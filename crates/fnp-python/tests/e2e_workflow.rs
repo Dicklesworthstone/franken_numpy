@@ -3,13 +3,16 @@
 //! These tests verify that multiple fnp functions work correctly together
 //! in realistic usage scenarios, not just in isolation.
 
-use std::process::Command;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+    sync::OnceLock,
+};
+
+static NUMPY_ORACLE_PYTHON: OnceLock<Result<String, String>> = OnceLock::new();
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let python = std::env::var("FNP_ORACLE_PYTHON")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| "python3".to_string());
+    let python = numpy_oracle_python()?;
     let output = Command::new(&python)
         .args(["-c", script])
         .output()
@@ -22,6 +25,161 @@ fn numpy_oracle(script: &str) -> Result<String, String> {
         eprint!("{}", String::from_utf8_lossy(&output.stderr));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn numpy_oracle_python() -> Result<String, String> {
+    NUMPY_ORACLE_PYTHON
+        .get_or_init(resolve_numpy_oracle_python)
+        .clone()
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn is_default_python_selector(value: &str) -> bool {
+    matches!(value.trim(), "python" | "python3")
+}
+
+fn python_imports_numpy(python: &str) -> bool {
+    Command::new(python)
+        .args([
+            "-c",
+            "import importlib.util; raise SystemExit(0 if importlib.util.find_spec('numpy') else 1)",
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn target_dir() -> PathBuf {
+    let path = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn target_numpy_venv_python() -> PathBuf {
+    target_dir().join("fnp-python-e2e-numpy-venv/bin/python3")
+}
+
+fn command_failure(command_name: &str, output: &std::process::Output) -> String {
+    format!(
+        "{command_name} failed (stdout={} stderr={})",
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+fn bootstrap_target_numpy_venv(
+    python_path: &Path,
+    bootstrap_python: &str,
+) -> Result<String, String> {
+    let venv_dir = python_path.parent().and_then(Path::parent).ok_or_else(|| {
+        format!(
+            "invalid fnp-python NumPy venv path {}",
+            python_path.display()
+        )
+    })?;
+
+    if python_path.is_file() && python_imports_numpy(&python_path.display().to_string()) {
+        return Ok(python_path.display().to_string());
+    }
+
+    if Command::new("uv")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        let create = Command::new("uv")
+            .arg("venv")
+            .arg("--allow-existing")
+            .arg("--python")
+            .arg(bootstrap_python)
+            .arg(venv_dir)
+            .output()
+            .map_err(|error| format!("failed to create fnp-python NumPy venv via uv: {error}"))?;
+        if !create.status.success() {
+            return Err(command_failure("uv venv", &create));
+        }
+
+        let install = Command::new("uv")
+            .arg("pip")
+            .arg("install")
+            .arg("--python")
+            .arg(python_path)
+            .arg("numpy")
+            .output()
+            .map_err(|error| {
+                format!("failed to install NumPy into fnp-python venv via uv: {error}")
+            })?;
+        if !install.status.success() {
+            return Err(command_failure("uv pip install numpy", &install));
+        }
+    } else {
+        let create = Command::new(bootstrap_python)
+            .arg("-m")
+            .arg("venv")
+            .arg(venv_dir)
+            .output()
+            .map_err(|error| {
+                format!("failed to create fnp-python NumPy venv via {bootstrap_python}: {error}")
+            })?;
+        if !create.status.success() {
+            return Err(command_failure("python -m venv", &create));
+        }
+
+        let install = Command::new(python_path)
+            .arg("-m")
+            .arg("pip")
+            .arg("install")
+            .arg("numpy")
+            .output()
+            .map_err(|error| format!("failed to install NumPy into fnp-python venv: {error}"))?;
+        if !install.status.success() {
+            return Err(command_failure("python -m pip install numpy", &install));
+        }
+    }
+
+    let resolved = python_path.display().to_string();
+    if python_imports_numpy(&resolved) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "bootstrapped fnp-python NumPy venv does not import numpy: {}",
+            python_path.display()
+        ))
+    }
+}
+
+fn resolve_numpy_oracle_python() -> Result<String, String> {
+    if let Some(configured) = env_nonempty("FNP_ORACLE_PYTHON")
+        && !is_default_python_selector(&configured)
+    {
+        if python_imports_numpy(&configured) {
+            return Ok(configured);
+        }
+        return Err(format!(
+            "configured FNP_ORACLE_PYTHON={configured:?} cannot import numpy; unset it to allow target-dir bootstrap"
+        ));
+    }
+
+    let bootstrap_python = env_nonempty("PYO3_PYTHON")
+        .or_else(|| env_nonempty("FNP_ORACLE_PYTHON"))
+        .unwrap_or_else(|| "python3".to_string());
+    if python_imports_numpy(&bootstrap_python) {
+        return Ok(bootstrap_python);
+    }
+
+    bootstrap_target_numpy_venv(&target_numpy_venv_python(), &bootstrap_python)
 }
 
 fn fnp_script(body: String) -> String {
