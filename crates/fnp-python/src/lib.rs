@@ -7396,14 +7396,34 @@ fn nonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn flatnonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let a = extract_numeric_array(py, a.bind(py), "flatnonzero(a)")?;
+    let a_for_fallback = a.clone_ref(py);
+    let a = match extract_numeric_array(py, a.bind(py), "flatnonzero(a)") {
+        Ok(array) => array,
+        Err(_) => {
+            let numpy = py.import("numpy")?;
+            return Ok(numpy
+                .getattr("flatnonzero")?
+                .call1((a_for_fallback.bind(py),))?
+                .unbind());
+        }
+    };
     let result = a.flatnonzero();
     build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
 fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let a = extract_numeric_array(py, a.bind(py), "argwhere(a)")?;
+    let a_for_fallback = a.clone_ref(py);
+    let a = match extract_numeric_array(py, a.bind(py), "argwhere(a)") {
+        Ok(array) => array,
+        Err(_) => {
+            let numpy = py.import("numpy")?;
+            return Ok(numpy
+                .getattr("argwhere")?
+                .call1((a_for_fallback.bind(py),))?
+                .unbind());
+        }
+    };
     let result = a.argwhere();
     build_numpy_array_from_ufunc(py, &result)
 }

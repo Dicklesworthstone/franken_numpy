@@ -110,6 +110,18 @@ fn conformance_searching_matrix() {
             py,
             &module,
             &numpy,
+            "searching-flatnonzero-string-truthiness",
+            "flatnonzero",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_s(py, vec!["", "x", "0", "false"])?]),
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
             "searching-argwhere-2d",
             "argwhere",
             RequirementLevel::Must,
@@ -121,6 +133,18 @@ fn conformance_searching_matrix() {
                     [np_array_2d_f(py, vec![vec![0.0, 1.0], vec![2.0, 0.0]])?],
                 )
             },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-argwhere-string-truthiness",
+            "argwhere",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_s(py, vec!["", "x", "0", "false"])?]),
             no_kwargs,
         );
 
