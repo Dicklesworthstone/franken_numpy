@@ -6,13 +6,20 @@
 use std::process::Command;
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
+    let python = std::env::var("FNP_ORACLE_PYTHON")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "python3".to_string());
+    let output = Command::new(&python)
         .args(["-c", script])
         .output()
-        .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+        .map_err(|error| format!("{python} should be available: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
+    }
+    if !output.stderr.is_empty() {
+        eprint!("{}", String::from_utf8_lossy(&output.stderr));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -60,7 +67,11 @@ print(fnp.allclose(result_mean, 0, atol=1e-10) and fnp.allclose(result_std, 1, a
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "normalize pipeline should work correctly");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "normalize pipeline should work correctly"
+    );
     Ok(())
 }
 
@@ -82,6 +93,104 @@ print(all_in_range)
     );
     let result = numpy_oracle(&script)?;
     assert_eq!(result.trim(), "True", "minmax scale pipeline should work");
+    Ok(())
+}
+
+#[test]
+fn e2e_loadtxt_public_api_feature_pipeline() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import json
+import os
+import sys
+import tempfile
+
+test_name = "loadtxt_public_api_feature_pipeline"
+
+def log(phase, event, **data):
+    print(json.dumps({
+        "suite": "fnp_public_api_e2e",
+        "test": test_name,
+        "phase": phase,
+        "event": event,
+        "data": data,
+    }, sort_keys=True), file=sys.stderr)
+
+rows = [
+    "day,temp_f,humidity,units",
+    "1,68.0,0.45,120",
+    "2,70.5,0.50,132",
+    "3,66.0,0.47,118",
+    "4,74.0,0.60,145",
+    "5,71.5,0.58,139",
+    "6,69.0,0.52,128",
+]
+
+with tempfile.NamedTemporaryFile("w", suffix=".csv", delete=False) as handle:
+    handle.write("\n".join(rows))
+    path = handle.name
+
+try:
+    log("load", "file_created", rows=len(rows) - 1)
+    data = fnp.loadtxt(
+        path,
+        delimiter=",",
+        skiprows=1,
+        usecols=[1, 2, 3],
+        dtype=float,
+    )
+    log("load", "loaded", shape=list(data.shape), dtype=str(data.dtype))
+
+    temp_f = data[:, 0]
+    humidity = data[:, 1]
+    units = data[:, 2]
+
+    temp_c = fnp.divide(fnp.multiply(fnp.subtract(temp_f, 32.0), 5.0), 9.0)
+    unit_z = fnp.divide(fnp.subtract(units, fnp.mean(units)), fnp.std(units))
+    risk_score = fnp.add(fnp.multiply(temp_c, 0.7), fnp.multiply(humidity, 12.0))
+    high_risk = risk_score[units >= 130.0]
+
+    actual = np.array([
+        float(fnp.mean(temp_c)),
+        float(fnp.amax(risk_score)),
+        float(fnp.sum(high_risk > 24.0)),
+        float(fnp.mean(unit_z)),
+    ])
+    log("operate", "pipeline_complete", high_risk_rows=int(len(high_risk)))
+
+    expected_data = np.loadtxt(
+        path,
+        delimiter=",",
+        skiprows=1,
+        usecols=[1, 2, 3],
+        dtype=float,
+    )
+    expected_temp_c = (expected_data[:, 0] - 32.0) * 5.0 / 9.0
+    expected_unit_z = (expected_data[:, 2] - np.mean(expected_data[:, 2])) / np.std(expected_data[:, 2])
+    expected_risk = expected_temp_c * 0.7 + expected_data[:, 1] * 12.0
+    expected_high_risk = expected_risk[expected_data[:, 2] >= 130.0]
+    expected = np.array([
+        np.mean(expected_temp_c),
+        np.max(expected_risk),
+        np.sum(expected_high_risk > 24.0),
+        np.mean(expected_unit_z),
+    ])
+
+    passed = bool(np.allclose(actual, expected, atol=1e-12))
+    log("assert", "allclose", actual=actual.tolist(), expected=expected.tolist(), passed=passed)
+    print(passed)
+finally:
+    os.unlink(path)
+    log("teardown", "file_removed")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "loadtxt public API pipeline should match numpy"
+    );
     Ok(())
 }
 
@@ -110,7 +219,11 @@ print(fnp.allclose(original_dist, rotated_dist))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "matrix rotation should preserve distances");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "matrix rotation should preserve distances"
+    );
     Ok(())
 }
 
@@ -168,7 +281,11 @@ print(r > 0.9)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "correlation workflow should compute high r");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "correlation workflow should compute high r"
+    );
     Ok(())
 }
 
@@ -226,7 +343,11 @@ print(smoothed_var < original_var)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "signal smoothing should reduce variance");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "signal smoothing should reduce variance"
+    );
     Ok(())
 }
 
@@ -254,7 +375,11 @@ print(fnp.allclose(derivative, expected, atol=0.1))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "derivative approximation should be close to cos(x)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "derivative approximation should be close to cos(x)"
+    );
     Ok(())
 }
 
@@ -282,7 +407,11 @@ print(fnp.prod(step5.shape) == 24 and len(fnp.unique(step4)) == 24)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "reshape/transpose chain should preserve data");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reshape/transpose chain should preserve data"
+    );
     Ok(())
 }
 
@@ -308,7 +437,11 @@ print(fnp.array_equal(result, fnp.multiply(data, 2)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "split/process/concat should work correctly");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "split/process/concat should work correctly"
+    );
     Ok(())
 }
 
@@ -391,7 +524,11 @@ print(fnp.isfinite(stable_result) and stable_result > 1000)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logsumexp should be numerically stable");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logsumexp should be numerically stable"
+    );
     Ok(())
 }
 
@@ -415,7 +552,11 @@ print(sums_to_one and all_positive)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "softmax should sum to 1 and be positive");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "softmax should sum to 1 and be positive"
+    );
     Ok(())
 }
 
@@ -446,7 +587,11 @@ print(center_val > 0.9 and corner_val < 0.2)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "meshgrid Gaussian computation should work");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "meshgrid Gaussian computation should work"
+    );
     Ok(())
 }
 
@@ -475,6 +620,10 @@ print(diag_zero and symmetric)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "distance matrix should be symmetric with 0 diagonal");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "distance matrix should be symmetric with 0 diagonal"
+    );
     Ok(())
 }
