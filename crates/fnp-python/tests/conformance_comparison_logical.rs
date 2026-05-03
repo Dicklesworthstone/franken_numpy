@@ -412,6 +412,26 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+#[test]
+fn logical_not_nan_is_truthy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, 1.0, np.nan])
+result = fnp.logical_not(x)
+expected = np.logical_not(x)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical_not nan handling should match numpy"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Edge cases
 // ─────────────────────────────────────────────────────────────────────────────

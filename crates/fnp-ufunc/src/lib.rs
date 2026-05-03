@@ -31604,13 +31604,13 @@ pub fn logical_xor(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFunc
 }
 
 /// Element-wise logical NOT.
-/// Returns a boolean array where True indicates x is falsy (zero or NaN).
+/// Returns a boolean array where True indicates x is falsy (zero).
 /// NumPy equivalent: `np.logical_not(x)`.
 pub fn logical_not(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
     let values: Vec<f64> = x
         .values
         .iter()
-        .map(|&a| if a == 0.0 || a.is_nan() { 1.0 } else { 0.0 })
+        .map(|&a| if a == 0.0 { 1.0 } else { 0.0 })
         .collect();
     Ok(UFuncArray {
         shape: x.shape.clone(),
@@ -37351,6 +37351,13 @@ print(json.dumps(payload))
         let b = UFuncArray::new(vec![2], vec![4.0, 2.0], DType::I64).expect("b");
         let out = a.elementwise_binary(&b, BinaryOp::RightShift).expect("ok");
         assert_eq!(out.values(), &[1.0, 5.0]);
+    }
+
+    #[test]
+    fn logical_not_treats_nan_as_truthy() {
+        let a = UFuncArray::new(vec![3], vec![0.0, 1.0, f64::NAN], DType::F64).expect("a");
+        let out = crate::logical_not(&a).expect("logical_not");
+        assert_eq!(out.values(), &[1.0, 0.0, 0.0]);
     }
 
     #[test]
