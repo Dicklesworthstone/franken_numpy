@@ -7553,13 +7553,12 @@ fn count_nonzero(
     }
     .map_err(map_ufunc_error)?;
 
+    if result.shape().is_empty() && axes.is_none() {
+        return fallback();
+    }
+
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if result.shape().is_empty() {
-        // numpy.count_nonzero(arr, axis=None) returns a numpy.int64 (0-D
-        // scalar), NOT a plain Python int — its repr is "np.int64(3)".
-        // Unlike numpy.ma.count which *does* return Python int for
-        // axis=None, count_nonzero preserves the numpy scalar type.
-        // Extract via get_item(()) which yields the 0-D numpy scalar.
         return Ok(output.bind(py).get_item(())?.unbind());
     }
 

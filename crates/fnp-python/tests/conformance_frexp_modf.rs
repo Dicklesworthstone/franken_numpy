@@ -39,55 +39,6 @@ fn fnp_script(body: String) -> String {
     )
 }
 
-fn parse_float_list(s: &str) -> Result<Vec<f64>, String> {
-    if s.is_empty() || s == "[]" {
-        return Ok(vec![]);
-    }
-    let trimmed = s
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .ok_or_else(|| format!("expected bracketed float list, got {s:?}"))?;
-
-    let mut values = Vec::new();
-    for token in trimmed
-        .split(|c: char| c.is_whitespace() || c == ',')
-        .filter(|t| !t.is_empty())
-    {
-        let t = token.trim().trim_end_matches('.');
-        let value = if t == "nan" || t == "NaN" {
-            f64::NAN
-        } else if t == "inf" || t == "Inf" {
-            f64::INFINITY
-        } else if t == "-inf" || t == "-Inf" {
-            f64::NEG_INFINITY
-        } else {
-            t.parse::<f64>()
-                .map_err(|error| format!("invalid float token {token:?} in {s:?}: {error}"))?
-        };
-        values.push(value);
-    }
-    Ok(values)
-}
-
-fn floats_close(a: &[f64], b: &[f64], rel_tol: f64) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b.iter()).all(|(x, y)| {
-        if x.is_nan() && y.is_nan() {
-            true
-        } else if x.is_infinite() && y.is_infinite() {
-            x.signum() == y.signum()
-        } else if *x == 0.0 && *y == 0.0 {
-            true
-        } else {
-            let diff = (x - y).abs();
-            let max_val = x.abs().max(y.abs()).max(1e-15);
-            diff <= rel_tol * max_val
-        }
-    })
-}
-
 #[test]
 fn frexp_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
