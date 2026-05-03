@@ -344,11 +344,14 @@ fn values_equivalent(
     if kwargs.set_item("equal_nan", true).is_err() {
         return false;
     }
-    let values_match = numpy
-        .getattr("array_equal")
-        .and_then(|array_equal| array_equal.call((a, b), Some(&kwargs)))
-        .and_then(|r| r.extract::<bool>())
-        .unwrap_or(false);
+    let values_match = match numpy.getattr("array_equal") {
+        Ok(array_equal) => array_equal
+            .call((a, b), Some(&kwargs))
+            .and_then(|r| r.extract::<bool>())
+            .or_else(|_| array_equal.call1((a, b)).and_then(|r| r.extract::<bool>()))
+            .unwrap_or(false),
+        Err(_) => false,
+    };
     values_match && (repr_match || scalar_str_equivalent(py, a, b))
 }
 

@@ -683,6 +683,18 @@ fn conformance_searching_matrix() {
             |py| PyTuple::new(py, [np_array_1d_i(py, vec![0, 1, 0, 2, 0])?]),
             no_kwargs,
         );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-where-string-condition-as-nonzero",
+            "where",
+            RequirementLevel::Must,
+            CompareMode::Surface,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_s(py, vec!["", "x", "0", "false"])?]),
+            no_kwargs,
+        );
         // 3-arg form selects from x or y based on condition.
         run_case(
             py,
@@ -704,6 +716,52 @@ fn conformance_searching_matrix() {
                         cond,
                         np_array_1d_f(py, vec![1.0, 2.0, 3.0, 4.0])?,
                         np_array_1d_f(py, vec![10.0, 20.0, 30.0, 40.0])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-where-string-condition-select",
+            "where",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_s(py, vec!["", "x", "0", "false"])?,
+                        np_array_1d_i(py, vec![1, 2, 3, 4])?,
+                        np_array_1d_i(py, vec![10, 20, 30, 40])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-where-string-choices",
+            "where",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                let cond = py
+                    .import("numpy")?
+                    .getattr("array")?
+                    .call1((vec![true, false, true, false],))?;
+                PyTuple::new(
+                    py,
+                    [
+                        cond,
+                        np_array_1d_s(py, vec!["a", "b", "c", "d"])?,
+                        np_array_1d_s(py, vec!["w", "x", "y", "z"])?,
                     ],
                 )
             },

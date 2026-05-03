@@ -7366,12 +7366,38 @@ fn where_py(
     x: Option<Py<PyAny>>,
     y: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let condition = extract_numeric_array(py, condition.bind(py), "where(condition)")?;
+    let condition_for_fallback = condition.clone_ref(py);
+    let x_for_fallback = x.as_ref().map(|value| value.clone_ref(py));
+    let y_for_fallback = y.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let where_fn = numpy.getattr("where")?;
+        match (&x_for_fallback, &y_for_fallback) {
+            (Some(x), Some(y)) => Ok(where_fn
+                .call1((condition_for_fallback.bind(py), x.bind(py), y.bind(py)))?
+                .unbind()),
+            (None, None) => Ok(where_fn.call1((condition_for_fallback.bind(py),))?.unbind()),
+            _ => Err(PyValueError::new_err(
+                "where: either provide both x and y or neither",
+            )),
+        }
+    };
+
+    let condition = match extract_numeric_array(py, condition.bind(py), "where(condition)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
 
     match (x, y) {
         (Some(x), Some(y)) => {
-            let x = extract_numeric_array(py, x.bind(py), "where(x)")?;
-            let y = extract_numeric_array(py, y.bind(py), "where(y)")?;
+            let x = match extract_numeric_array(py, x.bind(py), "where(x)") {
+                Ok(array) => array,
+                Err(_) => return fallback(),
+            };
+            let y = match extract_numeric_array(py, y.bind(py), "where(y)") {
+                Ok(array) => array,
+                Err(_) => return fallback(),
+            };
             let result = UFuncArray::where_select(&condition, &x, &y).map_err(map_ufunc_error)?;
             build_numpy_array_from_ufunc(py, &result)
         }
