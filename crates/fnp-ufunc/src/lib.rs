@@ -2420,6 +2420,15 @@ impl UFuncArrayView {
     }
 
     pub fn itemset(&self, index: &[i64], value: f64) -> Result<(), UFuncError> {
+        // Acquire every fallible lock before mutating either backing store.
+        let mut sidecar_guard =
+            if let Some(ref sidecar) = self.integer_sidecar {
+                Some(sidecar.write().map_err(|_| {
+                    UFuncError::Msg("shared view: sidecar lock poisoned".to_string())
+                })?)
+            } else {
+                None
+            };
         let mut data = self
             .buffer
             .write()
@@ -2428,12 +2437,8 @@ impl UFuncArrayView {
         if matches!(self.dtype, DType::I64 | DType::U64) {
             ensure_exact_integer_bridge_value_supported(value, self.dtype, "itemset", offset)?;
         }
-        data[offset] = value;
-        if let Some(ref sidecar) = self.integer_sidecar {
-            let mut s = sidecar
-                .write()
-                .map_err(|_| UFuncError::Msg("shared view: sidecar lock poisoned".to_string()))?;
-            match &mut *s {
+        if let Some(ref mut s) = sidecar_guard {
+            match &mut **s {
                 IntegerSidecar::I64(v) => {
                     ensure_exact_integer_bridge_value_supported(
                         value,
@@ -2441,7 +2446,10 @@ impl UFuncArrayView {
                         "itemset",
                         offset,
                     )?;
-                    v[offset] = value as i64;
+                    let slot = v.get_mut(offset).ok_or_else(|| {
+                        UFuncError::Msg("shared view: sidecar length mismatch".to_string())
+                    })?;
+                    *slot = value as i64;
                 }
                 IntegerSidecar::U64(v) => {
                     ensure_exact_integer_bridge_value_supported(
@@ -2450,10 +2458,14 @@ impl UFuncArrayView {
                         "itemset",
                         offset,
                     )?;
-                    v[offset] = value as u64;
+                    let slot = v.get_mut(offset).ok_or_else(|| {
+                        UFuncError::Msg("shared view: sidecar length mismatch".to_string())
+                    })?;
+                    *slot = value as u64;
                 }
             }
         }
+        data[offset] = value;
         Ok(())
     }
 
@@ -33054,7 +33066,7 @@ mod tests {
     use super::{
         AxisSlice, BinaryDispatchMethod, BinaryOp, FloatErrorKind, FloatErrorMode,
         FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
-        FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, MaskedArrayEdges,
+        FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError, MaskedArray, MaskedArrayEdges,
         OverrideDispatchDecision, OverrideOperand, OverridePayloadClass, PrintOptions,
         PyObjectArray, PyObjectValue, QuantileInterp, ShapeError, StringArray,
         UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError, UFuncLogRecord,
@@ -41255,6 +41267,43 @@ print(json.dumps(payload))
 
         let materialized = UFuncArray::from_shared_view(&rev).unwrap();
         assert_eq!(materialized.values(), &[5.0, 99.0, 3.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn shared_view_itemset_is_atomic_when_sidecar_lock_is_poisoned() {
+        let buffer = Arc::new(RwLock::new(vec![1.0, 2.0]));
+        let sidecar = Arc::new(RwLock::new(IntegerSidecar::I64(vec![1, 2])));
+        let view = UFuncArrayView::new(
+            vec![2],
+            Arc::clone(&buffer),
+            Some(Arc::clone(&sidecar)),
+            0,
+            vec![1],
+            DType::I64,
+        )
+        .unwrap();
+
+        let poison_sidecar = Arc::clone(&sidecar);
+        let poison_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+            let _guard = poison_sidecar.write().expect("sidecar write lock");
+            panic!("poison sidecar for itemset atomicity regression");
+        }));
+        assert!(poison_result.is_err());
+
+        let err = view
+            .itemset(&[0], 42.0)
+            .expect_err("poisoned sidecar should reject itemset");
+        assert!(
+            matches!(err, UFuncError::Msg(ref message) if message.contains("sidecar lock poisoned")),
+            "unexpected error: {err:?}"
+        );
+
+        let data = buffer.read().expect("buffer lock should not be poisoned");
+        assert_eq!(&*data, &[1.0, 2.0]);
+        let exact = sidecar
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(*exact, IntegerSidecar::I64(vec![1, 2]));
     }
 
     #[test]
