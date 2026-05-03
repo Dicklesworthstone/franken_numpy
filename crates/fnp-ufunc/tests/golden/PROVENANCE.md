@@ -2,7 +2,9 @@
 
 `public_api.golden` snapshots the current observable output for commonly used
 `fnp_ufunc::UFuncArray` entry points: creation, broadcasting, elementwise
-ufuncs, reductions, slicing, and scalar indexing.
+ufuncs, reductions, slicing, scalar indexing, shape transforms, joins,
+selection/order operations, set/index helpers, contractions, cumulative ops,
+and comparison summaries.
 
 Refresh intentionally with:
 

@@ -107,3 +107,116 @@ slice_rows_reverse_cols_even
   shape: [3, 2]
   dtype: F64
   values: [8.0, 10.0, 4.0, 6.0, 0.0, 2.0]
+
+## shape transforms and joins
+reshape_2x3_to_3x2
+  shape: [3, 2]
+  dtype: F64
+  values: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+transpose_default_2x3
+  shape: [3, 2]
+  dtype: F64
+  values: [1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
+
+concatenate_axis0
+  shape: [4, 2]
+  dtype: F64
+  values: [1.0, 2.0, 3.0, 4.0, 10.0, 20.0, 30.0, 40.0]
+
+stack_axis1
+  shape: [3, 2]
+  dtype: F64
+  values: [1.0, 10.0, 2.0, 20.0, 3.0, 30.0]
+
+## selection and ordering
+clip_1_5_to_4_5
+  shape: [2, 3]
+  dtype: F64
+  values: [3.0, 1.5, 2.0, 4.5, 4.0, 4.5]
+
+sort_axis1_quicksort
+  shape: [2, 3]
+  dtype: F64
+  values: [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+
+argsort_axis1_stable
+  shape: [2, 3]
+  dtype: I64
+  values: [1.0, 2.0, 0.0, 1.0, 2.0, 0.0]
+
+where_select_2x2
+  shape: [2, 2]
+  dtype: F64
+  values: [10.0, -1.0, -1.0, 40.0]
+
+## indexing and set helpers
+take_axis1_indices_2_0
+  shape: [2, 2]
+  dtype: F64
+  values: [3.0, 1.0, 6.0, 4.0]
+
+where_nonzero_axis0
+  shape: [3]
+  dtype: I64
+  values: [0.0, 1.0, 1.0]
+
+where_nonzero_axis1
+  shape: [3]
+  dtype: I64
+  values: [1.0, 0.0, 2.0]
+
+unique_all_values
+  shape: [3]
+  dtype: F64
+  values: [1.0, 2.0, 3.0]
+
+unique_all_indices
+  shape: [3]
+  dtype: I64
+  values: [1.0, 3.0, 0.0]
+
+unique_all_inverse
+  shape: [5]
+  dtype: I64
+  values: [2.0, 0.0, 2.0, 1.0, 0.0]
+
+unique_all_counts
+  shape: [3]
+  dtype: I64
+  values: [2.0, 1.0, 2.0]
+
+## linear algebra and contractions
+matmul_2x3_by_3x2
+  shape: [2, 2]
+  dtype: F64
+  values: [58.0, 64.0, 139.0, 154.0]
+
+dot_1d_inner
+  shape: []
+  dtype: F64
+  values: [32.0]
+
+einsum_weighted_row_sum
+  shape: [2]
+  dtype: F64
+  values: [-1.0, 0.5]
+
+## cumulative and comparison summaries
+cumsum_axis1
+  shape: [2, 3]
+  dtype: F64
+  values: [1.0, 3.0, 6.0, 4.0, 9.0, 15.0]
+
+percentile_75_axis0
+  shape: [3]
+  dtype: F64
+  values: [3.25, 4.25, 5.25]
+
+isclose_mixed
+  shape: [3]
+  dtype: Bool
+  values: [1.0, 1.0, 0.0]
+
+allclose_first_two
+  value: true
