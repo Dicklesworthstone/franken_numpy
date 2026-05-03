@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 use fnp_dtype::DType;
 use fnp_linalg::{det_2x2, inv_2x2, solve_2x2};
 use fnp_random::Generator;
-use fnp_ufunc::{BinaryOp, UFuncArray};
+use fnp_ufunc::{BinaryOp, UFuncArray, UnaryOp};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -274,6 +274,14 @@ elif case_id == "ufunc_greater_0d_scalar_rhs_broadcast":
 elif case_id == "ufunc_reduce_keepdims_broadcast_add":
     values = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
     emit(np.add(values, np.sum(values, axis=1, keepdims=True)))
+elif case_id == "ufunc_complex_abs":
+    emit(np.abs(np.array([3.0 + 4.0j, 5.0 - 12.0j, complex(np.nan, 1.0), complex(np.inf, -2.0)])))
+elif case_id == "ufunc_complex_isnan":
+    emit(np.isnan(np.array([1.0 + 2.0j, complex(np.inf, 0.0), complex(np.nan, 0.0), complex(3.0, -np.inf)])))
+elif case_id == "ufunc_complex_isinf":
+    emit(np.isinf(np.array([1.0 + 2.0j, complex(np.inf, 0.0), complex(np.nan, 0.0), complex(3.0, -np.inf)])))
+elif case_id == "ufunc_complex_isfinite":
+    emit(np.isfinite(np.array([1.0 + 2.0j, complex(np.inf, 0.0), complex(np.nan, 0.0), complex(3.0, -np.inf)])))
 elif case_id == "ufunc_floor_divide_inf":
     emit(np.floor_divide(np.array([np.inf, -np.inf, 9.0]), np.array([2.0, 2.0, 4.0])))
 elif case_id == "ufunc_logical_or_nan":
@@ -348,6 +356,10 @@ fn assert_oracle_match(case_id: &str, actual_shape: &[usize], actual_values: &[f
     for (index, (actual, expected)) in actual_values.iter().zip(oracle.values.iter()).enumerate() {
         let matches = if actual.is_nan() || expected.is_nan() {
             actual.is_nan() && expected.is_nan()
+        } else if actual.is_infinite() || expected.is_infinite() {
+            actual.is_infinite()
+                && expected.is_infinite()
+                && actual.is_sign_positive() == expected.is_sign_positive()
         } else {
             (actual - expected).abs() <= tol.max(tol * expected.abs())
         };
@@ -442,6 +454,57 @@ fn ufunc_ops_match_live_numpy_reference() {
         reduced.shape(),
         reduced.values(),
         1e-12,
+    );
+}
+
+#[test]
+fn complex_unary_ops_match_live_numpy_reference() {
+    let complex = UFuncArray::new(
+        vec![4, 2],
+        vec![3.0, 4.0, 5.0, -12.0, f64::NAN, 1.0, f64::INFINITY, -2.0],
+        DType::Complex128,
+    )
+    .expect("complex array");
+
+    let abs = complex
+        .try_elementwise_unary(UnaryOp::Abs)
+        .expect("complex abs");
+    assert_oracle_match("ufunc_complex_abs", abs.shape(), abs.values(), 1e-12);
+
+    let predicate_input = UFuncArray::new(
+        vec![4, 2],
+        vec![
+            1.0,
+            2.0,
+            f64::INFINITY,
+            0.0,
+            f64::NAN,
+            0.0,
+            3.0,
+            f64::NEG_INFINITY,
+        ],
+        DType::Complex128,
+    )
+    .expect("predicate complex array");
+
+    let isnan = predicate_input
+        .try_elementwise_unary(UnaryOp::Isnan)
+        .expect("complex isnan");
+    assert_oracle_match("ufunc_complex_isnan", isnan.shape(), isnan.values(), 0.0);
+
+    let isinf = predicate_input
+        .try_elementwise_unary(UnaryOp::Isinf)
+        .expect("complex isinf");
+    assert_oracle_match("ufunc_complex_isinf", isinf.shape(), isinf.values(), 0.0);
+
+    let isfinite = predicate_input
+        .try_elementwise_unary(UnaryOp::Isfinite)
+        .expect("complex isfinite");
+    assert_oracle_match(
+        "ufunc_complex_isfinite",
+        isfinite.shape(),
+        isfinite.values(),
+        0.0,
     );
 }
 
