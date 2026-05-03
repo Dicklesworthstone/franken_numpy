@@ -2,7 +2,7 @@
 
 > Source: `scripts/fnp_python_compliance_matrix.py`
 
-> Total parity tests scanned: **372**
+> Total parity tests scanned: **373**
 
 > Do not edit by hand — regenerate via `python3 scripts/fnp_python_compliance_matrix.py`.
 
@@ -12,17 +12,17 @@
 
 | Level | Count | Share |
 |-------|------:|------:|
-| MUST | 242 | 65.1% |
-| SHOULD | 119 | 32.0% |
-| MAY | 11 | 3.0% |
-| **Total** | **372** | 100.0% |
+| MUST | 243 | 65.1% |
+| SHOULD | 119 | 31.9% |
+| MAY | 11 | 2.9% |
+| **Total** | **373** | 100.0% |
 
 ## Per-domain breakdown
 
 | Domain | Level | Tests | Description |
 |--------|:-----:|------:|-------------|
 | `concat_split` | SHOULD | 6 | Concatenate / split / stack families |
-| `constructor` | MUST | 41 | Array constructors (zeros/ones/arange/linspace…) |
+| `constructor` | MUST | 42 | Array constructors (zeros/ones/arange/linspace…) |
 | `dtype_policy` | SHOULD | 1 | dtype promotion / casting / can_cast |
 | `fft` | MUST | 11 | FFT family (fft/ifft/rfft/fftshift…) |
 | `index_select` | SHOULD | 26 | Advanced indexing / take / put / where / choose |
@@ -199,6 +199,7 @@
 | `logaddexp2_matches_numpy_broadcasting_and_infinities` | `ufunc_numeric` | MUST |
 | `logaddexp_matches_numpy_basic` | `ufunc_numeric` | MUST |
 | `logaddexp_matches_numpy_broadcasting_and_infinities` | `ufunc_numeric` | MUST |
+| `logspace_matches_numpy_native_scalar_fast_path_and_fallbacks` | `constructor` | MUST |
 | `lstsq_matches_numpy_tuple_return_across_shapes_and_rcond` | `linalg` | MUST |
 | `ma_average_matches_numpy_unweighted_axis_and_fallback_cases` | `masked` | SHOULD |
 | `ma_count_matches_numpy_across_axis_and_keepdims` | `masked` | SHOULD |
