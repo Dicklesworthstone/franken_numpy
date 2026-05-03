@@ -251,6 +251,8 @@ def emit(value):
         shape = list(arr.shape)
     print(json.dumps({"shape": shape, "values": values}))
 
+subnormal = np.nextafter(np.float64(0.0), np.float64(1.0))
+
 if case_id == "ufunc_add_broadcast":
     emit(np.add(
         np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
@@ -282,6 +284,15 @@ elif case_id == "ufunc_complex_isinf":
     emit(np.isinf(np.array([1.0 + 2.0j, complex(np.inf, 0.0), complex(np.nan, 0.0), complex(3.0, -np.inf)])))
 elif case_id == "ufunc_complex_isfinite":
     emit(np.isfinite(np.array([1.0 + 2.0j, complex(np.inf, 0.0), complex(np.nan, 0.0), complex(3.0, -np.inf)])))
+elif case_id == "ufunc_subnormal_abs":
+    emit(np.abs(np.array([subnormal, -subnormal, subnormal * 2.0, -subnormal * 2.0])))
+elif case_id == "ufunc_subnormal_add":
+    emit(np.add(
+        np.array([subnormal, subnormal * 2.0, -subnormal, np.finfo(np.float64).tiny]),
+        np.array([subnormal, -subnormal, -subnormal, subnormal]),
+    ))
+elif case_id == "ufunc_subnormal_reduce_sum":
+    emit(np.sum(np.full(4097, subnormal)))
 elif case_id == "ufunc_floor_divide_inf":
     emit(np.floor_divide(np.array([np.inf, -np.inf, 9.0]), np.array([2.0, 2.0, 4.0])))
 elif case_id == "ufunc_logical_or_nan":
@@ -506,6 +517,34 @@ fn complex_unary_ops_match_live_numpy_reference() {
         isfinite.values(),
         0.0,
     );
+}
+
+#[test]
+fn subnormal_ufuncs_match_live_numpy_reference() {
+    let subnormal = f64::from_bits(1);
+    let subnormal_values = array(
+        &[4],
+        &[subnormal, -subnormal, subnormal * 2.0, -subnormal * 2.0],
+    );
+
+    let abs = subnormal_values.elementwise_unary(UnaryOp::Abs);
+    assert_oracle_match("ufunc_subnormal_abs", abs.shape(), abs.values(), 0.0);
+
+    let lhs = array(
+        &[4],
+        &[subnormal, subnormal * 2.0, -subnormal, f64::MIN_POSITIVE],
+    );
+    let rhs = array(&[4], &[subnormal, -subnormal, -subnormal, subnormal]);
+    let add = lhs
+        .elementwise_binary(&rhs, BinaryOp::Add)
+        .expect("subnormal add");
+    assert_oracle_match("ufunc_subnormal_add", add.shape(), add.values(), 0.0);
+
+    let many_subnormals = vec![subnormal; 4097];
+    let sum = array(&[4097], &many_subnormals)
+        .reduce_sum(None, false)
+        .expect("subnormal reduce_sum");
+    assert_oracle_match("ufunc_subnormal_reduce_sum", sum.shape(), sum.values(), 0.0);
 }
 
 #[test]
