@@ -41286,7 +41286,7 @@ print(json.dumps(payload))
         let poison_sidecar = Arc::clone(&sidecar);
         let poison_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
             let _guard = poison_sidecar.write().expect("sidecar write lock");
-            panic!("poison sidecar for itemset atomicity regression");
+            std::panic::resume_unwind(Box::new("poison sidecar for itemset atomicity regression"));
         }));
         assert!(poison_result.is_err());
 
