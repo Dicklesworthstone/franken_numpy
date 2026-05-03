@@ -36,6 +36,7 @@ clippy_*.txt
 deep_clippy.txt
 rust-bug-scan.txt
 ubs_out.txt
+*.actual
 
 # Root-level compiled test binaries and scratch test source files
 /patch_oracle

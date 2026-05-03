@@ -1,0 +1,109 @@
+# fnp-ufunc public API golden v1
+
+## ndarray creation
+zeros_2x3_f64
+  shape: [2, 3]
+  dtype: F64
+  values: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+ones_3_i64
+  shape: [3]
+  dtype: I64
+  values: [1.0, 1.0, 1.0]
+
+full_2x2_f64
+  shape: [2, 2]
+  dtype: F64
+  values: [-3.5, -3.5, -3.5, -3.5]
+
+arange_even_f64
+  shape: [3]
+  dtype: F64
+  values: [0.0, 2.0, 4.0]
+
+linspace_quarters_f64
+  shape: [5]
+  dtype: F64
+  values: [0.0, 0.25, 0.5, 0.75, 1.0]
+
+## broadcasting
+column_plus_row
+  shape: [2, 3]
+  dtype: F64
+  values: [11.0, 21.0, 31.0, 12.0, 22.0, 32.0]
+
+broadcast_1x3_to_2x3
+  shape: [2, 3]
+  dtype: F64
+  values: [4.0, 5.0, 6.0, 4.0, 5.0, 6.0]
+
+## ufunc results
+binary_multiply
+  shape: [4]
+  dtype: F64
+  values: [2.0, -8.0, -7.0, 13.5]
+
+binary_divide
+  shape: [4]
+  dtype: F64
+  values: [0.5, -0.5, -1.75, 1.5]
+
+unary_negative
+  shape: [4]
+  dtype: F64
+  values: [-1.0, 2.0, -3.5, 4.5]
+
+unary_sqrt
+  shape: [4]
+  dtype: F64
+  values: [0.0, 1.0, 2.0, 3.0]
+
+logical_not_nan_truthiness
+  shape: [3]
+  dtype: Bool
+  values: [1.0, 0.0, 0.0]
+
+## reductions
+sum_all
+  shape: []
+  dtype: F64
+  values: [21.0]
+
+sum_axis0
+  shape: [3]
+  dtype: F64
+  values: [5.0, 7.0, 9.0]
+
+sum_axis1_keepdims
+  shape: [2, 1]
+  dtype: F64
+  values: [6.0, 15.0]
+
+mean_axis0
+  shape: [3]
+  dtype: F64
+  values: [2.5, 3.5, 4.5]
+
+min_axis1
+  shape: [2]
+  dtype: F64
+  values: [1.0, 4.0]
+
+max_all
+  shape: []
+  dtype: F64
+  values: [6.0]
+
+## slicing and indexing
+item_2_1
+  value: 9.0
+
+slice_axis_cols_1_to_4_step_2
+  shape: [3, 2]
+  dtype: F64
+  values: [1.0, 3.0, 5.0, 7.0, 9.0, 11.0]
+
+slice_rows_reverse_cols_even
+  shape: [3, 2]
+  dtype: F64
+  values: [8.0, 10.0, 4.0, 6.0, 0.0, 2.0]
