@@ -1,6 +1,6 @@
 //! Conformance tests for numpy polynomial operations against NumPy oracle.
 //!
-//! Tests polyval, polyder, polyint, polyroots.
+//! Tests polyval, polyder, polyint, polyfit, polyadd, polysub, polymul, polydiv.
 
 use std::process::Command;
 
@@ -214,5 +214,229 @@ print(np.allclose(result, 3))
     );
     let result = numpy_oracle(&script)?;
     assert_eq!(result.trim(), "True", "polyval at 0 should equal constant term");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// polyadd
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn polyadd_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = [1, 2, 3]  # x^2 + 2x + 3
+b = [4, 5]     # 4x + 5
+result = fnp.polyadd(a, b)
+expected = np.polyadd(a, b)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polyadd basic should match numpy");
+    Ok(())
+}
+
+#[test]
+fn polyadd_same_degree() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = [1, 2, 3]
+b = [3, 2, 1]
+result = fnp.polyadd(a, b)
+expected = np.polyadd(a, b)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polyadd same degree should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// polysub
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn polysub_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = [1, 2, 3]
+b = [4, 5]
+result = fnp.polysub(a, b)
+expected = np.polysub(a, b)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polysub basic should match numpy");
+    Ok(())
+}
+
+#[test]
+fn polysub_self_gives_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = [1, 2, 3]
+result = fnp.polysub(a, a)
+expected = np.polysub(a, a)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polysub self should give zero");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// polymul
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn polymul_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = [1, 1]  # x + 1
+b = [1, -1]  # x - 1
+result = fnp.polymul(a, b)  # x^2 - 1
+expected = np.polymul(a, b)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polymul basic should match numpy");
+    Ok(())
+}
+
+#[test]
+fn polymul_by_constant() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = [1, 2, 3]
+b = [2]  # multiply by constant 2
+result = fnp.polymul(a, b)
+expected = np.polymul(a, b)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polymul by constant should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// polydiv
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn polydiv_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = [1, 0, -1]  # x^2 - 1
+b = [1, -1]     # x - 1
+q, r = fnp.polydiv(a, b)
+expected_q, expected_r = np.polydiv(a, b)
+print(np.allclose(q, expected_q) and np.allclose(r, expected_r))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polydiv basic should match numpy");
+    Ok(())
+}
+
+#[test]
+fn polydiv_no_remainder() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = [1, 3, 2]  # x^2 + 3x + 2 = (x+1)(x+2)
+b = [1, 1]     # x + 1
+q, r = fnp.polydiv(a, b)
+expected_q, expected_r = np.polydiv(a, b)
+print(np.allclose(q, expected_q) and np.allclose(r, expected_r, atol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polydiv no remainder should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// polyfit
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn polyfit_linear() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0, 1, 2, 3, 4])
+y = np.array([1, 3, 5, 7, 9])  # y = 2x + 1
+result = fnp.polyfit(x, y, 1)
+expected = np.polyfit(x, y, 1)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polyfit linear should match numpy");
+    Ok(())
+}
+
+#[test]
+fn polyfit_quadratic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0, 1, 2, 3, 4])
+y = np.array([1, 2, 5, 10, 17])  # y = x^2 + 1
+result = fnp.polyfit(x, y, 2)
+expected = np.polyfit(x, y, 2)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polyfit quadratic should match numpy");
+    Ok(())
+}
+
+#[test]
+fn polyfit_with_weights() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0, 1, 2, 3, 4])
+y = np.array([1, 3, 5, 7, 9])
+w = np.array([1, 1, 2, 1, 1])  # weight middle point more
+result = fnp.polyfit(x, y, 1, w=w)
+expected = np.polyfit(x, y, 1, w=w)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polyfit with weights should match numpy");
+    Ok(())
+}
+
+#[test]
+fn polyfit_roundtrip() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0, 1, 2, 3, 4])
+y = np.array([1, 3, 5, 7, 9])
+coeffs = fnp.polyfit(x, y, 1)
+y_pred = fnp.polyval(coeffs, x)
+print(np.allclose(y, y_pred))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "polyfit then polyval should recover y");
     Ok(())
 }
