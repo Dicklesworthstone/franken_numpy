@@ -23515,23 +23515,64 @@ fn isfortran(
 
 // Rounding aliases (2).
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, decimals=0, out=None))]
 fn around(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    a: Py<PyAny>,
+    decimals: i32,
+    out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "around", args, kwargs)
+    let numpy = py.import("numpy")?;
+    let around_fn = numpy.getattr("around")?;
+    let a_for_fallback = a.clone_ref(py);
+    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("decimals", decimals)?;
+        if let Some(o) = out_for_fallback.as_ref() {
+            kwargs.set_item("out", o.bind(py))?;
+        }
+        Ok(around_fn
+            .call((a_for_fallback.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    if out.as_ref().is_some_and(|v| !v.bind(py).is_none()) {
+        return fallback();
+    }
+
+    let array = match extract_precise_numeric_array(py, a.bind(py), "around(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    if matches!(array.dtype(), DType::Complex64 | DType::Complex128) {
+        return fallback();
+    }
+
+    let result = if decimals == 0 {
+        array.elementwise_unary(UnaryOp::Rint)
+    } else {
+        let scale = 10_f64.powi(decimals);
+        let values: Vec<f64> = array
+            .values()
+            .iter()
+            .map(|&v| (v * scale).round_ties_even() / scale)
+            .collect();
+        UFuncArray::new(array.shape().to_vec(), values, array.dtype()).map_err(map_ufunc_error)?
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, decimals=0, out=None))]
 fn round(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    a: Py<PyAny>,
+    decimals: i32,
+    out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "round", args, kwargs)
+    around(py, a, decimals, out)
 }
 
 // Dimension-promotion (3).
