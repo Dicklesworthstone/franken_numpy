@@ -165,13 +165,9 @@ def parse_source() -> set[str]:
         names.add(pyname)
     for fn in FN_ADD_RE.findall(source):
         names.add(fn)
-    # BitGenerator is installed via setattr or via a lazy __getattr__.
-    if 'random.setattr("BitGenerator"' in source:
-        names.add("BitGenerator")
-    if (
-        "if name == 'BitGenerator'" in source
-        and "import numpy.random" in source
-    ):
+    # BitGenerator is installed via a lazy __getattr__ that re-exports from numpy.
+    # Detect the frozenset pattern: frozenset(('BitGenerator', ...))
+    if "'BitGenerator'" in source and "_NUMPY_RANDOM_NAMES" in source:
         names.add("BitGenerator")
     # install() binds aliases from a tuple, guarded by hasattr(_rand, name).
     # Only count alias names whose PyRandomState method actually exists.

@@ -11,21 +11,16 @@
 
 | Level | Present | Total | Coverage |
 |-------|--------:|------:|---------:|
-| MUST | 55 | 56 | 98.2% |
+| MUST | 56 | 56 | 100.0% |
 | SHOULD | 3 | 3 | 100.0% |
 | MAY | 2 | 2 | 100.0% |
-| **Total** | **60** | **61** | **98.4%** |
-
-## Missing names
-
-| Name | Level |
-|------|:-----:|
-| `BitGenerator` | MUST |
+| **Total** | **61** | **61** | **100.0%** |
 
 ## Present names
 
 | Name | Level |
 |------|:-----:|
+| `BitGenerator` | MUST |
 | `Generator` | MUST |
 | `MT19937` | MUST |
 | `PCG64` | MUST |
