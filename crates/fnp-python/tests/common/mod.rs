@@ -151,15 +151,18 @@ where
     let _guard = PY_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     Python::initialize();
     Python::attach(|py| {
-        if py.import("numpy").is_err() {
-            // numpy not present in the embedded interpreter — treat as
-            // pass. Local / rch flows install numpy before running.
-            return;
-        }
-        let module = PyModule::new(py, "fnp_python_conformance").unwrap();
-        fnp_python(&module).unwrap();
-        let numpy = py.import("numpy").unwrap();
-        f(py, module, numpy).unwrap();
+        let numpy = match py.import("numpy") {
+            Ok(numpy) => numpy,
+            Err(err) => {
+                panic!("NumPy oracle must be importable for fnp-python conformance tests: {err}")
+            }
+        };
+        let module = PyModule::new(py, "fnp_python_conformance")
+            .unwrap_or_else(|err| panic!("failed to create fnp-python conformance module: {err}"));
+        fnp_python(&module)
+            .unwrap_or_else(|err| panic!("failed to initialize fnp-python module: {err}"));
+        f(py, module, numpy)
+            .unwrap_or_else(|err| panic!("fnp-python conformance callback failed: {err}"));
     });
 }
 
