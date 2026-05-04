@@ -16,7 +16,7 @@ mod common;
 
 use common::{CompareMode, RequirementLevel, Totals, run_case, with_fnp_and_numpy};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyTuple};
+use pyo3::types::{PyDict, PyList, PyTuple};
 
 fn no_kwargs<'py>(_py: Python<'py>) -> PyResult<Option<pyo3::Bound<'py, PyDict>>> {
     Ok(None)
@@ -48,6 +48,51 @@ fn np_array_1d_object_s<'py>(
     values: Vec<&str>,
 ) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
     let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+    numpy.getattr("array")?.call((values,), Some(&kwargs))
+}
+
+fn np_array_1d_object_mixed_truthiness<'py>(
+    py: Python<'py>,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let numpy = py.import("numpy")?;
+    let values = PyList::empty(py);
+    values.append(py.None())?;
+    values.append("")?;
+    values.append("x")?;
+    values.append(0_i64)?;
+    values.append(3_i64)?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+    numpy.getattr("array")?.call((values,), Some(&kwargs))
+}
+
+fn np_array_1d_object_mixed_left<'py>(
+    py: Python<'py>,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let numpy = py.import("numpy")?;
+    let values = PyList::empty(py);
+    values.append(py.None())?;
+    values.append("b")?;
+    values.append(0_i64)?;
+    values.append(4_i64)?;
+    values.append("z")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+    numpy.getattr("array")?.call((values,), Some(&kwargs))
+}
+
+fn np_array_1d_object_mixed_right<'py>(
+    py: Python<'py>,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let numpy = py.import("numpy")?;
+    let values = PyList::empty(py);
+    values.append("w")?;
+    values.append(py.None())?;
+    values.append("y")?;
+    values.append(0_i64)?;
+    values.append(9_i64)?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", numpy.getattr("object_")?)?;
     numpy.getattr("array")?.call((values,), Some(&kwargs))
@@ -144,6 +189,18 @@ fn conformance_searching_matrix() {
             py,
             &module,
             &numpy,
+            "searching-flatnonzero-mixed-object-truthiness",
+            "flatnonzero",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_object_mixed_truthiness(py)?]),
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
             "searching-argwhere-2d",
             "argwhere",
             RequirementLevel::Must,
@@ -179,6 +236,18 @@ fn conformance_searching_matrix() {
             CompareMode::Strict,
             t,
             |py| PyTuple::new(py, [np_array_1d_object_s(py, vec!["", "x", "0", "false"])?]),
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-argwhere-mixed-object-truthiness",
+            "argwhere",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_object_mixed_truthiness(py)?]),
             no_kwargs,
         );
 
@@ -217,6 +286,18 @@ fn conformance_searching_matrix() {
             CompareMode::Strict,
             t,
             |py| PyTuple::new(py, [np_array_1d_object_s(py, vec!["", "x", "0", "false"])?]),
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-count_nonzero-mixed-object-truthiness",
+            "count_nonzero",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_object_mixed_truthiness(py)?]),
             no_kwargs,
         );
         run_case(
@@ -753,6 +834,18 @@ fn conformance_searching_matrix() {
             |py| PyTuple::new(py, [np_array_1d_object_s(py, vec!["", "x", "0", "false"])?]),
             no_kwargs,
         );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-where-mixed-object-condition-as-nonzero",
+            "where",
+            RequirementLevel::Must,
+            CompareMode::Surface,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_object_mixed_truthiness(py)?]),
+            no_kwargs,
+        );
         // 3-arg form selects from x or y based on condition.
         run_case(
             py,
@@ -825,6 +918,27 @@ fn conformance_searching_matrix() {
             py,
             &module,
             &numpy,
+            "searching-where-mixed-object-condition-select",
+            "where",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_object_mixed_truthiness(py)?,
+                        np_array_1d_i(py, vec![1, 2, 3, 4, 5])?,
+                        np_array_1d_i(py, vec![10, 20, 30, 40, 50])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
             "searching-where-string-choices",
             "where",
             RequirementLevel::Must,
@@ -866,6 +980,31 @@ fn conformance_searching_matrix() {
                         cond,
                         np_array_1d_object_s(py, vec!["a", "b", "c", "d"])?,
                         np_array_1d_object_s(py, vec!["w", "x", "y", "z"])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-where-mixed-object-choices",
+            "where",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                let cond = py
+                    .import("numpy")?
+                    .getattr("array")?
+                    .call1((vec![true, false, true, false, true],))?;
+                PyTuple::new(
+                    py,
+                    [
+                        cond,
+                        np_array_1d_object_mixed_left(py)?,
+                        np_array_1d_object_mixed_right(py)?,
                     ],
                 )
             },
