@@ -242,3 +242,39 @@ print(result.dtype == a.dtype)
     assert_eq!(result.trim(), "True", "partition should preserve dtype");
     Ok(())
 }
+
+#[test]
+fn partition_0d_raises_axis_error() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array(5)
+try:
+    fnp.partition(a, 0)
+    print("no_error")
+except np.exceptions.AxisError:
+    print("axis_error")
+except Exception as e:
+    print(f"other: {type(e).__name__}")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "axis_error", "partition on 0-D should raise AxisError");
+    Ok(())
+}
+
+#[test]
+fn argpartition_0d_returns_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array(5)
+result = fnp.argpartition(a, 0)
+expected = np.argpartition(a, 0)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argpartition on 0-D should return [0] like numpy");
+    Ok(())
+}

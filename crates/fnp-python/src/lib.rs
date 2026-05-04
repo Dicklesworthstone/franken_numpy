@@ -16432,6 +16432,7 @@ fn partition(
     };
     if native.has_integer_sidecar()
         || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
+        || native.shape().is_empty()
     {
         return fallback(py);
     }
@@ -16510,6 +16511,9 @@ fn argpartition(
     if native.has_integer_sidecar()
         || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
     {
+        return fallback(py);
+    }
+    if native.shape().is_empty() {
         return fallback(py);
     }
     let axis_len = match native
