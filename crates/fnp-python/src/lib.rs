@@ -23720,13 +23720,49 @@ fn correlate(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (a, b, rtol=1e-05, atol=1e-08, equal_nan=false))]
 fn isclose(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    a: Py<PyAny>,
+    b: Py<PyAny>,
+    rtol: f64,
+    atol: f64,
+    equal_nan: bool,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "isclose", args, kwargs)
+    let numpy = py.import("numpy")?;
+    let isclose_fn = numpy.getattr("isclose")?;
+    let a_for_fallback = a.clone_ref(py);
+    let b_for_fallback = b.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("rtol", rtol)?;
+        kwargs.set_item("atol", atol)?;
+        kwargs.set_item("equal_nan", equal_nan)?;
+        Ok(isclose_fn
+            .call((a_for_fallback.bind(py), b_for_fallback.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    let arr_a = match extract_precise_numeric_array(py, a.bind(py), "isclose(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    let arr_b = match extract_precise_numeric_array(py, b.bind(py), "isclose(b)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    if matches!(arr_a.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(arr_b.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+
+    let result = match arr_a.isclose_equal_nan(&arr_b, rtol, atol, equal_nan) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 // NaN-aware cumulative (2).
