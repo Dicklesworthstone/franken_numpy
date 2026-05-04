@@ -136,6 +136,42 @@ print(np.array_equal(result, expected))
 }
 
 #[test]
+fn where_python_scalar_choices_preserve_numpy_weak_promotion() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array([True, False])
+cases = [
+    (1, np.array([2, 3], dtype=np.int8)),
+    (np.array([1, 2], dtype=np.int8), 3),
+    (1, np.array([2, 3], dtype=np.uint8)),
+    (np.array([1, 2], dtype=np.uint8), 3),
+    (1.0, np.array([2, 3], dtype=np.float32)),
+    (np.array([1, 2], dtype=np.float32), 3.0),
+    (np.array([1, 2], dtype=np.float16), 3.0),
+]
+outcomes = []
+for x, y in cases:
+    result = fnp.where(condition, x, y)
+    expected = np.where(condition, x, y)
+    outcomes.append(
+        np.array_equal(result, expected)
+        and result.shape == expected.shape
+        and result.dtype == expected.dtype
+    )
+print(all(outcomes))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where Python scalar choices should use NumPy weak scalar promotion"
+    );
+    Ok(())
+}
+
+#[test]
 fn where_explicit_none_choice_values() -> Result<(), String> {
     let script = fnp_script(
         r#"

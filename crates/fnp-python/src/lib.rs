@@ -7391,6 +7391,11 @@ fn where_py(
         2 => {
             let x_arg = args.get_item(0)?;
             let y_arg = args.get_item(1)?;
+            let numpy = py.import("numpy")?;
+            let ndarray_type = numpy.getattr("ndarray")?;
+            if !x_arg.is_instance(&ndarray_type)? || !y_arg.is_instance(&ndarray_type)? {
+                return fallback();
+            }
             let x = match extract_precise_numeric_array(py, &x_arg, "where(x)") {
                 Ok(array) => array,
                 Err(_) => return fallback(),
