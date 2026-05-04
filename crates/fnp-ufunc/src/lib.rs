@@ -2293,11 +2293,13 @@ impl UFuncArrayView {
         self.offset
     }
 
+    #[inline]
     #[must_use]
     pub fn dtype(&self) -> DType {
         self.dtype
     }
 
+    #[inline]
     #[must_use]
     pub fn is_writable(&self) -> bool {
         self.writable
@@ -5276,11 +5278,13 @@ impl UFuncArray {
         })
     }
 
+    #[inline]
     #[must_use]
     pub fn shape(&self) -> &[usize] {
         &self.shape
     }
 
+    #[inline]
     #[must_use]
     pub fn values(&self) -> &[f64] {
         &self.values
@@ -5288,6 +5292,7 @@ impl UFuncArray {
 
     /// Returns `true` if this array has a lossless integer sidecar that
     /// preserves exact i64/u64 values exceeding f64 representability.
+    #[inline]
     #[must_use]
     pub fn has_integer_sidecar(&self) -> bool {
         self.integer_sidecar.is_some()
