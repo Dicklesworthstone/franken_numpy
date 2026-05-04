@@ -315,6 +315,47 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+#[test]
+fn where_preserves_numpy_dtype_promotion_matrix() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array([True, False, True, False])
+cases = [
+    (
+        np.array([1, 2, 3, 4], dtype=np.int8),
+        np.array([10, 20, 30, 40], dtype=np.int8),
+    ),
+    (
+        np.array([1, 2, 3, 4], dtype=np.float32),
+        np.array([10, 20, 30, 40], dtype=np.float32),
+    ),
+    (
+        np.array([1, 2, 3, 4], dtype=np.int16),
+        np.array([10, 20, 30, 40], dtype=np.uint16),
+    ),
+]
+outcomes = []
+for x, y in cases:
+    result = fnp.where(condition, x, y)
+    expected = np.where(condition, x, y)
+    outcomes.append(
+        np.array_equal(result, expected)
+        and result.shape == expected.shape
+        and result.dtype == expected.dtype
+    )
+print(all(outcomes))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where should preserve NumPy dtype promotion for narrow numeric choices"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // where(condition) - index mode (like nonzero)
 // ─────────────────────────────────────────────────────────────────────────────

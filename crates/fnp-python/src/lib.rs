@@ -7381,7 +7381,8 @@ fn where_py(
         return fallback();
     }
 
-    let condition = match extract_numeric_array(py, condition.bind(py), "where(condition)") {
+    let condition = match extract_precise_numeric_array(py, condition.bind(py), "where(condition)")
+    {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -7390,11 +7391,11 @@ fn where_py(
         2 => {
             let x_arg = args.get_item(0)?;
             let y_arg = args.get_item(1)?;
-            let x = match extract_numeric_array(py, &x_arg, "where(x)") {
+            let x = match extract_precise_numeric_array(py, &x_arg, "where(x)") {
                 Ok(array) => array,
                 Err(_) => return fallback(),
             };
-            let y = match extract_numeric_array(py, &y_arg, "where(y)") {
+            let y = match extract_precise_numeric_array(py, &y_arg, "where(y)") {
                 Ok(array) => array,
                 Err(_) => return fallback(),
             };
