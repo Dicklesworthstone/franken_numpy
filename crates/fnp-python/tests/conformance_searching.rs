@@ -43,6 +43,16 @@ fn np_array_1d_s<'py>(
     py.import("numpy")?.getattr("array")?.call1((values,))
 }
 
+fn np_array_1d_object_s<'py>(
+    py: Python<'py>,
+    values: Vec<&str>,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", numpy.getattr("object_")?)?;
+    numpy.getattr("array")?.call((values,), Some(&kwargs))
+}
+
 fn np_array_2d_f<'py>(
     py: Python<'py>,
     rows: Vec<Vec<f64>>,
@@ -122,6 +132,18 @@ fn conformance_searching_matrix() {
             py,
             &module,
             &numpy,
+            "searching-flatnonzero-object-truthiness",
+            "flatnonzero",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_object_s(py, vec!["", "x", "0", "false"])?]),
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
             "searching-argwhere-2d",
             "argwhere",
             RequirementLevel::Must,
@@ -145,6 +167,18 @@ fn conformance_searching_matrix() {
             CompareMode::Strict,
             t,
             |py| PyTuple::new(py, [np_array_1d_s(py, vec!["", "x", "0", "false"])?]),
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-argwhere-object-truthiness",
+            "argwhere",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_object_s(py, vec!["", "x", "0", "false"])?]),
             no_kwargs,
         );
 
@@ -171,6 +205,18 @@ fn conformance_searching_matrix() {
             CompareMode::Strict,
             t,
             |py| PyTuple::new(py, [np_array_1d_s(py, vec!["", "x", "0", "false"])?]),
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-count_nonzero-object-truthiness",
+            "count_nonzero",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_object_s(py, vec!["", "x", "0", "false"])?]),
             no_kwargs,
         );
         run_case(
@@ -695,6 +741,18 @@ fn conformance_searching_matrix() {
             |py| PyTuple::new(py, [np_array_1d_s(py, vec!["", "x", "0", "false"])?]),
             no_kwargs,
         );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-where-object-condition-as-nonzero",
+            "where",
+            RequirementLevel::Must,
+            CompareMode::Surface,
+            t,
+            |py| PyTuple::new(py, [np_array_1d_object_s(py, vec!["", "x", "0", "false"])?]),
+            no_kwargs,
+        );
         // 3-arg form selects from x or y based on condition.
         run_case(
             py,
@@ -746,6 +804,27 @@ fn conformance_searching_matrix() {
             py,
             &module,
             &numpy,
+            "searching-where-object-condition-select",
+            "where",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_object_s(py, vec!["", "x", "0", "false"])?,
+                        np_array_1d_i(py, vec![1, 2, 3, 4])?,
+                        np_array_1d_i(py, vec![10, 20, 30, 40])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
             "searching-where-string-choices",
             "where",
             RequirementLevel::Must,
@@ -762,6 +841,31 @@ fn conformance_searching_matrix() {
                         cond,
                         np_array_1d_s(py, vec!["a", "b", "c", "d"])?,
                         np_array_1d_s(py, vec!["w", "x", "y", "z"])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-where-object-choices",
+            "where",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                let cond = py
+                    .import("numpy")?
+                    .getattr("array")?
+                    .call1((vec![true, false, true, false],))?;
+                PyTuple::new(
+                    py,
+                    [
+                        cond,
+                        np_array_1d_object_s(py, vec!["a", "b", "c", "d"])?,
+                        np_array_1d_object_s(py, vec!["w", "x", "y", "z"])?,
                     ],
                 )
             },
