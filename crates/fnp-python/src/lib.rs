@@ -9697,7 +9697,7 @@ fn diff(
     let Ok(n) = usize::try_from(n) else {
         return fallback();
     };
-    let a = match extract_numeric_array(py, a.bind(py), "diff(a)") {
+    let a = match extract_precise_numeric_array(py, a.bind(py), "diff(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
