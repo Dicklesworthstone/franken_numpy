@@ -206,6 +206,44 @@ print(all(ours == theirs == "TypeError" for ours, theirs in cases))
 }
 
 #[test]
+fn where_invalid_positional_arity_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array([True, False])
+x = np.array([1, 2])
+y = np.array([10, 20])
+
+def error_surface(call):
+    try:
+        call()
+        return ("OK", "")
+    except Exception as exc:
+        return (type(exc).__name__, str(exc))
+
+cases = [
+    (
+        error_surface(lambda: fnp.where(condition, x)),
+        error_surface(lambda: np.where(condition, x)),
+    ),
+    (
+        error_surface(lambda: fnp.where(condition, x, y, 99)),
+        error_surface(lambda: np.where(condition, x, y, 99)),
+    ),
+]
+print(all(ours == theirs and ours[0] != "OK" for ours, theirs in cases))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where invalid positional arity errors should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn where_all_true() -> Result<(), String> {
     let script = fnp_script(
         r#"
