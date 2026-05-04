@@ -1,6 +1,6 @@
-//! Conformance tests for numpy unravel_index and unique_* functions against NumPy oracle.
+//! Conformance tests for numpy index conversion and unique_* functions against NumPy oracle.
 //!
-//! Tests unravel_index, unique_all, unique_counts, unique_inverse, unique_values.
+//! Tests unravel_index, ravel_multi_index, unique_all, unique_counts, unique_inverse, unique_values.
 
 use std::process::Command;
 
@@ -146,6 +146,149 @@ print(result == expected)
     );
     let result = numpy_oracle(&script)?;
     assert_eq!(result.trim(), "True", "unravel_index 1d shape should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ravel_multi_index
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn ravel_multi_index_basic_2d() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+result = fnp.ravel_multi_index((3, 5), (7, 6))
+expected = np.ravel_multi_index((3, 5), (7, 6))
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ravel_multi_index basic 2d should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ravel_multi_index_basic_3d() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+result = fnp.ravel_multi_index((2, 1, 3), (3, 4, 5))
+expected = np.ravel_multi_index((2, 1, 3), (3, 4, 5))
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ravel_multi_index basic 3d should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ravel_multi_index_array_coords() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+result = fnp.ravel_multi_index(([3, 5, 1], [2, 4, 0]), (7, 6))
+expected = np.ravel_multi_index(([3, 5, 1], [2, 4, 0]), (7, 6))
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ravel_multi_index array coords should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ravel_multi_index_fortran_order() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+result = fnp.ravel_multi_index((3, 5), (7, 6), order='F')
+expected = np.ravel_multi_index((3, 5), (7, 6), order='F')
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ravel_multi_index fortran order should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ravel_multi_index_zero_coords() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+result = fnp.ravel_multi_index((0, 0, 0), (3, 4, 5))
+expected = np.ravel_multi_index((0, 0, 0), (3, 4, 5))
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ravel_multi_index zero coords should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ravel_multi_index_last_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+shape = (3, 4, 5)
+coords = (2, 3, 4)
+result = fnp.ravel_multi_index(coords, shape)
+expected = np.ravel_multi_index(coords, shape)
+print(result == expected == 3 * 4 * 5 - 1)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ravel_multi_index last element should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ravel_multi_index_mode_clip() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+result = fnp.ravel_multi_index((10, 2), (7, 6), mode='clip')
+expected = np.ravel_multi_index((10, 2), (7, 6), mode='clip')
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ravel_multi_index mode clip should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ravel_multi_index_mode_wrap() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+result = fnp.ravel_multi_index((8, 2), (7, 6), mode='wrap')
+expected = np.ravel_multi_index((8, 2), (7, 6), mode='wrap')
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ravel_multi_index mode wrap should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ravel_unravel_roundtrip() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+shape = (5, 6, 7)
+coords = (2, 3, 4)
+flat = fnp.ravel_multi_index(coords, shape)
+back = fnp.unravel_index(flat, shape)
+print(coords == back)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ravel and unravel should roundtrip");
     Ok(())
 }
 
