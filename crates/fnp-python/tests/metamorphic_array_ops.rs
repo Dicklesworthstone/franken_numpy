@@ -877,3 +877,288 @@ print(np.allclose(via_dot, via_einsum))
     assert_eq!(result.trim(), "True", "dot(a, b) == einsum('i,i->', a, b)");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// around/round metamorphic properties
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn around_is_idempotent() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+a = np.random.randn(100) * 1000
+for decimals in [-2, -1, 0, 1, 2, 3]:
+    once = fnp.around(a, decimals=decimals)
+    twice = fnp.around(once, decimals=decimals)
+    if not np.array_equal(once, twice):
+        print("False")
+        break
+else:
+    print("True")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "around(around(x, n), n) == around(x, n)");
+    Ok(())
+}
+
+#[test]
+fn around_zero_decimals_matches_rint() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+a = np.random.randn(100) * 10
+around_result = fnp.around(a, decimals=0)
+rint_result = fnp.rint(a)
+print(np.array_equal(around_result, rint_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "around(x, 0) == rint(x)");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// diff/cumsum metamorphic properties
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn diff_cumsum_telescoping() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(50)
+# sum of differences equals last - first
+diffs = fnp.diff(x)
+total_diff = fnp.sum(diffs)
+expected = x[-1] - x[0]
+print(np.allclose(total_diff, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sum(diff(x)) == x[-1] - x[0]");
+    Ok(())
+}
+
+#[test]
+fn ediff1d_telescoping() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(50)
+diffs = fnp.ediff1d(x)
+total_diff = fnp.sum(diffs)
+expected = x[-1] - x[0]
+print(np.allclose(total_diff, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sum(ediff1d(x)) == x[-1] - x[0]");
+    Ok(())
+}
+
+#[test]
+fn cumsum_diff_recovers_original_shifted() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(50)
+cs = fnp.cumsum(x)
+d = fnp.diff(cs)
+# diff(cumsum(x)) == x[1:]
+print(np.allclose(d, x[1:]))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diff(cumsum(x)) == x[1:]");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// searchsorted metamorphic properties
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn searchsorted_left_right_relationship() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 2, 2, 3, 4, 5])
+v = 2
+left = fnp.searchsorted(a, v, side='left')
+right = fnp.searchsorted(a, v, side='right')
+# All elements in a[left:right] should equal v
+segment = a[left:right]
+all_equal = np.all(segment == v)
+# Count should match
+count_in_segment = len(segment)
+count_total = np.sum(a == v)
+print(all_equal and count_in_segment == count_total)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "searchsorted left/right brackets all equal elements");
+    Ok(())
+}
+
+#[test]
+fn searchsorted_insertion_preserves_sortedness() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+a = np.sort(np.random.randn(50))
+v = np.random.randn(10)
+indices = fnp.searchsorted(a, v)
+# Inserting at these indices should preserve sortedness
+for i, idx in enumerate(indices):
+    inserted = np.insert(a, idx, v[i])
+    if not np.all(inserted[:-1] <= inserted[1:]):
+        print("False")
+        break
+else:
+    print("True")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "insertion at searchsorted index preserves sortedness");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// unique metamorphic properties
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn unique_has_no_duplicates() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randint(0, 20, size=100)
+u = fnp.unique(x)
+# All elements in unique result should be distinct
+has_no_dups = len(u) == len(set(u.tolist()))
+print(has_no_dups)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "unique(x) has no duplicates");
+    Ok(())
+}
+
+#[test]
+fn unique_is_subset() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randint(0, 20, size=100)
+u = fnp.unique(x)
+# All elements in unique should be in original
+is_subset = all(elem in x for elem in u)
+print(is_subset)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "unique(x) is subset of x");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// partition metamorphic properties
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn partition_kth_is_sorted_position() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+for kth in [0, 10, 50, 90, 99]:
+    p = fnp.partition(x, kth)
+    s = fnp.sort(x)
+    # Element at kth position should be same as in sorted array
+    if not np.isclose(p[kth], s[kth]):
+        print("False")
+        break
+else:
+    print("True")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "partition(x, k)[k] == sort(x)[k]");
+    Ok(())
+}
+
+#[test]
+fn partition_left_right_ordering() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+kth = 50
+p = fnp.partition(x, kth)
+pivot = p[kth]
+# All elements left of kth should be <= pivot
+# All elements right of kth should be >= pivot
+left_ok = np.all(p[:kth] <= pivot)
+right_ok = np.all(p[kth+1:] >= pivot)
+print(left_ok and right_ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "partition maintains left <= pivot <= right");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// linear algebra metamorphic properties
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn matrix_inverse_product_is_identity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(5, 5)
+A = A + np.eye(5) * 5  # Make well-conditioned
+A_inv = fnp.linalg.inv(A)
+product = fnp.dot(A, A_inv)
+identity = np.eye(5)
+print(np.allclose(product, identity, atol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "A @ inv(A) == I");
+    Ok(())
+}
+
+#[test]
+fn transpose_matmul_relationship() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(4, 5)
+B = np.random.randn(5, 3)
+# (A @ B).T == B.T @ A.T
+AB = fnp.matmul(A, B)
+AB_T = fnp.transpose(AB)
+BT_AT = fnp.matmul(fnp.transpose(B), fnp.transpose(A))
+print(np.allclose(AB_T, BT_AT))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "(A @ B).T == B.T @ A.T");
+    Ok(())
+}
