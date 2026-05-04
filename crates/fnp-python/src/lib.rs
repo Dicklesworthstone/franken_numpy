@@ -23877,13 +23877,72 @@ fn array_str(
 
 // Elementwise differences (1).
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (ary, to_end=None, to_begin=None))]
 fn ediff1d(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    ary: Py<PyAny>,
+    to_end: Option<Py<PyAny>>,
+    to_begin: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "ediff1d", args, kwargs)
+    let numpy = py.import("numpy")?;
+    let ediff1d_fn = numpy.getattr("ediff1d")?;
+    let ary_ref = ary.clone_ref(py);
+    let to_end_ref = to_end.as_ref().map(|v| v.clone_ref(py));
+    let to_begin_ref = to_begin.as_ref().map(|v| v.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(te) = to_end_ref.as_ref() {
+            kwargs.set_item("to_end", te.bind(py))?;
+        }
+        if let Some(tb) = to_begin_ref.as_ref() {
+            kwargs.set_item("to_begin", tb.bind(py))?;
+        }
+        Ok(ediff1d_fn.call((ary_ref.bind(py),), Some(&kwargs))?.unbind())
+    };
+
+    let array = match extract_precise_numeric_array(py, ary.bind(py), "ediff1d(ary)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+
+    let flat = array.ravel();
+    let diff_result = match flat.diff(1, Some(0)) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+
+    if to_begin.is_none() && to_end.is_none() {
+        return build_numpy_array_from_ufunc(py, &diff_result);
+    }
+
+    let mut parts: Vec<UFuncArray> = Vec::with_capacity(3);
+
+    if let Some(tb) = to_begin {
+        let tb_array = match extract_precise_numeric_array(py, tb.bind(py), "ediff1d(to_begin)") {
+            Ok(arr) => arr.ravel(),
+            Err(_) => return fallback(),
+        };
+        let tb_cast = tb_array.astype(diff_result.dtype());
+        parts.push(tb_cast);
+    }
+
+    parts.push(diff_result);
+
+    if let Some(te) = to_end {
+        let te_array = match extract_precise_numeric_array(py, te.bind(py), "ediff1d(to_end)") {
+            Ok(arr) => arr.ravel(),
+            Err(_) => return fallback(),
+        };
+        let te_cast = te_array.astype(parts.last().unwrap().dtype());
+        parts.push(te_cast);
+    }
+
+    let refs: Vec<&UFuncArray> = parts.iter().collect();
+    let result = match UFuncArray::concatenate(&refs, 0) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 // Print-options (3). printoptions is a context manager; passthrough
