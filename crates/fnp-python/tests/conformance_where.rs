@@ -136,6 +136,76 @@ print(np.array_equal(result, expected))
 }
 
 #[test]
+fn where_explicit_none_choice_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array([True, False, True, False])
+y = np.array([1, 2, 3, 4])
+left_none = fnp.where(condition, None, y)
+left_expected = np.where(condition, None, y)
+right_none = fnp.where(condition, y, None)
+right_expected = np.where(condition, y, None)
+both_none = fnp.where(condition, None, None)
+both_expected = np.where(condition, None, None)
+print(
+    np.array_equal(left_none, left_expected)
+    and left_none.dtype == left_expected.dtype
+    and np.array_equal(right_none, right_expected)
+    and right_none.dtype == right_expected.dtype
+    and np.array_equal(both_none, both_expected)
+    and both_none.dtype == both_expected.dtype
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where explicit None choices should match numpy object selection"
+    );
+    Ok(())
+}
+
+#[test]
+fn where_rejects_positional_only_keywords() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array([True, False])
+x = np.array([1, 2])
+y = np.array([10, 20])
+
+def error_type(call):
+    try:
+        call()
+        return "OK"
+    except Exception as exc:
+        return type(exc).__name__
+
+cases = [
+    (
+        error_type(lambda: fnp.where(condition=condition)),
+        error_type(lambda: np.where(condition=condition)),
+    ),
+    (
+        error_type(lambda: fnp.where(condition, x=x, y=y)),
+        error_type(lambda: np.where(condition, x=x, y=y)),
+    ),
+]
+print(all(ours == theirs == "TypeError" for ours, theirs in cases))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where positional-only keyword rejection should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn where_all_true() -> Result<(), String> {
     let script = fnp_script(
         r#"

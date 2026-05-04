@@ -7359,55 +7359,53 @@ fn trapz(
 }
 
 #[pyfunction(name = "where")]
-#[pyo3(signature = (condition, x=None, y=None))]
+#[pyo3(signature = (condition, /, *args))]
 fn where_py(
     py: Python<'_>,
     condition: Py<PyAny>,
-    x: Option<Py<PyAny>>,
-    y: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
 ) -> PyResult<Py<PyAny>> {
-    let condition_for_fallback = condition.clone_ref(py);
-    let x_for_fallback = x.as_ref().map(|value| value.clone_ref(py));
-    let y_for_fallback = y.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         let where_fn = numpy.getattr("where")?;
-        match (&x_for_fallback, &y_for_fallback) {
-            (Some(x), Some(y)) => Ok(where_fn
-                .call1((condition_for_fallback.bind(py), x.bind(py), y.bind(py)))?
-                .unbind()),
-            (None, None) => Ok(where_fn.call1((condition_for_fallback.bind(py),))?.unbind()),
-            _ => Err(PyValueError::new_err(
-                "where: either provide both x and y or neither",
-            )),
+        let mut positional = Vec::with_capacity(args.len() + 1);
+        positional.push(condition.clone_ref(py));
+        for arg in args.iter() {
+            positional.push(arg.unbind());
         }
+        let positional = PyTuple::new(py, positional.iter().map(|arg| arg.bind(py)))?;
+        Ok(where_fn.call1(positional)?.unbind())
     };
+
+    if args.len() != 0 && args.len() != 2 {
+        return fallback();
+    }
 
     let condition = match extract_numeric_array(py, condition.bind(py), "where(condition)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
 
-    match (x, y) {
-        (Some(x), Some(y)) => {
-            let x = match extract_numeric_array(py, x.bind(py), "where(x)") {
+    match args.len() {
+        2 => {
+            let x_arg = args.get_item(0)?;
+            let y_arg = args.get_item(1)?;
+            let x = match extract_numeric_array(py, &x_arg, "where(x)") {
                 Ok(array) => array,
                 Err(_) => return fallback(),
             };
-            let y = match extract_numeric_array(py, y.bind(py), "where(y)") {
+            let y = match extract_numeric_array(py, &y_arg, "where(y)") {
                 Ok(array) => array,
                 Err(_) => return fallback(),
             };
             let result = UFuncArray::where_select(&condition, &x, &y).map_err(map_ufunc_error)?;
             build_numpy_array_from_ufunc(py, &result)
         }
-        (None, None) => {
+        0 => {
             let result = where_nonzero(&condition).map_err(map_ufunc_error)?;
             build_numpy_tuple_from_ufuncs(py, &result)
         }
-        _ => Err(PyValueError::new_err(
-            "where: either provide both x and y or neither",
-        )),
+        _ => fallback(),
     }
 }
 
@@ -33475,13 +33473,9 @@ mod tests {
                 numeric_array(py, vec![vec![1_i64, 0_i64], vec![0_i64, 1_i64]], "int64");
             let x = numeric_array(py, vec![10.0, 20.0], "float64");
             let y = numeric_array(py, vec![vec![1.0], vec![2.0]], "float64");
+            let args = PyTuple::new(py, [x.clone().into_any(), y.clone().into_any()])?;
 
-            let actual = where_py(
-                py,
-                condition.clone().unbind(),
-                Some(x.clone().unbind()),
-                Some(y.clone().unbind()),
-            )?;
+            let actual = where_py(py, condition.clone().unbind(), &args)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("where")?.call1((condition, x, y))?;
 
@@ -33504,13 +33498,9 @@ mod tests {
             let condition = numeric_array(py, vec![1_i64, 0_i64, 1_i64], "int64");
             let x = numeric_array(py, vec![large, large + 1, large + 2], "uint64");
             let y = numeric_array(py, vec![7_u64, 8_u64, 9_u64], "uint64");
+            let args = PyTuple::new(py, [x.clone().into_any(), y.clone().into_any()])?;
 
-            let actual = where_py(
-                py,
-                condition.clone().unbind(),
-                Some(x.clone().unbind()),
-                Some(y.clone().unbind()),
-            )?;
+            let actual = where_py(py, condition.clone().unbind(), &args)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("where")?.call1((condition, x, y))?;
 
@@ -33535,7 +33525,8 @@ mod tests {
                 "int64",
             );
 
-            let actual = where_py(py, condition.clone().unbind(), None, None)?;
+            let args = PyTuple::empty(py);
+            let actual = where_py(py, condition.clone().unbind(), &args)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("where")?.call1((condition,))?;
 
