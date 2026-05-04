@@ -7381,8 +7381,14 @@ fn where_py(
         return fallback();
     }
 
-    let condition = match extract_precise_numeric_array(py, condition.bind(py), "where(condition)")
-    {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let condition_bound = condition.bind(py);
+    if !condition_bound.is_exact_instance(&ndarray_type) {
+        return fallback();
+    }
+
+    let condition = match extract_precise_numeric_array(py, condition_bound, "where(condition)") {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
@@ -7391,9 +7397,7 @@ fn where_py(
         2 => {
             let x_arg = args.get_item(0)?;
             let y_arg = args.get_item(1)?;
-            let numpy = py.import("numpy")?;
-            let ndarray_type = numpy.getattr("ndarray")?;
-            if !x_arg.is_instance(&ndarray_type)? || !y_arg.is_instance(&ndarray_type)? {
+            if !x_arg.is_exact_instance(&ndarray_type) || !y_arg.is_exact_instance(&ndarray_type) {
                 return fallback();
             }
             let x = match extract_precise_numeric_array(py, &x_arg, "where(x)") {
@@ -7408,6 +7412,9 @@ fn where_py(
             build_numpy_array_from_ufunc(py, &result)
         }
         0 => {
+            if condition.shape().is_empty() {
+                return fallback();
+            }
             let result = where_nonzero(&condition).map_err(map_ufunc_error)?;
             build_numpy_tuple_from_ufuncs(py, &result)
         }

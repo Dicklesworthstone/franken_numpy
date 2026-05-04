@@ -59,7 +59,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where basic selection should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where basic selection should match numpy"
+    );
     Ok(())
 }
 
@@ -77,7 +81,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where float values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where float values should match numpy"
+    );
     Ok(())
 }
 
@@ -95,7 +103,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where 2d selection should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where 2d selection should match numpy"
+    );
     Ok(())
 }
 
@@ -113,7 +125,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where broadcast condition should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where broadcast condition should match numpy"
+    );
     Ok(())
 }
 
@@ -131,7 +147,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where scalar values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where scalar values should match numpy"
+    );
     Ok(())
 }
 
@@ -280,6 +300,42 @@ print(all(ours == theirs and ours[0] != "OK" for ours, theirs in cases))
 }
 
 #[test]
+fn where_ndarray_subclass_dispatch_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+class WhereOverride(np.ndarray):
+    def __array_function__(self, func, types, args, kwargs):
+        if func is np.where:
+            return "OVERRIDE"
+        return NotImplemented
+
+def subclass(values):
+    return np.asarray(values).view(WhereOverride)
+
+condition = np.array([True, False])
+x = np.array([1, 2])
+y = np.array([10, 20])
+
+cases = [
+    (fnp.where(subclass([True, False])), np.where(subclass([True, False]))),
+    (fnp.where(subclass([True, False]), x, y), np.where(subclass([True, False]), x, y)),
+    (fnp.where(condition, subclass([1, 2]), y), np.where(condition, subclass([1, 2]), y)),
+    (fnp.where(condition, x, subclass([10, 20])), np.where(condition, x, subclass([10, 20]))),
+]
+print(all(ours == theirs == "OVERRIDE" for ours, theirs in cases))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where should honor ndarray subclass __array_function__ dispatch"
+    );
+    Ok(())
+}
+
+#[test]
 fn where_all_true() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -329,7 +385,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where empty array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where empty array should match numpy"
+    );
     Ok(())
 }
 
@@ -347,7 +407,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where numeric condition should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where numeric condition should match numpy"
+    );
     Ok(())
 }
 
@@ -408,7 +472,43 @@ print(len(result) == len(expected) and all(np.array_equal(r, e) for r, e in zip(
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where index mode 1d should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where index mode 1d should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn where_index_mode_scalar_error_surface_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def error_surface(call):
+    try:
+        call()
+        return ("OK", "")
+    except Exception as exc:
+        return (type(exc).__name__, str(exc))
+
+cases = [
+    True,
+    False,
+    np.array(True),
+    np.array(False),
+    np.array(1),
+    np.array(0),
+]
+print(all(error_surface(lambda cond=cond: fnp.where(cond)) == error_surface(lambda cond=cond: np.where(cond)) for cond in cases))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where scalar-condition error surface should match numpy"
+    );
     Ok(())
 }
 
@@ -424,7 +524,11 @@ print(len(result) == len(expected) and all(np.array_equal(r, e) for r, e in zip(
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where index mode 2d should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where index mode 2d should match numpy"
+    );
     Ok(())
 }
 
@@ -440,7 +544,11 @@ print(len(result) == len(expected) and all(len(r) == 0 for r in result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where index mode all false should return empty indices");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where index mode all false should return empty indices"
+    );
     Ok(())
 }
 
@@ -456,7 +564,11 @@ print(len(result) == len(expected) and all(np.array_equal(r, e) for r, e in zip(
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where index mode all true should return all indices");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where index mode all true should return all indices"
+    );
     Ok(())
 }
 
