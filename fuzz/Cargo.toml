@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 fnp-dtype = { path = "../crates/fnp-dtype" }
 fnp-io = { path = "../crates/fnp-io" }
+fnp-linalg = { path = "../crates/fnp-linalg" }
 fnp-ndarray = { path = "../crates/fnp-ndarray" }
 fnp-ufunc = { path = "../crates/fnp-ufunc" }
 libfuzzer-sys = "0.4.10"
@@ -66,6 +67,13 @@ bench = false
 [[bin]]
 name = "dtype_parsing"
 path = "fuzz_targets/dtype_parsing.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "linalg_parsing"
+path = "fuzz_targets/linalg_parsing.rs"
 test = false
 doc = false
 bench = false

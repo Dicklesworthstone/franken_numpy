@@ -117,6 +117,7 @@ version = "0.0.0"
 dependencies = [
  "fnp-dtype",
  "fnp-io",
+ "fnp-linalg",
  "fnp-ndarray",
  "fnp-ufunc",
  "libfuzzer-sys",
