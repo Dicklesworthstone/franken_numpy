@@ -732,3 +732,148 @@ print(np.allclose(result1, result2))
     assert_eq!(result.trim(), "True", "2D where(cond, x, y) == where(~cond, y, x)");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// einsum / matmul metamorphic relations
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn einsum_trace_equals_diag_sum() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(5, 5)
+trace_einsum = fnp.einsum('ii', A)
+trace_diag = fnp.sum(fnp.diag(A))
+print(np.allclose(trace_einsum, trace_diag))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "einsum('ii', A) == sum(diag(A))");
+    Ok(())
+}
+
+#[test]
+fn einsum_transpose_equals_transpose() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(4, 6)
+via_einsum = fnp.einsum('ij->ji', A)
+via_transpose = fnp.transpose(A)
+print(np.allclose(via_einsum, via_transpose))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "einsum('ij->ji', A) == transpose(A)");
+    Ok(())
+}
+
+#[test]
+fn einsum_matmul_equals_matmul() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(3, 4)
+B = np.random.randn(4, 5)
+via_einsum = fnp.einsum('ij,jk->ik', A, B)
+via_matmul = fnp.matmul(A, B)
+print(np.allclose(via_einsum, via_matmul))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "einsum('ij,jk->ik', A, B) == matmul(A, B)");
+    Ok(())
+}
+
+#[test]
+fn matmul_associativity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(3, 4)
+B = np.random.randn(4, 5)
+C = np.random.randn(5, 2)
+left = fnp.matmul(fnp.matmul(A, B), C)
+right = fnp.matmul(A, fnp.matmul(B, C))
+print(np.allclose(left, right))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "(A @ B) @ C == A @ (B @ C)");
+    Ok(())
+}
+
+#[test]
+fn matmul_transpose_reverses_order() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(3, 4)
+B = np.random.randn(4, 5)
+left = fnp.transpose(fnp.matmul(A, B))
+right = fnp.matmul(fnp.transpose(B), fnp.transpose(A))
+print(np.allclose(left, right))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "(A @ B).T == B.T @ A.T");
+    Ok(())
+}
+
+#[test]
+fn sum_along_axes_equals_total_sum() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(4, 5, 6)
+total_direct = fnp.sum(A)
+total_via_axes = fnp.sum(fnp.sum(fnp.sum(A, axis=0), axis=0), axis=0)
+print(np.allclose(total_direct, total_via_axes))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sum(A) == sum(sum(sum(A, axis=0), axis=0), axis=0)");
+    Ok(())
+}
+
+#[test]
+fn mean_is_sum_over_size() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(4, 5, 6)
+mean_direct = fnp.mean(A)
+mean_via_sum = fnp.sum(A) / A.size
+print(np.allclose(mean_direct, mean_via_sum))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "mean(A) == sum(A) / size");
+    Ok(())
+}
+
+#[test]
+fn dot_inner_equivalence_1d() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+a = np.random.randn(10)
+b = np.random.randn(10)
+via_dot = fnp.dot(a, b)
+via_einsum = fnp.einsum('i,i->', a, b)
+print(np.allclose(via_dot, via_einsum))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "dot(a, b) == einsum('i,i->', a, b)");
+    Ok(())
+}
