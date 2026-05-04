@@ -620,3 +620,115 @@ print(np.allclose(result, expected, rtol=1e-10))
     assert_eq!(result.trim(), "True", "prod(exp(x)) should equal exp(sum(x))");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// where metamorphic relationships
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn where_inverted_condition_swaps_x_y() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+cond = np.random.randint(0, 2, 50).astype(bool)
+x = np.random.randn(50)
+y = np.random.randn(50)
+result1 = fnp.where(cond, x, y)
+result2 = fnp.where(~cond, y, x)
+print(np.allclose(result1, result2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "where(cond, x, y) == where(~cond, y, x)");
+    Ok(())
+}
+
+#[test]
+fn where_all_true_returns_x() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(30)
+y = np.random.randn(30)
+cond = np.ones(30, dtype=bool)
+result = fnp.where(cond, x, y)
+print(np.allclose(result, x))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "where(all_true, x, y) == x");
+    Ok(())
+}
+
+#[test]
+fn where_all_false_returns_y() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(30)
+y = np.random.randn(30)
+cond = np.zeros(30, dtype=bool)
+result = fnp.where(cond, x, y)
+print(np.allclose(result, y))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "where(all_false, x, y) == y");
+    Ok(())
+}
+
+#[test]
+fn where_same_x_y_returns_that_value() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+cond = np.random.randint(0, 2, 40).astype(bool)
+v = np.random.randn(40)
+result = fnp.where(cond, v, v)
+print(np.allclose(result, v))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "where(cond, v, v) == v");
+    Ok(())
+}
+
+#[test]
+fn where_1arg_count_equals_count_nonzero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+indices = fnp.where(x > 0)
+count = fnp.count_nonzero(x > 0)
+print(len(indices[0]) == count)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "len(where(cond)[0]) == count_nonzero(cond)");
+    Ok(())
+}
+
+#[test]
+fn where_2d_inverted_condition_swaps() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+cond = np.random.randint(0, 2, (5, 7)).astype(bool)
+x = np.random.randn(5, 7)
+y = np.random.randn(5, 7)
+result1 = fnp.where(cond, x, y)
+result2 = fnp.where(~cond, y, x)
+print(np.allclose(result1, result2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "2D where(cond, x, y) == where(~cond, y, x)");
+    Ok(())
+}
