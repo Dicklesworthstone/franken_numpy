@@ -4309,6 +4309,8 @@ fn try_normalize_permutation_axes(axes: &[isize], ndim: usize) -> Option<Vec<usi
     Some(normalized)
 }
 
+/// Extract and validate axes for tensorsolve permutation.
+/// Reserved for numpy.linalg.tensorsolve support.
 #[allow(dead_code)]
 fn extract_tensorsolve_axes(
     py: Python<'_>,
@@ -5247,6 +5249,8 @@ fn python_is_complex_obj(value: &Bound<'_, PyAny>) -> PyResult<bool> {
     Ok(false)
 }
 
+/// Extract typed storage from a flattened numpy array.
+/// Reserved for structured array support (structured_to_unstructured, unstructured_to_structured).
 #[allow(dead_code)]
 fn extract_storage_from_flat_array(
     flat: &Bound<'_, PyAny>,
@@ -5353,6 +5357,8 @@ fn extract_storage_from_flat_array(
     }
 }
 
+/// Recursively extract leaf columns from a structured numpy array.
+/// Reserved for structured array support (structured_to_unstructured).
 #[allow(dead_code)]
 fn extract_structured_leaf_columns(
     py: Python<'_>,
@@ -5398,6 +5404,7 @@ fn extract_structured_leaf_columns(
     Ok(columns)
 }
 
+/// Promote a slice of dtypes to their common type. Reserved for structured array support.
 #[allow(dead_code)]
 fn promote_structured_leaf_dtypes(dtypes: &[DType]) -> Option<DType> {
     let mut iter = dtypes.iter().copied();
@@ -5405,6 +5412,7 @@ fn promote_structured_leaf_dtypes(dtypes: &[DType]) -> Option<DType> {
     Some(iter.fold(first, promote))
 }
 
+/// Build a numpy array from interleaved column storage. Reserved for unstructured_to_structured.
 #[allow(dead_code)]
 fn build_numpy_array_from_interleaved_storage(
     py: Python<'_>,
