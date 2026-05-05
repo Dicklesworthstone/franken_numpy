@@ -113,6 +113,27 @@ fn np_array_2d_s<'py>(
 }
 
 #[test]
+fn count_nonzero_axis_none_scalar_surface_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let ours_input = np_array_1d_i(py, vec![0, 1, 0, 2, 0, 3])?;
+        let theirs_input = np_array_1d_i(py, vec![0, 1, 0, 2, 0, 3])?;
+        let ours = module.getattr("count_nonzero")?.call1((ours_input,))?;
+        let theirs = numpy.getattr("count_nonzero")?.call1((theirs_input,))?;
+
+        let ours_type = ours.get_type().name()?.to_string();
+        let theirs_type = theirs.get_type().name()?.to_string();
+        assert_eq!(ours_type, theirs_type);
+        assert_eq!(ours_type, "int");
+        assert_eq!(
+            ours.str()?.to_string(),
+            theirs.str()?.to_string(),
+            "count_nonzero(axis=None) should match NumPy's Python scalar surface"
+        );
+        Ok(())
+    });
+}
+
+#[test]
 fn conformance_searching_matrix() {
     static TOTALS: Totals = Totals::new();
 
