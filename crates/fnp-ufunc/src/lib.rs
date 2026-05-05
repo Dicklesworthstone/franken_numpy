@@ -240,6 +240,7 @@ thread_local! {
 }
 
 #[must_use]
+#[inline]
 pub fn geterr() -> FloatErrorState {
     FLOAT_ERROR_STATE.with(|state| *state.borrow())
 }
