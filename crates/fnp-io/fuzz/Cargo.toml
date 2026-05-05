@@ -1,0 +1,52 @@
+[package]
+name = "fnp-io-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.fnp-io]
+path = ".."
+
+[[bin]]
+name = "fuzz_npy"
+path = "fuzz_targets/fuzz_npy.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_npz"
+path = "fuzz_targets/fuzz_npz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_load_auto"
+path = "fuzz_targets/fuzz_load_auto.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_fromstring"
+path = "fuzz_targets/fuzz_fromstring.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_loadtxt"
+path = "fuzz_targets/fuzz_loadtxt.rs"
+test = false
+doc = false
+bench = false
