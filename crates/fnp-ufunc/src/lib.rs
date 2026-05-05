@@ -34540,6 +34540,23 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn reduce_sum_axis_zero_compensates_large_strided_columns() {
+        let repeats = (COMPENSATED_SUM_MIN_LEN / 4) + 1;
+        let mut values = Vec::with_capacity(repeats * 8);
+        for _ in 0..repeats {
+            values.extend_from_slice(&[1.0e16, 10.0, 1.0, 20.0, -1.0e16, 30.0, 1.0, 40.0]);
+        }
+        let arr = UFuncArray::new(vec![repeats * 4, 2], values, DType::F64).expect("arr");
+
+        let out = arr.reduce_sum(Some(0), false).expect("sum axis=0");
+        assert_eq!(out.shape(), &[2]);
+        assert_eq!(
+            out.values(),
+            &[2.0 * repeats as f64, 100.0 * repeats as f64]
+        );
+    }
+
+    #[test]
     fn reduce_sum_axis_zero_preserves_c_order() {
         let arr = UFuncArray::new(
             vec![2, 3, 2],
@@ -36170,6 +36187,20 @@ print(json.dumps(payload))
 
         let out = arr.reduce_mean(None, false).expect("mean all");
         assert_eq!(out.values(), &[0.5]);
+    }
+
+    #[test]
+    fn reduce_mean_axis_zero_uses_compensated_sum_for_large_strided_columns() {
+        let repeats = (COMPENSATED_SUM_MIN_LEN / 4) + 1;
+        let mut values = Vec::with_capacity(repeats * 8);
+        for _ in 0..repeats {
+            values.extend_from_slice(&[1.0e16, 10.0, 1.0, 20.0, -1.0e16, 30.0, 1.0, 40.0]);
+        }
+        let arr = UFuncArray::new(vec![repeats * 4, 2], values, DType::F64).expect("arr");
+
+        let out = arr.reduce_mean(Some(0), false).expect("mean axis=0");
+        assert_eq!(out.shape(), &[2]);
+        assert_eq!(out.values(), &[0.5, 25.0]);
     }
 
     #[test]
@@ -57885,14 +57916,18 @@ print(json.dumps(payload))
 
         let data = buffer.read().unwrap();
         for i in 0..100 {
-            assert_eq!(data[i], (i * 2) as f64, "concurrent itemset corrupted index {i}");
+            assert_eq!(
+                data[i],
+                (i * 2) as f64,
+                "concurrent itemset corrupted index {i}"
+            );
         }
     }
 
     #[test]
     fn shared_view_concurrent_read_write_no_deadlock() {
-        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
         use std::thread;
 
         let buffer = Arc::new(RwLock::new((0..50).map(|i| i as f64).collect::<Vec<_>>()));
@@ -57952,15 +57987,8 @@ print(json.dumps(payload))
         use std::thread;
 
         let buffer = Arc::new(RwLock::new(vec![0.0; 20]));
-        let view = UFuncArrayView::new(
-            vec![20],
-            Arc::clone(&buffer),
-            None,
-            0,
-            vec![1],
-            DType::F64,
-        )
-        .unwrap();
+        let view = UFuncArrayView::new(vec![20], Arc::clone(&buffer), None, 0, vec![1], DType::F64)
+            .unwrap();
         let view = Arc::new(view);
 
         let mut handles = Vec::new();
@@ -58048,7 +58076,8 @@ print(json.dumps(payload))
         }
 
         for h in handles {
-            h.join().expect("thread panicked - potential deadlock in itemset/to_array interleaving");
+            h.join()
+                .expect("thread panicked - potential deadlock in itemset/to_array interleaving");
         }
 
         assert_eq!(writes_completed.load(Ordering::Relaxed), 100);

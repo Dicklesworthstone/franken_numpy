@@ -4,7 +4,7 @@
 //! specific input values. When an oracle (expected output) is unavailable,
 //! metamorphic relations between inputs/outputs provide correctness evidence.
 
-use fnp_ufunc::{UFuncArray, UnaryOp, BinaryOp};
+use fnp_ufunc::{BinaryOp, UFuncArray, UnaryOp};
 use std::f64::consts::PI;
 
 const EPSILON: f64 = 1e-10;
@@ -17,7 +17,11 @@ fn approx_eq(a: f64, b: f64, eps: f64) -> bool {
 fn arr_approx_eq(a: &UFuncArray, b: &UFuncArray, eps: f64) -> bool {
     let a_data = a.values();
     let b_data = b.values();
-    a_data.len() == b_data.len() && a_data.iter().zip(b_data.iter()).all(|(x, y)| approx_eq(*x, *y, eps))
+    a_data.len() == b_data.len()
+        && a_data
+            .iter()
+            .zip(b_data.iter())
+            .all(|(x, y)| approx_eq(*x, *y, eps))
 }
 
 fn scalar_approx_eq(a: &UFuncArray, expected: f64, eps: f64) -> bool {
@@ -35,7 +39,17 @@ fn from_vec(v: Vec<f64>) -> UFuncArray {
 
 #[test]
 fn mr_pythagorean_identity_single_values() {
-    let test_values = [0.0, PI / 6.0, PI / 4.0, PI / 3.0, PI / 2.0, PI, 1.5, 2.7, -0.5];
+    let test_values = [
+        0.0,
+        PI / 6.0,
+        PI / 4.0,
+        PI / 3.0,
+        PI / 2.0,
+        PI,
+        1.5,
+        2.7,
+        -0.5,
+    ];
 
     for x in test_values {
         let arr = from_vec(vec![x]);
