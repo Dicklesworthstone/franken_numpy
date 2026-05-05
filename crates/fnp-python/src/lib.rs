@@ -10664,13 +10664,23 @@ fn masked_object(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (newshape, dtype=None))]
 fn make_mask_none(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
+    newshape: &Bound<'_, PyAny>,
+    dtype: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    numpy_ma_passthrough(py, "make_mask_none", args, kwargs)
+    let shape = parse_shape_override(newshape, "make_mask_none")?;
+    if dtype.is_some() {
+        let numpy = py.import("numpy.ma")?;
+        let func = numpy.getattr("make_mask_none")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", dtype)?;
+        return Ok(func.call((newshape,), Some(&kwargs))?.unbind());
+    }
+    let arr = UFuncArray::zeros(shape, DType::Bool)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    build_numpy_array_from_ufunc(py, &arr)
 }
 
 #[pyfunction]

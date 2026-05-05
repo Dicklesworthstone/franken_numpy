@@ -341,3 +341,66 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
     assert_eq!(output, "True", "ma.corrcoef 1d mismatch");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// make_mask_none
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn make_mask_none_1d() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+fnp_result = fnp.ma.make_mask_none((5,))
+np_result = ma.make_mask_none((5,))
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    assert_eq!(output, "True", "make_mask_none 1d mismatch");
+    Ok(())
+}
+
+#[test]
+fn make_mask_none_2d() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+fnp_result = fnp.ma.make_mask_none((3, 4))
+np_result = ma.make_mask_none((3, 4))
+print(np.array_equal(fnp_result, np_result) and fnp_result.shape == (3, 4))
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    assert_eq!(output, "True", "make_mask_none 2d mismatch");
+    Ok(())
+}
+
+#[test]
+fn make_mask_none_scalar_shape() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+fnp_result = fnp.ma.make_mask_none(5)
+np_result = ma.make_mask_none(5)
+print(np.array_equal(fnp_result, np_result) and fnp_result.shape == (5,))
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    assert_eq!(output, "True", "make_mask_none scalar shape mismatch");
+    Ok(())
+}
+
+#[test]
+fn make_mask_none_dtype_bool() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+fnp_result = fnp.ma.make_mask_none((2, 3))
+print(fnp_result.dtype == np.bool_ and np.all(fnp_result == False))
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    assert_eq!(output, "True", "make_mask_none dtype/values mismatch");
+    Ok(())
+}
