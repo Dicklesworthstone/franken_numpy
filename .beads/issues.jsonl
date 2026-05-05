@@ -1034,3 +1034,12 @@
   "category": "modes-of-reasoning-project-analysis",
   "description": "Architecture analysis found all 8 core crates lacked crate-level documentation. Added //! module docs to: fnp-dtype, fnp-ufunc, fnp-python, fnp-linalg, fnp-random, fnp-io, fnp-ndarray, fnp-iter, fnp-runtime. Each now documents core types, key functions, and memory safety guarantees."
 }
+{
+  "id": "fnp-ma-utils-conformance",
+  "title": "Add conformance tests for numpy.ma utility functions",
+  "priority": 1,
+  "status": "done",
+  "created": "2026-05-05T03:05:00Z",
+  "category": "testing-conformance-harnesses",
+  "description": "Added 17 conformance tests for previously untested numpy.ma utility functions: getdata (3 tests), is_mask (3 tests), isMA/isMaskedArray/isarray (4 tests), harden_mask/soften_mask (2 tests), ma.cov (2 tests), ma.corrcoef (3 tests). All verified against NumPy oracle."
+}
