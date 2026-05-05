@@ -85,5 +85,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "binary_fromfile"
+path = "fuzz_targets/binary_fromfile.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
