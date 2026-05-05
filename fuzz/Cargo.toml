@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 fnp-dtype = { path = "../crates/fnp-dtype" }
 fnp-io = { path = "../crates/fnp-io" }
+fnp-iter = { path = "../crates/fnp-iter" }
 fnp-linalg = { path = "../crates/fnp-linalg" }
 fnp-ndarray = { path = "../crates/fnp-ndarray" }
 fnp-ufunc = { path = "../crates/fnp-ufunc" }
@@ -88,6 +89,13 @@ bench = false
 [[bin]]
 name = "binary_fromfile"
 path = "fuzz_targets/binary_fromfile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "flatiter_indexing"
+path = "fuzz_targets/flatiter_indexing.rs"
 test = false
 doc = false
 bench = false
