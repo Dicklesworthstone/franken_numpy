@@ -89,6 +89,31 @@ print(np.allclose(result, expected))
     Ok(())
 }
 
+#[test]
+fn exp_subnormal_inputs_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([
+    np.nextafter(0.0, 1.0),
+    np.finfo(np.float64).tiny / 2.0,
+    -np.nextafter(0.0, 1.0),
+    -np.finfo(np.float64).tiny / 2.0,
+], dtype=np.float64)
+result = fnp.exp(x)
+expected = np.exp(x)
+print(result.dtype == expected.dtype and np.allclose(result, expected, rtol=1e-15, atol=0.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "exp subnormal inputs should match numpy"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // expm1
 // ─────────────────────────────────────────────────────────────────────────────
@@ -121,7 +146,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "expm1 small values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "expm1 small values should match numpy"
+    );
     Ok(())
 }
 
@@ -161,6 +190,56 @@ print(np.allclose(result, [0.0]))
     Ok(())
 }
 
+#[test]
+fn log_subnormal_inputs_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([
+    np.nextafter(0.0, 1.0),
+    np.finfo(np.float64).tiny / 2.0,
+    np.finfo(np.float64).tiny,
+], dtype=np.float64)
+result = fnp.log(x)
+expected = np.log(x)
+print(result.dtype == expected.dtype and np.allclose(result, expected, rtol=1e-15, atol=0.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "log subnormal inputs should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn log_zero_and_subnormal_boundary_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, np.nextafter(0.0, 1.0)], dtype=np.float64)
+result = fnp.log(x)
+expected = np.log(x)
+finite = np.isfinite(expected)
+ok = (
+    result.dtype == expected.dtype
+    and np.array_equal(np.isneginf(result), np.isneginf(expected))
+    and np.allclose(result[finite], expected[finite], rtol=1e-15, atol=0.0)
+)
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "log zero/subnormal boundary should match numpy"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // log1p
 // ─────────────────────────────────────────────────────────────────────────────
@@ -193,7 +272,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "log1p small values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "log1p small values should match numpy"
+    );
     Ok(())
 }
 
@@ -229,7 +312,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "log10 of powers of 10 should be integers");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "log10 of powers of 10 should be integers"
+    );
     Ok(())
 }
 
@@ -265,7 +352,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "log2 of powers of 2 should be integers");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "log2 of powers of 2 should be integers"
+    );
     Ok(())
 }
 
@@ -301,7 +392,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sqrt of perfect squares should be integers");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sqrt of perfect squares should be integers"
+    );
     Ok(())
 }
 
@@ -373,7 +468,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "power int exponent should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "power int exponent should match numpy"
+    );
     Ok(())
 }
 
@@ -389,7 +488,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "power float exponent should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "power float exponent should match numpy"
+    );
     Ok(())
 }
 
@@ -406,7 +509,37 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "power array exponent should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "power array exponent should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn power_subnormal_inputs_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([
+    np.nextafter(0.0, 1.0),
+    np.finfo(np.float64).tiny / 2.0,
+    -np.nextafter(0.0, 1.0),
+    -np.finfo(np.float64).tiny / 2.0,
+], dtype=np.float64)
+exponents = np.array([1.0, 2.0, 3.0, 2.0], dtype=np.float64)
+result = fnp.power(x, exponents)
+expected = np.power(x, exponents)
+print(result.dtype == expected.dtype and np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "power subnormal inputs should match numpy"
+    );
     Ok(())
 }
 
@@ -442,7 +575,11 @@ print(np.allclose(result, x))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sqrt(square(x)) should equal x for positive x");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sqrt(square(x)) should equal x for positive x"
+    );
     Ok(())
 }
 
