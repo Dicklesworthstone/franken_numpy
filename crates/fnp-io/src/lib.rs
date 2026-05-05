@@ -1,3 +1,25 @@
+//! File I/O for FrankenNumPy.
+//!
+//! This crate handles reading and writing NumPy array files and text data.
+//!
+//! # Formats
+//!
+//! - **NPY**: Single array binary format (`load`, `save`)
+//! - **NPZ**: Compressed archive of multiple arrays (`savez`, `savez_compressed`)
+//! - **Text**: CSV/whitespace-delimited data (`loadtxt`, `savetxt`, `genfromtxt`)
+//!
+//! # Functions
+//!
+//! - [`load_npy`] - Load a single array from .npy file
+//! - [`save_npy`] - Save a single array to .npy file
+//! - [`load_npz`] - Load arrays from .npz archive
+//! - [`loadtxt`] - Load text data with delimiter/comment handling
+//! - [`genfromtxt`] - Load text with missing value handling
+//!
+//! # Memory Safety
+//!
+//! Uses `#![forbid(unsafe_code)]` - implemented in safe Rust.
+
 #![forbid(unsafe_code)]
 
 use core::fmt;

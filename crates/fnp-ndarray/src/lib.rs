@@ -1,3 +1,24 @@
+//! N-dimensional array utilities for FrankenNumPy.
+//!
+//! This crate provides shape manipulation, broadcasting, and memory layout
+//! utilities used by the array operations.
+//!
+//! # Core Types
+//!
+//! - [`MemoryOrder`] - C (row-major) or Fortran (column-major) layout
+//! - [`ShapeError`] - Errors from shape operations
+//!
+//! # Functions
+//!
+//! - [`broadcast_shape`] - Compute broadcast shape of multiple arrays
+//! - [`broadcast_shapes`] - Broadcast multiple shapes together
+//! - [`element_count`] - Total elements in a shape
+//! - [`fix_unknown_dimension`] - Resolve -1 in reshape operations
+//!
+//! # Memory Safety
+//!
+//! Uses `#![forbid(unsafe_code)]` - implemented in safe Rust.
+
 #![forbid(unsafe_code)]
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

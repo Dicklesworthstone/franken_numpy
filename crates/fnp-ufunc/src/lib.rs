@@ -1,3 +1,28 @@
+//! Universal functions (ufuncs) for FrankenNumPy.
+//!
+//! This crate implements NumPy-compatible array operations including:
+//!
+//! # Core Types
+//!
+//! - [`UFuncArray`] - The main array type with shape, values, and dtype
+//! - [`UnaryOp`] - Elementwise unary operations (sin, cos, exp, log, etc.)
+//! - [`BinaryOp`] - Elementwise binary operations (add, multiply, etc.)
+//!
+//! # Operations
+//!
+//! - **Elementwise**: sin, cos, tan, exp, log, sqrt, abs, and 40+ more
+//! - **Reductions**: sum, prod, min, max, mean, std, var along axes
+//! - **Linear algebra**: dot, matmul, tensordot, einsum
+//! - **Window functions**: bartlett, hanning, hamming, blackman, kaiser
+//! - **Special functions**: i0 (Bessel), sinc, bessel_j0/j1/y0/y1
+//! - **Searching/sorting**: argmin, argmax, argsort, searchsorted
+//! - **Set operations**: unique, intersect1d, union1d, setdiff1d
+//!
+//! # Memory Safety
+//!
+//! This crate uses `#![forbid(unsafe_code)]` - all operations are
+//! implemented in safe Rust with no raw pointer manipulation.
+
 #![forbid(unsafe_code)]
 
 use fnp_dtype::{

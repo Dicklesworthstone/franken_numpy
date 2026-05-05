@@ -1,3 +1,25 @@
+//! Random number generation for FrankenNumPy.
+//!
+//! This crate implements NumPy-compatible random number generation with
+//! the PCG64 bit generator and various probability distributions.
+//!
+//! # Core Types
+//!
+//! - [`Generator`] - Main RNG interface (like `numpy.random.Generator`)
+//! - [`BitGenerator`] - Low-level bit generator (PCG64)
+//! - [`SeedSequence`] - Seed entropy pool for reproducible seeding
+//!
+//! # Distributions
+//!
+//! - **Uniform**: `random`, `integers`, `uniform`
+//! - **Normal**: `normal`, `standard_normal`, `lognormal`
+//! - **Discrete**: `choice`, `permutation`, `shuffle`
+//! - **Specialized**: `binomial`, `poisson`, `exponential`, `gamma`, etc.
+//!
+//! # Memory Safety
+//!
+//! Uses `#![forbid(unsafe_code)]` - implemented in safe Rust.
+
 #![forbid(unsafe_code)]
 
 mod ziggurat;

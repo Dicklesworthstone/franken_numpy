@@ -1,3 +1,20 @@
+//! Linear algebra operations for FrankenNumPy.
+//!
+//! This crate provides NumPy-compatible linear algebra functions including
+//! matrix decompositions, solvers, and eigenvalue computations.
+//!
+//! # Functions
+//!
+//! - **Decompositions**: `svd`, `qr`, `cholesky`, `lu`
+//! - **Solvers**: `solve`, `lstsq`, `pinv`
+//! - **Eigenvalues**: `eig`, `eigh`, `eigvals`, `eigvalsh`
+//! - **Norms**: `norm`, `cond`, `matrix_rank`
+//! - **Determinants**: `det`, `slogdet`
+//!
+//! # Memory Safety
+//!
+//! Uses `#![forbid(unsafe_code)]` - implemented in safe Rust.
+
 #![forbid(unsafe_code)]
 
 use core::fmt;

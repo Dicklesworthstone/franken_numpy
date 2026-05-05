@@ -1,3 +1,24 @@
+//! Array iteration utilities for FrankenNumPy.
+//!
+//! This crate provides NumPy-compatible multi-dimensional array iterators
+//! including `nditer` for efficient array traversal with broadcasting.
+//!
+//! # Core Types
+//!
+//! - [`Nditer`] - N-dimensional iterator (like `numpy.nditer`)
+//! - [`NditerOptions`] - Configuration for iteration behavior
+//! - [`NditerOrder`] - Iteration order (C, Fortran, or auto)
+//!
+//! # Features
+//!
+//! - Multi-array broadcasting during iteration
+//! - Configurable memory order
+//! - External loop optimization
+//!
+//! # Memory Safety
+//!
+//! Uses `#![forbid(unsafe_code)]` - implemented in safe Rust.
+
 #![forbid(unsafe_code)]
 
 use std::io::Write;

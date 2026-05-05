@@ -1025,3 +1025,12 @@
   "category": "testing-golden-artifacts",
   "description": "Added 11 golden artifact tests for native Rust implementations: window functions (bartlett, hanning, hamming, blackman, kaiser), bessel i0, sinc, trig (sin/cos/tan), exp/log, plus edge cases. These catch numerical regressions without requiring numpy oracle."
 }
+{
+  "id": "fnp-crate-documentation",
+  "title": "Add crate-level documentation to all 8 crates",
+  "priority": 1,
+  "status": "done",
+  "created": "2026-05-05T02:58:00Z",
+  "category": "modes-of-reasoning-project-analysis",
+  "description": "Architecture analysis found all 8 core crates lacked crate-level documentation. Added //! module docs to: fnp-dtype, fnp-ufunc, fnp-python, fnp-linalg, fnp-random, fnp-io, fnp-ndarray, fnp-iter, fnp-runtime. Each now documents core types, key functions, and memory safety guarantees."
+}

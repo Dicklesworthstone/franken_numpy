@@ -1,3 +1,20 @@
+//! Data type definitions for FrankenNumPy.
+//!
+//! This crate provides the core `DType` enum representing NumPy-compatible
+//! data types, along with type promotion rules, array storage variants,
+//! and dtype parsing utilities.
+//!
+//! # Core Types
+//!
+//! - [`DType`] - Enum of all supported numeric types (bool, int, float, complex)
+//! - [`ArrayStorage`] - Type-erased storage for array data
+//! - [`f16`] - Half-precision float (re-exported from `half` crate)
+//!
+//! # Type Promotion
+//!
+//! The [`promote`] function implements NumPy's type promotion rules for
+//! binary operations between different dtypes.
+
 #![forbid(unsafe_code)]
 
 pub use half::f16;

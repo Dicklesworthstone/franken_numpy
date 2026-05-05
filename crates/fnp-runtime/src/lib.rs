@@ -1,3 +1,23 @@
+//! Runtime configuration and decision auditing for FrankenNumPy.
+//!
+//! This crate provides runtime mode selection and decision event logging
+//! for tracking compatibility decisions during array operations.
+//!
+//! # Core Types
+//!
+//! - [`RuntimeMode`] - Strict or Hardened execution mode
+//! - [`DecisionEvent`] - Logged decision with evidence
+//! - [`EvidenceLedger`] - Collection of decision events
+//!
+//! # Runtime Modes
+//!
+//! - **Strict**: Exact NumPy parity, fail on any divergence
+//! - **Hardened**: Best-effort compatibility with graceful fallbacks
+//!
+//! # Memory Safety
+//!
+//! Uses `#![forbid(unsafe_code)]` - implemented in safe Rust.
+
 #![forbid(unsafe_code)]
 
 use std::time::{SystemTime, UNIX_EPOCH};

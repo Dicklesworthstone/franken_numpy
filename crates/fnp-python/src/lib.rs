@@ -1,3 +1,26 @@
+//! Python bindings for FrankenNumPy.
+//!
+//! This crate provides a PyO3-based Python extension module that exposes
+//! NumPy-compatible functions and classes. It serves as the primary interface
+//! between Python code and the native Rust implementations.
+//!
+//! # Module Structure
+//!
+//! The module exports:
+//! - **Array creation**: `array`, `zeros`, `ones`, `empty`, `arange`, `linspace`
+//! - **Math operations**: `sin`, `cos`, `exp`, `log`, `sqrt`, and 50+ ufuncs
+//! - **Reductions**: `sum`, `prod`, `min`, `max`, `mean`, `std`, `var`
+//! - **Linear algebra**: `dot`, `matmul`, `linalg.inv`, `linalg.eig`, `linalg.svd`
+//! - **FFT**: `fft.fft`, `fft.ifft`, `fft.rfft`, `fft.irfft`
+//! - **Random**: `random.Generator`, `random.default_rng`, distributions
+//! - **Polynomial**: `polynomial.Polynomial`, `polynomial.Chebyshev`, etc.
+//!
+//! # Native vs Passthrough
+//!
+//! Most functions have native Rust implementations for performance. Some
+//! complex functions fall back to NumPy for exact parity (marked with
+//! "Passthrough to np." comments).
+
 use fnp_dtype::{ArrayStorage, DType, f16, promote};
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolerance_aliases};
