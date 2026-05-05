@@ -1002,6 +1002,7 @@ pub enum UnaryOp {
     Arcsinh,
     Arctanh,
     Invert,
+    I0,
 }
 
 impl UnaryOp {
@@ -1050,6 +1051,7 @@ impl UnaryOp {
             Self::Arcsinh => "arcsinh",
             Self::Arctanh => "arctanh",
             Self::Invert => "invert",
+            Self::I0 => "i0",
         }
     }
 
@@ -1181,6 +1183,7 @@ impl UnaryOp {
                 let a = x as i64;
                 (!a) as f64
             }
+            Self::I0 => bessel_i0(x),
         }
     }
 }
