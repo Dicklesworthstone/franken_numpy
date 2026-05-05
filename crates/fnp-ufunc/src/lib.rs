@@ -57996,4 +57996,62 @@ print(json.dumps(payload))
             assert_eq!(data[i], (i + 100) as f64);
         }
     }
+
+    #[test]
+    fn shared_view_concurrent_itemset_and_to_array_no_deadlock() {
+        // Stress test: concurrent itemset (writes sidecar then buffer) and to_array
+        // (reads buffer then sidecar). The lock ordering contract prevents AB-BA deadlocks.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::thread;
+
+        let buffer = Arc::new(RwLock::new((0..100).map(|i| i as f64).collect::<Vec<_>>()));
+        let sidecar = Arc::new(RwLock::new(IntegerSidecar::I64((0..100).collect())));
+
+        let view = UFuncArrayView::new(
+            vec![10, 10],
+            Arc::clone(&buffer),
+            Some(Arc::clone(&sidecar)),
+            0,
+            vec![10, 1],
+            DType::I64,
+        )
+        .expect("view creation should succeed");
+
+        let conversions_completed = Arc::new(AtomicUsize::new(0));
+        let writes_completed = Arc::new(AtomicUsize::new(0));
+        let mut handles = vec![];
+
+        // Spawn 4 writers calling itemset
+        for t in 0..4 {
+            let v = view.clone();
+            let counter = Arc::clone(&writes_completed);
+            handles.push(thread::spawn(move || {
+                for i in 0..25 {
+                    let row = (t * 25 + i) / 10;
+                    let col = (t * 25 + i) % 10;
+                    let _ = v.itemset(&[row as i64, col as i64], (t * 1000 + i) as f64);
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        // Spawn 4 readers calling to_array
+        for _ in 0..4 {
+            let v = view.clone();
+            let counter = Arc::clone(&conversions_completed);
+            handles.push(thread::spawn(move || {
+                for _ in 0..25 {
+                    let _ = v.to_array();
+                    counter.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread panicked - potential deadlock in itemset/to_array interleaving");
+        }
+
+        assert_eq!(writes_completed.load(Ordering::Relaxed), 100);
+        assert_eq!(conversions_completed.load(Ordering::Relaxed), 100);
+    }
 }
