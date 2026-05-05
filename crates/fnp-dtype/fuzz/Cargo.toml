@@ -1,0 +1,45 @@
+[package]
+name = "fnp-dtype-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.fnp-dtype]
+path = ".."
+
+[[bin]]
+name = "fuzz_dtype_parse"
+path = "fuzz_targets/fuzz_dtype_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_result_type"
+path = "fuzz_targets/fuzz_result_type.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_can_cast"
+path = "fuzz_targets/fuzz_can_cast.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_min_scalar_type"
+path = "fuzz_targets/fuzz_min_scalar_type.rs"
+test = false
+doc = false
+bench = false
