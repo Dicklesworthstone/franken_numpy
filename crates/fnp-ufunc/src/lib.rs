@@ -57820,4 +57820,44 @@ print(json.dumps(payload))
         assert!((r.values()[2] - 52.0_f64.sqrt()).abs() < 1e-10);
         assert!((r.values()[3] - 74.0_f64.sqrt()).abs() < 1e-10);
     }
+
+    #[test]
+    fn shared_view_concurrent_itemset_no_deadlock() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let buffer = Arc::new(RwLock::new((0..100).map(|i| i as f64).collect::<Vec<_>>()));
+        let sidecar = Arc::new(RwLock::new(IntegerSidecar::I64((0..100).collect())));
+        let view = UFuncArrayView::new(
+            vec![100],
+            Arc::clone(&buffer),
+            Some(Arc::clone(&sidecar)),
+            0,
+            vec![1],
+            DType::I64,
+        )
+        .unwrap();
+        let view = Arc::new(view);
+
+        let handles: Vec<_> = (0..4)
+            .map(|t| {
+                let v = Arc::clone(&view);
+                thread::spawn(move || {
+                    for i in 0..25 {
+                        let idx = (t * 25 + i) as i64;
+                        v.itemset(&[idx], (idx * 2) as f64).unwrap();
+                    }
+                })
+            })
+            .collect();
+
+        for h in handles {
+            h.join().expect("thread panicked");
+        }
+
+        let data = buffer.read().unwrap();
+        for i in 0..100 {
+            assert_eq!(data[i], (i * 2) as f64, "concurrent itemset corrupted index {i}");
+        }
+    }
 }
