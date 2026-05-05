@@ -1351,3 +1351,252 @@ print(np.allclose(lhs, rhs, rtol=1e-8))
     assert_eq!(result.trim(), "True", "lstsq satisfies normal equations");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Statistical metamorphic properties
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn var_shift_invariant() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+c = 12345.6789
+# var(x + c) == var(x) (shift invariance)
+v1 = fnp.var(x)
+v2 = fnp.var(x + c)
+print(np.allclose(v1, v2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "var(x + c) == var(x)");
+    Ok(())
+}
+
+#[test]
+fn var_scale_property() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+c = 3.5
+# var(c * x) == c^2 * var(x)
+v1 = fnp.var(c * x)
+v2 = c**2 * fnp.var(x)
+print(np.allclose(v1, v2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "var(c * x) == c^2 * var(x)");
+    Ok(())
+}
+
+#[test]
+fn std_shift_invariant() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+c = 99999.0
+# std(x + c) == std(x)
+s1 = fnp.std(x)
+s2 = fnp.std(x + c)
+print(np.allclose(s1, s2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "std(x + c) == std(x)");
+    Ok(())
+}
+
+#[test]
+fn std_scale_property() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+c = 2.5
+# std(c * x) == |c| * std(x)
+s1 = fnp.std(c * x)
+s2 = abs(c) * fnp.std(x)
+print(np.allclose(s1, s2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "std(c * x) == |c| * std(x)");
+    Ok(())
+}
+
+#[test]
+fn std_is_sqrt_var() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+# std(x) == sqrt(var(x))
+s = fnp.std(x)
+v = fnp.sqrt(fnp.var(x))
+print(np.allclose(s, v))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "std(x) == sqrt(var(x))");
+    Ok(())
+}
+
+#[test]
+fn cov_self_equals_var() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+# cov(x, x)[0,0] == var(x, ddof=1)
+c = fnp.cov(x)
+v = fnp.var(x, ddof=1)
+print(np.allclose(c, v))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cov(x, x) == var(x, ddof=1)");
+    Ok(())
+}
+
+#[test]
+fn corrcoef_self_is_one() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+# corrcoef(x, x)[0,1] == 1
+r = fnp.corrcoef(x, x)
+print(np.allclose(r[0, 1], 1.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "corrcoef(x, x)[0,1] == 1");
+    Ok(())
+}
+
+#[test]
+fn corrcoef_negation_is_minus_one() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+# corrcoef(x, -x)[0,1] == -1
+r = fnp.corrcoef(x, -x)
+print(np.allclose(r[0, 1], -1.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "corrcoef(x, -x)[0,1] == -1");
+    Ok(())
+}
+
+#[test]
+fn corrcoef_shift_invariant() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+y = np.random.randn(100)
+c, d = 1000.0, 2000.0
+# corrcoef(x + c, y + d) == corrcoef(x, y)
+r1 = fnp.corrcoef(x, y)
+r2 = fnp.corrcoef(x + c, y + d)
+print(np.allclose(r1, r2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "corrcoef is shift invariant");
+    Ok(())
+}
+
+#[test]
+fn corrcoef_scale_invariant() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+y = np.random.randn(100)
+# corrcoef(a*x, b*y) == corrcoef(x, y) for a, b > 0
+r1 = fnp.corrcoef(x, y)
+r2 = fnp.corrcoef(5.0 * x, 3.0 * y)
+print(np.allclose(r1, r2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "corrcoef is scale invariant for positive scales");
+    Ok(())
+}
+
+#[test]
+fn cov_shift_invariant() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+y = np.random.randn(100)
+c, d = 50000.0, 60000.0
+# cov(x + c, y + d) == cov(x, y)
+xy = np.vstack([x, y])
+xy_shifted = np.vstack([x + c, y + d])
+c1 = fnp.cov(xy)
+c2 = fnp.cov(xy_shifted)
+print(np.allclose(c1, c2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cov is shift invariant");
+    Ok(())
+}
+
+#[test]
+fn mean_shift_property() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+c = 12345.6789
+# mean(x + c) == mean(x) + c
+m1 = fnp.mean(x + c)
+m2 = fnp.mean(x) + c
+print(np.allclose(m1, m2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "mean(x + c) == mean(x) + c");
+    Ok(())
+}
+
+#[test]
+fn mean_scale_property() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+x = np.random.randn(100)
+c = 3.14159
+# mean(c * x) == c * mean(x)
+m1 = fnp.mean(c * x)
+m2 = c * fnp.mean(x)
+print(np.allclose(m1, m2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "mean(c * x) == c * mean(x)");
+    Ok(())
+}
