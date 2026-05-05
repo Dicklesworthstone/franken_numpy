@@ -31,6 +31,45 @@ fn np_array_float<'py>(
     py.import("numpy")?.getattr("array")?.call1((items,))
 }
 
+fn np_array_0d_int<'py>(
+    py: Python<'py>,
+    item: i64,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    py.import("numpy")?.getattr("array")?.call1((item,))
+}
+
+fn np_array_0d_float<'py>(
+    py: Python<'py>,
+    item: f64,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    py.import("numpy")?.getattr("array")?.call1((item,))
+}
+
+fn np_array_2d_int<'py>(
+    py: Python<'py>,
+    rows: Vec<Vec<i64>>,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    py.import("numpy")?.getattr("array")?.call1((rows,))
+}
+
+fn np_array_2d_float<'py>(
+    py: Python<'py>,
+    rows: Vec<Vec<f64>>,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    py.import("numpy")?.getattr("array")?.call1((rows,))
+}
+
+fn np_row_sum_keepdims_float<'py>(
+    py: Python<'py>,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let numpy = py.import("numpy")?;
+    let values = np_array_2d_float(py, vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]])?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("axis", 1)?;
+    kwargs.set_item("keepdims", true)?;
+    numpy.getattr("sum")?.call((values,), Some(&kwargs))
+}
+
 #[test]
 fn conformance_arithmetic_ops_matrix() {
     static TOTALS: Totals = Totals::new();
@@ -123,6 +162,46 @@ fn conformance_arithmetic_ops_matrix() {
             },
             no_kwargs,
         );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "arith-add-0d-array-lhs-broadcast-2d",
+            "add",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_0d_int(py, 5)?,
+                        np_array_2d_int(py, vec![vec![1, 2, 3], vec![4, 5, 6]])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "arith-add-keepdims-row-sum-broadcast",
+            "add",
+            RequirementLevel::Should,
+            CompareMode::Close,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_2d_float(py, vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]])?,
+                        np_row_sum_keepdims_float(py)?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
 
         // ─── subtract ────────────────────────────────────────────────────
         run_case(
@@ -160,6 +239,26 @@ fn conformance_arithmetic_ops_matrix() {
                     [
                         np_array_int(py, vec![1, 2, 3])?,
                         np_array_int(py, vec![10, 20, 30])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "arith-subtract-0d-array-rhs-broadcast-2d",
+            "subtract",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_2d_int(py, vec![vec![10, 20, 30], vec![40, 50, 60]])?,
+                        np_array_0d_int(py, 7)?,
                     ],
                 )
             },
@@ -219,6 +318,26 @@ fn conformance_arithmetic_ops_matrix() {
             |py| PyTuple::new(py, [np_array_int(py, vec![])?, np_array_int(py, vec![])?]),
             no_kwargs,
         );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "arith-multiply-0d-array-rhs-broadcast-2d",
+            "multiply",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_2d_int(py, vec![vec![1, 2, 3], vec![4, 5, 6]])?,
+                        np_array_0d_int(py, -2)?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
 
         // ─── divide / true_divide ────────────────────────────────────────
         run_case(
@@ -236,6 +355,26 @@ fn conformance_arithmetic_ops_matrix() {
                     [
                         np_array_int(py, vec![10, 20, 30])?,
                         np_array_int(py, vec![2, 4, 6])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "arith-divide-0d-array-lhs-broadcast-2d",
+            "divide",
+            RequirementLevel::Should,
+            CompareMode::Close,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_0d_float(py, 12.0)?,
+                        np_array_2d_float(py, vec![vec![2.0, 3.0, 4.0], vec![6.0, 8.0, 12.0]])?,
                     ],
                 )
             },

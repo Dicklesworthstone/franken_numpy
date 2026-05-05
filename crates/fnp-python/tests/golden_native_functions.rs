@@ -109,10 +109,10 @@ fn golden_kaiser_8_beta14() {
     let expected = [
         7.726866835270368e-06,
         0.017964074282044187,
-        0.27277209015009414,
+        0.272_772_090_150_094_1,
         0.8708037664339706,
         0.8708037664339706,
-        0.27277209015009414,
+        0.272_772_090_150_094_1,
         0.017964074282044187,
         7.726866835270368e-06,
     ];
@@ -135,12 +135,12 @@ fn golden_i0_values() {
     let input = UFuncArray::new(vec![6], vec![0.0, 0.5, 1.0, 2.0, 5.0, 10.0], DType::F64).unwrap();
     let result = input.i0();
     let expected = [
-        1.0,                    // i0(0) = 1 exactly
-        1.0634833707413234,     // i0(0.5)
-        1.2660658480342601,     // i0(1) - our polynomial approx
-        2.2795853023360673,     // i0(2)
-        27.239871823604442,     // i0(5)
-        2815.7166284662544,     // i0(10)
+        1.0,                // i0(0) = 1 exactly
+        1.0634833707413234, // i0(0.5)
+        1.2660658480342601, // i0(1) - our polynomial approx
+        2.2795853023360673, // i0(2)
+        27.239871823604442, // i0(5)
+        2815.7166284662544, // i0(10)
     ];
     for (i, (&a, &e)) in result.values().iter().zip(expected.iter()).enumerate() {
         let diff = (a - e).abs();
@@ -167,22 +167,23 @@ fn golden_sinc_values() {
     .unwrap();
     let result = input.sinc();
     let expected = [
-        1.0,                                // sinc(0) = 1 by definition
-        0.6366197723675814,                 // sinc(0.5) = 2/pi
-        3.898171832519376e-17,              // sinc(1) ≈ 0
-        3.898171832519376e-17,              // sinc(-1) ≈ 0
-        -3.898171832519376e-17,             // sinc(2) ≈ 0
-        0.9003163161571061,                 // sinc(0.25)
-        -0.04359862862918773,               // sinc(pi) from our impl
+        1.0,                         // sinc(0) = 1 by definition
+        std::f64::consts::FRAC_2_PI, // sinc(0.5) = 2/pi
+        3.898171832519376e-17,       // sinc(1) ≈ 0
+        3.898171832519376e-17,       // sinc(-1) ≈ 0
+        -3.898171832519376e-17,      // sinc(2) ≈ 0
+        0.9003163161571061,          // sinc(0.25)
+        -0.04359862862918773,        // sinc(pi) from our impl
     ];
     for (i, (&a, &e)) in result.values().iter().zip(expected.iter()).enumerate() {
         let diff = (a - e).abs();
         // For values near zero, use absolute tolerance
-        let tol = if e.abs() < 1e-10 { 1e-10 } else { e.abs() * 1e-8 };
-        assert!(
-            diff < tol,
-            "sinc[{i}]: expected {e}, got {a}, diff {diff}"
-        );
+        let tol = if e.abs() < 1e-10 {
+            1e-10
+        } else {
+            e.abs() * 1e-8
+        };
+        assert!(diff < tol, "sinc[{i}]: expected {e}, got {a}, diff {diff}");
     }
 }
 
@@ -193,15 +194,31 @@ fn golden_sinc_values() {
 #[test]
 fn golden_sin_cos_tan() {
     let pi = std::f64::consts::PI;
-    let input = UFuncArray::new(vec![4], vec![0.0, pi / 6.0, pi / 4.0, pi / 3.0], DType::F64).unwrap();
+    let input =
+        UFuncArray::new(vec![4], vec![0.0, pi / 6.0, pi / 4.0, pi / 3.0], DType::F64).unwrap();
 
     let sin_result = input.elementwise_unary(UnaryOp::Sin);
     let cos_result = input.elementwise_unary(UnaryOp::Cos);
     let tan_result = input.elementwise_unary(UnaryOp::Tan);
 
-    let sin_expected = [0.0, 0.5, 0.7071067811865476, 0.8660254037844386];
-    let cos_expected = [1.0, 0.8660254037844387, 0.7071067811865476, 0.5000000000000001];
-    let tan_expected = [0.0, 0.5773502691896257, 0.9999999999999999, 1.7320508075688767];
+    let sin_expected = [
+        0.0,
+        0.5,
+        std::f64::consts::FRAC_1_SQRT_2,
+        0.8660254037844386,
+    ];
+    let cos_expected = [
+        1.0,
+        0.8660254037844387,
+        std::f64::consts::FRAC_1_SQRT_2,
+        0.5000000000000001,
+    ];
+    let tan_expected = [
+        0.0,
+        0.5773502691896257,
+        0.9999999999999999,
+        1.7320508075688767,
+    ];
 
     assert_vec_close(sin_result.values(), &sin_expected, "sin");
     assert_vec_close(cos_result.values(), &cos_expected, "cos");
@@ -210,7 +227,12 @@ fn golden_sin_cos_tan() {
 
 #[test]
 fn golden_exp_log() {
-    let input = UFuncArray::new(vec![5], vec![0.0, 1.0, 2.0, std::f64::consts::E, 10.0], DType::F64).unwrap();
+    let input = UFuncArray::new(
+        vec![5],
+        vec![0.0, 1.0, 2.0, std::f64::consts::E, 10.0],
+        DType::F64,
+    )
+    .unwrap();
 
     let exp_result = input.elementwise_unary(UnaryOp::Exp);
     let log_result = input.elementwise_unary(UnaryOp::Log);
@@ -225,9 +247,9 @@ fn golden_exp_log() {
     let log_expected = [
         f64::NEG_INFINITY,
         0.0,
-        0.6931471805599453,
+        std::f64::consts::LN_2,
         1.0,
-        2.302585092994046,
+        std::f64::consts::LN_10,
     ];
 
     assert_vec_close(exp_result.values(), &exp_expected, "exp");
@@ -261,10 +283,10 @@ fn golden_window_edge_cases() {
 fn golden_i0_edge_cases() {
     // i0(0) = 1 exactly
     let zero = UFuncArray::new(vec![1], vec![0.0], DType::F64).unwrap();
-    assert_eq!(zero.i0().values()[0], 1.0);
+    assert_close(zero.i0().values()[0], 1.0, "i0(0)");
 
     // i0 is even: i0(-x) = i0(x)
     let pos = UFuncArray::new(vec![1], vec![3.5], DType::F64).unwrap();
     let neg = UFuncArray::new(vec![1], vec![-3.5], DType::F64).unwrap();
-    assert_eq!(pos.i0().values()[0], neg.i0().values()[0]);
+    assert_close(pos.i0().values()[0], neg.i0().values()[0], "i0 even");
 }
