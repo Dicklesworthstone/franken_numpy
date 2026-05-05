@@ -2221,6 +2221,14 @@ impl AxisSlice {
 /// This is the first step toward NumPy-style alias-preserving views. It keeps
 /// indexing and contiguity logic in one place without forcing an immediate,
 /// repo-wide rewrite of `UFuncArray`.
+///
+/// # Lock Ordering Contract
+///
+/// When acquiring both `buffer` and `integer_sidecar` locks, always acquire
+/// `integer_sidecar` first, then `buffer`. This prevents AB-BA deadlocks when
+/// concurrent threads call methods like `itemset` (writes both) and `to_array`
+/// (reads both sequentially). The `to_array` path is safe because it releases
+/// the buffer lock before acquiring the sidecar lock.
 #[derive(Debug, Clone)]
 pub struct UFuncArrayView {
     shape: Vec<usize>,
@@ -2424,7 +2432,7 @@ impl UFuncArrayView {
     }
 
     pub fn itemset(&self, index: &[i64], value: f64) -> Result<(), UFuncError> {
-        // Acquire every fallible lock before mutating either backing store.
+        // Lock ordering: sidecar first, buffer second. See struct-level doc.
         let mut sidecar_guard =
             if let Some(ref sidecar) = self.integer_sidecar {
                 Some(sidecar.write().map_err(|_| {
