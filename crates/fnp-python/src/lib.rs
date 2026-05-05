@@ -21571,23 +21571,85 @@ fn has_unrecognized_kwargs(kwargs: Option<&Bound<'_, PyDict>>, allowed: &[&str])
 
 // Array creators
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (shape, dtype=None, order=None, **kwargs))]
 fn zeros(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    shape: &Bound<'_, PyAny>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    order: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "zeros", args, kwargs)
+    let has_extra_kwargs = kwargs.is_some_and(|k| !k.is_empty());
+    let is_fortran = order.is_some_and(|o| o.eq_ignore_ascii_case("f"));
+    if has_extra_kwargs || is_fortran {
+        let numpy = py.import("numpy")?;
+        let zeros_fn = numpy.getattr("zeros")?;
+        let kw = PyDict::new(py);
+        kw.set_item("shape", shape)?;
+        if let Some(d) = dtype {
+            kw.set_item("dtype", d)?;
+        }
+        if let Some(o) = order {
+            kw.set_item("order", o)?;
+        }
+        if let Some(extra) = kwargs {
+            for (k, v) in extra.iter() {
+                kw.set_item(k, v)?;
+            }
+        }
+        return Ok(zeros_fn.call((), Some(&kw))?.unbind());
+    }
+    let parsed_shape = parse_shape_override(shape, "zeros")?;
+    let target_dtype = extract_python_dtype(
+        py,
+        dtype.map(|d| d.clone().unbind()),
+        DType::F64,
+        "zeros",
+    )?;
+    let arr = UFuncArray::zeros(parsed_shape, target_dtype)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    build_numpy_array_from_ufunc(py, &arr)
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (shape, dtype=None, order=None, **kwargs))]
 fn ones(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    shape: &Bound<'_, PyAny>,
+    dtype: Option<&Bound<'_, PyAny>>,
+    order: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "ones", args, kwargs)
+    let has_extra_kwargs = kwargs.is_some_and(|k| !k.is_empty());
+    let is_fortran = order.is_some_and(|o| o.eq_ignore_ascii_case("f"));
+    if has_extra_kwargs || is_fortran {
+        let numpy = py.import("numpy")?;
+        let ones_fn = numpy.getattr("ones")?;
+        let kw = PyDict::new(py);
+        kw.set_item("shape", shape)?;
+        if let Some(d) = dtype {
+            kw.set_item("dtype", d)?;
+        }
+        if let Some(o) = order {
+            kw.set_item("order", o)?;
+        }
+        if let Some(extra) = kwargs {
+            for (k, v) in extra.iter() {
+                kw.set_item(k, v)?;
+            }
+        }
+        return Ok(ones_fn.call((), Some(&kw))?.unbind());
+    }
+    let parsed_shape = parse_shape_override(shape, "ones")?;
+    let target_dtype = extract_python_dtype(
+        py,
+        dtype.map(|d| d.clone().unbind()),
+        DType::F64,
+        "ones",
+    )?;
+    let arr = UFuncArray::ones(parsed_shape, target_dtype)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
+    build_numpy_array_from_ufunc(py, &arr)
 }
 
 #[pyfunction]
