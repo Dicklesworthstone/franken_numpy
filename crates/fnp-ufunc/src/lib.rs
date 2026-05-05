@@ -57888,4 +57888,112 @@ print(json.dumps(payload))
             assert_eq!(data[i], (i * 2) as f64, "concurrent itemset corrupted index {i}");
         }
     }
+
+    #[test]
+    fn shared_view_concurrent_read_write_no_deadlock() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::thread;
+
+        let buffer = Arc::new(RwLock::new((0..50).map(|i| i as f64).collect::<Vec<_>>()));
+        let sidecar = Arc::new(RwLock::new(IntegerSidecar::I64((0..50).collect())));
+        let view = UFuncArrayView::new(
+            vec![50],
+            Arc::clone(&buffer),
+            Some(Arc::clone(&sidecar)),
+            0,
+            vec![1],
+            DType::I64,
+        )
+        .unwrap();
+        let view = Arc::new(view);
+        let reads_completed = Arc::new(AtomicUsize::new(0));
+        let writes_completed = Arc::new(AtomicUsize::new(0));
+
+        let mut handles = Vec::new();
+
+        // Spawn 2 writer threads
+        for t in 0..2 {
+            let v = Arc::clone(&view);
+            let wc = Arc::clone(&writes_completed);
+            handles.push(thread::spawn(move || {
+                for i in 0..25 {
+                    let idx = (t * 25 + i) as i64;
+                    v.itemset(&[idx], (idx * 3) as f64).unwrap();
+                    wc.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        // Spawn 4 reader threads calling to_array
+        for _ in 0..4 {
+            let v = Arc::clone(&view);
+            let rc = Arc::clone(&reads_completed);
+            handles.push(thread::spawn(move || {
+                for _ in 0..10 {
+                    let arr = v.to_array().unwrap();
+                    assert_eq!(arr.shape(), &[50]);
+                    rc.fetch_add(1, Ordering::Relaxed);
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread panicked - potential deadlock");
+        }
+
+        assert_eq!(writes_completed.load(Ordering::Relaxed), 50);
+        assert_eq!(reads_completed.load(Ordering::Relaxed), 40);
+    }
+
+    #[test]
+    fn shared_view_concurrent_item_read_write_interleaved() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let buffer = Arc::new(RwLock::new(vec![0.0; 20]));
+        let view = UFuncArrayView::new(
+            vec![20],
+            Arc::clone(&buffer),
+            None,
+            0,
+            vec![1],
+            DType::F64,
+        )
+        .unwrap();
+        let view = Arc::new(view);
+
+        let mut handles = Vec::new();
+
+        // Writers set values
+        for t in 0..4 {
+            let v = Arc::clone(&view);
+            handles.push(thread::spawn(move || {
+                for i in 0..5 {
+                    let idx = (t * 5 + i) as i64;
+                    v.itemset(&[idx], (idx + 100) as f64).unwrap();
+                }
+            }));
+        }
+
+        // Readers check values via item()
+        for _ in 0..4 {
+            let v = Arc::clone(&view);
+            handles.push(thread::spawn(move || {
+                for i in 0..20 {
+                    let _ = v.item(&[i as i64]).unwrap();
+                }
+            }));
+        }
+
+        for h in handles {
+            h.join().expect("thread panicked - potential deadlock");
+        }
+
+        // Verify all values were written
+        let data = buffer.read().unwrap();
+        for i in 0..20 {
+            assert_eq!(data[i], (i + 100) as f64);
+        }
+    }
 }
