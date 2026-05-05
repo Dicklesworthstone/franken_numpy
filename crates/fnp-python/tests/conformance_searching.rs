@@ -112,6 +112,23 @@ fn np_array_2d_s<'py>(
     py.import("numpy")?.getattr("array")?.call1((rows,))
 }
 
+fn assert_count_nonzero_scalar_surface(
+    label: &str,
+    ours: &pyo3::Bound<'_, pyo3::types::PyAny>,
+    theirs: &pyo3::Bound<'_, pyo3::types::PyAny>,
+) -> PyResult<()> {
+    let ours_type = ours.get_type().name()?.to_string();
+    let theirs_type = theirs.get_type().name()?.to_string();
+    assert_eq!(ours_type, theirs_type, "{label} result type mismatch");
+    assert_eq!(ours_type, "int", "{label} should return a Python int");
+    assert_eq!(
+        ours.str()?.to_string(),
+        theirs.str()?.to_string(),
+        "{label} result value mismatch"
+    );
+    Ok(())
+}
+
 #[test]
 fn count_nonzero_axis_none_scalar_surface_matches_numpy() {
     with_fnp_and_numpy(|py, module, numpy| {
@@ -129,6 +146,28 @@ fn count_nonzero_axis_none_scalar_surface_matches_numpy() {
             theirs.str()?.to_string(),
             "count_nonzero(axis=None) should match NumPy's Python scalar surface"
         );
+        Ok(())
+    });
+}
+
+#[test]
+fn count_nonzero_axis_none_scalar_inputs_return_python_int_like_numpy() {
+    with_fnp_and_numpy(|_, module, numpy| {
+        let ours = module.getattr("count_nonzero")?.call1((5_i64,))?;
+        let theirs = numpy.getattr("count_nonzero")?.call1((5_i64,))?;
+        assert_count_nonzero_scalar_surface("python-int", &ours, &theirs)?;
+
+        let ours_input = numpy.getattr("int64")?.call1((3_i64,))?;
+        let theirs_input = numpy.getattr("int64")?.call1((3_i64,))?;
+        let ours = module.getattr("count_nonzero")?.call1((ours_input,))?;
+        let theirs = numpy.getattr("count_nonzero")?.call1((theirs_input,))?;
+        assert_count_nonzero_scalar_surface("numpy-int64-scalar", &ours, &theirs)?;
+
+        let ours_input = numpy.getattr("array")?.call1((0_i64,))?;
+        let theirs_input = numpy.getattr("array")?.call1((0_i64,))?;
+        let ours = module.getattr("count_nonzero")?.call1((ours_input,))?;
+        let theirs = numpy.getattr("count_nonzero")?.call1((theirs_input,))?;
+        assert_count_nonzero_scalar_surface("zero-d-array", &ours, &theirs)?;
         Ok(())
     });
 }
