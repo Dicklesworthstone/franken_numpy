@@ -643,6 +643,7 @@ impl BinaryOp {
         )
     }
 
+    #[inline]
     #[must_use]
     pub fn apply(self, lhs: f64, rhs: f64) -> f64 {
         match self {
@@ -1066,6 +1067,7 @@ impl UnaryOp {
         matches!(self, Self::Invert)
     }
 
+    #[inline]
     #[must_use]
     pub fn apply(self, x: f64) -> f64 {
         match self {
