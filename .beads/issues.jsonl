@@ -1016,3 +1016,12 @@
   "category": "mock-code-finder",
   "description": "Systematic stub/mock/placeholder audit found codebase clean: no TODO/unimplemented!/NotImplemented markers, no hardcoded returns, no sleep() fake work, no dead tests. 53 numpy passthroughs are intentional (complex semantics). 5 dead_code functions are reserved helpers (structured arrays). Fixed outdated conformance_special_math.rs docstring that claimed window functions were passthroughs when they are now native."
 }
+{
+  "id": "fnp-golden-native-tests",
+  "title": "Add golden artifact tests for native Rust functions",
+  "priority": 1,
+  "status": "done",
+  "created": "2026-05-05T02:42:00Z",
+  "category": "testing-golden-artifacts",
+  "description": "Added 11 golden artifact tests for native Rust implementations: window functions (bartlett, hanning, hamming, blackman, kaiser), bessel i0, sinc, trig (sin/cos/tan), exp/log, plus edge cases. These catch numerical regressions without requiring numpy oracle."
+}
