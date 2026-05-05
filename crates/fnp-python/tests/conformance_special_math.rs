@@ -7,9 +7,10 @@
 //! sample-data utilities (trapezoid, trapz, interp, digitize, bincount,
 //! histogram).
 //!
-//! All 13 wrappers ship as numpy passthroughs (no native fast path) so
-//! every parity assertion uses Strict comparison for integer outputs
-//! and Close for float outputs (1 ULP tolerated).
+//! Window functions (bartlett, hanning, hamming, blackman, kaiser) and
+//! special functions (i0, sinc) now use native Rust implementations via
+//! UFuncArray methods. Sample-data utilities remain numpy passthroughs
+//! for full format/corner-case parity.
 
 mod common;
 

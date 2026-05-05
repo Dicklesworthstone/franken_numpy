@@ -1007,3 +1007,12 @@
   "category": "porting-to-rust",
   "description": "Ported np.i0 (modified Bessel function, order 0) from numpy passthrough to native Rust via UnaryOp::I0. Uses existing bessel_i0 polynomial approximation (Abramowitz & Stegun). Precision ~3e-8 vs numpy (Cephes). Test tolerance relaxed from 1e-10 to 1e-7."
 }
+{
+  "id": "fnp-mock-audit-clean",
+  "title": "Mock-code-finder audit: codebase clean, outdated doc fixed",
+  "priority": 1,
+  "status": "done",
+  "created": "2026-05-05T02:25:00Z",
+  "category": "mock-code-finder",
+  "description": "Systematic stub/mock/placeholder audit found codebase clean: no TODO/unimplemented!/NotImplemented markers, no hardcoded returns, no sleep() fake work, no dead tests. 53 numpy passthroughs are intentional (complex semantics). 5 dead_code functions are reserved helpers (structured arrays). Fixed outdated conformance_special_math.rs docstring that claimed window functions were passthroughs when they are now native."
+}
