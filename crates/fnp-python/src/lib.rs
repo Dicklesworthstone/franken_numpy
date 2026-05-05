@@ -7606,7 +7606,9 @@ fn count_nonzero(
         if let Some(ax) = &axis_for_fallback {
             kwargs.set_item("axis", ax.bind(py))?;
         }
-        kwargs.set_item("keepdims", keepdims)?;
+        if keepdims {
+            kwargs.set_item("keepdims", true)?;
+        }
         Ok(numpy
             .getattr("count_nonzero")?
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
@@ -7662,6 +7664,11 @@ fn count_nonzero(
         Some(axes) => a.count_nonzero_axes(axes, keepdims),
     }
     .map_err(map_ufunc_error)?;
+
+    if axes.is_none() && !keepdims {
+        let count = result.values().first().copied().unwrap_or(0.0) as i64;
+        return Ok(count.into_pyobject(py)?.unbind().into_any());
+    }
 
     if result.shape().is_empty() && axes.is_none() {
         return fallback();
