@@ -10,10 +10,10 @@
 //! patterns with 4 inline tests but no standalone concurrency test file.
 //! These tests verify thread safety in isolation.
 
-use fnp_dtype::DType;
+use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::UFuncArray;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -45,7 +45,11 @@ fn concurrent_shared_view_reads_no_race() {
         t.join().expect("thread should not panic");
     }
 
-    assert_eq!(completed.load(Ordering::SeqCst), 8, "all threads should complete");
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        8,
+        "all threads should complete"
+    );
 }
 
 #[test]
@@ -73,7 +77,11 @@ fn concurrent_shared_view_shape_access_no_race() {
         t.join().expect("thread should not panic");
     }
 
-    assert_eq!(completed.load(Ordering::SeqCst), 8, "all threads should complete");
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        8,
+        "all threads should complete"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -113,7 +121,11 @@ fn concurrent_reads_during_write_no_deadlock() {
         r.join().expect("reader should not deadlock");
     }
 
-    assert_eq!(completed.load(Ordering::SeqCst), 5, "all threads should complete");
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        5,
+        "all threads should complete"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -144,7 +156,78 @@ fn concurrent_to_array_no_race() {
         t.join().expect("thread should not panic");
     }
 
-    assert_eq!(completed.load(Ordering::SeqCst), 8, "all threads should complete");
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        8,
+        "all threads should complete"
+    );
+}
+
+#[test]
+fn sidecar_backed_itemset_to_array_contention_no_deadlock() -> Result<(), String> {
+    let initial = (0..128).map(|i| i64::MAX - i).collect::<Vec<_>>();
+    let arr = UFuncArray::from_storage(vec![128], ArrayStorage::I64(initial))
+        .map_err(|err| format!("{err:?}"))?;
+    assert!(arr.has_integer_sidecar());
+
+    let view = Arc::new(arr.shared_view().map_err(|err| format!("{err:?}"))?);
+    let writes_completed = Arc::new(AtomicUsize::new(0));
+    let reads_completed = Arc::new(AtomicUsize::new(0));
+    let mut threads = Vec::new();
+
+    for worker in 0..4 {
+        let view = Arc::clone(&view);
+        let writes_completed = Arc::clone(&writes_completed);
+        threads.push(thread::spawn(move || -> Result<(), String> {
+            for offset in 0..32 {
+                let index = worker * 32 + offset;
+                view.itemset(&[index as i64], (1_000 + index) as f64)
+                    .map_err(|err| format!("{err:?}"))?;
+                writes_completed.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }));
+    }
+
+    for _ in 0..4 {
+        let view = Arc::clone(&view);
+        let reads_completed = Arc::clone(&reads_completed);
+        threads.push(thread::spawn(move || -> Result<(), String> {
+            for _ in 0..32 {
+                let owned = view.to_array().map_err(|err| format!("{err:?}"))?;
+                assert_eq!(owned.shape(), &[128]);
+                assert!(owned.has_integer_sidecar());
+                reads_completed.fetch_add(1, Ordering::SeqCst);
+            }
+            Ok(())
+        }));
+    }
+
+    for thread in threads {
+        thread
+            .join()
+            .map_err(|_| "sidecar-backed view thread should not deadlock".to_string())??;
+    }
+
+    assert_eq!(writes_completed.load(Ordering::SeqCst), 128);
+    assert_eq!(reads_completed.load(Ordering::SeqCst), 128);
+
+    let final_storage = view
+        .to_array()
+        .map_err(|err| format!("{err:?}"))?
+        .to_storage()
+        .map_err(|err| format!("{err:?}"))?;
+    let values = match final_storage {
+        ArrayStorage::I64(values) => values,
+        other => {
+            return Err(format!(
+                "sidecar-backed final storage should remain I64: {other:?}"
+            ));
+        }
+    };
+    assert_eq!(values[0], 1_000);
+    assert_eq!(values[127], 1_127);
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -175,7 +258,11 @@ fn concurrent_clone_no_race() {
         t.join().expect("thread should not panic");
     }
 
-    assert_eq!(completed.load(Ordering::SeqCst), 8, "all threads should complete");
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        8,
+        "all threads should complete"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -211,7 +298,11 @@ fn stress_interleaved_read_write_no_deadlock() {
         t.join().expect("thread should not deadlock");
     }
 
-    assert_eq!(completed.load(Ordering::SeqCst), 8, "all threads should complete");
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        8,
+        "all threads should complete"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -7,28 +7,42 @@
 //! - datetime_as_string formats NaT correctly
 //! - NaT values are distinct from valid dates
 
-use fnp_ufunc::{datetime_as_string, isnat, UFuncArray};
+use fnp_ufunc::{UFuncArray, datetime_as_string, isnat};
 
 #[test]
 fn nat_parsing_datetime64_succeeds() {
     let result = UFuncArray::from_datetime_strings(vec![1], vec!["NaT".to_string()], None);
-    assert!(result.is_ok(), "NaT should parse successfully for datetime64");
+    assert!(
+        result.is_ok(),
+        "NaT should parse successfully for datetime64"
+    );
     let arr = result.unwrap();
     assert_eq!(arr.shape(), &[1]);
 
     let isnat_result = isnat(&arr).expect("isnat should succeed");
-    assert_eq!(isnat_result.values()[0], 1.0, "NaT should be detected by isnat()");
+    assert_eq!(
+        isnat_result.values()[0],
+        1.0,
+        "NaT should be detected by isnat()"
+    );
 }
 
 #[test]
 fn nat_parsing_timedelta64_succeeds() {
     let result = UFuncArray::from_timedelta_strings(vec![1], vec!["NaT".to_string()], None);
-    assert!(result.is_ok(), "NaT should parse successfully for timedelta64");
+    assert!(
+        result.is_ok(),
+        "NaT should parse successfully for timedelta64"
+    );
     let arr = result.unwrap();
     assert_eq!(arr.shape(), &[1]);
 
     let isnat_result = isnat(&arr).expect("isnat should succeed");
-    assert_eq!(isnat_result.values()[0], 1.0, "NaT should be detected by isnat()");
+    assert_eq!(
+        isnat_result.values()[0],
+        1.0,
+        "NaT should be detected by isnat()"
+    );
 }
 
 #[test]
@@ -114,26 +128,26 @@ fn nat_timedelta_mixed_with_valid() {
 
 #[test]
 fn valid_date_is_not_nat() {
-    let arr = UFuncArray::from_datetime_strings(
-        vec![1],
-        vec!["2024-07-04".to_string()],
-        Some("D"),
-    )
-    .expect("valid date should parse");
+    let arr = UFuncArray::from_datetime_strings(vec![1], vec!["2024-07-04".to_string()], Some("D"))
+        .expect("valid date should parse");
 
     let isnat_result = isnat(&arr).expect("isnat should succeed");
-    assert_eq!(isnat_result.values()[0], 0.0, "valid date should NOT be NaT");
+    assert_eq!(
+        isnat_result.values()[0],
+        0.0,
+        "valid date should NOT be NaT"
+    );
 }
 
 #[test]
 fn valid_timedelta_is_not_nat() {
-    let arr = UFuncArray::from_timedelta_strings(
-        vec![1],
-        vec!["42D".to_string()],
-        Some("D"),
-    )
-    .expect("valid timedelta should parse");
+    let arr = UFuncArray::from_timedelta_strings(vec![1], vec!["42D".to_string()], Some("D"))
+        .expect("valid timedelta should parse");
 
     let isnat_result = isnat(&arr).expect("isnat should succeed");
-    assert_eq!(isnat_result.values()[0], 0.0, "valid timedelta should NOT be NaT");
+    assert_eq!(
+        isnat_result.values()[0],
+        0.0,
+        "valid timedelta should NOT be NaT"
+    );
 }

@@ -2255,11 +2255,11 @@ impl AxisSlice {
 ///
 /// # Lock Ordering Contract
 ///
-/// When acquiring both `buffer` and `integer_sidecar` locks, always acquire
-/// `integer_sidecar` first, then `buffer`. This prevents AB-BA deadlocks when
-/// concurrent threads call methods like `itemset` (writes both) and `to_array`
-/// (reads both sequentially). The `to_array` path is safe because it releases
-/// the buffer lock before acquiring the sidecar lock.
+/// When holding both `buffer` and `integer_sidecar` locks at the same time,
+/// always acquire `integer_sidecar` first, then `buffer`. This prevents AB-BA
+/// deadlocks when concurrent threads call methods like `itemset`, which writes
+/// both. Sequential readers like `to_array` may read the buffer first only
+/// because they release that guard before acquiring the sidecar lock.
 #[derive(Debug, Clone)]
 pub struct UFuncArrayView {
     shape: Vec<usize>,
