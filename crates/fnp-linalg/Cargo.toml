@@ -6,3 +6,10 @@ license-file = "../../LICENSE"
 
 [dependencies]
 fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "criterion_linalg"
+harness = false

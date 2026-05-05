@@ -1,0 +1,209 @@
+//! Criterion benchmarks for fnp-linalg.
+//!
+//! Measures performance baselines for core linear algebra operations:
+//! - solve_nxn: linear system solving
+//! - det_nxn: determinant computation
+//! - inv_nxn: matrix inversion
+//! - cholesky_nxn: Cholesky decomposition
+//! - qr_nxn: QR decomposition
+//! - svd_nxn: singular value decomposition
+//! - eigvalsh_nxn: symmetric eigenvalues
+//! - matrix_norm_frobenius: Frobenius norm
+//!
+//! Finding: fnp-linalg (10,120 LOC) had ZERO benchmarks despite containing
+//! performance-critical numerical algorithms.
+
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use fnp_linalg::{
+    cholesky_nxn, det_nxn, eigvalsh_nxn, inv_nxn, matrix_norm_frobenius, qr_nxn, solve_nxn,
+    svd_nxn,
+};
+
+fn generate_spd_matrix(n: usize) -> Vec<f64> {
+    let mut a = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            a[i * n + j] = if i == j {
+                (n + 1) as f64
+            } else {
+                1.0 / ((i as f64 - j as f64).abs() + 1.0)
+            };
+        }
+    }
+    a
+}
+
+fn generate_random_matrix(n: usize, seed: u64) -> Vec<f64> {
+    let mut state = seed;
+    (0..n * n)
+        .map(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+        })
+        .collect()
+}
+
+fn generate_invertible_matrix(n: usize) -> Vec<f64> {
+    let mut a = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            a[i * n + j] = if i == j {
+                (n * 2) as f64
+            } else {
+                ((i + j) % 5) as f64 * 0.1
+            };
+        }
+    }
+    a
+}
+
+fn bench_solve(c: &mut Criterion) {
+    let mut group = c.benchmark_group("solve_nxn");
+
+    for n in [16, 32, 64, 128, 256] {
+        let a = generate_invertible_matrix(n);
+        let b: Vec<f64> = (0..n).map(|i| (i + 1) as f64).collect();
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
+            bench.iter(|| {
+                let result = solve_nxn(black_box(&a), black_box(&b), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_det(c: &mut Criterion) {
+    let mut group = c.benchmark_group("det_nxn");
+
+    for n in [16, 32, 64, 128, 256] {
+        let a = generate_random_matrix(n, 42);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
+            bench.iter(|| {
+                let result = det_nxn(black_box(&a), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_inv(c: &mut Criterion) {
+    let mut group = c.benchmark_group("inv_nxn");
+
+    for n in [16, 32, 64, 128, 256] {
+        let a = generate_invertible_matrix(n);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
+            bench.iter(|| {
+                let result = inv_nxn(black_box(&a), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_cholesky(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cholesky_nxn");
+
+    for n in [16, 32, 64, 128, 256] {
+        let a = generate_spd_matrix(n);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
+            bench.iter(|| {
+                let result = cholesky_nxn(black_box(&a), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_qr(c: &mut Criterion) {
+    let mut group = c.benchmark_group("qr_nxn");
+
+    for n in [16, 32, 64, 128] {
+        let a = generate_random_matrix(n, 123);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
+            bench.iter(|| {
+                let result = qr_nxn(black_box(&a), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_svd(c: &mut Criterion) {
+    let mut group = c.benchmark_group("svd_nxn");
+
+    for n in [16, 32, 64, 128] {
+        let a = generate_random_matrix(n, 456);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
+            bench.iter(|| {
+                let result = svd_nxn(black_box(&a), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_eigvalsh(c: &mut Criterion) {
+    let mut group = c.benchmark_group("eigvalsh_nxn");
+
+    for n in [16, 32, 64, 128] {
+        let a = generate_spd_matrix(n);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
+            bench.iter(|| {
+                let result = eigvalsh_nxn(black_box(&a), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_norm_frobenius(c: &mut Criterion) {
+    let mut group = c.benchmark_group("norm_frobenius");
+
+    for n in [64, 128, 256, 512, 1024] {
+        let a = generate_random_matrix(n, 789);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
+            bench.iter(|| {
+                let result = matrix_norm_frobenius(black_box(&a), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_solve,
+    bench_det,
+    bench_inv,
+    bench_cholesky,
+    bench_qr,
+    bench_svd,
+    bench_eigvalsh,
+    bench_norm_frobenius,
+);
+
+criterion_main!(benches);
