@@ -1162,3 +1162,192 @@ print(np.allclose(AB_T, BT_AT))
     assert_eq!(result.trim(), "True", "(A @ B).T == B.T @ A.T");
     Ok(())
 }
+
+#[test]
+fn det_multiplicative_property() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(4, 4)
+B = np.random.randn(4, 4)
+# det(A @ B) == det(A) * det(B)
+det_AB = fnp.linalg.det(fnp.matmul(A, B))
+det_A_times_det_B = fnp.linalg.det(A) * fnp.linalg.det(B)
+print(np.allclose(det_AB, det_A_times_det_B, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "det(A @ B) == det(A) * det(B)");
+    Ok(())
+}
+
+#[test]
+fn det_transpose_invariant() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(5, 5)
+# det(A.T) == det(A)
+det_A = fnp.linalg.det(A)
+det_AT = fnp.linalg.det(fnp.transpose(A))
+print(np.allclose(det_A, det_AT))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "det(A.T) == det(A)");
+    Ok(())
+}
+
+#[test]
+fn trace_additive_property() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(5, 5)
+B = np.random.randn(5, 5)
+# trace(A + B) == trace(A) + trace(B)
+trace_sum = fnp.trace(A + B)
+sum_traces = fnp.trace(A) + fnp.trace(B)
+print(np.allclose(trace_sum, sum_traces))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "trace(A + B) == trace(A) + trace(B)");
+    Ok(())
+}
+
+#[test]
+fn norm_homogeneity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(4, 5)
+k = 3.7
+# norm(k * A) == |k| * norm(A)
+norm_kA = fnp.linalg.norm(k * A)
+k_norm_A = abs(k) * fnp.linalg.norm(A)
+print(np.allclose(norm_kA, k_norm_A))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "norm(k * A) == |k| * norm(A)");
+    Ok(())
+}
+
+#[test]
+fn svd_reconstruction() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(4, 6)
+# A == U @ diag(s) @ Vh
+U, s, Vh = fnp.linalg.svd(A, full_matrices=False)
+reconstructed = U @ np.diag(s) @ Vh
+print(np.allclose(A, reconstructed))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "A == U @ diag(s) @ Vh (SVD reconstruction)");
+    Ok(())
+}
+
+#[test]
+fn eig_transpose_same_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(4, 4)
+# eigenvalues of A and A.T should be the same (possibly different order)
+eigvals_A = np.sort(fnp.linalg.eigvals(A))
+eigvals_AT = np.sort(fnp.linalg.eigvals(fnp.transpose(A)))
+print(np.allclose(eigvals_A, eigvals_AT))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "eigvals(A) == eigvals(A.T) (up to ordering)");
+    Ok(())
+}
+
+#[test]
+fn qr_reconstruction() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(5, 4)
+# A == Q @ R
+Q, R = fnp.linalg.qr(A)
+reconstructed = Q @ R
+print(np.allclose(A, reconstructed))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "A == Q @ R (QR reconstruction)");
+    Ok(())
+}
+
+#[test]
+fn cholesky_reconstruction() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(4, 4)
+A = A @ A.T + np.eye(4)  # Make positive definite
+# A == L @ L.T
+L = fnp.linalg.cholesky(A)
+reconstructed = L @ L.T
+print(np.allclose(A, reconstructed))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "A == L @ L.T (Cholesky reconstruction)");
+    Ok(())
+}
+
+#[test]
+fn solve_verification() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(5, 5)
+A = A + np.eye(5) * 3  # Make well-conditioned
+b = np.random.randn(5)
+# A @ solve(A, b) == b
+x = fnp.linalg.solve(A, b)
+Ax = A @ x
+print(np.allclose(Ax, b))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "A @ solve(A, b) == b");
+    Ok(())
+}
+
+#[test]
+fn lstsq_normal_equations() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+np.random.seed(42)
+A = np.random.randn(6, 4)
+b = np.random.randn(6)
+# For overdetermined system, lstsq minimizes ||Ax - b||
+x, residuals, rank, s = fnp.linalg.lstsq(A, b, rcond=None)
+# A.T @ A @ x == A.T @ b (normal equations, approximately)
+lhs = A.T @ A @ x
+rhs = A.T @ b
+print(np.allclose(lhs, rhs, rtol=1e-8))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "lstsq satisfies normal equations");
+    Ok(())
+}
