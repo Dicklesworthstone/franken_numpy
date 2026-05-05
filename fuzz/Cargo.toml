@@ -78,5 +78,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "loadtxt_genfromtxt"
+path = "fuzz_targets/loadtxt_genfromtxt.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]
