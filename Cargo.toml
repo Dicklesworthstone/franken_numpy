@@ -12,6 +12,12 @@ members = [
   "crates/fnp-runtime",
   "crates/fnp-python",
 ]
+exclude = [
+  "crates/fnp-dtype/fuzz",
+  "crates/fnp-ndarray/fuzz",
+  "crates/fnp-iter/fuzz",
+  "crates/fnp-io/fuzz",
+]
 
 [workspace.package]
 edition = "2024"
