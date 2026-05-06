@@ -572,6 +572,7 @@ name = "fnp-io"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "criterion 0.5.1",
  "flate2",
  "insta",
 ]
@@ -595,6 +596,9 @@ dependencies = [
 [[package]]
 name = "fnp-ndarray"
 version = "0.1.0"
+dependencies = [
+ "criterion 0.5.1",
+]
 
 [[package]]
 name = "fnp-python"

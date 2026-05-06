@@ -5,3 +5,10 @@ edition = "2024"
 license-file = "../../LICENSE"
 
 [dependencies]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "criterion_ndarray"
+harness = false
