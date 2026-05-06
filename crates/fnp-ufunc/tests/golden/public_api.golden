@@ -220,3 +220,86 @@ isclose_mixed
 
 allclose_first_two
   value: true
+
+## statistical analysis
+diff_n1
+  shape: [4]
+  dtype: F64
+  values: [2.0, 3.0, 4.0, 5.0]
+
+diff_n2
+  shape: [3]
+  dtype: F64
+  values: [1.0, 1.0, 1.0]
+
+ptp_all
+  shape: []
+  dtype: F64
+  values: [7.0]
+
+ptp_axis1
+  shape: [2]
+  dtype: F64
+  values: [4.0, 6.0]
+
+cov_3x4
+  shape: [3, 3]
+  dtype: F64
+  values: [1.666666666667, 3.333333333333, 0.833333333333, 3.333333333333, 6.666666666667, 1.666666666667, 0.833333333333, 1.666666666667, 0.416666666667]
+
+corrcoef_3x4
+  shape: [3, 3]
+  dtype: F64
+  values: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+
+## nan-aware reductions
+nansum_all
+  shape: []
+  dtype: F64
+  values: [9.0]
+
+nanmean_all
+  shape: []
+  dtype: F64
+  values: [3.0]
+
+nansum_axis1
+  shape: [2]
+  dtype: F64
+  values: [4.0, 9.0]
+
+nanmean_axis0
+  shape: [3]
+  dtype: F64
+  values: [2.5, 5.0, 3.0]
+
+## histogram and binning
+histogram_5bins_counts
+  shape: [5]
+  dtype: I64
+  values: [2.0, 1.0, 3.0, 2.0, 2.0]
+
+histogram_5bins_edges
+  shape: [6]
+  dtype: F64
+  values: [0.5, 1.58, 2.66, 3.74, 4.82, 5.9]
+
+histogram_custom_edges_counts
+  shape: [3]
+  dtype: I64
+  values: [2.0, 4.0, 4.0]
+
+bincount_simple
+  shape: [4]
+  dtype: I64
+  values: [3.0, 2.0, 2.0, 1.0]
+
+digitize_default
+  shape: [5]
+  dtype: I64
+  values: [0.0, 1.0, 2.0, 3.0, 4.0]
+
+digitize_right
+  shape: [5]
+  dtype: I64
+  values: [0.0, 1.0, 2.0, 3.0, 4.0]
