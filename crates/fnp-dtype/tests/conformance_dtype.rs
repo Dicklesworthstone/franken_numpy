@@ -172,14 +172,14 @@ fn conformance_can_cast_complex128_to_f64_safe() -> Result<(), String> {
 }
 
 #[test]
-#[ignore = "franken_numpy-3cr5e: fnp-dtype returns false, numpy returns True"]
 fn conformance_can_cast_complex128_to_f64_same_kind() -> Result<(), String> {
+    // NumPy: complex is NOT same_kind as real float (different "kind" categories)
     let numpy_result = numpy_oracle(
         "import numpy as np; print(np.can_cast(np.complex128, np.float64, casting='same_kind'))",
     )?;
     let fnp_result = fnp_dtype::can_cast(fnp_dtype::DType::Complex128, fnp_dtype::DType::F64, "same_kind");
-    assert!(fnp_result);
-    assert_eq!(numpy_result, "True");
+    assert!(!fnp_result, "complex128 -> f64 should NOT be same_kind castable");
+    assert_eq!(numpy_result, "False");
     Ok(())
 }
 
