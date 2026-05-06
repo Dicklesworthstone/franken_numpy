@@ -191,7 +191,8 @@ impl IOSupportedDType {
         }
         let endian = bytes[0];
         let kind = bytes[1];
-        let width_str = &descr[2..];
+        // Use get() to avoid panic on invalid UTF-8 char boundary
+        let width_str = descr.get(2..).ok_or(IOError::DTypeDescriptorInvalid)?;
         let width: usize = width_str
             .parse()
             .map_err(|_| IOError::DTypeDescriptorInvalid)?;

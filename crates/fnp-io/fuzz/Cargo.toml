@@ -50,3 +50,17 @@ path = "fuzz_targets/fuzz_loadtxt.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_fromfile"
+path = "fuzz_targets/fuzz_fromfile.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_header"
+path = "fuzz_targets/fuzz_header.rs"
+test = false
+doc = false
+bench = false
