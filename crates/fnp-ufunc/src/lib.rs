@@ -2520,20 +2520,34 @@ impl UFuncArrayView {
         }
 
         // Copy-on-write: if the buffer is shared, detach before mutating.
+        // Lock ordering: sidecar first, buffer second (matches itemset/to_array).
+        // Both locks must be held atomically during clone to ensure the copied
+        // buffer[i] and sidecar[i] values come from the same point in time.
         if Arc::strong_count(&self.buffer) > 1 {
-            let cloned = self
+            let sidecar_guard = if let Some(ref sidecar) = self.integer_sidecar {
+                Some(
+                    sidecar
+                        .read()
+                        .map_err(|_| UFuncError::Msg("shared view: sidecar lock poisoned".to_string()))?,
+                )
+            } else {
+                None
+            };
+
+            let buffer_guard = self
                 .buffer
                 .read()
-                .map_err(|_| UFuncError::Msg("shared view: read lock poisoned".to_string()))?
-                .clone();
-            self.buffer = Arc::new(RwLock::new(cloned));
+                .map_err(|_| UFuncError::Msg("shared view: read lock poisoned".to_string()))?;
 
-            if let Some(ref sidecar) = self.integer_sidecar {
-                let cloned_sidecar = sidecar
-                    .read()
-                    .map_err(|_| UFuncError::Msg("shared view: sidecar lock poisoned".to_string()))?
-                    .clone();
-                self.integer_sidecar = Some(Arc::new(RwLock::new(cloned_sidecar)));
+            let cloned_buffer = buffer_guard.clone();
+            let cloned_sidecar = sidecar_guard.as_ref().map(|g| (**g).clone());
+
+            drop(buffer_guard);
+            drop(sidecar_guard);
+
+            self.buffer = Arc::new(RwLock::new(cloned_buffer));
+            if let Some(s) = cloned_sidecar {
+                self.integer_sidecar = Some(Arc::new(RwLock::new(s)));
             }
         }
 

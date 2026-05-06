@@ -551,3 +551,105 @@ fn to_array_buffer_sidecar_consistency_under_contention() {
         total_inconsistencies
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// itemset_cow atomic clone: buffer and sidecar must be cloned atomically
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn itemset_cow_atomic_clone_no_buffer_sidecar_skew() {
+    // Regression test for non-atomic clone bug in itemset_cow.
+    //
+    // Before the fix: itemset_cow cloned buffer (releasing lock), then cloned
+    // sidecar separately. A concurrent itemset between the two clones could
+    // update both buffer and sidecar atomically, causing the COW copy to have
+    // buffer from time T1 but sidecar from time T2 — an inconsistent snapshot.
+    //
+    // After the fix: itemset_cow holds both locks (sidecar first, buffer second)
+    // during the clone operation, ensuring atomicity.
+    //
+    // Strategy: create a shared view with sidecar (requires at least one value
+    // outside f64 exact range to force sidecar creation), spawn writers that call
+    // itemset on the shared view while another thread calls itemset_cow to
+    // create a private copy. The private copy's to_array should always return
+    // consistent buffer/sidecar values.
+
+    // Include one large value (i64::MAX) to force sidecar creation, rest are small
+    let mut initial: Vec<i64> = (1..64).map(|i| 1_000_000 + i).collect();
+    initial.insert(0, i64::MAX);
+    let arr = UFuncArray::from_storage(vec![64], ArrayStorage::I64(initial))
+        .expect("create sidecar-backed array");
+    assert!(arr.has_integer_sidecar(), "need sidecar for this test");
+
+    let shared_view = Arc::new(arr.shared_view().expect("shared view"));
+    let inconsistencies = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::new();
+
+    // Writers: continuously modify indices 1-63 (skip index 0 which has i64::MAX)
+    for writer_id in 0..2i64 {
+        let view = Arc::clone(&shared_view);
+        handles.push(thread::spawn(move || {
+            for round in 0..1000i64 {
+                let value = (2_000_000 + writer_id * 100_000 + round) as f64;
+                for i in 1..64i64 {
+                    let _ = view.itemset(&[i], value);
+                }
+            }
+        }));
+    }
+
+    // COW readers: call itemset_cow to create private copies, then verify consistency
+    for _ in 0..4 {
+        let view = Arc::clone(&shared_view);
+        let inconsistencies = Arc::clone(&inconsistencies);
+        handles.push(thread::spawn(move || {
+            for _ in 0..200 {
+                // Clone the shared view to get our own view struct (not the Arc data)
+                let mut cow_view = (*view).clone();
+
+                // Trigger COW clone by writing index 1 (leave 0 alone, it's i64::MAX)
+                if cow_view.itemset_cow(&[1], 9_999_999.0).is_err() {
+                    continue;
+                }
+
+                // The private copy should be internally consistent
+                let owned = match cow_view.to_array() {
+                    Ok(a) => a,
+                    Err(_) => continue,
+                };
+                let storage = match owned.to_storage() {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let sidecar_vals = match storage {
+                    ArrayStorage::I64(v) => v,
+                    _ => continue,
+                };
+
+                // Check consistency: buffer[i] as i64 should match sidecar[i]
+                // for indices 2-63 (skip 0=i64::MAX anchor, 1=our write)
+                for i in 2..64 {
+                    let buffer_val = match owned.item(&[i as i64]) {
+                        Ok(v) => v,
+                        Err(_) => continue,
+                    };
+                    let sidecar_val = sidecar_vals[i];
+                    if buffer_val as i64 != sidecar_val {
+                        inconsistencies.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().expect("thread should complete");
+    }
+
+    let total_inconsistencies = inconsistencies.load(Ordering::SeqCst);
+    assert_eq!(
+        total_inconsistencies, 0,
+        "itemset_cow produced {} buffer/sidecar mismatches — non-atomic clone race!",
+        total_inconsistencies
+    );
+}
