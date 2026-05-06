@@ -1,0 +1,45 @@
+[package]
+name = "fnp-iter-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.fnp-iter]
+path = ".."
+
+[[bin]]
+name = "fuzz_ndindex"
+path = "fuzz_targets/fuzz_ndindex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_flatiter_indices"
+path = "fuzz_targets/fuzz_flatiter_indices.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_nditer_plan"
+path = "fuzz_targets/fuzz_nditer_plan.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_transfer_class"
+path = "fuzz_targets/fuzz_transfer_class.rs"
+test = false
+doc = false
+bench = false
