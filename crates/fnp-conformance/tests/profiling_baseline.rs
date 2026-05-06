@@ -74,7 +74,14 @@ fn capture_environment_fingerprint() {
     println!("rustc: {}", rustc_version);
     println!("cpu: {}", cpu_info);
     println!("mem_kb: {}", mem_info);
-    println!("profile: {}", if cfg!(debug_assertions) { "debug" } else { "release" });
+    println!(
+        "profile: {}",
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+    );
     println!("================================\n");
 }
 
@@ -89,12 +96,8 @@ fn capture_environment_fingerprint() {
 #[test]
 fn baseline_ufunc_add_broadcast() {
     let dim = 1024usize;
-    let lhs = UFuncArray::new(
-        vec![dim, dim],
-        build_matrix_values(dim, 7, 257),
-        DType::F64,
-    )
-    .expect("lhs");
+    let lhs =
+        UFuncArray::new(vec![dim, dim], build_matrix_values(dim, 7, 257), DType::F64).expect("lhs");
     let rhs = UFuncArray::new(
         vec![dim],
         (0..dim).map(|i| f64::from((i % 29) as u32)).collect(),
@@ -115,7 +118,10 @@ fn baseline_ufunc_add_broadcast() {
     let p95 = percentile(&samples, 95.0);
     let p99 = percentile(&samples, 99.0);
 
-    println!("ufunc_add_broadcast 1024x1024+1024: p50={:?} p95={:?} p99={:?}", p50, p95, p99);
+    println!(
+        "ufunc_add_broadcast 1024x1024+1024: p50={:?} p95={:?} p99={:?}",
+        p50, p95, p99
+    );
 
     // Budget envelope: p95 < 25ms in release (measured 18.8ms; optimization target: <5ms)
     #[cfg(not(debug_assertions))]
@@ -154,7 +160,10 @@ fn baseline_reduce_sum_axis1() {
     let p95 = percentile(&samples, 95.0);
     let p99 = percentile(&samples, 99.0);
 
-    println!("reduce_sum_axis1 1024x1024: p50={:?} p95={:?} p99={:?}", p50, p95, p99);
+    println!(
+        "reduce_sum_axis1 1024x1024: p50={:?} p95={:?} p99={:?}",
+        p50, p95, p99
+    );
 
     #[cfg(not(debug_assertions))]
     assert!(
@@ -198,7 +207,10 @@ fn baseline_matmul_256x256() {
     let p95 = percentile(&samples, 95.0);
     let p99 = percentile(&samples, 99.0);
 
-    println!("matmul 256x256x256x256: p50={:?} p95={:?} p99={:?}", p50, p95, p99);
+    println!(
+        "matmul 256x256x256x256: p50={:?} p95={:?} p99={:?}",
+        p50, p95, p99
+    );
 
     #[cfg(not(debug_assertions))]
     assert!(
@@ -238,7 +250,10 @@ fn baseline_sort_quicksort_1m() {
     let p95 = percentile(&samples, 95.0);
     let p99 = percentile(&samples, 99.0);
 
-    println!("sort_quicksort 1M: p50={:?} p95={:?} p99={:?}", p50, p95, p99);
+    println!(
+        "sort_quicksort 1M: p50={:?} p95={:?} p99={:?}",
+        p50, p95, p99
+    );
 
     #[cfg(not(debug_assertions))]
     assert!(
@@ -321,7 +336,10 @@ fn baseline_io_npy_roundtrip() {
     let p95 = percentile(&samples, 95.0);
     let p99 = percentile(&samples, 99.0);
 
-    println!("io_npy_roundtrip 512x512: p50={:?} p95={:?} p99={:?}", p50, p95, p99);
+    println!(
+        "io_npy_roundtrip 512x512: p50={:?} p95={:?} p99={:?}",
+        p50, p95, p99
+    );
 
     #[cfg(not(debug_assertions))]
     assert!(

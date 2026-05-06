@@ -14,8 +14,8 @@ use fnp_conformance::{
     set_dtype_promotion_log_path, set_runtime_policy_log_path, set_shape_stride_log_path,
 };
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
