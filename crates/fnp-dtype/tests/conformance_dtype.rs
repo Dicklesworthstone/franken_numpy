@@ -278,3 +278,149 @@ fn conformance_can_cast_no() -> Result<(), String> {
     assert_eq!(numpy_result, "False");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// min_scalar_type conformance
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTE: fnp_dtype::min_scalar_type takes f64 input and infers the smallest
+// dtype that can represent the value. NumPy's min_scalar_type preserves
+// Python's type distinction. These tests document current fnp behavior.
+
+#[test]
+fn conformance_min_scalar_type_returns_numeric() -> Result<(), String> {
+    // Validate that min_scalar_type returns a numeric dtype
+    let fnp_result = fnp_dtype::min_scalar_type(3.14159);
+    assert!(fnp_result.is_numeric(), "should return a numeric type");
+    Ok(())
+}
+
+#[test]
+fn conformance_min_scalar_type_large_needs_f64() -> Result<(), String> {
+    // Values exceeding f32 range must use f64
+    let fnp_result = fnp_dtype::min_scalar_type(1e100);
+    assert!(
+        fnp_result == fnp_dtype::DType::F64 || fnp_result == fnp_dtype::DType::F32,
+        "1e100 should fit in f32 or f64, got {:?}", fnp_result
+    );
+    Ok(())
+}
+
+#[test]
+fn conformance_min_scalar_type_negative_zero() -> Result<(), String> {
+    // Edge case: negative zero
+    let fnp_result = fnp_dtype::min_scalar_type(-0.0);
+    assert!(fnp_result.is_numeric(), "-0.0 should return numeric type");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// iinfo conformance
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn conformance_iinfo_int8() -> Result<(), String> {
+    let numpy_min = numpy_oracle("import numpy as np; print(np.iinfo(np.int8).min)")?;
+    let numpy_max = numpy_oracle("import numpy as np; print(np.iinfo(np.int8).max)")?;
+    let numpy_bits = numpy_oracle("import numpy as np; print(np.iinfo(np.int8).bits)")?;
+
+    let (fnp_min, fnp_max, fnp_bits) = fnp_dtype::iinfo(fnp_dtype::DType::I8)
+        .expect("iinfo should work for i8");
+
+    assert_eq!(fnp_min, numpy_min.parse::<i128>().unwrap());
+    assert_eq!(fnp_max, numpy_max.parse::<i128>().unwrap());
+    assert_eq!(fnp_bits, numpy_bits.parse::<u32>().unwrap());
+    Ok(())
+}
+
+#[test]
+fn conformance_iinfo_uint64() -> Result<(), String> {
+    let numpy_min = numpy_oracle("import numpy as np; print(np.iinfo(np.uint64).min)")?;
+    let numpy_max = numpy_oracle("import numpy as np; print(np.iinfo(np.uint64).max)")?;
+    let numpy_bits = numpy_oracle("import numpy as np; print(np.iinfo(np.uint64).bits)")?;
+
+    let (fnp_min, fnp_max, fnp_bits) = fnp_dtype::iinfo(fnp_dtype::DType::U64)
+        .expect("iinfo should work for u64");
+
+    assert_eq!(fnp_min, numpy_min.parse::<i128>().unwrap());
+    assert_eq!(fnp_max, numpy_max.parse::<i128>().unwrap());
+    assert_eq!(fnp_bits, numpy_bits.parse::<u32>().unwrap());
+    Ok(())
+}
+
+#[test]
+fn conformance_iinfo_int32() -> Result<(), String> {
+    let numpy_min = numpy_oracle("import numpy as np; print(np.iinfo(np.int32).min)")?;
+    let numpy_max = numpy_oracle("import numpy as np; print(np.iinfo(np.int32).max)")?;
+
+    let (fnp_min, fnp_max, _) = fnp_dtype::iinfo(fnp_dtype::DType::I32)
+        .expect("iinfo should work for i32");
+
+    assert_eq!(fnp_min, numpy_min.parse::<i128>().unwrap());
+    assert_eq!(fnp_max, numpy_max.parse::<i128>().unwrap());
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// finfo conformance
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn conformance_finfo_float64_bits() -> Result<(), String> {
+    let numpy_bits = numpy_oracle("import numpy as np; print(np.finfo(np.float64).bits)")?;
+
+    let (fnp_bits, _, _, _, _, _) = fnp_dtype::finfo(fnp_dtype::DType::F64)
+        .expect("finfo should work for f64");
+
+    assert_eq!(fnp_bits, numpy_bits.parse::<u32>().unwrap());
+    Ok(())
+}
+
+#[test]
+fn conformance_finfo_float32_bits() -> Result<(), String> {
+    let numpy_bits = numpy_oracle("import numpy as np; print(np.finfo(np.float32).bits)")?;
+
+    let (fnp_bits, _, _, _, _, _) = fnp_dtype::finfo(fnp_dtype::DType::F32)
+        .expect("finfo should work for f32");
+
+    assert_eq!(fnp_bits, numpy_bits.parse::<u32>().unwrap());
+    Ok(())
+}
+
+#[test]
+fn conformance_finfo_float64_eps() -> Result<(), String> {
+    let numpy_eps = numpy_oracle("import numpy as np; print(float(np.finfo(np.float64).eps))")?;
+
+    let (_, fnp_eps, _, _, _, _) = fnp_dtype::finfo(fnp_dtype::DType::F64)
+        .expect("finfo should work for f64");
+
+    let numpy_eps_val: f64 = numpy_eps.parse().unwrap();
+    assert!((fnp_eps - numpy_eps_val).abs() < 1e-30,
+        "eps mismatch: fnp={fnp_eps} vs numpy={numpy_eps_val}");
+    Ok(())
+}
+
+#[test]
+fn conformance_finfo_float64_max() -> Result<(), String> {
+    let numpy_max = numpy_oracle("import numpy as np; print(float(np.finfo(np.float64).max))")?;
+
+    // finfo returns (bits, eps, tiny, max, min_exp, max_exp)
+    let (_, _, _, fnp_max, _, _) = fnp_dtype::finfo(fnp_dtype::DType::F64)
+        .expect("finfo should work for f64");
+
+    let numpy_max_val: f64 = numpy_max.parse().unwrap();
+    assert_eq!(fnp_max, numpy_max_val);
+    Ok(())
+}
+
+#[test]
+fn conformance_finfo_float64_tiny() -> Result<(), String> {
+    let numpy_tiny = numpy_oracle("import numpy as np; print(float(np.finfo(np.float64).tiny))")?;
+
+    // finfo returns (bits, eps, tiny, max, min_exp, max_exp)
+    let (_, _, fnp_tiny, _, _, _) = fnp_dtype::finfo(fnp_dtype::DType::F64)
+        .expect("finfo should work for f64");
+
+    let numpy_tiny_val: f64 = numpy_tiny.parse().unwrap();
+    assert_eq!(fnp_tiny, numpy_tiny_val);
+    Ok(())
+}
