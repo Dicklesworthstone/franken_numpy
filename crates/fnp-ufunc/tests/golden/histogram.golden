@@ -1,0 +1,133 @@
+# fnp-ufunc histogram/binning golden v1
+
+## histogram basic
+hist_5bins_counts
+  shape: (5)
+  dtype: I64
+  values: [2.0, 2.0, 2.0, 1.0, 3.0]
+
+hist_5bins_edges
+  shape: (6)
+  dtype: F64
+  values: [0.500000, 2.300000, 4.100000, 5.900000, 7.700000, 9.500000]
+
+hist_uniform_counts
+  shape: (10)
+  dtype: I64
+  values: [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 3.0]
+
+hist_uniform_edges
+  shape: (11)
+  dtype: F64
+  values: [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+
+## histogram with edges
+hist_custom_edges_counts
+  shape: (3)
+  dtype: I64
+  values: [3.0, 2.0, 5.0]
+
+hist_custom_edges_edges
+  shape: (4)
+  dtype: F64
+  values: [0.0, 2.500000, 5.0, 10.0]
+
+## histogram auto strategies
+hist_auto_nbins
+  value: 11.0
+
+hist_sturges_nbins
+  value: 8.0
+
+hist_sqrt_nbins
+  value: 11.0
+
+## bincount
+bincount_basic
+  shape: (6)
+  dtype: I64
+  values: [1.0, 2.0, 3.0, 1.0, 0.0, 1.0]
+
+bincount_weighted
+  shape: (6)
+  dtype: F64
+  values: [0.500000, 2.500000, 7.500000, 0.100000, 0.0, 0.200000]
+
+bincount_minlength_10
+  shape: (10)
+  dtype: F64
+  values: [0.500000, 2.500000, 7.500000, 0.100000, 0.0, 0.200000, 0.0, 0.0, 0.0, 0.0]
+
+## digitize
+digitize_left
+  shape: (7)
+  dtype: I64
+  values: [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 5.0]
+
+digitize_right
+  shape: (7)
+  dtype: I64
+  values: [0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 5.0]
+
+digitize_edge_cases
+  shape: (4)
+  dtype: I64
+  values: [0.0, 1.0, 5.0, 5.0]
+
+## searchsorted
+searchsorted_left
+  shape: (5)
+  dtype: I64
+  values: [0.0, 1.0, 2.0, 4.0, 6.0]
+
+searchsorted_right
+  shape: (5)
+  dtype: I64
+  values: [0.0, 1.0, 3.0, 4.0, 6.0]
+
+searchsorted_exact_left
+  shape: (3)
+  dtype: I64
+  values: [0.0, 2.0, 5.0]
+
+searchsorted_exact_right
+  shape: (3)
+  dtype: I64
+  values: [1.0, 3.0, 6.0]
+
+## histogram with range
+hist_range_2_8_counts
+  shape: (5)
+  dtype: F64
+  values: [2.0, 0.0, 1.0, 2.0, 1.0]
+
+hist_range_2_8_edges
+  shape: (6)
+  dtype: F64
+  values: [2.0, 3.200000, 4.400000, 5.600000, 6.800000, 8.0]
+
+## edge cases
+hist_single_element_counts
+  shape: (3)
+  dtype: I64
+  values: [0.0, 1.0, 0.0]
+
+hist_single_element_edges
+  shape: (4)
+  dtype: F64
+  values: [4.500000, 4.833333, 5.166667, 5.500000]
+
+hist_same_value_counts
+  shape: (5)
+  dtype: I64
+  values: [0.0, 0.0, 10.0, 0.0, 0.0]
+
+hist_same_value_edges
+  shape: (6)
+  dtype: F64
+  values: [2.500000, 2.700000, 2.900000, 3.100000, 3.300000, 3.500000]
+
+bincount_sparse
+  shape: (11)
+  dtype: I64
+  values: [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0]
