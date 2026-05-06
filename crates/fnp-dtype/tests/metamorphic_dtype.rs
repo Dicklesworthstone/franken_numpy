@@ -3,7 +3,7 @@
 //! Tests invariants and mathematical properties that must hold regardless of
 //! specific input values.
 
-use fnp_dtype::{can_cast, common_type, min_scalar_type, result_type, DType};
+use fnp_dtype::{DType, can_cast, common_type, min_scalar_type, result_type};
 
 const ALL_DTYPES: &[DType] = &[
     DType::Bool,
@@ -206,7 +206,13 @@ fn mr_common_type_permutation_invariance() {
 #[test]
 fn mr_common_type_idempotence_floats() {
     // common_type promotes integers to F64, so only check float types for idempotence
-    for &dtype in &[DType::F16, DType::F32, DType::F64, DType::Complex64, DType::Complex128] {
+    for &dtype in &[
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
         let result = common_type(&[dtype, dtype]);
         assert_eq!(
             result, dtype,
@@ -218,11 +224,21 @@ fn mr_common_type_idempotence_floats() {
 #[test]
 fn mr_common_type_integers_become_f64() {
     // common_type promotes integers to F64 per numpy semantics
-    for &dtype in &[DType::Bool, DType::I8, DType::I16, DType::I32, DType::I64,
-                    DType::U8, DType::U16, DType::U32, DType::U64] {
+    for &dtype in &[
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+    ] {
         let result = common_type(&[dtype]);
         assert_eq!(
-            result, DType::F64,
+            result,
+            DType::F64,
             "common_type([{dtype:?}]) should be F64 (integer promotion), got {result:?}"
         );
     }
@@ -230,7 +246,13 @@ fn mr_common_type_integers_become_f64() {
 
 #[test]
 fn mr_common_type_single_float() {
-    for &dtype in &[DType::F16, DType::F32, DType::F64, DType::Complex64, DType::Complex128] {
+    for &dtype in &[
+        DType::F16,
+        DType::F32,
+        DType::F64,
+        DType::Complex64,
+        DType::Complex128,
+    ] {
         let result = common_type(&[dtype]);
         assert_eq!(
             result, dtype,

@@ -6,7 +6,7 @@
 //! Finding: fnp-dtype (1,700+ LOC) had ZERO golden tests despite containing
 //! the foundational type system for the entire FrankenNumPy stack.
 
-use fnp_dtype::{can_cast, common_type, min_scalar_type, result_type, DType};
+use fnp_dtype::{DType, can_cast, common_type, min_scalar_type, result_type};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DType::parse golden tests
@@ -194,9 +194,18 @@ fn golden_result_type_float_promotion() {
 
 #[test]
 fn golden_result_type_complex() {
-    assert_eq!(result_type(&[DType::F32, DType::Complex64]), DType::Complex64);
-    assert_eq!(result_type(&[DType::F64, DType::Complex64]), DType::Complex128);
-    assert_eq!(result_type(&[DType::Complex64, DType::Complex128]), DType::Complex128);
+    assert_eq!(
+        result_type(&[DType::F32, DType::Complex64]),
+        DType::Complex64
+    );
+    assert_eq!(
+        result_type(&[DType::F64, DType::Complex64]),
+        DType::Complex128
+    );
+    assert_eq!(
+        result_type(&[DType::Complex64, DType::Complex128]),
+        DType::Complex128
+    );
 }
 
 #[test]
@@ -305,5 +314,8 @@ fn golden_common_type_int_and_float() {
 
 #[test]
 fn golden_common_type_complex() {
-    assert_eq!(common_type(&[DType::F64, DType::Complex128]), DType::Complex128);
+    assert_eq!(
+        common_type(&[DType::F64, DType::Complex128]),
+        DType::Complex128
+    );
 }

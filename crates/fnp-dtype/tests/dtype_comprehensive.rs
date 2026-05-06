@@ -10,7 +10,7 @@
 //! Motivation: fnp-dtype is a foundational crate with 0 test files despite
 //! 3186 lines of source code. This addresses a critical test coverage gap.
 
-use fnp_dtype::{promote, promote_for_sum_reduction, DType};
+use fnp_dtype::{DType, promote, promote_for_sum_reduction};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DType::parse() tests
@@ -374,9 +374,18 @@ fn promote_complex_with_integers() {
 
 #[test]
 fn promote_complex_complex() {
-    assert_eq!(promote(DType::Complex64, DType::Complex64), DType::Complex64);
-    assert_eq!(promote(DType::Complex64, DType::Complex128), DType::Complex128);
-    assert_eq!(promote(DType::Complex128, DType::Complex128), DType::Complex128);
+    assert_eq!(
+        promote(DType::Complex64, DType::Complex64),
+        DType::Complex64
+    );
+    assert_eq!(
+        promote(DType::Complex64, DType::Complex128),
+        DType::Complex128
+    );
+    assert_eq!(
+        promote(DType::Complex128, DType::Complex128),
+        DType::Complex128
+    );
 }
 
 #[test]
@@ -439,8 +448,14 @@ fn sum_reduction_preserves_floats() {
 
 #[test]
 fn sum_reduction_preserves_complex() {
-    assert_eq!(promote_for_sum_reduction(DType::Complex64), DType::Complex64);
-    assert_eq!(promote_for_sum_reduction(DType::Complex128), DType::Complex128);
+    assert_eq!(
+        promote_for_sum_reduction(DType::Complex64),
+        DType::Complex64
+    );
+    assert_eq!(
+        promote_for_sum_reduction(DType::Complex128),
+        DType::Complex128
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
