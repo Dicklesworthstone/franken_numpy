@@ -432,3 +432,350 @@ fn mr_cbrt_cube_inverse() {
         "cbrt(x)³ should equal x"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR Category 11: Inverse Trigonometric Relations
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_arcsin_sin_inverse() {
+    // arcsin(sin(x)) = x for x in [-π/2, π/2]
+    let values: Vec<f64> = (-15..=15).map(|i| i as f64 * 0.1).collect(); // [-1.5, 1.5] ⊂ [-π/2, π/2]
+    let original = from_vec(values);
+
+    let sin_x = original.elementwise_unary(UnaryOp::Sin);
+    let arcsin_sin_x = sin_x.elementwise_unary(UnaryOp::Arcsin);
+
+    assert!(
+        arr_approx_eq(&arcsin_sin_x, &original, TRIG_EPSILON),
+        "arcsin(sin(x)) should equal x for x in [-π/2, π/2]"
+    );
+}
+
+#[test]
+fn mr_arccos_cos_inverse() {
+    // arccos(cos(x)) = x for x in [0, π]
+    let values: Vec<f64> = (1..=30).map(|i| i as f64 * 0.1).collect(); // [0.1, 3.0] ⊂ [0, π]
+    let original = from_vec(values);
+
+    let cos_x = original.elementwise_unary(UnaryOp::Cos);
+    let arccos_cos_x = cos_x.elementwise_unary(UnaryOp::Arccos);
+
+    assert!(
+        arr_approx_eq(&arccos_cos_x, &original, TRIG_EPSILON),
+        "arccos(cos(x)) should equal x for x in [0, π]"
+    );
+}
+
+#[test]
+fn mr_arctan_tan_inverse() {
+    // arctan(tan(x)) = x for x in (-π/2, π/2)
+    let values: Vec<f64> = (-14..=14).map(|i| i as f64 * 0.1).collect(); // [-1.4, 1.4] ⊂ (-π/2, π/2)
+    let original = from_vec(values);
+
+    let tan_x = original.elementwise_unary(UnaryOp::Tan);
+    let arctan_tan_x = tan_x.elementwise_unary(UnaryOp::Arctan);
+
+    assert!(
+        arr_approx_eq(&arctan_tan_x, &original, TRIG_EPSILON),
+        "arctan(tan(x)) should equal x for x in (-π/2, π/2)"
+    );
+}
+
+#[test]
+fn mr_arcsinh_sinh_inverse() {
+    // arcsinh(sinh(x)) = x for all x
+    let values: Vec<f64> = (-30..=30).map(|i| i as f64 * 0.2).collect();
+    let original = from_vec(values);
+
+    let sinh_x = original.elementwise_unary(UnaryOp::Sinh);
+    let arcsinh_sinh_x = sinh_x.elementwise_unary(UnaryOp::Arcsinh);
+
+    assert!(
+        arr_approx_eq(&arcsinh_sinh_x, &original, EPSILON),
+        "arcsinh(sinh(x)) should equal x"
+    );
+}
+
+#[test]
+fn mr_arctanh_tanh_inverse() {
+    // arctanh(tanh(x)) = x for all x (tanh maps R to (-1,1))
+    let values: Vec<f64> = (-30..=30).map(|i| i as f64 * 0.2).collect();
+    let original = from_vec(values);
+
+    let tanh_x = original.elementwise_unary(UnaryOp::Tanh);
+    let arctanh_tanh_x = tanh_x.elementwise_unary(UnaryOp::Arctanh);
+
+    assert!(
+        arr_approx_eq(&arctanh_tanh_x, &original, EPSILON),
+        "arctanh(tanh(x)) should equal x"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR Category 12: Statistical Invariants (Mean, Variance)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_mean_translation_invariance() {
+    // mean(x + c) = mean(x) + c
+    let values: Vec<f64> = (1..=50).map(|i| i as f64 * 0.7 + 3.14).collect();
+    let original = from_vec(values);
+    let constant = 42.5;
+    let c_arr = from_vec(vec![constant; 50]);
+
+    let translated = original.elementwise_binary(&c_arr, BinaryOp::Add).unwrap();
+    let mean_orig = original.reduce_mean(None, false).unwrap();
+    let mean_trans = translated.reduce_mean(None, false).unwrap();
+
+    let expected_mean = mean_orig.values()[0] + constant;
+    assert!(
+        scalar_approx_eq(&mean_trans, expected_mean, EPSILON),
+        "mean(x + c) should equal mean(x) + c; got {} vs expected {}",
+        mean_trans.values()[0],
+        expected_mean
+    );
+}
+
+#[test]
+fn mr_mean_scaling() {
+    // mean(k*x) = k * mean(x)
+    let values: Vec<f64> = (1..=40).map(|i| i as f64 * 0.3 + 1.0).collect();
+    let original = from_vec(values);
+    let k = 7.5;
+    let k_arr = from_vec(vec![k; 40]);
+
+    let scaled = original.elementwise_binary(&k_arr, BinaryOp::Mul).unwrap();
+    let mean_orig = original.reduce_mean(None, false).unwrap();
+    let mean_scaled = scaled.reduce_mean(None, false).unwrap();
+
+    let expected_mean = mean_orig.values()[0] * k;
+    assert!(
+        scalar_approx_eq(&mean_scaled, expected_mean, EPSILON),
+        "mean(k*x) should equal k*mean(x); got {} vs expected {}",
+        mean_scaled.values()[0],
+        expected_mean
+    );
+}
+
+#[test]
+fn mr_variance_translation_invariance() {
+    // var(x + c) = var(x) — variance is invariant under translation
+    let values: Vec<f64> = (1..=50).map(|i| i as f64 * 0.7 + 3.14).collect();
+    let original = from_vec(values);
+    let constant = 999.0;
+    let c_arr = from_vec(vec![constant; 50]);
+
+    let translated = original.elementwise_binary(&c_arr, BinaryOp::Add).unwrap();
+    let var_orig = original.reduce_var(None, false, 0).unwrap();
+    let var_trans = translated.reduce_var(None, false, 0).unwrap();
+
+    assert!(
+        arr_approx_eq(&var_orig, &var_trans, EPSILON),
+        "var(x + c) should equal var(x); got {:?} vs {:?}",
+        var_trans.values(),
+        var_orig.values()
+    );
+}
+
+#[test]
+fn mr_variance_scaling() {
+    // var(k*x) = k² * var(x)
+    let values: Vec<f64> = (1..=40).map(|i| i as f64 * 0.3 + 1.0).collect();
+    let original = from_vec(values);
+    let k = 3.0;
+    let k_arr = from_vec(vec![k; 40]);
+
+    let scaled = original.elementwise_binary(&k_arr, BinaryOp::Mul).unwrap();
+    let var_orig = original.reduce_var(None, false, 0).unwrap();
+    let var_scaled = scaled.reduce_var(None, false, 0).unwrap();
+
+    let expected_var = var_orig.values()[0] * k * k;
+    assert!(
+        scalar_approx_eq(&var_scaled, expected_var, 1e-8),
+        "var(k*x) should equal k²*var(x); got {} vs expected {}",
+        var_scaled.values()[0],
+        expected_var
+    );
+}
+
+#[test]
+fn mr_std_scaling() {
+    // std(k*x) = |k| * std(x)
+    let values: Vec<f64> = (1..=40).map(|i| i as f64 * 0.3 + 1.0).collect();
+    let original = from_vec(values);
+    let k = 3.0;
+    let k_arr = from_vec(vec![k; 40]);
+
+    let scaled = original.elementwise_binary(&k_arr, BinaryOp::Mul).unwrap();
+    let std_orig = original.reduce_std(None, false, 0).unwrap();
+    let std_scaled = scaled.reduce_std(None, false, 0).unwrap();
+
+    let expected_std = std_orig.values()[0] * k.abs();
+    assert!(
+        scalar_approx_eq(&std_scaled, expected_std, 1e-8),
+        "std(k*x) should equal |k|*std(x); got {} vs expected {}",
+        std_scaled.values()[0],
+        expected_std
+    );
+}
+
+#[test]
+fn mr_sum_scaling() {
+    // sum(k*x) = k * sum(x)
+    let values: Vec<f64> = (1..=30).map(|i| i as f64 * 0.5).collect();
+    let original = from_vec(values);
+    let k = 4.0;
+    let k_arr = from_vec(vec![k; 30]);
+
+    let scaled = original.elementwise_binary(&k_arr, BinaryOp::Mul).unwrap();
+    let sum_orig = original.reduce_sum(None, false).unwrap();
+    let sum_scaled = scaled.reduce_sum(None, false).unwrap();
+
+    let expected_sum = sum_orig.values()[0] * k;
+    assert!(
+        scalar_approx_eq(&sum_scaled, expected_sum, EPSILON),
+        "sum(k*x) should equal k*sum(x); got {} vs expected {}",
+        sum_scaled.values()[0],
+        expected_sum
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR Category 13: Tanh Odd Function (missing from Category 2)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_tanh_odd_function() {
+    let values: Vec<f64> = (1..30).map(|i| i as f64 * 0.2).collect();
+    let pos = from_vec(values.clone());
+    let neg = from_vec(values.iter().map(|x| -x).collect());
+
+    let tanh_pos = pos.elementwise_unary(UnaryOp::Tanh);
+    let tanh_neg = neg.elementwise_unary(UnaryOp::Tanh);
+    let neg_tanh_pos = tanh_pos.elementwise_unary(UnaryOp::Negative);
+
+    assert!(
+        arr_approx_eq(&tanh_neg, &neg_tanh_pos, EPSILON),
+        "tanh(-x) should equal -tanh(x)"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR Category 14: Cumulative/Differential Relations
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_diff_cumsum_inverse() {
+    // diff(cumsum(x)) should give back x (shifted by one element)
+    // Specifically: diff(cumsum([a,b,c,d])) = [a, b, c, d] for elements 1..
+    // because cumsum gives [a, a+b, a+b+c, a+b+c+d] and diff gives [b, c, d]
+    // So diff(cumsum(x))[i] == x[i+1] for i in 0..len-1
+    let values: Vec<f64> = (1..=20).map(|i| i as f64 * 0.7 + 0.3).collect();
+    let original = from_vec(values.clone());
+
+    let cumsum_x = original.cumsum(None).unwrap();
+    let diff_cumsum = cumsum_x.diff(1, None).unwrap();
+
+    // diff(cumsum(x)) should equal x[1:] (all elements except first)
+    let expected_slice: Vec<f64> = values[1..].to_vec();
+    let expected = from_vec(expected_slice);
+
+    assert!(
+        arr_approx_eq(&diff_cumsum, &expected, EPSILON),
+        "diff(cumsum(x)) should equal x[1:]"
+    );
+}
+
+#[test]
+fn mr_cumsum_diff_relation() {
+    // cumsum(diff(x)) + x[0] should give back x
+    // because diff gives [x1-x0, x2-x1, ...] and cumsum gives
+    // [x1-x0, x2-x0, x3-x0, ...], so cumsum(diff(x)) + x[0] = x[1:]
+    let values: Vec<f64> = (1..=20).map(|i| i as f64 * 0.5 + 2.0).collect();
+    let original = from_vec(values.clone());
+
+    let diff_x = original.diff(1, None).unwrap();
+    let cumsum_diff = diff_x.cumsum(None).unwrap();
+
+    // cumsum(diff(x)) + x[0] should equal x[1:]
+    let x0 = values[0];
+    let x0_arr = from_vec(vec![x0; 19]); // diff reduces length by 1
+    let reconstructed = cumsum_diff.elementwise_binary(&x0_arr, BinaryOp::Add).unwrap();
+
+    let expected_slice: Vec<f64> = values[1..].to_vec();
+    let expected = from_vec(expected_slice);
+
+    assert!(
+        arr_approx_eq(&reconstructed, &expected, EPSILON),
+        "cumsum(diff(x)) + x[0] should equal x[1:]"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR Category 15: FFT Inverse Relations
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_fft_ifft_roundtrip() {
+    // ifft(fft(x)) should return complex values where real parts equal x
+    // and imaginary parts are ~0.
+    // fft: real [n] → complex [n, 2]
+    // ifft: complex [n, 2] → complex [n, 2]
+    let values: Vec<f64> = (0..16).map(|i| (i as f64 * 0.3).sin()).collect();
+    let original = from_vec(values.clone());
+
+    let fft_x = original.fft(None).unwrap();
+    let ifft_fft_x = fft_x.ifft().unwrap();
+
+    // ifft returns complex [n, 2] - extract real parts
+    let result_vals = ifft_fft_x.values();
+    assert_eq!(
+        result_vals.len(), values.len() * 2,
+        "ifft output should have n*2 values (complex interleaved)"
+    );
+
+    for (i, orig) in values.iter().enumerate() {
+        let real_part = result_vals[i * 2];
+        let imag_part = result_vals[i * 2 + 1];
+
+        assert!(
+            approx_eq(real_part, *orig, 1e-10),
+            "ifft(fft(x)) real part mismatch at {}: expected {}, got {}",
+            i, orig, real_part
+        );
+        assert!(
+            approx_eq(imag_part, 0.0, 1e-10),
+            "ifft(fft(x)) imaginary part should be ~0 at {}: got {}",
+            i, imag_part
+        );
+    }
+}
+
+#[test]
+fn mr_rfft_irfft_roundtrip() {
+    // irfft(rfft(x), len(x)) should return real output matching x
+    // rfft: real [n] → complex [n/2+1, 2]
+    // irfft: complex [n/2+1, 2] → real [n]
+    let n = 16;
+    let values: Vec<f64> = (0..n).map(|i| (i as f64 * 0.2).cos()).collect();
+    let original = from_vec(values.clone());
+
+    let rfft_x = original.rfft(None).unwrap();
+    let irfft_rfft_x = rfft_x.irfft(Some(n)).unwrap();
+
+    let result_vals = irfft_rfft_x.values();
+    assert_eq!(
+        result_vals.len(), n,
+        "irfft output should have n values (real): got {}",
+        result_vals.len()
+    );
+
+    for (i, (orig, result)) in values.iter().zip(result_vals.iter()).enumerate() {
+        assert!(
+            approx_eq(*result, *orig, 1e-10),
+            "irfft(rfft(x)) mismatch at {}: expected {}, got {}",
+            i, orig, result
+        );
+    }
+}
