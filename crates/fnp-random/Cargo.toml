@@ -6,3 +6,10 @@ license-file = "../../LICENSE"
 
 [dependencies]
 fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }
+
+[dev-dependencies]
+criterion = "0.6"
+
+[[bench]]
+name = "random_ops"
+harness = false
