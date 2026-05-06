@@ -613,6 +613,7 @@ dependencies = [
 name = "fnp-random"
 version = "0.1.0"
 dependencies = [
+ "criterion 0.6.0",
  "fnp-ndarray",
 ]
 
