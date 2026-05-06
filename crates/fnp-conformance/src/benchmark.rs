@@ -325,13 +325,15 @@ pub fn generate_benchmark_baseline(
         },
     )?;
 
-    let reduce_axis1_elements_per_run = 256;
-    let reduce_axis1_bytes_per_run = (256 * 256 + reduce_axis1_elements_per_run) * item_size;
+    let reduce_axis1_input_elements_per_run = 256 * 256;
+    let reduce_axis1_output_elements_per_run = 256;
+    let reduce_axis1_bytes_per_run =
+        (reduce_axis1_input_elements_per_run + reduce_axis1_output_elements_per_run) * item_size;
     let reduce_axis1 = time_workload(
         "reduce_sum_axis1_keepdims_false_256x256",
         20,
         WorkloadInstrumentation {
-            elements_per_run: reduce_axis1_elements_per_run,
+            elements_per_run: reduce_axis1_input_elements_per_run,
             bytes_processed_per_run: reduce_axis1_bytes_per_run,
             peak_live_bytes_per_run: reduce_axis1_bytes_per_run,
             heap_allocations_per_run: 1,
@@ -346,13 +348,15 @@ pub fn generate_benchmark_baseline(
         },
     )?;
 
-    let reduce_all_elements_per_run = 1;
-    let reduce_all_bytes_per_run = (256 * 256 + reduce_all_elements_per_run) * item_size;
+    let reduce_all_input_elements_per_run = 256 * 256;
+    let reduce_all_output_elements_per_run = 1;
+    let reduce_all_bytes_per_run =
+        (reduce_all_input_elements_per_run + reduce_all_output_elements_per_run) * item_size;
     let reduce_all = time_workload(
         "reduce_sum_all_keepdims_false_256x256",
         20,
         WorkloadInstrumentation {
-            elements_per_run: reduce_all_elements_per_run,
+            elements_per_run: reduce_all_input_elements_per_run,
             bytes_processed_per_run: reduce_all_bytes_per_run,
             peak_live_bytes_per_run: reduce_all_bytes_per_run,
             heap_allocations_per_run: 1,
@@ -366,7 +370,6 @@ pub fn generate_benchmark_baseline(
             Ok(())
         },
     )?;
-
     let large_add_dim = 1024usize;
     let large_add_elements_per_run = large_add_dim * large_add_dim;
     let lhs_add_large = UFuncArray::new(
@@ -400,6 +403,27 @@ pub fn generate_benchmark_baseline(
             let out = lhs_add_large
                 .elementwise_binary(&rhs_add_large, BinaryOp::Add)
                 .map_err(|err| format!("large broadcast add failed: {err}"))?;
+            std::hint::black_box(out.values()[0]);
+            Ok(())
+        },
+    )?;
+    let reduce_large_axis1_output_elements_per_run = large_add_dim;
+    let reduce_large_axis1_bytes_per_run =
+        (large_add_elements_per_run + reduce_large_axis1_output_elements_per_run) * item_size;
+    let reduce_large_axis1 = time_workload(
+        "reduce_sum_axis1_keepdims_false_1024x1024",
+        8,
+        WorkloadInstrumentation {
+            elements_per_run: large_add_elements_per_run,
+            bytes_processed_per_run: reduce_large_axis1_bytes_per_run,
+            peak_live_bytes_per_run: reduce_large_axis1_bytes_per_run,
+            heap_allocations_per_run: 1,
+            allocator_stress: AllocatorStressLevel::Steady,
+        },
+        || {
+            let out = lhs_add_large
+                .reduce_sum(Some(1), false)
+                .map_err(|err| format!("large axis reduction failed: {err}"))?;
             std::hint::black_box(out.values()[0]);
             Ok(())
         },
@@ -658,6 +682,7 @@ pub fn generate_benchmark_baseline(
             reduce_axis1,
             reduce_all,
             add_large_workload,
+            reduce_large_axis1,
             matmul_workload,
             sort_workload,
             fft_workload,
@@ -700,6 +725,14 @@ mod tests {
         std::env::temp_dir().join(format!("fnp_{name}_{ts}.json"))
     }
 
+    fn workload_elements_per_run(baseline: &BenchmarkBaseline, name: &str) -> Option<usize> {
+        baseline
+            .workloads
+            .iter()
+            .find(|workload| workload.name == name)
+            .map(|workload| workload.telemetry.elements_per_run)
+    }
+
     #[test]
     fn baseline_generator_writes_json() {
         let output_path = temp_file("baseline");
@@ -722,6 +755,24 @@ mod tests {
             assert!(workload.telemetry.bandwidth_mib_per_sec_p50 > 0.0);
             assert!(workload.telemetry.throughput_elements_per_sec_p50 > 0.0);
         }
+        assert_eq!(
+            workload_elements_per_run(&baseline, "reduce_sum_axis1_keepdims_false_256x256"),
+            Some(256 * 256),
+            "reduction throughput must count input elements processed, not output elements"
+        );
+        assert_eq!(
+            workload_elements_per_run(&baseline, "reduce_sum_all_keepdims_false_256x256"),
+            Some(256 * 256),
+            "global reduction throughput must count input elements processed, not scalar output"
+        );
+        let large_add_elements =
+            workload_elements_per_run(&baseline, "ufunc_add_broadcast_1024x1024_by_1024");
+        assert_eq!(large_add_elements, Some(1024 * 1024));
+        assert_eq!(
+            large_add_elements,
+            workload_elements_per_run(&baseline, "reduce_sum_axis1_keepdims_false_1024x1024"),
+            "hotspot baseline must retain a same-size reduction comparator"
+        );
         let observed_slo_paths: BTreeSet<&'static str> = baseline
             .workloads
             .iter()
