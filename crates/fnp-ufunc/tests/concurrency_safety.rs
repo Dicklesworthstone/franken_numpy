@@ -342,3 +342,131 @@ fn concurrent_access_completes_within_timeout() {
     );
     assert_eq!(completed.load(Ordering::SeqCst), 16);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// View creation operations under concurrency
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn concurrent_slice_axis_view_creation_no_race() {
+    let arr = UFuncArray::arange(0.0, 100.0, 1.0, DType::F64).unwrap();
+    let view = arr.shared_view().unwrap();
+    let completed = Arc::new(AtomicUsize::new(0));
+
+    let threads: Vec<_> = (0..8)
+        .map(|i| {
+            let v = view.clone();
+            let completed = Arc::clone(&completed);
+            thread::spawn(move || {
+                for _ in 0..20 {
+                    let start = (i * 10) as i64;
+                    let stop = start + 10;
+                    let sliced = v.slice_axis(0, Some(start), Some(stop), 1).unwrap();
+                    assert_eq!(sliced.shape(), &[10]);
+                    let _ = sliced.item(&[0]).unwrap();
+                }
+                completed.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+
+    for t in threads {
+        t.join().expect("slice_axis thread should not panic");
+    }
+
+    assert_eq!(completed.load(Ordering::SeqCst), 8);
+}
+
+#[test]
+fn concurrent_nested_slice_operations_no_deadlock() {
+    let arr = UFuncArray::zeros(vec![100], DType::F64).unwrap();
+    let view = arr.shared_view().unwrap();
+    let completed = Arc::new(AtomicUsize::new(0));
+
+    let threads: Vec<_> = (0..4)
+        .map(|_| {
+            let v = view.clone();
+            let completed = Arc::clone(&completed);
+            thread::spawn(move || {
+                for _ in 0..10 {
+                    let slice1 = v.slice_axis(0, Some(0), Some(80), 1).unwrap();
+                    let slice2 = slice1.slice_axis(0, Some(10), Some(50), 1).unwrap();
+                    let slice3 = slice2.slice_axis(0, Some(5), Some(30), 2).unwrap();
+                    assert!(slice3.shape()[0] > 0);
+                }
+                completed.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+
+    for t in threads {
+        t.join().expect("nested slice thread should not deadlock");
+    }
+
+    assert_eq!(completed.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn concurrent_view_creation_with_read_write_no_race() {
+    let arr = UFuncArray::arange(0.0, 200.0, 1.0, DType::F64).unwrap();
+    let view = arr.shared_view().unwrap();
+    let completed = Arc::new(AtomicUsize::new(0));
+
+    let threads: Vec<_> = (0..8)
+        .map(|i| {
+            let v = view.clone();
+            let completed = Arc::clone(&completed);
+            thread::spawn(move || {
+                for j in 0..20 {
+                    match (i + j) % 3 {
+                        0 => {
+                            let sliced = v.slice_axis(0, Some(0), Some(100), 1).unwrap();
+                            let _ = sliced.item(&[j % 100]);
+                        }
+                        1 => {
+                            let _ = v.item(&[((i * 20 + j) % 200) as i64]);
+                        }
+                        _ => {
+                            let _ = v.itemset(&[((i * 20 + j) % 200) as i64], 999.0);
+                        }
+                    }
+                }
+                completed.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+
+    for t in threads {
+        t.join().expect("mixed operations should not race");
+    }
+
+    assert_eq!(completed.load(Ordering::SeqCst), 8);
+}
+
+#[test]
+fn concurrent_view_to_array_with_slice_no_race() {
+    let arr = UFuncArray::arange(0.0, 50.0, 1.0, DType::F64).unwrap();
+    let view = arr.shared_view().unwrap();
+    let completed = Arc::new(AtomicUsize::new(0));
+
+    let threads: Vec<_> = (0..6)
+        .map(|i| {
+            let v = view.clone();
+            let completed = Arc::clone(&completed);
+            thread::spawn(move || {
+                for _ in 0..10 {
+                    let sliced = v.slice_axis(0, Some((i * 5) as i64), Some(((i + 1) * 5) as i64), 1).unwrap();
+                    let owned = sliced.to_array().unwrap();
+                    assert_eq!(owned.shape(), &[5]);
+                }
+                completed.fetch_add(1, Ordering::SeqCst);
+            })
+        })
+        .collect();
+
+    for t in threads {
+        t.join().expect("slice+to_array should not race");
+    }
+
+    assert_eq!(completed.load(Ordering::SeqCst), 6);
+}
