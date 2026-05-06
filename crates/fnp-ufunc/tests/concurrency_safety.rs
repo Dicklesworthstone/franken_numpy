@@ -653,3 +653,110 @@ fn itemset_cow_atomic_clone_no_buffer_sidecar_skew() {
         total_inconsistencies
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Poisoned lock detection
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn poisoned_buffer_lock_detected_via_thread_panic() {
+    use std::sync::RwLock;
+
+    let buffer = Arc::new(RwLock::new(vec![1.0, 2.0, 3.0]));
+    let buffer_clone = Arc::clone(&buffer);
+
+    let handle = thread::spawn(move || {
+        let _guard = buffer_clone.write().unwrap();
+        panic!("intentional panic to poison lock");
+    });
+
+    let _ = handle.join();
+
+    assert!(buffer.is_poisoned(), "lock should be poisoned after thread panic");
+
+    let read_result = buffer.read();
+    assert!(read_result.is_err(), "read on poisoned lock should return Err");
+
+    let write_result = buffer.write();
+    assert!(write_result.is_err(), "write on poisoned lock should return Err");
+}
+
+#[test]
+fn shared_view_recovers_from_thread_panic() {
+    let arr = UFuncArray::arange(0.0, 10.0, 1.0, DType::F64).unwrap();
+    let view = arr.shared_view().unwrap();
+    let view_for_panic = view.clone();
+
+    let handle = thread::spawn(move || {
+        let _val = view_for_panic.item(&[0]).unwrap();
+        panic!("intentional panic while using view");
+    });
+
+    let _ = handle.join();
+
+    let result = view.item(&[0]);
+    match result {
+        Ok(val) => assert_eq!(val, 0.0, "view still usable after sibling thread panic"),
+        Err(err) => {
+            let msg = format!("{err:?}");
+            assert!(
+                msg.contains("poison") || msg.contains("Poison"),
+                "if error, should mention poisoning: {msg}"
+            );
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Lock ordering verification
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn lock_ordering_sidecar_then_buffer_no_deadlock() {
+    let initial: Vec<i64> = (0..100).map(|i| i64::MAX - i).collect();
+    let arr = UFuncArray::from_storage(vec![100], ArrayStorage::I64(initial))
+        .expect("create sidecar-backed array");
+    assert!(arr.has_integer_sidecar(), "need sidecar for lock ordering test");
+
+    let view = Arc::new(arr.shared_view().expect("shared view"));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::new();
+
+    for _ in 0..4 {
+        let view = Arc::clone(&view);
+        let completed = Arc::clone(&completed);
+        handles.push(thread::spawn(move || {
+            for i in 0..50i64 {
+                let _ = view.itemset(&[i], 999.0);
+            }
+            completed.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+
+    for _ in 0..4 {
+        let view = Arc::clone(&view);
+        let completed = Arc::clone(&completed);
+        handles.push(thread::spawn(move || {
+            for _ in 0..50 {
+                let _ = view.to_array();
+            }
+            completed.fetch_add(1, Ordering::SeqCst);
+        }));
+    }
+
+    let timeout = Duration::from_secs(5);
+    let start = std::time::Instant::now();
+    for h in handles {
+        let remaining = timeout.saturating_sub(start.elapsed());
+        if remaining.is_zero() {
+            panic!("lock ordering test timed out — potential deadlock");
+        }
+        h.join().expect("thread should complete without deadlock");
+    }
+
+    assert_eq!(
+        completed.load(Ordering::SeqCst),
+        8,
+        "all threads should complete — lock ordering is correct"
+    );
+}
