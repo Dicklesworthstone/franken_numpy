@@ -1,0 +1,39 @@
+[package]
+name = "fnp-ufunc-fuzz"
+version = "0.0.0"
+authors = ["Automatically generated"]
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.fnp-ufunc]
+path = ".."
+
+[[bin]]
+name = "fuzz_parse_gufunc_signature"
+path = "fuzz_targets/fuzz_parse_gufunc_signature.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_parse_fixed_signature"
+path = "fuzz_targets/fuzz_parse_fixed_signature.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_datetime_unit_parse"
+path = "fuzz_targets/fuzz_datetime_unit_parse.rs"
+test = false
+doc = false
+bench = false
