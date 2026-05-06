@@ -79,7 +79,123 @@ fn no_not_implemented_panics() {
 fn test_count_sanity_check() {
     let test_count = grep_pattern(r"#\[test\]");
     assert!(
-        test_count > 2000,
-        "expected >2000 test functions, found {test_count} — test coverage may have regressed"
+        test_count > 6000,
+        "expected >6000 test functions, found {test_count} — test coverage may have regressed"
+    );
+}
+
+#[test]
+fn no_fixme_hack_markers() {
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir");
+
+    let output = std::process::Command::new("rg")
+        .args([
+            "-c",
+            r"//.*\b(FIXME|HACK|XXX)\b",
+            "--type",
+            "rust",
+            "-g",
+            "!target/",
+            "-g",
+            "!.rch-target/",
+            "-g",
+            "!fuzz/",
+            "-g",
+            "!codebase_hygiene.rs",
+        ])
+        .arg(crates_dir)
+        .output()
+        .expect("rg should be available");
+
+    if !output.status.success() {
+        return;
+    }
+
+    let count: usize = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split(':').last()?.parse::<usize>().ok())
+        .sum();
+
+    assert_eq!(
+        count, 0,
+        "found {count} FIXME/HACK/XXX comment markers — address or convert to tracked issues"
+    );
+}
+
+#[test]
+fn no_dbg_macros_in_library_code() {
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir");
+
+    let output = std::process::Command::new("rg")
+        .args([
+            "-c",
+            r"dbg!\(",
+            "--type",
+            "rust",
+            "-g",
+            "*/src/*.rs",
+            "-g",
+            "!target/",
+            "-g",
+            "!.rch-target/",
+        ])
+        .arg(crates_dir)
+        .output()
+        .expect("rg should be available");
+
+    if !output.status.success() {
+        return;
+    }
+
+    let count: usize = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split(':').last()?.parse::<usize>().ok())
+        .sum();
+
+    assert_eq!(
+        count, 0,
+        "found {count} dbg! macros in library code — remove before release"
+    );
+}
+
+#[test]
+fn no_allow_unused_in_library_code() {
+    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir");
+
+    let output = std::process::Command::new("rg")
+        .args([
+            "-c",
+            r"#\[allow\(dead_code\)\]|#\[allow\(unused",
+            "--type",
+            "rust",
+            "-g",
+            "*/src/lib.rs",
+            "-g",
+            "!target/",
+            "-g",
+            "!.rch-target/",
+        ])
+        .arg(crates_dir)
+        .output()
+        .expect("rg should be available");
+
+    if !output.status.success() {
+        return;
+    }
+
+    let count: usize = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(|line| line.split(':').last()?.parse::<usize>().ok())
+        .sum();
+
+    assert!(
+        count < 5,
+        "found {count} allow(dead_code/unused) in lib.rs files — clean up unused code"
     );
 }
