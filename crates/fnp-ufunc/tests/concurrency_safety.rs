@@ -470,3 +470,84 @@ fn concurrent_view_to_array_with_slice_no_race() {
 
     assert_eq!(completed.load(Ordering::SeqCst), 6);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Data consistency: buffer and sidecar must be read atomically
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn to_array_buffer_sidecar_consistency_under_contention() {
+    // Tests that to_array() returns arrays where buffer[i] and sidecar[i] for
+    // the SAME index come from the same point in time.
+    //
+    // Without the fix: to_array read buffer (release), then read sidecar.
+    // An itemset between these reads could update both, causing buffer[i] = old
+    // but sidecar[i] = new for the returned array.
+    //
+    // With the fix: to_array holds both locks, so buffer[i] and sidecar[i]
+    // are always from the same snapshot.
+    //
+    // Strategy: use one large value (i64::MAX) to force sidecar creation, then
+    // test small values at other indices where f64 IS exact.
+
+    // Element 0 is large (forces sidecar), elements 1-63 are small (f64-exact)
+    let mut initial: Vec<i64> = (1..64).map(|i| 1_000_000 + i).collect();
+    initial.insert(0, i64::MAX); // Force sidecar creation
+    let arr = UFuncArray::from_storage(vec![64], ArrayStorage::I64(initial))
+        .expect("create sidecar-backed array");
+    assert!(arr.has_integer_sidecar());
+
+    let view = Arc::new(arr.shared_view().expect("shared view"));
+    let inconsistencies = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::new();
+
+    // Writers: update indices 1-63 with exact-representable values
+    // (leave index 0 as i64::MAX to keep sidecar alive)
+    for writer_id in 0..4i64 {
+        let view = Arc::clone(&view);
+        handles.push(thread::spawn(move || {
+            for round in 0..500i64 {
+                let value = (2_000_000 + writer_id * 100_000 + round) as f64;
+                for i in 1..64i64 {
+                    let _ = view.itemset(&[i], value);
+                }
+            }
+        }));
+    }
+
+    // Readers: call to_array and verify buffer[i] == sidecar[i] for indices 1-63
+    for _ in 0..4 {
+        let view = Arc::clone(&view);
+        let inconsistencies = Arc::clone(&inconsistencies);
+        handles.push(thread::spawn(move || {
+            for _ in 0..500 {
+                let owned = view.to_array().expect("to_array");
+                let storage = owned.to_storage().expect("to_storage");
+                let sidecar_vals = match storage {
+                    ArrayStorage::I64(v) => v,
+                    _ => panic!("expected I64 storage"),
+                };
+
+                // buffer[i] as i64 should match sidecar[i] for small-integer indices
+                for i in 1..64 {
+                    let buffer_val = owned.item(&[i as i64]).expect("item");
+                    let sidecar_val = sidecar_vals[i];
+                    if buffer_val as i64 != sidecar_val {
+                        inconsistencies.fetch_add(1, Ordering::SeqCst);
+                    }
+                }
+            }
+        }));
+    }
+
+    for h in handles {
+        h.join().expect("thread should complete");
+    }
+
+    let total_inconsistencies = inconsistencies.load(Ordering::SeqCst);
+    assert_eq!(
+        total_inconsistencies, 0,
+        "to_array returned {} buffer/sidecar mismatches — race condition!",
+        total_inconsistencies
+    );
+}

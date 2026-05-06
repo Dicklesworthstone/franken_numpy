@@ -2632,21 +2632,86 @@ impl UFuncArrayView {
     }
 
     pub fn to_array(&self) -> Result<UFuncArray, UFuncError> {
-        let (values, indices) = self.materialize_with_indices()?;
-        let mut arr = UFuncArray::new(self.shape.clone(), values, self.dtype)?;
-        if let Some(ref sidecar) = self.integer_sidecar {
-            let s = sidecar
-                .read()
-                .map_err(|_| UFuncError::Msg("shared view: sidecar lock poisoned".to_string()))?;
-            arr.integer_sidecar = match &*s {
+        // Lock ordering: sidecar first, buffer second (matches itemset).
+        // We must hold both locks atomically to ensure buffer[i] and sidecar[i]
+        // come from the same point in time. Cannot call materialize_with_indices()
+        // because it acquires/releases buffer lock internally.
+        let sidecar_guard = if let Some(ref sidecar) = self.integer_sidecar {
+            Some(
+                sidecar
+                    .read()
+                    .map_err(|_| UFuncError::Msg("shared view: sidecar lock poisoned".to_string()))?,
+            )
+        } else {
+            None
+        };
+
+        // Acquire buffer lock second (after sidecar)
+        let data = self
+            .buffer
+            .read()
+            .map_err(|_| UFuncError::Msg("shared view: read lock poisoned".to_string()))?;
+
+        // Inline materialization while holding both locks
+        let total = element_count(&self.shape).map_err(UFuncError::Shape)?;
+        let mut values = Vec::with_capacity(total);
+        let mut indices = Vec::with_capacity(total);
+        let ndim = self.shape.len();
+        let mut coords = vec![0usize; ndim];
+        let mut current_offset = self.offset;
+
+        for _ in 0..total {
+            if current_offset < 0 || current_offset >= data.len() as isize {
+                return Err(UFuncError::Msg(
+                    "shared view materialization: out-of-bounds offset".to_string(),
+                ));
+            }
+            values.push(data[current_offset as usize]);
+            indices.push(current_offset as usize);
+
+            for i in (0..ndim).rev() {
+                coords[i] += 1;
+                if coords[i] < self.shape[i] {
+                    current_offset =
+                        current_offset.checked_add(self.strides[i]).ok_or_else(|| {
+                            UFuncError::Msg("shared view: offset overflow".to_string())
+                        })?;
+                    break;
+                } else {
+                    coords[i] = 0;
+                    let dim_minus_1 = isize::try_from(self.shape[i] - 1).map_err(|_| {
+                        UFuncError::Msg("shared view: dimension overflow".to_string())
+                    })?;
+                    let reset_span = dim_minus_1.checked_mul(self.strides[i]).ok_or_else(|| {
+                        UFuncError::Msg("shared view: offset overflow".to_string())
+                    })?;
+                    current_offset = current_offset.checked_sub(reset_span).ok_or_else(|| {
+                        UFuncError::Msg("shared view: offset overflow".to_string())
+                    })?;
+                }
+            }
+        }
+
+        // Copy sidecar values while still holding both locks
+        let sidecar_copy = if let Some(ref s) = sidecar_guard {
+            Some(match &**s {
                 IntegerSidecar::I64(v) => {
-                    Some(IntegerSidecar::I64(indices.iter().map(|&i| v[i]).collect()))
+                    IntegerSidecar::I64(indices.iter().map(|&i| v[i]).collect())
                 }
                 IntegerSidecar::U64(v) => {
-                    Some(IntegerSidecar::U64(indices.iter().map(|&i| v[i]).collect()))
+                    IntegerSidecar::U64(indices.iter().map(|&i| v[i]).collect())
                 }
-            };
-        }
+            })
+        } else {
+            None
+        };
+
+        // Release locks (drop guards) before constructing result
+        drop(data);
+        drop(sidecar_guard);
+
+        let mut arr = UFuncArray::new(self.shape.clone(), values, self.dtype)?;
+        arr.integer_sidecar = sidecar_copy;
         Ok(arr)
     }
 
