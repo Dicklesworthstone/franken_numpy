@@ -394,3 +394,366 @@ fn mr_dtype_item_size_consistent() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR: Double roundtrip idempotence (write -> read -> write -> read = identity)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_double_roundtrip_idempotent() {
+    let values: Vec<f64> = (0..50).map(|i| i as f64 * 0.01).collect();
+    let header = NpyHeader {
+        descr: IOSupportedDType::F64,
+        fortran_order: false,
+        shape: vec![10, 5],
+    };
+
+    // First roundtrip
+    let bytes1 = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
+    let loaded1 = read_npy_bytes(&bytes1, false).unwrap();
+
+    // Second roundtrip
+    let bytes2 = write_npy_bytes(&loaded1.header, &loaded1.payload, false).unwrap();
+    let loaded2 = read_npy_bytes(&bytes2, false).unwrap();
+
+    // Payloads should be identical
+    assert_eq!(
+        loaded1.payload.as_ref(),
+        loaded2.payload.as_ref(),
+        "double roundtrip should produce identical payloads"
+    );
+    assert_eq!(
+        loaded1.header.shape, loaded2.header.shape,
+        "double roundtrip should preserve shape"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR: Payload size = product(shape) * item_size
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_payload_size_equals_shape_times_itemsize() {
+    let shapes: &[&[usize]] = &[
+        &[10],
+        &[4, 5],
+        &[2, 3, 4],
+        &[1, 1, 1, 1],
+        &[100],
+    ];
+
+    for dtype in [IOSupportedDType::F64, IOSupportedDType::F32, IOSupportedDType::I32] {
+        let item_size = dtype.item_size().unwrap();
+
+        for &shape in shapes {
+            let n_elements: usize = shape.iter().product();
+            let expected_payload_size = n_elements * item_size;
+
+            let values: Vec<u8> = vec![0u8; expected_payload_size];
+            let header = NpyHeader {
+                descr: dtype,
+                fortran_order: false,
+                shape: shape.to_vec(),
+            };
+
+            let bytes = write_npy_bytes(&header, &values, false).unwrap();
+            let loaded = read_npy_bytes(&bytes, false).unwrap();
+
+            assert_eq!(
+                loaded.payload.len(),
+                expected_payload_size,
+                "payload size for shape {:?} dtype {:?} should be {}",
+                shape,
+                dtype,
+                expected_payload_size
+            );
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR: Shape interpretation invariance (same bytes, different shapes)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_reshape_preserves_raw_bytes() {
+    let values: Vec<f64> = (0..24).map(|i| i as f64).collect();
+    let raw_bytes: Vec<u8> = bytemuck::cast_slice(&values).to_vec();
+
+    // Write as different shapes (same total elements)
+    let shapes = vec![
+        vec![24],
+        vec![2, 12],
+        vec![3, 8],
+        vec![4, 6],
+        vec![2, 3, 4],
+        vec![2, 2, 6],
+    ];
+
+    for shape in &shapes {
+        let header = NpyHeader {
+            descr: IOSupportedDType::F64,
+            fortran_order: false,
+            shape: shape.clone(),
+        };
+
+        let bytes = write_npy_bytes(&header, &raw_bytes, false).unwrap();
+        let loaded = read_npy_bytes(&bytes, false).unwrap();
+
+        assert_eq!(
+            loaded.payload.as_ref(),
+            &raw_bytes[..],
+            "raw bytes should be preserved regardless of shape {:?}",
+            shape
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR: NPZ equivalence (all entries accessible regardless of write order)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_npz_all_entries_recoverable() {
+    let n_entries = 5;
+    let mut entries_data: Vec<(String, NpyHeader, Vec<u8>)> = Vec::new();
+
+    for i in 0..n_entries {
+        let values: Vec<f64> = (0..10).map(|j| (i * 10 + j) as f64).collect();
+        let header = NpyHeader {
+            descr: IOSupportedDType::F64,
+            fortran_order: false,
+            shape: vec![10],
+        };
+        entries_data.push((format!("arr_{}", i), header, bytemuck::cast_slice(&values).to_vec()));
+    }
+
+    let entries_refs: Vec<(&str, &NpyHeader, &[u8])> = entries_data
+        .iter()
+        .map(|(n, h, d)| (n.as_str(), h, d.as_slice()))
+        .collect();
+
+    let bytes = write_npz_bytes(&entries_refs).unwrap();
+    let loaded = read_npz_bytes(&bytes, false).unwrap();
+
+    assert_eq!(loaded.len(), n_entries, "all {} entries should be recoverable", n_entries);
+
+    // Verify each entry's data
+    for i in 0..n_entries {
+        let name = format!("arr_{}", i);
+        let entry = loaded
+            .iter()
+            .find(|e| e.name == name || e.name == format!("{}.npy", name))
+            .expect(&format!("entry {} should exist", name));
+
+        let expected_values: Vec<f64> = (0..10).map(|j| (i * 10 + j) as f64).collect();
+        let loaded_values: &[f64] = bytemuck::cast_slice(&entry.array.payload);
+        assert_eq!(
+            loaded_values,
+            &expected_values[..],
+            "entry {} values should match",
+            name
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR: Header invariance across repeated parsing
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_header_parse_deterministic() {
+    let values: Vec<f64> = vec![1.0, 2.0, 3.0];
+    let header = NpyHeader {
+        descr: IOSupportedDType::F64,
+        fortran_order: false,
+        shape: vec![3],
+    };
+
+    let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
+
+    // Parse multiple times
+    let loaded1 = read_npy_bytes(&bytes, false).unwrap();
+    let loaded2 = read_npy_bytes(&bytes, false).unwrap();
+    let loaded3 = read_npy_bytes(&bytes, false).unwrap();
+
+    assert_eq!(loaded1.header.descr, loaded2.header.descr);
+    assert_eq!(loaded2.header.descr, loaded3.header.descr);
+    assert_eq!(loaded1.header.shape, loaded2.header.shape);
+    assert_eq!(loaded2.header.shape, loaded3.header.shape);
+    assert_eq!(loaded1.header.fortran_order, loaded2.header.fortran_order);
+    assert_eq!(loaded2.header.fortran_order, loaded3.header.fortran_order);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR: Large array roundtrip (stress test)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_large_array_roundtrip() {
+    let n = 100_000;
+    let values: Vec<f64> = (0..n).map(|i| (i as f64).sin()).collect();
+    let header = NpyHeader {
+        descr: IOSupportedDType::F64,
+        fortran_order: false,
+        shape: vec![n],
+    };
+
+    let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
+    let loaded = read_npy_bytes(&bytes, false).unwrap();
+
+    let loaded_values: &[f64] = bytemuck::cast_slice(&loaded.payload);
+    assert_eq!(loaded_values.len(), n, "large array should roundtrip with correct size");
+
+    // Spot check values
+    assert_eq!(loaded_values[0], values[0]);
+    assert_eq!(loaded_values[n / 2], values[n / 2]);
+    assert_eq!(loaded_values[n - 1], values[n - 1]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR: Integer boundary values roundtrip
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_integer_boundary_roundtrip_i8() {
+    let values: Vec<i8> = vec![i8::MIN, i8::MIN + 1, -1, 0, 1, i8::MAX - 1, i8::MAX];
+    let header = NpyHeader {
+        descr: IOSupportedDType::I8,
+        fortran_order: false,
+        shape: vec![7],
+    };
+    let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
+    let loaded = read_npy_bytes(&bytes, false).unwrap();
+    let loaded_values: &[i8] = bytemuck::cast_slice(&loaded.payload);
+    assert_eq!(loaded_values, &values[..], "i8 boundary values should roundtrip");
+}
+
+#[test]
+fn mr_integer_boundary_roundtrip_i16() {
+    let values: Vec<i16> = vec![i16::MIN, -1000, -1, 0, 1, 1000, i16::MAX];
+    let header = NpyHeader {
+        descr: IOSupportedDType::I16,
+        fortran_order: false,
+        shape: vec![7],
+    };
+    let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
+    let loaded = read_npy_bytes(&bytes, false).unwrap();
+    let loaded_values: &[i16] = bytemuck::cast_slice(&loaded.payload);
+    assert_eq!(loaded_values, &values[..], "i16 boundary values should roundtrip");
+}
+
+#[test]
+fn mr_integer_boundary_roundtrip_u8() {
+    let values: Vec<u8> = vec![0, 1, 127, 128, 254, 255];
+    let header = NpyHeader {
+        descr: IOSupportedDType::U8,
+        fortran_order: false,
+        shape: vec![6],
+    };
+    let bytes = write_npy_bytes(&header, &values, false).unwrap();
+    let loaded = read_npy_bytes(&bytes, false).unwrap();
+    assert_eq!(loaded.payload.as_ref(), &values[..], "u8 boundary values should roundtrip");
+}
+
+#[test]
+fn mr_integer_boundary_roundtrip_u16() {
+    let values: Vec<u16> = vec![0, 1, 1000, 32767, 32768, 65534, 65535];
+    let header = NpyHeader {
+        descr: IOSupportedDType::U16,
+        fortran_order: false,
+        shape: vec![7],
+    };
+    let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
+    let loaded = read_npy_bytes(&bytes, false).unwrap();
+    let loaded_values: &[u16] = bytemuck::cast_slice(&loaded.payload);
+    assert_eq!(loaded_values, &values[..], "u16 boundary values should roundtrip");
+}
+
+#[test]
+fn mr_integer_boundary_roundtrip_u32() {
+    let values: Vec<u32> = vec![0, 1, u32::MAX / 2, u32::MAX - 1, u32::MAX];
+    let header = NpyHeader {
+        descr: IOSupportedDType::U32,
+        fortran_order: false,
+        shape: vec![5],
+    };
+    let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
+    let loaded = read_npy_bytes(&bytes, false).unwrap();
+    let loaded_values: &[u32] = bytemuck::cast_slice(&loaded.payload);
+    assert_eq!(loaded_values, &values[..], "u32 boundary values should roundtrip");
+}
+
+#[test]
+fn mr_integer_boundary_roundtrip_i32() {
+    let values: Vec<i32> = vec![i32::MIN, -1_000_000, -1, 0, 1, 1_000_000, i32::MAX];
+    let header = NpyHeader {
+        descr: IOSupportedDType::I32,
+        fortran_order: false,
+        shape: vec![7],
+    };
+    let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
+    let loaded = read_npy_bytes(&bytes, false).unwrap();
+    let loaded_values: &[i32] = bytemuck::cast_slice(&loaded.payload);
+    assert_eq!(loaded_values, &values[..], "i32 boundary values should roundtrip");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MR: Float special values roundtrip
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn mr_float_special_values_roundtrip_f64() {
+    let values: Vec<f64> = vec![
+        0.0,
+        -0.0,
+        f64::MIN_POSITIVE,
+        f64::MAX,
+        f64::MIN,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+    ];
+    let header = NpyHeader {
+        descr: IOSupportedDType::F64,
+        fortran_order: false,
+        shape: vec![8],
+    };
+    let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
+    let loaded = read_npy_bytes(&bytes, false).unwrap();
+    let loaded_values: &[f64] = bytemuck::cast_slice(&loaded.payload);
+
+    // Check non-NaN values directly
+    for i in 0..7 {
+        assert_eq!(loaded_values[i], values[i], "f64 special value at index {} should roundtrip", i);
+    }
+    // NaN requires special comparison
+    assert!(loaded_values[7].is_nan(), "NaN should roundtrip as NaN");
+}
+
+#[test]
+fn mr_float_special_values_roundtrip_f32() {
+    let values: Vec<f32> = vec![
+        0.0,
+        -0.0,
+        f32::MIN_POSITIVE,
+        f32::MAX,
+        f32::MIN,
+        f32::INFINITY,
+        f32::NEG_INFINITY,
+        f32::NAN,
+    ];
+    let header = NpyHeader {
+        descr: IOSupportedDType::F32,
+        fortran_order: false,
+        shape: vec![8],
+    };
+    let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
+    let loaded = read_npy_bytes(&bytes, false).unwrap();
+    let loaded_values: &[f32] = bytemuck::cast_slice(&loaded.payload);
+
+    for i in 0..7 {
+        assert_eq!(loaded_values[i], values[i], "f32 special value at index {} should roundtrip", i);
+    }
+    assert!(loaded_values[7].is_nan(), "f32 NaN should roundtrip as NaN");
+}
