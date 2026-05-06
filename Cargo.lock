@@ -604,6 +604,7 @@ dependencies = [
 name = "fnp-ufunc"
 version = "0.1.0"
 dependencies = [
+ "criterion 0.5.1",
  "fnp-dtype",
  "fnp-linalg",
  "fnp-ndarray",
