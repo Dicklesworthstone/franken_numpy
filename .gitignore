@@ -128,3 +128,17 @@ storage.sqlite3-wal.corrupt-*
 /*.py
 /*.c
 nohup.out
+
+# Local agent runtime state — recurring untracked noise across rounds
+.claude/
+.rch-target/
+# cargo-fuzz crash/minimization artifacts under any nested crate's fuzz dir
+**/fuzz/artifacts/
+# cargo-fuzz auto-generated hash-named corpus entries under any nested
+# crate's fuzz dir. The two-hex-char prefix is wide enough to catch real
+# 40-char SHA-1 names ("0363edd6…") and narrow enough to spare every
+# committed seed (bool_arr.npy, comma.txt, simple.txt, etc. — none have
+# hex chars at both index 0 AND index 1).
+**/fuzz/corpus/*/[0-9a-f][0-9a-f]*
+# Source-directory backups left behind by agent renames (e.g. fuzz/src.bak/)
+**/*.bak/
