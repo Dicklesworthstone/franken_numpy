@@ -230,6 +230,102 @@ fn trig_aliases_accept_ufunc_out_keyword() -> Result<(), String> {
 }
 
 #[test]
+fn core_ufuncs_accept_numpy_signature_out_and_where_keywords() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import inspect
+import numpy as np
+
+unary_cases = {
+    "abs": "np.array([-2.0, -0.0, 3.5])",
+    "absolute": "np.array([-2.0, -0.0, 3.5])",
+    "sin": "np.array([0.0, 0.5, 1.0])",
+    "cos": "np.array([0.0, 0.5, 1.0])",
+    "log": "np.array([0.25, 1.0, 4.0])",
+    "exp": "np.array([-1.0, 0.0, 1.0])",
+    "sqrt": "np.array([0.0, 4.0, 9.0])",
+    "arcsin": "np.array([-0.5, 0.0, 0.5])",
+    "arccos": "np.array([-0.5, 0.0, 0.5])",
+    "arctan": "np.array([-1.0, 0.0, 1.0])",
+    "arcsinh": "np.array([-1.0, 0.0, 1.0])",
+    "arccosh": "np.array([1.0, 2.0, 4.0])",
+    "arctanh": "np.array([-0.5, 0.0, 0.5])",
+    "sinh": "np.array([-1.0, 0.0, 1.0])",
+    "cosh": "np.array([-1.0, 0.0, 1.0])",
+    "tanh": "np.array([-1.0, 0.0, 1.0])",
+}
+binary_cases = {
+    "add": ("np.array([1.0, 2.0, 3.0])", "np.array([10.0, 20.0, 30.0])"),
+    "subtract": ("np.array([1.0, 2.0, 3.0])", "np.array([10.0, 20.0, 30.0])"),
+    "multiply": ("np.array([1.0, 2.0, 3.0])", "np.array([10.0, 20.0, 30.0])"),
+    "arctan2": ("np.array([1.0, 2.0, 3.0])", "np.array([4.0, 5.0, 6.0])"),
+    "true_divide": ("np.array([1.0, 2.0, 3.0])", "np.array([4.0, 5.0, 6.0])"),
+}
+mask = np.array([True, False, True])
+sentinel = -12345.0
+unary_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+binary_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+
+def assert_ufunc_signature_match(name, ours, theirs, expected):
+    ours_signature = inspect.signature(ours)
+    if str(ours_signature) != expected:
+        raise AssertionError(f"fnp.{name} signature mismatch: {ours_signature!s} != {expected}")
+    theirs_signature = inspect.signature(theirs)
+    if str(theirs_signature) not in {expected, "(*args, **kwargs)"}:
+        raise AssertionError(
+            f"numpy.{name} exposed unexpected signature: {theirs_signature!s}"
+        )
+    missing = {"out", "where"} - set(ours_signature.parameters)
+    if missing:
+        raise AssertionError(f"fnp.{name} missing expected ufunc kwargs: {sorted(missing)}")
+
+def assert_same_out(name, ours, theirs, ours_out, theirs_out):
+    if ours is not ours_out:
+        raise AssertionError(f"fnp.{name} did not return the provided out array")
+    if not np.allclose(ours_out, theirs_out, equal_nan=True):
+        raise AssertionError(f"{name} out mismatch: {ours_out!r} != {theirs_out!r}")
+    if ours_out[1] != sentinel:
+        raise AssertionError(f"fnp.{name} overwrote where=False slot")
+    if theirs_out[1] != sentinel:
+        raise AssertionError(f"numpy.{name} overwrote where=False slot")
+
+for name, expr in unary_cases.items():
+    x = eval(expr)
+    numpy_fn = getattr(np, name)
+    fnp_fn = getattr(fnp, name)
+    assert_ufunc_signature_match(name, fnp_fn, numpy_fn, unary_signature)
+    ours_out = np.full(x.shape, sentinel, dtype=float)
+    theirs_out = np.full(x.shape, sentinel, dtype=float)
+    ours = fnp_fn(x, out=ours_out, where=mask)
+    theirs = numpy_fn(x, out=theirs_out, where=mask)
+    assert_same_out(name, ours, theirs, ours_out, theirs_out)
+
+for name, (left_expr, right_expr) in binary_cases.items():
+    x1 = eval(left_expr)
+    x2 = eval(right_expr)
+    numpy_fn = getattr(np, name)
+    fnp_fn = getattr(fnp, name)
+    assert_ufunc_signature_match(name, fnp_fn, numpy_fn, binary_signature)
+    ours_out = np.full(x1.shape, sentinel, dtype=float)
+    theirs_out = np.full(x1.shape, sentinel, dtype=float)
+    ours = fnp_fn(x1, x2, out=ours_out, where=mask)
+    theirs = numpy_fn(x1, x2, out=theirs_out, where=mask)
+    assert_same_out(name, ours, theirs, ours_out, theirs_out)
+
+print("ok")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "ok",
+        "core ufuncs should accept NumPy signature kwargs"
+    );
+    Ok(())
+}
+
+#[test]
 fn sqrt_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         "np.array([0.0])",

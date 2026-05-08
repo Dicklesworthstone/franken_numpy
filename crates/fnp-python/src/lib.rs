@@ -13913,6 +13913,37 @@ fn native_unary_promoting_or_passthrough(
     }
 }
 
+fn native_unary_elementwise_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+    op: UnaryOp,
+    numpy_name: &str,
+    context: &str,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x = args.get_item(0)?;
+        native_unary_elementwise(py, &x, op, numpy_name, context)
+    } else {
+        core_numpy_passthrough(py, numpy_name, args, kwargs)
+    }
+}
+
+fn native_binary_arctan2_or_passthrough(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let x1 = extract_numeric_array(py, &args.get_item(0)?, "arctan2(x1)")?;
+        let x2 = extract_numeric_array(py, &args.get_item(1)?, "arctan2(x2)")?;
+        let result = ufunc_arctan2(&x1, &x2).map_err(map_ufunc_error)?;
+        build_numpy_array_from_ufunc(py, &result)
+    } else {
+        core_numpy_passthrough(py, "arctan2", args, kwargs)
+    }
+}
+
 fn native_binary_fmax_or_passthrough(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -15979,17 +16010,20 @@ fn as_strided(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x1, x2))]
-fn true_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn true_divide(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // Passthrough to np.true_divide so x1/x2 element-wise always
     // promotes to float (no integer truncation), matches numpy
     // broadcasting and division-by-zero (yields ±inf for floats with
     // appropriate sign) semantics.
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("true_divide")?
-        .call1((x1.bind(py), x2.bind(py)))?
-        .unbind())
+    core_numpy_passthrough(py, "true_divide", args, kwargs)
 }
 
 #[pyfunction]
@@ -16303,144 +16337,298 @@ fn linalg_vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyR
 }
 
 #[pyfunction]
-#[pyo3(name = "abs", signature = (x,))]
-fn py_abs(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_elementwise(py, x.bind(py), UnaryOp::Abs, "abs", "abs(x)")
+#[pyo3(
+    name = "abs",
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn py_abs(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_elementwise_or_passthrough(py, args, kwargs, UnaryOp::Abs, "abs", "abs(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn absolute(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    py_abs(py, x)
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn absolute(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_elementwise_or_passthrough(
+        py,
+        args,
+        kwargs,
+        UnaryOp::Abs,
+        "absolute",
+        "absolute(x)",
+    )
 }
 
 #[pyfunction]
-#[pyo3(signature = (x1, x2))]
-fn add(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn add(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // Passthrough to np.add. Element-wise addition with full numpy
     // broadcasting and dtype-promotion rules.
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("add")?
-        .call1((x1.bind(py), x2.bind(py)))?
-        .unbind())
+    core_numpy_passthrough(py, "add", args, kwargs)
 }
 
 #[pyfunction]
-#[pyo3(signature = (x1, x2))]
-fn subtract(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn subtract(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // Passthrough to np.subtract. Element-wise x1-x2 with numpy's
     // broadcasting and dtype-promotion rules.
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("subtract")?
-        .call1((x1.bind(py), x2.bind(py)))?
-        .unbind())
+    core_numpy_passthrough(py, "subtract", args, kwargs)
 }
 
 #[pyfunction]
-#[pyo3(signature = (x1, x2))]
-fn multiply(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn multiply(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // Passthrough to np.multiply. Element-wise x1*x2 with numpy's
     // broadcasting and dtype-promotion rules.
-    let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("multiply")?
-        .call1((x1.bind(py), x2.bind(py)))?
-        .unbind())
+    core_numpy_passthrough(py, "multiply", args, kwargs)
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn sin(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Sin, "sin", "sin(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn sin(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Sin, "sin", "sin(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn cos(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Cos, "cos", "cos(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn cos(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Cos, "cos", "cos(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn log(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Log, "log", "log(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn log(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Log, "log", "log(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn exp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Exp, "exp", "exp(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn exp(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Exp, "exp", "exp(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn sqrt(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Sqrt, "sqrt", "sqrt(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn sqrt(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Sqrt, "sqrt", "sqrt(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn arcsin(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Arcsin, "arcsin", "arcsin(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn arcsin(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arcsin, "arcsin", "arcsin(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn arccos(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Arccos, "arccos", "arccos(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn arccos(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arccos, "arccos", "arccos(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn arctan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Arctan, "arctan", "arctan(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn arctan(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Arctan, "arctan", "arctan(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x1, x2))]
-fn arctan2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let x1 = extract_numeric_array(py, x1.bind(py), "arctan2(x1)")?;
-    let x2 = extract_numeric_array(py, x2.bind(py), "arctan2(x2)")?;
-    let result = ufunc_arctan2(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn arctan2(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_binary_arctan2_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn arcsinh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Arcsinh, "arcsinh", "arcsinh(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn arcsinh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(
+        py,
+        args,
+        kwargs,
+        UnaryOp::Arcsinh,
+        "arcsinh",
+        "arcsinh(x)",
+    )
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn arccosh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Arccosh, "arccosh", "arccosh(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn arccosh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(
+        py,
+        args,
+        kwargs,
+        UnaryOp::Arccosh,
+        "arccosh",
+        "arccosh(x)",
+    )
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn arctanh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Arctanh, "arctanh", "arctanh(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn arctanh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(
+        py,
+        args,
+        kwargs,
+        UnaryOp::Arctanh,
+        "arctanh",
+        "arctanh(x)",
+    )
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn sinh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Sinh, "sinh", "sinh(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn sinh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Sinh, "sinh", "sinh(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn cosh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Cosh, "cosh", "cosh(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn cosh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Cosh, "cosh", "cosh(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn tanh(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Tanh, "tanh", "tanh(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn tanh(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Tanh, "tanh", "tanh(x)")
 }
 
 #[pyfunction]
