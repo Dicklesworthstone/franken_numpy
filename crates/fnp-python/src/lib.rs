@@ -14070,9 +14070,18 @@ fn native_binary_equal_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "equal(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "equal(x2)")?;
-        let result = ufunc_equal(&x1, &x2).map_err(map_ufunc_error)?;
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "equal(x1)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "equal", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "equal(x2)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "equal", args, kwargs),
+        };
+        let result = match ufunc_equal(&x1, &x2) {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "equal", args, kwargs),
+        };
         build_numpy_array_from_ufunc(py, &result)
     } else {
         core_numpy_passthrough(py, "equal", args, kwargs)
@@ -14085,9 +14094,18 @@ fn native_binary_not_equal_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "not_equal(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "not_equal(x2)")?;
-        let result = ufunc_not_equal(&x1, &x2).map_err(map_ufunc_error)?;
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "not_equal(x1)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "not_equal", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "not_equal(x2)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "not_equal", args, kwargs),
+        };
+        let result = match ufunc_not_equal(&x1, &x2) {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "not_equal", args, kwargs),
+        };
         build_numpy_array_from_ufunc(py, &result)
     } else {
         core_numpy_passthrough(py, "not_equal", args, kwargs)
@@ -14100,9 +14118,18 @@ fn native_binary_greater_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "greater(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "greater(x2)")?;
-        let result = ufunc_greater(&x1, &x2).map_err(map_ufunc_error)?;
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "greater(x1)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "greater", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "greater(x2)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "greater", args, kwargs),
+        };
+        let result = match ufunc_greater(&x1, &x2) {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "greater", args, kwargs),
+        };
         build_numpy_array_from_ufunc(py, &result)
     } else {
         core_numpy_passthrough(py, "greater", args, kwargs)
@@ -14115,9 +14142,18 @@ fn native_binary_greater_equal_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "greater_equal(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "greater_equal(x2)")?;
-        let result = ufunc_greater_equal(&x1, &x2).map_err(map_ufunc_error)?;
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "greater_equal(x1)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "greater_equal", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "greater_equal(x2)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "greater_equal", args, kwargs),
+        };
+        let result = match ufunc_greater_equal(&x1, &x2) {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "greater_equal", args, kwargs),
+        };
         build_numpy_array_from_ufunc(py, &result)
     } else {
         core_numpy_passthrough(py, "greater_equal", args, kwargs)
@@ -14130,9 +14166,18 @@ fn native_binary_less_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "less(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "less(x2)")?;
-        let result = ufunc_less(&x1, &x2).map_err(map_ufunc_error)?;
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "less(x1)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "less", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "less(x2)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "less", args, kwargs),
+        };
+        let result = match ufunc_less(&x1, &x2) {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "less", args, kwargs),
+        };
         build_numpy_array_from_ufunc(py, &result)
     } else {
         core_numpy_passthrough(py, "less", args, kwargs)
@@ -14145,9 +14190,18 @@ fn native_binary_less_equal_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "less_equal(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "less_equal(x2)")?;
-        let result = ufunc_less_equal(&x1, &x2).map_err(map_ufunc_error)?;
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "less_equal(x1)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "less_equal", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "less_equal(x2)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "less_equal", args, kwargs),
+        };
+        let result = match ufunc_less_equal(&x1, &x2) {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "less_equal", args, kwargs),
+        };
         build_numpy_array_from_ufunc(py, &result)
     } else {
         core_numpy_passthrough(py, "less_equal", args, kwargs)
@@ -14308,9 +14362,18 @@ fn native_binary_power_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "power(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "power(x2)")?;
-        let result = ufunc_power(&x1, &x2).map_err(map_ufunc_error)?;
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "power(x1)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "power", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "power(x2)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "power", args, kwargs),
+        };
+        let result = match ufunc_power(&x1, &x2) {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "power", args, kwargs),
+        };
         build_numpy_array_from_ufunc(py, &result)
     } else {
         core_numpy_passthrough(py, "power", args, kwargs)
@@ -14323,9 +14386,18 @@ fn native_binary_divide_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "divide(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "divide(x2)")?;
-        let result = ufunc_divide(&x1, &x2).map_err(map_ufunc_error)?;
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "divide(x1)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "divide", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "divide(x2)") {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "divide", args, kwargs),
+        };
+        let result = match ufunc_divide(&x1, &x2) {
+            Ok(value) => value,
+            Err(_) => return core_numpy_passthrough(py, "divide", args, kwargs),
+        };
         build_numpy_array_from_ufunc(py, &result)
     } else {
         core_numpy_passthrough(py, "divide", args, kwargs)
