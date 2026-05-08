@@ -326,6 +326,97 @@ print("ok")
 }
 
 #[test]
+fn core_ufuncs_match_numpy_on_complex64_and_complex128_inputs() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+import numpy as np
+
+warnings.filterwarnings("ignore")
+
+unary_ops = [
+    "abs", "absolute", "sin", "cos", "tan", "exp", "log", "sqrt",
+    "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh",
+    "arcsinh", "arccosh", "arctanh",
+]
+binary_ops = ["add", "subtract", "multiply", "divide", "true_divide", "power"]
+comparison_ops = ["equal", "not_equal", "less", "less_equal", "greater", "greater_equal"]
+inputs = [
+    (
+        "complex64",
+        np.array([1.0 + 2.0j, -0.5 + 0.75j, 0.25 - 1.25j], dtype=np.complex64),
+        np.array([2.0 - 1.0j, 1.25 + 0.5j, -1.5 + 2.0j], dtype=np.complex64),
+    ),
+    (
+        "complex128",
+        np.array([1.0 + 2.0j, -0.5 + 0.75j, 0.25 - 1.25j], dtype=np.complex128),
+        np.array([2.0 - 1.0j, 1.25 + 0.5j, -1.5 + 2.0j], dtype=np.complex128),
+    ),
+]
+kw_mask = np.array([True, False, True])
+
+def assert_same(name, dtype_name, ours, theirs):
+    if ours.shape != theirs.shape:
+        raise AssertionError(f"{name}({dtype_name}) shape mismatch: {ours.shape} != {theirs.shape}")
+    if ours.dtype != theirs.dtype:
+        raise AssertionError(f"{name}({dtype_name}) dtype mismatch: {ours.dtype} != {theirs.dtype}")
+    if np.issubdtype(theirs.dtype, np.bool_):
+        ok = np.array_equal(ours, theirs)
+    else:
+        ok = np.allclose(ours, theirs, equal_nan=True, rtol=1e-5, atol=1e-6)
+    if not ok:
+        raise AssertionError(f"{name}({dtype_name}) values mismatch: {ours!r} != {theirs!r}")
+
+for dtype_name, x, y in inputs:
+    for name in unary_ops:
+        fnp_fn = getattr(fnp, name)
+        numpy_fn = getattr(np, name)
+        assert_same(name, dtype_name, fnp_fn(x), numpy_fn(x))
+
+        ours_out = np.full(x.shape, 123.0 + 456.0j, dtype=x.dtype)
+        theirs_out = np.full(x.shape, 123.0 + 456.0j, dtype=x.dtype)
+        ours = fnp_fn(x, out=ours_out, where=kw_mask)
+        theirs = numpy_fn(x, out=theirs_out, where=kw_mask)
+        if ours is not ours_out:
+            raise AssertionError(f"fnp.{name}({dtype_name}) did not return provided complex out")
+        if theirs is not theirs_out:
+            raise AssertionError(f"numpy.{name}({dtype_name}) did not return provided complex out")
+        assert_same(f"{name}[out,where]", dtype_name, ours_out, theirs_out)
+
+    for name in binary_ops:
+        fnp_fn = getattr(fnp, name)
+        numpy_fn = getattr(np, name)
+        assert_same(name, dtype_name, fnp_fn(x, y), numpy_fn(x, y))
+
+        ours_out = np.full(x.shape, 123.0 + 456.0j, dtype=x.dtype)
+        theirs_out = np.full(x.shape, 123.0 + 456.0j, dtype=x.dtype)
+        ours = fnp_fn(x, y, out=ours_out, where=kw_mask)
+        theirs = numpy_fn(x, y, out=theirs_out, where=kw_mask)
+        if ours is not ours_out:
+            raise AssertionError(f"fnp.{name}({dtype_name}) did not return provided complex out")
+        if theirs is not theirs_out:
+            raise AssertionError(f"numpy.{name}({dtype_name}) did not return provided complex out")
+        assert_same(f"{name}[out,where]", dtype_name, ours_out, theirs_out)
+
+    for name in comparison_ops:
+        fnp_fn = getattr(fnp, name)
+        numpy_fn = getattr(np, name)
+        assert_same(name, dtype_name, fnp_fn(x, y), numpy_fn(x, y))
+
+print("ok")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "ok",
+        "core ufunc complex64/complex128 parity should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn sqrt_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
         "np.array([0.0])",
