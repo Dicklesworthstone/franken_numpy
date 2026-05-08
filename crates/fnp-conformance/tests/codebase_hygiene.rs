@@ -35,7 +35,7 @@ fn grep_pattern(pattern: &str) -> usize {
 
     String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| line.split(':').last()?.parse::<usize>().ok())
+        .filter_map(|line| line.split(':').next_back()?.parse::<usize>().ok())
         .sum()
 }
 
@@ -115,7 +115,7 @@ fn no_fixme_hack_markers() {
 
     let count: usize = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| line.split(':').last()?.parse::<usize>().ok())
+        .filter_map(|line| line.split(':').next_back()?.parse::<usize>().ok())
         .sum();
 
     assert_eq!(
@@ -153,7 +153,7 @@ fn no_dbg_macros_in_library_code() {
 
     let count: usize = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| line.split(':').last()?.parse::<usize>().ok())
+        .filter_map(|line| line.split(':').next_back()?.parse::<usize>().ok())
         .sum();
 
     assert_eq!(
@@ -191,7 +191,7 @@ fn no_allow_unused_in_library_code() {
 
     let count: usize = String::from_utf8_lossy(&output.stdout)
         .lines()
-        .filter_map(|line| line.split(':').last()?.parse::<usize>().ok())
+        .filter_map(|line| line.split(':').next_back()?.parse::<usize>().ok())
         .sum();
 
     assert!(
