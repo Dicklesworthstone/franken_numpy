@@ -318,3 +318,33 @@ fn mr_element_count_with_zero_dim() {
         "element_count with zero dim should be 0"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Regression: fuzz crash-1bc73e4f — external_loop with zero-element shape
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn regression_fuzz_crash_1bc73e4f_external_loop_zero_elem() {
+    // When external_loop=true and a dimension is zero, iteration_shape.product()
+    // must not exceed element_count. Previously returned Vec::new() whose product
+    // is 1 (identity), violating the invariant 1 <= 0.
+    for shape in [
+        vec![0usize, 5],      // zero in first dim (F-order inner loop)
+        vec![5, 0],           // zero in second dim
+        vec![0],              // single zero dim
+        vec![3, 0, 4],        // zero in middle
+    ] {
+        for order in [NditerOrder::C, NditerOrder::F] {
+            let opts = NditerOptions { order, external_loop: true };
+            let plan = NditerPlan::new(shape.clone(), 8, opts).unwrap();
+            let total = plan.element_count();
+            let iter_total: usize = plan.iteration_shape().iter().product();
+
+            assert!(
+                iter_total <= total,
+                "iteration_shape product ({iter_total}) must be <= element_count ({total}) \
+                 for shape={shape:?}, order={order:?}, external_loop=true"
+            );
+        }
+    }
+}

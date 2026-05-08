@@ -1599,7 +1599,7 @@ fn plan_external_loop(
     }
 
     if element_count == 0 {
-        return (Vec::new(), None, 1);
+        return (vec![0], None, 0);
     }
 
     match options.order {
