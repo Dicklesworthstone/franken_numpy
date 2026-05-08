@@ -26,7 +26,7 @@
       "packet_id": "FNP-P2C-001",
       "subsystem": "shape/reshape legality",
       "legacy_paths": [
-        "legacy_numpy_code/numpy/_core/src/multiarray/shape.c"
+        "legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c"
       ],
       "legacy_symbols": [
         "_fix_unknown_dimension",
@@ -63,9 +63,9 @@
       "packet_id": "FNP-P2C-002",
       "subsystem": "dtype descriptors and promotion",
       "legacy_paths": [
-        "legacy_numpy_code/numpy/_core/src/multiarray/descriptor.c",
-        "legacy_numpy_code/numpy/_core/src/multiarray/dtypemeta.c",
-        "legacy_numpy_code/numpy/_core/include/numpy/can_cast_table.h"
+        "legacy_numpy_code/numpy/numpy/_core/src/multiarray/descriptor.c",
+        "legacy_numpy_code/numpy/numpy/_core/src/multiarray/dtypemeta.c",
+        "legacy_numpy_code/numpy/numpy/_core/src/multiarray/can_cast_table.h"
       ],
       "legacy_symbols": [
         "_convert_from_type",
@@ -100,7 +100,7 @@
       "packet_id": "FNP-P2C-003",
       "subsystem": "strided transfer semantics",
       "legacy_paths": [
-        "legacy_numpy_code/numpy/_core/src/multiarray/dtype_transfer.c"
+        "legacy_numpy_code/numpy/numpy/_core/src/multiarray/dtype_transfer.c"
       ],
       "legacy_symbols": [
         "_strided_to_strided_*",
@@ -127,7 +127,7 @@
       "packet_id": "FNP-P2C-004",
       "subsystem": "NDIter traversal/index semantics",
       "legacy_paths": [
-        "legacy_numpy_code/numpy/_core/src/multiarray/nditer_api.c"
+        "legacy_numpy_code/numpy/numpy/_core/src/multiarray/nditer_api.c"
       ],
       "legacy_symbols": [
         "NpyIter_Reset",
@@ -157,7 +157,7 @@
       "packet_id": "FNP-P2C-005",
       "subsystem": "ufunc dispatch + gufunc signature",
       "legacy_paths": [
-        "legacy_numpy_code/numpy/_core/src/multiarray/umath/ufunc_object.c"
+        "legacy_numpy_code/numpy/numpy/_core/src/umath/ufunc_object.c"
       ],
       "legacy_symbols": [
         "_parse_signature",
@@ -192,7 +192,7 @@
       "packet_id": "FNP-P2C-006",
       "subsystem": "stride tricks + broadcasting API",
       "legacy_paths": [
-        "legacy_numpy_code/numpy/lib/_stride_tricks_impl.py"
+        "legacy_numpy_code/numpy/numpy/lib/_stride_tricks_impl.py"
       ],
       "legacy_symbols": [
         "as_strided",
@@ -222,7 +222,7 @@
       "packet_id": "FNP-P2C-007",
       "subsystem": "RNG core and constructor contract",
       "legacy_paths": [
-        "legacy_numpy_code/numpy/random/_generator.pyx"
+        "legacy_numpy_code/numpy/numpy/random/_generator.pyx"
       ],
       "legacy_symbols": [
         "Generator",
@@ -276,8 +276,8 @@
       "packet_id": "FNP-P2C-009",
       "subsystem": "NPY/NPZ IO contract",
       "legacy_paths": [
-        "legacy_numpy_code/numpy/lib/format.py",
-        "legacy_numpy_code/numpy/lib/npyio.py"
+        "legacy_numpy_code/numpy/numpy/lib/format.py",
+        "legacy_numpy_code/numpy/numpy/lib/npyio.py"
       ],
       "legacy_symbols": [
         "header parse/write contracts",

@@ -144,16 +144,18 @@ RaptorQ applicability note:
 Unit/property gate investigation:
 
 ```bash
+FNP_TEST_CONTRACT_LOG_PATH=artifacts/logs/test_contract_e2e_manual.jsonl # evidence-validator-ignore(owner=conformance, reason=manual-investigation-output)
+FNP_TEST_CONTRACT_REPORT_PATH=artifacts/logs/test_contract_gate_report.json # evidence-validator-ignore(owner=conformance, reason=manual-investigation-output)
 rch exec -- cargo run -p fnp-conformance --bin run_test_contract_gate -- \
-  --log-path artifacts/logs/test_contract_e2e_manual.jsonl \
-  | tee artifacts/logs/test_contract_gate_report.json
+  --log-path "$FNP_TEST_CONTRACT_LOG_PATH" \
+  | tee "$FNP_TEST_CONTRACT_REPORT_PATH"
 ```
 
 If this fails, inspect missing fields quickly:
 
 ```bash
 jq -r '.suites[] | select(.suite=="runtime_policy_log_contract") | .failures[]' \
-  artifacts/logs/test_contract_gate_report.json
+  "$FNP_TEST_CONTRACT_REPORT_PATH"
 ```
 
 Differential gate investigation:
@@ -167,9 +169,12 @@ jq -r '.failures[:5][] | [.id, .reason] | @tsv' \
 E2E workflow gate investigation with artifact index:
 
 ```bash
+FNP_WORKFLOW_E2E_LOG=artifacts/logs/workflow_scenario_e2e_manual.jsonl # evidence-validator-ignore(owner=conformance, reason=manual-investigation-output)
+FNP_WORKFLOW_RELIABILITY=artifacts/logs/workflow_scenario_reliability_manual.json # evidence-validator-ignore(owner=conformance, reason=manual-investigation-output)
+FNP_WORKFLOW_ARTIFACT_INDEX=artifacts/logs/workflow_scenario_artifact_index_manual.json # evidence-validator-ignore(owner=conformance, reason=manual-investigation-output)
 scripts/e2e/run_workflow_scenario_gate.sh \
-  artifacts/logs/workflow_scenario_e2e_manual.jsonl \
-  artifacts/logs/workflow_scenario_reliability_manual.json \
-  artifacts/logs/workflow_scenario_artifact_index_manual.json
-jq '.triage' artifacts/logs/workflow_scenario_artifact_index_manual.json
+  "$FNP_WORKFLOW_E2E_LOG" \
+  "$FNP_WORKFLOW_RELIABILITY" \
+  "$FNP_WORKFLOW_ARTIFACT_INDEX"
+jq '.triage' "$FNP_WORKFLOW_ARTIFACT_INDEX"
 ```
