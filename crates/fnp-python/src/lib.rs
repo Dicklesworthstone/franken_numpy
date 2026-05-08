@@ -4243,9 +4243,10 @@ fn split_helper_default(
         Err(_) => return split_helper_numpy_fallback(py, kind, ary, indices_or_sections, axis),
     };
 
-    let result = kind
-        .rust_sections(&array, sections, axis.unwrap_or(0))
-        .map_err(map_ufunc_error)?;
+    let result = match kind.rust_sections(&array, sections, axis.unwrap_or(0)) {
+        Ok(value) => value,
+        Err(_) => return split_helper_numpy_fallback(py, kind, ary, indices_or_sections, axis),
+    };
     build_numpy_list_from_ufuncs(py, &result)
 }
 
@@ -17770,10 +17771,9 @@ fn recfunctions_merge_arrays(
     };
 
     // Native path: merge a sequence of structured arrays side-by-side.
-    // flatten=False (default) wraps each input's dtype as a nested
-    // field named f0, f1, ... — matches recfunctions' behavior.
-    // flatten=True would inline fields; not exercised by the parity
-    // test and requires conflict-resolution → delegate.
+    // For flat structured inputs, numpy preserves each source field name
+    // in the output dtype. Duplicate/conflicting field names delegate so
+    // numpy owns the canonical error surface.
     if flatten || usemask || asrecarray {
         return fallback(py);
     }
@@ -17805,28 +17805,40 @@ fn recfunctions_merge_arrays(
         }
     }
 
-    // Build nested descriptor: [('f0', dtype0), ('f1', dtype1), ...].
+    // Build flattened descriptor: [('x', dtype_x), ('y', dtype_y), ...].
     let descr = PyList::empty(py);
-    for (idx, arr) in arrays.iter().enumerate() {
-        let field_name = format!("f{idx}");
-        descr.append(PyTuple::new(
-            py,
-            [
-                field_name.into_pyobject(py)?.into_any(),
-                arr.getattr("dtype")?.into_any(),
-            ],
-        )?)?;
+    let mut field_names = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for arr in &arrays {
+        let dtype = arr.getattr("dtype")?;
+        let names: Vec<String> = match dtype.getattr("names")?.extract() {
+            Ok(names) => names,
+            Err(_) => return fallback(py),
+        };
+        for name in names {
+            if !seen.insert(name.clone()) {
+                return fallback(py);
+            }
+            let field = dtype.get_item(name.as_str())?;
+            descr.append(PyTuple::new(
+                py,
+                [
+                    name.clone().into_pyobject(py)?.into_any(),
+                    field.clone().into_any(),
+                ],
+            )?)?;
+            field_names.push((name, arr.clone()));
+        }
     }
     let new_dtype = numpy.getattr("dtype")?.call1((descr,))?;
 
-    // Allocate output and slot each input into the matching fN field.
+    // Allocate output and copy each source field into its output field.
     let zeros_fn = numpy.getattr("zeros")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", new_dtype)?;
     let out = zeros_fn.call((arrays[0].getattr("shape")?,), Some(&kwargs))?;
-    for (idx, arr) in arrays.iter().enumerate() {
-        let field_name = format!("f{idx}");
-        out.set_item(field_name.as_str(), arr)?;
+    for (field_name, arr) in field_names {
+        out.set_item(field_name.as_str(), arr.get_item(field_name.as_str())?)?;
     }
 
     let _ = fill_value;
