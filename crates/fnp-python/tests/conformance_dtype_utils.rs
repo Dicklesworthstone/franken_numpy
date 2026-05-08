@@ -238,6 +238,88 @@ print(result == expected)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// structured-array recfunctions
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn recfunctions_drop_rename_append_flat_structured_arrays() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+from numpy.lib import recfunctions as rfn
+
+base = np.array(
+    [(1, 1.5, b"aa"), (2, 2.5, b"bb")],
+    dtype=[("a", "i4"), ("b", "f8"), ("c", "S2")],
+)
+
+drop_result = fnp.recfunctions_drop_fields(base, ["b"], usemask=False)
+drop_expected = rfn.drop_fields(base, ["b"], usemask=False)
+
+rename_result = fnp.recfunctions_rename_fields(base, {"a": "alpha", "c": "label"})
+rename_expected = rfn.rename_fields(base, {"a": "alpha", "c": "label"})
+
+append_data = np.array([7, 8], dtype=np.int16)
+append_result = fnp.recfunctions_append_fields(base, "flag", append_data, usemask=False)
+append_expected = rfn.append_fields(base, "flag", append_data, usemask=False)
+
+match = (
+    drop_result.dtype == drop_expected.dtype
+    and np.array_equal(drop_result, drop_expected)
+    and rename_result.dtype == rename_expected.dtype
+    and np.array_equal(rename_result, rename_expected)
+    and append_result.dtype == append_expected.dtype
+    and np.array_equal(append_result, append_expected)
+)
+print(match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "flat structured recfunctions should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn recfunctions_merge_and_unstructured_to_structured() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+from numpy.lib import recfunctions as rfn
+
+left = np.array([(1,), (2,)], dtype=[("x", "i2")])
+right = np.array([(1.25,), (2.5,)], dtype=[("y", "f4")])
+merge_result = fnp.recfunctions_merge_arrays([left, right], usemask=False, flatten=False)
+merge_expected = rfn.merge_arrays([left, right], usemask=False, flatten=False)
+
+plain = np.array([[1.0, 1.5], [2.0, 2.5]], dtype=np.float64)
+target_dtype = np.dtype([("count", "i4"), ("ratio", "f8")])
+struct_result = fnp.recfunctions_unstructured_to_structured(plain, dtype=target_dtype)
+struct_expected = rfn.unstructured_to_structured(plain, dtype=target_dtype)
+
+match = (
+    merge_result.dtype == merge_expected.dtype
+    and np.array_equal(merge_result, merge_expected)
+    and struct_result.dtype == struct_expected.dtype
+    and struct_result.shape == struct_expected.shape
+    and np.array_equal(struct_result, struct_expected)
+)
+print(match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "merge/unstructured structured recfunctions should match numpy"
+    );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Relationship tests
 // ─────────────────────────────────────────────────────────────────────────────
 

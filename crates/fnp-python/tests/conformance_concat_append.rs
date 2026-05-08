@@ -127,6 +127,70 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+#[test]
+fn concatenate_negative_axis_3d() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(12, dtype=np.int16).reshape(2, 3, 2)
+b = np.arange(12, 24, dtype=np.int16).reshape(2, 3, 2)
+result = fnp.concatenate([a, b], axis=-1)
+expected = np.concatenate([a, b], axis=-1)
+print(result.dtype == expected.dtype and result.shape == expected.shape and np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "concatenate negative axis should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn concatenate_empty_axis_preserves_shape_and_dtype() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.empty((2, 0), dtype=np.float32)
+b = np.array([[1.5, 2.5], [3.5, 4.5]], dtype=np.float32)
+result = fnp.concatenate([a, b, a], axis=1)
+expected = np.concatenate([a, b, a], axis=1)
+print(result.dtype == expected.dtype and result.shape == expected.shape and np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "concatenate empty axis operands should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn concatenate_structured_arrays_preserves_fields() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+dtype = np.dtype([("left", "i4"), ("right", "f8")])
+a = np.array([(1, 1.5), (2, 2.5)], dtype=dtype)
+b = np.array([(3, 3.5)], dtype=dtype)
+result = fnp.concatenate([a, b])
+expected = np.concatenate([a, b])
+print(result.dtype == expected.dtype and result.shape == expected.shape and np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "concatenate structured arrays should match numpy"
+    );
+    Ok(())
+}
+
 // ��────────────────────────────────────────────────────────────────────────────
 // append
 // ─────────────────────────────────────────────────────────────────────────────

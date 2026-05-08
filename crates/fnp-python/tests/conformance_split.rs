@@ -312,3 +312,86 @@ print(np.array_equal(result, a))
     assert_eq!(result.trim(), "True", "vsplit then vstack should be identity");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SHOULD-level edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn array_split_more_sections_than_elements() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([10, 20, 30], dtype=np.int16)
+result = fnp.array_split(a, 5)
+expected = np.array_split(a, 5)
+match = (
+    len(result) == len(expected)
+    and all(r.dtype == e.dtype for r, e in zip(result, expected))
+    and all(r.shape == e.shape for r, e in zip(result, expected))
+    and all(np.array_equal(r, e) for r, e in zip(result, expected))
+)
+print(match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "array_split should preserve empty partitions and dtype"
+    );
+    Ok(())
+}
+
+#[test]
+fn split_uneven_integer_sections_error_surface() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(5)
+def capture(fn):
+    try:
+        fn(a, 2)
+    except Exception as exc:
+        return type(exc).__name__, str(exc)
+    return "OK", ""
+
+ours = capture(fnp.split)
+expected = capture(np.split)
+print(ours[0] == expected[0] and ours[1] == expected[1])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "split uneven sections error should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn dsplit_with_explicit_indices_and_empty_tail() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(24, dtype=np.int32).reshape(2, 3, 4)
+result = fnp.dsplit(a, [0, 2, 4])
+expected = np.dsplit(a, [0, 2, 4])
+match = (
+    len(result) == len(expected)
+    and all(r.dtype == e.dtype for r, e in zip(result, expected))
+    and all(r.shape == e.shape for r, e in zip(result, expected))
+    and all(np.array_equal(r, e) for r, e in zip(result, expected))
+)
+print(match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "dsplit explicit indices should preserve empty slices"
+    );
+    Ok(())
+}
