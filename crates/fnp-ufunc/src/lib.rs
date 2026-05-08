@@ -2707,18 +2707,10 @@ impl UFuncArrayView {
         }
 
         // Copy sidecar values while still holding both locks
-        let sidecar_copy = if let Some(ref s) = sidecar_guard {
-            Some(match &**s {
-                IntegerSidecar::I64(v) => {
-                    IntegerSidecar::I64(indices.iter().map(|&i| v[i]).collect())
-                }
-                IntegerSidecar::U64(v) => {
-                    IntegerSidecar::U64(indices.iter().map(|&i| v[i]).collect())
-                }
-            })
-        } else {
-            None
-        };
+        let sidecar_copy = sidecar_guard.as_ref().map(|s| match &**s {
+            IntegerSidecar::I64(v) => IntegerSidecar::I64(indices.iter().map(|&i| v[i]).collect()),
+            IntegerSidecar::U64(v) => IntegerSidecar::U64(indices.iter().map(|&i| v[i]).collect()),
+        });
 
         // Release locks (drop guards) before constructing result
         drop(data);

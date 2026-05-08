@@ -289,7 +289,7 @@ fn conformance_can_cast_no() -> Result<(), String> {
 #[test]
 fn conformance_min_scalar_type_returns_numeric() -> Result<(), String> {
     // Validate that min_scalar_type returns a numeric dtype
-    let fnp_result = fnp_dtype::min_scalar_type(3.14159);
+    let fnp_result = fnp_dtype::min_scalar_type(std::f64::consts::PI);
     assert!(fnp_result.is_numeric(), "should return a numeric type");
     Ok(())
 }
