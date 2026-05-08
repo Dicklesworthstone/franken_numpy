@@ -10,6 +10,7 @@ use std::process::Command;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const REPRO_COMMAND: &str = "cargo run -p fnp-conformance --bin generate_benchmark_baseline";
+const BENCHMARK_BASELINE_SCHEMA_VERSION: u8 = 2;
 pub const MEMORY_FOOTPRINT_SLO_PATH: &str = "memory footprint";
 pub const ALLOCATION_CHURN_SLO_PATH: &str = "allocation churn";
 pub const ALLOCATOR_FRAGMENTATION_SLO_PATH: &str =
@@ -50,14 +51,28 @@ pub enum AllocatorStressLevel {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkloadTelemetry {
+    #[serde(default)]
+    pub input_elements_per_run: usize,
+    #[serde(default)]
+    pub output_elements_per_run: usize,
+    #[serde(default)]
     pub elements_per_run: usize,
+    #[serde(default)]
+    pub bytes_touched_estimate_per_run: usize,
+    #[serde(default)]
     pub bytes_processed_per_run: usize,
+    #[serde(default)]
+    pub available_parallelism: usize,
+    #[serde(default)]
+    pub configured_thread_count: Option<usize>,
     pub throughput_elements_per_sec_p50: f64,
     pub throughput_elements_per_sec_p95: f64,
     pub bandwidth_mib_per_sec_p50: f64,
     pub bandwidth_mib_per_sec_p95: f64,
     #[serde(default)]
     pub peak_live_bytes_per_run: usize,
+    #[serde(default)]
+    pub process_high_water_rss_bytes: Option<u64>,
     #[serde(default)]
     pub heap_allocations_per_run: usize,
     #[serde(default)]
@@ -127,6 +142,36 @@ fn rustc_version() -> String {
         Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
         _ => "unknown".to_string(),
     }
+}
+
+fn available_parallelism() -> usize {
+    std::thread::available_parallelism().map_or(1, usize::from)
+}
+
+fn configured_thread_count() -> Option<usize> {
+    for key in ["FNP_NUM_THREADS", "RAYON_NUM_THREADS", "OMP_NUM_THREADS"] {
+        let Ok(value) = std::env::var(key) else {
+            continue;
+        };
+        let Ok(parsed) = value.parse::<usize>() else {
+            continue;
+        };
+        if parsed > 0 {
+            return Some(parsed);
+        }
+    }
+    None
+}
+
+fn process_high_water_rss_bytes() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(raw) = line.strip_prefix("VmHWM:") {
+            let kib = raw.split_whitespace().next()?.parse::<u64>().ok()?;
+            return kib.checked_mul(1024);
+        }
+    }
+    None
 }
 
 const MIN_SAMPLE_MS: f64 = 1.0e-6;
@@ -224,7 +269,10 @@ fn summarize_samples(samples: &[f64]) -> PercentileSummary {
 #[derive(Debug, Clone, Copy)]
 struct WorkloadInstrumentation {
     elements_per_run: usize,
+    input_elements_per_run: usize,
+    output_elements_per_run: usize,
     bytes_processed_per_run: usize,
+    bytes_touched_estimate_per_run: usize,
     peak_live_bytes_per_run: usize,
     heap_allocations_per_run: usize,
     allocator_stress: AllocatorStressLevel,
@@ -251,8 +299,13 @@ where
     let percentiles = summarize_samples(&samples_ms);
     let bytes_per_run_mib = instrumentation.bytes_processed_per_run as f64 / (1024.0 * 1024.0);
     let telemetry = WorkloadTelemetry {
+        input_elements_per_run: instrumentation.input_elements_per_run,
+        output_elements_per_run: instrumentation.output_elements_per_run,
         elements_per_run: instrumentation.elements_per_run,
+        bytes_touched_estimate_per_run: instrumentation.bytes_touched_estimate_per_run,
         bytes_processed_per_run: instrumentation.bytes_processed_per_run,
+        available_parallelism: available_parallelism(),
+        configured_thread_count: configured_thread_count(),
         throughput_elements_per_sec_p50: compute_per_second(
             instrumentation.elements_per_run as f64,
             percentiles.p50_ms,
@@ -264,6 +317,7 @@ where
         bandwidth_mib_per_sec_p50: compute_per_second(bytes_per_run_mib, percentiles.p50_ms),
         bandwidth_mib_per_sec_p95: compute_per_second(bytes_per_run_mib, percentiles.p95_ms),
         peak_live_bytes_per_run: instrumentation.peak_live_bytes_per_run,
+        process_high_water_rss_bytes: process_high_water_rss_bytes(),
         heap_allocations_per_run: instrumentation.heap_allocations_per_run,
         allocator_stress: instrumentation.allocator_stress,
     };
@@ -311,7 +365,10 @@ pub fn generate_benchmark_baseline(
         20,
         WorkloadInstrumentation {
             elements_per_run: add_elements_per_run,
+            input_elements_per_run: add_elements_per_run * 2,
+            output_elements_per_run: add_elements_per_run,
             bytes_processed_per_run: add_bytes_per_run,
+            bytes_touched_estimate_per_run: add_bytes_per_run,
             peak_live_bytes_per_run: add_bytes_per_run,
             heap_allocations_per_run: 1,
             allocator_stress: AllocatorStressLevel::Steady,
@@ -334,7 +391,10 @@ pub fn generate_benchmark_baseline(
         20,
         WorkloadInstrumentation {
             elements_per_run: reduce_axis1_input_elements_per_run,
+            input_elements_per_run: reduce_axis1_input_elements_per_run,
+            output_elements_per_run: reduce_axis1_output_elements_per_run,
             bytes_processed_per_run: reduce_axis1_bytes_per_run,
+            bytes_touched_estimate_per_run: reduce_axis1_bytes_per_run,
             peak_live_bytes_per_run: reduce_axis1_bytes_per_run,
             heap_allocations_per_run: 1,
             allocator_stress: AllocatorStressLevel::Steady,
@@ -357,7 +417,10 @@ pub fn generate_benchmark_baseline(
         20,
         WorkloadInstrumentation {
             elements_per_run: reduce_all_input_elements_per_run,
+            input_elements_per_run: reduce_all_input_elements_per_run,
+            output_elements_per_run: reduce_all_output_elements_per_run,
             bytes_processed_per_run: reduce_all_bytes_per_run,
+            bytes_touched_estimate_per_run: reduce_all_bytes_per_run,
             peak_live_bytes_per_run: reduce_all_bytes_per_run,
             heap_allocations_per_run: 1,
             allocator_stress: AllocatorStressLevel::Steady,
@@ -394,7 +457,10 @@ pub fn generate_benchmark_baseline(
         8,
         WorkloadInstrumentation {
             elements_per_run: large_add_elements_per_run,
+            input_elements_per_run: large_add_elements_per_run * 2,
+            output_elements_per_run: large_add_elements_per_run,
             bytes_processed_per_run: add_large_bytes_per_run,
+            bytes_touched_estimate_per_run: add_large_bytes_per_run,
             peak_live_bytes_per_run: add_large_bytes_per_run,
             heap_allocations_per_run: 1,
             allocator_stress: AllocatorStressLevel::Steady,
@@ -415,7 +481,10 @@ pub fn generate_benchmark_baseline(
         8,
         WorkloadInstrumentation {
             elements_per_run: large_add_elements_per_run,
+            input_elements_per_run: large_add_elements_per_run,
+            output_elements_per_run: reduce_large_axis1_output_elements_per_run,
             bytes_processed_per_run: reduce_large_axis1_bytes_per_run,
+            bytes_touched_estimate_per_run: reduce_large_axis1_bytes_per_run,
             peak_live_bytes_per_run: reduce_large_axis1_bytes_per_run,
             heap_allocations_per_run: 1,
             allocator_stress: AllocatorStressLevel::Steady,
@@ -453,7 +522,10 @@ pub fn generate_benchmark_baseline(
         6,
         WorkloadInstrumentation {
             elements_per_run: matmul_elements,
+            input_elements_per_run: matmul_elements * 2,
+            output_elements_per_run: matmul_elements,
             bytes_processed_per_run: matmul_bytes_per_run,
+            bytes_touched_estimate_per_run: matmul_bytes_per_run,
             peak_live_bytes_per_run: matmul_bytes_per_run,
             heap_allocations_per_run: 1,
             allocator_stress: AllocatorStressLevel::Steady,
@@ -482,7 +554,10 @@ pub fn generate_benchmark_baseline(
         8,
         WorkloadInstrumentation {
             elements_per_run: sort_len,
+            input_elements_per_run: sort_len,
+            output_elements_per_run: sort_len,
             bytes_processed_per_run: sort_bytes_per_run,
+            bytes_touched_estimate_per_run: sort_bytes_per_run,
             peak_live_bytes_per_run: sort_bytes_per_run,
             heap_allocations_per_run: 1,
             allocator_stress: AllocatorStressLevel::Steady,
@@ -515,7 +590,10 @@ pub fn generate_benchmark_baseline(
         8,
         WorkloadInstrumentation {
             elements_per_run: fft_len,
+            input_elements_per_run: fft_len,
+            output_elements_per_run: fft_len,
             bytes_processed_per_run: fft_bytes_per_run,
+            bytes_touched_estimate_per_run: fft_bytes_per_run,
             peak_live_bytes_per_run: fft_bytes_per_run,
             heap_allocations_per_run: 1,
             allocator_stress: AllocatorStressLevel::Steady,
@@ -544,7 +622,10 @@ pub fn generate_benchmark_baseline(
         10,
         WorkloadInstrumentation {
             elements_per_run: large_add_elements_per_run,
+            input_elements_per_run: large_add_elements_per_run,
+            output_elements_per_run: large_add_elements_per_run,
             bytes_processed_per_run: astype_bytes_per_run,
+            bytes_touched_estimate_per_run: astype_bytes_per_run,
             peak_live_bytes_per_run: astype_bytes_per_run,
             heap_allocations_per_run: 1,
             allocator_stress: AllocatorStressLevel::Steady,
@@ -561,7 +642,10 @@ pub fn generate_benchmark_baseline(
         20,
         WorkloadInstrumentation {
             elements_per_run: large_add_elements_per_run,
+            input_elements_per_run: large_add_elements_per_run,
+            output_elements_per_run: large_add_elements_per_run,
             bytes_processed_per_run: large_add_elements_per_run * item_size,
+            bytes_touched_estimate_per_run: large_add_elements_per_run * item_size,
             peak_live_bytes_per_run: large_add_elements_per_run * item_size,
             heap_allocations_per_run: 0,
             allocator_stress: AllocatorStressLevel::None,
@@ -594,7 +678,10 @@ pub fn generate_benchmark_baseline(
         8,
         WorkloadInstrumentation {
             elements_per_run: io_elements,
+            input_elements_per_run: io_elements,
+            output_elements_per_run: io_elements,
             bytes_processed_per_run: io_elements * item_size * 2,
+            bytes_touched_estimate_per_run: io_elements * item_size * 2,
             peak_live_bytes_per_run: io_elements * item_size * 3,
             heap_allocations_per_run: 3,
             allocator_stress: AllocatorStressLevel::Steady,
@@ -625,7 +712,10 @@ pub fn generate_benchmark_baseline(
         6,
         WorkloadInstrumentation {
             elements_per_run: fragmentation_elements_per_run,
+            input_elements_per_run: fragmentation_elements_per_run,
+            output_elements_per_run: fragmentation_elements_per_run,
             bytes_processed_per_run: fragmentation_elements_per_run * item_size * 2,
+            bytes_touched_estimate_per_run: fragmentation_elements_per_run * item_size * 2,
             peak_live_bytes_per_run: fragmentation_peak_len * item_size * 3,
             heap_allocations_per_run: fragmentation_lengths.len() * 3,
             allocator_stress: AllocatorStressLevel::Adversarial,
@@ -662,7 +752,7 @@ pub fn generate_benchmark_baseline(
         "os={} arch={} cpus={} rustc={}",
         std::env::consts::OS,
         std::env::consts::ARCH,
-        std::thread::available_parallelism().map_or(1, usize::from),
+        available_parallelism(),
         rustc
     );
     let reproducibility = ReproMetadata {
@@ -674,7 +764,7 @@ pub fn generate_benchmark_baseline(
     };
 
     let baseline = BenchmarkBaseline {
-        schema_version: 1,
+        schema_version: BENCHMARK_BASELINE_SCHEMA_VERSION,
         generated_at_unix_ms: now_unix_ms(),
         git_commit: git_commit_short(repo_root),
         workloads: vec![
@@ -733,6 +823,17 @@ mod tests {
             .map(|workload| workload.telemetry.elements_per_run)
     }
 
+    fn workload_telemetry<'a>(
+        baseline: &'a BenchmarkBaseline,
+        name: &str,
+    ) -> Option<&'a super::WorkloadTelemetry> {
+        baseline
+            .workloads
+            .iter()
+            .find(|workload| workload.name == name)
+            .map(|workload| &workload.telemetry)
+    }
+
     #[test]
     fn baseline_generator_writes_json() {
         let output_path = temp_file("baseline");
@@ -740,7 +841,7 @@ mod tests {
 
         let baseline = generate_benchmark_baseline(&repo_root, &output_path)
             .expect("baseline generation should succeed");
-        assert_eq!(baseline.schema_version, 1);
+        assert_eq!(baseline.schema_version, 2);
         assert!(!baseline.workloads.is_empty());
         assert!(!baseline.environment_fingerprint.trim().is_empty());
         assert!(
@@ -752,9 +853,30 @@ mod tests {
         assert!(!baseline.evidence_log_refs.is_empty());
         for workload in &baseline.workloads {
             assert!(workload.telemetry.bytes_processed_per_run > 0);
+            assert!(workload.telemetry.bytes_touched_estimate_per_run > 0);
+            assert!(workload.telemetry.input_elements_per_run > 0);
+            assert!(workload.telemetry.output_elements_per_run > 0);
+            assert!(workload.telemetry.available_parallelism > 0);
             assert!(workload.telemetry.bandwidth_mib_per_sec_p50 > 0.0);
             assert!(workload.telemetry.throughput_elements_per_sec_p50 > 0.0);
         }
+        let add_telemetry = workload_telemetry(&baseline, "ufunc_add_broadcast_256x256_by_256")
+            .expect("broadcast add telemetry");
+        assert_eq!(add_telemetry.input_elements_per_run, 256 * 256 * 2);
+        assert_eq!(add_telemetry.output_elements_per_run, 256 * 256);
+        assert_eq!(
+            add_telemetry.bytes_touched_estimate_per_run,
+            256 * 256 * std::mem::size_of::<f64>() * 3
+        );
+        let reduction_telemetry =
+            workload_telemetry(&baseline, "reduce_sum_axis1_keepdims_false_256x256")
+                .expect("reduction telemetry");
+        assert_eq!(reduction_telemetry.input_elements_per_run, 256 * 256);
+        assert_eq!(reduction_telemetry.output_elements_per_run, 256);
+        assert_eq!(
+            reduction_telemetry.bytes_touched_estimate_per_run,
+            (256 * 256 + 256) * std::mem::size_of::<f64>()
+        );
         assert_eq!(
             workload_elements_per_run(&baseline, "reduce_sum_axis1_keepdims_false_256x256"),
             Some(256 * 256),
@@ -795,8 +917,65 @@ mod tests {
             .flat_map(|workload| workload.telemetry.covered_slo_paths())
             .collect();
         assert_eq!(parsed_slo_paths, required_slo_paths);
+        let parsed_raw: serde_json::Value = serde_json::from_str(&raw).expect("baseline json");
+        let parsed_telemetry = &parsed_raw["workloads"][0]["telemetry"];
+        assert!(parsed_telemetry.get("input_elements_per_run").is_some());
+        assert!(parsed_telemetry.get("output_elements_per_run").is_some());
+        assert!(
+            parsed_telemetry
+                .get("bytes_touched_estimate_per_run")
+                .is_some()
+        );
+        assert!(parsed_telemetry.get("available_parallelism").is_some());
+        assert!(parsed_telemetry.get("configured_thread_count").is_some());
+        assert!(
+            parsed_telemetry
+                .get("process_high_water_rss_bytes")
+                .is_some()
+        );
 
         let _ = fs::remove_file(output_path);
+    }
+
+    #[test]
+    fn schema_v1_telemetry_defaults_new_many_core_fields() {
+        let raw = r#"{
+            "schema_version": 1,
+            "generated_at_unix_ms": 0,
+            "git_commit": "test",
+            "workloads": [{
+                "name": "legacy",
+                "runs": 1,
+                "samples_ms": [1.0],
+                "percentiles": {
+                    "p50_ms": 1.0,
+                    "p95_ms": 1.0,
+                    "p99_ms": 1.0,
+                    "min_ms": 1.0,
+                    "max_ms": 1.0
+                },
+                "telemetry": {
+                    "elements_per_run": 10,
+                    "bytes_processed_per_run": 80,
+                    "throughput_elements_per_sec_p50": 10000.0,
+                    "throughput_elements_per_sec_p95": 9000.0,
+                    "bandwidth_mib_per_sec_p50": 1.0,
+                    "bandwidth_mib_per_sec_p95": 0.9
+                }
+            }]
+        }"#;
+
+        let parsed: BenchmarkBaseline = serde_json::from_str(raw).expect("legacy schema parse");
+        let telemetry = &parsed.workloads[0].telemetry;
+
+        assert_eq!(parsed.schema_version, 1);
+        assert_eq!(telemetry.elements_per_run, 10);
+        assert_eq!(telemetry.input_elements_per_run, 0);
+        assert_eq!(telemetry.output_elements_per_run, 0);
+        assert_eq!(telemetry.bytes_touched_estimate_per_run, 0);
+        assert_eq!(telemetry.available_parallelism, 0);
+        assert_eq!(telemetry.configured_thread_count, None);
+        assert_eq!(telemetry.process_high_water_rss_bytes, None);
     }
 
     #[test]
@@ -806,7 +985,10 @@ mod tests {
             3,
             WorkloadInstrumentation {
                 elements_per_run: 1,
+                input_elements_per_run: 1,
+                output_elements_per_run: 1,
                 bytes_processed_per_run: 1,
+                bytes_touched_estimate_per_run: 1,
                 peak_live_bytes_per_run: 1,
                 heap_allocations_per_run: 0,
                 allocator_stress: AllocatorStressLevel::None,

@@ -28,15 +28,15 @@ fn parse_output_path(repo_root: &std::path::Path) -> Result<PathBuf, String> {
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
-            "--output-path" => {
+            "--output-path" | "--report-path" => {
                 let value = args
                     .next()
-                    .ok_or_else(|| "--output-path requires a value".to_string())?;
+                    .ok_or_else(|| format!("{arg} requires a value"))?;
                 output_path = Some(PathBuf::from(value));
             }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run -p fnp-conformance --bin generate_benchmark_baseline -- [--output-path <path>]"
+                    "Usage: cargo run -p fnp-conformance --bin generate_benchmark_baseline -- [--output-path|--report-path <path>]"
                 );
                 std::process::exit(0);
             }
