@@ -716,11 +716,6 @@ fn function_exclusion(name: &str) -> Option<FnpPythonApiExclusion> {
             "tracked_masked_helper_gap",
             "known fnp-python masked-array helper coverage gap; tracked by franken_numpy-pxnkv",
         ))
-    } else if MATRIX_SHAPE_GAPS.contains(&name) {
-        Some((
-            "tracked_matrix_shape_gap",
-            "known fnp-python matrix/shape helper coverage gap; tracked by franken_numpy-npcr0",
-        ))
     } else {
         None
     }?;
@@ -751,18 +746,6 @@ const MASKED_HELPER_GAPS: &[&str] = &[
     "notmasked_contiguous",
     "notmasked_edges",
     "set_fill_value",
-];
-
-const MATRIX_SHAPE_GAPS: &[&str] = &[
-    "asmatrix",
-    "astype",
-    "bmat",
-    "cumulative_prod",
-    "cumulative_sum",
-    "matvec",
-    "shape",
-    "size_count",
-    "vecmat",
 ];
 
 #[cfg(test)]

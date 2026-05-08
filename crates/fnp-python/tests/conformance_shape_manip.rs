@@ -53,7 +53,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "squeeze remove all 1 dims should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "squeeze remove all 1 dims should match numpy"
+    );
     Ok(())
 }
 
@@ -69,7 +73,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "squeeze specific axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "squeeze specific axis should match numpy"
+    );
     Ok(())
 }
 
@@ -101,7 +109,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "squeeze negative axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "squeeze negative axis should match numpy"
+    );
     Ok(())
 }
 
@@ -121,7 +133,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "expand_dims axis=0 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "expand_dims axis=0 should match numpy"
+    );
     Ok(())
 }
 
@@ -137,7 +153,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "expand_dims axis=1 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "expand_dims axis=1 should match numpy"
+    );
     Ok(())
 }
 
@@ -153,7 +173,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "expand_dims negative axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "expand_dims negative axis should match numpy"
+    );
     Ok(())
 }
 
@@ -169,7 +193,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "expand_dims 2d array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "expand_dims 2d array should match numpy"
+    );
     Ok(())
 }
 
@@ -221,7 +249,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "swapaxes negative axes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "swapaxes negative axes should match numpy"
+    );
     Ok(())
 }
 
@@ -237,7 +269,11 @@ print(np.array_equal(result, expected) and np.array_equal(result, a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "swapaxes same axis should be identity");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "swapaxes same axis should be identity"
+    );
     Ok(())
 }
 
@@ -257,7 +293,11 @@ print(np.array_equal(result, a) and result.shape == a.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "expand_dims then squeeze should be identity");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "expand_dims then squeeze should be identity"
+    );
     Ok(())
 }
 
@@ -289,6 +329,87 @@ print(np.array_equal(swap_result, transpose_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "swapaxes(0,1) should equal transpose for 2d");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "swapaxes(0,1) should equal transpose for 2d"
+    );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Matrix and array-API shape helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn shape_size_count_astype_and_cumulative_helpers_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(12, dtype=np.int16).reshape(3, 4)
+cast_expected = np.astype(a, np.float32)
+cast_result = fnp.astype(a, np.float32)
+cumsum_expected = np.cumulative_sum(a, axis=1)
+cumsum_result = fnp.cumulative_sum(a, axis=1)
+cumprod_expected = np.cumulative_prod(a + 1, axis=0)
+cumprod_result = fnp.cumulative_prod(a + 1, axis=0)
+match = (
+    fnp.shape(a) == np.shape(a)
+    and fnp.size_count(a) == np.size(a)
+    and fnp.size_count(a, axis=1) == np.size(a, axis=1)
+    and cast_result.dtype == cast_expected.dtype
+    and np.array_equal(cast_result, cast_expected)
+    and np.array_equal(cumsum_result, cumsum_expected)
+    and np.array_equal(cumprod_result, cumprod_expected)
+)
+print(match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "shape/size_count/astype/cumulative helpers should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn asmatrix_bmat_matvec_and_vecmat_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+matrix_input = np.arange(6).reshape(2, 3)
+asmatrix_expected = np.asmatrix(matrix_input)
+asmatrix_result = fnp.asmatrix(matrix_input)
+block_parts = [
+    [np.eye(2, dtype=int), np.ones((2, 1), dtype=int)],
+    [np.zeros((1, 2), dtype=int), np.array([[5]], dtype=int)],
+]
+bmat_expected = np.bmat(block_parts)
+bmat_result = fnp.bmat(block_parts)
+vec = np.array([2, 3, 5])
+mat = np.arange(6).reshape(2, 3)
+matvec_expected = np.matvec(mat, vec)
+matvec_result = fnp.matvec(mat, vec)
+vecmat_expected = np.vecmat(vec, mat.T)
+vecmat_result = fnp.vecmat(vec, mat.T)
+match = (
+    isinstance(asmatrix_result, np.matrix)
+    and isinstance(bmat_result, np.matrix)
+    and np.array_equal(asmatrix_result, asmatrix_expected)
+    and np.array_equal(bmat_result, bmat_expected)
+    and np.array_equal(matvec_result, matvec_expected)
+    and np.array_equal(vecmat_result, vecmat_expected)
+)
+print(match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asmatrix/bmat/matvec/vecmat should match numpy"
+    );
     Ok(())
 }
