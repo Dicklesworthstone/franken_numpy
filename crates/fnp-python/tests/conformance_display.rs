@@ -174,6 +174,74 @@ print("array(" in repr_result and "array(" not in str_result)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "array_str and array_repr should differ");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "array_str and array_repr should differ"
+    );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// array2string and display configuration
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn array2string_printoptions_and_set_printoptions_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1.23456, 2000.0], [np.nan, -0.0]])
+original = np.get_printoptions()
+try:
+    with np.printoptions(precision=2, suppress=True, linewidth=32):
+        expected = np.array2string(a, separator=", ")
+    with fnp.printoptions(precision=2, suppress=True, linewidth=32):
+        result = fnp.array2string(a, separator=", ")
+
+    fnp.set_printoptions(precision=3, threshold=4, edgeitems=1)
+    ours = {key: np.get_printoptions()[key] for key in ["precision", "threshold", "edgeitems"]}
+    np.set_printoptions(**original)
+    np.set_printoptions(precision=3, threshold=4, edgeitems=1)
+    expected_options = {
+        key: np.get_printoptions()[key]
+        for key in ["precision", "threshold", "edgeitems"]
+    }
+    print(result == expected and ours == expected_options)
+finally:
+    np.set_printoptions(**original)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "array2string/printoptions/set_printoptions should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn setbufsize_and_get_include_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+original_size = np.setbufsize(8192)
+try:
+    ours_old_size = fnp.setbufsize(16384)
+    np.setbufsize(8192)
+    expected_old_size = np.setbufsize(16384)
+    include_match = fnp.get_include() == np.get_include()
+    print(ours_old_size == expected_old_size and include_match)
+finally:
+    np.setbufsize(original_size)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "setbufsize/get_include should match numpy"
+    );
     Ok(())
 }

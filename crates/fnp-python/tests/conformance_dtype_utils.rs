@@ -52,7 +52,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "broadcast_shapes basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_shapes basic should match numpy"
+    );
     Ok(())
 }
 
@@ -67,7 +71,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "broadcast_shapes scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_shapes scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -82,7 +90,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "broadcast_shapes multiple should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_shapes multiple should match numpy"
+    );
     Ok(())
 }
 
@@ -101,7 +113,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "can_cast int to float should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "can_cast int to float should match numpy"
+    );
     Ok(())
 }
 
@@ -116,7 +132,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "can_cast float to int should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "can_cast float to int should match numpy"
+    );
     Ok(())
 }
 
@@ -131,7 +151,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "can_cast same type should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "can_cast same type should match numpy"
+    );
     Ok(())
 }
 
@@ -146,7 +170,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "can_cast with casting should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "can_cast with casting should match numpy"
+    );
     Ok(())
 }
 
@@ -167,7 +195,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "common_type int+float should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "common_type int+float should match numpy"
+    );
     Ok(())
 }
 
@@ -184,7 +216,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "common_type floats should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "common_type floats should match numpy"
+    );
     Ok(())
 }
 
@@ -203,7 +239,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "promote_types int+float should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "promote_types int+float should match numpy"
+    );
     Ok(())
 }
 
@@ -218,7 +258,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "promote_types ints should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "promote_types ints should match numpy"
+    );
     Ok(())
 }
 
@@ -233,7 +277,91 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "promote_types same should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "promote_types same should match numpy"
+    );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// dtype predicates and datetime dtype helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn isdtype_issubdtype_isfortran_and_isnat_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+isdtype_cases = [
+    (np.dtype("int32"), "integral"),
+    (np.dtype("uint64"), "unsigned integer"),
+    (np.dtype("float64"), "real floating"),
+    (np.dtype("complex128"), "complex floating"),
+    (np.dtype("bool"), "bool"),
+]
+issubdtype_cases = [
+    (np.int32, np.integer),
+    (np.float64, np.floating),
+    (np.complex128, np.number),
+    (np.bool_, np.integer),
+]
+c_array = np.arange(6).reshape(2, 3)
+f_array = np.asfortranarray(c_array)
+dates = np.array(["NaT", "2024-01-02", "2024-01-03"], dtype="datetime64[D]")
+durations = np.array(["NaT", 1, 2], dtype="timedelta64[D]")
+match = (
+    all(fnp.isdtype(dtype, kind) == np.isdtype(dtype, kind) for dtype, kind in isdtype_cases)
+    and all(fnp.issubdtype(lhs, rhs) == np.issubdtype(lhs, rhs) for lhs, rhs in issubdtype_cases)
+    and fnp.isfortran(c_array) == np.isfortran(c_array)
+    and fnp.isfortran(f_array) == np.isfortran(f_array)
+    and np.array_equal(fnp.isnat(dates), np.isnat(dates))
+    and np.array_equal(fnp.isnat(durations), np.isnat(durations))
+)
+print(match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isdtype/issubdtype/isfortran/isnat should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn datetime_data_and_datetime_as_string_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+dates = np.array(["2024-01-02T03:04:05.123", "NaT"], dtype="datetime64[ms]")
+dtypes = [
+    np.dtype("datetime64[ms]"),
+    np.dtype("datetime64[D]"),
+    np.dtype("timedelta64[us]"),
+]
+match = (
+    all(fnp.datetime_data(dtype) == np.datetime_data(dtype) for dtype in dtypes)
+    and np.array_equal(
+        fnp.datetime_as_string(dates, unit="ms"),
+        np.datetime_as_string(dates, unit="ms"),
+    )
+    and np.array_equal(
+        fnp.datetime_as_string(dates, unit="s", timezone="UTC"),
+        np.datetime_as_string(dates, unit="s", timezone="UTC"),
+    )
+)
+print(match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "datetime_data/datetime_as_string should match numpy"
+    );
     Ok(())
 }
 
@@ -335,6 +463,10 @@ print(can == True and promoted == np.dtype('float64'))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "can_cast implies compatible promotion");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "can_cast implies compatible promotion"
+    );
     Ok(())
 }

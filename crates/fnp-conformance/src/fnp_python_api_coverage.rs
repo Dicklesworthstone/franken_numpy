@@ -711,11 +711,6 @@ fn function_exclusion(name: &str) -> Option<FnpPythonApiExclusion> {
             "flat_namespace_alias",
             "flat numpy.linalg alias; canonical nested linalg surface carries conformance evidence",
         ))
-    } else if DISPLAY_CONFIG_DTYPE_GAPS.contains(&name) {
-        Some((
-            "tracked_display_config_dtype_gap",
-            "known fnp-python display/config/dtype coverage gap; tracked by franken_numpy-xhcvz",
-        ))
     } else if MASKED_HELPER_GAPS.contains(&name) {
         Some((
             "tracked_masked_helper_gap",
@@ -735,20 +730,6 @@ fn function_exclusion(name: &str) -> Option<FnpPythonApiExclusion> {
         reason: reason.1.to_string(),
     })
 }
-
-const DISPLAY_CONFIG_DTYPE_GAPS: &[&str] = &[
-    "array2string",
-    "datetime_as_string",
-    "datetime_data",
-    "get_include",
-    "isdtype",
-    "isfortran",
-    "isnat",
-    "issubdtype",
-    "printoptions",
-    "set_printoptions",
-    "setbufsize",
-];
 
 const MASKED_HELPER_GAPS: &[&str] = &[
     "common_fill_value",
