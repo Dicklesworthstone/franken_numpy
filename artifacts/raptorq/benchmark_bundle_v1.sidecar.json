@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "bundle_id": "benchmark_bundle_v1",
-  "generated_at_unix_ms": 1776481263952,
+  "generated_at_unix_ms": 1778226800519,
   "source_hash": "d36bac54f3f15f1e58c23c837175f3b5f228f376d1fd01d3d0d2294e3e1552b9",
   "source_size": 16138,
   "object_id_u128": 1002,
@@ -12,6 +12,8 @@
   "source_symbols": 64,
   "repair_symbols": 16,
   "total_symbols": 80,
+  "encoding_parallelism": 1,
+  "decoding_parallelism": 1,
   "symbols": [
     {
       "sbn": 0,

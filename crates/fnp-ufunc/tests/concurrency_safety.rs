@@ -424,10 +424,10 @@ fn concurrent_view_creation_with_read_write_no_race() {
                             let _ = sliced.item(&[j % 100]);
                         }
                         1 => {
-                            let _ = v.item(&[((i * 20 + j) % 200) as i64]);
+                            let _ = v.item(&[((i * 20 + j) % 200)]);
                         }
                         _ => {
-                            let _ = v.itemset(&[((i * 20 + j) % 200) as i64], 999.0);
+                            let _ = v.itemset(&[((i * 20 + j) % 200)], 999.0);
                         }
                     }
                 }
@@ -455,7 +455,9 @@ fn concurrent_view_to_array_with_slice_no_race() {
             let completed = Arc::clone(&completed);
             thread::spawn(move || {
                 for _ in 0..10 {
-                    let sliced = v.slice_axis(0, Some((i * 5) as i64), Some(((i + 1) * 5) as i64), 1).unwrap();
+                    let sliced = v
+                        .slice_axis(0, Some((i * 5) as i64), Some(((i + 1) * 5) as i64), 1)
+                        .unwrap();
                     let owned = sliced.to_array().unwrap();
                     assert_eq!(owned.shape(), &[5]);
                 }
@@ -529,10 +531,9 @@ fn to_array_buffer_sidecar_consistency_under_contention() {
                 };
 
                 // buffer[i] as i64 should match sidecar[i] for small-integer indices
-                for i in 1..64 {
+                for (i, sidecar_val) in sidecar_vals.iter().enumerate().take(64).skip(1) {
                     let buffer_val = owned.item(&[i as i64]).expect("item");
-                    let sidecar_val = sidecar_vals[i];
-                    if buffer_val as i64 != sidecar_val {
+                    if buffer_val as i64 != *sidecar_val {
                         inconsistencies.fetch_add(1, Ordering::SeqCst);
                     }
                 }
@@ -628,13 +629,12 @@ fn itemset_cow_atomic_clone_no_buffer_sidecar_skew() {
 
                 // Check consistency: buffer[i] as i64 should match sidecar[i]
                 // for indices 2-63 (skip 0=i64::MAX anchor, 1=our write)
-                for i in 2..64 {
+                for (i, sidecar_val) in sidecar_vals.iter().enumerate().take(64).skip(2) {
                     let buffer_val = match owned.item(&[i as i64]) {
                         Ok(v) => v,
                         Err(_) => continue,
                     };
-                    let sidecar_val = sidecar_vals[i];
-                    if buffer_val as i64 != sidecar_val {
+                    if buffer_val as i64 != *sidecar_val {
                         inconsistencies.fetch_add(1, Ordering::SeqCst);
                     }
                 }
@@ -662,7 +662,7 @@ fn itemset_cow_atomic_clone_no_buffer_sidecar_skew() {
 fn poisoned_lock_error_handling_works() {
     // Verify that PoisonError can be recovered from using into_inner()
     // This tests the pattern used in fnp-ufunc for handling poisoned locks
-    use std::sync::{RwLock, PoisonError};
+    use std::sync::{PoisonError, RwLock};
 
     let lock = RwLock::new(vec![1.0, 2.0, 3.0]);
 
@@ -719,7 +719,10 @@ fn lock_ordering_sidecar_then_buffer_no_deadlock() {
     let initial: Vec<i64> = (0..100).map(|i| i64::MAX - i).collect();
     let arr = UFuncArray::from_storage(vec![100], ArrayStorage::I64(initial))
         .expect("create sidecar-backed array");
-    assert!(arr.has_integer_sidecar(), "need sidecar for lock ordering test");
+    assert!(
+        arr.has_integer_sidecar(),
+        "need sidecar for lock ordering test"
+    );
 
     let view = Arc::new(arr.shared_view().expect("shared view"));
     let completed = Arc::new(AtomicUsize::new(0));

@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use fnp_conformance::{HarnessConfig, SuiteReport, raptorq_artifacts};
+use fnp_conformance::{
+    HarnessConfig, SuiteReport,
+    raptorq_artifacts::{self, RaptorQParallelismConfig},
+};
 use serde::Serialize;
 use std::fs;
 use std::path::PathBuf;
@@ -35,6 +38,7 @@ struct ReliabilitySummary {
     flaky_failures: usize,
     flake_budget: usize,
     coverage_floor: f64,
+    expected_parallelism: Option<RaptorQParallelismConfig>,
     coverage_ratio: f64,
     diagnostics: Vec<ReliabilityDiagnostic>,
 }
@@ -53,6 +57,7 @@ struct GateOptions {
     retries: usize,
     flake_budget: usize,
     coverage_floor: f64,
+    parallelism: Option<RaptorQParallelismConfig>,
     report_path: Option<PathBuf>,
 }
 
@@ -71,7 +76,10 @@ fn run() -> Result<(), String> {
     let mut attempts = Vec::new();
 
     for attempt in 0..=options.retries {
-        let suite = raptorq_artifacts::run_raptorq_artifact_suite(&cfg)?;
+        let suite = raptorq_artifacts::run_raptorq_artifact_suite_with_parallelism(
+            &cfg,
+            options.parallelism,
+        )?;
         let suite_summary = summarize_suite(suite);
         let attempt_passed = suite_summary.case_count == suite_summary.pass_count
             && suite_summary.failures.is_empty();
@@ -149,6 +157,7 @@ fn run() -> Result<(), String> {
             flaky_failures,
             flake_budget: options.flake_budget,
             coverage_floor: options.coverage_floor,
+            expected_parallelism: options.parallelism,
             coverage_ratio,
             diagnostics,
         },
@@ -183,6 +192,7 @@ fn parse_args() -> Result<GateOptions, String> {
     let mut retries = 0usize;
     let mut flake_budget = 0usize;
     let mut coverage_floor = 1.0f64;
+    let mut parallelism: Option<RaptorQParallelismConfig> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -221,9 +231,18 @@ fn parse_args() -> Result<GateOptions, String> {
                     ));
                 }
             }
+            "--parallelism" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--parallelism requires a value".to_string())?;
+                let worker_count = value
+                    .parse::<usize>()
+                    .map_err(|err| format!("invalid --parallelism value '{value}': {err}"))?;
+                parallelism = Some(RaptorQParallelismConfig::from_worker_count(worker_count)?);
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run -p fnp-conformance --bin run_raptorq_gate -- [--report-path <path>] [--retries <n>] [--flake-budget <n>] [--coverage-floor <ratio>]"
+                    "Usage: cargo run -p fnp-conformance --bin run_raptorq_gate -- [--report-path <path>] [--retries <n>] [--flake-budget <n>] [--coverage-floor <ratio>] [--parallelism <n>]"
                 );
                 std::process::exit(0);
             }
@@ -235,6 +254,7 @@ fn parse_args() -> Result<GateOptions, String> {
         retries,
         flake_budget,
         coverage_floor,
+        parallelism,
         report_path,
     })
 }

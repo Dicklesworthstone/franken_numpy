@@ -1,10 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 cd /data/projects/franken_numpy
+PARALLELISM="${FNP_RAPTORQ_PARALLELISM:-1}"
 # Run the ufunc differential first so the report file is current
 # before computing the RaptorQ sidecar hash over bundle source files.
 cargo run -p fnp-conformance --bin run_ufunc_differential
-cargo run -p fnp-conformance --bin generate_raptorq_sidecars
+cargo run -p fnp-conformance --bin generate_raptorq_sidecars -- --parallelism "$PARALLELISM"
 # Copy to target dir so rch artifact retrieval picks them up
 mkdir -p /data/tmp/cargo-target/raptorq_out
 cp artifacts/raptorq/conformance_bundle_v1.sidecar.json /data/tmp/cargo-target/raptorq_out/

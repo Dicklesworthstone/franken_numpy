@@ -7,8 +7,8 @@
 //! dependencies. Each test verifies exact output matches expected values.
 
 use fnp_io::{
-    fromfile_text, fromstring, genfromtxt, loadtxt, loadtxt_unpack,
-    loadtxt_usecols, tofile_text, IOSupportedDType,
+    IOSupportedDType, fromfile_text, fromstring, genfromtxt, loadtxt, loadtxt_unpack,
+    loadtxt_usecols, tofile_text,
 };
 
 const EPSILON: f64 = 1e-14;
@@ -157,7 +157,11 @@ fn golden_loadtxt_usecols_multiple() {
     let input = "1 2 3 4\n5 6 7 8\n";
     let result = loadtxt_usecols(input, ' ', '#', 0, usize::MAX, Some(&[0, 2])).unwrap();
     let expected = vec![1.0, 3.0, 5.0, 7.0];
-    assert_close(&result.values, &expected, "loadtxt_usecols multiple columns");
+    assert_close(
+        &result.values,
+        &expected,
+        "loadtxt_usecols multiple columns",
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -192,7 +196,10 @@ fn golden_genfromtxt_with_missing_nan() {
     let input = "1 2 3\n4  6\n";
     let result = genfromtxt(input, ' ', '#', 0, f64::NAN).unwrap();
     assert!(result.values.len() >= 3);
-    assert!(approx_eq(result.values[0], 1.0), "first element should be 1.0");
+    assert!(
+        approx_eq(result.values[0], 1.0),
+        "first element should be 1.0"
+    );
 }
 
 #[test]
@@ -227,7 +234,7 @@ fn golden_fromstring_comma_sep() {
 fn golden_fromstring_scientific() {
     let input = b"1e-10 2e+5 3.14e0";
     let result = fromstring(input, IOSupportedDType::F64, " ").unwrap();
-    let expected = vec![1e-10, 2e5, 3.14];
+    let expected = vec![1e-10, 2e5, 314.0_f64 / 100.0];
     assert_close(&result, &expected, "fromstring scientific");
 }
 
@@ -276,9 +283,18 @@ fn golden_loadtxt_trailing_whitespace() {
 fn golden_loadtxt_inf_values() {
     let input = "inf -inf 0\n1 inf -inf\n";
     let result = loadtxt(input, ' ', '#', 0, usize::MAX).unwrap();
-    assert!(result.values[0].is_infinite() && result.values[0] > 0.0, "should be +inf");
-    assert!(result.values[1].is_infinite() && result.values[1] < 0.0, "should be -inf");
-    assert!(result.values[4].is_infinite() && result.values[4] > 0.0, "should be +inf");
+    assert!(
+        result.values[0].is_infinite() && result.values[0] > 0.0,
+        "should be +inf"
+    );
+    assert!(
+        result.values[1].is_infinite() && result.values[1] < 0.0,
+        "should be -inf"
+    );
+    assert!(
+        result.values[4].is_infinite() && result.values[4] > 0.0,
+        "should be +inf"
+    );
 }
 
 #[test]
@@ -287,7 +303,10 @@ fn golden_loadtxt_nan_values() {
     let result = loadtxt(input, ' ', '#', 0, usize::MAX).unwrap();
     assert!(result.values[0].is_nan(), "first element should be NaN");
     assert!(result.values[4].is_nan(), "fifth element should be NaN");
-    assert!(approx_eq(result.values[1], 1.0), "second element should be 1.0");
+    assert!(
+        approx_eq(result.values[1], 1.0),
+        "second element should be 1.0"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -3,8 +3,9 @@
 //! These benchmarks establish baselines for dtype promotion, casting checks,
 //! and type inference - all hot-path operations in array computations.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_dtype::{ArrayStorage, DType, can_cast, common_type, min_scalar_type, result_type};
+use std::hint::black_box;
 
 fn bench_result_type(c: &mut Criterion) {
     let mut group = c.benchmark_group("result_type");
@@ -23,17 +24,21 @@ fn bench_result_type(c: &mut Criterion) {
     }
 
     let triple = vec![DType::I32, DType::F32, DType::U16];
-    group.bench_function("triple", |b| {
-        b.iter(|| result_type(black_box(&triple)))
-    });
+    group.bench_function("triple", |b| b.iter(|| result_type(black_box(&triple))));
 
     let many: Vec<DType> = vec![
-        DType::Bool, DType::I8, DType::I16, DType::I32, DType::I64,
-        DType::U8, DType::U16, DType::U32, DType::U64, DType::F32,
+        DType::Bool,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::F32,
     ];
-    group.bench_function("ten_types", |b| {
-        b.iter(|| result_type(black_box(&many)))
-    });
+    group.bench_function("ten_types", |b| b.iter(|| result_type(black_box(&many))));
 
     group.finish();
 }
@@ -45,14 +50,23 @@ fn bench_can_cast(c: &mut Criterion) {
         ("i32_to_f64_safe", DType::I32, DType::F64, "safe"),
         ("f64_to_i32_unsafe", DType::F64, DType::I32, "unsafe"),
         ("u8_to_i16_safe", DType::U8, DType::I16, "safe"),
-        ("complex_to_f64_same_kind", DType::Complex128, DType::F64, "same_kind"),
+        (
+            "complex_to_f64_same_kind",
+            DType::Complex128,
+            DType::F64,
+            "same_kind",
+        ),
         ("bool_to_i64_safe", DType::Bool, DType::I64, "safe"),
     ];
 
     for (name, from, to, casting) in &cases {
-        group.bench_with_input(BenchmarkId::new("check", name), &(*from, *to, *casting), |b, (from, to, casting)| {
-            b.iter(|| can_cast(black_box(*from), black_box(*to), black_box(casting)))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("check", name),
+            &(*from, *to, *casting),
+            |b, (from, to, casting)| {
+                b.iter(|| can_cast(black_box(*from), black_box(*to), black_box(casting)))
+            },
+        );
     }
 
     group.finish();
@@ -85,7 +99,10 @@ fn bench_common_type(c: &mut Criterion) {
     let pairs = [
         ("f32_f64", vec![DType::F32, DType::F64]),
         ("i32_f32", vec![DType::I32, DType::F32]),
-        ("complex64_complex128", vec![DType::Complex64, DType::Complex128]),
+        (
+            "complex64_complex128",
+            vec![DType::Complex64, DType::Complex128],
+        ),
     ];
 
     for (name, dtypes) in &pairs {
@@ -127,18 +144,22 @@ fn bench_array_storage_cast(c: &mut Criterion) {
         let i32_data: Vec<i32> = (0..size).collect();
         let storage = ArrayStorage::I32(i32_data);
 
-        group.bench_with_input(BenchmarkId::new("i32_to_f64", size), &storage, |b, storage| {
-            b.iter(|| storage.cast_to(black_box(DType::F64)))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("i32_to_f64", size),
+            &storage,
+            |b, storage| b.iter(|| storage.cast_to(black_box(DType::F64))),
+        );
     }
 
     for &size in &sizes {
         let f64_data: Vec<f64> = (0..size).map(|x| x as f64 * 0.1).collect();
         let storage = ArrayStorage::F64(f64_data);
 
-        group.bench_with_input(BenchmarkId::new("f64_to_i32", size), &storage, |b, storage| {
-            b.iter(|| storage.cast_to(black_box(DType::I32)))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("f64_to_i32", size),
+            &storage,
+            |b, storage| b.iter(|| storage.cast_to(black_box(DType::I32))),
+        );
     }
 
     group.finish();

@@ -14,7 +14,40 @@ use sha2::{Digest, Sha256};
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+pub const MAX_RAPTORQ_PARALLELISM: usize = 64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RaptorQParallelismConfig {
+    pub worker_count: usize,
+}
+
+impl RaptorQParallelismConfig {
+    pub const fn serial() -> Self {
+        Self { worker_count: 1 }
+    }
+
+    pub fn from_worker_count(worker_count: usize) -> Result<Self, String> {
+        if worker_count == 0 {
+            return Err("raptorq parallelism must be at least 1".to_string());
+        }
+        if worker_count > MAX_RAPTORQ_PARALLELISM {
+            return Err(format!(
+                "raptorq parallelism {worker_count} exceeds max {MAX_RAPTORQ_PARALLELISM}"
+            ));
+        }
+        Ok(Self { worker_count })
+    }
+
+    pub fn available() -> Self {
+        let available = thread::available_parallelism().map_or(1, usize::from);
+        Self {
+            worker_count: available.clamp(1, MAX_RAPTORQ_PARALLELISM),
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleFilePayload {
@@ -56,6 +89,8 @@ pub struct RaptorQSidecar {
     pub source_symbols: u16,
     pub repair_symbols: usize,
     pub total_symbols: usize,
+    pub encoding_parallelism: usize,
+    pub decoding_parallelism: usize,
     pub symbols: Vec<RaptorQSymbolRecord>,
 }
 
@@ -72,6 +107,7 @@ pub struct ScrubReport {
     pub symbols_total: usize,
     pub symbols_used_full: usize,
     pub symbols_used_recovery: usize,
+    pub decoding_parallelism: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +121,28 @@ pub struct DecodeProofArtifact {
     pub expected_hash: String,
     pub recovered_hash: Option<String>,
     pub error: Option<String>,
+    pub decoding_parallelism: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct RaptorQBundleReportPaths<'a> {
+    pub sidecar_path: &'a Path,
+    pub scrub_report_path: &'a Path,
+    pub decode_proof_path: &'a Path,
+}
+
+impl<'a> RaptorQBundleReportPaths<'a> {
+    pub const fn new(
+        sidecar_path: &'a Path,
+        scrub_report_path: &'a Path,
+        decode_proof_path: &'a Path,
+    ) -> Self {
+        Self {
+            sidecar_path,
+            scrub_report_path,
+            decode_proof_path,
+        }
+    }
 }
 
 fn now_unix_ms() -> u128 {
@@ -150,6 +208,22 @@ pub fn generate_sidecar_from_payload(
     sidecar_path: &Path,
     object_seed: u64,
 ) -> Result<RaptorQSidecar, String> {
+    generate_sidecar_from_payload_with_config(
+        bundle_id,
+        payload,
+        sidecar_path,
+        object_seed,
+        RaptorQParallelismConfig::serial(),
+    )
+}
+
+pub fn generate_sidecar_from_payload_with_config(
+    bundle_id: &str,
+    payload: &[u8],
+    sidecar_path: &Path,
+    object_seed: u64,
+    parallelism: RaptorQParallelismConfig,
+) -> Result<RaptorQSidecar, String> {
     let symbol_size = 256u16;
     let max_block_size = payload.len().max(usize::from(symbol_size));
 
@@ -157,8 +231,8 @@ pub fn generate_sidecar_from_payload(
         repair_overhead: 1.25,
         max_block_size,
         symbol_size,
-        encoding_parallelism: 1,
-        decoding_parallelism: 1,
+        encoding_parallelism: parallelism.worker_count,
+        decoding_parallelism: parallelism.worker_count,
     };
 
     let source_symbol_count = payload.len().div_ceil(usize::from(symbol_size)).max(1);
@@ -193,6 +267,7 @@ pub fn generate_sidecar_from_payload(
             data_b64: BASE64.encode(symbol.data()),
         });
     }
+    symbol_records.sort_by_key(|record| (record.sbn, record.esi, symbol_kind_rank(&record.kind)));
 
     let stats = pipeline.stats();
     let source_blocks = u8::try_from(stats.blocks)
@@ -214,6 +289,8 @@ pub fn generate_sidecar_from_payload(
         source_symbols,
         repair_symbols: stats.repair_symbols,
         total_symbols: symbol_records.len(),
+        encoding_parallelism: config.encoding_parallelism,
+        decoding_parallelism: config.decoding_parallelism,
         symbols: symbol_records,
     };
 
@@ -228,6 +305,14 @@ pub fn generate_sidecar_from_payload(
         .map_err(|err| format!("failed writing {}: {err}", sidecar_path.display()))?;
 
     Ok(sidecar)
+}
+
+fn symbol_kind_rank(kind: &str) -> u8 {
+    match kind {
+        "source" => 0,
+        "repair" => 1,
+        _ => u8::MAX,
+    }
 }
 
 fn decode_payload_from_records(
@@ -268,6 +353,13 @@ fn decode_payload_from_records(
         let data = BASE64
             .decode(&record.data_b64)
             .map_err(|err| format!("base64 decode failed: {err}"))?;
+        let actual_hash = sha256_hex(&data);
+        if actual_hash != record.data_sha256 {
+            return Err(format!(
+                "symbol hash mismatch sbn={} esi={} kind={} expected={} actual={}",
+                record.sbn, record.esi, record.kind, record.data_sha256, actual_hash
+            ));
+        }
 
         let symbol = Symbol::new(SymbolId::new(object_id, record.sbn, record.esi), data, kind);
         let auth = AuthenticatedSymbol::new_verified(symbol, AuthenticationTag::zero());
@@ -285,6 +377,20 @@ pub fn scrub_and_write_reports(
     sidecar_path: &Path,
     scrub_report_path: &Path,
     decode_proof_path: &Path,
+) -> Result<(ScrubReport, DecodeProofArtifact), String> {
+    scrub_and_write_reports_with_config(
+        sidecar_path,
+        scrub_report_path,
+        decode_proof_path,
+        RaptorQParallelismConfig::serial(),
+    )
+}
+
+pub fn scrub_and_write_reports_with_config(
+    sidecar_path: &Path,
+    scrub_report_path: &Path,
+    decode_proof_path: &Path,
+    parallelism: RaptorQParallelismConfig,
 ) -> Result<(ScrubReport, DecodeProofArtifact), String> {
     let raw = fs::read_to_string(sidecar_path)
         .map_err(|err| format!("failed reading {}: {err}", sidecar_path.display()))?;
@@ -361,6 +467,7 @@ pub fn scrub_and_write_reports(
         symbols_total: sidecar.total_symbols,
         symbols_used_full: sidecar.symbols.len(),
         symbols_used_recovery: recovery_records.len(),
+        decoding_parallelism: parallelism.worker_count,
     };
 
     let decode_proof = DecodeProofArtifact {
@@ -373,6 +480,7 @@ pub fn scrub_and_write_reports(
         expected_hash: sidecar.source_hash,
         recovered_hash,
         error: recovery_error,
+        decoding_parallelism: parallelism.worker_count,
     };
 
     if let Some(parent) = scrub_report_path.parent() {
@@ -402,9 +510,38 @@ pub fn generate_bundle_sidecar_and_reports(
     decode_proof_path: &Path,
     object_seed: u64,
 ) -> Result<(), String> {
+    generate_bundle_sidecar_and_reports_with_config(
+        bundle_id,
+        repo_root,
+        files,
+        RaptorQBundleReportPaths::new(sidecar_path, scrub_report_path, decode_proof_path),
+        object_seed,
+        RaptorQParallelismConfig::serial(),
+    )
+}
+
+pub fn generate_bundle_sidecar_and_reports_with_config(
+    bundle_id: &str,
+    repo_root: &Path,
+    files: &[PathBuf],
+    report_paths: RaptorQBundleReportPaths<'_>,
+    object_seed: u64,
+    parallelism: RaptorQParallelismConfig,
+) -> Result<(), String> {
     let payload = build_bundle_payload(bundle_id, repo_root, files)?;
-    let _sidecar = generate_sidecar_from_payload(bundle_id, &payload, sidecar_path, object_seed)?;
-    let _ = scrub_and_write_reports(sidecar_path, scrub_report_path, decode_proof_path)?;
+    let _sidecar = generate_sidecar_from_payload_with_config(
+        bundle_id,
+        &payload,
+        report_paths.sidecar_path,
+        object_seed,
+        parallelism,
+    )?;
+    let _ = scrub_and_write_reports_with_config(
+        report_paths.sidecar_path,
+        report_paths.scrub_report_path,
+        report_paths.decode_proof_path,
+        parallelism,
+    )?;
     Ok(())
 }
 
@@ -448,6 +585,74 @@ fn default_bundle_specs(repo_root: &Path) -> Vec<BundleArtifactSpec> {
     ]
 }
 
+pub fn generate_default_bundle_sidecars_and_reports(
+    repo_root: &Path,
+    parallelism: RaptorQParallelismConfig,
+) -> Result<(), String> {
+    let specs = default_bundle_specs(repo_root)
+        .into_iter()
+        .enumerate()
+        .collect::<Vec<_>>();
+    if parallelism.worker_count == 1 || specs.len() <= 1 {
+        for (idx, spec) in &specs {
+            generate_bundle_sidecar_and_reports_with_config(
+                spec.bundle_id,
+                repo_root,
+                &spec.source_files,
+                RaptorQBundleReportPaths::new(
+                    &spec.sidecar_path,
+                    &spec.scrub_report_path,
+                    &spec.decode_proof_path,
+                ),
+                1001 + *idx as u64,
+                parallelism,
+            )?;
+        }
+        return Ok(());
+    }
+
+    let workers = parallelism.worker_count.min(specs.len());
+    let mut pending = specs.into_iter();
+    loop {
+        let batch = pending.by_ref().take(workers).collect::<Vec<_>>();
+        if batch.is_empty() {
+            break;
+        }
+
+        thread::scope(|scope| {
+            let handles = batch
+                .into_iter()
+                .map(|(idx, spec)| {
+                    scope.spawn(move || {
+                        generate_bundle_sidecar_and_reports_with_config(
+                            spec.bundle_id,
+                            repo_root,
+                            &spec.source_files,
+                            RaptorQBundleReportPaths::new(
+                                &spec.sidecar_path,
+                                &spec.scrub_report_path,
+                                &spec.decode_proof_path,
+                            ),
+                            1001 + idx as u64,
+                            parallelism,
+                        )
+                    })
+                })
+                .collect::<Vec<_>>();
+
+            for handle in handles {
+                handle
+                    .join()
+                    .map_err(|_| "raptorq worker thread panicked".to_string())??;
+            }
+
+            Ok::<(), String>(())
+        })?;
+    }
+
+    Ok(())
+}
+
 fn modified_unix_ms(path: &Path) -> Result<u128, String> {
     let metadata =
         fs::metadata(path).map_err(|err| format!("failed stat {}: {err}", path.display()))?;
@@ -480,6 +685,13 @@ fn record_check(report: &mut SuiteReport, passed: bool, failure: String) {
 }
 
 pub fn run_raptorq_artifact_suite(config: &HarnessConfig) -> Result<SuiteReport, String> {
+    run_raptorq_artifact_suite_with_parallelism(config, None)
+}
+
+pub fn run_raptorq_artifact_suite_with_parallelism(
+    config: &HarnessConfig,
+    expected_parallelism: Option<RaptorQParallelismConfig>,
+) -> Result<SuiteReport, String> {
     let repo_root = config
         .contract_root
         .parent()
@@ -676,6 +888,45 @@ pub fn run_raptorq_artifact_suite(config: &HarnessConfig) -> Result<SuiteReport,
         );
         record_check(
             &mut report,
+            RaptorQParallelismConfig::from_worker_count(sidecar.encoding_parallelism).is_ok(),
+            format!(
+                "{}: sidecar encoding_parallelism out of bounds: {}",
+                spec.bundle_id, sidecar.encoding_parallelism
+            ),
+        );
+        record_check(
+            &mut report,
+            RaptorQParallelismConfig::from_worker_count(sidecar.decoding_parallelism).is_ok(),
+            format!(
+                "{}: sidecar decoding_parallelism out of bounds: {}",
+                spec.bundle_id, sidecar.decoding_parallelism
+            ),
+        );
+        record_check(
+            &mut report,
+            sidecar.decoding_parallelism == scrub.decoding_parallelism
+                && scrub.decoding_parallelism == proof.decoding_parallelism,
+            format!(
+                "{}: decoding parallelism metadata mismatch sidecar={} scrub={} proof={}",
+                spec.bundle_id,
+                sidecar.decoding_parallelism,
+                scrub.decoding_parallelism,
+                proof.decoding_parallelism
+            ),
+        );
+        if let Some(expected) = expected_parallelism {
+            record_check(
+                &mut report,
+                sidecar.encoding_parallelism == expected.worker_count
+                    && sidecar.decoding_parallelism == expected.worker_count,
+                format!(
+                    "{}: sidecar parallelism metadata does not match expected {}",
+                    spec.bundle_id, expected.worker_count
+                ),
+            );
+        }
+        record_check(
+            &mut report,
             sidecar.bundle_id == spec.bundle_id,
             format!(
                 "{}: sidecar bundle_id mismatch actual={}",
@@ -805,8 +1056,10 @@ pub fn run_raptorq_artifact_suite(config: &HarnessConfig) -> Result<SuiteReport,
 #[cfg(test)]
 mod tests {
     use super::{
-        RaptorQSidecar, generate_bundle_sidecar_and_reports, generate_sidecar_from_payload,
-        scrub_and_write_reports,
+        DecodeProofArtifact, MAX_RAPTORQ_PARALLELISM, RaptorQBundleReportPaths,
+        RaptorQParallelismConfig, RaptorQSidecar, ScrubReport, generate_bundle_sidecar_and_reports,
+        generate_bundle_sidecar_and_reports_with_config, generate_sidecar_from_payload,
+        generate_sidecar_from_payload_with_config, scrub_and_write_reports,
     };
     use base64::Engine as _;
     use std::fs;
@@ -816,6 +1069,18 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         std::env::temp_dir().join(format!("fnp_{name}_{ts}"))
+    }
+
+    #[test]
+    fn parallelism_config_rejects_invalid_worker_counts() {
+        assert!(RaptorQParallelismConfig::from_worker_count(0).is_err());
+        assert!(RaptorQParallelismConfig::from_worker_count(MAX_RAPTORQ_PARALLELISM + 1).is_err());
+        assert_eq!(
+            RaptorQParallelismConfig::from_worker_count(MAX_RAPTORQ_PARALLELISM)
+                .expect("max worker count should be accepted")
+                .worker_count,
+            MAX_RAPTORQ_PARALLELISM
+        );
     }
 
     #[test]
@@ -853,6 +1118,99 @@ mod tests {
     }
 
     #[test]
+    fn sidecar_records_are_stable_across_worker_counts() {
+        let payload = b"parallelism-stability-payload-".repeat(128);
+        let serial_path = temp_path("serial_sidecar.json");
+        let parallel_path = temp_path("parallel_sidecar.json");
+        let parallelism =
+            RaptorQParallelismConfig::from_worker_count(4).expect("parallelism config");
+
+        let serial = generate_sidecar_from_payload_with_config(
+            "stable_bundle",
+            &payload,
+            &serial_path,
+            77,
+            RaptorQParallelismConfig::serial(),
+        )
+        .expect("serial sidecar generation should succeed");
+        let parallel = generate_sidecar_from_payload_with_config(
+            "stable_bundle",
+            &payload,
+            &parallel_path,
+            77,
+            parallelism,
+        )
+        .expect("parallel sidecar generation should succeed");
+
+        assert_eq!(serial.source_hash, parallel.source_hash);
+        assert_eq!(serial.source_size, parallel.source_size);
+        assert_eq!(serial.source_blocks, parallel.source_blocks);
+        assert_eq!(serial.source_symbols, parallel.source_symbols);
+        assert_eq!(serial.repair_symbols, parallel.repair_symbols);
+        assert_eq!(serial.total_symbols, parallel.total_symbols);
+        assert_eq!(serial.symbols.len(), parallel.symbols.len());
+        assert_eq!(
+            serial
+                .symbols
+                .iter()
+                .map(|record| (
+                    record.sbn,
+                    record.esi,
+                    record.kind.as_str(),
+                    record.data_sha256.as_str()
+                ))
+                .collect::<Vec<_>>(),
+            parallel
+                .symbols
+                .iter()
+                .map(|record| (
+                    record.sbn,
+                    record.esi,
+                    record.kind.as_str(),
+                    record.data_sha256.as_str()
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(serial.encoding_parallelism, 1);
+        assert_eq!(serial.decoding_parallelism, 1);
+        assert_eq!(parallel.encoding_parallelism, 4);
+        assert_eq!(parallel.decoding_parallelism, 4);
+    }
+
+    #[test]
+    fn scrub_reports_record_configured_decode_parallelism() {
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let file = temp_path("parallel_report_bundle.txt");
+        fs::write(&file, "parallel-report").expect("write fixture");
+
+        let sidecar = temp_path("parallel_report_sidecar.json");
+        let scrub = temp_path("parallel_report_scrub.json");
+        let proof = temp_path("parallel_report_proof.json");
+        let parallelism =
+            RaptorQParallelismConfig::from_worker_count(3).expect("parallelism config");
+
+        generate_bundle_sidecar_and_reports_with_config(
+            "parallel_report_bundle",
+            &repo_root,
+            &[file],
+            RaptorQBundleReportPaths::new(&sidecar, &scrub, &proof),
+            123,
+            parallelism,
+        )
+        .expect("parallel sidecar generation should succeed");
+
+        let scrub_raw = fs::read_to_string(&scrub).expect("read scrub");
+        let proof_raw = fs::read_to_string(&proof).expect("read proof");
+        let scrub: ScrubReport = serde_json::from_str(&scrub_raw).expect("parse scrub");
+        let proof: DecodeProofArtifact = serde_json::from_str(&proof_raw).expect("parse proof");
+
+        assert_eq!(scrub.status, "ok");
+        assert_eq!(scrub.decoding_parallelism, 3);
+        assert_eq!(proof.decoding_parallelism, 3);
+        assert!(proof.recovery_success);
+    }
+
+    #[test]
     fn tampered_sidecar_fails_scrub() {
         let payload = b"tamper-me-payload";
         let sidecar_path = temp_path("tamper_sidecar.json");
@@ -879,9 +1237,9 @@ mod tests {
             serde_json::to_string_pretty(&parsed).expect("serialize tampered sidecar");
         fs::write(&sidecar_path, tampered_raw).expect("write tampered sidecar");
 
-        let (scrub, _proof) = scrub_and_write_reports(&sidecar_path, &scrub_path, &proof_path)
-            .expect("scrub should produce report");
-        assert_eq!(scrub.status, "failed");
+        let err = scrub_and_write_reports(&sidecar_path, &scrub_path, &proof_path)
+            .expect_err("tampered symbol payload should fail closed");
+        assert!(err.contains("symbol hash mismatch"));
 
         let _ = fs::remove_file(sidecar_path);
         let _ = fs::remove_file(scrub_path);

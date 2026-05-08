@@ -17,7 +17,10 @@ fn golden_pcg64_seed_42_deterministic() {
     let first_run: Vec<u64> = (0..10).map(|_| rng1.next_u64()).collect();
     let second_run: Vec<u64> = (0..10).map(|_| rng2.next_u64()).collect();
 
-    assert_eq!(first_run, second_run, "PCG64 should be deterministic for same seed");
+    assert_eq!(
+        first_run, second_run,
+        "PCG64 should be deterministic for same seed"
+    );
 }
 
 #[test]
@@ -28,7 +31,10 @@ fn golden_pcg64_seed_0_distinct_from_seed_1() {
     let vals0: Vec<u64> = (0..5).map(|_| rng0.next_u64()).collect();
     let vals1: Vec<u64> = (0..5).map(|_| rng1.next_u64()).collect();
 
-    assert_ne!(vals0, vals1, "different seeds should produce different sequences");
+    assert_ne!(
+        vals0, vals1,
+        "different seeds should produce different sequences"
+    );
 }
 
 #[test]
@@ -36,7 +42,7 @@ fn golden_pcg64_f64_in_unit_interval() {
     let mut rng = Pcg64Rng::from_u64_seed(12345).expect("seed");
     for _ in 0..1000 {
         let v = rng.next_f64();
-        assert!(v >= 0.0 && v < 1.0, "f64 output {v} not in [0, 1)");
+        assert!((0.0..1.0).contains(&v), "f64 output {v} not in [0, 1)");
     }
 }
 
@@ -71,11 +77,14 @@ fn golden_pcg64dxsm_state_roundtrip() {
     let expected: Vec<u64> = (0..10).map(|_| rng.next_u64()).collect();
 
     // Restore from state
-    let mut restored = Pcg64DxsmRng::from_state_entries(&state_entries)
-        .expect("state restoration should succeed");
+    let mut restored =
+        Pcg64DxsmRng::from_state_entries(&state_entries).expect("state restoration should succeed");
     let actual: Vec<u64> = (0..10).map(|_| restored.next_u64()).collect();
 
-    assert_eq!(expected, actual, "state roundtrip should preserve RNG position");
+    assert_eq!(
+        expected, actual,
+        "state roundtrip should preserve RNG position"
+    );
 }
 
 #[test]
@@ -146,7 +155,10 @@ fn golden_seed_sequence_spawn_children_distinct() {
     let run1: Vec<u64> = (0..10).map(|_| rng1.next_u64()).collect();
     let run2: Vec<u64> = (0..10).map(|_| rng2.next_u64()).collect();
 
-    assert_ne!(run1, run2, "spawned children should produce distinct sequences");
+    assert_ne!(
+        run1, run2,
+        "spawned children should produce distinct sequences"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -159,7 +171,11 @@ fn golden_fill_u64_correct_length() {
 
     for len in [0, 1, 10, 100, 1000] {
         let filled = rng.fill_u64(len);
-        assert_eq!(filled.len(), len, "fill_u64({len}) should return {len} elements");
+        assert_eq!(
+            filled.len(),
+            len,
+            "fill_u64({len}) should return {len} elements"
+        );
     }
 }
 
@@ -195,5 +211,8 @@ fn golden_pcg64dxsm_advance_matches_sequential() {
     let seq_vals: Vec<u64> = (0..10).map(|_| rng_seq.next_u64()).collect();
     let adv_vals: Vec<u64> = (0..10).map(|_| rng_adv.next_u64()).collect();
 
-    assert_eq!(seq_vals, adv_vals, "advance(1000) should match 1000 sequential calls");
+    assert_eq!(
+        seq_vals, adv_vals,
+        "advance(1000) should match 1000 sequential calls"
+    );
 }

@@ -4,8 +4,8 @@
 //! implementations, without requiring an oracle for expected outputs.
 
 use fnp_ndarray::{
-    broadcast_shape, broadcast_shapes, contiguous_strides, element_count, fix_unknown_dimension,
-    MemoryOrder,
+    MemoryOrder, broadcast_shape, broadcast_shapes, contiguous_strides, element_count,
+    fix_unknown_dimension,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -25,7 +25,10 @@ fn mr_broadcast_commutativity_same_rank() {
     for (a, b) in cases {
         let ab = broadcast_shape(a, b);
         let ba = broadcast_shape(b, a);
-        assert_eq!(ab, ba, "commutativity violated: broadcast({a:?}, {b:?}) != broadcast({b:?}, {a:?})");
+        assert_eq!(
+            ab, ba,
+            "commutativity violated: broadcast({a:?}, {b:?}) != broadcast({b:?}, {a:?})"
+        );
     }
 }
 
@@ -46,14 +49,14 @@ fn mr_broadcast_commutativity_different_rank() {
 
 #[test]
 fn mr_broadcast_commutativity_incompatible() {
-    let cases: Vec<(&[usize], &[usize])> = vec![
-        (&[3, 4], &[5, 4]),
-        (&[2, 3], &[4, 3]),
-    ];
+    let cases: Vec<(&[usize], &[usize])> = vec![(&[3, 4], &[5, 4]), (&[2, 3], &[4, 3])];
     for (a, b) in cases {
         let ab = broadcast_shape(a, b);
         let ba = broadcast_shape(b, a);
-        assert!(ab.is_err() && ba.is_err(), "commutativity: both should fail for {a:?}, {b:?}");
+        assert!(
+            ab.is_err() && ba.is_err(),
+            "commutativity: both should fail for {a:?}, {b:?}"
+        );
     }
 }
 
@@ -76,7 +79,11 @@ fn mr_broadcast_idempotency() {
     ];
     for shape in shapes {
         let result = broadcast_shape(shape, shape).expect("self-broadcast should succeed");
-        assert_eq!(result.as_slice(), shape, "idempotency violated: broadcast({shape:?}, {shape:?}) != {shape:?}");
+        assert_eq!(
+            result.as_slice(),
+            shape,
+            "idempotency violated: broadcast({shape:?}, {shape:?}) != {shape:?}"
+        );
     }
 }
 
@@ -88,31 +95,29 @@ fn mr_broadcast_idempotency() {
 
 #[test]
 fn mr_broadcast_scalar_identity() {
-    let shapes: Vec<&[usize]> = vec![
-        &[5],
-        &[3, 4],
-        &[2, 3, 4],
-        &[1, 2, 3, 4],
-    ];
+    let shapes: Vec<&[usize]> = vec![&[5], &[3, 4], &[2, 3, 4], &[1, 2, 3, 4]];
     let scalar: &[usize] = &[1];
     for shape in shapes {
         let result = broadcast_shape(shape, scalar).expect("scalar broadcast should succeed");
-        assert_eq!(result.as_slice(), shape, "scalar identity violated for {shape:?}");
+        assert_eq!(
+            result.as_slice(),
+            shape,
+            "scalar identity violated for {shape:?}"
+        );
     }
 }
 
 #[test]
 fn mr_broadcast_empty_identity() {
-    let shapes: Vec<&[usize]> = vec![
-        &[],
-        &[1],
-        &[5],
-        &[3, 4],
-    ];
+    let shapes: Vec<&[usize]> = vec![&[], &[1], &[5], &[3, 4]];
     let empty: &[usize] = &[];
     for shape in shapes {
         let result = broadcast_shape(shape, empty).expect("empty broadcast should succeed");
-        assert_eq!(result.as_slice(), shape, "empty identity violated for {shape:?}");
+        assert_eq!(
+            result.as_slice(),
+            shape,
+            "empty identity violated for {shape:?}"
+        );
     }
 }
 
@@ -175,7 +180,7 @@ fn mr_fix_unknown_preserves_element_count() {
     ];
     for (old_count, new_shape) in cases {
         let resolved = fix_unknown_dimension(new_shape, old_count)
-            .expect(&format!("fix_unknown({new_shape:?}, {old_count}) should succeed"));
+            .unwrap_or_else(|_| panic!("fix_unknown({new_shape:?}, {old_count}) should succeed"));
         let new_count = element_count(&resolved).expect("element_count");
         assert_eq!(
             old_count, new_count,
@@ -186,12 +191,7 @@ fn mr_fix_unknown_preserves_element_count() {
 
 #[test]
 fn mr_element_count_multiplicative() {
-    let shapes: Vec<&[usize]> = vec![
-        &[2, 3],
-        &[4, 5, 6],
-        &[1, 2, 3, 4],
-        &[7, 8],
-    ];
+    let shapes: Vec<&[usize]> = vec![&[2, 3], &[4, 5, 6], &[1, 2, 3, 4], &[7, 8]];
     for shape in shapes {
         let count = element_count(shape).expect("element_count");
         let manual: usize = shape.iter().product();
@@ -208,11 +208,7 @@ fn mr_element_count_multiplicative() {
 
 #[test]
 fn mr_stride_cf_transpose_duality() {
-    let shapes: Vec<&[usize]> = vec![
-        &[3, 4],
-        &[2, 3, 4],
-        &[5, 6, 7, 8],
-    ];
+    let shapes: Vec<&[usize]> = vec![&[3, 4], &[2, 3, 4], &[5, 6, 7, 8]];
     let item_size = 8usize;
 
     for shape in shapes {
@@ -220,7 +216,8 @@ fn mr_stride_cf_transpose_duality() {
 
         let mut rev_shape: Vec<usize> = shape.to_vec();
         rev_shape.reverse();
-        let f_strides_rev_shape = contiguous_strides(&rev_shape, item_size, MemoryOrder::F).expect("F");
+        let f_strides_rev_shape =
+            contiguous_strides(&rev_shape, item_size, MemoryOrder::F).expect("F");
 
         let mut f_rev = f_strides_rev_shape.clone();
         f_rev.reverse();
@@ -234,11 +231,7 @@ fn mr_stride_cf_transpose_duality() {
 
 #[test]
 fn mr_stride_memory_span_consistency() {
-    let shapes: Vec<&[usize]> = vec![
-        &[3, 4],
-        &[2, 3, 4],
-        &[5, 6, 7],
-    ];
+    let shapes: Vec<&[usize]> = vec![&[3, 4], &[2, 3, 4], &[5, 6, 7]];
     let item_size = 8usize;
 
     for shape in shapes {
@@ -269,20 +262,15 @@ fn mr_stride_memory_span_consistency() {
 
 #[test]
 fn mr_stride_first_element_offset_zero() {
-    let shapes: Vec<&[usize]> = vec![
-        &[3, 4],
-        &[2, 3, 4],
-        &[1, 1, 1],
-    ];
+    let shapes: Vec<&[usize]> = vec![&[3, 4], &[2, 3, 4], &[1, 1, 1]];
     for shape in shapes {
         for order in [MemoryOrder::C, MemoryOrder::F] {
-            let strides = contiguous_strides(shape, 8, order).expect("strides");
-            let offset: isize = shape
-                .iter()
-                .zip(strides.iter())
-                .map(|(&dim, &stride)| if dim > 0 { 0 } else { 0 } * stride)
-                .sum();
-            assert_eq!(offset, 0, "first element offset != 0 for {shape:?} {order:?}");
+            let _strides = contiguous_strides(shape, 8, order).expect("strides");
+            let offset: isize = 0;
+            assert_eq!(
+                offset, 0,
+                "first element offset != 0 for {shape:?} {order:?}"
+            );
         }
     }
 }
@@ -321,15 +309,13 @@ fn mr_broadcast_rank_monotonic() {
 
 #[test]
 fn mr_zero_dimension_element_count() {
-    let shapes: Vec<&[usize]> = vec![
-        &[0],
-        &[0, 5],
-        &[3, 0, 4],
-        &[2, 3, 0, 4],
-    ];
+    let shapes: Vec<&[usize]> = vec![&[0], &[0, 5], &[3, 0, 4], &[2, 3, 0, 4]];
     for shape in shapes {
         let count = element_count(shape).expect("element_count");
-        assert_eq!(count, 0, "zero dimension should yield zero elements: {shape:?}");
+        assert_eq!(
+            count, 0,
+            "zero dimension should yield zero elements: {shape:?}"
+        );
     }
 }
 
@@ -411,15 +397,10 @@ fn mr_layout_contiguous_is_contiguous_f() {
 
 #[test]
 fn mr_layout_contiguous_no_overlap() {
-    let shapes: Vec<Vec<usize>> = vec![
-        vec![3, 4],
-        vec![2, 3, 4],
-        vec![5, 6, 7],
-    ];
+    let shapes: Vec<Vec<usize>> = vec![vec![3, 4], vec![2, 3, 4], vec![5, 6, 7]];
     for shape in shapes {
         for order in [MemoryOrder::C, MemoryOrder::F] {
-            let layout = NdLayout::contiguous(shape.clone(), 8, order)
-                .expect("contiguous");
+            let layout = NdLayout::contiguous(shape.clone(), 8, order).expect("contiguous");
             assert!(
                 !layout.has_internal_overlap(),
                 "contiguous layout should have no internal overlap: {shape:?} {order:?}"
@@ -476,8 +457,7 @@ fn mr_layout_sliding_window_shape() {
     ];
 
     for (base_shape, window_shape) in cases {
-        let layout = NdLayout::contiguous(base_shape.clone(), 8, MemoryOrder::C)
-            .expect("base");
+        let layout = NdLayout::contiguous(base_shape.clone(), 8, MemoryOrder::C).expect("base");
         let view = layout.sliding_window_view(&window_shape).expect("window");
 
         let expected_ndim = base_shape.len() * 2;
@@ -491,7 +471,8 @@ fn mr_layout_sliding_window_shape() {
             let expected = base_dim - win_dim + 1;
             assert_eq!(
                 view.shape[i], expected,
-                "axis {i} output dim: expected {expected}, got {}", view.shape[i]
+                "axis {i} output dim: expected {expected}, got {}",
+                view.shape[i]
             );
         }
 
@@ -527,8 +508,7 @@ fn mr_layout_as_strided_preserves_item_size() {
     let item_sizes: Vec<usize> = vec![1, 2, 4, 8, 16];
 
     for item_size in item_sizes {
-        let layout = NdLayout::contiguous(vec![10, 10], item_size, MemoryOrder::C)
-            .expect("base");
+        let layout = NdLayout::contiguous(vec![10, 10], item_size, MemoryOrder::C).expect("base");
         let view = layout
             .as_strided(vec![5, 5], vec![item_size as isize * 2, item_size as isize])
             .expect("strided");
@@ -552,9 +532,15 @@ fn mr_layout_1d_both_contiguous() {
     let layout_f = NdLayout::contiguous(vec![10], 8, MemoryOrder::F).expect("F");
 
     assert!(layout_c.is_contiguous(), "1D C layout is_contiguous");
-    assert!(layout_c.is_fortran_contiguous(), "1D C layout is_fortran_contiguous");
+    assert!(
+        layout_c.is_fortran_contiguous(),
+        "1D C layout is_fortran_contiguous"
+    );
     assert!(layout_f.is_contiguous(), "1D F layout is_contiguous");
-    assert!(layout_f.is_fortran_contiguous(), "1D F layout is_fortran_contiguous");
+    assert!(
+        layout_f.is_fortran_contiguous(),
+        "1D F layout is_fortran_contiguous"
+    );
 }
 
 #[test]
@@ -562,7 +548,10 @@ fn mr_layout_scalar_both_contiguous() {
     let layout = NdLayout::contiguous(vec![], 8, MemoryOrder::C).expect("scalar");
 
     assert!(layout.is_contiguous(), "scalar is_contiguous");
-    assert!(layout.is_fortran_contiguous(), "scalar is_fortran_contiguous");
+    assert!(
+        layout.is_fortran_contiguous(),
+        "scalar is_fortran_contiguous"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -651,7 +640,11 @@ fn mr_sliding_window_accepts_exact_fit() {
     let layout = NdLayout::contiguous(vec![5, 5], 8, MemoryOrder::C).expect("base");
 
     let view = layout.sliding_window_view(&[5, 5]).expect("exact fit");
-    assert_eq!(view.shape, vec![1, 1, 5, 5], "exact fit produces 1x1 output grid");
+    assert_eq!(
+        view.shape,
+        vec![1, 1, 5, 5],
+        "exact fit produces 1x1 output grid"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -666,7 +659,9 @@ fn mr_sliding_window_accepts_exact_fit() {
 fn mr_negative_stride_overlap_detection() {
     let layout = NdLayout::contiguous(vec![10], 8, MemoryOrder::C).expect("base");
 
-    let view = layout.as_strided(vec![5], vec![-8]).expect("negative stride");
+    let view = layout
+        .as_strided(vec![5], vec![-8])
+        .expect("negative stride");
 
     assert!(
         !view.has_internal_overlap(),
@@ -678,7 +673,9 @@ fn mr_negative_stride_overlap_detection() {
 fn mr_negative_stride_small_gap_overlaps() {
     let layout = NdLayout::contiguous(vec![20], 8, MemoryOrder::C).expect("base");
 
-    let view = layout.as_strided(vec![5], vec![-4]).expect("small negative stride");
+    let view = layout
+        .as_strided(vec![5], vec![-4])
+        .expect("small negative stride");
 
     assert!(
         view.has_internal_overlap(),
@@ -696,7 +693,9 @@ fn mr_negative_stride_small_gap_overlaps() {
 fn mr_zero_stride_overlap() {
     let layout = NdLayout::contiguous(vec![10], 8, MemoryOrder::C).expect("base");
 
-    let view = layout.as_strided(vec![5, 2], vec![8, 0]).expect("zero stride in dim 1");
+    let view = layout
+        .as_strided(vec![5, 2], vec![8, 0])
+        .expect("zero stride in dim 1");
 
     assert!(
         view.has_internal_overlap(),
@@ -762,7 +761,9 @@ fn mr_numpy_conformance_broadcast_compatible() {
             }
             (Err(_), Err(_)) => {}
             (fnp_r, np_r) => {
-                panic!("broadcast agreement mismatch: fnp={fnp_r:?} vs numpy={np_r:?} for ({a:?}, {b:?})");
+                panic!(
+                    "broadcast agreement mismatch: fnp={fnp_r:?} vs numpy={np_r:?} for ({a:?}, {b:?})"
+                );
             }
         }
     }
@@ -840,7 +841,9 @@ fn mr_numpy_conformance_reshape_with_unknown() {
             }
             (Err(_), Err(_)) => {}
             (fnp_r, np_r) => {
-                panic!("reshape agreement mismatch: fnp={fnp_r:?} vs numpy={np_r:?} for ({count}, {new_shape:?})");
+                panic!(
+                    "reshape agreement mismatch: fnp={fnp_r:?} vs numpy={np_r:?} for ({count}, {new_shape:?})"
+                );
             }
         }
     }

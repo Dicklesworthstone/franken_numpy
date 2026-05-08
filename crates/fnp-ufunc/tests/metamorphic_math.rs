@@ -519,7 +519,8 @@ fn mr_arctanh_tanh_inverse() {
 #[test]
 fn mr_mean_translation_invariance() {
     // mean(x + c) = mean(x) + c
-    let values: Vec<f64> = (1..=50).map(|i| i as f64 * 0.7 + 3.14).collect();
+    let offset = 314.0_f64 / 100.0;
+    let values: Vec<f64> = (1..=50).map(|i| i as f64 * 0.7 + offset).collect();
     let original = from_vec(values);
     let constant = 42.5;
     let c_arr = from_vec(vec![constant; 50]);
@@ -561,7 +562,8 @@ fn mr_mean_scaling() {
 #[test]
 fn mr_variance_translation_invariance() {
     // var(x + c) = var(x) — variance is invariant under translation
-    let values: Vec<f64> = (1..=50).map(|i| i as f64 * 0.7 + 3.14).collect();
+    let offset = 314.0_f64 / 100.0;
+    let values: Vec<f64> = (1..=50).map(|i| i as f64 * 0.7 + offset).collect();
     let original = from_vec(values);
     let constant = 999.0;
     let c_arr = from_vec(vec![constant; 50]);
@@ -701,7 +703,9 @@ fn mr_cumsum_diff_relation() {
     // cumsum(diff(x)) + x[0] should equal x[1:]
     let x0 = values[0];
     let x0_arr = from_vec(vec![x0; 19]); // diff reduces length by 1
-    let reconstructed = cumsum_diff.elementwise_binary(&x0_arr, BinaryOp::Add).unwrap();
+    let reconstructed = cumsum_diff
+        .elementwise_binary(&x0_arr, BinaryOp::Add)
+        .unwrap();
 
     let expected_slice: Vec<f64> = values[1..].to_vec();
     let expected = from_vec(expected_slice);
@@ -731,7 +735,8 @@ fn mr_fft_ifft_roundtrip() {
     // ifft returns complex [n, 2] - extract real parts
     let result_vals = ifft_fft_x.values();
     assert_eq!(
-        result_vals.len(), values.len() * 2,
+        result_vals.len(),
+        values.len() * 2,
         "ifft output should have n*2 values (complex interleaved)"
     );
 
@@ -742,12 +747,15 @@ fn mr_fft_ifft_roundtrip() {
         assert!(
             approx_eq(real_part, *orig, 1e-10),
             "ifft(fft(x)) real part mismatch at {}: expected {}, got {}",
-            i, orig, real_part
+            i,
+            orig,
+            real_part
         );
         assert!(
             approx_eq(imag_part, 0.0, 1e-10),
             "ifft(fft(x)) imaginary part should be ~0 at {}: got {}",
-            i, imag_part
+            i,
+            imag_part
         );
     }
 }
@@ -766,7 +774,8 @@ fn mr_rfft_irfft_roundtrip() {
 
     let result_vals = irfft_rfft_x.values();
     assert_eq!(
-        result_vals.len(), n,
+        result_vals.len(),
+        n,
         "irfft output should have n values (real): got {}",
         result_vals.len()
     );
@@ -775,7 +784,9 @@ fn mr_rfft_irfft_roundtrip() {
         assert!(
             approx_eq(*result, *orig, 1e-10),
             "irfft(rfft(x)) mismatch at {}: expected {}, got {}",
-            i, orig, result
+            i,
+            orig,
+            result
         );
     }
 }

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "bundle_id": "benchmark_bundle_v1",
-  "generated_at_unix_ms": 1776481263964,
+  "generated_at_unix_ms": 1778226800535,
   "status": "ok",
   "expected_hash": "d36bac54f3f15f1e58c23c837175f3b5f228f376d1fd01d3d0d2294e3e1552b9",
   "decoded_hash": "d36bac54f3f15f1e58c23c837175f3b5f228f376d1fd01d3d0d2294e3e1552b9",
@@ -9,5 +9,6 @@
   "recovery_decode_match": true,
   "symbols_total": 80,
   "symbols_used_full": 80,
-  "symbols_used_recovery": 79
+  "symbols_used_recovery": 79,
+  "decoding_parallelism": 1
 }

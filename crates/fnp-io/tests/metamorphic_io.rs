@@ -6,7 +6,9 @@
 //! - NPZ entry ordering invariance
 //! - Dtype descriptor roundtrip stability
 
-use fnp_io::{IOSupportedDType, NpyHeader, read_npy_bytes, write_npy_bytes, read_npz_bytes, write_npz_bytes};
+use fnp_io::{
+    IOSupportedDType, NpyHeader, read_npy_bytes, read_npz_bytes, write_npy_bytes, write_npz_bytes,
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // NPY round-trip invariance
@@ -28,7 +30,11 @@ fn mr_npy_roundtrip_f64_1d() {
     assert_eq!(loaded.header.fortran_order, header.fortran_order);
 
     let loaded_values: &[f64] = bytemuck::cast_slice(&loaded.payload);
-    assert_eq!(loaded_values, &values[..], "values should roundtrip exactly");
+    assert_eq!(
+        loaded_values,
+        &values[..],
+        "values should roundtrip exactly"
+    );
 }
 
 #[test]
@@ -74,7 +80,10 @@ fn mr_npy_roundtrip_fortran_order() {
     let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
     let loaded = read_npy_bytes(&bytes, false).unwrap();
 
-    assert!(loaded.header.fortran_order, "fortran_order should roundtrip as true");
+    assert!(
+        loaded.header.fortran_order,
+        "fortran_order should roundtrip as true"
+    );
     assert_eq!(loaded.header.shape, vec![3, 4]);
 }
 
@@ -104,7 +113,10 @@ fn mr_npy_roundtrip_scalar() {
     let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
     let loaded = read_npy_bytes(&bytes, false).unwrap();
 
-    assert!(loaded.header.shape.is_empty(), "scalar shape should roundtrip");
+    assert!(
+        loaded.header.shape.is_empty(),
+        "scalar shape should roundtrip"
+    );
     let loaded_values: &[f64] = bytemuck::cast_slice(&loaded.payload);
     assert_eq!(loaded_values[0], 42.0);
 }
@@ -223,8 +235,14 @@ fn mr_npz_roundtrip_multiple_entries() {
     assert_eq!(entries_out.len(), 2, "both entries should roundtrip");
 
     // Find entries by base name (with or without .npy extension)
-    let x_entry = entries_out.iter().find(|e| e.name == "x" || e.name == "x.npy").unwrap();
-    let y_entry = entries_out.iter().find(|e| e.name == "y" || e.name == "y.npy").unwrap();
+    let x_entry = entries_out
+        .iter()
+        .find(|e| e.name == "x" || e.name == "x.npy")
+        .unwrap();
+    let y_entry = entries_out
+        .iter()
+        .find(|e| e.name == "y" || e.name == "y.npy")
+        .unwrap();
 
     assert_eq!(x_entry.array.header.shape, vec![2]);
     assert_eq!(y_entry.array.header.shape, vec![3]);
@@ -267,8 +285,14 @@ fn mr_npz_entry_order_independence() {
 
     // Match by base name (with or without .npy extension)
     for base in ["a", "b", "c"] {
-        let e1 = entries1.iter().find(|e| e.name == base || e.name == format!("{}.npy", base)).unwrap();
-        let e2 = entries2.iter().find(|e| e.name == base || e.name == format!("{}.npy", base)).unwrap();
+        let e1 = entries1
+            .iter()
+            .find(|e| e.name == base || e.name == format!("{}.npy", base))
+            .unwrap();
+        let e2 = entries2
+            .iter()
+            .find(|e| e.name == base || e.name == format!("{}.npy", base))
+            .unwrap();
 
         assert_eq!(
             e1.array.payload.as_ref(),
@@ -295,7 +319,11 @@ fn mr_npy_roundtrip_i64() {
     let loaded = read_npy_bytes(&bytes, false).unwrap();
 
     let loaded_values: &[i64] = bytemuck::cast_slice(&loaded.payload);
-    assert_eq!(loaded_values, &values[..], "i64 extreme values should roundtrip");
+    assert_eq!(
+        loaded_values,
+        &values[..],
+        "i64 extreme values should roundtrip"
+    );
 }
 
 #[test]
@@ -324,7 +352,11 @@ fn mr_npy_roundtrip_bool() {
     let bytes = write_npy_bytes(&header, &values, false).unwrap();
     let loaded = read_npy_bytes(&bytes, false).unwrap();
 
-    assert_eq!(loaded.payload.as_ref(), &values[..], "bool values should roundtrip");
+    assert_eq!(
+        loaded.payload.as_ref(),
+        &values[..],
+        "bool values should roundtrip"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -434,15 +466,13 @@ fn mr_double_roundtrip_idempotent() {
 
 #[test]
 fn mr_payload_size_equals_shape_times_itemsize() {
-    let shapes: &[&[usize]] = &[
-        &[10],
-        &[4, 5],
-        &[2, 3, 4],
-        &[1, 1, 1, 1],
-        &[100],
-    ];
+    let shapes: &[&[usize]] = &[&[10], &[4, 5], &[2, 3, 4], &[1, 1, 1, 1], &[100]];
 
-    for dtype in [IOSupportedDType::F64, IOSupportedDType::F32, IOSupportedDType::I32] {
+    for dtype in [
+        IOSupportedDType::F64,
+        IOSupportedDType::F32,
+        IOSupportedDType::I32,
+    ] {
         let item_size = dtype.item_size().unwrap();
 
         for &shape in shapes {
@@ -525,7 +555,11 @@ fn mr_npz_all_entries_recoverable() {
             fortran_order: false,
             shape: vec![10],
         };
-        entries_data.push((format!("arr_{}", i), header, bytemuck::cast_slice(&values).to_vec()));
+        entries_data.push((
+            format!("arr_{}", i),
+            header,
+            bytemuck::cast_slice(&values).to_vec(),
+        ));
     }
 
     let entries_refs: Vec<(&str, &NpyHeader, &[u8])> = entries_data
@@ -536,7 +570,12 @@ fn mr_npz_all_entries_recoverable() {
     let bytes = write_npz_bytes(&entries_refs).unwrap();
     let loaded = read_npz_bytes(&bytes, false).unwrap();
 
-    assert_eq!(loaded.len(), n_entries, "all {} entries should be recoverable", n_entries);
+    assert_eq!(
+        loaded.len(),
+        n_entries,
+        "all {} entries should be recoverable",
+        n_entries
+    );
 
     // Verify each entry's data
     for i in 0..n_entries {
@@ -544,7 +583,7 @@ fn mr_npz_all_entries_recoverable() {
         let entry = loaded
             .iter()
             .find(|e| e.name == name || e.name == format!("{}.npy", name))
-            .expect(&format!("entry {} should exist", name));
+            .unwrap_or_else(|| panic!("entry {name} should exist"));
 
         let expected_values: Vec<f64> = (0..10).map(|j| (i * 10 + j) as f64).collect();
         let loaded_values: &[f64] = bytemuck::cast_slice(&entry.array.payload);
@@ -603,7 +642,11 @@ fn mr_large_array_roundtrip() {
     let loaded = read_npy_bytes(&bytes, false).unwrap();
 
     let loaded_values: &[f64] = bytemuck::cast_slice(&loaded.payload);
-    assert_eq!(loaded_values.len(), n, "large array should roundtrip with correct size");
+    assert_eq!(
+        loaded_values.len(),
+        n,
+        "large array should roundtrip with correct size"
+    );
 
     // Spot check values
     assert_eq!(loaded_values[0], values[0]);
@@ -626,7 +669,11 @@ fn mr_integer_boundary_roundtrip_i8() {
     let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
     let loaded = read_npy_bytes(&bytes, false).unwrap();
     let loaded_values: &[i8] = bytemuck::cast_slice(&loaded.payload);
-    assert_eq!(loaded_values, &values[..], "i8 boundary values should roundtrip");
+    assert_eq!(
+        loaded_values,
+        &values[..],
+        "i8 boundary values should roundtrip"
+    );
 }
 
 #[test]
@@ -640,7 +687,11 @@ fn mr_integer_boundary_roundtrip_i16() {
     let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
     let loaded = read_npy_bytes(&bytes, false).unwrap();
     let loaded_values: &[i16] = bytemuck::cast_slice(&loaded.payload);
-    assert_eq!(loaded_values, &values[..], "i16 boundary values should roundtrip");
+    assert_eq!(
+        loaded_values,
+        &values[..],
+        "i16 boundary values should roundtrip"
+    );
 }
 
 #[test]
@@ -653,7 +704,11 @@ fn mr_integer_boundary_roundtrip_u8() {
     };
     let bytes = write_npy_bytes(&header, &values, false).unwrap();
     let loaded = read_npy_bytes(&bytes, false).unwrap();
-    assert_eq!(loaded.payload.as_ref(), &values[..], "u8 boundary values should roundtrip");
+    assert_eq!(
+        loaded.payload.as_ref(),
+        &values[..],
+        "u8 boundary values should roundtrip"
+    );
 }
 
 #[test]
@@ -667,7 +722,11 @@ fn mr_integer_boundary_roundtrip_u16() {
     let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
     let loaded = read_npy_bytes(&bytes, false).unwrap();
     let loaded_values: &[u16] = bytemuck::cast_slice(&loaded.payload);
-    assert_eq!(loaded_values, &values[..], "u16 boundary values should roundtrip");
+    assert_eq!(
+        loaded_values,
+        &values[..],
+        "u16 boundary values should roundtrip"
+    );
 }
 
 #[test]
@@ -681,7 +740,11 @@ fn mr_integer_boundary_roundtrip_u32() {
     let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
     let loaded = read_npy_bytes(&bytes, false).unwrap();
     let loaded_values: &[u32] = bytemuck::cast_slice(&loaded.payload);
-    assert_eq!(loaded_values, &values[..], "u32 boundary values should roundtrip");
+    assert_eq!(
+        loaded_values,
+        &values[..],
+        "u32 boundary values should roundtrip"
+    );
 }
 
 #[test]
@@ -695,7 +758,11 @@ fn mr_integer_boundary_roundtrip_i32() {
     let bytes = write_npy_bytes(&header, bytemuck::cast_slice(&values), false).unwrap();
     let loaded = read_npy_bytes(&bytes, false).unwrap();
     let loaded_values: &[i32] = bytemuck::cast_slice(&loaded.payload);
-    assert_eq!(loaded_values, &values[..], "i32 boundary values should roundtrip");
+    assert_eq!(
+        loaded_values,
+        &values[..],
+        "i32 boundary values should roundtrip"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -725,7 +792,11 @@ fn mr_float_special_values_roundtrip_f64() {
 
     // Check non-NaN values directly
     for i in 0..7 {
-        assert_eq!(loaded_values[i], values[i], "f64 special value at index {} should roundtrip", i);
+        assert_eq!(
+            loaded_values[i], values[i],
+            "f64 special value at index {} should roundtrip",
+            i
+        );
     }
     // NaN requires special comparison
     assert!(loaded_values[7].is_nan(), "NaN should roundtrip as NaN");
@@ -753,7 +824,11 @@ fn mr_float_special_values_roundtrip_f32() {
     let loaded_values: &[f32] = bytemuck::cast_slice(&loaded.payload);
 
     for i in 0..7 {
-        assert_eq!(loaded_values[i], values[i], "f32 special value at index {} should roundtrip", i);
+        assert_eq!(
+            loaded_values[i], values[i],
+            "f32 special value at index {} should roundtrip",
+            i
+        );
     }
     assert!(loaded_values[7].is_nan(), "f32 NaN should roundtrip as NaN");
 }
