@@ -711,11 +711,6 @@ fn function_exclusion(name: &str) -> Option<FnpPythonApiExclusion> {
             "flat_namespace_alias",
             "flat numpy.linalg alias; canonical nested linalg surface carries conformance evidence",
         ))
-    } else if MASKED_HELPER_GAPS.contains(&name) {
-        Some((
-            "tracked_masked_helper_gap",
-            "known fnp-python masked-array helper coverage gap; tracked by franken_numpy-pxnkv",
-        ))
     } else {
         None
     }?;
@@ -725,28 +720,6 @@ fn function_exclusion(name: &str) -> Option<FnpPythonApiExclusion> {
         reason: reason.1.to_string(),
     })
 }
-
-const MASKED_HELPER_GAPS: &[&str] = &[
-    "common_fill_value",
-    "compress_nd",
-    "compress_rowcols",
-    "default_fill_value",
-    "flatten_mask",
-    "flatten_structured_array",
-    "ma_apply_along_axis",
-    "ma_apply_over_axes",
-    "ma_argmax",
-    "ma_argmin",
-    "make_mask_descr",
-    "make_mask_none",
-    "mask_cols",
-    "mask_rowcols",
-    "mask_rows",
-    "masked_object",
-    "notmasked_contiguous",
-    "notmasked_edges",
-    "set_fill_value",
-];
 
 #[cfg(test)]
 mod tests {

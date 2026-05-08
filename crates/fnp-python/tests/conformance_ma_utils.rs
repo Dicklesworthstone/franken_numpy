@@ -404,3 +404,162 @@ print(fnp_result.dtype == np.bool_ and np.all(fnp_result == False))
     assert_eq!(output, "True", "make_mask_none dtype/values mismatch");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Top-level masked helper export coverage
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn top_level_mask_construction_and_fill_helpers_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def same_surface(left, right):
+    if isinstance(left, ma.MaskedArray) or isinstance(right, ma.MaskedArray):
+        return (
+            isinstance(left, ma.MaskedArray)
+            and isinstance(right, ma.MaskedArray)
+            and np.array_equal(ma.getdata(left), ma.getdata(right))
+            and np.array_equal(ma.getmaskarray(left), ma.getmaskarray(right))
+        )
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        return np.array_equal(left, right)
+    return repr(left) == repr(right)
+
+structured_dtype = np.dtype([("a", np.int16), ("b", np.float32)])
+structured_mask = np.array(
+    [(True, False), (False, True)],
+    dtype=[("a", bool), ("b", bool)],
+)
+structured_values = ma.array(
+    np.array([(1, 2.5), (3, 4.5)], dtype=structured_dtype),
+    mask=structured_mask,
+)
+
+common_left = ma.array([1, 2], mask=[0, 1], fill_value=-7)
+common_right = ma.array([3, 4], mask=[0, 0], fill_value=-7)
+fill_result = ma.array([1, 2, 3], mask=[0, 1, 0])
+fill_expected = fill_result.copy()
+fnp_set_result = fnp.set_fill_value(fill_result, -123)
+np_set_result = ma.set_fill_value(fill_expected, -123)
+
+match = (
+    fnp.common_fill_value(common_left, common_right)
+    == ma.common_fill_value(common_left, common_right)
+    and fnp.default_fill_value(np.array([1], dtype=np.int16))
+    == ma.default_fill_value(np.array([1], dtype=np.int16))
+    and fnp_set_result == np_set_result
+    and fill_result.fill_value == fill_expected.fill_value
+    and same_surface(
+        fnp.masked_object(["x", "sentinel", "y"], "sentinel"),
+        ma.masked_object(["x", "sentinel", "y"], "sentinel"),
+    )
+    and same_surface(fnp.make_mask_none((2, 3)), ma.make_mask_none((2, 3)))
+    and fnp.make_mask_descr(structured_dtype) == ma.make_mask_descr(structured_dtype)
+    and same_surface(fnp.flatten_mask(structured_mask), ma.flatten_mask(structured_mask))
+    and same_surface(
+        fnp.flatten_structured_array(structured_values),
+        ma.flatten_structured_array(structured_values),
+    )
+)
+print(match)
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    assert_eq!(
+        output, "True",
+        "top-level masked construction/fill helpers mismatch"
+    );
+    Ok(())
+}
+
+#[test]
+fn top_level_mask_rowcol_compress_and_edge_helpers_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def same_surface(left, right):
+    if isinstance(left, ma.MaskedArray) or isinstance(right, ma.MaskedArray):
+        return (
+            isinstance(left, ma.MaskedArray)
+            and isinstance(right, ma.MaskedArray)
+            and np.array_equal(ma.getdata(left), ma.getdata(right))
+            and np.array_equal(ma.getmaskarray(left), ma.getmaskarray(right))
+        )
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        return np.array_equal(left, right)
+    return repr(left) == repr(right)
+
+x = ma.array(
+    [[1, 2, 3], [4, 5, 6], [7, 8, 9]],
+    mask=[[False, True, False], [False, False, False], [True, True, True]],
+)
+match = (
+    same_surface(fnp.mask_rows(x), ma.mask_rows(x))
+    and same_surface(fnp.mask_cols(x), ma.mask_cols(x))
+    and same_surface(fnp.mask_rowcols(x), ma.mask_rowcols(x))
+    and same_surface(fnp.compress_nd(x), ma.compress_nd(x))
+    and same_surface(fnp.compress_rowcols(x), ma.compress_rowcols(x))
+    and same_surface(fnp.notmasked_edges(x, axis=1), ma.notmasked_edges(x, axis=1))
+    and same_surface(
+        fnp.notmasked_contiguous(x, axis=1),
+        ma.notmasked_contiguous(x, axis=1),
+    )
+)
+print(match)
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    assert_eq!(
+        output, "True",
+        "top-level masked row/col/compress/edge helpers mismatch"
+    );
+    Ok(())
+}
+
+#[test]
+fn top_level_masked_apply_and_arg_helpers_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def same_surface(left, right):
+    if isinstance(left, ma.MaskedArray) or isinstance(right, ma.MaskedArray):
+        return (
+            isinstance(left, ma.MaskedArray)
+            and isinstance(right, ma.MaskedArray)
+            and np.array_equal(ma.getdata(left), ma.getdata(right))
+            and np.array_equal(ma.getmaskarray(left), ma.getmaskarray(right))
+        )
+    if isinstance(left, np.ndarray) or isinstance(right, np.ndarray):
+        return np.array_equal(left, right)
+    return repr(left) == repr(right)
+
+def spread(row):
+    return row.max() - row.min()
+
+x = ma.array(
+    [[1, 2, 3], [4, 5, 6]],
+    mask=[[False, True, False], [False, False, True]],
+)
+match = (
+    same_surface(
+        fnp.ma_apply_along_axis(spread, 1, x),
+        ma.apply_along_axis(spread, 1, x),
+    )
+    and same_surface(
+        fnp.ma_apply_over_axes(ma.sum, x, [0, 1]),
+        ma.apply_over_axes(ma.sum, x, [0, 1]),
+    )
+    and np.array_equal(fnp.ma_argmax(x, axis=1), ma.argmax(x, axis=1))
+    and np.array_equal(fnp.ma_argmin(x, axis=0), ma.argmin(x, axis=0))
+)
+print(match)
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    assert_eq!(
+        output, "True",
+        "top-level masked apply/arg helpers mismatch"
+    );
+    Ok(())
+}
