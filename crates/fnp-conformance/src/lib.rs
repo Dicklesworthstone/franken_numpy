@@ -7,6 +7,7 @@ pub mod fnp_python_api_coverage;
 pub mod fnp_python_conformance_shards;
 pub mod raptorq_artifacts;
 pub mod security_contracts;
+pub mod swarm_handoff;
 pub mod test_contracts;
 pub mod ufunc_differential;
 pub mod workflow_scenarios;
