@@ -15,9 +15,12 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub const MAX_RAPTORQ_PARALLELISM: usize = 64;
+pub const RAPTORQ_STRESS_REPORT_SCHEMA_VERSION: u8 = 1;
+pub const RAPTORQ_STRESS_SMOKE_BYTES: usize = 64 * 1024;
+pub const RAPTORQ_STRESS_LOCAL_BYTES: usize = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RaptorQParallelismConfig {
@@ -122,6 +125,74 @@ pub struct DecodeProofArtifact {
     pub recovered_hash: Option<String>,
     pub error: Option<String>,
     pub decoding_parallelism: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RaptorQStressMode {
+    Smoke,
+    Local,
+}
+
+impl RaptorQStressMode {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Smoke => "smoke",
+            Self::Local => "local",
+        }
+    }
+
+    pub const fn default_source_bytes(self) -> usize {
+        match self {
+            Self::Smoke => RAPTORQ_STRESS_SMOKE_BYTES,
+            Self::Local => RAPTORQ_STRESS_LOCAL_BYTES,
+        }
+    }
+
+    pub fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "smoke" => Ok(Self::Smoke),
+            "local" => Ok(Self::Local),
+            other => Err(format!(
+                "invalid raptorq stress mode '{other}', expected smoke or local"
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RaptorQStressGateConfig {
+    pub repo_root: PathBuf,
+    pub output_dir: PathBuf,
+    pub mode: RaptorQStressMode,
+    pub parallelism: RaptorQParallelismConfig,
+    pub source_bytes: usize,
+    pub replay_command: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaptorQStressReport {
+    pub schema_version: u8,
+    pub bundle_id: String,
+    pub mode: RaptorQStressMode,
+    pub status: String,
+    pub worker_count: usize,
+    pub output_dir: String,
+    pub input_files: Vec<String>,
+    pub sidecar_path: String,
+    pub scrub_report_path: String,
+    pub decode_proof_path: String,
+    pub input_hash: String,
+    pub recovered_hash: String,
+    pub elapsed_ms: u128,
+    pub source_size: usize,
+    pub source_symbols: u16,
+    pub repair_symbols: usize,
+    pub total_symbols: usize,
+    pub dropped_symbol_scenario: Option<String>,
+    pub recovery_symbols_used: usize,
+    pub replay_command: String,
+    pub diagnostics: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -653,6 +724,202 @@ pub fn generate_default_bundle_sidecars_and_reports(
     Ok(())
 }
 
+fn deterministic_stress_bytes(size: usize) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(size);
+    for idx in 0..size {
+        let word = (idx as u64)
+            .wrapping_mul(0x9E37_79B1)
+            .wrapping_add((idx as u64) >> 7)
+            .wrapping_add(0xA5);
+        bytes.push((word & 0xFF) as u8);
+    }
+    bytes
+}
+
+fn write_stress_bundle_inputs(config: &RaptorQStressGateConfig) -> Result<Vec<PathBuf>, String> {
+    if config.source_bytes == 0 {
+        return Err("raptorq stress source bytes must be greater than zero".to_string());
+    }
+
+    let input_dir = config.output_dir.join("input");
+    fs::create_dir_all(&input_dir)
+        .map_err(|err| format!("failed creating {}: {err}", input_dir.display()))?;
+
+    let payload_path = input_dir.join("deterministic_payload.bin");
+    fs::write(
+        &payload_path,
+        deterministic_stress_bytes(config.source_bytes),
+    )
+    .map_err(|err| format!("failed writing {}: {err}", payload_path.display()))?;
+
+    let manifest_path = input_dir.join("manifest.json");
+    let manifest = serde_json::json!({
+        "schema_version": 1,
+        "mode": config.mode.as_str(),
+        "source_bytes": config.source_bytes,
+        "worker_count": config.parallelism.worker_count,
+        "payload_path": "deterministic_payload.bin",
+    });
+    let manifest_raw = serde_json::to_string_pretty(&manifest)
+        .map_err(|err| format!("failed serializing stress manifest: {err}"))?;
+    fs::write(&manifest_path, manifest_raw)
+        .map_err(|err| format!("failed writing {}: {err}", manifest_path.display()))?;
+
+    Ok(vec![manifest_path, payload_path])
+}
+
+pub fn run_raptorq_stress_gate(
+    config: &RaptorQStressGateConfig,
+) -> Result<RaptorQStressReport, String> {
+    let start = Instant::now();
+    let bundle_id = format!("raptorq_stress_{}", config.mode.as_str());
+    fs::create_dir_all(&config.output_dir)
+        .map_err(|err| format!("failed creating {}: {err}", config.output_dir.display()))?;
+
+    let input_files = write_stress_bundle_inputs(config)?;
+    let sidecar_path = config.output_dir.join("stress_bundle.sidecar.json");
+    let scrub_report_path = config.output_dir.join("stress_bundle.scrub_report.json");
+    let decode_proof_path = config.output_dir.join("stress_bundle.decode_proof.json");
+
+    let payload = build_bundle_payload(&bundle_id, &config.repo_root, &input_files)?;
+    let input_hash = sha256_hex(&payload);
+    let sidecar = generate_sidecar_from_payload_with_config(
+        &bundle_id,
+        &payload,
+        &sidecar_path,
+        0x5EED_8A77,
+        config.parallelism,
+    )?;
+    let (scrub, proof) = scrub_and_write_reports_with_config(
+        &sidecar_path,
+        &scrub_report_path,
+        &decode_proof_path,
+        config.parallelism,
+    )?;
+
+    let recovered_hash = proof.recovered_hash.clone().unwrap_or_default();
+    let mut diagnostics = Vec::new();
+    if sidecar.source_hash != input_hash {
+        diagnostics
+            .push("sidecar source hash did not match deterministic bundle input".to_string());
+    }
+    if scrub.status != "ok" || !scrub.full_decode_match || !scrub.recovery_decode_match {
+        diagnostics.push("scrub report did not prove full and recovery decode match".to_string());
+    }
+    if !proof.recovery_success {
+        diagnostics.push("decode proof did not recover after bounded symbol loss".to_string());
+    }
+    if proof.expected_hash != input_hash
+        || proof.recovered_hash.as_deref() != Some(input_hash.as_str())
+    {
+        diagnostics.push("decode proof hashes did not match deterministic input hash".to_string());
+    }
+
+    let status = if diagnostics.is_empty() {
+        "pass"
+    } else {
+        "fail"
+    }
+    .to_string();
+    let report = RaptorQStressReport {
+        schema_version: RAPTORQ_STRESS_REPORT_SCHEMA_VERSION,
+        bundle_id,
+        mode: config.mode,
+        status,
+        worker_count: config.parallelism.worker_count,
+        output_dir: config.output_dir.display().to_string(),
+        input_files: input_files
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect(),
+        sidecar_path: sidecar_path.display().to_string(),
+        scrub_report_path: scrub_report_path.display().to_string(),
+        decode_proof_path: decode_proof_path.display().to_string(),
+        input_hash,
+        recovered_hash,
+        elapsed_ms: start.elapsed().as_millis(),
+        source_size: sidecar.source_size,
+        source_symbols: sidecar.source_symbols,
+        repair_symbols: sidecar.repair_symbols,
+        total_symbols: sidecar.total_symbols,
+        dropped_symbol_scenario: proof.dropped_symbol,
+        recovery_symbols_used: proof.recovery_symbols_used,
+        replay_command: config.replay_command.clone(),
+        diagnostics,
+    };
+
+    validate_raptorq_stress_report(&report)?;
+    Ok(report)
+}
+
+pub fn validate_raptorq_stress_report(report: &RaptorQStressReport) -> Result<(), String> {
+    if report.schema_version != RAPTORQ_STRESS_REPORT_SCHEMA_VERSION {
+        return Err(format!(
+            "raptorq stress report schema_version must be {}, got {}",
+            RAPTORQ_STRESS_REPORT_SCHEMA_VERSION, report.schema_version
+        ));
+    }
+    if report.status != "pass" {
+        return Err(format!(
+            "raptorq stress report status must be pass, got {}: {:?}",
+            report.status, report.diagnostics
+        ));
+    }
+    RaptorQParallelismConfig::from_worker_count(report.worker_count)?;
+    if report.input_files.is_empty() {
+        return Err("raptorq stress report must list input files".to_string());
+    }
+    for path in &report.input_files {
+        if !Path::new(path).is_file() {
+            return Err(format!("raptorq stress input file missing: {path}"));
+        }
+    }
+    for path in [
+        &report.sidecar_path,
+        &report.scrub_report_path,
+        &report.decode_proof_path,
+    ] {
+        if !Path::new(path).is_file() {
+            return Err(format!("raptorq stress artifact missing: {path}"));
+        }
+    }
+    if report.input_hash.len() != 64
+        || !report
+            .input_hash
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("raptorq stress report input_hash must be a sha256 hex digest".to_string());
+    }
+    if report.recovered_hash != report.input_hash {
+        return Err(format!(
+            "raptorq stress recovered hash mismatch expected={} actual={}",
+            report.input_hash, report.recovered_hash
+        ));
+    }
+    if report.source_size == 0 {
+        return Err("raptorq stress source_size must be non-zero".to_string());
+    }
+    if report.total_symbols != usize::from(report.source_symbols) + report.repair_symbols {
+        return Err(format!(
+            "raptorq stress symbol counts mismatch total={} source={} repair={}",
+            report.total_symbols, report.source_symbols, report.repair_symbols
+        ));
+    }
+    if report.dropped_symbol_scenario.is_none() {
+        return Err("raptorq stress report must record a dropped-symbol scenario".to_string());
+    }
+    if report.recovery_symbols_used == 0 {
+        return Err("raptorq stress report must record recovery symbol usage".to_string());
+    }
+    if !report.replay_command.contains("run_raptorq_gate") {
+        return Err(
+            "raptorq stress report replay command must reference run_raptorq_gate".to_string(),
+        );
+    }
+    Ok(())
+}
+
 fn modified_unix_ms(path: &Path) -> Result<u128, String> {
     let metadata =
         fs::metadata(path).map_err(|err| format!("failed stat {}: {err}", path.display()))?;
@@ -1057,9 +1324,11 @@ pub fn run_raptorq_artifact_suite_with_parallelism(
 mod tests {
     use super::{
         DecodeProofArtifact, MAX_RAPTORQ_PARALLELISM, RaptorQBundleReportPaths,
-        RaptorQParallelismConfig, RaptorQSidecar, ScrubReport, generate_bundle_sidecar_and_reports,
+        RaptorQParallelismConfig, RaptorQSidecar, RaptorQStressGateConfig, RaptorQStressMode,
+        RaptorQStressReport, ScrubReport, generate_bundle_sidecar_and_reports,
         generate_bundle_sidecar_and_reports_with_config, generate_sidecar_from_payload,
-        generate_sidecar_from_payload_with_config, scrub_and_write_reports,
+        generate_sidecar_from_payload_with_config, run_raptorq_stress_gate,
+        scrub_and_write_reports, validate_raptorq_stress_report,
     };
     use base64::Engine as _;
     use std::fs;
@@ -1244,5 +1513,59 @@ mod tests {
         let _ = fs::remove_file(sidecar_path);
         let _ = fs::remove_file(scrub_path);
         let _ = fs::remove_file(proof_path);
+    }
+
+    fn small_stress_report(name: &str) -> RaptorQStressReport {
+        let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let output_dir = temp_path(name);
+        run_raptorq_stress_gate(&RaptorQStressGateConfig {
+            repo_root,
+            output_dir,
+            mode: RaptorQStressMode::Smoke,
+            parallelism: RaptorQParallelismConfig::serial(),
+            source_bytes: 2048,
+            replay_command:
+                "cargo run -p fnp-conformance --bin run_raptorq_gate -- --stress-mode smoke"
+                    .to_string(),
+        })
+        .expect("stress report should pass")
+    }
+
+    #[test]
+    fn run_raptorq_gate_stress_report_records_required_fields() {
+        let report = small_stress_report("stress_required_fields");
+
+        assert_eq!(report.status, "pass");
+        assert_eq!(report.mode, RaptorQStressMode::Smoke);
+        assert_eq!(report.worker_count, 1);
+        assert_eq!(report.input_hash, report.recovered_hash);
+        assert_eq!(
+            report.total_symbols,
+            usize::from(report.source_symbols) + report.repair_symbols
+        );
+        assert!(report.dropped_symbol_scenario.is_some());
+        assert!(report.recovery_symbols_used > 0);
+        assert!(report.replay_command.contains("run_raptorq_gate"));
+        validate_raptorq_stress_report(&report).expect("stress report validates");
+    }
+
+    #[test]
+    fn run_raptorq_gate_stress_report_validation_fails_closed_on_hash_mismatch() {
+        let mut report = small_stress_report("stress_hash_mismatch");
+        report.recovered_hash = "0".repeat(64);
+
+        let err =
+            validate_raptorq_stress_report(&report).expect_err("hash mismatch should fail closed");
+        assert!(err.contains("recovered hash mismatch"));
+    }
+
+    #[test]
+    fn run_raptorq_gate_stress_report_validation_fails_closed_on_missing_decode_proof() {
+        let mut report = small_stress_report("stress_missing_proof");
+        report.decode_proof_path = temp_path("missing_decode_proof").display().to_string();
+
+        let err = validate_raptorq_stress_report(&report)
+            .expect_err("missing decode proof should fail closed");
+        assert!(err.contains("raptorq stress artifact missing"));
     }
 }
