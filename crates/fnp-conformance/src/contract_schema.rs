@@ -707,12 +707,12 @@ mod tests {
 
         write(
             &packet_dir.join("parity_report.raptorq.json"),
-            "{\n  \"schema_version\": 1,\n  \"bundle_id\": \"packet_sidecar\",\n  \"generated_at_unix_ms\": 0,\n  \"source_hash\": \"abc\",\n  \"source_size\": 1,\n  \"object_id_u128\": 1,\n  \"symbol_size\": 256,\n  \"max_block_size\": 256,\n  \"repair_overhead\": 1.25,\n  \"source_blocks\": 1,\n  \"source_symbols\": 1,\n  \"repair_symbols\": 1,\n  \"total_symbols\": 0,\n  \"symbols\": []\n}\n",
+            "{\n  \"schema_version\": 1,\n  \"bundle_id\": \"packet_sidecar\",\n  \"generated_at_unix_ms\": 0,\n  \"source_hash\": \"abc\",\n  \"source_size\": 1,\n  \"object_id_u128\": 1,\n  \"symbol_size\": 256,\n  \"max_block_size\": 256,\n  \"repair_overhead\": 1.25,\n  \"source_blocks\": 1,\n  \"source_symbols\": 1,\n  \"repair_symbols\": 1,\n  \"total_symbols\": 0,\n  \"encoding_parallelism\": 1,\n  \"decoding_parallelism\": 1,\n  \"symbols\": []\n}\n",
         );
 
         write(
             &packet_dir.join("parity_report.decode_proof.json"),
-            "{\n  \"schema_version\": 1,\n  \"bundle_id\": \"packet_sidecar\",\n  \"generated_at_unix_ms\": 0,\n  \"dropped_symbol\": null,\n  \"recovery_symbols_used\": 0,\n  \"recovery_success\": true,\n  \"expected_hash\": \"abc\",\n  \"recovered_hash\": \"abc\",\n  \"error\": null\n}\n",
+            "{\n  \"schema_version\": 1,\n  \"bundle_id\": \"packet_sidecar\",\n  \"generated_at_unix_ms\": 0,\n  \"dropped_symbol\": null,\n  \"recovery_symbols_used\": 0,\n  \"recovery_success\": true,\n  \"expected_hash\": \"abc\",\n  \"recovered_hash\": \"abc\",\n  \"error\": null,\n  \"decoding_parallelism\": 1\n}\n",
         );
     }
 
