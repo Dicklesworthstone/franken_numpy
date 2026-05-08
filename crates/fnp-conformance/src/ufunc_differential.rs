@@ -3247,8 +3247,9 @@ mod tests {
     };
     use fnp_dtype::DType;
     use fnp_ufunc::{
-        PyObjectValue, UFuncArray, frompyfunc, frompyfunc_object,
-        frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter,
+        BinaryOp, FloatErrorMode, ParallelPartitionConfig, PyObjectValue, UFuncArray, errstate,
+        frompyfunc, frompyfunc_object, frompyfunc_python_import_with_interpreter,
+        frompyfunc_python_with_interpreter,
     };
     use serde_json::Value;
     use std::collections::BTreeMap;
@@ -5198,6 +5199,106 @@ print(json.dumps({
 
         assert_eq!(shifted.shape(), &[2, 3]);
         assert_eq!(shifted.values(), &[7.0, 8.0, 9.0, 19.0, 20.0, 21.0]);
+    }
+
+    #[test]
+    fn differential_partition_contract_broadcast_add_matches_conformance_case() {
+        let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+        let case = make_binary_case(
+            "partition_broadcast_add",
+            UFuncOperation::Add,
+            &[2, 1],
+            &[1.0, 10.0],
+            &[3],
+            &[0.5, 1.5, 2.5],
+        );
+        let (expected_shape, expected_values, expected_dtype) =
+            execute_input_case(&case).expect("conformance add case");
+
+        let lhs = UFuncArray::new(case.lhs_shape.clone(), case.lhs_values.clone(), DType::F64)
+            .expect("lhs");
+        let rhs = UFuncArray::new(
+            case.rhs_shape.clone().expect("rhs shape"),
+            case.rhs_values.clone().expect("rhs values"),
+            DType::F64,
+        )
+        .expect("rhs");
+        let config = ParallelPartitionConfig::from_worker_count(3).expect("partition config");
+        let contract = lhs
+            .plan_elementwise_binary_partitions(&rhs, BinaryOp::Add, config)
+            .expect("partition plan");
+        assert!(
+            contract.is_parallel_safe(),
+            "{:?}",
+            contract.serial_required_reasons
+        );
+
+        let partitioned = lhs
+            .execute_elementwise_binary_partition_plan(&rhs, BinaryOp::Add, &contract)
+            .expect("partition replay");
+        assert_eq!(partitioned.shape(), expected_shape.as_slice());
+        assert_eq!(partitioned.values(), expected_values.as_slice());
+        assert_eq!(expected_dtype, "f64");
+    }
+
+    #[test]
+    fn differential_partition_contract_sum_axis_keepdims_matches_conformance_case() {
+        let case = UFuncInputCase {
+            id: "partition_sum_axis1_keepdims".to_string(),
+            op: UFuncOperation::Sum,
+            lhs_shape: vec![2, 3],
+            lhs_values: vec![1.0, -0.0, f64::NAN, 4.0, 5.0, 6.0],
+            lhs_dtype: "f64".to_string(),
+            rhs_shape: None,
+            rhs_values: None,
+            rhs_dtype: None,
+            axis: Some(1),
+            axes: None,
+            keepdims: Some(true),
+            ddof: None,
+            clip_min: None,
+            clip_max: None,
+            third_shape: None,
+            third_values: None,
+            third_dtype: None,
+            sig: None,
+            signature: None,
+            dtype: None,
+            seed: 0,
+            mode: "strict".to_string(),
+            env_fingerprint: "tests".to_string(),
+            artifact_refs: Vec::new(),
+            reason_code: "ufunc_reduction_contract_violation".to_string(),
+            expected_reason_code: "ufunc_reduction_contract_violation".to_string(),
+            expected_error_contains: String::new(),
+        };
+        let (expected_shape, expected_values, expected_dtype) =
+            execute_input_case(&case).expect("conformance sum case");
+
+        let arr = UFuncArray::new(case.lhs_shape.clone(), case.lhs_values.clone(), DType::F64)
+            .expect("input");
+        let config = ParallelPartitionConfig::from_worker_count(2).expect("partition config");
+        let contract = arr
+            .plan_reduce_sum_partitions(case.axis, case.keepdims.unwrap_or(false), config)
+            .expect("sum partition plan");
+        assert!(
+            contract.is_parallel_safe(),
+            "{:?}",
+            contract.serial_required_reasons
+        );
+
+        let partitioned = arr
+            .execute_reduce_sum_partition_plan(case.axis, case.keepdims.unwrap_or(false), &contract)
+            .expect("partition replay");
+        assert_eq!(partitioned.shape(), expected_shape.as_slice());
+        for (actual, expected) in partitioned.values().iter().zip(expected_values.iter()) {
+            if expected.is_nan() {
+                assert!(actual.is_nan(), "expected NaN, got {actual:?}");
+            } else {
+                assert_eq!(actual.to_bits(), expected.to_bits());
+            }
+        }
+        assert_eq!(expected_dtype, "f64");
     }
 
     #[test]

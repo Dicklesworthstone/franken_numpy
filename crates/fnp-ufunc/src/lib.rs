@@ -1432,6 +1432,145 @@ pub struct BinaryDispatchSelection {
     pub custom_loop_name: Option<String>,
 }
 
+const MAX_PARALLEL_PARTITION_WORKERS: usize = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParallelPartitionConfig {
+    pub worker_count: usize,
+    pub min_elements_per_chunk: usize,
+}
+
+impl ParallelPartitionConfig {
+    #[must_use]
+    pub const fn serial() -> Self {
+        Self {
+            worker_count: 1,
+            min_elements_per_chunk: 1,
+        }
+    }
+
+    pub fn from_worker_count(worker_count: usize) -> Result<Self, String> {
+        Self {
+            worker_count,
+            min_elements_per_chunk: 1,
+        }
+        .validate()
+    }
+
+    pub fn with_min_elements_per_chunk(mut self, min_elements: usize) -> Result<Self, String> {
+        self.min_elements_per_chunk = min_elements;
+        self.validate()
+    }
+
+    pub fn validate(self) -> Result<Self, String> {
+        if self.worker_count == 0 {
+            return Err("parallel partition worker_count must be at least 1".to_string());
+        }
+        if self.worker_count > MAX_PARALLEL_PARTITION_WORKERS {
+            return Err(format!(
+                "parallel partition worker_count {} exceeds max {MAX_PARALLEL_PARTITION_WORKERS}",
+                self.worker_count
+            ));
+        }
+        if self.min_elements_per_chunk == 0 {
+            return Err("parallel partition min_elements_per_chunk must be at least 1".to_string());
+        }
+        Ok(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ParallelPartitionChunk {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl ParallelPartitionChunk {
+    #[must_use]
+    pub const fn len(self) -> usize {
+        self.end - self.start
+    }
+
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.start == self.end
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelPartitionGranularity {
+    OutputElements,
+    ReductionOutputLanes,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParallelPartitionOperation {
+    BinaryUFunc {
+        op: &'static str,
+    },
+    SumReduction {
+        axis: Option<isize>,
+        normalized_axis: Option<usize>,
+        keepdims: bool,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParallelPartitionContract {
+    pub operation: ParallelPartitionOperation,
+    pub out_shape: Vec<usize>,
+    pub out_count: usize,
+    pub out_dtype: DType,
+    pub configured_worker_count: usize,
+    pub min_elements_per_chunk: usize,
+    pub granularity: ParallelPartitionGranularity,
+    pub chunks: Vec<ParallelPartitionChunk>,
+    pub safe_to_parallelize: bool,
+    pub serial_required_reasons: Vec<String>,
+    pub contract_notes: Vec<String>,
+}
+
+impl ParallelPartitionContract {
+    #[must_use]
+    pub fn is_parallel_safe(&self) -> bool {
+        self.safe_to_parallelize
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParallelViewSafetyContract {
+    pub shape: Vec<usize>,
+    pub strides: Vec<isize>,
+    pub is_contiguous: bool,
+    pub may_have_internal_overlap: bool,
+    pub safe_for_parallel_read: bool,
+    pub safe_for_parallel_writeback: bool,
+    pub serial_required_reasons: Vec<String>,
+}
+
+fn deterministic_partition_chunks(
+    total: usize,
+    config: ParallelPartitionConfig,
+) -> Vec<ParallelPartitionChunk> {
+    if total == 0 {
+        return Vec::new();
+    }
+
+    let chunks_by_size = total.div_ceil(config.min_elements_per_chunk);
+    let chunk_count = config.worker_count.min(chunks_by_size).max(1);
+    let base_len = total / chunk_count;
+    let extra = total % chunk_count;
+    let mut chunks = Vec::with_capacity(chunk_count);
+    let mut start = 0usize;
+    for idx in 0..chunk_count {
+        let len = base_len + usize::from(idx < extra);
+        let end = start + len;
+        chunks.push(ParallelPartitionChunk { start, end });
+        start = end;
+    }
+    chunks
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixedSignature {
     pub inputs: Vec<DType>,
@@ -2453,6 +2592,43 @@ impl UFuncArrayView {
         true
     }
 
+    #[must_use]
+    pub fn parallel_safety_contract(&self) -> ParallelViewSafetyContract {
+        let may_have_internal_overlap =
+            Self::detect_overlap(&self.shape, &self.strides).unwrap_or(true);
+        let is_contiguous = self.is_contiguous();
+        let safe_for_parallel_read = !may_have_internal_overlap;
+        let safe_for_parallel_writeback = is_contiguous && !may_have_internal_overlap;
+
+        let mut serial_required_reasons = Vec::new();
+        if may_have_internal_overlap {
+            serial_required_reasons.push(
+                "view has possible internal overlap, so parallel direct reads/writes are not a safe initial contract"
+                    .to_string(),
+            );
+        }
+        if !is_contiguous {
+            serial_required_reasons.push(
+                "non-contiguous view writeback remains serial until view-aware scatter ordering is proven"
+                    .to_string(),
+            );
+        }
+        if !self.writable {
+            serial_required_reasons
+                .push("read-only view cannot participate in direct parallel writeback".to_string());
+        }
+
+        ParallelViewSafetyContract {
+            shape: self.shape.clone(),
+            strides: self.strides.clone(),
+            is_contiguous,
+            may_have_internal_overlap,
+            safe_for_parallel_read,
+            safe_for_parallel_writeback,
+            serial_required_reasons,
+        }
+    }
+
     pub fn item(&self, index: &[i64]) -> Result<f64, UFuncError> {
         let data = self
             .buffer
@@ -2525,11 +2701,9 @@ impl UFuncArrayView {
         // buffer[i] and sidecar[i] values come from the same point in time.
         if Arc::strong_count(&self.buffer) > 1 {
             let sidecar_guard = if let Some(ref sidecar) = self.integer_sidecar {
-                Some(
-                    sidecar
-                        .read()
-                        .map_err(|_| UFuncError::Msg("shared view: sidecar lock poisoned".to_string()))?,
-                )
+                Some(sidecar.read().map_err(|_| {
+                    UFuncError::Msg("shared view: sidecar lock poisoned".to_string())
+                })?)
             } else {
                 None
             };
@@ -2650,15 +2824,14 @@ impl UFuncArrayView {
         // We must hold both locks atomically to ensure buffer[i] and sidecar[i]
         // come from the same point in time. Cannot call materialize_with_indices()
         // because it acquires/releases buffer lock internally.
-        let sidecar_guard = if let Some(ref sidecar) = self.integer_sidecar {
-            Some(
-                sidecar
-                    .read()
-                    .map_err(|_| UFuncError::Msg("shared view: sidecar lock poisoned".to_string()))?,
-            )
-        } else {
-            None
-        };
+        let sidecar_guard =
+            if let Some(ref sidecar) = self.integer_sidecar {
+                Some(sidecar.read().map_err(|_| {
+                    UFuncError::Msg("shared view: sidecar lock poisoned".to_string())
+                })?)
+            } else {
+                None
+            };
 
         // Acquire buffer lock second (after sidecar)
         let data = self
@@ -5566,6 +5739,148 @@ impl UFuncArray {
         self.elementwise_binary_with_registry(rhs, op, &UFuncLoopRegistry::new())
     }
 
+    pub fn plan_elementwise_binary_partitions(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+        config: ParallelPartitionConfig,
+    ) -> Result<ParallelPartitionContract, UFuncError> {
+        let config = config.validate().map_err(UFuncError::Msg)?;
+        let selection = plan_binary_dispatch_with_registry(
+            op.name(),
+            self,
+            rhs,
+            &UFuncLoopRegistry::new(),
+            None,
+        )?;
+        let true_division_from_integral = matches!(op, BinaryOp::Div)
+            && (self.dtype.is_integer() || self.dtype == DType::Bool)
+            && (rhs.dtype.is_integer() || rhs.dtype == DType::Bool);
+        let out_dtype = if op.is_bool_output() {
+            DType::Bool
+        } else if true_division_from_integral {
+            DType::F64
+        } else {
+            selection.plan.out_dtype
+        };
+
+        let mut serial_required_reasons = Vec::new();
+        if !matches!(op, BinaryOp::Add | BinaryOp::Mul) {
+            serial_required_reasons.push(format!(
+                "binary op '{}' remains serial until its floating-point/error-order contract is proven",
+                op.name()
+            ));
+        }
+        if !geterr().is_all_ignore() {
+            serial_required_reasons.push(
+                "floating-point error handling is not all-ignore; warning/callback/log ordering remains serial"
+                    .to_string(),
+            );
+        }
+        if self.has_integer_sidecar() || rhs.has_integer_sidecar() {
+            serial_required_reasons.push(
+                "exact integer sidecar propagation remains serial until sidecar merge ordering is proven"
+                    .to_string(),
+            );
+        }
+        if self.uses_complex_interleaved_storage() || rhs.uses_complex_interleaved_storage() {
+            serial_required_reasons.push(
+                "complex interleaved storage remains serial until complex lane partitioning is proven"
+                    .to_string(),
+            );
+        }
+
+        Ok(ParallelPartitionContract {
+            operation: ParallelPartitionOperation::BinaryUFunc { op: op.name() },
+            out_shape: selection.plan.out_shape.clone(),
+            out_count: selection.plan.out_count,
+            out_dtype,
+            configured_worker_count: config.worker_count,
+            min_elements_per_chunk: config.min_elements_per_chunk,
+            granularity: ParallelPartitionGranularity::OutputElements,
+            chunks: deterministic_partition_chunks(selection.plan.out_count, config),
+            safe_to_parallelize: serial_required_reasons.is_empty(),
+            serial_required_reasons,
+            contract_notes: vec![
+                "chunks are half-open flat C-order output ranges and never depend on host CPU count"
+                    .to_string(),
+                "broadcast source positions are derived from the existing broadcast contract before partitioning"
+                    .to_string(),
+                "each output element is written exactly once; direct UFuncArrayView writeback is out of scope"
+                    .to_string(),
+            ],
+        })
+    }
+
+    pub fn execute_elementwise_binary_partition_plan(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+        contract: &ParallelPartitionContract,
+    ) -> Result<Self, UFuncError> {
+        if !contract.safe_to_parallelize {
+            return Err(UFuncError::Msg(format!(
+                "parallel binary partition contract is not safe: {}",
+                contract.serial_required_reasons.join("; ")
+            )));
+        }
+        if contract.operation != (ParallelPartitionOperation::BinaryUFunc { op: op.name() }) {
+            return Err(UFuncError::Msg(
+                "partition contract operation does not match binary op".to_string(),
+            ));
+        }
+
+        let expected = self.plan_elementwise_binary_partitions(
+            rhs,
+            op,
+            ParallelPartitionConfig {
+                worker_count: contract.configured_worker_count,
+                min_elements_per_chunk: contract.min_elements_per_chunk,
+            },
+        )?;
+        if !expected.safe_to_parallelize {
+            return Err(UFuncError::Msg(format!(
+                "current binary partition contract is not safe: {}",
+                expected.serial_required_reasons.join("; ")
+            )));
+        }
+        if expected.operation != contract.operation
+            || expected.out_shape != contract.out_shape
+            || expected.out_count != contract.out_count
+            || expected.out_dtype != contract.out_dtype
+            || expected.granularity != contract.granularity
+            || expected.chunks != contract.chunks
+        {
+            return Err(UFuncError::Msg(
+                "partition contract does not match the deterministic binary plan".to_string(),
+            ));
+        }
+
+        let broadcasted = Self::broadcast_arrays(&[self, rhs])?;
+        let lhs = &broadcasted[0];
+        let rhs = &broadcasted[1];
+        let mut values = vec![0.0f64; contract.out_count];
+        for chunk in &contract.chunks {
+            if chunk.end > values.len() || chunk.start > chunk.end {
+                return Err(UFuncError::Msg(format!(
+                    "invalid partition chunk [{}, {}) for output count {}",
+                    chunk.start,
+                    chunk.end,
+                    values.len()
+                )));
+            }
+            for (idx, slot) in values
+                .iter_mut()
+                .enumerate()
+                .take(chunk.end)
+                .skip(chunk.start)
+            {
+                *slot = op.apply(lhs.values[idx], rhs.values[idx]);
+            }
+        }
+        Self::from_values_with_dtype(contract.out_shape.clone(), values, contract.out_dtype)
+    }
+
     fn elementwise_datetime_comparison(
         &self,
         rhs: &Self,
@@ -6953,6 +7268,157 @@ impl UFuncArray {
                 })
             }
         }
+    }
+
+    pub fn plan_reduce_sum_partitions(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        config: ParallelPartitionConfig,
+    ) -> Result<ParallelPartitionContract, UFuncError> {
+        let config = config.validate().map_err(UFuncError::Msg)?;
+        let normalized_axis = axis
+            .map(|raw_axis| normalize_axis(raw_axis, self.shape.len()))
+            .transpose()?;
+        let out_shape = match normalized_axis {
+            Some(axis) => reduced_shape(&self.shape, axis, keepdims),
+            None if keepdims => vec![1; self.shape.len()],
+            None => Vec::new(),
+        };
+        let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+
+        let mut serial_required_reasons = Vec::new();
+        if normalized_axis.is_none() {
+            serial_required_reasons.push(
+                "axis=None sum is a single reduction lane and must preserve global accumulation order"
+                    .to_string(),
+            );
+        }
+        if self.has_integer_sidecar() {
+            serial_required_reasons.push(
+                "exact integer sidecar sum remains serial until sidecar lane merge ordering is proven"
+                    .to_string(),
+            );
+        }
+
+        Ok(ParallelPartitionContract {
+            operation: ParallelPartitionOperation::SumReduction {
+                axis,
+                normalized_axis,
+                keepdims,
+            },
+            out_shape,
+            out_count,
+            out_dtype: promote_for_sum_reduction(self.dtype),
+            configured_worker_count: config.worker_count,
+            min_elements_per_chunk: config.min_elements_per_chunk,
+            granularity: ParallelPartitionGranularity::ReductionOutputLanes,
+            chunks: deterministic_partition_chunks(out_count, config),
+            safe_to_parallelize: serial_required_reasons.is_empty(),
+            serial_required_reasons,
+            contract_notes: vec![
+                "axis reductions partition independent output lanes, not the reduced axis itself"
+                    .to_string(),
+                "each lane scans the reduced axis in increasing input order to preserve NaN and signed-zero behavior"
+                    .to_string(),
+                "empty reduced axes produce zero-filled output lanes without reading input elements"
+                    .to_string(),
+                "axis=None remains serial until a reproducible floating accumulator tree is specified"
+                    .to_string(),
+            ],
+        })
+    }
+
+    pub fn execute_reduce_sum_partition_plan(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        contract: &ParallelPartitionContract,
+    ) -> Result<Self, UFuncError> {
+        if !contract.safe_to_parallelize {
+            return Err(UFuncError::Msg(format!(
+                "parallel reduction partition contract is not safe: {}",
+                contract.serial_required_reasons.join("; ")
+            )));
+        }
+        let normalized_axis = axis
+            .map(|raw_axis| normalize_axis(raw_axis, self.shape.len()))
+            .transpose()?;
+        if contract.operation
+            != (ParallelPartitionOperation::SumReduction {
+                axis,
+                normalized_axis,
+                keepdims,
+            })
+        {
+            return Err(UFuncError::Msg(
+                "partition contract operation does not match sum reduction".to_string(),
+            ));
+        }
+        let Some(axis_index) = normalized_axis else {
+            return Err(UFuncError::Msg(
+                "axis=None sum partition contracts are serial-only".to_string(),
+            ));
+        };
+
+        let expected = self.plan_reduce_sum_partitions(
+            axis,
+            keepdims,
+            ParallelPartitionConfig {
+                worker_count: contract.configured_worker_count,
+                min_elements_per_chunk: contract.min_elements_per_chunk,
+            },
+        )?;
+        if !expected.safe_to_parallelize {
+            return Err(UFuncError::Msg(format!(
+                "current reduction partition contract is not safe: {}",
+                expected.serial_required_reasons.join("; ")
+            )));
+        }
+        if expected.operation != contract.operation
+            || expected.out_shape != contract.out_shape
+            || expected.out_count != contract.out_count
+            || expected.out_dtype != contract.out_dtype
+            || expected.granularity != contract.granularity
+            || expected.chunks != contract.chunks
+        {
+            return Err(UFuncError::Msg(
+                "partition contract does not match the deterministic reduction plan".to_string(),
+            ));
+        }
+
+        let axis_len = self.shape[axis_index];
+        let inner = self.shape[axis_index + 1..]
+            .iter()
+            .copied()
+            .product::<usize>();
+        let mut values = vec![0.0f64; contract.out_count];
+        for chunk in &contract.chunks {
+            if chunk.end > values.len() || chunk.start > chunk.end {
+                return Err(UFuncError::Msg(format!(
+                    "invalid reduction partition chunk [{}, {}) for output count {}",
+                    chunk.start,
+                    chunk.end,
+                    values.len()
+                )));
+            }
+            if axis_len == 0 {
+                continue;
+            }
+            for (out_flat, slot) in values
+                .iter_mut()
+                .enumerate()
+                .take(chunk.end)
+                .skip(chunk.start)
+            {
+                let outer_idx = out_flat / inner;
+                let inner_idx = out_flat % inner;
+                let base = outer_idx * axis_len * inner + inner_idx;
+                *slot = reduce_sum_strided(&self.values, base, inner, axis_len);
+            }
+        }
+
+        Self::from_values_with_dtype(contract.out_shape.clone(), values, contract.out_dtype)
     }
 
     /// Sum with initial value (`np.sum(initial=...)`).

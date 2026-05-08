@@ -4,7 +4,8 @@
 //! specific input values. When an oracle (expected output) is unavailable,
 //! metamorphic relations between inputs/outputs provide correctness evidence.
 
-use fnp_ufunc::{BinaryOp, UFuncArray, UnaryOp};
+use fnp_dtype::DType;
+use fnp_ufunc::{BinaryOp, FloatErrorMode, ParallelPartitionConfig, UFuncArray, UnaryOp, errstate};
 use std::f64::consts::PI;
 
 const EPSILON: f64 = 1e-10;
@@ -31,6 +32,219 @@ fn scalar_approx_eq(a: &UFuncArray, expected: f64, eps: f64) -> bool {
 
 fn from_vec(v: Vec<f64>) -> UFuncArray {
     UFuncArray::from_vec(v)
+}
+
+fn assert_bitwise_equal(lhs: &[f64], rhs: &[f64]) {
+    assert_eq!(lhs.len(), rhs.len(), "value lengths differ");
+    for (idx, (&l, &r)) in lhs.iter().zip(rhs.iter()).enumerate() {
+        assert_eq!(
+            l.to_bits(),
+            r.to_bits(),
+            "bitwise mismatch at index {idx}: left={l:?} right={r:?}"
+        );
+    }
+}
+
+#[test]
+fn partition_contract_binary_broadcast_add_replays_serial() {
+    let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+    let lhs = UFuncArray::new(
+        vec![2, 3],
+        vec![1.0, 2.0, 3.0, 10.0, 20.0, 30.0],
+        DType::F64,
+    )
+    .expect("lhs");
+    let rhs = UFuncArray::new(vec![3], vec![0.5, 1.5, 2.5], DType::F64).expect("rhs");
+    let config = ParallelPartitionConfig::from_worker_count(4)
+        .expect("worker config")
+        .with_min_elements_per_chunk(1)
+        .expect("chunk config");
+
+    let first = lhs
+        .plan_elementwise_binary_partitions(&rhs, BinaryOp::Add, config)
+        .expect("first partition plan");
+    let second = lhs
+        .plan_elementwise_binary_partitions(&rhs, BinaryOp::Add, config)
+        .expect("second partition plan");
+    assert_eq!(first, second, "partition planner must be deterministic");
+    assert!(
+        first.is_parallel_safe(),
+        "{:?}",
+        first.serial_required_reasons
+    );
+    assert_eq!(first.out_shape, vec![2, 3]);
+    assert_eq!(first.chunks.len(), 4);
+    assert_eq!(first.chunks.first().map(|c| c.start), Some(0));
+    assert_eq!(first.chunks.last().map(|c| c.end), Some(6));
+
+    let partitioned = lhs
+        .execute_elementwise_binary_partition_plan(&rhs, BinaryOp::Add, &first)
+        .expect("partitioned replay");
+    let serial = lhs
+        .elementwise_binary(&rhs, BinaryOp::Add)
+        .expect("serial add");
+    assert_bitwise_equal(partitioned.values(), serial.values());
+    assert_eq!(partitioned.shape(), serial.shape());
+}
+
+#[test]
+fn partition_contract_rejects_invalid_public_config_literals() {
+    let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+    let lhs = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).expect("lhs");
+    let rhs = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::F64).expect("rhs");
+
+    let worker_err = lhs
+        .plan_elementwise_binary_partitions(
+            &rhs,
+            BinaryOp::Add,
+            ParallelPartitionConfig {
+                worker_count: 0,
+                min_elements_per_chunk: 1,
+            },
+        )
+        .expect_err("zero worker count should be rejected");
+    assert!(
+        format!("{worker_err:?}").contains("worker_count must be at least 1"),
+        "{worker_err:?}"
+    );
+
+    let chunk_err = lhs
+        .plan_reduce_sum_partitions(
+            Some(0),
+            false,
+            ParallelPartitionConfig {
+                worker_count: 1,
+                min_elements_per_chunk: 0,
+            },
+        )
+        .expect_err("zero minimum chunk size should be rejected");
+    assert!(
+        format!("{chunk_err:?}").contains("min_elements_per_chunk must be at least 1"),
+        "{chunk_err:?}"
+    );
+}
+
+#[test]
+fn partition_contract_rejects_tampered_chunk_layouts() {
+    let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+    let lhs = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::F64).expect("lhs");
+    let rhs = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::F64).expect("rhs");
+    let config = ParallelPartitionConfig::from_worker_count(2).expect("worker config");
+    let mut contract = lhs
+        .plan_elementwise_binary_partitions(&rhs, BinaryOp::Add, config)
+        .expect("partition plan");
+    contract.chunks.pop();
+
+    let err = lhs
+        .execute_elementwise_binary_partition_plan(&rhs, BinaryOp::Add, &contract)
+        .expect_err("tampered chunk list should be rejected");
+    assert!(
+        format!("{err:?}").contains("deterministic binary plan"),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn partition_contract_binary_mul_preserves_nan_and_signed_zero_bits() {
+    let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+    let lhs =
+        UFuncArray::new(vec![2, 2], vec![-0.0, f64::NAN, 3.0, -4.0], DType::F64).expect("lhs");
+    let rhs = UFuncArray::new(vec![2], vec![2.0, -1.0], DType::F64).expect("rhs");
+    let config = ParallelPartitionConfig::from_worker_count(2).expect("worker config");
+
+    let contract = lhs
+        .plan_elementwise_binary_partitions(&rhs, BinaryOp::Mul, config)
+        .expect("partition plan");
+    assert!(
+        contract.is_parallel_safe(),
+        "{:?}",
+        contract.serial_required_reasons
+    );
+    let partitioned = lhs
+        .execute_elementwise_binary_partition_plan(&rhs, BinaryOp::Mul, &contract)
+        .expect("partitioned replay");
+    let serial = lhs
+        .elementwise_binary(&rhs, BinaryOp::Mul)
+        .expect("serial multiply");
+
+    assert_bitwise_equal(partitioned.values(), serial.values());
+}
+
+#[test]
+fn partition_contract_sum_axis_keepdims_replays_serial_for_empty_axis() {
+    let arr = UFuncArray::new(vec![2, 0, 3], Vec::new(), DType::F64).expect("empty axis input");
+    let config = ParallelPartitionConfig::from_worker_count(4).expect("worker config");
+
+    let contract = arr
+        .plan_reduce_sum_partitions(Some(1), true, config)
+        .expect("sum axis partition plan");
+    assert!(
+        contract.is_parallel_safe(),
+        "{:?}",
+        contract.serial_required_reasons
+    );
+    assert_eq!(contract.out_shape, vec![2, 1, 3]);
+    assert_eq!(contract.out_count, 6);
+    assert_eq!(contract.chunks.len(), 4);
+
+    let partitioned = arr
+        .execute_reduce_sum_partition_plan(Some(1), true, &contract)
+        .expect("partitioned reduction replay");
+    let serial = arr.reduce_sum(Some(1), true).expect("serial reduction");
+    assert_bitwise_equal(partitioned.values(), serial.values());
+    assert_eq!(partitioned.shape(), serial.shape());
+}
+
+#[test]
+fn partition_contract_sum_axis_none_remains_serial_for_float_order() {
+    let arr = UFuncArray::new(vec![3], vec![1.0e16, 1.0, -1.0e16], DType::F64).expect("input");
+    let config = ParallelPartitionConfig::from_worker_count(8).expect("worker config");
+
+    let contract = arr
+        .plan_reduce_sum_partitions(None, false, config)
+        .expect("axis none partition contract");
+    assert!(!contract.is_parallel_safe());
+    assert!(
+        contract
+            .serial_required_reasons
+            .iter()
+            .any(|reason| reason.contains("global accumulation order")),
+        "{:?}",
+        contract.serial_required_reasons
+    );
+    assert!(
+        arr.execute_reduce_sum_partition_plan(None, false, &contract)
+            .is_err()
+    );
+}
+
+#[test]
+fn partition_contract_view_safety_records_noncontiguous_and_overlap_limits() {
+    let arr =
+        UFuncArray::new(vec![3, 3], (0..9).map(f64::from).collect(), DType::F64).expect("input");
+
+    let reversed = arr
+        .slice_axis_view(0, None, None, -1)
+        .expect("reverse axis view");
+    let reversed_contract = reversed.parallel_safety_contract();
+    assert!(!reversed_contract.is_contiguous);
+    assert!(!reversed_contract.may_have_internal_overlap);
+    assert!(reversed_contract.safe_for_parallel_read);
+    assert!(!reversed_contract.safe_for_parallel_writeback);
+
+    let broadcast = UFuncArray::new(vec![1, 3], vec![1.0, 2.0, 3.0], DType::F64)
+        .expect("broadcast source")
+        .broadcast_to_view(&[4, 3])
+        .expect("broadcast view");
+    let broadcast_contract = broadcast.parallel_safety_contract();
+    assert!(broadcast_contract.may_have_internal_overlap);
+    assert!(!broadcast_contract.safe_for_parallel_read);
+    assert!(
+        broadcast_contract
+            .serial_required_reasons
+            .iter()
+            .any(|reason| reason.contains("internal overlap"))
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
