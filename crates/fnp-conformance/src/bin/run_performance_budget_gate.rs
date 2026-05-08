@@ -1,6 +1,9 @@
 #![forbid(unsafe_code)]
 
-use fnp_conformance::benchmark::{BenchmarkBaseline, BenchmarkWorkload, REQUIRED_SLO_PATHS};
+use fnp_conformance::benchmark::{
+    ALLOCATION_CHURN_SLO_PATH, ALLOCATOR_FRAGMENTATION_SLO_PATH, BenchmarkBaseline,
+    BenchmarkWorkload, MEMORY_FOOTPRINT_SLO_PATH, REQUIRED_SLO_PATHS,
+};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -33,6 +36,54 @@ struct ReliabilityDiagnostic {
     reason_code: String,
     message: String,
     evidence_refs: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    workload_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_family: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    expected_measurement_fields: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    remediation: Option<String>,
+}
+
+impl ReliabilityDiagnostic {
+    fn generic(
+        subsystem: impl Into<String>,
+        reason_code: impl Into<String>,
+        message: impl Into<String>,
+        evidence_refs: Vec<String>,
+    ) -> Self {
+        Self {
+            subsystem: subsystem.into(),
+            reason_code: reason_code.into(),
+            message: message.into(),
+            evidence_refs,
+            workload_name: None,
+            path_family: None,
+            expected_measurement_fields: Vec::new(),
+            remediation: None,
+        }
+    }
+
+    fn for_workload(
+        budget: &WorkloadBudget,
+        reason_code: impl Into<String>,
+        message: impl Into<String>,
+        evidence_refs: Vec<String>,
+        expected_measurement_fields: Vec<String>,
+        remediation: impl Into<String>,
+    ) -> Self {
+        Self {
+            subsystem: budget.name.to_string(),
+            reason_code: reason_code.into(),
+            message: message.into(),
+            evidence_refs,
+            workload_name: Some(budget.name.to_string()),
+            path_family: Some(budget.path_family.to_string()),
+            expected_measurement_fields,
+            remediation: Some(remediation.into()),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -40,6 +91,7 @@ struct ReliabilitySummary {
     coverage_floor: f64,
     coverage_ratio: f64,
     max_p99_regression_ratio: f64,
+    missing_instrumentation_policy: &'static str,
     diagnostics: Vec<ReliabilityDiagnostic>,
     warnings: Vec<ReliabilityDiagnostic>,
 }
@@ -67,6 +119,8 @@ struct GateOptions {
     max_p99_regression_ratio: f64,
     coverage_floor: f64,
 }
+
+const MISSING_INSTRUMENTATION_POLICY: &str = "fail_closed";
 
 const WORKLOAD_BUDGETS: &[WorkloadBudget] = &[
     WorkloadBudget {
@@ -133,6 +187,38 @@ fn run() -> Result<(), String> {
     let reference = load_baseline(&options.reference_path)?;
     let candidate = load_baseline(&options.candidate_path)?;
 
+    let summary = evaluate_gate(&options, reference, candidate)?;
+    let status = summary.status;
+    let summary_json = serde_json::to_string_pretty(&summary)
+        .map_err(|err| format!("failed serializing summary: {err}"))?;
+
+    if let Some(report_path) = options.report_path {
+        if let Some(parent) = report_path.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!(
+                    "failed creating report directory {}: {err}",
+                    parent.display()
+                )
+            })?;
+        }
+        fs::write(&report_path, summary_json.as_bytes())
+            .map_err(|err| format!("failed writing report {}: {err}", report_path.display()))?;
+    }
+
+    println!("{summary_json}");
+
+    if status == "fail" {
+        std::process::exit(2);
+    }
+
+    Ok(())
+}
+
+fn evaluate_gate(
+    options: &GateOptions,
+    reference: BenchmarkBaseline,
+    candidate: BenchmarkBaseline,
+) -> Result<GateSummary, String> {
     let reference_map: BTreeMap<&str, &BenchmarkWorkload> = reference
         .workloads
         .iter()
@@ -173,33 +259,26 @@ fn run() -> Result<(), String> {
     };
 
     if coverage_ratio + f64::EPSILON < options.coverage_floor {
-        diagnostics.push(ReliabilityDiagnostic {
-            subsystem: "performance_budget".to_string(),
-            reason_code: "coverage_floor_breach".to_string(),
-            message: format!(
+        diagnostics.push(ReliabilityDiagnostic::generic(
+            "performance_budget",
+            "coverage_floor_breach",
+            format!(
                 "coverage ratio {:.6} is below floor {:.6}",
                 coverage_ratio, options.coverage_floor
             ),
-            evidence_refs: vec![
+            vec![
                 options.reference_path.display().to_string(),
                 options.candidate_path.display().to_string(),
             ],
-        });
+        ));
     }
 
     let uninstrumented_budget_paths = missing_slo_paths(&candidate);
-    let warnings = uninstrumented_budget_paths
-        .iter()
-        .map(|path| ReliabilityDiagnostic {
-            subsystem: "performance_budget".to_string(),
-            reason_code: "budget_path_uninstrumented".to_string(),
-            message: format!(
-                "SLO path '{}' is not yet covered by generated benchmark workloads",
-                path
-            ),
-            evidence_refs: vec![options.candidate_path.display().to_string()],
-        })
-        .collect::<Vec<_>>();
+    diagnostics.extend(missing_slo_path_diagnostics(
+        &uninstrumented_budget_paths,
+        &options.candidate_path,
+    ));
+    let warnings = Vec::new();
 
     let status = if diagnostics.is_empty() {
         "pass"
@@ -211,7 +290,7 @@ fn run() -> Result<(), String> {
         .as_ref()
         .map(|path| path.display().to_string());
 
-    let summary = GateSummary {
+    Ok(GateSummary {
         status,
         reference_path: options.reference_path.display().to_string(),
         candidate_path: options.candidate_path.display().to_string(),
@@ -225,35 +304,12 @@ fn run() -> Result<(), String> {
             coverage_floor: options.coverage_floor,
             coverage_ratio,
             max_p99_regression_ratio: options.max_p99_regression_ratio,
+            missing_instrumentation_policy: MISSING_INSTRUMENTATION_POLICY,
             diagnostics,
             warnings,
         },
         report_path,
-    };
-
-    let summary_json = serde_json::to_string_pretty(&summary)
-        .map_err(|err| format!("failed serializing summary: {err}"))?;
-
-    if let Some(report_path) = options.report_path {
-        if let Some(parent) = report_path.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!(
-                    "failed creating report directory {}: {err}",
-                    parent.display()
-                )
-            })?;
-        }
-        fs::write(&report_path, summary_json.as_bytes())
-            .map_err(|err| format!("failed writing report {}: {err}", report_path.display()))?;
-    }
-
-    println!("{summary_json}");
-
-    if status == "fail" {
-        std::process::exit(2);
-    }
-
-    Ok(())
+    })
 }
 
 fn parse_args() -> Result<GateOptions, String> {
@@ -358,18 +414,25 @@ fn evaluate_budget(
             violations.push("missing_candidate_workload".to_string());
         }
 
-        diagnostics.push(ReliabilityDiagnostic {
-            subsystem: "performance_budget".to_string(),
-            reason_code: "missing_workload".to_string(),
-            message: format!(
+        diagnostics.push(ReliabilityDiagnostic::for_workload(
+            budget,
+            "missing_workload",
+            format!(
                 "workload '{}' missing in reference or candidate baseline",
                 budget.name
             ),
-            evidence_refs: vec![
+            vec![
                 reference_path.display().to_string(),
                 candidate_path.display().to_string(),
             ],
-        });
+            vec![
+                "workloads[].name".to_string(),
+                "workloads[].percentiles.p95_ms".to_string(),
+                "workloads[].percentiles.p99_ms".to_string(),
+                "workloads[].telemetry".to_string(),
+            ],
+            "regenerate the candidate baseline with generate_benchmark_baseline and keep every budgeted workload present",
+        ));
 
         return (
             WorkloadDeltaSummary {
@@ -405,12 +468,14 @@ fn evaluate_budget(
             "p95 {:.6}ms exceeded budget {:.6}ms",
             candidate_p95, budget.p95_budget_ms
         );
-        diagnostics.push(ReliabilityDiagnostic {
-            subsystem: budget.name.to_string(),
-            reason_code: "p95_budget_exceeded".to_string(),
-            message: violation.clone(),
-            evidence_refs: vec![candidate_path.display().to_string()],
-        });
+        diagnostics.push(ReliabilityDiagnostic::for_workload(
+            budget,
+            "p95_budget_exceeded",
+            violation.clone(),
+            vec![candidate_path.display().to_string()],
+            vec!["workloads[].percentiles.p95_ms".to_string()],
+            "profile the workload, optimize or update the explicit budget with evidence",
+        ));
         violations.push(violation);
     }
 
@@ -420,26 +485,30 @@ fn evaluate_budget(
                 "p99 regression ratio {:.6} exceeded budget {:.6}",
                 value, max_p99_regression_ratio
             );
-            diagnostics.push(ReliabilityDiagnostic {
-                subsystem: budget.name.to_string(),
-                reason_code: "p99_regression_budget_exceeded".to_string(),
-                message: violation.clone(),
-                evidence_refs: vec![
+            diagnostics.push(ReliabilityDiagnostic::for_workload(
+                budget,
+                "p99_regression_budget_exceeded",
+                violation.clone(),
+                vec![
                     reference_path.display().to_string(),
                     candidate_path.display().to_string(),
                 ],
-            });
+                vec!["workloads[].percentiles.p99_ms".to_string()],
+                "compare reference and candidate profiles, then fix the tail regression or provide an explicit budget change",
+            ));
             violations.push(violation);
         }
         Some(_) => {}
         None => {
             let violation = "reference p99 must be > 0 to evaluate tail regression".to_string();
-            diagnostics.push(ReliabilityDiagnostic {
-                subsystem: budget.name.to_string(),
-                reason_code: "invalid_reference_tail".to_string(),
-                message: violation.clone(),
-                evidence_refs: vec![reference_path.display().to_string()],
-            });
+            diagnostics.push(ReliabilityDiagnostic::for_workload(
+                budget,
+                "invalid_reference_tail",
+                violation.clone(),
+                vec![reference_path.display().to_string()],
+                vec!["workloads[].percentiles.p99_ms".to_string()],
+                "regenerate the reference baseline so p99_ms is positive for every budgeted workload",
+            ));
             violations.push(violation);
         }
     }
@@ -481,6 +550,59 @@ fn missing_slo_paths(candidate: &BenchmarkBaseline) -> Vec<String> {
         .collect()
 }
 
+fn missing_slo_path_diagnostics(
+    paths: &[String],
+    candidate_path: &Path,
+) -> Vec<ReliabilityDiagnostic> {
+    paths
+        .iter()
+        .map(|path| {
+            let (expected_measurement_fields, remediation) = slo_path_instrumentation_policy(path);
+            ReliabilityDiagnostic {
+                subsystem: "performance_budget".to_string(),
+                reason_code: "budget_path_uninstrumented".to_string(),
+                message: format!(
+                    "SLO path '{}' is not covered by generated benchmark workload telemetry; strict performance-budget gates fail closed for missing instrumentation",
+                    path
+                ),
+                evidence_refs: vec![candidate_path.display().to_string()],
+                workload_name: Some("candidate_baseline".to_string()),
+                path_family: Some(path.clone()),
+                expected_measurement_fields,
+                remediation: Some(remediation),
+            }
+        })
+        .collect()
+}
+
+fn slo_path_instrumentation_policy(path: &str) -> (Vec<String>, String) {
+    match path {
+        MEMORY_FOOTPRINT_SLO_PATH => (
+            vec![
+                "workloads[].telemetry.peak_live_bytes_per_run".to_string(),
+                "workloads[].telemetry.process_high_water_rss_bytes".to_string(),
+            ],
+            "record positive peak live bytes for at least one generated candidate workload"
+                .to_string(),
+        ),
+        ALLOCATION_CHURN_SLO_PATH => (
+            vec!["workloads[].telemetry.heap_allocations_per_run".to_string()],
+            "record positive heap allocation counts for at least one generated candidate workload"
+                .to_string(),
+        ),
+        ALLOCATOR_FRAGMENTATION_SLO_PATH => (
+            vec!["workloads[].telemetry.allocator_stress=adversarial".to_string()],
+            "include an adversarial allocator-stress workload in the candidate baseline"
+                .to_string(),
+        ),
+        _ => (
+            vec!["workloads[].telemetry.covered_slo_paths()".to_string()],
+            "extend WorkloadTelemetry::covered_slo_paths and generated baseline telemetry for this SLO path"
+                .to_string(),
+        ),
+    }
+}
+
 fn regression_ratio(reference: f64, candidate: f64) -> Option<f64> {
     if reference <= 0.0 {
         return None;
@@ -494,12 +616,16 @@ fn percent_delta(reference: f64, candidate: f64) -> Option<f64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkloadBudget, evaluate_budget, missing_slo_paths};
+    use super::{
+        GateOptions, MISSING_INSTRUMENTATION_POLICY, WORKLOAD_BUDGETS, WorkloadBudget,
+        evaluate_budget, evaluate_gate, missing_slo_paths,
+    };
     use fnp_conformance::benchmark::{
         ALLOCATION_CHURN_SLO_PATH, ALLOCATOR_FRAGMENTATION_SLO_PATH, AllocatorStressLevel,
         BenchmarkBaseline, BenchmarkWorkload, MEMORY_FOOTPRINT_SLO_PATH, PercentileSummary,
         ReproMetadata, WorkloadTelemetry,
     };
+    use std::path::PathBuf;
 
     fn workload(name: &str, p95_ms: f64, p99_ms: f64) -> BenchmarkWorkload {
         BenchmarkWorkload {
@@ -539,6 +665,164 @@ mod tests {
             reproducibility: ReproMetadata::default(),
             evidence_log_refs: Vec::new(),
         }
+    }
+
+    fn budgeted_baseline_with_telemetry(telemetry: WorkloadTelemetry) -> BenchmarkBaseline {
+        BenchmarkBaseline {
+            schema_version: 1,
+            generated_at_unix_ms: 0,
+            git_commit: "test".to_string(),
+            workloads: WORKLOAD_BUDGETS
+                .iter()
+                .map(|budget| BenchmarkWorkload {
+                    name: budget.name.to_string(),
+                    runs: 5,
+                    samples_ms: vec![1.0, 1.1, 1.2],
+                    percentiles: PercentileSummary {
+                        p50_ms: 1.0,
+                        p95_ms: budget.p95_budget_ms * 0.25,
+                        p99_ms: 1.2,
+                        min_ms: 1.0,
+                        max_ms: 1.2,
+                    },
+                    telemetry: telemetry.clone(),
+                })
+                .collect(),
+            environment_fingerprint: "test-env".to_string(),
+            reproducibility: ReproMetadata::default(),
+            evidence_log_refs: Vec::new(),
+        }
+    }
+
+    fn fully_instrumented_telemetry() -> WorkloadTelemetry {
+        WorkloadTelemetry {
+            peak_live_bytes_per_run: 4096,
+            process_high_water_rss_bytes: Some(8192),
+            heap_allocations_per_run: 3,
+            allocator_stress: AllocatorStressLevel::Adversarial,
+            ..WorkloadTelemetry::default()
+        }
+    }
+
+    fn gate_options() -> GateOptions {
+        GateOptions {
+            reference_path: PathBuf::from("reference.json"),
+            candidate_path: PathBuf::from("candidate.json"),
+            report_path: Some(PathBuf::from("report.json")),
+            max_p99_regression_ratio: 0.07,
+            coverage_floor: 1.0,
+        }
+    }
+
+    #[test]
+    fn run_performance_budget_gate_passes_when_every_budget_path_is_instrumented() {
+        let reference = budgeted_baseline_with_telemetry(fully_instrumented_telemetry());
+        let candidate = budgeted_baseline_with_telemetry(fully_instrumented_telemetry());
+
+        let summary = evaluate_gate(&gate_options(), reference, candidate).expect("gate summary");
+
+        assert_eq!(summary.status, "pass");
+        assert!(summary.uninstrumented_budget_paths.is_empty());
+        assert_eq!(
+            summary.reliability.missing_instrumentation_policy,
+            MISSING_INSTRUMENTATION_POLICY
+        );
+        assert!(summary.reliability.diagnostics.is_empty());
+        assert!(summary.reliability.warnings.is_empty());
+    }
+
+    #[test]
+    fn run_performance_budget_gate_fails_when_candidate_omits_one_budgeted_workload() {
+        let reference = budgeted_baseline_with_telemetry(fully_instrumented_telemetry());
+        let mut candidate = budgeted_baseline_with_telemetry(fully_instrumented_telemetry());
+        let omitted_workload = WORKLOAD_BUDGETS.first().expect("workload budgets").name;
+        candidate
+            .workloads
+            .retain(|workload| workload.name != omitted_workload);
+
+        let summary = evaluate_gate(&gate_options(), reference, candidate).expect("gate summary");
+
+        assert_eq!(summary.status, "fail");
+        let missing_summary = summary
+            .workloads
+            .iter()
+            .find(|workload| workload.name == omitted_workload)
+            .expect("missing workload summary");
+        assert_eq!(missing_summary.status, "fail");
+        assert!(
+            missing_summary
+                .violations
+                .iter()
+                .any(|violation| violation == "missing_candidate_workload")
+        );
+        let diagnostic = summary
+            .reliability
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.reason_code == "missing_workload")
+            .expect("missing workload diagnostic");
+        assert_eq!(
+            diagnostic.workload_name.as_deref(),
+            Some(WORKLOAD_BUDGETS[0].name)
+        );
+        assert_eq!(
+            diagnostic.path_family.as_deref(),
+            Some(WORKLOAD_BUDGETS[0].path_family)
+        );
+        assert!(
+            diagnostic
+                .expected_measurement_fields
+                .iter()
+                .any(|field| field == "workloads[].percentiles.p95_ms")
+        );
+        assert!(
+            diagnostic
+                .remediation
+                .as_deref()
+                .is_some_and(|message| message.contains("generate_benchmark_baseline"))
+        );
+    }
+
+    #[test]
+    fn run_performance_budget_gate_fails_closed_when_slo_path_is_uninstrumented() {
+        let reference = budgeted_baseline_with_telemetry(fully_instrumented_telemetry());
+        let candidate = budgeted_baseline_with_telemetry(WorkloadTelemetry {
+            peak_live_bytes_per_run: 4096,
+            heap_allocations_per_run: 3,
+            allocator_stress: AllocatorStressLevel::Steady,
+            ..WorkloadTelemetry::default()
+        });
+
+        let summary = evaluate_gate(&gate_options(), reference, candidate).expect("gate summary");
+
+        assert_eq!(summary.status, "fail");
+        assert_eq!(
+            summary.uninstrumented_budget_paths,
+            vec![ALLOCATOR_FRAGMENTATION_SLO_PATH.to_string()]
+        );
+        assert!(summary.reliability.warnings.is_empty());
+        let diagnostic = summary
+            .reliability
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.reason_code == "budget_path_uninstrumented")
+            .expect("missing instrumentation diagnostic");
+        assert_eq!(
+            diagnostic.path_family.as_deref(),
+            Some(ALLOCATOR_FRAGMENTATION_SLO_PATH)
+        );
+        assert!(
+            diagnostic
+                .expected_measurement_fields
+                .iter()
+                .any(|field| field == "workloads[].telemetry.allocator_stress=adversarial")
+        );
+        assert!(
+            diagnostic
+                .remediation
+                .as_deref()
+                .is_some_and(|message| message.contains("adversarial allocator-stress"))
+        );
     }
 
     #[test]

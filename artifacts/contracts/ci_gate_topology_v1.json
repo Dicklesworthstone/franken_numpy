@@ -62,7 +62,9 @@
       "required_command_fragment": "scripts/e2e/run_performance_budget_gate.sh",
       "required_outputs": [
         "candidate_baseline",
-        "performance_budget_report"
+        "performance_budget_report",
+        "uninstrumented_budget_paths",
+        "missing_instrumentation_policy"
       ]
     },
     {

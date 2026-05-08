@@ -1,10 +1,29 @@
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use fnp_conformance::{HarnessConfig, run_all_core_suites, run_smoke};
 use fnp_iter::{Nditer, NditerOptions, NditerOrder, NditerStep, nditer_python_with_interpreter};
 use serde::Deserialize;
+use serde_json::Value;
+
+fn repo_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+}
+
+fn unique_target_path(stem: &str, extension: &str) -> PathBuf {
+    let ts_millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis());
+    repo_root().join("target").join(format!(
+        "{stem}_{}_{}.{}",
+        std::process::id(),
+        ts_millis,
+        extension
+    ))
+}
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
 struct OracleNditerState {
@@ -264,6 +283,107 @@ fn nditer_wrapper_seek_matches_numpy_multi_index_assignment() {
     }
 
     assert_eq!(rust_states, oracle_states);
+}
+
+#[test]
+fn run_performance_budget_gate_cli_fails_closed_on_uninstrumented_candidate() {
+    let reference_path = repo_root().join("artifacts/baselines/ufunc_benchmark_baseline.json");
+    let candidate_path = unique_target_path("perf_budget_uninstrumented_candidate", "json");
+    let report_path = unique_target_path("perf_budget_uninstrumented_report", "json");
+
+    fs::create_dir_all(candidate_path.parent().expect("candidate parent"))
+        .expect("create target dir");
+    let mut candidate: Value =
+        serde_json::from_slice(&fs::read(&reference_path).expect("read reference baseline"))
+            .expect("parse reference baseline");
+    let workloads = candidate
+        .get_mut("workloads")
+        .and_then(Value::as_array_mut)
+        .expect("baseline workloads array");
+    for workload in workloads {
+        let telemetry = workload
+            .get_mut("telemetry")
+            .and_then(Value::as_object_mut)
+            .expect("workload telemetry object");
+        telemetry.insert(
+            "allocator_stress".to_string(),
+            Value::String("steady".to_string()),
+        );
+    }
+    fs::write(
+        &candidate_path,
+        serde_json::to_vec_pretty(&candidate).expect("serialize candidate"),
+    )
+    .expect("write candidate baseline");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_run_performance_budget_gate"))
+        .arg("--reference-path")
+        .arg(&reference_path)
+        .arg("--candidate-path")
+        .arg(&candidate_path)
+        .arg("--report-path")
+        .arg(&report_path)
+        .arg("--coverage-floor")
+        .arg("1.0")
+        .output()
+        .expect("run performance budget gate");
+
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "gate should fail closed for missing instrumentation; stdout={} stderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(report_path.is_file(), "report should be written on failure");
+
+    let report: Value = serde_json::from_slice(&fs::read(&report_path).expect("read report"))
+        .expect("parse report");
+    let report = report.as_object().expect("report object");
+    let reliability = report
+        .get("reliability")
+        .and_then(Value::as_object)
+        .expect("reliability object");
+    assert_eq!(report.get("status").and_then(Value::as_str), Some("fail"));
+    assert_eq!(
+        reliability
+            .get("missing_instrumentation_policy")
+            .and_then(Value::as_str),
+        Some("fail_closed")
+    );
+    assert!(
+        report
+            .get("uninstrumented_budget_paths")
+            .and_then(Value::as_array)
+            .expect("uninstrumented paths")
+            .iter()
+            .any(
+                |path| path.as_str() == Some("allocator fragmentation under adversarial workloads")
+            )
+    );
+    let diagnostic = reliability
+        .get("diagnostics")
+        .and_then(Value::as_array)
+        .expect("diagnostics")
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.get("reason_code").and_then(Value::as_str)
+                == Some("budget_path_uninstrumented")
+        })
+        .expect("missing instrumentation diagnostic");
+    assert_eq!(
+        diagnostic.get("path_family").and_then(Value::as_str),
+        Some("allocator fragmentation under adversarial workloads")
+    );
+    assert!(
+        diagnostic
+            .get("expected_measurement_fields")
+            .and_then(Value::as_array)
+            .expect("expected measurement fields")
+            .iter()
+            .any(|field| field.as_str()
+                == Some("workloads[].telemetry.allocator_stress=adversarial"))
+    );
 }
 
 #[test]

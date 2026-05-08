@@ -50,7 +50,12 @@ const REQUIRED_MERGE_BLOCKERS: &[&str] =
 const REQUIRED_G7_COMMAND_FRAGMENT: &str = "scripts/e2e/run_performance_budget_gate.sh";
 const REQUIRED_G8_COMMAND_FRAGMENT: &str = "scripts/e2e/run_raptorq_gate.sh";
 const REQUIRED_G8_PHASE2C_FRAGMENT: &str = "validate_phase2c_packets";
-const REQUIRED_G7_OUTPUTS: &[&str] = &["candidate_baseline", "performance_budget_report"];
+const REQUIRED_G7_OUTPUTS: &[&str] = &[
+    "candidate_baseline",
+    "performance_budget_report",
+    "uninstrumented_budget_paths",
+    "missing_instrumentation_policy",
+];
 const REQUIRED_G8_OUTPUTS: &[&str] = &[
     "sidecar",
     "scrub_report",
@@ -823,5 +828,47 @@ fn record_contract_check(report: &mut SuiteReport, pass: bool, failure_message: 
         report.pass_count += 1;
     } else {
         report.failures.push(failure_message);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CI_GATE_TOPOLOGY_CONTRACT_PATH, REQUIRED_G7_OUTPUTS, validate_ci_gate_topology_contract,
+    };
+    use serde_json::Value;
+    use std::{fs, path::PathBuf};
+
+    #[test]
+    fn run_test_contract_gate_validates_g7_strict_performance_budget_outputs() {
+        let report =
+            validate_ci_gate_topology_contract().expect("ci gate topology contract report");
+
+        assert!(
+            report.failures.is_empty(),
+            "ci gate topology contract failures: {:?}",
+            report.failures
+        );
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let contract_path = repo_root.join(CI_GATE_TOPOLOGY_CONTRACT_PATH);
+        let contract: Value =
+            serde_json::from_str(&fs::read_to_string(contract_path).expect("read contract"))
+                .expect("parse contract");
+        let g7_outputs = contract
+            .get("gates")
+            .and_then(Value::as_array)
+            .expect("gates array")
+            .iter()
+            .find(|gate| gate.get("id").and_then(Value::as_str) == Some("G7"))
+            .and_then(|gate| gate.get("required_outputs").and_then(Value::as_array))
+            .expect("G7 required outputs");
+        for required_output in REQUIRED_G7_OUTPUTS {
+            assert!(
+                g7_outputs
+                    .iter()
+                    .any(|output| output.as_str() == Some(required_output)),
+                "G7 required output {required_output} missing from contract"
+            );
+        }
     }
 }
