@@ -38,6 +38,7 @@ use std::collections::HashSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, RwLock};
+use std::thread;
 
 use serde::{Deserialize, Serialize};
 
@@ -5818,6 +5819,39 @@ impl UFuncArray {
         op: BinaryOp,
         contract: &ParallelPartitionContract,
     ) -> Result<Self, UFuncError> {
+        self.validate_elementwise_binary_partition_contract(rhs, op, contract)?;
+
+        let broadcasted = Self::broadcast_arrays(&[self, rhs])?;
+        let lhs = &broadcasted[0];
+        let rhs = &broadcasted[1];
+        let mut values = vec![0.0f64; contract.out_count];
+        for chunk in &contract.chunks {
+            if chunk.end > values.len() || chunk.start > chunk.end {
+                return Err(UFuncError::Msg(format!(
+                    "invalid partition chunk [{}, {}) for output count {}",
+                    chunk.start,
+                    chunk.end,
+                    values.len()
+                )));
+            }
+            for (idx, slot) in values
+                .iter_mut()
+                .enumerate()
+                .take(chunk.end)
+                .skip(chunk.start)
+            {
+                *slot = op.apply(lhs.values[idx], rhs.values[idx]);
+            }
+        }
+        Self::from_values_with_dtype(contract.out_shape.clone(), values, contract.out_dtype)
+    }
+
+    fn validate_elementwise_binary_partition_contract(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+        contract: &ParallelPartitionContract,
+    ) -> Result<(), UFuncError> {
         if !contract.safe_to_parallelize {
             return Err(UFuncError::Msg(format!(
                 "parallel binary partition contract is not safe: {}",
@@ -5855,30 +5889,85 @@ impl UFuncArray {
                 "partition contract does not match the deterministic binary plan".to_string(),
             ));
         }
+        Ok(())
+    }
+
+    pub fn execute_elementwise_binary_partition_plan_parallel(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+        contract: &ParallelPartitionContract,
+    ) -> Result<Self, UFuncError> {
+        if !matches!(op, BinaryOp::Add) {
+            return Err(UFuncError::Msg(format!(
+                "parallel binary execution is currently opt-in for add only, not {}",
+                op.name()
+            )));
+        }
+        self.validate_elementwise_binary_partition_contract(rhs, op, contract)?;
 
         let broadcasted = Self::broadcast_arrays(&[self, rhs])?;
         let lhs = &broadcasted[0];
         let rhs = &broadcasted[1];
         let mut values = vec![0.0f64; contract.out_count];
-        for chunk in &contract.chunks {
-            if chunk.end > values.len() || chunk.start > chunk.end {
+
+        let out_count = values.len();
+        thread::scope(|scope| -> Result<(), UFuncError> {
+            let mut handles = Vec::with_capacity(contract.chunks.len());
+            let mut remaining = values.as_mut_slice();
+            let mut cursor = 0usize;
+            for chunk in &contract.chunks {
+                let chunk = *chunk;
+                if chunk.start != cursor || chunk.start > chunk.end || chunk.end > out_count {
+                    return Err(UFuncError::Msg(format!(
+                        "invalid parallel binary partition chunk [{}, {}) for output count {}",
+                        chunk.start, chunk.end, out_count
+                    )));
+                }
+                let (chunk_values, rest) = remaining.split_at_mut(chunk.len());
+                remaining = rest;
+                cursor = chunk.end;
+                let lhs_values = &lhs.values;
+                let rhs_values = &rhs.values;
+                handles.push(scope.spawn(move || {
+                    for (offset, slot) in chunk_values.iter_mut().enumerate() {
+                        let idx = chunk.start + offset;
+                        *slot = op.apply(lhs_values[idx], rhs_values[idx]);
+                    }
+                }));
+            }
+            if cursor != out_count {
                 return Err(UFuncError::Msg(format!(
-                    "invalid partition chunk [{}, {}) for output count {}",
-                    chunk.start,
-                    chunk.end,
-                    values.len()
+                    "parallel binary partition chunks covered {} of {} output elements",
+                    cursor, out_count
                 )));
             }
-            for (idx, slot) in values
-                .iter_mut()
-                .enumerate()
-                .take(chunk.end)
-                .skip(chunk.start)
-            {
-                *slot = op.apply(lhs.values[idx], rhs.values[idx]);
+
+            for handle in handles {
+                handle.join().map_err(|_| {
+                    UFuncError::Msg("parallel binary partition worker panicked".to_string())
+                })?;
             }
-        }
+            Ok(())
+        })?;
+
         Self::from_values_with_dtype(contract.out_shape.clone(), values, contract.out_dtype)
+    }
+
+    pub fn elementwise_binary_parallel(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+        config: ParallelPartitionConfig,
+    ) -> Result<Self, UFuncError> {
+        if !matches!(op, BinaryOp::Add) {
+            return self.elementwise_binary(rhs, op);
+        }
+        let contract = self.plan_elementwise_binary_partitions(rhs, op, config)?;
+        if !contract.is_parallel_safe() || contract.chunks.len() < 2 {
+            return self.elementwise_binary(rhs, op);
+        }
+        self.execute_elementwise_binary_partition_plan_parallel(rhs, op, &contract)
     }
 
     fn elementwise_datetime_comparison(
@@ -7335,6 +7424,48 @@ impl UFuncArray {
         keepdims: bool,
         contract: &ParallelPartitionContract,
     ) -> Result<Self, UFuncError> {
+        let axis_index = self.validate_reduce_sum_partition_contract(axis, keepdims, contract)?;
+
+        let axis_len = self.shape[axis_index];
+        let inner = self.shape[axis_index + 1..]
+            .iter()
+            .copied()
+            .product::<usize>();
+        let mut values = vec![0.0f64; contract.out_count];
+        for chunk in &contract.chunks {
+            if chunk.end > values.len() || chunk.start > chunk.end {
+                return Err(UFuncError::Msg(format!(
+                    "invalid reduction partition chunk [{}, {}) for output count {}",
+                    chunk.start,
+                    chunk.end,
+                    values.len()
+                )));
+            }
+            if axis_len == 0 {
+                continue;
+            }
+            for (out_flat, slot) in values
+                .iter_mut()
+                .enumerate()
+                .take(chunk.end)
+                .skip(chunk.start)
+            {
+                let outer_idx = out_flat / inner;
+                let inner_idx = out_flat % inner;
+                let base = outer_idx * axis_len * inner + inner_idx;
+                *slot = reduce_sum_strided(&self.values, base, inner, axis_len);
+            }
+        }
+
+        Self::from_values_with_dtype(contract.out_shape.clone(), values, contract.out_dtype)
+    }
+
+    fn validate_reduce_sum_partition_contract(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        contract: &ParallelPartitionContract,
+    ) -> Result<usize, UFuncError> {
         if !contract.safe_to_parallelize {
             return Err(UFuncError::Msg(format!(
                 "parallel reduction partition contract is not safe: {}",
@@ -7386,6 +7517,16 @@ impl UFuncArray {
                 "partition contract does not match the deterministic reduction plan".to_string(),
             ));
         }
+        Ok(axis_index)
+    }
+
+    pub fn execute_reduce_sum_partition_plan_parallel(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        contract: &ParallelPartitionContract,
+    ) -> Result<Self, UFuncError> {
+        let axis_index = self.validate_reduce_sum_partition_contract(axis, keepdims, contract)?;
 
         let axis_len = self.shape[axis_index];
         let inner = self.shape[axis_index + 1..]
@@ -7393,32 +7534,67 @@ impl UFuncArray {
             .copied()
             .product::<usize>();
         let mut values = vec![0.0f64; contract.out_count];
-        for chunk in &contract.chunks {
-            if chunk.end > values.len() || chunk.start > chunk.end {
+
+        let out_count = values.len();
+        thread::scope(|scope| -> Result<(), UFuncError> {
+            let mut handles = Vec::with_capacity(contract.chunks.len());
+            let mut remaining = values.as_mut_slice();
+            let mut cursor = 0usize;
+            for chunk in &contract.chunks {
+                let chunk = *chunk;
+                if chunk.start != cursor || chunk.start > chunk.end || chunk.end > out_count {
+                    return Err(UFuncError::Msg(format!(
+                        "invalid parallel reduction partition chunk [{}, {}) for output count {}",
+                        chunk.start, chunk.end, out_count
+                    )));
+                }
+                let (chunk_values, rest) = remaining.split_at_mut(chunk.len());
+                remaining = rest;
+                cursor = chunk.end;
+                let source_values = &self.values;
+                handles.push(scope.spawn(move || {
+                    if axis_len == 0 {
+                        chunk_values.fill(0.0);
+                        return;
+                    }
+                    for (offset, slot) in chunk_values.iter_mut().enumerate() {
+                        let out_flat = chunk.start + offset;
+                        let outer_idx = out_flat / inner;
+                        let inner_idx = out_flat % inner;
+                        let base = outer_idx * axis_len * inner + inner_idx;
+                        *slot = reduce_sum_strided(source_values, base, inner, axis_len);
+                    }
+                }));
+            }
+            if cursor != out_count {
                 return Err(UFuncError::Msg(format!(
-                    "invalid reduction partition chunk [{}, {}) for output count {}",
-                    chunk.start,
-                    chunk.end,
-                    values.len()
+                    "parallel reduction partition chunks covered {} of {} output elements",
+                    cursor, out_count
                 )));
             }
-            if axis_len == 0 {
-                continue;
+
+            for handle in handles {
+                handle.join().map_err(|_| {
+                    UFuncError::Msg("parallel reduction partition worker panicked".to_string())
+                })?;
             }
-            for (out_flat, slot) in values
-                .iter_mut()
-                .enumerate()
-                .take(chunk.end)
-                .skip(chunk.start)
-            {
-                let outer_idx = out_flat / inner;
-                let inner_idx = out_flat % inner;
-                let base = outer_idx * axis_len * inner + inner_idx;
-                *slot = reduce_sum_strided(&self.values, base, inner, axis_len);
-            }
-        }
+            Ok(())
+        })?;
 
         Self::from_values_with_dtype(contract.out_shape.clone(), values, contract.out_dtype)
+    }
+
+    pub fn reduce_sum_parallel(
+        &self,
+        axis: Option<isize>,
+        keepdims: bool,
+        config: ParallelPartitionConfig,
+    ) -> Result<Self, UFuncError> {
+        let contract = self.plan_reduce_sum_partitions(axis, keepdims, config)?;
+        if !contract.is_parallel_safe() || contract.chunks.len() < 2 {
+            return self.reduce_sum(axis, keepdims);
+        }
+        self.execute_reduce_sum_partition_plan_parallel(axis, keepdims, &contract)
     }
 
     /// Sum with initial value (`np.sum(initial=...)`).

@@ -4,7 +4,7 @@
 //! specific input values. When an oracle (expected output) is unavailable,
 //! metamorphic relations between inputs/outputs provide correctness evidence.
 
-use fnp_dtype::DType;
+use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{BinaryOp, FloatErrorMode, ParallelPartitionConfig, UFuncArray, UnaryOp, errstate};
 use std::f64::consts::PI;
 
@@ -245,6 +245,187 @@ fn partition_contract_view_safety_records_noncontiguous_and_overlap_limits() {
             .iter()
             .any(|reason| reason.contains("internal overlap"))
     );
+}
+
+#[test]
+fn parallel_opt_in_broadcast_add_matches_serial_for_large_broadcast() {
+    let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+    let lhs_values = (0..(64 * 64))
+        .map(|idx| match idx {
+            0 => -0.0,
+            257 => f64::NAN,
+            _ => f64::from((idx % 113) as u32) - 50.0,
+        })
+        .collect();
+    let rhs_values = (0..64)
+        .map(|idx| {
+            if idx == 7 {
+                -0.0
+            } else {
+                f64::from((idx % 11) as u32) / 3.0
+            }
+        })
+        .collect();
+    let lhs = UFuncArray::new(vec![64, 64], lhs_values, DType::F64).expect("lhs");
+    let rhs = UFuncArray::new(vec![64], rhs_values, DType::F64).expect("rhs");
+    let config = ParallelPartitionConfig::from_worker_count(4)
+        .expect("worker config")
+        .with_min_elements_per_chunk(256)
+        .expect("chunk config");
+
+    let serial = lhs
+        .elementwise_binary(&rhs, BinaryOp::Add)
+        .expect("serial add");
+    let parallel = lhs
+        .elementwise_binary_parallel(&rhs, BinaryOp::Add, config)
+        .expect("parallel add");
+
+    assert_eq!(parallel.shape(), serial.shape());
+    assert_eq!(parallel.dtype(), serial.dtype());
+    assert_bitwise_equal(parallel.values(), serial.values());
+}
+
+#[test]
+fn parallel_opt_in_broadcast_add_matches_serial_for_materialized_noncontiguous_view() {
+    let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+    let base = UFuncArray::new(
+        vec![16, 8],
+        (0..(16 * 8))
+            .map(|idx| f64::from((idx % 19) as u32) - 8.0)
+            .collect(),
+        DType::F64,
+    )
+    .expect("base");
+    let reversed_cols = base
+        .slice_axis_view(1, None, None, -1)
+        .expect("non-contiguous view");
+    let lhs = UFuncArray::from_shared_view(&reversed_cols).expect("materialized view");
+    let rhs = UFuncArray::new(
+        vec![8],
+        (0..8).map(|idx| f64::from(idx as u32) * 0.25).collect(),
+        DType::F64,
+    )
+    .expect("rhs");
+    let config = ParallelPartitionConfig::from_worker_count(4)
+        .expect("worker config")
+        .with_min_elements_per_chunk(16)
+        .expect("chunk config");
+
+    let serial = lhs
+        .elementwise_binary(&rhs, BinaryOp::Add)
+        .expect("serial add");
+    let parallel = lhs
+        .elementwise_binary_parallel(&rhs, BinaryOp::Add, config)
+        .expect("parallel add");
+
+    assert_bitwise_equal(parallel.values(), serial.values());
+    assert_eq!(parallel.shape(), serial.shape());
+    assert_eq!(parallel.dtype(), serial.dtype());
+}
+
+#[test]
+fn parallel_opt_in_broadcast_add_preserves_dtype_promotion() {
+    let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+    let lhs =
+        UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::I32).expect("lhs");
+    let rhs = UFuncArray::new(vec![3], vec![0.5, -0.0, 2.25], DType::F64).expect("rhs");
+    let config = ParallelPartitionConfig::from_worker_count(3)
+        .expect("worker config")
+        .with_min_elements_per_chunk(1)
+        .expect("chunk config");
+
+    let serial = lhs
+        .elementwise_binary(&rhs, BinaryOp::Add)
+        .expect("serial add");
+    let parallel = lhs
+        .elementwise_binary_parallel(&rhs, BinaryOp::Add, config)
+        .expect("parallel add");
+
+    assert_eq!(parallel.dtype(), serial.dtype());
+    assert_eq!(parallel.dtype(), DType::F64);
+    assert_bitwise_equal(parallel.values(), serial.values());
+}
+
+#[test]
+fn parallel_opt_in_sum_axis_matches_serial_for_nan_signed_zero_and_empty_axes() {
+    let arr_values = (0..(8 * 16))
+        .map(|idx| match idx {
+            0 => -0.0,
+            17 => f64::NAN,
+            _ => f64::from((idx % 23) as u32) - 7.0,
+        })
+        .collect();
+    let arr = UFuncArray::new(vec![8, 16], arr_values, DType::F64).expect("input");
+    let config = ParallelPartitionConfig::from_worker_count(4)
+        .expect("worker config")
+        .with_min_elements_per_chunk(4)
+        .expect("chunk config");
+
+    let serial = arr.reduce_sum(Some(1), false).expect("serial sum");
+    let parallel = arr
+        .reduce_sum_parallel(Some(1), false, config)
+        .expect("parallel sum");
+    assert_bitwise_equal(parallel.values(), serial.values());
+    assert_eq!(parallel.shape(), serial.shape());
+    assert_eq!(parallel.dtype(), serial.dtype());
+
+    let empty = UFuncArray::new(vec![4, 0, 3], Vec::new(), DType::F64).expect("empty");
+    let serial_empty = empty.reduce_sum(Some(1), true).expect("serial empty sum");
+    let parallel_empty = empty
+        .reduce_sum_parallel(Some(1), true, config)
+        .expect("parallel empty sum");
+    assert_bitwise_equal(parallel_empty.values(), serial_empty.values());
+    assert_eq!(parallel_empty.shape(), serial_empty.shape());
+}
+
+#[test]
+fn parallel_opt_in_falls_back_to_serial_for_global_sum_sidecars_and_non_add_ops() {
+    let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+    let config = ParallelPartitionConfig::from_worker_count(4)
+        .expect("worker config")
+        .with_min_elements_per_chunk(1)
+        .expect("chunk config");
+
+    let global_sum =
+        UFuncArray::new(vec![3], vec![1.0e16, 1.0, -1.0e16], DType::F64).expect("sum input");
+    let serial_sum = global_sum.reduce_sum(None, false).expect("serial sum");
+    let parallel_sum = global_sum
+        .reduce_sum_parallel(None, false, config)
+        .expect("serial fallback sum");
+    assert_bitwise_equal(parallel_sum.values(), serial_sum.values());
+
+    let large_ints = UFuncArray::from_storage(
+        vec![2],
+        ArrayStorage::I64(vec![9_007_199_254_740_993, -9_007_199_254_740_993]),
+    )
+    .expect("large integer sidecar input");
+    let ones = UFuncArray::new(vec![2], vec![1.0, 1.0], DType::I64).expect("rhs");
+    let serial_add = large_ints
+        .elementwise_binary(&ones, BinaryOp::Add)
+        .expect("serial sidecar add");
+    let fallback_add = large_ints
+        .elementwise_binary_parallel(&ones, BinaryOp::Add, config)
+        .expect("sidecar fallback add");
+    assert_bitwise_equal(fallback_add.values(), serial_add.values());
+    assert_eq!(fallback_add.dtype(), serial_add.dtype());
+
+    let lhs = UFuncArray::new(vec![2], vec![-0.0, f64::NAN], DType::F64).expect("lhs");
+    let rhs = UFuncArray::new(vec![2], vec![2.0, -1.0], DType::F64).expect("rhs");
+    let mul_contract = lhs
+        .plan_elementwise_binary_partitions(&rhs, BinaryOp::Mul, config)
+        .expect("mul partition contract");
+    assert!(mul_contract.is_parallel_safe());
+    assert!(
+        lhs.execute_elementwise_binary_partition_plan_parallel(&rhs, BinaryOp::Mul, &mul_contract)
+            .is_err()
+    );
+    let serial_mul = lhs
+        .elementwise_binary(&rhs, BinaryOp::Mul)
+        .expect("serial mul");
+    let fallback_mul = lhs
+        .elementwise_binary_parallel(&rhs, BinaryOp::Mul, config)
+        .expect("mul fallback");
+    assert_bitwise_equal(fallback_mul.values(), serial_mul.values());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

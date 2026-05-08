@@ -2,7 +2,7 @@
 
 use fnp_dtype::DType;
 use fnp_io::{IOSupportedDType, load, save};
-use fnp_ufunc::{BinaryOp, UFuncArray};
+use fnp_ufunc::{BinaryOp, ParallelPartitionConfig, UFuncArray};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path;
@@ -11,6 +11,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 const REPRO_COMMAND: &str = "cargo run -p fnp-conformance --bin generate_benchmark_baseline";
 const BENCHMARK_BASELINE_SCHEMA_VERSION: u8 = 2;
+const PARALLEL_PROTOTYPE_THREADS_ENV: &str = "FNP_PARALLEL_PROTOTYPE_THREADS";
+const PARALLEL_PROTOTYPE_MIN_ELEMENTS_PER_CHUNK: usize = 8_192;
 pub const MEMORY_FOOTPRINT_SLO_PATH: &str = "memory footprint";
 pub const ALLOCATION_CHURN_SLO_PATH: &str = "allocation churn";
 pub const ALLOCATOR_FRAGMENTATION_SLO_PATH: &str =
@@ -149,7 +151,12 @@ fn available_parallelism() -> usize {
 }
 
 fn configured_thread_count() -> Option<usize> {
-    for key in ["FNP_NUM_THREADS", "RAYON_NUM_THREADS", "OMP_NUM_THREADS"] {
+    for key in [
+        PARALLEL_PROTOTYPE_THREADS_ENV,
+        "FNP_NUM_THREADS",
+        "RAYON_NUM_THREADS",
+        "OMP_NUM_THREADS",
+    ] {
         let Ok(value) = std::env::var(key) else {
             continue;
         };
@@ -161,6 +168,22 @@ fn configured_thread_count() -> Option<usize> {
         }
     }
     None
+}
+
+fn parallel_prototype_config_from_value(raw: Option<&str>) -> Option<ParallelPartitionConfig> {
+    let threads = raw?.parse::<usize>().ok()?;
+    if threads <= 1 {
+        return None;
+    }
+    ParallelPartitionConfig::from_worker_count(threads)
+        .ok()?
+        .with_min_elements_per_chunk(PARALLEL_PROTOTYPE_MIN_ELEMENTS_PER_CHUNK)
+        .ok()
+}
+
+fn parallel_prototype_config() -> Option<ParallelPartitionConfig> {
+    let raw = std::env::var(PARALLEL_PROTOTYPE_THREADS_ENV).ok();
+    parallel_prototype_config_from_value(raw.as_deref())
 }
 
 fn process_high_water_rss_bytes() -> Option<u64> {
@@ -336,6 +359,7 @@ pub fn generate_benchmark_baseline(
     output_path: &Path,
 ) -> Result<BenchmarkBaseline, String> {
     let item_size = DType::F64.item_size();
+    let parallel_config = parallel_prototype_config();
     let lhs_add = UFuncArray::new(
         vec![256, 256],
         (0..(256 * 256)).map(|i| f64::from(i as u32)).collect(),
@@ -374,9 +398,14 @@ pub fn generate_benchmark_baseline(
             allocator_stress: AllocatorStressLevel::Steady,
         },
         || {
-            let out = lhs_add
-                .elementwise_binary(&rhs_add, BinaryOp::Add)
-                .map_err(|err| format!("broadcast add failed: {err}"))?;
+            let out = match parallel_config {
+                Some(config) => lhs_add
+                    .elementwise_binary_parallel(&rhs_add, BinaryOp::Add, config)
+                    .map_err(|err| format!("parallel broadcast add failed: {err}"))?,
+                None => lhs_add
+                    .elementwise_binary(&rhs_add, BinaryOp::Add)
+                    .map_err(|err| format!("broadcast add failed: {err}"))?,
+            };
             std::hint::black_box(out.values()[0]);
             Ok(())
         },
@@ -400,9 +429,14 @@ pub fn generate_benchmark_baseline(
             allocator_stress: AllocatorStressLevel::Steady,
         },
         || {
-            let out = reduce_in
-                .reduce_sum(Some(1), false)
-                .map_err(|err| format!("axis reduction failed: {err}"))?;
+            let out = match parallel_config {
+                Some(config) => reduce_in
+                    .reduce_sum_parallel(Some(1), false, config)
+                    .map_err(|err| format!("parallel axis reduction failed: {err}"))?,
+                None => reduce_in
+                    .reduce_sum(Some(1), false)
+                    .map_err(|err| format!("axis reduction failed: {err}"))?,
+            };
             std::hint::black_box(out.values()[0]);
             Ok(())
         },
@@ -466,9 +500,14 @@ pub fn generate_benchmark_baseline(
             allocator_stress: AllocatorStressLevel::Steady,
         },
         || {
-            let out = lhs_add_large
-                .elementwise_binary(&rhs_add_large, BinaryOp::Add)
-                .map_err(|err| format!("large broadcast add failed: {err}"))?;
+            let out = match parallel_config {
+                Some(config) => lhs_add_large
+                    .elementwise_binary_parallel(&rhs_add_large, BinaryOp::Add, config)
+                    .map_err(|err| format!("parallel large broadcast add failed: {err}"))?,
+                None => lhs_add_large
+                    .elementwise_binary(&rhs_add_large, BinaryOp::Add)
+                    .map_err(|err| format!("large broadcast add failed: {err}"))?,
+            };
             std::hint::black_box(out.values()[0]);
             Ok(())
         },
@@ -490,9 +529,14 @@ pub fn generate_benchmark_baseline(
             allocator_stress: AllocatorStressLevel::Steady,
         },
         || {
-            let out = lhs_add_large
-                .reduce_sum(Some(1), false)
-                .map_err(|err| format!("large axis reduction failed: {err}"))?;
+            let out = match parallel_config {
+                Some(config) => lhs_add_large
+                    .reduce_sum_parallel(Some(1), false, config)
+                    .map_err(|err| format!("parallel large axis reduction failed: {err}"))?,
+                None => lhs_add_large
+                    .reduce_sum(Some(1), false)
+                    .map_err(|err| format!("large axis reduction failed: {err}"))?,
+            };
             std::hint::black_box(out.values()[0]);
             Ok(())
         },
@@ -803,7 +847,8 @@ pub fn generate_benchmark_baseline(
 mod tests {
     use super::{
         AllocatorStressLevel, BenchmarkBaseline, MIN_SAMPLE_MS, REQUIRED_SLO_PATHS,
-        WorkloadInstrumentation, generate_benchmark_baseline, time_workload,
+        WorkloadInstrumentation, generate_benchmark_baseline, parallel_prototype_config_from_value,
+        time_workload,
     };
     use std::collections::BTreeSet;
     use std::fs;
@@ -832,6 +877,22 @@ mod tests {
             .iter()
             .find(|workload| workload.name == name)
             .map(|workload| &workload.telemetry)
+    }
+
+    #[test]
+    fn parallel_prototype_config_requires_explicit_threads_above_one() {
+        assert!(parallel_prototype_config_from_value(None).is_none());
+        assert!(parallel_prototype_config_from_value(Some("")).is_none());
+        assert!(parallel_prototype_config_from_value(Some("not-a-number")).is_none());
+        assert!(parallel_prototype_config_from_value(Some("0")).is_none());
+        assert!(parallel_prototype_config_from_value(Some("1")).is_none());
+
+        let config = parallel_prototype_config_from_value(Some("4")).expect("parallel config");
+        assert_eq!(config.worker_count, 4);
+        assert_eq!(
+            config.min_elements_per_chunk,
+            super::PARALLEL_PROTOTYPE_MIN_ELEMENTS_PER_CHUNK
+        );
     }
 
     #[test]

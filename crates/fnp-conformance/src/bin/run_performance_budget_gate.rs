@@ -2,7 +2,7 @@
 
 use fnp_conformance::benchmark::{
     ALLOCATION_CHURN_SLO_PATH, ALLOCATOR_FRAGMENTATION_SLO_PATH, BenchmarkBaseline,
-    BenchmarkWorkload, MEMORY_FOOTPRINT_SLO_PATH, REQUIRED_SLO_PATHS,
+    BenchmarkWorkload, MEMORY_FOOTPRINT_SLO_PATH, REQUIRED_SLO_PATHS, generate_benchmark_baseline,
 };
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
@@ -118,6 +118,7 @@ struct GateOptions {
     report_path: Option<PathBuf>,
     max_p99_regression_ratio: f64,
     coverage_floor: f64,
+    generate_candidate: bool,
 }
 
 const MISSING_INSTRUMENTATION_POLICY: &str = "fail_closed";
@@ -184,6 +185,10 @@ fn main() {
 
 fn run() -> Result<(), String> {
     let options = parse_args()?;
+    if options.generate_candidate {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        generate_benchmark_baseline(&repo_root, &options.candidate_path)?;
+    }
     let reference = load_baseline(&options.reference_path)?;
     let candidate = load_baseline(&options.candidate_path)?;
 
@@ -321,6 +326,7 @@ fn parse_args() -> Result<GateOptions, String> {
     let mut report_path: Option<PathBuf> = None;
     let mut max_p99_regression_ratio = 0.07f64;
     let mut coverage_floor = 1.0f64;
+    let mut generate_candidate = false;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -369,9 +375,12 @@ fn parse_args() -> Result<GateOptions, String> {
                     ));
                 }
             }
+            "--generate-candidate" => {
+                generate_candidate = true;
+            }
             "--help" | "-h" => {
                 println!(
-                    "Usage: cargo run -p fnp-conformance --bin run_performance_budget_gate -- [--reference-path <path>] [--candidate-path <path>] [--report-path <path>] [--max-p99-regression-ratio <ratio>] [--coverage-floor <ratio>]"
+                    "Usage: cargo run -p fnp-conformance --bin run_performance_budget_gate -- [--reference-path <path>] [--candidate-path <path>] [--report-path <path>] [--max-p99-regression-ratio <ratio>] [--coverage-floor <ratio>] [--generate-candidate]"
                 );
                 std::process::exit(0);
             }
@@ -385,6 +394,7 @@ fn parse_args() -> Result<GateOptions, String> {
         report_path,
         max_p99_regression_ratio,
         coverage_floor,
+        generate_candidate,
     })
 }
 
@@ -711,6 +721,7 @@ mod tests {
             report_path: Some(PathBuf::from("report.json")),
             max_p99_regression_ratio: 0.07,
             coverage_floor: 1.0,
+            generate_candidate: false,
         }
     }
 
