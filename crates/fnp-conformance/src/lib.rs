@@ -3,6 +3,7 @@
 pub mod benchmark;
 pub mod contract_schema;
 pub mod cross_engine_benchmark;
+pub mod fnp_python_api_coverage;
 pub mod fnp_python_conformance_shards;
 pub mod raptorq_artifacts;
 pub mod security_contracts;
