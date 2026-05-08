@@ -1199,8 +1199,26 @@ impl UnaryOp {
             }
             Self::Exp2 => x.exp2(),
             Self::Fabs => x.abs(),
-            Self::Arccosh => x.acosh(),
-            Self::Arcsinh => x.asinh(),
+            Self::Arccosh => {
+                // For very large x, acosh(x) ≈ ln(2x) = ln(2) + ln(x)
+                // Use asymptotic form to avoid overflow in sqrt(x^2 - 1)
+                if x > 1e150 {
+                    std::f64::consts::LN_2 + x.ln()
+                } else {
+                    x.acosh()
+                }
+            }
+            Self::Arcsinh => {
+                // For very large |x|, asinh(x) ≈ sign(x) * ln(2|x|) = sign(x) * (ln(2) + ln(|x|))
+                // Use asymptotic form to avoid overflow in sqrt(x^2 + 1)
+                if x > 1e150 {
+                    std::f64::consts::LN_2 + x.ln()
+                } else if x < -1e150 {
+                    -(std::f64::consts::LN_2 + (-x).ln())
+                } else {
+                    x.asinh()
+                }
+            }
             Self::Arctanh => x.atanh(),
             Self::Invert => {
                 if !x.is_finite() {
