@@ -3,26 +3,26 @@
 packet_id: `FNP-P2C-002`  
 subsystem: `dtype descriptors and promotion`
 
-## 1. Crate and Module Boundary Skeleton
+## 1. Crate and Module Boundary Status
 
 | Crate | Planned module boundary | Responsibility | Public surface contract |
 |---|---|---|---|
 | `crates/fnp-dtype` | `dtype_catalog` (existing in `src/lib.rs`) | canonical scoped dtype taxonomy and parsing | `DType`, `DType::parse`, `DType::name`, `DType::item_size` |
-| `crates/fnp-dtype` | `promotion_table` (existing core + packet-D expansion) | deterministic promotion decisions and policy invariants | `promote(lhs, rhs) -> DType` |
-| `crates/fnp-dtype` | `cast_policy` (existing core + packet-D expansion) | lossless cast admissibility and rejection taxonomy | `can_cast_lossless(src, dst) -> bool` |
-| `crates/fnp-dtype` | `descriptor_norm` (packet-D planned boundary) | descriptor/type-object normalization and alias canonicalization | `normalize_descriptor(...) -> Result<DType, DTypeError>` (planned) |
-| `crates/fnp-conformance` | `dtype_promotion_suite` (existing) | fixture-driven dtype promotion validation | `run_dtype_promotion_suite` |
-| `crates/fnp-conformance` | `dtype_packet_differential` (packet-F planned boundary) | differential/metamorphic/adversarial dtype and cast verification | packet-F runner entrypoint (planned) |
+| `crates/fnp-dtype` | `promotion_table` (packet-D/E landed) | deterministic promotion decisions and policy invariants | `promote`, `result_type`, reduction-promotion helpers |
+| `crates/fnp-dtype` | `cast_policy` (packet-D/E landed) | lossless/same-kind cast admissibility and rejection taxonomy | `can_cast_lossless`, `can_cast`, `can_cast_same_kind`-backed policy |
+| `crates/fnp-dtype` | descriptor parsing/normalization (scoped packet-D/E landed; alias breadth ongoing) | descriptor/type-object parsing and scoped alias canonicalization | `DType::parse`, void descriptor parsing, structured dtype/storage descriptors |
+| `crates/fnp-conformance` | `dtype_promotion_suite` (packet-E landed) | fixture-driven dtype promotion validation | dtype promotion fixtures, packet-E unit/property evidence |
+| `crates/fnp-conformance` | `dtype_packet_differential` (packet-F/G landed) | differential/metamorphic/adversarial dtype and cast verification | packet-002 dtype fixtures, oracle report, workflow replay artifacts |
 | `crates/fnp-runtime` | policy audit integration (existing) | strict/hardened decision logging and fail-closed boundaries | runtime policy decision/audit interfaces |
 
 ## 2. Implementation Sequence (D-Stage to I-Stage)
 
-1. Stabilize packet-D module boundary plan around current `fnp-dtype` surface without introducing unsafe paths.
-2. Add descriptor normalization scaffolding (alias/canonicalization) in `fnp-dtype` with explicit fail-closed error taxonomy.
-3. Expand cast-policy matrix representation incrementally with deterministic tests and invariant checks.
-4. Wire packet-F conformance runner to oracle-driven dtype/cast scenarios and adversarial edges.
-5. Add packet-G e2e mixed-dtype replay path with structured logs and artifact linking.
-6. Promote packet-I parity/risk/durability artifacts once E/F/G/H evidence is complete.
+1. Keep the landed packet-D/E `fnp-dtype` catalog, promotion, cast-policy, descriptor parsing, structured-storage, and structured-log evidence green.
+2. Expand descriptor alias/canonicalization breadth where richer NumPy dtype objects remain outside the current scoped parser.
+3. Maintain cast-policy matrix determinism with invariant checks and packet fixtures.
+4. Expand packet-F oracle-driven dtype/cast scenarios and adversarial edges without weakening fail-closed classes.
+5. Maintain packet-G mixed-dtype replay paths with structured logs and artifact linking.
+6. Keep packet-I parity/risk/durability artifacts ready and linked to the current final evidence pack.
 
 ## 3. Public Surface Contract Notes
 
@@ -30,7 +30,7 @@ subsystem: `dtype descriptors and promotion`
   - `DType`
   - `promote`
   - `can_cast_lossless`
-- Packet-D planned additions are constrained to deterministic descriptor normalization and explicit error-class handling.
+- Residual descriptor work is constrained to deterministic alias normalization and explicit error-class handling.
 - No compatibility shims; direct contract-aligned evolution only.
 
 ## 4. Instrumentation Insertion Points
