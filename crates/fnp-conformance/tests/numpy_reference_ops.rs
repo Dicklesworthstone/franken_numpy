@@ -344,6 +344,38 @@ elif case_id == "correlate_same_asymmetric":
         np.array([3.0, -1.0, 2.0]),
         mode="same",
     ))
+elif case_id == "meshgrid_xy_x":
+    grids = np.meshgrid(
+        np.array([1.0, 2.0]),
+        np.array([3.0, 4.0, 5.0]),
+        indexing="xy",
+    )
+    emit(grids[0])
+elif case_id == "meshgrid_xy_y":
+    grids = np.meshgrid(
+        np.array([1.0, 2.0]),
+        np.array([3.0, 4.0, 5.0]),
+        indexing="xy",
+    )
+    emit(grids[1])
+elif case_id == "meshgrid_sparse_ij_x":
+    grids = np.meshgrid(
+        np.array([1.0, 2.0]),
+        np.array([3.0, 4.0, 5.0]),
+        np.array([8.0, 9.0]),
+        indexing="ij",
+        sparse=True,
+    )
+    emit(grids[0])
+elif case_id == "meshgrid_sparse_ij_z":
+    grids = np.meshgrid(
+        np.array([1.0, 2.0]),
+        np.array([3.0, 4.0, 5.0]),
+        np.array([8.0, 9.0]),
+        indexing="ij",
+        sparse=True,
+    )
+    emit(grids[2])
 else:
     raise SystemExit(f"unknown case_id: {case_id}")
 "#;
@@ -673,6 +705,44 @@ fn sampling_ops_match_live_numpy_reference() {
         correlate_same.values(),
         1e-12,
     );
+}
+
+#[test]
+fn meshgrid_ops_match_live_numpy_reference() -> Result<(), String> {
+    let dense_x = array(&[2], &[1.0, 2.0]);
+    let dense_y = array(&[3], &[3.0, 4.0, 5.0]);
+    let xy =
+        UFuncArray::meshgrid_indexing(&[dense_x, dense_y], "xy").map_err(|err| err.to_string())?;
+    let [xy_x, xy_y] = xy.as_slice() else {
+        return Err(format!("dense xy meshgrid returned {} grids", xy.len()));
+    };
+    assert_oracle_match("meshgrid_xy_x", xy_x.shape(), xy_x.values(), 0.0);
+    assert_oracle_match("meshgrid_xy_y", xy_y.shape(), xy_y.values(), 0.0);
+
+    let sparse_x = array(&[2], &[1.0, 2.0]);
+    let sparse_y = array(&[3], &[3.0, 4.0, 5.0]);
+    let sparse_z = array(&[2], &[8.0, 9.0]);
+    let sparse_ij = UFuncArray::meshgrid_advanced(&[sparse_x, sparse_y, sparse_z], "ij", true)
+        .map_err(|err| err.to_string())?;
+    let [sparse_ij_x, _, sparse_ij_z] = sparse_ij.as_slice() else {
+        return Err(format!(
+            "sparse ij meshgrid returned {} grids",
+            sparse_ij.len()
+        ));
+    };
+    assert_oracle_match(
+        "meshgrid_sparse_ij_x",
+        sparse_ij_x.shape(),
+        sparse_ij_x.values(),
+        0.0,
+    );
+    assert_oracle_match(
+        "meshgrid_sparse_ij_z",
+        sparse_ij_z.shape(),
+        sparse_ij_z.values(),
+        0.0,
+    );
+    Ok(())
 }
 
 #[test]
