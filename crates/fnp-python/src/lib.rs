@@ -7816,7 +7816,11 @@ fn count_nonzero(
 
     if axes.is_none() && !keepdims {
         let count = result.values().first().copied().unwrap_or(0.0) as i64;
-        return Ok(count.into_pyobject(py)?.unbind().into_any());
+        // numpy.count_nonzero returns numpy.intp (i.e., numpy.int64 on 64-bit
+        // platforms), not a Python int. Wrap accordingly so the return type
+        // is drop-in compatible with numpy 2.x.
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("intp")?.call1((count,))?.unbind());
     }
 
     if result.shape().is_empty() && axes.is_none() {

@@ -120,7 +120,6 @@ fn assert_count_nonzero_scalar_surface(
     let ours_type = ours.get_type().name()?.to_string();
     let theirs_type = theirs.get_type().name()?.to_string();
     assert_eq!(ours_type, theirs_type, "{label} result type mismatch");
-    assert_eq!(ours_type, "int", "{label} should return a Python int");
     assert_eq!(
         ours.str()?.to_string(),
         theirs.str()?.to_string(),
@@ -139,12 +138,14 @@ fn count_nonzero_axis_none_scalar_surface_matches_numpy() {
 
         let ours_type = ours.get_type().name()?.to_string();
         let theirs_type = theirs.get_type().name()?.to_string();
-        assert_eq!(ours_type, theirs_type);
-        assert_eq!(ours_type, "int");
+        assert_eq!(
+            ours_type, theirs_type,
+            "count_nonzero(axis=None) result type must match numpy"
+        );
         assert_eq!(
             ours.str()?.to_string(),
             theirs.str()?.to_string(),
-            "count_nonzero(axis=None) should match NumPy's Python scalar surface"
+            "count_nonzero(axis=None) should match NumPy's scalar surface"
         );
         Ok(())
     });
