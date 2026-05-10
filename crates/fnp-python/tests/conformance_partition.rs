@@ -54,7 +54,11 @@ print(result[2] == expected[2] and np.sort(result[:2]).tolist() == np.sort(expec
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "partition 1d kth=2 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "partition 1d kth=2 should match numpy"
+    );
     Ok(())
 }
 
@@ -71,7 +75,11 @@ print(result[0] == expected[0])
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "partition kth=0 should give minimum at index 0");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "partition kth=0 should give minimum at index 0"
+    );
     Ok(())
 }
 
@@ -88,7 +96,11 @@ print(result[4] == expected[4])
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "partition kth=last should give maximum at last index");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "partition kth=last should give maximum at last index"
+    );
     Ok(())
 }
 
@@ -105,7 +117,11 @@ print(np.array_equal(result[1], expected[1]))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "partition 2d axis=0 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "partition 2d axis=0 should match numpy"
+    );
     Ok(())
 }
 
@@ -122,7 +138,58 @@ print(np.array_equal(result[:, 1], expected[:, 1]))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "partition 2d axis=1 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "partition 2d axis=1 should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn partition_kind_introselect_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([9, 4, 1, 7, 3, 6])
+kth = 2
+result = fnp.partition(a, kth, kind="introselect")
+expected = np.partition(a, kth, kind="introselect")
+print(result[kth] == expected[kth] and np.sort(result[:kth]).tolist() == np.sort(expected[:kth]).tolist())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "partition kind=introselect should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn partition_invalid_kind_matches_numpy_error() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([3, 1, 2])
+def classify(call):
+    try:
+        call()
+        return ("ok", "")
+    except Exception as error:
+        return (type(error).__name__, str(error).splitlines()[0])
+result = classify(lambda: fnp.partition(a, 1, kind="bogus"))
+expected = classify(lambda: np.partition(a, 1, kind="bogus"))
+print(result == expected and result[0] != "ok")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "partition invalid kind should preserve numpy error behavior"
+    );
     Ok(())
 }
 
@@ -143,7 +210,11 @@ print(a[result[2]] == a[expected[2]])
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "argpartition 1d kth=2 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argpartition 1d kth=2 should match numpy"
+    );
     Ok(())
 }
 
@@ -160,7 +231,11 @@ print(a[result[0]] == a[expected[0]] == np.min(a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "argpartition kth=0 should give index of minimum");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argpartition kth=0 should give index of minimum"
+    );
     Ok(())
 }
 
@@ -181,7 +256,11 @@ print(matches)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "argpartition 2d axis=0 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argpartition 2d axis=0 should match numpy"
+    );
     Ok(())
 }
 
@@ -202,7 +281,58 @@ print(matches)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "argpartition 2d axis=1 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argpartition 2d axis=1 should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn argpartition_kind_introselect_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([9, 4, 1, 7, 3, 6])
+kth = 2
+result = fnp.argpartition(a, kth, kind="introselect")
+expected = np.argpartition(a, kth, kind="introselect")
+print(a[result[kth]] == a[expected[kth]])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argpartition kind=introselect should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn argpartition_invalid_kind_matches_numpy_error() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([3, 1, 2])
+def classify(call):
+    try:
+        call()
+        return ("ok", "")
+    except Exception as error:
+        return (type(error).__name__, str(error).splitlines()[0])
+result = classify(lambda: fnp.argpartition(a, 1, kind="bogus"))
+expected = classify(lambda: np.argpartition(a, 1, kind="bogus"))
+print(result == expected and result[0] != "ok")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argpartition invalid kind should preserve numpy error behavior"
+    );
     Ok(())
 }
 
@@ -224,7 +354,11 @@ print(p[kth] == a[ap[kth]])
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "partition and argpartition should be consistent");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "partition and argpartition should be consistent"
+    );
     Ok(())
 }
 
@@ -259,7 +393,11 @@ except Exception as e:
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "axis_error", "partition on 0-D should raise AxisError");
+    assert_eq!(
+        result.trim(),
+        "axis_error",
+        "partition on 0-D should raise AxisError"
+    );
     Ok(())
 }
 
@@ -275,6 +413,10 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "argpartition on 0-D should return [0] like numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argpartition on 0-D should return [0] like numpy"
+    );
     Ok(())
 }

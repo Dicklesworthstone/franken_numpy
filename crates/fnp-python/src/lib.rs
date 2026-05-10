@@ -16942,6 +16942,7 @@ fn partition(
     if order
         .as_ref()
         .is_some_and(|value| !value.bind(py).is_none())
+        || kind != "introselect"
     {
         return fallback(py);
     }
@@ -17014,6 +17015,7 @@ fn argpartition(
     if order
         .as_ref()
         .is_some_and(|value| !value.bind(py).is_none())
+        || kind != "introselect"
     {
         return fallback(py);
     }
