@@ -4032,28 +4032,42 @@ impl Generator {
             }
             Ok(result)
         } else {
-            // Weighted sampling without replacement
+            // NumPy draws the remaining sample count in batches, deduplicates
+            // choices within each batch, then retries only the still-missing
+            // slots. That affects the public RNG stream when a batch collides.
             let mut weights = p.to_vec();
-            let mut indices: Vec<usize> = (0..n).collect();
-            let mut result = Vec::with_capacity(size);
-            for _ in 0..size {
+            let mut found = Vec::with_capacity(size);
+            while found.len() < size {
+                let remaining = size - found.len();
+                for &idx in &found {
+                    weights[idx] = 0.0;
+                }
                 let total: f64 = weights.iter().sum();
                 if total <= 0.0 {
                     break;
                 }
-                let u = self.next_f64() * total;
-                let mut cumulative = 0.0;
-                let mut chosen = indices.len() - 1;
-                for (i, &w) in weights.iter().enumerate() {
-                    cumulative += w;
-                    if cumulative > u {
-                        chosen = i;
-                        break;
+                let mut batch = Vec::with_capacity(remaining);
+                for _ in 0..remaining {
+                    let draw = self.next_f64();
+                    let threshold = draw * total;
+                    let mut cumulative = 0.0;
+                    let mut chosen = n - 1;
+                    for (idx, &weight) in weights.iter().enumerate() {
+                        cumulative += weight;
+                        if cumulative > threshold {
+                            chosen = idx;
+                            break;
+                        }
+                    }
+                    if !batch.contains(&chosen) {
+                        batch.push(chosen);
                     }
                 }
-                result.push(a[indices[chosen]]);
-                indices.swap_remove(chosen);
-                weights.swap_remove(chosen);
+                found.extend(batch);
+            }
+            let mut result = Vec::with_capacity(size);
+            for idx in found.into_iter().take(size) {
+                result.push(a[idx]);
             }
             Ok(result)
         }
@@ -9274,6 +9288,26 @@ for child in rng.spawn(n_children):
         for &v in &samples {
             assert!(a.contains(&v), "unexpected value {v}");
         }
+    }
+
+    #[test]
+    fn choice_weighted_no_replace_matches_numpy_oracle_stream() {
+        let mut rng = oracle_gen();
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let p = [0.4, 0.3, 0.2, 0.05, 0.05];
+
+        let samples = rng.choice_weighted(&a, 3, false, &p).unwrap();
+        assert_eq!(samples, [4.0, 1.0, 2.0]);
+
+        let expected_after = [
+            0.5501051021142127,
+            0.8831674052732996,
+            0.8883371973100436,
+            0.3033192453525694,
+            0.4400329555858611,
+        ];
+        let after = rng.random(5);
+        assert_f64_seq("choice_weighted_no_replace_after", &after, &expected_after);
     }
 
     #[test]
