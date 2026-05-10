@@ -366,6 +366,30 @@ elif case_id == "diff_axis1_second_order_2d":
         n=2,
         axis=1,
     ))
+elif case_id == "searchsorted_duplicates_left":
+    emit(np.searchsorted(
+        np.array([1.0, 2.0, 2.0, 2.0, 3.0]),
+        np.array([0.0, 2.0, 2.5, 4.0]),
+        side="left",
+    ))
+elif case_id == "searchsorted_duplicates_right":
+    emit(np.searchsorted(
+        np.array([1.0, 2.0, 2.0, 2.0, 3.0]),
+        np.array([0.0, 2.0, 2.5, 4.0]),
+        side="right",
+    ))
+elif case_id == "searchsorted_with_sorter":
+    emit(np.searchsorted(
+        np.array([5.0, 1.0, 3.0]),
+        np.array([2.0, 4.0]),
+        sorter=np.array([1, 2, 0]),
+    ))
+elif case_id == "where_broadcast_2d":
+    emit(np.where(
+        np.array([[True], [False]]),
+        np.array([[1.0, 2.0, 3.0]]),
+        np.array([[10.0, 20.0, 30.0], [40.0, 50.0, 60.0]]),
+    ))
 elif case_id == "gradient_axis0_2d":
     emit(np.gradient(
         np.array([[1.0, 2.0, 3.0], [4.0, 8.0, 16.0], [9.0, 18.0, 36.0]]),
@@ -786,6 +810,55 @@ fn roll_diff_ops_match_live_numpy_reference() {
         "diff_axis1_second_order_2d",
         diff_axis1_n2.shape(),
         diff_axis1_n2.values(),
+        1e-12,
+    );
+}
+
+#[test]
+fn searchsorted_where_ops_match_live_numpy_reference() {
+    let sorted = array(&[5], &[1.0, 2.0, 2.0, 2.0, 3.0]);
+    let probes = array(&[4], &[0.0, 2.0, 2.5, 4.0]);
+
+    let left = sorted
+        .searchsorted(&probes, Some("left"), None)
+        .expect("left searchsorted with duplicates");
+    assert_oracle_match(
+        "searchsorted_duplicates_left",
+        left.shape(),
+        left.values(),
+        1e-12,
+    );
+
+    let right = sorted
+        .searchsorted(&probes, Some("right"), None)
+        .expect("right searchsorted with duplicates");
+    assert_oracle_match(
+        "searchsorted_duplicates_right",
+        right.shape(),
+        right.values(),
+        1e-12,
+    );
+
+    let unsorted = array(&[3], &[5.0, 1.0, 3.0]);
+    let sorted_probe = array(&[2], &[2.0, 4.0]);
+    let sorter = unsorted
+        .searchsorted(&sorted_probe, None, Some(&[1, 2, 0]))
+        .expect("searchsorted with sorter");
+    assert_oracle_match(
+        "searchsorted_with_sorter",
+        sorter.shape(),
+        sorter.values(),
+        1e-12,
+    );
+
+    let condition = array(&[2, 1], &[1.0, 0.0]);
+    let x = array(&[1, 3], &[1.0, 2.0, 3.0]);
+    let y = array(&[2, 3], &[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+    let selected = UFuncArray::where_select(&condition, &x, &y).expect("broadcast where select");
+    assert_oracle_match(
+        "where_broadcast_2d",
+        selected.shape(),
+        selected.values(),
         1e-12,
     );
 }
