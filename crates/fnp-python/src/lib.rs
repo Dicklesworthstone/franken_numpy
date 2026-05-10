@@ -18013,44 +18013,79 @@ fn recfunctions_merge_arrays(
     }
 
     let target_shape: Vec<usize> = arrays[0].getattr("shape")?.extract()?;
+    let mut input_field_names: Vec<Vec<String>> = Vec::with_capacity(arrays.len());
     for arr in &arrays {
         let shape: Vec<usize> = arr.getattr("shape")?.extract()?;
         if shape != target_shape {
             return fallback(py);
         }
-        let names_opt = arr.getattr("dtype")?.getattr("names")?;
+        let dtype = arr.getattr("dtype")?;
+        let names_opt = dtype.getattr("names")?;
         if names_opt.is_none() {
-            // Plain (unstructured) inputs — recfunctions coerces them
-            // into a single-field structured array via defaultfmt;
-            // delegate so the fN auto-naming matches exactly.
+            return fallback(py);
+        }
+        let Ok(names) = names_opt.extract::<Vec<String>>() else {
+            return fallback(py);
+        };
+        input_field_names.push(names);
+    }
+
+    // numpy.lib.recfunctions.merge_arrays(flatten=False) semantics:
+    //   - single-field input: promote that field's name to top level
+    //   - multi-field input:  wrap all of its fields under a synthesized fN
+    // Detect duplicate top-level names across inputs (numpy raises) and
+    // delegate so the canonical error surface matches.
+    let mut top_names: Vec<String> = Vec::with_capacity(arrays.len());
+    for (i, names) in input_field_names.iter().enumerate() {
+        if names.len() == 1 {
+            top_names.push(names[0].clone());
+        } else {
+            top_names.push(format!("f{i}"));
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    for n in &top_names {
+        if !seen.insert(n.clone()) {
             return fallback(py);
         }
     }
 
-    // Build nested descriptor: [('f0', sub_dtype_0), ('f1', sub_dtype_1), ...].
-    // Each top-level field wraps all fields from one input array.
     let descr = PyList::empty(py);
     for (i, arr) in arrays.iter().enumerate() {
         let dtype = arr.getattr("dtype")?;
-        let field_name = format!("f{}", i);
-        descr.append(PyTuple::new(
-            py,
-            [
-                field_name.into_pyobject(py)?.into_any(),
-                dtype.clone().into_any(),
-            ],
-        )?)?;
+        if input_field_names[i].len() == 1 {
+            let field_name = &input_field_names[i][0];
+            let sub_dtype = dtype.get_item(field_name.as_str())?;
+            descr.append(PyTuple::new(
+                py,
+                [
+                    field_name.clone().into_pyobject(py)?.into_any(),
+                    sub_dtype.clone().into_any(),
+                ],
+            )?)?;
+        } else {
+            descr.append(PyTuple::new(
+                py,
+                [
+                    top_names[i].clone().into_pyobject(py)?.into_any(),
+                    dtype.clone().into_any(),
+                ],
+            )?)?;
+        }
     }
     let new_dtype = numpy.getattr("dtype")?.call1((descr,))?;
 
-    // Allocate output and copy each source array into its corresponding top-level field.
     let zeros_fn = numpy.getattr("zeros")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", new_dtype)?;
     let out = zeros_fn.call((arrays[0].getattr("shape")?,), Some(&kwargs))?;
     for (i, arr) in arrays.iter().enumerate() {
-        let field_name = format!("f{}", i);
-        out.set_item(field_name.as_str(), arr)?;
+        if input_field_names[i].len() == 1 {
+            let field_name = &input_field_names[i][0];
+            out.set_item(field_name.as_str(), arr.get_item(field_name.as_str())?)?;
+        } else {
+            out.set_item(top_names[i].as_str(), arr)?;
+        }
     }
 
     let _ = fill_value;
@@ -22091,12 +22126,8 @@ fn zeros(
         return Ok(zeros_fn.call((), Some(&kw))?.unbind());
     }
     let parsed_shape = parse_shape_override(shape, "zeros")?;
-    let target_dtype = extract_python_dtype(
-        py,
-        dtype.map(|d| d.clone().unbind()),
-        DType::F64,
-        "zeros",
-    )?;
+    let target_dtype =
+        extract_python_dtype(py, dtype.map(|d| d.clone().unbind()), DType::F64, "zeros")?;
     let arr = UFuncArray::zeros(parsed_shape, target_dtype)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     build_numpy_array_from_ufunc(py, &arr)
@@ -22132,12 +22163,8 @@ fn ones(
         return Ok(ones_fn.call((), Some(&kw))?.unbind());
     }
     let parsed_shape = parse_shape_override(shape, "ones")?;
-    let target_dtype = extract_python_dtype(
-        py,
-        dtype.map(|d| d.clone().unbind()),
-        DType::F64,
-        "ones",
-    )?;
+    let target_dtype =
+        extract_python_dtype(py, dtype.map(|d| d.clone().unbind()), DType::F64, "ones")?;
     let arr = UFuncArray::ones(parsed_shape, target_dtype)
         .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
     build_numpy_array_from_ufunc(py, &arr)
@@ -24331,7 +24358,10 @@ fn isclose(
         kwargs.set_item("atol", atol)?;
         kwargs.set_item("equal_nan", equal_nan)?;
         Ok(isclose_fn
-            .call((a_for_fallback.bind(py), b_for_fallback.bind(py)), Some(&kwargs))?
+            .call(
+                (a_for_fallback.bind(py), b_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
             .unbind())
     };
 
@@ -24566,7 +24596,9 @@ fn ediff1d(
         if let Some(tb) = to_begin_ref.as_ref() {
             kwargs.set_item("to_begin", tb.bind(py))?;
         }
-        Ok(ediff1d_fn.call((ary_ref.bind(py),), Some(&kwargs))?.unbind())
+        Ok(ediff1d_fn
+            .call((ary_ref.bind(py),), Some(&kwargs))?
+            .unbind())
     };
 
     let array = match extract_precise_numeric_array(py, ary.bind(py), "ediff1d(ary)") {

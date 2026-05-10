@@ -447,6 +447,109 @@ print(match)
     Ok(())
 }
 
+#[test]
+fn recfunctions_merge_arrays_multi_field_input_wraps_under_fn() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+from numpy.lib import recfunctions as rfn
+
+# Multi-field input must be wrapped under a synthesized fN; single-field
+# input keeps its name flat at the top level.
+multi = np.array([(1, 2), (3, 4)], dtype=[("a", "i2"), ("b", "i4")])
+single = np.array([(0.5,), (1.5,)], dtype=[("c", "f4")])
+got = fnp.recfunctions_merge_arrays([multi, single], usemask=False, flatten=False)
+expected = rfn.merge_arrays([multi, single], usemask=False, flatten=False)
+print(got.dtype == expected.dtype and np.array_equal(got, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "merge_arrays must wrap multi-field inputs under fN while leaving single-field names flat"
+    );
+    Ok(())
+}
+
+#[test]
+fn recfunctions_merge_arrays_two_multi_field_inputs_get_distinct_fn_keys() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+from numpy.lib import recfunctions as rfn
+
+m1 = np.array([(1, 2)], dtype=[("a", "i2"), ("b", "i4")])
+m2 = np.array([(3, 4)], dtype=[("p", "i2"), ("q", "i4")])
+got = fnp.recfunctions_merge_arrays([m1, m2], usemask=False, flatten=False)
+expected = rfn.merge_arrays([m1, m2], usemask=False, flatten=False)
+print(got.dtype == expected.dtype and np.array_equal(got, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "merge_arrays must wrap each multi-field input under its own fN key"
+    );
+    Ok(())
+}
+
+#[test]
+fn recfunctions_merge_arrays_three_unique_single_field_inputs_stay_flat() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+from numpy.lib import recfunctions as rfn
+
+a = np.array([(1,)], dtype=[("x", "i2")])
+b = np.array([(2.5,)], dtype=[("y", "f4")])
+c = np.array([(7,)], dtype=[("z", "i8")])
+got = fnp.recfunctions_merge_arrays([a, b, c], usemask=False, flatten=False)
+expected = rfn.merge_arrays([a, b, c], usemask=False, flatten=False)
+print(got.dtype == expected.dtype and np.array_equal(got, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "merge_arrays of three unique single-field inputs must stay flat"
+    );
+    Ok(())
+}
+
+#[test]
+fn recfunctions_merge_arrays_duplicate_field_name_raises() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+from numpy.lib import recfunctions as rfn
+
+a = np.array([(1,)], dtype=[("x", "i2")])
+b = np.array([(2.5,)], dtype=[("x", "f4")])
+
+def errored(fn):
+    try:
+        fn()
+        return False
+    except Exception:
+        return True
+
+ours_err = errored(lambda: fnp.recfunctions_merge_arrays([a, b], usemask=False, flatten=False))
+numpy_err = errored(lambda: rfn.merge_arrays([a, b], usemask=False, flatten=False))
+print(ours_err == numpy_err == True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "merge_arrays must raise on duplicate top-level field names like numpy"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Relationship tests
 // ─────────────────────────────────────────────────────────────────────────────
