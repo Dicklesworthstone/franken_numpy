@@ -129,7 +129,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "loadtxt with delimiter should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "loadtxt with delimiter should match numpy"
+    );
     Ok(())
 }
 
@@ -145,7 +149,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "loadtxt with dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "loadtxt with dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -161,7 +169,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "loadtxt with skiprows should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "loadtxt with skiprows should match numpy"
+    );
     Ok(())
 }
 
@@ -177,7 +189,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "loadtxt with usecols should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "loadtxt with usecols should match numpy"
+    );
     Ok(())
 }
 
@@ -193,7 +209,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "loadtxt with comments should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "loadtxt with comments should match numpy"
+    );
     Ok(())
 }
 
@@ -262,7 +282,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "genfromtxt with delimiter should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "genfromtxt with delimiter should match numpy"
+    );
     Ok(())
 }
 
@@ -278,7 +302,11 @@ print(np.allclose(result, expected, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "genfromtxt with missing should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "genfromtxt with missing should match numpy"
+    );
     Ok(())
 }
 
@@ -294,6 +322,10 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "genfromtxt with skip_header should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "genfromtxt with skip_header should match numpy"
+    );
     Ok(())
 }
