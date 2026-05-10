@@ -3,35 +3,34 @@
 packet_id: `FNP-P2C-005`  
 subsystem: `ufunc dispatch + gufunc signature`
 
-## 1. Crate and Module Boundary Skeleton
+## 1. Crate and Module Boundary Status
 
 | Crate | Planned module boundary | Responsibility | Public surface contract |
 |---|---|---|---|
-| `crates/fnp-ufunc` | `signature_parser` (packet-D planned boundary) | parse/normalize gufunc signatures, enforce `sig`/`signature` conflict rules, and produce deterministic signature IR | signature parse/normalize entrypoints used by ufunc call setup (planned) |
-| `crates/fnp-ufunc` | `argument_normalizer` (packet-D planned boundary) | canonicalize positional/keyword ufunc call state before dispatch | normalized call context for dispatch planner (planned) |
-| `crates/fnp-ufunc` | `dispatch_planner` (packet-D planned boundary) | deterministic method/loop selection using signature + dtype constraints | deterministic dispatch selection contract (`P2C005-R05`) |
-| `crates/fnp-ufunc` | `override_bridge` (packet-D planned boundary) | evaluate `__array_ufunc__` precedence ordering and payload class validity | override ordering/validation boundary (`P2C005-R04`) |
-| `crates/fnp-ufunc` | `reduction_adapter` (packet-D planned boundary) | reduction wrapper integration for `axis`/`keepdims`/`where` semantics | reduction contract surface (`P2C005-R08`) |
-| `crates/fnp-ufunc` | `loop_registry` (packet-D/E planned boundary) | custom loop registration compatibility envelope and fail-closed unknown semantics | loop-registration contract surface (`P2C005-R09`) |
-| `crates/fnp-dtype` + `crates/fnp-ufunc` | `type_resolution_bridge` (packet-D planned boundary) | deterministic promotion/default-type-resolution bridge for dispatch planner | type-resolution contract (`P2C005-R06`) |
+| `crates/fnp-ufunc` | signature parser/conflict guard (packet-D/E landed inline) | parse/normalize gufunc signatures, enforce `sig`/`signature` conflict rules, and produce deterministic signature IR | `normalize_signature_keywords`, `parse_gufunc_signature`, `parse_fixed_signature_string`, `normalize_fixed_signature_keywords` |
+| `crates/fnp-ufunc` | argument/dispatch normalization (packet-D/E landed inline) | canonicalize call state before dispatch and enforce deterministic method/loop selection using signature + dtype constraints | `plan_binary_dispatch_with_registry`, `plan_binary_dispatch_with_signature`, `elementwise_binary_with_registry` |
+| `crates/fnp-ufunc` | override bridge reason-code boundary (packet-D/E landed evidence) | capture `__array_ufunc__` precedence/validity classes in the packet reason-code and conformance evidence layers | `UFUNC_PACKET_REASON_CODES`, `UFuncLogRecord`, packet-F differential/adversarial fixtures |
+| `crates/fnp-ufunc` | reduction adapter (packet-D/E landed inline) | reduction wrapper integration for `axis`/`keepdims`/`where` semantics | `FromPyFuncReduceAxisSpec`, `FromPyFuncReduceOptions`, `reduce_frompyfunc_values`, `reduce_sum_where`, `reduce_*_axes` |
+| `crates/fnp-ufunc` | loop registry boundary (packet-D/E landed inline) | custom loop registration compatibility envelope and fail-closed unknown semantics | `UFuncLoopRegistry`, `plan_binary_dispatch_with_registry`, `ufunc_loop_registry_invalid` |
+| `crates/fnp-dtype` + `crates/fnp-ufunc` | type-resolution bridge (packet-D/E landed inline) | deterministic promotion/default-type-resolution bridge for dispatch planner | dtype promotion contracts plus `plan_binary_dispatch_with_signature` |
 | `crates/fnp-runtime` | policy/audit decision context (existing) | strict/hardened fail-closed mediation with reason-code and evidence logging | `decide_and_record_with_context` integration from ufunc packet suites |
-| `crates/fnp-conformance` | `ufunc_packet_suite` (packet-F planned boundary) | fixture-driven differential/metamorphic/adversarial coverage for signature/override/dispatch/reduction contracts | packet-F runner + fixture manifests (planned) |
-| `crates/fnp-conformance` | workflow scenario integration (existing + packet-G extension) | strict/hardened replay scenarios for signature/dispatch/reduction journeys | packet-G scenario entries in workflow corpus (planned) |
+| `crates/fnp-conformance` | ufunc packet suite (packet-F landed) | fixture-driven differential/metamorphic/adversarial coverage for signature/override/dispatch/reduction contracts | `run_ufunc_differential`, ufunc fixture manifests, reason-code mismatch artifacts |
+| `crates/fnp-conformance` | workflow scenario integration (packet-G/H/I landed for current scope) | strict/hardened replay scenarios for signature/dispatch/reduction journeys | packet-005 workflow scenario artifacts and final evidence pack |
 
 ## 2. Implementation Sequence (D-Stage to I-Stage)
 
-1. Land packet-D module skeletons in `fnp-ufunc` (`signature_parser`, `argument_normalizer`, `dispatch_planner`, `override_bridge`, `reduction_adapter`, `loop_registry`) with explicit TODO gates for deferred parity debt.
-2. Define packet reason-code taxonomy aligned with contract rows `P2C005-R01`..`R10`.
-3. Implement deterministic signature conflict and grammar normalization boundary (`sig`/`signature`/fixed signature forms).
-4. Implement override precedence boundary with runtime-policy mediation hooks for strict/hardened behavior classes.
-5. Implement deterministic dispatch planner + type-resolution bridge with `fnp-dtype` promotion contracts.
-6. Add reduction wrapper contract seam for `axis`/`keepdims`/`where` legality and deterministic failure taxonomy.
-7. Add loop-registry boundary stubs with explicit fail-closed handling for unsupported registration semantics.
-8. Add packet-F conformance harness placeholders and fixture schemas for signature/override/dispatch/reduction differential lanes.
-9. Add packet-G workflow scenario placeholders linking fixture IDs to replay/e2e script paths.
-10. Wire packet policy decisions into runtime audit context fields (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`).
-11. Gate packet-H optimization work behind baseline/profile/isomorphism evidence.
-12. Close packet-I with parity summary + risk + durability sidecar/scrub/decode-proof artifacts.
+1. Keep landed packet-D/E ufunc signature, dispatch, reduction, loop-registry, reason-code, and structured-log boundaries green in `fnp-ufunc`.
+2. Maintain packet reason-code taxonomy alignment with contract rows `P2C005-R01`..`R10`.
+3. Preserve deterministic signature conflict and grammar normalization behavior for `sig`/`signature`/fixed signature forms.
+4. Expand override precedence fixtures and runtime-policy evidence where the current corpus still has edge-family breadth debt.
+5. Preserve deterministic dispatch planner + type-resolution behavior across dtype promotion contracts.
+6. Maintain reduction wrapper coverage for `axis`/`keepdims`/`where` legality and deterministic failure taxonomy.
+7. Keep loop-registry unsupported/custom semantics fail-closed while follow-on user-dtype coverage expands.
+8. Expand packet-F differential/metamorphic/adversarial fixture breadth for signature/override/dispatch/reduction lanes.
+9. Expand packet-G workflow scenario breadth for override and gufunc edge families before readiness drill sign-off.
+10. Preserve runtime audit context fields (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`) in all packet decisions.
+11. Keep packet-H same-shape ufunc optimization tied to baseline/profile/isomorphism evidence.
+12. Keep packet-I parity summary + risk + durability sidecar/scrub/decode-proof artifacts ready.
 
 ## 3. Public Surface Contract Notes
 
@@ -80,7 +79,7 @@ All emissions must include:
 - Planning-stage validation rules:
   - no behavior-changing dispatch migration is shipped in this bead;
   - packet contract and reason-code taxonomy remain internally consistent;
-  - packet validator may remain `not_ready` until downstream E-I artifacts land.
+  - packet validator remains `ready` for the landed E-I artifact set.
 - Validation command (offloaded via `rch`):  
   `rch exec -- cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-005`
 
