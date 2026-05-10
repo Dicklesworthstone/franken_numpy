@@ -10,7 +10,7 @@ subsystem: `stride-tricks and broadcasting API`
 | `crates/fnp-ndarray` | `shape_broadcast_core` (existing in `src/lib.rs`) | deterministic shape broadcast legality and merge rules | `broadcast_shape`, `broadcast_shapes`, `can_broadcast` |
 | `crates/fnp-ndarray` | `layout_stride_core` (existing in `src/lib.rs`) | contiguous stride calculus + layout metadata ownership | `contiguous_strides`, `NdLayout` |
 | `crates/fnp-ndarray` | `stride_tricks_api` (packet-D planned boundary) | clean-room `broadcast_to`/`broadcast_arrays`/`as_strided` API-layer semantics | packet-D API entry points (planned) |
-| `crates/fnp-iter` | `iterator_axisdata` (packet-D planned boundary; crate currently stub) | nditer-like axisdata construction, no-broadcast handling, compatible stride introspection | iterator constructor/introspection APIs (planned) |
+| `crates/fnp-iter` | `iterator_axisdata` / transfer planning (packet-D core landed) | nditer-like construction, operand broadcast planning, no-broadcast handling, compatible stride introspection | `NditerPlan`, `Nditer`, operand broadcast plan structs, `TransferContext`, `select_transfer_loop` |
 | `crates/fnp-conformance` | shape/stride suite (existing) + packet-F extensions | fixture-driven parity checks for shape/stride/stride-tricks behavior | `run_shape_stride_suite` + packet-F runner additions |
 | `crates/fnp-runtime` | policy audit integration (existing) | strict/hardened decision logging and fail-closed handling at packet boundaries | runtime decision/audit interfaces |
 
@@ -18,7 +18,7 @@ subsystem: `stride-tricks and broadcasting API`
 
 1. Lock packet-D Rust boundary for stride-tricks and iterator responsibilities without introducing unsafe code.
 2. Add `fnp-ndarray` API scaffolding for `broadcast_to`/`broadcast_arrays`/`as_strided` semantics aligned to packet contract rows.
-3. Introduce `fnp-iter` planning stubs for axisdata/no-broadcast paths and compatible-stride introspection.
+3. Extend the landed `fnp-iter` axisdata/no-broadcast and compatible-stride planning core with packet-local stride-tricks integration fixtures.
 4. Extend packet-F conformance runners with stride-tricks differential/metamorphic/adversarial fixtures.
 5. Add packet-G e2e stride-tricks + iterator replay scenarios with structured forensics logs.
 6. Promote packet-I parity/risk/durability artifacts after E/F/G/H evidence closes.
