@@ -3,6 +3,7 @@
 use crate::raptorq_artifacts::{DecodeProofArtifact, RaptorQSidecar};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -95,6 +96,36 @@ impl PacketReadinessReport {
     #[must_use]
     pub fn is_ready(&self) -> bool {
         self.status == "ready"
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortingLedgerFreshnessDiagnostic {
+    pub packet_id: String,
+    pub line_number: usize,
+    pub column: String,
+    pub stale_phrase: String,
+    pub readiness_status: String,
+    pub line: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PortingLedgerFreshnessReport {
+    pub schema_version: u8,
+    pub ledger_path: String,
+    pub phase2c_root: String,
+    pub status: String,
+    pub checked_packet_count: usize,
+    pub ready_packet_count: usize,
+    pub stale_row_count: usize,
+    pub diagnostics: Vec<PortingLedgerFreshnessDiagnostic>,
+    pub checked_at_unix_ms: u128,
+}
+
+impl PortingLedgerFreshnessReport {
+    #[must_use]
+    pub fn is_fresh(&self) -> bool {
+        self.status == "fresh"
     }
 }
 
@@ -637,9 +668,232 @@ pub fn write_packet_readiness_report(
         .map_err(|err| format!("failed writing {}: {err}", output_path.display()))
 }
 
+pub fn validate_phase2c_porting_ledger(
+    ledger_path: &Path,
+    phase2c_root: &Path,
+) -> Result<PortingLedgerFreshnessReport, String> {
+    let ledger = fs::read_to_string(ledger_path)
+        .map_err(|err| format!("failed reading {}: {err}", ledger_path.display()))?;
+    let readiness_reports = read_ready_packet_reports(phase2c_root)?;
+    let rows = parse_packet_rows(&ledger);
+    let stale_phrases = stale_packet_status_phrases();
+    let mut diagnostics = Vec::new();
+
+    for (packet_id, readiness) in &readiness_reports {
+        if !readiness.is_ready()
+            || !readiness.missing_artifacts.is_empty()
+            || !readiness.missing_fields.is_empty()
+            || !readiness.parse_errors.is_empty()
+        {
+            continue;
+        }
+
+        let Some(row) = rows.get(packet_id) else {
+            diagnostics.push(PortingLedgerFreshnessDiagnostic {
+                packet_id: packet_id.clone(),
+                line_number: 0,
+                column: "packet_row".to_string(),
+                stale_phrase: "missing packet row".to_string(),
+                readiness_status: readiness.status.clone(),
+                line: String::new(),
+            });
+            continue;
+        };
+
+        for (column, value) in row.status_cells() {
+            let normalized = normalize_stale_scan_text(value);
+            for phrase in &stale_phrases {
+                if normalized.contains(phrase) {
+                    diagnostics.push(PortingLedgerFreshnessDiagnostic {
+                        packet_id: packet_id.clone(),
+                        line_number: row.line_number,
+                        column: column.to_string(),
+                        stale_phrase: phrase.to_string(),
+                        readiness_status: readiness.status.clone(),
+                        line: row.raw.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    diagnostics.sort_by(|lhs, rhs| {
+        lhs.packet_id
+            .cmp(&rhs.packet_id)
+            .then(lhs.line_number.cmp(&rhs.line_number))
+            .then(lhs.column.cmp(&rhs.column))
+            .then(lhs.stale_phrase.cmp(&rhs.stale_phrase))
+    });
+    diagnostics.dedup();
+
+    let stale_packets: BTreeSet<&str> = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.packet_id.as_str())
+        .collect();
+    let status = if diagnostics.is_empty() {
+        "fresh"
+    } else {
+        "stale"
+    };
+
+    Ok(PortingLedgerFreshnessReport {
+        schema_version: 1,
+        ledger_path: ledger_path.display().to_string(),
+        phase2c_root: phase2c_root.display().to_string(),
+        status: status.to_string(),
+        checked_packet_count: readiness_reports.len(),
+        ready_packet_count: readiness_reports
+            .values()
+            .filter(|report| {
+                report.is_ready()
+                    && report.missing_artifacts.is_empty()
+                    && report.missing_fields.is_empty()
+                    && report.parse_errors.is_empty()
+            })
+            .count(),
+        stale_row_count: stale_packets.len(),
+        diagnostics,
+        checked_at_unix_ms: now_unix_ms(),
+    })
+}
+
+pub fn write_porting_ledger_freshness_report(
+    output_path: &Path,
+    report: &PortingLedgerFreshnessReport,
+) -> Result<(), String> {
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+    let raw = serde_json::to_string_pretty(report)
+        .map_err(|err| format!("failed serializing porting ledger report: {err}"))?;
+    fs::write(output_path, raw)
+        .map_err(|err| format!("failed writing {}: {err}", output_path.display()))
+}
+
+#[derive(Debug, Clone)]
+struct PacketLedgerRow {
+    line_number: usize,
+    raw: String,
+    current_evidence_refs: String,
+    parity_debt_status: String,
+}
+
+impl PacketLedgerRow {
+    fn status_cells(&self) -> [(&'static str, &str); 2] {
+        [
+            ("current evidence refs", self.current_evidence_refs.as_str()),
+            ("parity debt status", self.parity_debt_status.as_str()),
+        ]
+    }
+}
+
+fn read_ready_packet_reports(
+    phase2c_root: &Path,
+) -> Result<BTreeMap<String, PacketReadinessReport>, String> {
+    let mut reports = BTreeMap::new();
+    let entries = fs::read_dir(phase2c_root)
+        .map_err(|err| format!("failed reading {}: {err}", phase2c_root.display()))?;
+
+    for entry in entries {
+        let entry = entry.map_err(|err| format!("failed reading phase2c entry: {err}"))?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("FNP-P2C-") {
+            continue;
+        }
+        let report_path = path.join("packet_readiness_report.json");
+        if !report_path.is_file() {
+            continue;
+        }
+        let raw = fs::read_to_string(&report_path)
+            .map_err(|err| format!("failed reading {}: {err}", report_path.display()))?;
+        let report: PacketReadinessReport = serde_json::from_str(&raw)
+            .map_err(|err| format!("invalid readiness report {}: {err}", report_path.display()))?;
+        reports.insert(report.packet_id.clone(), report);
+    }
+
+    Ok(reports)
+}
+
+fn parse_packet_rows(ledger: &str) -> BTreeMap<String, PacketLedgerRow> {
+    let mut rows = BTreeMap::new();
+
+    for (index, line) in ledger.lines().enumerate() {
+        let Some(packet_id) = extract_packet_id_from_row(line) else {
+            continue;
+        };
+        let cells = markdown_table_cells(line);
+        if cells.len() < 12 {
+            continue;
+        }
+        rows.insert(
+            packet_id,
+            PacketLedgerRow {
+                line_number: index + 1,
+                raw: line.to_string(),
+                current_evidence_refs: cells.get(10).cloned().unwrap_or_default(),
+                parity_debt_status: cells.get(11).cloned().unwrap_or_default(),
+            },
+        );
+    }
+
+    rows
+}
+
+fn extract_packet_id_from_row(line: &str) -> Option<String> {
+    let (_, rest) = line.split_once("`FNP-P2C-")?;
+    let (suffix, _) = rest.split_once('`')?;
+    Some(format!("FNP-P2C-{suffix}"))
+}
+
+fn markdown_table_cells(line: &str) -> Vec<String> {
+    line.trim_matches('|')
+        .split('|')
+        .map(|cell| cell.trim().to_string())
+        .collect()
+}
+
+fn normalize_stale_scan_text(value: &str) -> String {
+    value
+        .to_ascii_lowercase()
+        .replace(['_', '-'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn stale_packet_status_phrases() -> Vec<String> {
+    [
+        "anchor only",
+        "open",
+        "partial",
+        "missing packet artifact",
+        "missing packet artifacts",
+        "missing artifacts",
+        "e i pending",
+        "packet e pending",
+        "packet f pending",
+        "packet g pending",
+        "packet h pending",
+        "packet i pending",
+    ]
+    .into_iter()
+    .map(str::to_string)
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{validate_phase2c_packet, write_packet_readiness_report};
+    use super::{
+        PacketReadinessReport, validate_phase2c_packet, validate_phase2c_porting_ledger,
+        write_packet_readiness_report, write_porting_ledger_freshness_report,
+    };
     use std::fs;
     use std::path::Path;
 
@@ -657,6 +911,37 @@ mod tests {
             fs::create_dir_all(parent).expect("create parent dir");
         }
         fs::write(path, content).expect("write file");
+    }
+
+    fn write_readiness_report(
+        phase2c_root: &Path,
+        packet_id: &str,
+        status: &str,
+        missing_artifacts: Vec<String>,
+    ) {
+        let report = PacketReadinessReport {
+            schema_version: 1,
+            contract_schema_version: super::CONTRACT_SCHEMA_VERSION.to_string(),
+            packet_id: packet_id.to_string(),
+            packet_dir: phase2c_root.join(packet_id).display().to_string(),
+            status: status.to_string(),
+            missing_artifacts,
+            missing_fields: Vec::new(),
+            parse_errors: Vec::new(),
+            checked_at_unix_ms: 1,
+        };
+        write(
+            &phase2c_root
+                .join(packet_id)
+                .join("packet_readiness_report.json"),
+            &serde_json::to_string_pretty(&report).expect("serialize readiness report"),
+        );
+    }
+
+    fn packet_ledger_row(packet_id: &str, current_evidence: &str, parity_status: &str) -> String {
+        format!(
+            "| `{packet_id}` | subsystem | anchors | contracts | strict | hardened | non-goals | unit | differential | e2e | {current_evidence} | {parity_status} | owner |\n"
+        )
     }
 
     fn write_valid_packet(packet_dir: &Path, packet_id: &str) {
@@ -773,5 +1058,94 @@ mod tests {
                 .any(|field| field.artifact == "fixture_manifest.json"
                     && field.field_path == "oracle_tests")
         );
+    }
+
+    #[test]
+    fn porting_ledger_rejects_stale_ready_packet_row() {
+        let root = temp_dir("porting_ledger_stale");
+        let phase2c_root = root.join("artifacts/phase2c");
+        let ledger_path = root.join("PORTING_ESSENCE_EXTRACTION_LEDGER_V1.md");
+        write_readiness_report(&phase2c_root, "FNP-P2C-001", "ready", Vec::new());
+        write(
+            &ledger_path,
+            &packet_ledger_row(
+                "FNP-P2C-001",
+                "anchor-only legacy map; missing packet artifacts",
+                "open / partial",
+            ),
+        );
+
+        let report =
+            validate_phase2c_porting_ledger(&ledger_path, &phase2c_root).expect("validate ledger");
+        assert_eq!(report.status, "stale");
+        assert!(!report.is_fresh());
+        assert_eq!(report.checked_packet_count, 1);
+        assert_eq!(report.ready_packet_count, 1);
+        assert_eq!(report.stale_row_count, 1);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.packet_id == "FNP-P2C-001"
+                    && diagnostic.stale_phrase == "anchor only")
+        );
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.column == "parity debt status"
+                    && diagnostic.stale_phrase == "open")
+        );
+    }
+
+    #[test]
+    fn porting_ledger_allows_stale_text_for_not_ready_packet() {
+        let root = temp_dir("porting_ledger_not_ready");
+        let phase2c_root = root.join("artifacts/phase2c");
+        let ledger_path = root.join("PORTING_ESSENCE_EXTRACTION_LEDGER_V1.md");
+        write_readiness_report(
+            &phase2c_root,
+            "FNP-P2C-002",
+            "not_ready",
+            vec!["parity_report.json".to_string()],
+        );
+        write(
+            &ledger_path,
+            &packet_ledger_row("FNP-P2C-002", "anchor-only evidence", "open / partial"),
+        );
+
+        let report =
+            validate_phase2c_porting_ledger(&ledger_path, &phase2c_root).expect("validate ledger");
+        assert_eq!(report.status, "fresh");
+        assert!(report.is_fresh());
+        assert_eq!(report.checked_packet_count, 1);
+        assert_eq!(report.ready_packet_count, 0);
+        assert!(report.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn porting_ledger_accepts_clean_ready_packet_row_and_writes_report() {
+        let root = temp_dir("porting_ledger_clean");
+        let phase2c_root = root.join("artifacts/phase2c");
+        let ledger_path = root.join("PORTING_ESSENCE_EXTRACTION_LEDGER_V1.md");
+        write_readiness_report(&phase2c_root, "FNP-P2C-003", "ready", Vec::new());
+        write(
+            &ledger_path,
+            &packet_ledger_row(
+                "FNP-P2C-003",
+                "final_evidence_pack.json and packet_readiness_report.json",
+                "ready: packet evidence validator-clean; residual breadth remains explicit",
+            ),
+        );
+
+        let report =
+            validate_phase2c_porting_ledger(&ledger_path, &phase2c_root).expect("validate ledger");
+        assert_eq!(report.status, "fresh");
+        assert_eq!(report.ready_packet_count, 1);
+        assert!(report.diagnostics.is_empty());
+
+        let out = root.join("report.json");
+        write_porting_ledger_freshness_report(&out, &report).expect("write report");
+        assert!(out.exists());
     }
 }
