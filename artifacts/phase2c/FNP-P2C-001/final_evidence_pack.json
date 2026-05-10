@@ -2,13 +2,13 @@
   "schema_version": 1,
   "packet_id": "FNP-P2C-001",
   "subtask_id": "FNP-P2C-001-I",
-  "generated_at_unix_ms": 1771441913768,
+  "generated_at_unix_ms": 1778393809517,
   "status": "pass",
   "reproducibility_command": "cargo run -p fnp-conformance --bin generate_packet001_final_evidence_pack",
   "parity_signals": {
     "strict_parity": 1.0,
     "hardened_parity": 1.0,
-    "compatibility_drift_hash": "sha256:5cdf559b47ce1a59f0c7f13af9df87cdbc562c84d2f1b0845d71372282ae8e79",
+    "compatibility_drift_hash": "sha256:c3c14fbbc1d4840323861f522236a6be2d63ce4d856a93937812ed914f780dcb",
     "divergence_classes": [
       "no_observed_strict_drift_in_packet001_gates",
       "no_observed_hardened_drift_in_packet001_gates"
@@ -56,18 +56,18 @@
     "artifacts/phase2c/FNP-P2C-001/differential_metamorphic_adversarial_evidence.json": "0f053fa8793493626426d1f16a2826a13f993fc29769464d1762390953b70a21",
     "artifacts/phase2c/FNP-P2C-001/e2e_replay_forensics_evidence.json": "2cd3a0d97213aedf045a6b3f30475ddec000771f6dc97fcbb949cbc215220a4e",
     "artifacts/phase2c/FNP-P2C-001/fixture_manifest.json": "57d2487bf32b2d106c48f92b15be2c68390be6071b45791201b9322c8195b110",
-    "artifacts/phase2c/FNP-P2C-001/legacy_anchor_map.md": "2ee67757139cb4a9e3dd1e513fccf4728e7f82b2aa9729c7d5cc8634e271ee6a",
+    "artifacts/phase2c/FNP-P2C-001/legacy_anchor_map.md": "52dc223915a4f81aec6ff7bc1a100dfa3ecb079c2a71d665324629d37f9c78b9",
     "artifacts/phase2c/FNP-P2C-001/optimization_profile_isomorphism_evidence.json": "43c4ef01a9b8c26ade13b72257d1c5d71e5e20b2431bcbb9552d660631940c4c",
     "artifacts/phase2c/FNP-P2C-001/optimization_profile_report.json": "4505bfd613a44ff550f355aab402a870ddad55d11249573fbc56636a5906ed86",
     "artifacts/phase2c/FNP-P2C-001/parity_gate.yaml": "0fc5e002193f26af9e09e920e606d3268c573910ee43d62aecea21a192e6146e",
-    "artifacts/phase2c/FNP-P2C-001/parity_report.json": "62d7fae0c4e3762d6535493339f36451d13dca7bae4fc32adb1d6671795550ac",
-    "artifacts/phase2c/FNP-P2C-001/risk_note.md": "03afd37e4486e7b96d682e30d0e5b176708535a695b838e39fdd350ccc8854d1",
+    "artifacts/phase2c/FNP-P2C-001/parity_report.json": "01bf010fffc42c4aa41d2e58b9f0b745ce34562c099dc62ea7252a648b218d00",
+    "artifacts/phase2c/FNP-P2C-001/risk_note.md": "68babadba2cae9484e500151ca6ffd8a4b2de9a07b8f8073dcce24bf1f36f6b7",
     "artifacts/phase2c/FNP-P2C-001/unit_property_evidence.json": "7fc747e64a61a4f4fc730af0136f2871fc51604552141b751678c9c5f56d05a8",
     "artifacts/phase2c/FNP-P2C-001/workflow_scenario_packet001_opt_artifact_index.json": "94a02e8c1fc4ea4e9fae99a54bc76514f4e855b0432c917e7740800379e7b34a",
     "artifacts/phase2c/FNP-P2C-001/workflow_scenario_packet001_opt_e2e.jsonl": "efa1b3822246017b2af0e0175bbb1e7cef09295ae462abb07419de69c6cce2a8",
     "artifacts/phase2c/FNP-P2C-001/workflow_scenario_packet001_opt_reliability.json": "eec0a29589284ecb88eb2716bcfe27373a4f9e2be4d2c722dacf67915237caa3",
-    "crates/fnp-conformance/fixtures/oracle_outputs/shape_stride_differential_report.json": "55a1e3563ff139eb1e6951fb9341a748894cb0e4ce88fa14deea01d7e383ed0c",
-    "crates/fnp-conformance/fixtures/shape_stride_cases.json": "01e5c7a0aae48d5a38a9ef2c3cb4fd861d117c37c0515873f5df25bda046ebda"
+    "crates/fnp-conformance/fixtures/oracle_outputs/shape_stride_differential_report.json": "6192918a5149014208e2f9f0a0019d825bbe7e382b046adda3e09f589dc580e4",
+    "crates/fnp-conformance/fixtures/shape_stride_cases.json": "aa8dd0f625cf9dfa3cc100a271f9936fbae7eed8dd1896fa88391d3129d523c1"
   },
   "raptorq": {
     "sidecar_path": "artifacts/phase2c/FNP-P2C-001/parity_report.raptorq.json",
