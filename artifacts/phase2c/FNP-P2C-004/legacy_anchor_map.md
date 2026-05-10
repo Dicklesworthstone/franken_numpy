@@ -90,13 +90,17 @@ This map captures concrete legacy NumPy anchors for iterator construction, trave
 
 | Rust path | Anchor | Coverage note |
 |---|---|---|
-| `crates/fnp-iter/src/lib.rs:1` | placeholder `add` function | iterator subsystem is currently a stub; packet parity debt remains |
+| `crates/fnp-iter/src/lib.rs:576` | `NditerPlan` | packet-D iterator planning core is landed, including shape/order/external-loop planning and deterministic step construction |
+| `crates/fnp-iter/src/lib.rs:941` | `Nditer` | landed iterator state machine covers reset, seek-by-linear-index, seek-by-multi-index, `iterindex`, `multi_index`, and external-loop chunk emission |
+| `crates/fnp-iter/src/lib.rs:80` | `FlatIterIndex` | flatiter single, slice, fancy, and boolean-mask contracts are modeled with stable read/write validation helpers |
+| `crates/fnp-iter/src/lib.rs:389` | `ndindex` / `ndenumerate` | index-stream helpers provide deterministic coordinate and coordinate/value traversal surfaces |
 | `crates/fnp-ufunc/src/lib.rs:73` | `UFuncArray::elementwise_binary` | current broadcast traversal is hand-rolled odometer logic, not reusable iterator API |
 | `crates/fnp-ufunc/src/lib.rs:184` | `contiguous_strides_elems` | local stride helper used by ufunc execution path |
 | `crates/fnp-ufunc/src/lib.rs:199` | `aligned_broadcast_axis_steps` | local broadcast-step synthesis for two-operand traversal |
 | `crates/fnp-ufunc/src/lib.rs:218` | `reduce_sum_axis_contiguous` | contiguous reduction traversal kernel |
-| `crates/fnp-conformance/src/workflow_scenarios.rs:133` | workflow scenario step engine | e2e harness exists, but no packet-specific nditer/flatiter scenarios yet |
-| `crates/fnp-conformance/fixtures/workflow_scenario_corpus.json:1` | workflow corpus | currently focused on ufunc/runtime policy paths; iterator-surface coverage gap |
+| `crates/fnp-conformance/tests/smoke.rs:243` | NumPy-backed NDIter smoke checks | strict iterator progression and seek behavior are compared against live NumPy states |
+| `crates/fnp-conformance/fixtures/workflow_scenario_corpus.json:939` | `nditer_packet_replay` | packet-G workflow coverage now links iterator/flatiter fixtures to strict/hardened replay evidence |
+| `crates/fnp-conformance/fixtures/workflow_scenario_corpus.json:1011` | `nditer_packet_hostile_guardrails` | hostile iterator guardrail workflow keeps unknown wire metadata fail-closed with packet artifact references |
 
 ## Graveyard and FrankenSuite Mapping
 
@@ -108,6 +112,6 @@ This map captures concrete legacy NumPy anchors for iterator construction, trave
 ## Notes for Follow-on Packet Steps
 
 - Packet B (`bd-23m.15.2`) must lock strict/hardened invariant rows for index modes (`multi_index`, `c_index`, `f_index`), `external_loop`, `no_broadcast`, and overlap policy.
-- Packet D (`bd-23m.15.4`) must introduce an actual iterator subsystem in `fnp-iter` and migrate ad-hoc traversal logic out of `fnp-ufunc` where appropriate.
-- Packet E/F (`bd-23m.15.5`, `bd-23m.15.6`) must add unit/property + differential/adversarial coverage for flatiter/nditer/ndindex/ndenumerate semantics.
+- Packet D (`bd-23m.15.4`) landed the `fnp-iter` planning/state core. Remaining migration work is to move ad-hoc `fnp-ufunc` traversal toward shared iterator cursors where it can be proved behavior-preserving.
+- Packet E/F (`bd-23m.15.5`, `bd-23m.15.6`) now have baseline unit/property and NumPy smoke coverage; continued breadth expansion should target `op_axes`, `itershape`, overlap, hostile flatiter assignment, and version-specific diagnostic edges.
 - Packet G (`bd-23m.15.7`) must attach replay-forensics scenario logs keyed by `fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`.
