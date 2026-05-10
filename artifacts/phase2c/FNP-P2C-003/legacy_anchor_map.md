@@ -77,7 +77,9 @@ This map captures concrete legacy NumPy anchors for strided transfer loop select
 
 | Rust path | Anchor | Coverage note |
 |---|---|---|
-| `crates/fnp-iter/src/lib.rs:1` | placeholder `add` function | iterator crate is still a stub; no transfer planner/state machine exists yet |
+| `crates/fnp-iter/src/lib.rs:61` | `TransferSelectorInput` / `select_transfer_class` | implemented transfer-class selection for dtype/alignment/stride context |
+| `crates/fnp-iter/src/lib.rs:80` | `FlatIterIndex` / flatiter validators | implemented flatiter read/write indexing contract with stable error taxonomy |
+| `crates/fnp-iter/src/lib.rs:1684` | `TransferContext` / `select_transfer_loop` | implemented packet transfer-loop decision core; packet-local transfer fixtures remain ongoing evidence debt |
 | `crates/fnp-ufunc/src/lib.rs:73` | `UFuncArray::elementwise_binary` | current transfer/traversal behavior is manual broadcast-odometer execution |
 | `crates/fnp-ufunc/src/lib.rs:184` | `contiguous_strides_elems` | local stride synthesis for transfer traversal |
 | `crates/fnp-ufunc/src/lib.rs:199` | `aligned_broadcast_axis_steps` | axis-step mapping approximates transfer-loop stepping |

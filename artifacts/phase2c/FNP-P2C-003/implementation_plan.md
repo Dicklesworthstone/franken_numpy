@@ -7,9 +7,9 @@ subsystem: `strided transfer semantics`
 
 | Crate | Planned module boundary | Responsibility | Public surface contract |
 |---|---|---|---|
-| `crates/fnp-iter` | `transfer_selector` (packet-D planned boundary; crate currently stub) | deterministic transfer-loop selection based on dtype/alignment/stride context | transfer selector API returning stable transfer-class decisions (planned) |
-| `crates/fnp-iter` | `transfer_overlap_guard` (packet-D/E planned boundary) | overlap-aware direction/copy mediation and alias-policy checks | overlap policy interfaces + decision reason-code mapping (planned) |
-| `crates/fnp-iter` | `flatiter_transfer` (packet-D/E planned boundary) | flatiter read/write transfer semantics for integer/slice/fancy/bool indexing classes | flatiter transfer APIs and error taxonomy hooks (planned) |
+| `crates/fnp-iter` | `transfer_selector` (packet-D core landed) | deterministic transfer-loop selection based on dtype/alignment/stride context | `TransferSelectorInput`, `select_transfer_class`, `TransferContext`, `select_transfer_loop` |
+| `crates/fnp-iter` | `transfer_overlap_guard` (packet-D/E core landed) | overlap-aware direction/copy mediation and alias-policy checks | `overlap_copy_policy`, `NditerTransferFlags`, transfer decision reason-code mapping |
+| `crates/fnp-iter` | `flatiter_transfer` (packet-D/E core landed) | flatiter read/write transfer semantics for integer/slice/fancy/bool indexing classes | `FlatIterIndex`, `resolve_flatiter_indices`, `validate_flatiter_read`, `validate_flatiter_write` |
 | `crates/fnp-ufunc` | `transfer_executor` (packet-D planned boundary) | migration seam from current broadcast-odometer traversal to reusable transfer-selector/guard stack | adapter seam for `elementwise_binary`/reduction transfer pathways (planned) |
 | `crates/fnp-dtype` | `cast_policy_core` (existing in `src/lib.rs`) | cast compatibility policy primitives used by transfer gating | `promote`, `can_cast_lossless` |
 | `crates/fnp-ndarray` | `shape_stride_core` (existing in `src/lib.rs`) | shape/broadcast/stride legality primitives used by transfer traversal planning | `broadcast_shape`, `broadcast_shapes`, `contiguous_strides`, `NdLayout` |
@@ -19,12 +19,12 @@ subsystem: `strided transfer semantics`
 
 ## 2. Implementation Sequence (D-Stage to I-Stage)
 
-1. Land packet-D module skeleton for transfer selector/overlap guard/flatiter transfer boundaries in `fnp-iter`.
+1. Keep the landed packet-D transfer selector/overlap guard/flatiter transfer boundaries in `fnp-iter` green.
 2. Define transfer reason-code taxonomy and strict/hardened decision boundaries from `P2C003-R01`..`R10`.
 3. Wire transfer selector inputs to `fnp-dtype` cast policy and `fnp-ndarray` stride/broadcast primitives.
 4. Introduce `fnp-ufunc` adapter seam so current traversal can incrementally migrate without behavior drift.
-5. Add packet-F transfer fixture schemas and runner placeholders in `fnp-conformance`.
-6. Add packet-G workflow scenario placeholders linking transfer fixture IDs + e2e scripts and artifact refs.
+5. Expand packet-F transfer fixture schemas and runners in `fnp-conformance`.
+6. Expand packet-G workflow scenarios linking transfer fixture IDs + e2e scripts and artifact refs.
 7. Connect transfer policy decisions to runtime audit context fields (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`).
 8. Gate packet-H optimization work behind baseline/profile/isomorphism evidence artifacts.
 9. Close packet-I with parity summary + risk + durability sidecar/scrub/decode-proof linkage.
