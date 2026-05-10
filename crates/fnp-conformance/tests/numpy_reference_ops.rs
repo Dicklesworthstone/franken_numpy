@@ -344,6 +344,28 @@ elif case_id == "correlate_same_asymmetric":
         np.array([3.0, -1.0, 2.0]),
         mode="same",
     ))
+elif case_id == "roll_flat_negative_2d":
+    emit(np.roll(
+        np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+        -2,
+    ))
+elif case_id == "roll_axis1_positive_2d":
+    emit(np.roll(
+        np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
+        1,
+        axis=1,
+    ))
+elif case_id == "diff_axis0_2d":
+    emit(np.diff(
+        np.array([[1.0, 4.0, 9.0], [2.0, 8.0, 18.0], [5.0, 10.0, 30.0]]),
+        axis=0,
+    ))
+elif case_id == "diff_axis1_second_order_2d":
+    emit(np.diff(
+        np.array([[1.0, 3.0, 6.0, 10.0], [2.0, 5.0, 11.0, 23.0]]),
+        n=2,
+        axis=1,
+    ))
 elif case_id == "gradient_axis0_2d":
     emit(np.gradient(
         np.array([[1.0, 2.0, 3.0], [4.0, 8.0, 16.0], [9.0, 18.0, 36.0]]),
@@ -724,6 +746,46 @@ fn sampling_ops_match_live_numpy_reference() {
         "correlate_same_asymmetric",
         correlate_same.shape(),
         correlate_same.values(),
+        1e-12,
+    );
+}
+
+#[test]
+fn roll_diff_ops_match_live_numpy_reference() {
+    let roll_source = array(&[2, 3], &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    let rolled_flat = roll_source.roll(-2, None).expect("flat roll");
+    assert_oracle_match(
+        "roll_flat_negative_2d",
+        rolled_flat.shape(),
+        rolled_flat.values(),
+        1e-12,
+    );
+
+    let rolled_axis = roll_source.roll(1, Some(1)).expect("axis=1 roll");
+    assert_oracle_match(
+        "roll_axis1_positive_2d",
+        rolled_axis.shape(),
+        rolled_axis.values(),
+        1e-12,
+    );
+
+    let diff_axis0_source = array(&[3, 3], &[1.0, 4.0, 9.0, 2.0, 8.0, 18.0, 5.0, 10.0, 30.0]);
+    let diff_axis0 = diff_axis0_source.diff(1, Some(0)).expect("axis=0 diff");
+    assert_oracle_match(
+        "diff_axis0_2d",
+        diff_axis0.shape(),
+        diff_axis0.values(),
+        1e-12,
+    );
+
+    let diff_axis1_source = array(&[2, 4], &[1.0, 3.0, 6.0, 10.0, 2.0, 5.0, 11.0, 23.0]);
+    let diff_axis1_n2 = diff_axis1_source
+        .diff(2, Some(1))
+        .expect("axis=1 second-order diff");
+    assert_oracle_match(
+        "diff_axis1_second_order_2d",
+        diff_axis1_n2.shape(),
+        diff_axis1_n2.values(),
         1e-12,
     );
 }
