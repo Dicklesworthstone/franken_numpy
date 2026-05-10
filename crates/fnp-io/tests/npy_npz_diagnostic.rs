@@ -3,7 +3,7 @@
 use fnp_io::{
     IOSupportedDType, MAX_ARCHIVE_MEMBERS, MAX_DISPATCH_RETRIES, MAX_HEADER_BYTES,
     MAX_MEMMAP_VALIDATION_RETRIES, MemmapMode, NpyHeader, classify_load_dispatch, load_auto,
-    read_npy_bytes, read_npz_bytes, save, savez, validate_header_schema,
+    read_npy_bytes, read_npz_bytes, save, savez, savez_compressed, validate_header_schema,
     validate_io_policy_metadata, validate_magic_version, validate_memmap_contract,
     validate_npz_archive_budget, validate_read_payload, validate_write_contract, write_npy_bytes,
 };
@@ -196,6 +196,28 @@ fn npy_npz_diagnostic_reason_codes_cover_malformed_boundaries() {
             run: || read_npz_bytes(b"PK\x03\x04bad", false).map(|_| ()),
         },
         DiagnosticCase {
+            id: "npz_save_duplicate_member_rejected",
+            reason_code: "io_npz_archive_contract_violation",
+            run: || {
+                let entries: Vec<(&str, &[usize], &[f64], IOSupportedDType)> = vec![
+                    ("arr", &[1], &[1.0], IOSupportedDType::F64),
+                    ("arr", &[1], &[2.0], IOSupportedDType::F64),
+                ];
+                savez(&entries).map(|_| ())
+            },
+        },
+        DiagnosticCase {
+            id: "npz_save_compressed_duplicate_member_rejected",
+            reason_code: "io_npz_archive_contract_violation",
+            run: || {
+                let entries: Vec<(&str, &[usize], &[f64], IOSupportedDType)> = vec![
+                    ("arr", &[1], &[1.0], IOSupportedDType::F64),
+                    ("arr.npy", &[1], &[2.0], IOSupportedDType::F64),
+                ];
+                savez_compressed(&entries).map(|_| ())
+            },
+        },
+        DiagnosticCase {
             id: "io_policy_unknown_mode_rejected",
             reason_code: "io_policy_unknown_metadata",
             run: || validate_io_policy_metadata("mystery", "known_compatible_low_risk"),
@@ -216,6 +238,10 @@ fn npy_npz_diagnostic_success_controls_keep_strict_paths_distinct() {
 
     let npz = savez(&[("arr", &[2], &[1.0, 2.0], IOSupportedDType::F64)]).expect("valid npz");
     read_npz_bytes(&npz, false).expect("valid npz should decode");
+
+    let compressed = savez_compressed(&[("arr", &[2], &[1.0, 2.0], IOSupportedDType::F64)])
+        .expect("valid compressed npz");
+    read_npz_bytes(&compressed, false).expect("valid compressed npz should decode");
 }
 
 struct DiagnosticCase {

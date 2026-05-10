@@ -3115,10 +3115,35 @@ pub fn load_npz(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzLoadedEntry>, 
     Ok(results)
 }
 
+fn normalized_npz_file_name(name: &str) -> String {
+    if name.ends_with(".npy") {
+        name.to_string()
+    } else {
+        format!("{name}.npy")
+    }
+}
+
+fn validate_public_npz_entry_names(
+    entries: &[(&str, &[usize], &[f64], IOSupportedDType)],
+) -> Result<(), IOError> {
+    let mut seen = HashSet::with_capacity(entries.len());
+    for &(name, _, _, _) in entries {
+        let file_name = normalized_npz_file_name(name);
+        if !seen.insert(file_name) {
+            return Err(IOError::NpzArchiveContractViolation(
+                "npz: archive member names must be unique",
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// High-level savez: serialize multiple named arrays to an uncompressed NPZ archive (np.savez).
 ///
 /// Each entry is (name, shape, values, dtype).
 pub fn savez(entries: &[(&str, &[usize], &[f64], IOSupportedDType)]) -> Result<Vec<u8>, IOError> {
+    validate_public_npz_entry_names(entries)?;
+
     let mut payloads = Vec::with_capacity(entries.len());
     let mut headers = Vec::with_capacity(entries.len());
 
@@ -3147,6 +3172,8 @@ pub fn savez(entries: &[(&str, &[usize], &[f64], IOSupportedDType)]) -> Result<V
 pub fn savez_compressed(
     entries: &[(&str, &[usize], &[f64], IOSupportedDType)],
 ) -> Result<Vec<u8>, IOError> {
+    validate_public_npz_entry_names(entries)?;
+
     let mut payloads = Vec::with_capacity(entries.len());
     let mut headers = Vec::with_capacity(entries.len());
 
@@ -6517,6 +6544,32 @@ mm.flush()
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].0, "arr");
         assert_eq!(loaded[0].2, vec![10.0, 20.0, 30.0, 40.0]);
+    }
+
+    #[test]
+    fn savez_rejects_duplicate_public_member_names() {
+        let entries: Vec<(&str, &[usize], &[f64], IOSupportedDType)> = vec![
+            ("arr", &[1], &[1.0], IOSupportedDType::F64),
+            ("arr", &[1], &[2.0], IOSupportedDType::F64),
+        ];
+        let err = savez(&entries).expect_err("duplicate public member name");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
+
+        let compressed = savez_compressed(&entries).expect_err("duplicate compressed member name");
+        assert_eq!(
+            compressed.reason_code(),
+            "io_npz_archive_contract_violation"
+        );
+    }
+
+    #[test]
+    fn savez_rejects_normalized_public_member_name_collisions() {
+        let entries: Vec<(&str, &[usize], &[f64], IOSupportedDType)> = vec![
+            ("arr", &[1], &[1.0], IOSupportedDType::F64),
+            ("arr.npy", &[1], &[2.0], IOSupportedDType::F64),
+        ];
+        let err = savez(&entries).expect_err("normalized public member name collision");
+        assert_eq!(err.reason_code(), "io_npz_archive_contract_violation");
     }
 
     // ── String / Unicode NPY tests ──
