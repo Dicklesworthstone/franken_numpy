@@ -22,7 +22,10 @@
 //! "Passthrough to np." comments).
 
 use fnp_dtype::{ArrayStorage, DType, f16, promote};
-use fnp_io::{IOSupportedDType, load as io_load, save as io_save};
+use fnp_io::{
+    IOSupportedDType, load as io_load, save as io_save, savez as io_savez,
+    savez_compressed as io_savez_compressed,
+};
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolerance_aliases};
 use fnp_ndarray::{broadcast_shapes, element_count};
@@ -4988,6 +4991,132 @@ fn loaded_npy_storage(dtype: IOSupportedDType, values: Vec<f64>) -> Option<Array
         )),
         IOSupportedDType::F64 => Some(ArrayStorage::F64(values)),
         _ => None,
+    }
+}
+
+struct NativeNpzEntry {
+    name: String,
+    array: UFuncArray,
+    dtype: IOSupportedDType,
+}
+
+fn collect_native_npz_entries(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwds: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Vec<NativeNpzEntry>>> {
+    if args.is_empty() && kwds.is_none_or(|dict| dict.is_empty()) {
+        return Ok(None);
+    }
+
+    let mut entries = Vec::with_capacity(args.len() + kwds.map_or(0, |dict| dict.len()));
+    for (index, arg) in args.iter().enumerate() {
+        let name = format!("arr_{index}");
+        if let Some(kwds) = kwds
+            && kwds.contains(name.as_str())?
+        {
+            return Ok(None);
+        }
+        let array = match extract_precise_numeric_array(py, &arg, "savez(args)") {
+            Ok(array) => array,
+            Err(_) => return Ok(None),
+        };
+        let Some(dtype) = native_npy_io_dtype(array.dtype()) else {
+            return Ok(None);
+        };
+        entries.push(NativeNpzEntry { name, array, dtype });
+    }
+
+    if let Some(kwds) = kwds {
+        for (key, value) in kwds.iter() {
+            let name = key.extract::<String>()?;
+            let array = match extract_precise_numeric_array(py, &value, "savez(kwds)") {
+                Ok(array) => array,
+                Err(_) => return Ok(None),
+            };
+            let Some(dtype) = native_npy_io_dtype(array.dtype()) else {
+                return Ok(None);
+            };
+            entries.push(NativeNpzEntry { name, array, dtype });
+        }
+    }
+
+    Ok(Some(entries))
+}
+
+fn numpy_savez_call(
+    py: Python<'_>,
+    function_name: &str,
+    file: &Py<PyAny>,
+    args: &Bound<'_, PyTuple>,
+    allow_pickle: bool,
+    kwds: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let mut positional = Vec::with_capacity(args.len() + 1);
+    positional.push(file.clone_ref(py));
+    for arg in args.iter() {
+        positional.push(arg.unbind());
+    }
+    let positional = PyTuple::new(py, positional.iter().map(|arg| arg.bind(py)))?;
+    let call_kwargs = PyDict::new(py);
+    if let Some(kwds) = kwds {
+        for (key, value) in kwds.iter() {
+            call_kwargs.set_item(key, value)?;
+        }
+    }
+    call_kwargs.set_item("allow_pickle", allow_pickle)?;
+    Ok(numpy
+        .getattr(function_name)?
+        .call(&positional, Some(&call_kwargs))?
+        .unbind())
+}
+
+fn savez_impl(
+    py: Python<'_>,
+    file: Py<PyAny>,
+    args: &Bound<'_, PyTuple>,
+    allow_pickle: bool,
+    kwds: Option<&Bound<'_, PyDict>>,
+    compressed: bool,
+) -> PyResult<Py<PyAny>> {
+    let function_name = if compressed {
+        "savez_compressed"
+    } else {
+        "savez"
+    };
+    let fallback = || numpy_savez_call(py, function_name, &file, args, allow_pickle, kwds);
+
+    let file_bound = file.bind(py);
+    if !file_bound.hasattr("write")? {
+        return fallback();
+    }
+
+    let Some(native_entries) = collect_native_npz_entries(py, args, kwds)? else {
+        return fallback();
+    };
+    let entries: Vec<(&str, &[usize], &[f64], IOSupportedDType)> = native_entries
+        .iter()
+        .map(|entry| {
+            (
+                entry.name.as_str(),
+                entry.array.shape(),
+                entry.array.values(),
+                entry.dtype,
+            )
+        })
+        .collect();
+    let bytes = if compressed {
+        io_savez_compressed(&entries)
+    } else {
+        io_savez(&entries)
+    };
+    match bytes {
+        Ok(bytes) => {
+            file_bound.call_method1("write", (PyBytes::new(py, &bytes),))?;
+            Ok(py.None())
+        }
+        Err(_) => fallback(),
     }
 }
 
@@ -16908,6 +17037,30 @@ fn save(
 }
 
 #[pyfunction]
+#[pyo3(signature = (file, *args, allow_pickle=true, **kwds))]
+fn savez(
+    py: Python<'_>,
+    file: Py<PyAny>,
+    args: &Bound<'_, PyTuple>,
+    allow_pickle: bool,
+    kwds: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    savez_impl(py, file, args, allow_pickle, kwds, false)
+}
+
+#[pyfunction]
+#[pyo3(signature = (file, *args, allow_pickle=true, **kwds))]
+fn savez_compressed(
+    py: Python<'_>,
+    file: Py<PyAny>,
+    args: &Bound<'_, PyTuple>,
+    allow_pickle: bool,
+    kwds: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    savez_impl(py, file, args, allow_pickle, kwds, true)
+}
+
+#[pyfunction]
 #[pyo3(signature = (file, mmap_mode=None, allow_pickle=false, fix_imports=true, encoding="ASCII", *, max_header_size=10000_usize))]
 #[allow(clippy::too_many_arguments)]
 fn load(
@@ -25290,6 +25443,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ma_argmax, m)?)?;
     m.add_function(wrap_pyfunction!(ma_argmin, m)?)?;
     m.add_function(wrap_pyfunction!(save, m)?)?;
+    m.add_function(wrap_pyfunction!(savez, m)?)?;
+    m.add_function(wrap_pyfunction!(savez_compressed, m)?)?;
     m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_function(wrap_pyfunction!(savetxt, m)?)?;
     m.add_function(wrap_pyfunction!(tofile, m)?)?;

@@ -97,6 +97,105 @@ print(
     Ok(())
 }
 
+#[test]
+fn savez_bytesio_positional_and_keyword_arrays_match_numpy_npz() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import zipfile
+first = np.array([[1.25, -2.5], [3.75, 4.5]], dtype=np.float64)
+named = np.array([5.5, 6.5, 7.5], dtype=np.float32)
+buf = BytesIO()
+result = fnp.savez(buf, first, named=named)
+payload = buf.getvalue()
+with zipfile.ZipFile(BytesIO(payload)) as archive:
+    methods = {info.filename: info.compress_type for info in archive.infolist()}
+loaded = np.load(BytesIO(payload))
+print(
+    result is None
+    and loaded.files == ["arr_0", "named"]
+    and methods == {"arr_0.npy": zipfile.ZIP_STORED, "named.npy": zipfile.ZIP_STORED}
+    and np.array_equal(loaded["arr_0"], first)
+    and np.array_equal(loaded["named"], named)
+    and loaded["arr_0"].dtype == first.dtype
+    and loaded["named"].dtype == named.dtype
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "savez BytesIO archive should match NumPy NPZ names, dtypes, and values"
+    );
+    Ok(())
+}
+
+#[test]
+fn savez_compressed_bytesio_writes_deflated_numpy_loadable_npz() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import zipfile
+first = np.arange(12, dtype=np.float64).reshape(3, 4)
+second = np.linspace(-1.0, 1.0, 5, dtype=np.float32)
+buf = BytesIO()
+result = fnp.savez_compressed(buf, first, second=second)
+payload = buf.getvalue()
+with zipfile.ZipFile(BytesIO(payload)) as archive:
+    methods = {info.filename: info.compress_type for info in archive.infolist()}
+loaded = np.load(BytesIO(payload))
+print(
+    result is None
+    and loaded.files == ["arr_0", "second"]
+    and methods == {"arr_0.npy": zipfile.ZIP_DEFLATED, "second.npy": zipfile.ZIP_DEFLATED}
+    and np.array_equal(loaded["arr_0"], first)
+    and np.array_equal(loaded["second"], second)
+    and loaded["arr_0"].dtype == first.dtype
+    and loaded["second"].dtype == second.dtype
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "savez_compressed BytesIO archive should be deflated and NumPy-loadable"
+    );
+    Ok(())
+}
+
+#[test]
+fn savez_path_appends_npz_suffix_and_roundtrips_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import tempfile
+from pathlib import Path
+with tempfile.TemporaryDirectory() as tmp:
+    path = Path(tmp) / "archive"
+    expected_path = path.with_suffix(".npz")
+    data = np.array([1.0, 2.5, 4.0], dtype=np.float64)
+    result = fnp.savez(path, data=data)
+    loaded = np.load(expected_path)
+    print(
+        result is None
+        and expected_path.exists()
+        and loaded.files == ["data"]
+        and np.array_equal(loaded["data"], data)
+        and loaded["data"].dtype == data.dtype
+    )
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "savez path wrapper should append .npz and roundtrip through NumPy"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // loadtxt
 // ─────────────────────────────────────────────────────────────────────────────
