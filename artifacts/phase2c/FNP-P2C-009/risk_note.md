@@ -31,17 +31,17 @@ subsystem: `NPY/NPZ IO contract`
 
 | lane | fixture family | objective | owner bead |
 |---|---|---|---|
-| Fuzz/property | packet-E IO parser/roundtrip corpus (planned) | detect header/schema/pickle/memmap/archive contract violations with shrinkable counterexamples | `bd-23m.20.5` |
-| Differential/metamorphic | packet-F IO oracle/adversarial corpus (planned) | enforce strict parity for parse/write/dispatch/archive failure-class behavior | `bd-23m.20.6` |
+| Fuzz/property | packet-E IO parser/roundtrip corpus | preserve landed header/schema/pickle/memmap/archive invariant fixtures and expand shrinkable counterexample breadth | `bd-23m.20.5` |
+| Differential/metamorphic | packet-F IO oracle/adversarial corpus | preserve landed parse/write/dispatch/archive failure-class parity checks and expand malformed/archive edge breadth | `bd-23m.20.6` |
 | E2E/replay | packet-G IO workflow scenarios (`io_packet_replay`, `io_packet_hostile_guardrails`) | verify strict/hardened replay traceability and policy-forensics linkage with step-level logs | `bd-23m.20.7` |
 
 ## Residual Risks and Compensating Controls
 
 | residual_id | residual risk | compensating controls | closure gate |
 |---|---|---|---|
-| `P2C009-RES-01` | `fnp-io` remains a stub and does not yet implement packet IO boundaries. | keep unsupported IO semantics fail-closed and block parity promotion until packet-D boundary work lands | `bd-23m.20.4` + packet-E baseline tests |
-| `P2C009-RES-02` | packet-scoped unit/property parser/roundtrip corpus is incomplete. | require packet-E suite with deterministic shrink/replay logging before parity claims | `bd-23m.20.5` |
-| `P2C009-RES-03` | differential/adversarial coverage for malformed metadata and archive edges remains incomplete. | enforce packet-F fixture lanes and differential gate coverage | `bd-23m.20.6` |
+| `P2C009-RES-01` | Packet-D `fnp-io` boundaries are landed for header parsing, NPY/NPZ roundtrip, dispatch/pickle policy, text IO, and memmap entrypoints; residual risk is unsupported edge breadth, not missing module implementation. | keep unsupported IO semantics fail-closed and require packet-I evidence plus targeted fixtures before broad parity promotion | `artifacts/phase2c/FNP-P2C-009/implementation_plan.md` + `artifacts/phase2c/FNP-P2C-009/final_evidence_pack.json` |
+| `P2C009-RES-02` | packet-scoped unit/property parser/roundtrip corpus exists for current IO contract lanes; remaining risk is wider shrinkable coverage across additional header, descriptor, text, and memmap variants. | preserve packet-E deterministic shrink/replay logging and extend fixture breadth when new IO edge classes are found | `bd-23m.20.5` + `artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json` |
+| `P2C009-RES-03` | differential/adversarial coverage exists for current malformed metadata and archive lanes; remaining risk is deeper duplicate-name, member-order, compression, and hostile-size breadth. | enforce packet-F fixture lanes and differential gate coverage before accepting new IO behavior claims | `bd-23m.20.6` + `crates/fnp-conformance/fixtures/io_adversarial_cases.json` |
 | `P2C009-RES-04` | packet-scoped e2e replay now covers golden and hostile IO workflows; remaining risk is breadth expansion across additional user journeys. | maintain packet-G scenario logs/artifact index/evidence links and expand scenario matrix before packet-I closure | `bd-23m.20.7` (`artifacts/phase2c/FNP-P2C-009/e2e_replay_forensics_evidence.json`) |
 | `P2C009-RES-05` | hardened budget/calibration thresholds are now profiled for packet-H hotspot behavior but are not yet tuned for full adversarial corpus scale. | use packet-H profile/isomorphism evidence as calibration baseline and keep conservative fallback trigger active until packet-I sign-off | packet-I closure (`artifacts/phase2c/FNP-P2C-009/optimization_profile_isomorphism_evidence.json`) |
 
