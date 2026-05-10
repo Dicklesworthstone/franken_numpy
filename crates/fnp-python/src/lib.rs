@@ -16848,6 +16848,68 @@ fn argpartition(
 }
 
 #[pyfunction]
+#[pyo3(signature = (
+    fname,
+    x,
+    fmt=None,
+    delimiter=" ",
+    newline="\n",
+    header="",
+    footer="",
+    comments="# ",
+    encoding=None,
+))]
+#[allow(clippy::too_many_arguments)]
+fn savetxt(
+    py: Python<'_>,
+    fname: Py<PyAny>,
+    x: Py<PyAny>,
+    fmt: Option<Py<PyAny>>,
+    delimiter: &str,
+    newline: &str,
+    header: &str,
+    footer: &str,
+    comments: &str,
+    encoding: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(fmt_val) = fmt.as_ref() {
+        kwargs.set_item("fmt", fmt_val.bind(py))?;
+    }
+    kwargs.set_item("delimiter", delimiter)?;
+    kwargs.set_item("newline", newline)?;
+    kwargs.set_item("header", header)?;
+    kwargs.set_item("footer", footer)?;
+    kwargs.set_item("comments", comments)?;
+    if let Some(enc) = encoding {
+        kwargs.set_item("encoding", enc)?;
+    }
+    numpy
+        .getattr("savetxt")?
+        .call((fname.bind(py), x.bind(py)), Some(&kwargs))?;
+    Ok(py.None())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, fid, sep="", format="%s"))]
+fn tofile(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    fid: Py<PyAny>,
+    sep: &str,
+    format: &str,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let array = numpy.getattr("asarray")?.call1((a.bind(py),))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("sep", sep)?;
+    kwargs.set_item("format", format)?;
+    array.call_method("tofile", (fid.bind(py),), Some(&kwargs))?;
+    Ok(py.None())
+}
+
+#[pyfunction]
 #[pyo3(signature = (file, dtype=None, count=-1_i64, sep="", offset=0_i64, *, like=None))]
 fn fromfile(
     py: Python<'_>,
@@ -25035,6 +25097,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pad, m)?)?;
     m.add_function(wrap_pyfunction!(ma_argmax, m)?)?;
     m.add_function(wrap_pyfunction!(ma_argmin, m)?)?;
+    m.add_function(wrap_pyfunction!(savetxt, m)?)?;
+    m.add_function(wrap_pyfunction!(tofile, m)?)?;
     m.add_function(wrap_pyfunction!(loadtxt, m)?)?;
     m.add_function(wrap_pyfunction!(genfromtxt, m)?)?;
     m.add_function(wrap_pyfunction!(partition, m)?)?;
