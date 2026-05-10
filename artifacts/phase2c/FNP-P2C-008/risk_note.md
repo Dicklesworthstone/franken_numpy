@@ -31,7 +31,7 @@ subsystem: `linalg bridge first wave`
 
 | lane | fixture family | objective | owner bead |
 |---|---|---|---|
-| Fuzz/property | packet-E linalg invariant corpus (planned) | detect solver/decomposition/spectral/tolerance contract violations with shrinkable counterexamples | `bd-23m.19.5` |
+| Fuzz/property | packet-E linalg invariant corpus | detect solver/decomposition/spectral/tolerance contract violations with shrinkable counterexamples | `bd-23m.19.5` |
 | Differential/metamorphic | packet-F linalg oracle/adversarial corpus (implemented) | enforce strict parity for linalg output/failure-class behavior across golden and hostile cases | `bd-23m.19.6` |
 | E2E/replay | packet-G linalg workflow scenarios (implemented) | verify strict/hardened replay traceability and policy-forensics linkage through packet-scoped replay logs and forensics artifact indexes | `bd-23m.19.7` |
 
@@ -39,8 +39,8 @@ subsystem: `linalg bridge first wave`
 
 | residual_id | residual risk | compensating controls | closure gate |
 |---|---|---|---|
-| `P2C008-RES-01` | `fnp-linalg` is still skeletal for the full packet boundary surface. | keep unsupported semantics fail-closed and block parity promotion until packet-D boundary work lands | `bd-23m.19.4` + packet-E baseline tests |
-| `P2C008-RES-02` | packet-scoped unit/property linalg corpus is incomplete. | require packet-E suite with deterministic shrink/replay logging before parity claims | `bd-23m.19.5` |
+| `P2C008-RES-01` | `fnp-linalg` first-wave boundary surfaces are landed; residual risk is breadth across the full legacy linalg API, output modes, and backend edge classes. | keep unsupported semantics fail-closed and gate every new linalg surface through packet evidence refresh | packet-D/E evidence + packet validator evidence update |
+| `P2C008-RES-02` | packet-scoped unit/property linalg corpus exists for the current surface; residual risk is broader solver/decomposition/spectral/tolerance/backend coverage. | maintain packet-E deterministic shrink/replay logging and add regressions for each promoted linalg class | `bd-23m.19.5` |
 | `P2C008-RES-03` | closed: differential/adversarial coverage for singular/non-convergence/tolerance-edge classes is now wired into packet-F suites and gates. | maintain packet-F fixture lanes and differential gate coverage (`linalg_differential`, `linalg_metamorphic`, `linalg_adversarial`). | `bd-23m.19.6` |
 | `P2C008-RES-04` | closed: packet-scoped e2e replay for linalg journeys is implemented and audited. | maintain packet-G workflow scenarios + wrapper script and keep `workflow_scenario_packet008_opt_{e2e,reliability,artifact_index}` artifacts fresh with gate runs. | `bd-23m.19.7` |
 | `P2C008-RES-05` | closed: hardened budget/calibration thresholds were revalidated using packet-H baseline/rebaseline profiling and behavior-isomorphism checks. | maintain packet-H optimization evidence (`optimization_profile_report.json`, `optimization_profile_isomorphism_evidence.json`) and re-run fallback trigger checks during packet-I closure. | `bd-23m.19.8` |
@@ -95,8 +95,10 @@ subsystem: `linalg bridge first wave`
 
 ## raptorq_artifacts
 
-- `artifacts/phase2c/FNP-P2C-008/parity_report.raptorq.json` (planned at packet-I)
-- `artifacts/phase2c/FNP-P2C-008/parity_report.decode_proof.json` (planned at packet-I)
+- `artifacts/phase2c/FNP-P2C-008/parity_report.raptorq.json`
+- `artifacts/phase2c/FNP-P2C-008/parity_report.scrub_report.json`
+- `artifacts/phase2c/FNP-P2C-008/parity_report.decode_proof.json`
+- `artifacts/phase2c/FNP-P2C-008/final_evidence_pack.json`
 - `artifacts/raptorq/conformance_bundle_v1.sidecar.json` (program-level baseline reference)
 - `artifacts/raptorq/conformance_bundle_v1.scrub_report.json` (program-level baseline reference)
 - `artifacts/raptorq/conformance_bundle_v1.decode_proof.json` (program-level baseline reference)
