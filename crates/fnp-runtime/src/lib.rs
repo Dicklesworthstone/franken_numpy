@@ -499,31 +499,111 @@ pub fn expected_loss_for_action(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IntegrationCapability {
+    pub capability: &'static str,
+    pub crate_item: &'static str,
+    pub fnp_role: &'static str,
+}
+
+impl IntegrationCapability {
+    #[must_use]
+    pub const fn new(
+        capability: &'static str,
+        crate_item: &'static str,
+        fnp_role: &'static str,
+    ) -> Self {
+        Self {
+            capability,
+            crate_item,
+            fnp_role,
+        }
+    }
+}
+
 #[cfg(feature = "asupersync")]
 pub mod asupersync_integration {
-    /// Marker function proving asupersync linkage is available for runtime plumbing.
+    use super::IntegrationCapability;
+
+    /// Stable feature tag for runtime orchestration diagnostics.
     #[must_use]
     pub fn runtime_tag() -> &'static str {
         "asupersync"
+    }
+
+    /// Runtime-facing capabilities wired to concrete asupersync public APIs.
+    #[must_use]
+    pub fn capability_snapshot() -> [IntegrationCapability; 4] {
+        [
+            IntegrationCapability::new(
+                "deterministic_lab_runtime",
+                std::any::type_name::<asupersync::LabRuntime>(),
+                "deterministic replay for conformance and benchmark orchestration",
+            ),
+            IntegrationCapability::new(
+                "capability_context",
+                std::any::type_name::<asupersync::Cx>(),
+                "explicit authority boundary for long-running evidence jobs",
+            ),
+            IntegrationCapability::new(
+                "raptorq_encoding_pipeline",
+                std::any::type_name::<asupersync::EncodingPipeline>(),
+                "repair-symbol sidecar generation and scrub/decode drills",
+            ),
+            IntegrationCapability::new(
+                "structured_outcome",
+                std::any::type_name::<asupersync::Outcome<(), ()>>(),
+                "cancellation-aware outcome recording for runtime audit events",
+            ),
+        ]
     }
 }
 
 #[cfg(feature = "frankentui")]
 pub mod frankentui_integration {
-    /// Marker function proving FrankenTUI linkage is available for observability UIs.
+    use super::IntegrationCapability;
+
+    /// Stable feature tag for observability diagnostics.
     #[must_use]
     pub fn ui_tag() -> &'static str {
         "frankentui"
+    }
+
+    /// Observability-facing capabilities wired to concrete ftui public APIs.
+    #[must_use]
+    pub fn capability_snapshot() -> [IntegrationCapability; 4] {
+        [
+            IntegrationCapability::new(
+                "render_buffer",
+                std::any::type_name::<ftui::Buffer>(),
+                "parity drift and performance delta dashboard backing store",
+            ),
+            IntegrationCapability::new(
+                "render_frame",
+                std::any::type_name::<ftui::Frame<'static>>(),
+                "terminal-native incident and recovery views",
+            ),
+            IntegrationCapability::new(
+                "theme_surface",
+                std::any::type_name::<ftui::Theme>(),
+                "consistent hardened-mode decision dashboard styling",
+            ),
+            IntegrationCapability::new(
+                "terminal_capabilities",
+                std::any::type_name::<ftui::TerminalCapabilities>(),
+                "fail-closed terminal feature discovery for observability UIs",
+            ),
+        ]
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        CompatibilityClass, DecisionAction, DecisionAuditContext, DecisionLossModel,
-        EvidenceLedger, RuntimeMode, decide_and_record, decide_and_record_with_context,
-        decide_compatibility, decide_compatibility_from_wire, evaluate_policy_override,
-        expected_loss_for_action, posterior_incompatibility,
+        decide_and_record, decide_and_record_with_context, decide_compatibility,
+        decide_compatibility_from_wire, evaluate_policy_override, expected_loss_for_action,
+        posterior_incompatibility, CompatibilityClass, DecisionAction, DecisionAuditContext,
+        DecisionLossModel, EvidenceLedger, RuntimeMode,
     };
 
     #[test]
@@ -1302,6 +1382,71 @@ mod tests {
             "known_incompatible"
         );
         assert_eq!(CompatibilityClass::Unknown.as_str(), "unknown");
+    }
+
+    #[test]
+    fn integration_capability_constructor_preserves_fields() {
+        let capability =
+            super::IntegrationCapability::new("capability", "crate::Item", "runtime role");
+        assert_eq!(capability.capability, "capability");
+        assert_eq!(capability.crate_item, "crate::Item");
+        assert_eq!(capability.fnp_role, "runtime role");
+    }
+
+    #[test]
+    #[cfg(feature = "asupersync")]
+    fn asupersync_feature_snapshot_references_public_types() {
+        let snapshot = super::asupersync_integration::capability_snapshot();
+        assert_eq!(super::asupersync_integration::runtime_tag(), "asupersync");
+        assert_eq!(snapshot.len(), 4);
+        assert!(
+            snapshot.iter().all(|capability| {
+                !capability.capability.is_empty()
+                    && !capability.crate_item.is_empty()
+                    && !capability.fnp_role.is_empty()
+            }),
+            "asupersync snapshot entries must be fully populated"
+        );
+        assert!(
+            snapshot
+                .iter()
+                .any(|capability| capability.crate_item.contains("LabRuntime")),
+            "snapshot must reference the concrete deterministic runtime type"
+        );
+        assert!(
+            snapshot
+                .iter()
+                .any(|capability| capability.crate_item.contains("EncodingPipeline")),
+            "snapshot must reference the concrete RaptorQ encoding pipeline type"
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "frankentui")]
+    fn frankentui_feature_snapshot_references_public_types() {
+        let snapshot = super::frankentui_integration::capability_snapshot();
+        assert_eq!(super::frankentui_integration::ui_tag(), "frankentui");
+        assert_eq!(snapshot.len(), 4);
+        assert!(
+            snapshot.iter().all(|capability| {
+                !capability.capability.is_empty()
+                    && !capability.crate_item.is_empty()
+                    && !capability.fnp_role.is_empty()
+            }),
+            "frankentui snapshot entries must be fully populated"
+        );
+        assert!(
+            snapshot
+                .iter()
+                .any(|capability| capability.crate_item.contains("Buffer")),
+            "snapshot must reference the concrete render buffer type"
+        );
+        assert!(
+            snapshot
+                .iter()
+                .any(|capability| capability.crate_item.contains("TerminalCapabilities")),
+            "snapshot must reference the concrete terminal capability type"
+        );
     }
 
     // -----------------------------------------------------------------------

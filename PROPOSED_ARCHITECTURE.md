@@ -72,7 +72,7 @@ Current differential harness in `fnp-conformance`:
 - structured telemetry channels for evidence/event streams
 
 Current state:
-- `fnp-runtime` has optional linkage stubs
+- `fnp-runtime` exposes typed optional capability snapshots for deterministic lab runtime, explicit capability contexts, RaptorQ encoding pipelines, and structured outcomes
 - `fnp-conformance` uses asupersync RaptorQ primitives for sidecar generation and scrub/recovery drills
 
 ### frankentui usage plan
@@ -81,7 +81,7 @@ Current state:
 - interactive incident/recovery views for hardened-mode decisions
 
 Current state:
-- `fnp-runtime` exposes optional `frankentui` feature linkage stubs
+- `fnp-runtime` exposes typed optional `frankentui` capability snapshots for render buffers, frames, themes, and terminal capability discovery
 
 ## 8. Performance/Optimization Governance
 
