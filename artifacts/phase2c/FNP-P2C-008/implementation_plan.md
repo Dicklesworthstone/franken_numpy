@@ -3,36 +3,36 @@
 packet_id: `FNP-P2C-008`  
 subsystem: `linalg bridge first wave`
 
-## 1. Crate and Module Boundary Skeleton
+## 1. Crate and Module Boundary Status
 
 | Crate | Planned module boundary | Responsibility | Public surface contract |
 |---|---|---|---|
-| `crates/fnp-linalg` | `linalg_error_taxonomy` (packet-D planned boundary; crate currently skeletal) | deterministic mapping for `LinAlgError` families and packet reason-code taxonomy | stable error-class surface for linalg entrypoints (`P2C008-R01`..`R10`) |
-| `crates/fnp-linalg` | `solver_ops` (packet-D planned boundary) | `solve`, `inv`, `pinv` precondition validation and deterministic failure routing | solver contract boundary (`P2C008-R02`, `P2C008-R08`) |
-| `crates/fnp-linalg` | `factorization_ops` (packet-D planned boundary) | `cholesky`, `qr`, `svd` mode normalization and output-shape policy seams | factorization contracts (`P2C008-R03`, `P2C008-R04`, `P2C008-R05`) |
-| `crates/fnp-linalg` | `spectral_ops` (packet-D planned boundary) | `eig`, `eigvals`, `eigh`, `eigvalsh` branch and convergence policy seams | spectral contract (`P2C008-R06`) |
-| `crates/fnp-linalg` | `least_squares_ops` (packet-D planned boundary) | `lstsq` tuple-output class enforcement with tolerance policy gate | least-squares contract (`P2C008-R07`) |
-| `crates/fnp-linalg` | `norm_det_rank_ops` (packet-D planned boundary) | `norm`, `det`, `slogdet`, `matrix_rank`, `pinv` legality/tolerance boundaries | norm/det/rank contract (`P2C008-R08`) |
-| `crates/fnp-linalg` | `backend_bridge` + `lapack_adapter` (packet-D planned boundary) | backend seam, parameter validation, and deterministic backend error-hook mapping | backend bridge contract (`P2C008-R09`) |
+| `crates/fnp-linalg` | error taxonomy/reason-code core (packet-D/E landed inline) | deterministic mapping for `LinAlgError` families and packet reason-code taxonomy | `LinAlgError`, `reason_code`, `LINALG_PACKET_REASON_CODES`, `LinAlgLogRecord` |
+| `crates/fnp-linalg` | solver ops (packet-D/E landed inline) | `solve`, `inv`, `pinv` precondition validation and deterministic failure routing | `solve_2x2`, `inv_2x2`, `pinv_*`, `batch_inv` |
+| `crates/fnp-linalg` | factorization ops (packet-D/E landed inline) | `cholesky`, `qr`, `svd` mode normalization and output-shape policy seams | `QrMode`, `qr_*`, `svd_*`, `cholesky_*`, output-shape validators |
+| `crates/fnp-linalg` | spectral ops (packet-D/E landed inline) | `eig`, `eigvals`, `eigh`, `eigvalsh` branch and convergence policy seams | `eig_*`, `eigvals_*`, `eigh_*`, `eigvalsh_*`, batch spectral entrypoints |
+| `crates/fnp-linalg` | least-squares ops (packet-D/E landed inline) | `lstsq` tuple-output class enforcement with tolerance policy gate | `LstsqOutputShapes`, `lstsq_svd`, `lstsq_2x2`, `lstsq_output_shapes` |
+| `crates/fnp-linalg` | norm/det/rank/tolerance ops (packet-D/E landed inline) | `norm`, `det`, `slogdet`, `matrix_rank`, `pinv` legality/tolerance boundaries | `VectorNormOrder`, `MatrixNormOrder`, `det_*`, `slogdet_*`, `matrix_rank_*`, `validate_tolerance_policy` |
+| `crates/fnp-linalg` | backend bridge/policy guard (packet-D/E landed inline) | backend seam, parameter validation, and deterministic backend error-hook mapping | `validate_policy_metadata`, bounded backend/tolerance constants, fail-closed reason codes |
 | `crates/fnp-runtime` | policy/audit decision context (existing) | strict/hardened fail-closed mediation with reason-code and evidence logging for linalg packet decisions | `decide_and_record_with_context` integration from linalg suites |
-| `crates/fnp-conformance` | `linalg_packet_suite` (packet-F planned boundary) | fixture-driven differential/metamorphic/adversarial linalg coverage (singular, non-convergence, tolerance-edge, backend anomalies) | packet-F linalg runner + fixture manifests (planned) |
-| `crates/fnp-conformance` | workflow scenario integration (existing + packet-G extension) | strict/hardened replay scenarios linking linalg operations to packet workflows | packet-G linalg scenario entries in workflow corpus (planned) |
+| `crates/fnp-conformance` | linalg packet suite (packet-F landed) | fixture-driven differential/metamorphic/adversarial linalg coverage (singular, non-convergence, tolerance-edge, backend anomalies) | linalg differential/adversarial fixtures, oracle outputs, packet-F evidence |
+| `crates/fnp-conformance` | workflow scenario integration (packet-G/H/I landed for current scope) | strict/hardened replay scenarios linking linalg operations to packet workflows | packet-008 workflow scenario artifacts and final evidence pack |
 
 ## 2. Implementation Sequence (D-Stage to I-Stage)
 
-1. Land packet-D `fnp-linalg` module skeletons (`linalg_error_taxonomy`, `solver_ops`, `factorization_ops`, `spectral_ops`, `least_squares_ops`, `norm_det_rank_ops`, `backend_bridge`, `lapack_adapter`) with explicit TODO gates for deferred parity debt.
-2. Define packet reason-code taxonomy aligned with contract rows `P2C008-R01`..`R10`.
-3. Implement deterministic shape/ndim/square-ness legality checks at linalg entrypoints before backend dispatch.
-4. Implement solver pathways (`solve`, `inv`, `pinv`) with deterministic singular/incompatible-system failure class handling.
-5. Implement factorization and spectral mode gates (`qr`/`svd`/`cholesky`/`eig*`) with deterministic branch and output-class boundaries.
-6. Implement least-squares tuple contract and tolerance-policy seam for `lstsq`.
-7. Implement norm/det/rank/tolerance boundaries with deterministic class handling.
-8. Implement backend seam policy (`backend_bridge`, `lapack_adapter`, error-hook mapping) with fail-closed unsupported backend states.
-9. Add packet-F linalg conformance harness placeholders and fixture schemas for singular/non-convergence/tolerance/backend adversarial lanes.
-10. Add packet-G workflow scenario placeholders linking linalg fixture IDs to replay/e2e scripts.
-11. Wire packet linalg policy decisions into runtime audit context (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`).
-12. Gate packet-H optimization work behind baseline/profile/isomorphism evidence.
-13. Close packet-I with parity summary + risk + durability sidecar/scrub/decode-proof artifacts.
+1. Keep landed packet-D/E `fnp-linalg` error taxonomy, solver, factorization, spectral, least-squares, norm/det/rank, backend-policy, reason-code, and structured-log boundaries green.
+2. Maintain packet reason-code taxonomy alignment with contract rows `P2C008-R01`..`R10`.
+3. Preserve deterministic shape/ndim/square-ness legality checks at linalg entrypoints before backend dispatch.
+4. Preserve solver pathways (`solve`, `inv`, `pinv`) with deterministic singular/incompatible-system failure class handling.
+5. Maintain factorization and spectral mode gates (`qr`/`svd`/`cholesky`/`eig*`) with deterministic branch and output-class boundaries.
+6. Maintain least-squares tuple contract and tolerance-policy seam for `lstsq`.
+7. Maintain norm/det/rank/tolerance boundaries with deterministic class handling.
+8. Keep backend seam policy and unsupported backend states fail-closed.
+9. Expand packet-F linalg fixture breadth for larger singular/non-convergence/tolerance/backend adversarial lanes.
+10. Expand packet-G workflow scenarios where linalg fixtures should cover additional replay/e2e journeys.
+11. Preserve packet linalg policy decisions in runtime audit context (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`).
+12. Keep packet-H optimization work tied to baseline/profile/isomorphism evidence.
+13. Keep packet-I parity summary + risk + durability sidecar/scrub/decode-proof artifacts ready.
 
 ## 3. Public Surface Contract Notes
 
@@ -81,7 +81,7 @@ All emissions must include:
 - Planning-stage validation rules:
   - no behavior-changing linalg backend migration is shipped in this bead;
   - packet contract and reason-code taxonomy remain internally consistent;
-  - packet validator may remain `not_ready` until downstream E-I artifacts land.
+  - packet validator remains `ready` for the landed E-I artifact set.
 - Validation command (offloaded via `rch`):  
   `rch exec -- cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-008`
 
