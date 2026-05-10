@@ -12,6 +12,8 @@
   "source_symbols": 788,
   "repair_symbols": 197,
   "total_symbols": 985,
+  "encoding_parallelism": 1,
+  "decoding_parallelism": 1,
   "symbols": [
     {
       "sbn": 0,

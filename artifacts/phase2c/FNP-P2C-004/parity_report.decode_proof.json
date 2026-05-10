@@ -7,5 +7,6 @@
   "recovery_success": true,
   "expected_hash": "c2ce7d376cb3314a33360defde7e0eb13dd509c89d25542a8beed5bd23432007",
   "recovered_hash": "c2ce7d376cb3314a33360defde7e0eb13dd509c89d25542a8beed5bd23432007",
-  "error": null
+  "error": null,
+  "decoding_parallelism": 1
 }
