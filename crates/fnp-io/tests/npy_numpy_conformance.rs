@@ -1,5 +1,6 @@
 use fnp_io::{
-    IOSupportedDType, LoadBytes, load, load_auto, load_complex, load_npz, read_npy_bytes,
+    IOSupportedDType, LoadBytes, load, load_auto, load_complex, load_npz, read_npy_bytes, savez,
+    savez_compressed,
 };
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -11,6 +12,7 @@ const NUMPY_ORACLE_SCRIPT: &str = r#"
 import io
 import numpy as np
 import sys
+import zipfile
 
 case = sys.argv[1]
 
@@ -56,6 +58,20 @@ def emit_npz(compressed):
         np.savez(buf, floats=floats, ints=ints)
     print("npz_hex=" + buf.getvalue().hex())
 
+def emit_loaded_npz(raw_hex):
+    raw = bytes.fromhex(raw_hex)
+    with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+        methods = [f"{info.filename}:{info.compress_type}" for info in zf.infolist()]
+        print("zip_methods=" + ",".join(methods))
+    with np.load(io.BytesIO(raw), allow_pickle=False) as archive:
+        print("npz_names=" + ",".join(archive.files))
+        for name in archive.files:
+            arr = archive[name]
+            print(f"{name}_dtype=" + arr.dtype.str)
+            print(f"{name}_shape=" + ",".join(str(dim) for dim in arr.shape))
+            values = ",".join(f"{float(value):.17g}" for value in arr.ravel(order="C"))
+            print(f"{name}_values=" + values)
+
 if case == "f64_c_order":
     emit_npy(np.arange(6, dtype=np.dtype("<f8")).reshape(2, 3))
 elif case == "i16_big_endian":
@@ -70,6 +86,8 @@ elif case == "npz_store":
     emit_npz(False)
 elif case == "npz_deflate":
     emit_npz(True)
+elif case == "load_npz_hex":
+    emit_loaded_npz(sys.argv[2])
 else:
     raise AssertionError(f"unknown case {case}")
 "#;
@@ -131,10 +149,20 @@ fn numpy_python() -> Result<&'static str, String> {
 }
 
 fn run_numpy_case(case: &str) -> Result<BTreeMap<String, String>, String> {
-    let output = Command::new(numpy_python()?)
-        .arg("-c")
-        .arg(NUMPY_ORACLE_SCRIPT)
-        .arg(case)
+    run_numpy_case_with_extra_arg(case, None)
+}
+
+fn run_numpy_case_with_extra_arg(
+    case: &str,
+    extra_arg: Option<&str>,
+) -> Result<BTreeMap<String, String>, String> {
+    let mut command = Command::new(numpy_python()?);
+    command.arg("-c").arg(NUMPY_ORACLE_SCRIPT).arg(case);
+    if let Some(extra_arg) = extra_arg {
+        command.arg(extra_arg);
+    }
+
+    let output = command
         .output()
         .map_err(|err| format!("failed to run NumPy oracle: {err}"))?;
     if !output.status.success() {
@@ -155,6 +183,21 @@ fn run_numpy_case(case: &str) -> Result<BTreeMap<String, String>, String> {
                 .ok_or_else(|| format!("malformed oracle output line {line:?}"))
         })
         .collect()
+}
+
+fn bytes_to_hex(bytes: &[u8]) -> String {
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        for nibble in [byte >> 4, byte & 0x0f] {
+            let digit = match nibble {
+                0..=9 => b'0' + nibble,
+                10..=15 => b'a' + (nibble - 10),
+                _ => b'?',
+            };
+            out.push(char::from(digit));
+        }
+    }
+    out
 }
 
 fn hex_to_bytes(hex: &str) -> Result<Vec<u8>, String> {
@@ -247,6 +290,10 @@ fn numpy_npy_oracle(case: &str) -> Result<NumpyNpyOracle, String> {
 fn numpy_npz_oracle(case: &str) -> Result<Vec<u8>, String> {
     let lines = run_numpy_case(case)?;
     hex_to_bytes(require_line(&lines, "npz_hex")?)
+}
+
+fn numpy_load_npz_summary(npz_bytes: &[u8]) -> Result<BTreeMap<String, String>, String> {
+    run_numpy_case_with_extra_arg("load_npz_hex", Some(&bytes_to_hex(npz_bytes)))
 }
 
 fn ensure(condition: bool, message: impl Into<String>) -> Result<(), String> {
@@ -441,6 +488,78 @@ fn numpy_generated_npz_archives_dispatch_and_decode_members() -> Result<(), Stri
             format!("{case_id}: ints dtype"),
         )?;
         assert_close(&ints.2, &[1.0, 255.0])?;
+    }
+    Ok(())
+}
+
+#[test]
+fn rust_generated_npz_archives_load_in_numpy() -> Result<(), String> {
+    let floats = [1.25, -2.5];
+    let floats_shape = [2_usize];
+    let ints = [1.0, 255.0];
+    let ints_shape = [2_usize];
+    let entries = [
+        (
+            "floats",
+            floats_shape.as_slice(),
+            floats.as_slice(),
+            IOSupportedDType::F64,
+        ),
+        (
+            "ints",
+            ints_shape.as_slice(),
+            ints.as_slice(),
+            IOSupportedDType::U8,
+        ),
+    ];
+
+    for (case_id, npz_bytes, expected_method) in [
+        (
+            "rust_store",
+            savez(&entries).map_err(|err| format!("rust_store: save failed: {err}"))?,
+            "0",
+        ),
+        (
+            "rust_deflate",
+            savez_compressed(&entries)
+                .map_err(|err| format!("rust_deflate: save failed: {err}"))?,
+            "8",
+        ),
+    ] {
+        let lines = numpy_load_npz_summary(&npz_bytes)?;
+        let expected_methods = format!("floats.npy:{expected_method},ints.npy:{expected_method}");
+        ensure_eq(
+            require_line(&lines, "zip_methods")?.as_str(),
+            expected_methods.as_str(),
+            format!("{case_id}: ZIP compression methods"),
+        )?;
+        ensure_eq(
+            require_line(&lines, "npz_names")?.as_str(),
+            "floats,ints",
+            format!("{case_id}: NumPy-visible member names"),
+        )?;
+        ensure_eq(
+            require_line(&lines, "floats_dtype")?.as_str(),
+            "<f8",
+            format!("{case_id}: floats dtype"),
+        )?;
+        ensure_eq(
+            parse_shape(require_line(&lines, "floats_shape")?)?,
+            vec![2],
+            format!("{case_id}: floats shape"),
+        )?;
+        assert_close(&parse_values(lines.get("floats_values"))?, &floats)?;
+        ensure_eq(
+            require_line(&lines, "ints_dtype")?.as_str(),
+            "|u1",
+            format!("{case_id}: ints dtype"),
+        )?;
+        ensure_eq(
+            parse_shape(require_line(&lines, "ints_shape")?)?,
+            vec![2],
+            format!("{case_id}: ints shape"),
+        )?;
+        assert_close(&parse_values(lines.get("ints_values"))?, &ints)?;
     }
     Ok(())
 }
