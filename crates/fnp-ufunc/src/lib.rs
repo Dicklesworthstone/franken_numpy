@@ -1567,6 +1567,180 @@ pub struct ParallelViewSafetyContract {
     pub serial_required_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelOperationEligibilityKind {
+    SafeNow,
+    UnsafeUntilProof,
+    SerialOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParallelReductionCandidate {
+    Sum,
+    Product,
+    Min,
+    Max,
+}
+
+impl ParallelReductionCandidate {
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Sum => "sum",
+            Self::Product => "product",
+            Self::Min => "min",
+            Self::Max => "max",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParallelOperationEligibility {
+    pub operation: String,
+    pub kind: ParallelOperationEligibilityKind,
+    pub reasons: Vec<String>,
+    pub required_proofs: Vec<String>,
+}
+
+impl ParallelOperationEligibility {
+    fn safe_now(operation: impl Into<String>, required_proofs: &[&str]) -> Self {
+        Self {
+            operation: operation.into(),
+            kind: ParallelOperationEligibilityKind::SafeNow,
+            reasons: Vec::new(),
+            required_proofs: required_proofs
+                .iter()
+                .map(|proof| (*proof).to_string())
+                .collect(),
+        }
+    }
+
+    fn unsafe_until_proof(
+        operation: impl Into<String>,
+        reasons: &[&str],
+        required_proofs: &[&str],
+    ) -> Self {
+        Self {
+            operation: operation.into(),
+            kind: ParallelOperationEligibilityKind::UnsafeUntilProof,
+            reasons: reasons.iter().map(|reason| (*reason).to_string()).collect(),
+            required_proofs: required_proofs
+                .iter()
+                .map(|proof| (*proof).to_string())
+                .collect(),
+        }
+    }
+
+    fn serial_only(operation: impl Into<String>, reasons: &[&str]) -> Self {
+        Self {
+            operation: operation.into(),
+            kind: ParallelOperationEligibilityKind::SerialOnly,
+            reasons: reasons.iter().map(|reason| (*reason).to_string()).collect(),
+            required_proofs: Vec::new(),
+        }
+    }
+
+    #[must_use]
+    pub fn is_safe_now(&self) -> bool {
+        self.kind == ParallelOperationEligibilityKind::SafeNow && self.reasons.is_empty()
+    }
+
+    fn require_proof(&mut self, reason: impl Into<String>, proof: impl Into<String>) {
+        if self.kind == ParallelOperationEligibilityKind::SafeNow {
+            self.kind = ParallelOperationEligibilityKind::UnsafeUntilProof;
+        }
+        self.reasons.push(reason.into());
+        self.required_proofs.push(proof.into());
+    }
+}
+
+#[must_use]
+pub fn classify_parallel_binary_operation(op: BinaryOp) -> ParallelOperationEligibility {
+    let operation = format!("binary:{}", op.name());
+    match op {
+        BinaryOp::Add => ParallelOperationEligibility::safe_now(
+            operation,
+            &[
+                "broadcast output elements are independent and written exactly once",
+                "dtype promotion is fixed before partitioning",
+                "NaN and signed-zero behavior is element-local for add",
+            ],
+        ),
+        BinaryOp::Mul => ParallelOperationEligibility::safe_now(
+            operation,
+            &[
+                "broadcast output elements are independent and written exactly once",
+                "dtype promotion is fixed before partitioning",
+                "NaN and signed-zero behavior is element-local for multiply",
+            ],
+        ),
+        BinaryOp::Sub => ParallelOperationEligibility::unsafe_until_proof(
+            operation,
+            &[
+                "subtract is a candidate, but signed-zero and float-error parity proof is not complete",
+            ],
+            &[
+                "broadcast subtract must prove signed-zero bit parity against the serial path",
+                "subtract must prove deterministic float-error event handling before opt-in",
+            ],
+        ),
+        BinaryOp::Minimum | BinaryOp::Maximum | BinaryOp::Fmin | BinaryOp::Fmax => {
+            ParallelOperationEligibility::unsafe_until_proof(
+                operation,
+                &[
+                    "min/max-family operations need NaN propagation and signed-zero tie-rule proof before parallel eligibility",
+                ],
+                &[
+                    "NaN propagation and NaN-ignore variants must match NumPy-observable semantics",
+                    "equal-value signed-zero tie selection must be stable under partition replay",
+                ],
+            )
+        }
+        BinaryOp::LogicalAnd
+        | BinaryOp::LogicalOr
+        | BinaryOp::LogicalXor
+        | BinaryOp::Equal
+        | BinaryOp::NotEqual
+        | BinaryOp::Less
+        | BinaryOp::LessEqual
+        | BinaryOp::Greater
+        | BinaryOp::GreaterEqual => ParallelOperationEligibility::unsafe_until_proof(
+            operation,
+            &[
+                "bool-output operations need dtype, datetime, and where/out interaction proof before parallel eligibility",
+            ],
+            &[
+                "bool dtype output must be proven against promoted and datetime comparison dispatch",
+                "where/out writeback remains out of scope for the current direct-output prototype",
+            ],
+        ),
+        BinaryOp::Div
+        | BinaryOp::Power
+        | BinaryOp::Remainder
+        | BinaryOp::Arctan2
+        | BinaryOp::Fmod
+        | BinaryOp::Copysign
+        | BinaryOp::Heaviside
+        | BinaryOp::Nextafter
+        | BinaryOp::Hypot
+        | BinaryOp::Logaddexp
+        | BinaryOp::Logaddexp2
+        | BinaryOp::Ldexp
+        | BinaryOp::FloorDivide
+        | BinaryOp::FloatPower
+        | BinaryOp::BitwiseAnd
+        | BinaryOp::BitwiseOr
+        | BinaryOp::BitwiseXor
+        | BinaryOp::LeftShift
+        | BinaryOp::RightShift => ParallelOperationEligibility::serial_only(
+            operation,
+            &[
+                "operation remains serial-only in the current prototype because domain, exception, or exact-integer contracts are not partitioned",
+            ],
+        ),
+    }
+}
+
 fn deterministic_partition_chunks(
     total: usize,
     config: ParallelPartitionConfig,
@@ -5758,6 +5932,42 @@ impl UFuncArray {
         self.elementwise_binary_with_registry(rhs, op, &UFuncLoopRegistry::new())
     }
 
+    fn parallel_binary_context_eligibility(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+    ) -> ParallelOperationEligibility {
+        let mut eligibility = classify_parallel_binary_operation(op);
+        if !geterr().is_all_ignore() {
+            eligibility.require_proof(
+                "floating-point error handling is not all-ignore; warning/callback/log ordering remains serial",
+                "float-error event collection and dispatch order must be proven deterministic under chunking",
+            );
+        }
+        if self.has_integer_sidecar() || rhs.has_integer_sidecar() {
+            eligibility.require_proof(
+                "exact integer sidecar propagation remains serial until sidecar merge ordering is proven",
+                "sidecar merge ordering must preserve exact i64/u64 values through partitioned execution",
+            );
+        }
+        if self.uses_complex_interleaved_storage() || rhs.uses_complex_interleaved_storage() {
+            eligibility.require_proof(
+                "complex interleaved storage remains serial until complex lane partitioning is proven",
+                "complex real/imag lane writes must be proven non-tearing and dtype-stable under partitioning",
+            );
+        }
+        eligibility
+    }
+
+    pub fn audit_elementwise_binary_parallel_contract(
+        &self,
+        rhs: &Self,
+        op: BinaryOp,
+    ) -> Result<ParallelOperationEligibility, UFuncError> {
+        plan_binary_dispatch_with_registry(op.name(), self, rhs, &UFuncLoopRegistry::new(), None)?;
+        Ok(self.parallel_binary_context_eligibility(rhs, op))
+    }
+
     pub fn plan_elementwise_binary_partitions(
         &self,
         rhs: &Self,
@@ -5783,31 +5993,8 @@ impl UFuncArray {
             selection.plan.out_dtype
         };
 
-        let mut serial_required_reasons = Vec::new();
-        if !matches!(op, BinaryOp::Add | BinaryOp::Mul) {
-            serial_required_reasons.push(format!(
-                "binary op '{}' remains serial until its floating-point/error-order contract is proven",
-                op.name()
-            ));
-        }
-        if !geterr().is_all_ignore() {
-            serial_required_reasons.push(
-                "floating-point error handling is not all-ignore; warning/callback/log ordering remains serial"
-                    .to_string(),
-            );
-        }
-        if self.has_integer_sidecar() || rhs.has_integer_sidecar() {
-            serial_required_reasons.push(
-                "exact integer sidecar propagation remains serial until sidecar merge ordering is proven"
-                    .to_string(),
-            );
-        }
-        if self.uses_complex_interleaved_storage() || rhs.uses_complex_interleaved_storage() {
-            serial_required_reasons.push(
-                "complex interleaved storage remains serial until complex lane partitioning is proven"
-                    .to_string(),
-            );
-        }
+        let eligibility = self.parallel_binary_context_eligibility(rhs, op);
+        let serial_required_reasons = eligibility.reasons.clone();
 
         Ok(ParallelPartitionContract {
             operation: ParallelPartitionOperation::BinaryUFunc { op: op.name() },
@@ -5818,7 +6005,7 @@ impl UFuncArray {
             min_elements_per_chunk: config.min_elements_per_chunk,
             granularity: ParallelPartitionGranularity::OutputElements,
             chunks: deterministic_partition_chunks(selection.plan.out_count, config),
-            safe_to_parallelize: serial_required_reasons.is_empty(),
+            safe_to_parallelize: eligibility.is_safe_now(),
             serial_required_reasons,
             contract_notes: vec![
                 "chunks are half-open flat C-order output ranges and never depend on host CPU count"
@@ -5827,6 +6014,7 @@ impl UFuncArray {
                     .to_string(),
                 "each output element is written exactly once; direct UFuncArrayView writeback is out of scope"
                     .to_string(),
+                format!("parallel operation eligibility: {:?}", eligibility.kind),
             ],
         })
     }
@@ -7394,19 +7582,8 @@ impl UFuncArray {
         };
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
 
-        let mut serial_required_reasons = Vec::new();
-        if normalized_axis.is_none() {
-            serial_required_reasons.push(
-                "axis=None sum is a single reduction lane and must preserve global accumulation order"
-                    .to_string(),
-            );
-        }
-        if self.has_integer_sidecar() {
-            serial_required_reasons.push(
-                "exact integer sidecar sum remains serial until sidecar lane merge ordering is proven"
-                    .to_string(),
-            );
-        }
+        let eligibility = self.audit_reduce_sum_parallel_contract(axis)?;
+        let serial_required_reasons = eligibility.reasons.clone();
 
         Ok(ParallelPartitionContract {
             operation: ParallelPartitionOperation::SumReduction {
@@ -7421,7 +7598,7 @@ impl UFuncArray {
             min_elements_per_chunk: config.min_elements_per_chunk,
             granularity: ParallelPartitionGranularity::ReductionOutputLanes,
             chunks: deterministic_partition_chunks(out_count, config),
-            safe_to_parallelize: serial_required_reasons.is_empty(),
+            safe_to_parallelize: eligibility.is_safe_now(),
             serial_required_reasons,
             contract_notes: vec![
                 "axis reductions partition independent output lanes, not the reduced axis itself"
@@ -7432,8 +7609,98 @@ impl UFuncArray {
                     .to_string(),
                 "axis=None remains serial until a reproducible floating accumulator tree is specified"
                     .to_string(),
+                format!("parallel operation eligibility: {:?}", eligibility.kind),
             ],
         })
+    }
+
+    pub fn audit_reduce_sum_parallel_contract(
+        &self,
+        axis: Option<isize>,
+    ) -> Result<ParallelOperationEligibility, UFuncError> {
+        self.audit_parallel_reduction_candidate(ParallelReductionCandidate::Sum, axis)
+    }
+
+    pub fn audit_parallel_reduction_candidate(
+        &self,
+        candidate: ParallelReductionCandidate,
+        axis: Option<isize>,
+    ) -> Result<ParallelOperationEligibility, UFuncError> {
+        let normalized_axis = axis
+            .map(|raw_axis| normalize_axis(raw_axis, self.shape.len()))
+            .transpose()?;
+        let operation = format!("reduction:{}:axis={axis:?}", candidate.name());
+        let mut eligibility = match (candidate, normalized_axis) {
+            (ParallelReductionCandidate::Sum, Some(_)) => ParallelOperationEligibility::safe_now(
+                operation,
+                &[
+                    "axis reductions partition independent output lanes",
+                    "each lane scans its reduced axis in serial input order",
+                    "empty reduced axes produce deterministic zero-filled lanes",
+                ],
+            ),
+            (ParallelReductionCandidate::Sum, None) => ParallelOperationEligibility::serial_only(
+                operation,
+                &[
+                    "axis=None sum is a single reduction lane and must preserve global accumulation order",
+                ],
+            ),
+            (_, None) => ParallelOperationEligibility::serial_only(
+                operation,
+                &[
+                    "axis=None reduction is a single global lane and has no current partition contract",
+                ],
+            ),
+            (ParallelReductionCandidate::Product, Some(_)) => {
+                ParallelOperationEligibility::unsafe_until_proof(
+                    operation,
+                    &[
+                        "product reductions need signed-zero, NaN, overflow, and accumulator-order proof before parallel eligibility",
+                    ],
+                    &[
+                        "each output lane must preserve serial multiplication order",
+                        "float-error event handling and dtype promotion must be proven under chunking",
+                    ],
+                )
+            }
+            (ParallelReductionCandidate::Min | ParallelReductionCandidate::Max, Some(_)) => {
+                ParallelOperationEligibility::unsafe_until_proof(
+                    operation,
+                    &[
+                        "min/max reductions need NaN propagation and signed-zero tie-rule proof before parallel eligibility",
+                    ],
+                    &[
+                        "NaN propagation must match the serial reduction for every lane",
+                        "signed-zero and equal-value tie selection must be stable under partitioning",
+                    ],
+                )
+            }
+        };
+
+        if self.has_integer_sidecar() {
+            let sidecar_reason = match candidate {
+                ParallelReductionCandidate::Sum => {
+                    "exact integer sidecar sum remains serial until sidecar lane merge ordering is proven"
+                }
+                ParallelReductionCandidate::Product
+                | ParallelReductionCandidate::Min
+                | ParallelReductionCandidate::Max => {
+                    "exact integer sidecar reduction remains serial until sidecar lane merge ordering is proven"
+                }
+            };
+            eligibility.require_proof(
+                sidecar_reason,
+                "integer sidecar reduction output must preserve exact i64/u64 lane semantics",
+            );
+        }
+        if self.uses_complex_interleaved_storage() {
+            eligibility.require_proof(
+                "complex interleaved storage remains serial until complex reduction lane partitioning is proven",
+                "complex real/imag accumulator lanes must be proven dtype-stable under partitioning",
+            );
+        }
+
+        Ok(eligibility)
     }
 
     pub fn execute_reduce_sum_partition_plan(

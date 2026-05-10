@@ -3247,8 +3247,9 @@ mod tests {
     };
     use fnp_dtype::DType;
     use fnp_ufunc::{
-        BinaryOp, FloatErrorMode, ParallelPartitionConfig, PyObjectValue, UFuncArray, errstate,
-        frompyfunc, frompyfunc_object, frompyfunc_python_import_with_interpreter,
+        BinaryOp, FloatErrorMode, ParallelOperationEligibilityKind, ParallelPartitionConfig,
+        ParallelReductionCandidate, PyObjectValue, UFuncArray, classify_parallel_binary_operation,
+        errstate, frompyfunc, frompyfunc_object, frompyfunc_python_import_with_interpreter,
         frompyfunc_python_with_interpreter,
     };
     use serde_json::Value;
@@ -5299,6 +5300,73 @@ print(json.dumps({
             }
         }
         assert_eq!(expected_dtype, "f64");
+    }
+
+    #[test]
+    fn parallel_contract_audit_keeps_subtract_pending_and_divide_serial() {
+        let subtract = classify_parallel_binary_operation(BinaryOp::Sub);
+        assert_eq!(
+            subtract.kind,
+            ParallelOperationEligibilityKind::UnsafeUntilProof
+        );
+        assert!(
+            subtract
+                .required_proofs
+                .iter()
+                .any(|proof| proof.contains("signed-zero")),
+            "{:?}",
+            subtract.required_proofs
+        );
+
+        let divide = classify_parallel_binary_operation(BinaryOp::Div);
+        assert_eq!(divide.kind, ParallelOperationEligibilityKind::SerialOnly);
+        assert!(
+            divide
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("serial-only")),
+            "{:?}",
+            divide.reasons
+        );
+    }
+
+    #[test]
+    fn parallel_contract_audit_marks_axis_sum_safe_and_minmax_proof_pending() {
+        let arr = UFuncArray::new(
+            vec![2, 3],
+            vec![1.0, -0.0, f64::NAN, 4.0, 5.0, 6.0],
+            DType::F64,
+        )
+        .expect("input");
+
+        let axis_sum = arr
+            .audit_reduce_sum_parallel_contract(Some(1))
+            .expect("axis sum audit");
+        assert_eq!(axis_sum.kind, ParallelOperationEligibilityKind::SafeNow);
+
+        let global_sum = arr
+            .audit_reduce_sum_parallel_contract(None)
+            .expect("global sum audit");
+        assert_eq!(
+            global_sum.kind,
+            ParallelOperationEligibilityKind::SerialOnly
+        );
+
+        let max_axis = arr
+            .audit_parallel_reduction_candidate(ParallelReductionCandidate::Max, Some(1))
+            .expect("max audit");
+        assert_eq!(
+            max_axis.kind,
+            ParallelOperationEligibilityKind::UnsafeUntilProof
+        );
+        assert!(
+            max_axis
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("NaN propagation")),
+            "{:?}",
+            max_axis.reasons
+        );
     }
 
     #[test]

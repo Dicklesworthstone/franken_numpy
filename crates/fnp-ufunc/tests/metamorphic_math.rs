@@ -5,7 +5,10 @@
 //! metamorphic relations between inputs/outputs provide correctness evidence.
 
 use fnp_dtype::{ArrayStorage, DType};
-use fnp_ufunc::{BinaryOp, FloatErrorMode, ParallelPartitionConfig, UFuncArray, UnaryOp, errstate};
+use fnp_ufunc::{
+    BinaryOp, FloatErrorMode, ParallelOperationEligibilityKind, ParallelPartitionConfig,
+    ParallelReductionCandidate, UFuncArray, UnaryOp, classify_parallel_binary_operation, errstate,
+};
 use std::f64::consts::PI;
 
 const EPSILON: f64 = 1e-10;
@@ -43,6 +46,185 @@ fn assert_bitwise_equal(lhs: &[f64], rhs: &[f64]) {
             "bitwise mismatch at index {idx}: left={l:?} right={r:?}"
         );
     }
+}
+
+#[test]
+fn parallel_partition_operation_audit_classifies_binary_candidates() {
+    let add = classify_parallel_binary_operation(BinaryOp::Add);
+    assert_eq!(add.kind, ParallelOperationEligibilityKind::SafeNow);
+    assert!(add.is_safe_now());
+
+    let multiply = classify_parallel_binary_operation(BinaryOp::Mul);
+    assert_eq!(multiply.kind, ParallelOperationEligibilityKind::SafeNow);
+    assert!(
+        multiply
+            .required_proofs
+            .iter()
+            .any(|proof| proof.contains("signed-zero"))
+    );
+
+    let subtract = classify_parallel_binary_operation(BinaryOp::Sub);
+    assert_eq!(
+        subtract.kind,
+        ParallelOperationEligibilityKind::UnsafeUntilProof
+    );
+    assert!(
+        subtract
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("signed-zero")),
+        "{:?}",
+        subtract.reasons
+    );
+
+    let minimum = classify_parallel_binary_operation(BinaryOp::Minimum);
+    assert_eq!(
+        minimum.kind,
+        ParallelOperationEligibilityKind::UnsafeUntilProof
+    );
+    assert!(
+        minimum
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("NaN propagation")),
+        "{:?}",
+        minimum.reasons
+    );
+
+    let divide = classify_parallel_binary_operation(BinaryOp::Div);
+    assert_eq!(divide.kind, ParallelOperationEligibilityKind::SerialOnly);
+}
+
+#[test]
+fn parallel_partition_operation_audit_records_context_blockers() {
+    let lhs = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).expect("lhs");
+    let rhs = UFuncArray::new(vec![2], vec![3.0, 4.0], DType::F64).expect("rhs");
+
+    let _raise_guard = errstate(None, None, None, None, Some(FloatErrorMode::Raise));
+    let float_error_audit = lhs
+        .audit_elementwise_binary_parallel_contract(&rhs, BinaryOp::Add)
+        .expect("float error audit");
+    assert_eq!(
+        float_error_audit.kind,
+        ParallelOperationEligibilityKind::UnsafeUntilProof
+    );
+    assert!(
+        float_error_audit
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("floating-point error")),
+        "{:?}",
+        float_error_audit.reasons
+    );
+    drop(_raise_guard);
+
+    let _ignore_guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
+    let large_ints = UFuncArray::from_storage(
+        vec![2],
+        ArrayStorage::I64(vec![9_007_199_254_740_993, -9_007_199_254_740_993]),
+    )
+    .expect("large integer sidecar input");
+    let sidecar_audit = large_ints
+        .audit_elementwise_binary_parallel_contract(&rhs, BinaryOp::Add)
+        .expect("sidecar audit");
+    assert_eq!(
+        sidecar_audit.kind,
+        ParallelOperationEligibilityKind::UnsafeUntilProof
+    );
+    assert!(
+        sidecar_audit
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("integer sidecar")),
+        "{:?}",
+        sidecar_audit.reasons
+    );
+
+    let complex = UFuncArray::new(vec![1, 2], vec![1.0, -2.0], DType::Complex128).expect("complex");
+    let complex_audit = complex
+        .audit_elementwise_binary_parallel_contract(&complex, BinaryOp::Mul)
+        .expect("complex audit");
+    assert_eq!(
+        complex_audit.kind,
+        ParallelOperationEligibilityKind::UnsafeUntilProof
+    );
+    assert!(
+        complex_audit
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("complex interleaved")),
+        "{:?}",
+        complex_audit.reasons
+    );
+}
+
+#[test]
+fn parallel_partition_reduction_audit_classifies_sum_and_minmax() {
+    let arr = UFuncArray::new(
+        vec![2, 3],
+        vec![1.0, -0.0, f64::NAN, 4.0, 5.0, 6.0],
+        DType::F64,
+    )
+    .expect("input");
+
+    let axis_sum = arr
+        .audit_reduce_sum_parallel_contract(Some(1))
+        .expect("axis sum audit");
+    assert_eq!(axis_sum.kind, ParallelOperationEligibilityKind::SafeNow);
+    assert!(axis_sum.is_safe_now());
+
+    let global_sum = arr
+        .audit_reduce_sum_parallel_contract(None)
+        .expect("global sum audit");
+    assert_eq!(
+        global_sum.kind,
+        ParallelOperationEligibilityKind::SerialOnly
+    );
+    assert!(
+        global_sum
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("global accumulation order")),
+        "{:?}",
+        global_sum.reasons
+    );
+
+    let min_axis = arr
+        .audit_parallel_reduction_candidate(ParallelReductionCandidate::Min, Some(1))
+        .expect("min audit");
+    assert_eq!(
+        min_axis.kind,
+        ParallelOperationEligibilityKind::UnsafeUntilProof
+    );
+    assert!(
+        min_axis
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("NaN propagation")),
+        "{:?}",
+        min_axis.reasons
+    );
+
+    let large_ints = UFuncArray::from_storage(
+        vec![2, 2],
+        ArrayStorage::U64(vec![9_007_199_254_740_993, 2, 3, 4]),
+    )
+    .expect("large integer sidecar input");
+    let sidecar_sum = large_ints
+        .audit_reduce_sum_parallel_contract(Some(1))
+        .expect("sidecar sum audit");
+    assert_eq!(
+        sidecar_sum.kind,
+        ParallelOperationEligibilityKind::UnsafeUntilProof
+    );
+    assert!(
+        sidecar_sum
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("integer sidecar")),
+        "{:?}",
+        sidecar_sum.reasons
+    );
 }
 
 #[test]
