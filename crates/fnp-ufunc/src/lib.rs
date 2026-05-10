@@ -18982,10 +18982,10 @@ impl UFuncArray {
     /// - Multiple operands: "ij,jk,kl->il"
     /// - Ellipsis: "...ij,...jk->...ik"
     ///
-    /// Resolve einsum ellipsis (`...`) into Private-Use-Area placeholder labels.
+    /// Resolve einsum ellipsis (`...`) into Private-Use-Area synthetic labels.
     /// Each operand ellipsis captures (op.ndim - explicit_label_count) dimensions;
     /// all operand ellipses must describe broadcast dims of the same shape.
-    /// Returns (processed_input_subs, processed_output_sub, placeholders_string).
+    /// Returns (processed_input_subs, processed_output_sub, synthetic_labels_string).
     fn resolve_einsum_ellipsis(
         raw_input_subs: &[&str],
         raw_output_sub: Option<&str>,

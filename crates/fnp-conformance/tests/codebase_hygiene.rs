@@ -59,8 +59,9 @@ fn no_todo_macros() {
 
 #[test]
 fn no_stub_comments() {
-    let count =
-        grep_pattern(r"//[!/]*.*\b([sS][tT][uU][bB]|PLACEHOLDER)\b|//[!/]*.*\bMOCK\b.*\bimpl\b");
+    let count = grep_pattern(
+        r"//[!/]*.*\b([sS][tT][uU][bB]|[pP][lL][aA][cC][eE][hH][oO][lL][dD][eE][rR])\b|//[!/]*.*\b[mM][oO][cC][kK]\b.*\bimpl\b",
+    );
     assert_eq!(
         count, 0,
         "found {count} stub/placeholder comments — code should be complete"
