@@ -30,19 +30,19 @@ subsystem: `strided transfer semantics`
 
 | lane | fixture family | objective | owner bead |
 |---|---|---|---|
-| Fuzz/property | packet-E transfer invariant corpus (planned) | find overlap/mask/cast/flatiter counterexamples with shrinkable traces | `bd-23m.14.5` |
-| Differential/metamorphic | packet-F transfer oracle corpus (planned) | enforce strict parity for transfer success/failure classes and copy-equivalent outcomes | `bd-23m.14.6` |
-| E2E/replay | packet-G transfer workflow scenarios (planned) | verify strict/hardened replay traceability and policy-forensics linkage | `bd-23m.14.7` |
+| Fuzz/property | packet-E transfer invariant corpus | find overlap/mask/cast/flatiter counterexamples with shrinkable traces | `bd-23m.14.5` |
+| Differential/metamorphic | packet-F transfer oracle corpus | enforce strict parity for transfer success/failure classes and copy-equivalent outcomes | `bd-23m.14.6` |
+| E2E/replay | packet-G transfer workflow scenarios | verify strict/hardened replay traceability and policy-forensics linkage | `bd-23m.14.7` |
 
 ## Residual Risks and Compensating Controls
 
 | residual_id | residual risk | compensating controls | closure gate |
 |---|---|---|---|
-| `P2C003-RES-01` | No dedicated transfer-loop selector exists yet in `fnp-iter`; transfer behavior remains partially implicit. | keep unsupported transfer classes fail-closed and block promotion until packet-D skeleton lands | `bd-23m.14.4` + packet-E baseline tests |
-| `P2C003-RES-02` | Overlap/where/same-value invariants are not yet encoded in packet-scoped unit/property suites. | require packet-E suites before claiming stable transfer parity | `bd-23m.14.5` |
-| `P2C003-RES-03` | Differential oracle coverage for grouped/subarray/string-width transfer families is incomplete. | add packet-F fixture families and strict/hardened differential gates | `bd-23m.14.6` |
-| `P2C003-RES-04` | Replay forensics for transfer policy decisions is not yet packet-specific. | enforce packet-G scenario logging with required structured fields | `bd-23m.14.7` |
-| `P2C003-RES-05` | Hardened budget/calibration thresholds are defined but not empirically tuned to full transfer corpus scale. | trigger conservative fallback on drift; recalibrate from packet-H evidence artifacts | `bd-23m.14.8` + packet-I closure |
+| `P2C003-RES-01` | Dedicated selector, overlap guard, and flatiter transfer boundaries are landed in `fnp-iter`; residual risk is breadth across custom transfer classes and downstream ufunc adapter integration. | keep unsupported transfer classes fail-closed and gate new adapter promotion through packet evidence refresh | packet-D/E evidence + packet-F adapter coverage |
+| `P2C003-RES-02` | Overlap/where/same-value invariants are encoded for the current packet surface; residual risk is broader overlap, where-mask, same-value, and string-width edge coverage. | keep packet-E property fixtures as the admission gate and add regressions for every new transfer class | `bd-23m.14.5` + packet-E baseline tests |
+| `P2C003-RES-03` | Differential fixture families exist under `crates/fnp-conformance/fixtures/packet003_transfer/`; residual risk is grouped/subarray/string-width breadth. | require strict/hardened differential gates before claiming new transfer-family parity | `bd-23m.14.6` |
+| `P2C003-RES-04` | Packet-specific replay forensics are represented by `e2e_replay_forensics_evidence.json` and workflow scenario artifacts; residual risk is scenario breadth. | enforce packet-G scenario logging with required structured fields for every promoted workflow | `bd-23m.14.7` |
+| `P2C003-RES-05` | Packet-H optimization evidence exists, but hardened budget/calibration thresholds need recalibration as the transfer corpus grows. | trigger conservative fallback on drift; recalibrate from packet-H evidence artifacts before widening the corpus | `bd-23m.14.8` + packet-I closure |
 
 ## Budgeted Mode and Decision-Theoretic Controls
 
@@ -92,8 +92,10 @@ subsystem: `strided transfer semantics`
 
 ## raptorq_artifacts
 
-- `artifacts/phase2c/FNP-P2C-003/parity_report.raptorq.json` (planned at packet-I)
-- `artifacts/phase2c/FNP-P2C-003/parity_report.decode_proof.json` (planned at packet-I)
+- `artifacts/phase2c/FNP-P2C-003/parity_report.raptorq.json`
+- `artifacts/phase2c/FNP-P2C-003/parity_report.scrub_report.json`
+- `artifacts/phase2c/FNP-P2C-003/parity_report.decode_proof.json`
+- `artifacts/phase2c/FNP-P2C-003/final_evidence_pack.json`
 - `artifacts/raptorq/conformance_bundle_v1.sidecar.json` (program-level baseline reference)
 - `artifacts/raptorq/conformance_bundle_v1.scrub_report.json` (program-level baseline reference)
 - `artifacts/raptorq/conformance_bundle_v1.decode_proof.json` (program-level baseline reference)
