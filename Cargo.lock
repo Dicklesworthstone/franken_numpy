@@ -605,6 +605,7 @@ name = "fnp-python"
 version = "0.1.0"
 dependencies = [
  "fnp-dtype",
+ "fnp-io",
  "fnp-iter",
  "fnp-linalg",
  "fnp-ndarray",

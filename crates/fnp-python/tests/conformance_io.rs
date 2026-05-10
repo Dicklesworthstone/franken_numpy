@@ -1,6 +1,6 @@
 //! Conformance tests for numpy I/O functions against NumPy oracle.
 //!
-//! Tests loadtxt, genfromtxt.
+//! Tests save/load, loadtxt, genfromtxt.
 
 use std::process::Command;
 
@@ -30,12 +30,71 @@ fn fnp_script(body: String) -> String {
     format!(
         "import importlib.util\n\
          import numpy as np\n\
-         from io import StringIO\n\
+         from io import BytesIO, StringIO\n\
          spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
          fnp = importlib.util.module_from_spec(spec)\n\
          spec.loader.exec_module(fnp)\n\
          {body}"
     )
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// save / load
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn save_load_bytesio_roundtrip_matches_numpy_float64() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+arr = np.array([[1.25, -2.5], [3.75, 4.5]], dtype=np.float64)
+buf = BytesIO()
+fnp.save(buf, arr)
+payload = buf.getvalue()
+loaded = fnp.load(BytesIO(payload))
+expected_buf = BytesIO()
+np.save(expected_buf, arr)
+expected = np.load(BytesIO(expected_buf.getvalue()))
+print(
+    payload.startswith(b"\x93NUMPY")
+    and np.array_equal(loaded, expected)
+    and loaded.shape == expected.shape
+    and loaded.dtype == expected.dtype
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "save/load BytesIO float64 roundtrip should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn load_numpy_saved_bytesio_float32_preserves_shape_dtype_and_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+arr = np.array([[1.5, 2.5, 3.5], [4.5, 5.5, 6.5]], dtype=np.float32)
+buf = BytesIO()
+np.save(buf, arr)
+loaded = fnp.load(BytesIO(buf.getvalue()))
+print(
+    np.array_equal(loaded, arr)
+    and loaded.shape == arr.shape
+    and loaded.dtype == arr.dtype
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "load should preserve numpy-saved float32 NPY payloads"
+    );
+    Ok(())
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -22,6 +22,7 @@
 //! "Passthrough to np." comments).
 
 use fnp_dtype::{ArrayStorage, DType, f16, promote};
+use fnp_io::{IOSupportedDType, load as io_load, save as io_save};
 use fnp_iter::{Nditer, NditerOptions, NditerOrder};
 use fnp_linalg::{pinv_hermitian_nxn_with_tolerance_aliases, pinv_mxn_with_tolerance_aliases};
 use fnp_ndarray::{broadcast_shapes, element_count};
@@ -4969,6 +4970,24 @@ fn dtype_item_size(dtype: DType) -> Option<usize> {
         DType::Complex64 => Some(8),
         DType::Complex128 => Some(16),
         DType::Str | DType::Structured | DType::DateTime64 | DType::TimeDelta64 => None,
+    }
+}
+
+fn native_npy_io_dtype(dtype: DType) -> Option<IOSupportedDType> {
+    match dtype {
+        DType::F32 => Some(IOSupportedDType::F32),
+        DType::F64 => Some(IOSupportedDType::F64),
+        _ => None,
+    }
+}
+
+fn loaded_npy_storage(dtype: IOSupportedDType, values: Vec<f64>) -> Option<ArrayStorage> {
+    match dtype {
+        IOSupportedDType::F32 => Some(ArrayStorage::F32(
+            values.into_iter().map(|value| value as f32).collect(),
+        )),
+        IOSupportedDType::F64 => Some(ArrayStorage::F64(values)),
+        _ => None,
     }
 }
 
@@ -16848,6 +16867,147 @@ fn argpartition(
 }
 
 #[pyfunction]
+#[pyo3(signature = (file, arr, allow_pickle=true, fix_imports=true))]
+fn save(
+    py: Python<'_>,
+    file: Py<PyAny>,
+    arr: Py<PyAny>,
+    allow_pickle: bool,
+    fix_imports: bool,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("allow_pickle", allow_pickle)?;
+        kwargs.set_item("fix_imports", fix_imports)?;
+        Ok(numpy
+            .getattr("save")?
+            .call((file.bind(py), arr.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    let file_bound = file.bind(py);
+    if !file_bound.hasattr("write")? {
+        return fallback();
+    }
+
+    let array = match extract_precise_numeric_array(py, arr.bind(py), "save(arr)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
+    let Some(io_dtype) = native_npy_io_dtype(array.dtype()) else {
+        return fallback();
+    };
+
+    let bytes = match io_save(array.shape(), array.values(), io_dtype) {
+        Ok(bytes) => bytes,
+        Err(_) => return fallback(),
+    };
+    file_bound.call_method1("write", (PyBytes::new(py, &bytes),))?;
+    Ok(py.None())
+}
+
+#[pyfunction]
+#[pyo3(signature = (file, mmap_mode=None, allow_pickle=false, fix_imports=true, encoding="ASCII", *, max_header_size=10000_usize))]
+#[allow(clippy::too_many_arguments)]
+fn load(
+    py: Python<'_>,
+    file: Py<PyAny>,
+    mmap_mode: Option<Py<PyAny>>,
+    allow_pickle: bool,
+    fix_imports: bool,
+    encoding: &str,
+    max_header_size: usize,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(mode) = mmap_mode.as_ref() {
+            kwargs.set_item("mmap_mode", mode.bind(py))?;
+        }
+        kwargs.set_item("allow_pickle", allow_pickle)?;
+        kwargs.set_item("fix_imports", fix_imports)?;
+        kwargs.set_item("encoding", encoding)?;
+        kwargs.set_item("max_header_size", max_header_size)?;
+        Ok(numpy
+            .getattr("load")?
+            .call((file.bind(py),), Some(&kwargs))?
+            .unbind())
+    };
+
+    if mmap_mode
+        .as_ref()
+        .is_some_and(|mode| !mode.bind(py).is_none())
+        || allow_pickle
+    {
+        return fallback();
+    }
+
+    let file_bound = file.bind(py);
+    let bytes = if let Ok(read_result) = file_bound.call_method0("read") {
+        match read_result.extract::<Vec<u8>>() {
+            Ok(bytes) => bytes,
+            Err(_) => return fallback(),
+        }
+    } else if let Ok(raw) = file_bound.extract::<Vec<u8>>() {
+        raw
+    } else if let Ok(path_obj) = py.import("os")?.getattr("fspath")?.call1((file_bound,))
+        && let Ok(path) = path_obj.extract::<String>()
+    {
+        std::fs::read(&path).map_err(|err| PyOSError::new_err(err.to_string()))?
+    } else {
+        return fallback();
+    };
+
+    let (shape, values, io_dtype) = match io_load(&bytes) {
+        Ok(loaded) => loaded,
+        Err(_) => {
+            return load_via_numpy_bytes(
+                py,
+                &bytes,
+                allow_pickle,
+                fix_imports,
+                encoding,
+                max_header_size,
+            );
+        }
+    };
+    let Some(storage) = loaded_npy_storage(io_dtype, values) else {
+        return load_via_numpy_bytes(
+            py,
+            &bytes,
+            allow_pickle,
+            fix_imports,
+            encoding,
+            max_header_size,
+        );
+    };
+    build_numpy_array_from_storage(py, &shape, storage)
+}
+
+fn load_via_numpy_bytes(
+    py: Python<'_>,
+    bytes: &[u8],
+    allow_pickle: bool,
+    fix_imports: bool,
+    encoding: &str,
+    max_header_size: usize,
+) -> PyResult<Py<PyAny>> {
+    let io = py.import("io")?;
+    let buffer = io.getattr("BytesIO")?.call1((PyBytes::new(py, bytes),))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("allow_pickle", allow_pickle)?;
+    kwargs.set_item("fix_imports", fix_imports)?;
+    kwargs.set_item("encoding", encoding)?;
+    kwargs.set_item("max_header_size", max_header_size)?;
+    Ok(py
+        .import("numpy")?
+        .getattr("load")?
+        .call((buffer,), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (
     fname,
     x,
@@ -25097,6 +25257,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(pad, m)?)?;
     m.add_function(wrap_pyfunction!(ma_argmax, m)?)?;
     m.add_function(wrap_pyfunction!(ma_argmin, m)?)?;
+    m.add_function(wrap_pyfunction!(save, m)?)?;
+    m.add_function(wrap_pyfunction!(load, m)?)?;
     m.add_function(wrap_pyfunction!(savetxt, m)?)?;
     m.add_function(wrap_pyfunction!(tofile, m)?)?;
     m.add_function(wrap_pyfunction!(loadtxt, m)?)?;
