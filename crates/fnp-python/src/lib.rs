@@ -9648,8 +9648,14 @@ fn compress(
             )?
             .unbind())
     };
-    let condition = extract_condition_mask(py, condition.bind(py), "compress(condition)")?;
-    let a = extract_numeric_array(py, a.bind(py), "compress(a)")?;
+    let condition = match extract_condition_mask(py, condition.bind(py), "compress(condition)") {
+        Ok(condition) => condition,
+        Err(_) => return fallback(),
+    };
+    let a = match extract_numeric_array(py, a.bind(py), "compress(a)") {
+        Ok(array) => array,
+        Err(_) => return fallback(),
+    };
     let result = match a.compress(&condition, axis) {
         Ok(result) => result,
         Err(_) => return fallback(),

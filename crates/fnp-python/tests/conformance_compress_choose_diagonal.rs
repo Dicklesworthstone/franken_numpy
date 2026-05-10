@@ -54,7 +54,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "compress 1d basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "compress 1d basic should match numpy"
+    );
     Ok(())
 }
 
@@ -71,7 +75,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "compress 2d no axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "compress 2d no axis should match numpy"
+    );
     Ok(())
 }
 
@@ -88,7 +96,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "compress 2d axis=0 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "compress 2d axis=0 should match numpy"
+    );
     Ok(())
 }
 
@@ -105,7 +117,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "compress 2d axis=1 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "compress 2d axis=1 should match numpy"
+    );
     Ok(())
 }
 
@@ -122,7 +138,74 @@ print(np.array_equal(result, expected) and len(result) == 0)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "compress all false should return empty");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "compress all false should return empty"
+    );
+    Ok(())
+}
+
+#[test]
+fn compress_string_payload_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array([True, False, True])
+a = np.array(["alpha", "beta", "gamma"])
+result = fnp.compress(condition, a)
+expected = np.compress(condition, a)
+print(np.array_equal(result, expected) and result.dtype == expected.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "compress should preserve NumPy string payload behavior"
+    );
+    Ok(())
+}
+
+#[test]
+fn compress_string_condition_truthiness_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array(["", "x", "0"])
+a = np.array([10, 20, 30])
+result = fnp.compress(condition, a)
+expected = np.compress(condition, a)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "compress should match NumPy string condition truthiness"
+    );
+    Ok(())
+}
+
+#[test]
+fn compress_object_condition_truthiness_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array([object(), None, 1], dtype=object)
+a = np.array([10, 20, 30])
+result = fnp.compress(condition, a)
+expected = np.compress(condition, a)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "compress should match NumPy object condition truthiness"
+    );
     Ok(())
 }
 
@@ -177,7 +260,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "choose float arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "choose float arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -197,7 +284,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diagonal 2d basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diagonal 2d basic should match numpy"
+    );
     Ok(())
 }
 
@@ -213,7 +304,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diagonal offset=1 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diagonal offset=1 should match numpy"
+    );
     Ok(())
 }
 
@@ -229,7 +324,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diagonal offset=-1 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diagonal offset=-1 should match numpy"
+    );
     Ok(())
 }
 
@@ -245,7 +344,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diagonal non-square should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diagonal non-square should match numpy"
+    );
     Ok(())
 }
 
@@ -261,7 +364,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diagonal 3d default axes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diagonal 3d default axes should match numpy"
+    );
     Ok(())
 }
 
@@ -277,7 +384,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diagonal 3d custom axes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diagonal 3d custom axes should match numpy"
+    );
     Ok(())
 }
 
@@ -298,6 +409,10 @@ print(np.array_equal(compress_result, extract_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "compress and extract should be equivalent for 1d");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "compress and extract should be equivalent for 1d"
+    );
     Ok(())
 }
