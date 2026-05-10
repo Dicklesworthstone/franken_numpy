@@ -4,6 +4,7 @@ pub mod benchmark;
 pub mod contract_schema;
 pub mod cross_engine_benchmark;
 pub mod diagnostic_oracle;
+pub mod divergence_ledger;
 pub mod dtype_shape_diagnostics;
 pub mod fnp_python_api_coverage;
 pub mod fnp_python_conformance_shards;
