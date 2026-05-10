@@ -53,9 +53,9 @@
     },
     {
       "command": "rch exec -- cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-003",
-      "result": "not_ready",
-      "expected_exit": 2,
-      "note": "Packet-level readiness remains pending packet-I durability artifacts parity_report.raptorq.json and parity_report.decode_proof.json."
+      "result": "pass",
+      "expected_exit": 0,
+      "note": "Packet-level readiness is green with packet-I durability artifacts parity_report.raptorq.json, parity_report.scrub_report.json, and parity_report.decode_proof.json present."
     }
   ],
   "artifacts": [
@@ -69,6 +69,6 @@
   "notes": [
     "Structured log fields enforced by TransferLogRecord: fixture_id, seed, mode, env_fingerprint, artifact_refs, reason_code.",
     "Packet reason-code registry locked via TRANSFER_PACKET_REASON_CODES and round-trip replay-log assertions in both fnp-iter and fnp-conformance packet003 suites.",
-    "Packet validator intentionally remains not_ready until packet-I durability artifacts land; this does not block packet-E unit/property evidence completeness."
+    "Packet validator reports ready with zero missing artifacts, missing fields, or parse errors; packet-E unit/property evidence remains scoped to transfer invariant coverage."
   ]
 }
