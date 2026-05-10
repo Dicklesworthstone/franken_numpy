@@ -38,13 +38,15 @@ fn np_array_1d_int<'py>(
     py.import("numpy")?.getattr("array")?.call1((values,))
 }
 
-fn np_array_complex<'py>(
-    py: Python<'py>,
-) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+fn np_array_complex<'py>(py: Python<'py>) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
     let numpy = py.import("numpy")?;
     let globals = PyDict::new(py);
     globals.set_item("numpy", numpy)?;
-    py.eval(pyo3::ffi::c_str!("numpy.array([3+4j, 1+2j, 2+1j, 1+1j])"), Some(&globals), None)
+    py.eval(
+        pyo3::ffi::c_str!("numpy.array([3+4j, 1+2j, 2+1j, 1+1j])"),
+        Some(&globals),
+        None,
+    )
 }
 
 #[test]
@@ -123,6 +125,26 @@ fn conformance_sorting_matrix() {
                 Ok(Some(kw))
             },
         );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "sorting-sort-kind-stable-conflict",
+            "sort",
+            RequirementLevel::Should,
+            CompareMode::Error,
+            t,
+            |py| {
+                let arr = np_array_1d(py, vec![2.0, 1.0, 1.0])?;
+                PyTuple::new(py, [arr])
+            },
+            |py| {
+                let kw = PyDict::new(py);
+                kw.set_item("kind", "quicksort")?;
+                kw.set_item("stable", false)?;
+                Ok(Some(kw))
+            },
+        );
 
         // ─── argsort (MUST) ──────────────────────────────────────────────
         run_case(
@@ -175,6 +197,26 @@ fn conformance_sorting_matrix() {
             |py| {
                 let kw = PyDict::new(py);
                 kw.set_item("kind", "stable")?;
+                Ok(Some(kw))
+            },
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "sorting-argsort-kind-stable-conflict",
+            "argsort",
+            RequirementLevel::Should,
+            CompareMode::Error,
+            t,
+            |py| {
+                let arr = np_array_1d(py, vec![2.0, 1.0, 1.0])?;
+                PyTuple::new(py, [arr])
+            },
+            |py| {
+                let kw = PyDict::new(py);
+                kw.set_item("kind", "quicksort")?;
+                kw.set_item("stable", true)?;
                 Ok(Some(kw))
             },
         );

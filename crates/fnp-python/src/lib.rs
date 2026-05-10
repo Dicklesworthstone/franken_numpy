@@ -19885,6 +19885,11 @@ fn sort(
     let stable_kwarg = kwargs.and_then(|kw| kw.get_item("stable").ok().flatten());
     let kind_arg = kwargs.and_then(|kw| kw.get_item("kind").ok().flatten());
     let mut kind: Option<&str> = None;
+    if kind_arg.as_ref().is_some_and(|k| !k.is_none())
+        && stable_kwarg.as_ref().is_some_and(|v| !v.is_none())
+    {
+        return fallback(py);
+    }
     if let Some(k) = kind_arg.as_ref()
         && !k.is_none()
     {
@@ -19965,6 +19970,11 @@ fn argsort(
     let stable_kwarg = kwargs.and_then(|kw| kw.get_item("stable").ok().flatten());
     let kind_arg = kwargs.and_then(|kw| kw.get_item("kind").ok().flatten());
     let mut kind: Option<&str> = None;
+    if kind_arg.as_ref().is_some_and(|k| !k.is_none())
+        && stable_kwarg.as_ref().is_some_and(|v| !v.is_none())
+    {
+        return fallback(py);
+    }
     if let Some(k) = kind_arg.as_ref()
         && !k.is_none()
     {
