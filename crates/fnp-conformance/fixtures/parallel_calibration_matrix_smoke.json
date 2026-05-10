@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "generated_at_unix_ms": 0,
+  "git_commit": "fixture",
+  "mode": "quick",
+  "workload_count": 1,
+  "sample_count": 2,
+  "repo_root": ".",
+  "reproduction_command": "cargo run -p fnp-conformance --bin run_parallel_calibration_matrix -- --quick",
+  "host": {
+    "available_parallelism": 4
+  },
+  "entries": [
+    {
+      "workload_id": "broadcast_add_32x32_by_32",
+      "operation": "broadcast_add",
+      "shape": [
+        32,
+        32
+      ],
+      "rhs_shape": [
+        32
+      ],
+      "axis": null,
+      "keepdims": false,
+      "input_elements_per_run": 1024,
+      "output_elements_per_run": 1024,
+      "bytes_touched_estimate_per_run": 24576,
+      "thread_count": 4,
+      "min_elements_per_chunk": 128,
+      "expected_chunk_count": 4,
+      "serial": {
+        "samples_ms": [
+          10.0,
+          12.0
+        ],
+        "p50_ms": 10.0,
+        "p95_ms": 12.0,
+        "p99_ms": 12.0,
+        "min_ms": 10.0,
+        "max_ms": 12.0
+      },
+      "parallel": {
+        "samples_ms": [
+          8.0,
+          10.0
+        ],
+        "p50_ms": 8.0,
+        "p95_ms": 10.0,
+        "p99_ms": 10.0,
+        "min_ms": 8.0,
+        "max_ms": 10.0
+      },
+      "speedup": {
+        "p50_ratio": 1.25,
+        "p95_ratio": 1.2,
+        "p99_ratio": 1.2
+      },
+      "telemetry": {
+        "input_elements_per_run": 1024,
+        "output_elements_per_run": 1024,
+        "elements_per_run": 1024,
+        "bytes_touched_estimate_per_run": 24576,
+        "bytes_processed_per_run": 24576,
+        "peak_live_bytes_per_run": 24576,
+        "process_high_water_rss_bytes": 1048576,
+        "available_parallelism": 4,
+        "configured_thread_count": 4,
+        "serial_throughput_elements_per_sec_p50": 102400.0,
+        "serial_throughput_elements_per_sec_p95": 85333.333333,
+        "parallel_throughput_elements_per_sec_p50": 128000.0,
+        "parallel_throughput_elements_per_sec_p95": 102400.0,
+        "serial_bandwidth_mib_per_sec_p50": 2.34375,
+        "serial_bandwidth_mib_per_sec_p95": 1.953125,
+        "parallel_bandwidth_mib_per_sec_p50": 2.9296875,
+        "parallel_bandwidth_mib_per_sec_p95": 2.34375
+      }
+    }
+  ]
+}
