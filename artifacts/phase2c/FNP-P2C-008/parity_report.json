@@ -7,5 +7,5 @@
     "no_observed_strict_drift_in_packet008_gates",
     "no_observed_hardened_drift_in_packet008_gates"
   ],
-  "compatibility_drift_hash": "sha256:8aca1bbb5880a8bc239ca1cda4cd87177b3a928ce12241ad67e4148fdf63673b"
+  "compatibility_drift_hash": "sha256:b8ca499f1a5a3cc953878c60fe13bc29aa62be9335becc6c20883638e5c415e4"
 }

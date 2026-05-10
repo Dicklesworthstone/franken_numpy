@@ -36,9 +36,9 @@ Subsystem: `linalg bridge first wave`
 
 ## 4. Verification Hooks
 
-| Verification lane | Planned hook | Artifact target |
+| Verification lane | Current hook | Artifact target |
 |---|---|---|
-| Unit/property | solver/decomposition/spectral/tolerance law suites with shrinkable counterexamples | `crates/fnp-conformance/fixtures/linalg_property_cases.json` (planned), structured JSONL logs |
+| Unit/property | packet-E `fnp-linalg` solver/decomposition/spectral/tolerance law suites with deterministic seed/property coverage and structured linalg logs | `artifacts/phase2c/FNP-P2C-008/unit_property_evidence.json`, `crates/fnp-linalg/src/lib.rs`, structured JSONL-compatible `LinAlgLogRecord` fields |
 | Differential/metamorphic/adversarial | packet-F harness checks singular/non-convergence/tolerance-edge/backend-policy classes | `crates/fnp-conformance/src/lib.rs` (`run_linalg_differential_suite`, `run_linalg_metamorphic_suite`, `run_linalg_adversarial_suite`), `crates/fnp-conformance/fixtures/linalg_differential_cases.json`, `crates/fnp-conformance/fixtures/linalg_metamorphic_cases.json`, `crates/fnp-conformance/fixtures/linalg_adversarial_cases.json` |
 | E2E | linalg workflow scenarios chained with upstream/downstream packet behaviors | `scripts/e2e/run_linalg_contract_journey.sh`, `artifacts/logs/workflow_scenario_packet008_{e2e,reliability,artifact_index}.json`, `artifacts/phase2c/FNP-P2C-008/workflow_scenario_packet008_opt_{e2e,reliability,artifact_index}.json` |
 | Optimization/isomorphism | packet-H profile-first single-lever optimization with parity-preserving verification | `crates/fnp-conformance/src/bin/generate_packet008_optimization_report.rs`, `artifacts/phase2c/FNP-P2C-008/optimization_profile_report.json`, `artifacts/phase2c/FNP-P2C-008/optimization_profile_isomorphism_evidence.json` |
@@ -50,7 +50,7 @@ Subsystem: `linalg bridge first wave`
 - Optimization gate: no linalg optimization is accepted without baseline/profile + single-lever + isomorphism proof artifact.
 - EV gate: linalg optimization levers are promoted only when `EV >= 2.0`; otherwise tracked as deferred research debt.
 - Packet-H closure evidence: `artifacts/phase2c/FNP-P2C-008/optimization_profile_report.json` and `artifacts/phase2c/FNP-P2C-008/optimization_profile_isomorphism_evidence.json` show EV promotion (`24.0`) with no behavior drift.
-- RaptorQ scope: packet `FNP-P2C-008` durable evidence bundle must include sidecar/scrub/decode-proof links at packet-I closure.
+- RaptorQ scope: packet `FNP-P2C-008` durable evidence bundle includes packet-I sidecar/scrub/decode-proof links through `parity_report.raptorq.json`, `parity_report.scrub_report.json`, `parity_report.decode_proof.json`, and `final_evidence_pack.json`.
 
 ## 6. Rollback Handle
 
