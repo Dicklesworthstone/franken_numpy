@@ -324,6 +324,26 @@ elif case_id == "trapz_axis0":
     emit(np.trapz(np.array([[1.0, 2.0], [3.0, 4.0], [7.0, 11.0]]), dx=0.5, axis=0))
 elif case_id == "trapezoid_axis0":
     emit(np.trapezoid(np.array([[1.0, 2.0], [3.0, 4.0], [7.0, 11.0]]), dx=0.5, axis=0))
+elif case_id == "interp_left_right":
+    emit(np.interp(
+        np.array([-1.0, 0.25, 1.75, 4.0]),
+        np.array([0.0, 1.0, 2.0, 3.0]),
+        np.array([10.0, 20.0, 40.0, 80.0]),
+        left=-5.0,
+        right=99.0,
+    ))
+elif case_id == "convolve_valid_kernel_longer":
+    emit(np.convolve(
+        np.array([1.0, -2.0, 3.0]),
+        np.array([0.5, 1.5, -1.0, 2.0]),
+        mode="valid",
+    ))
+elif case_id == "correlate_same_asymmetric":
+    emit(np.correlate(
+        np.array([1.0, 2.0, 4.0, -1.0]),
+        np.array([3.0, -1.0, 2.0]),
+        mode="same",
+    ))
 else:
     raise SystemExit(f"unknown case_id: {case_id}")
 "#;
@@ -619,6 +639,40 @@ fn version_specific_trapezoid_reference_is_gated_by_live_numpy_version() {
         .expect("trapz alias should stay behaviorally equivalent");
     assert_eq!(alias.shape(), actual.shape());
     assert_eq!(alias.values(), actual.values());
+}
+
+#[test]
+fn sampling_ops_match_live_numpy_reference() {
+    let x = array(&[4], &[-1.0, 0.25, 1.75, 4.0]);
+    let xp = array(&[4], &[0.0, 1.0, 2.0, 3.0]);
+    let fp = array(&[4], &[10.0, 20.0, 40.0, 80.0]);
+    let interp =
+        UFuncArray::interp_lr(&x, &xp, &fp, Some(-5.0), Some(99.0)).expect("interp left/right");
+    assert_oracle_match("interp_left_right", interp.shape(), interp.values(), 1e-12);
+
+    let a = array(&[3], &[1.0, -2.0, 3.0]);
+    let v = array(&[4], &[0.5, 1.5, -1.0, 2.0]);
+    let convolve_valid = a
+        .convolve_mode(&v, "valid")
+        .expect("convolve valid with longer kernel");
+    assert_oracle_match(
+        "convolve_valid_kernel_longer",
+        convolve_valid.shape(),
+        convolve_valid.values(),
+        1e-12,
+    );
+
+    let signal = array(&[4], &[1.0, 2.0, 4.0, -1.0]);
+    let kernel = array(&[3], &[3.0, -1.0, 2.0]);
+    let correlate_same = signal
+        .correlate_mode(&kernel, "same")
+        .expect("correlate same with asymmetric kernel");
+    assert_oracle_match(
+        "correlate_same_asymmetric",
+        correlate_same.shape(),
+        correlate_same.values(),
+        1e-12,
+    );
 }
 
 #[test]
