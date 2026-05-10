@@ -12,6 +12,7 @@ const SCHEMA_VERSION: u8 = 1;
 const DEFAULT_REPORT_PATH: &str = "target/parallel_calibration_matrix.json";
 const DEFAULT_SAMPLE_COUNT: usize = 3;
 const DEFAULT_MIN_ELEMENTS_PER_CHUNK: usize = 8_192;
+const DEFAULT_MAX_MEMORY_PRESSURE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const REPRO_COMMAND: &str = "cargo run -p fnp-conformance --bin run_parallel_calibration_matrix";
 
 fn main() {
@@ -24,7 +25,7 @@ fn main() {
 fn run() -> Result<(), String> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let options = Options::parse(std::env::args().skip(1), &repo_root)?;
-    let workloads = calibration_workloads(options.mode);
+    let workloads = calibration_workloads(&options)?;
     let report = build_report(&options, &workloads)?;
     write_report(&options.report_path, &report)?;
     println!(
@@ -44,6 +45,9 @@ struct Options {
     sample_count: usize,
     thread_counts: Vec<usize>,
     min_elements_per_chunk: usize,
+    include_memory_pressure: bool,
+    memory_pressure_tier: MemoryPressureTier,
+    max_memory_pressure_bytes: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,6 +67,35 @@ impl CalibrationMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MemoryPressureTier {
+    Quick,
+    Medium,
+    LargeHost,
+}
+
+impl MemoryPressureTier {
+    fn parse(raw: &str) -> Result<Self, String> {
+        match raw {
+            "quick" => Ok(Self::Quick),
+            "medium" => Ok(Self::Medium),
+            "large-host" | "large_host" => Ok(Self::LargeHost),
+            _ => Err(format!(
+                "--memory-pressure-tier must be one of quick, medium, large-host; got {raw}"
+            )),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Quick => "quick",
+            Self::Medium => "medium",
+            Self::LargeHost => "large_host",
+        }
+    }
+}
+
 impl Options {
     fn parse<I>(args: I, repo_root: &Path) -> Result<Self, String>
     where
@@ -74,6 +107,10 @@ impl Options {
         let mut thread_counts = vec![2, 4];
         let mut thread_counts_were_explicit = false;
         let mut min_elements_per_chunk = DEFAULT_MIN_ELEMENTS_PER_CHUNK;
+        let mut include_memory_pressure = false;
+        let mut memory_pressure_tier = MemoryPressureTier::Quick;
+        let mut max_memory_pressure_bytes = DEFAULT_MAX_MEMORY_PRESSURE_BYTES;
+        let mut allow_large_host_memory_pressure = false;
 
         let mut args = args.into_iter();
         while let Some(arg) = args.next() {
@@ -116,6 +153,25 @@ impl Options {
                     min_elements_per_chunk =
                         parse_nonzero_usize("--min-elements-per-chunk", &value)?;
                 }
+                "--include-memory-pressure" => {
+                    include_memory_pressure = true;
+                }
+                "--memory-pressure-tier" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "--memory-pressure-tier requires a value".to_string())?;
+                    memory_pressure_tier = MemoryPressureTier::parse(&value)?;
+                }
+                "--max-memory-pressure-bytes" => {
+                    let value = args.next().ok_or_else(|| {
+                        "--max-memory-pressure-bytes requires a value".to_string()
+                    })?;
+                    max_memory_pressure_bytes =
+                        parse_nonzero_usize("--max-memory-pressure-bytes", &value)?;
+                }
+                "--allow-large-host-memory-pressure" => {
+                    allow_large_host_memory_pressure = true;
+                }
                 "--help" | "-h" => {
                     print_help();
                     std::process::exit(0);
@@ -127,6 +183,15 @@ impl Options {
         if mode == CalibrationMode::LargeHost && !thread_counts_were_explicit {
             thread_counts = vec![2, 4, 8, 16, 32, 64];
         }
+        if include_memory_pressure
+            && memory_pressure_tier == MemoryPressureTier::LargeHost
+            && !allow_large_host_memory_pressure
+        {
+            return Err(
+                "--memory-pressure-tier large-host requires --allow-large-host-memory-pressure"
+                    .to_string(),
+            );
+        }
 
         Ok(Self {
             repo_root: repo_root.to_path_buf(),
@@ -135,13 +200,16 @@ impl Options {
             sample_count,
             thread_counts,
             min_elements_per_chunk,
+            include_memory_pressure,
+            memory_pressure_tier,
+            max_memory_pressure_bytes,
         })
     }
 }
 
 fn print_help() {
     println!(
-        "Usage: {REPRO_COMMAND} -- [--quick|--large-host] [--report-path <path>] [--samples <n>] [--threads <csv>] [--min-elements-per-chunk <n>]"
+        "Usage: {REPRO_COMMAND} -- [--quick|--large-host] [--report-path <path>] [--samples <n>] [--threads <csv>] [--min-elements-per-chunk <n>] [--include-memory-pressure] [--memory-pressure-tier quick|medium|large-host] [--max-memory-pressure-bytes <n>]"
     );
 }
 
@@ -175,16 +243,49 @@ fn parse_thread_counts(raw: &str) -> Result<Vec<usize>, String> {
 enum CalibrationOperation {
     BroadcastAdd,
     AxisSum,
+    ChainedBroadcastAdd,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct WorkloadSpec {
     workload_id: String,
     operation: CalibrationOperation,
+    tier: WorkloadTier,
+    memory_pressure: bool,
     shape: Vec<usize>,
     rhs_shape: Option<Vec<usize>>,
     axis: Option<isize>,
     keepdims: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum WorkloadTier {
+    Baseline,
+    MemoryQuick,
+    MemoryMedium,
+    MemoryLargeHost,
+}
+
+impl WorkloadTier {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Baseline => "baseline",
+            Self::MemoryQuick => "memory_quick",
+            Self::MemoryMedium => "memory_medium",
+            Self::MemoryLargeHost => "memory_large_host",
+        }
+    }
+}
+
+impl From<MemoryPressureTier> for WorkloadTier {
+    fn from(tier: MemoryPressureTier) -> Self {
+        match tier {
+            MemoryPressureTier::Quick => Self::MemoryQuick,
+            MemoryPressureTier::Medium => Self::MemoryMedium,
+            MemoryPressureTier::LargeHost => Self::MemoryLargeHost,
+        }
+    }
 }
 
 impl WorkloadSpec {
@@ -205,7 +306,9 @@ impl WorkloadSpec {
                     .max(1))
             }
             (CalibrationOperation::AxisSum, None) => Ok(1),
-            (CalibrationOperation::BroadcastAdd, _) => Ok(self.element_count()),
+            (CalibrationOperation::BroadcastAdd | CalibrationOperation::ChainedBroadcastAdd, _) => {
+                Ok(self.element_count())
+            }
         }
     }
 
@@ -216,12 +319,27 @@ impl WorkloadSpec {
             CalibrationOperation::AxisSum => {
                 Ok((self.element_count() + self.output_count()?) * item_size)
             }
+            CalibrationOperation::ChainedBroadcastAdd => Ok(self.element_count() * item_size * 5),
+        }
+    }
+
+    fn peak_live_bytes_estimate(&self) -> Result<usize, String> {
+        self.bytes_touched_estimate()
+    }
+
+    fn allocation_churn_bytes_estimate(&self) -> Result<usize, String> {
+        let item_size = DType::F64.item_size();
+        match self.operation {
+            CalibrationOperation::BroadcastAdd | CalibrationOperation::AxisSum => {
+                Ok(self.output_count()? * item_size)
+            }
+            CalibrationOperation::ChainedBroadcastAdd => Ok(self.output_count()? * item_size * 2),
         }
     }
 }
 
-fn calibration_workloads(mode: CalibrationMode) -> Vec<WorkloadSpec> {
-    match mode {
+fn calibration_workloads(options: &Options) -> Result<Vec<WorkloadSpec>, String> {
+    let mut workloads = match options.mode {
         CalibrationMode::Quick => vec![
             broadcast_add_workload(128, 128),
             axis_sum_workload(128, 128),
@@ -240,13 +358,20 @@ fn calibration_workloads(mode: CalibrationMode) -> Vec<WorkloadSpec> {
             axis_sum_workload(1024, 1024),
             axis_sum_workload(2048, 2048),
         ],
+    };
+    if options.include_memory_pressure {
+        workloads.extend(memory_pressure_workloads(options.memory_pressure_tier));
+        validate_memory_pressure_limits(&workloads, options.max_memory_pressure_bytes)?;
     }
+    Ok(workloads)
 }
 
 fn broadcast_add_workload(rows: usize, cols: usize) -> WorkloadSpec {
     WorkloadSpec {
         workload_id: format!("broadcast_add_{rows}x{cols}_by_{cols}"),
         operation: CalibrationOperation::BroadcastAdd,
+        tier: WorkloadTier::Baseline,
+        memory_pressure: false,
         shape: vec![rows, cols],
         rhs_shape: Some(vec![cols]),
         axis: None,
@@ -258,11 +383,91 @@ fn axis_sum_workload(rows: usize, cols: usize) -> WorkloadSpec {
     WorkloadSpec {
         workload_id: format!("reduce_sum_axis1_{rows}x{cols}"),
         operation: CalibrationOperation::AxisSum,
+        tier: WorkloadTier::Baseline,
+        memory_pressure: false,
         shape: vec![rows, cols],
         rhs_shape: None,
         axis: Some(1),
         keepdims: false,
     }
+}
+
+fn memory_pressure_workloads(tier: MemoryPressureTier) -> Vec<WorkloadSpec> {
+    let (rows, cols) = match tier {
+        MemoryPressureTier::Quick => (256, 256),
+        MemoryPressureTier::Medium => (1024, 1024),
+        MemoryPressureTier::LargeHost => (4096, 4096),
+    };
+    vec![
+        memory_broadcast_add_workload(tier, rows, cols),
+        memory_axis_sum_workload(tier, rows, cols),
+        memory_chained_add_workload(tier, rows / 2, cols),
+    ]
+}
+
+fn memory_broadcast_add_workload(
+    tier: MemoryPressureTier,
+    rows: usize,
+    cols: usize,
+) -> WorkloadSpec {
+    WorkloadSpec {
+        workload_id: format!(
+            "memory_{}_broadcast_add_{rows}x{cols}_by_{cols}",
+            tier.as_str()
+        ),
+        operation: CalibrationOperation::BroadcastAdd,
+        tier: WorkloadTier::from(tier),
+        memory_pressure: true,
+        shape: vec![rows, cols],
+        rhs_shape: Some(vec![cols]),
+        axis: None,
+        keepdims: false,
+    }
+}
+
+fn memory_axis_sum_workload(tier: MemoryPressureTier, rows: usize, cols: usize) -> WorkloadSpec {
+    WorkloadSpec {
+        workload_id: format!("memory_{}_reduce_sum_axis1_{rows}x{cols}", tier.as_str()),
+        operation: CalibrationOperation::AxisSum,
+        tier: WorkloadTier::from(tier),
+        memory_pressure: true,
+        shape: vec![rows, cols],
+        rhs_shape: None,
+        axis: Some(1),
+        keepdims: false,
+    }
+}
+
+fn memory_chained_add_workload(tier: MemoryPressureTier, rows: usize, cols: usize) -> WorkloadSpec {
+    WorkloadSpec {
+        workload_id: format!(
+            "memory_{}_chained_broadcast_add_{rows}x{cols}_by_{cols}",
+            tier.as_str()
+        ),
+        operation: CalibrationOperation::ChainedBroadcastAdd,
+        tier: WorkloadTier::from(tier),
+        memory_pressure: true,
+        shape: vec![rows, cols],
+        rhs_shape: Some(vec![cols]),
+        axis: None,
+        keepdims: false,
+    }
+}
+
+fn validate_memory_pressure_limits(
+    workloads: &[WorkloadSpec],
+    max_memory_pressure_bytes: usize,
+) -> Result<(), String> {
+    for workload in workloads.iter().filter(|workload| workload.memory_pressure) {
+        let peak_live = workload.peak_live_bytes_estimate()?;
+        if peak_live > max_memory_pressure_bytes {
+            return Err(format!(
+                "memory pressure workload {} estimates {} peak-live bytes, above limit {}",
+                workload.workload_id, peak_live, max_memory_pressure_bytes
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -273,6 +478,9 @@ struct CalibrationReport {
     mode: &'static str,
     workload_count: usize,
     sample_count: usize,
+    include_memory_pressure: bool,
+    memory_pressure_tier: &'static str,
+    max_memory_pressure_bytes: usize,
     repo_root: String,
     reproduction_command: String,
     host: HostMetadata,
@@ -288,6 +496,8 @@ struct HostMetadata {
 struct CalibrationEntry {
     workload_id: String,
     operation: CalibrationOperation,
+    tier: &'static str,
+    memory_pressure: bool,
     shape: Vec<usize>,
     rhs_shape: Option<Vec<usize>>,
     axis: Option<isize>,
@@ -295,6 +505,8 @@ struct CalibrationEntry {
     input_elements_per_run: usize,
     output_elements_per_run: usize,
     bytes_touched_estimate_per_run: usize,
+    peak_live_bytes_estimate_per_run: usize,
+    allocation_churn_bytes_estimate_per_run: usize,
     thread_count: usize,
     min_elements_per_chunk: usize,
     expected_chunk_count: usize,
@@ -329,6 +541,9 @@ struct CalibrationTelemetry {
     bytes_touched_estimate_per_run: usize,
     bytes_processed_per_run: usize,
     peak_live_bytes_per_run: usize,
+    allocation_churn_bytes_estimate_per_run: usize,
+    memory_pressure: bool,
+    memory_pressure_tier: Option<&'static str>,
     process_high_water_rss_bytes: Option<u64>,
     available_parallelism: usize,
     configured_thread_count: Option<usize>,
@@ -360,6 +575,9 @@ fn build_report(
         mode: options.mode.as_str(),
         workload_count: workloads.len(),
         sample_count: options.sample_count,
+        include_memory_pressure: options.include_memory_pressure,
+        memory_pressure_tier: options.memory_pressure_tier.as_str(),
+        max_memory_pressure_bytes: options.max_memory_pressure_bytes,
         repo_root: options.repo_root.display().to_string(),
         reproduction_command: REPRO_COMMAND.to_string(),
         host: HostMetadata {
@@ -380,6 +598,8 @@ fn run_entry(
     let input_count = workload.element_count();
     let output_count = workload.output_count()?;
     let bytes_touched_estimate = workload.bytes_touched_estimate()?;
+    let peak_live_bytes_estimate = workload.peak_live_bytes_estimate()?;
+    let allocation_churn_bytes_estimate = workload.allocation_churn_bytes_estimate()?;
     let expected_chunk_count = expected_chunk_count(output_count, config);
     let mut serial_samples = Vec::with_capacity(options.sample_count);
     let mut parallel_samples = Vec::with_capacity(options.sample_count);
@@ -403,7 +623,10 @@ fn run_entry(
         elements_per_run: input_count,
         bytes_touched_estimate_per_run: bytes_touched_estimate,
         bytes_processed_per_run: bytes_touched_estimate,
-        peak_live_bytes_per_run: bytes_touched_estimate,
+        peak_live_bytes_per_run: peak_live_bytes_estimate,
+        allocation_churn_bytes_estimate_per_run: allocation_churn_bytes_estimate,
+        memory_pressure: workload.memory_pressure,
+        memory_pressure_tier: workload.memory_pressure.then_some(workload.tier.as_str()),
         process_high_water_rss_bytes: process_high_water_rss_bytes(),
         available_parallelism: available_parallelism(),
         configured_thread_count: Some(thread_count),
@@ -432,6 +655,8 @@ fn run_entry(
     Ok(CalibrationEntry {
         workload_id: workload.workload_id.clone(),
         operation: workload.operation,
+        tier: workload.tier.as_str(),
+        memory_pressure: workload.memory_pressure,
         shape: workload.shape.clone(),
         rhs_shape: workload.rhs_shape.clone(),
         axis: workload.axis,
@@ -439,6 +664,8 @@ fn run_entry(
         input_elements_per_run: input_count,
         output_elements_per_run: output_count,
         bytes_touched_estimate_per_run: bytes_touched_estimate,
+        peak_live_bytes_estimate_per_run: peak_live_bytes_estimate,
+        allocation_churn_bytes_estimate_per_run: allocation_churn_bytes_estimate,
         thread_count,
         min_elements_per_chunk: options.min_elements_per_chunk,
         expected_chunk_count,
@@ -497,6 +724,32 @@ impl WorkloadArrays {
                         .map_err(|err| format!("parallel axis sum failed: {err}"))
                 },
             ),
+            CalibrationOperation::ChainedBroadcastAdd => {
+                let rhs = self
+                    .rhs
+                    .as_ref()
+                    .ok_or_else(|| "chained broadcast add workload missing rhs".to_string())?;
+                measure_pair(
+                    || {
+                        let intermediate = self
+                            .lhs
+                            .elementwise_binary(rhs, BinaryOp::Add)
+                            .map_err(|err| format!("serial chained add step 1 failed: {err}"))?;
+                        intermediate
+                            .elementwise_binary(rhs, BinaryOp::Add)
+                            .map_err(|err| format!("serial chained add step 2 failed: {err}"))
+                    },
+                    || {
+                        let intermediate = self
+                            .lhs
+                            .elementwise_binary_parallel(rhs, BinaryOp::Add, config)
+                            .map_err(|err| format!("parallel chained add step 1 failed: {err}"))?;
+                        intermediate
+                            .elementwise_binary_parallel(rhs, BinaryOp::Add, config)
+                            .map_err(|err| format!("parallel chained add step 2 failed: {err}"))
+                    },
+                )
+            }
         }
     }
 }
@@ -670,6 +923,20 @@ fn write_report(path: &Path, report: &CalibrationReport) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn options_for_mode(mode: CalibrationMode) -> Options {
+        Options {
+            repo_root: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
+            mode,
+            report_path: PathBuf::from("target/test_parallel_calibration.json"),
+            sample_count: 1,
+            thread_counts: vec![2],
+            min_elements_per_chunk: 2,
+            include_memory_pressure: false,
+            memory_pressure_tier: MemoryPressureTier::Quick,
+            max_memory_pressure_bytes: DEFAULT_MAX_MEMORY_PRESSURE_BYTES,
+        }
+    }
+
     #[test]
     fn parallel_calibration_thread_counts_are_sorted_and_deduped() {
         assert_eq!(
@@ -686,9 +953,12 @@ mod tests {
 
     #[test]
     fn parallel_calibration_modes_select_deterministic_working_set_matrix() {
-        let quick = calibration_workloads(CalibrationMode::Quick);
-        let standard = calibration_workloads(CalibrationMode::Standard);
-        let large = calibration_workloads(CalibrationMode::LargeHost);
+        let quick = calibration_workloads(&options_for_mode(CalibrationMode::Quick))
+            .expect("quick workloads");
+        let standard = calibration_workloads(&options_for_mode(CalibrationMode::Standard))
+            .expect("standard workloads");
+        let large = calibration_workloads(&options_for_mode(CalibrationMode::LargeHost))
+            .expect("large workloads");
         assert_eq!(quick.len(), 2);
         assert_eq!(standard.len(), 4);
         assert_eq!(large.len(), 6);
@@ -705,6 +975,34 @@ mod tests {
         let options = Options::parse(["--large-host".to_string()], &repo_root).expect("options");
         assert_eq!(options.mode, CalibrationMode::LargeHost);
         assert_eq!(options.thread_counts, vec![2, 4, 8, 16, 32, 64]);
+    }
+
+    #[test]
+    fn memory_pressure_calibration_parses_tiers() {
+        assert_eq!(
+            MemoryPressureTier::parse("quick").expect("quick"),
+            MemoryPressureTier::Quick
+        );
+        assert_eq!(
+            MemoryPressureTier::parse("large-host").expect("large-host"),
+            MemoryPressureTier::LargeHost
+        );
+        assert!(MemoryPressureTier::parse("huge").is_err());
+    }
+
+    #[test]
+    fn memory_pressure_calibration_large_host_requires_explicit_allowance() {
+        let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let err = Options::parse(
+            [
+                "--include-memory-pressure".to_string(),
+                "--memory-pressure-tier".to_string(),
+                "large-host".to_string(),
+            ],
+            &repo_root,
+        )
+        .expect_err("large-host memory pressure must be explicit");
+        assert!(err.contains("allow-large-host-memory-pressure"));
     }
 
     #[test]
@@ -737,11 +1035,16 @@ mod tests {
             sample_count: 1,
             thread_counts: vec![2],
             min_elements_per_chunk: 2,
+            include_memory_pressure: false,
+            memory_pressure_tier: MemoryPressureTier::Quick,
+            max_memory_pressure_bytes: DEFAULT_MAX_MEMORY_PRESSURE_BYTES,
         };
         let workloads = vec![
             WorkloadSpec {
                 workload_id: "tiny_add".to_string(),
                 operation: CalibrationOperation::BroadcastAdd,
+                tier: WorkloadTier::Baseline,
+                memory_pressure: false,
                 shape: vec![4, 4],
                 rhs_shape: Some(vec![4]),
                 axis: None,
@@ -750,6 +1053,8 @@ mod tests {
             WorkloadSpec {
                 workload_id: "tiny_reduce".to_string(),
                 operation: CalibrationOperation::AxisSum,
+                tier: WorkloadTier::Baseline,
+                memory_pressure: false,
                 shape: vec![4, 4],
                 rhs_shape: None,
                 axis: Some(1),
@@ -762,6 +1067,7 @@ mod tests {
         assert_eq!(report.workload_count, 2);
         assert_eq!(report.entries.len(), 2);
         assert_eq!(report.mode, "quick");
+        assert!(!report.include_memory_pressure);
         assert!(
             report
                 .entries
@@ -775,5 +1081,74 @@ mod tests {
                 .all(|entry| entry.telemetry.bytes_touched_estimate_per_run
                     == entry.bytes_touched_estimate_per_run)
         );
+    }
+
+    #[test]
+    fn memory_pressure_calibration_appends_quick_scenarios() {
+        let mut options = options_for_mode(CalibrationMode::Quick);
+        options.include_memory_pressure = true;
+        options.memory_pressure_tier = MemoryPressureTier::Quick;
+        let workloads = calibration_workloads(&options).expect("workloads");
+        assert_eq!(workloads.len(), 5);
+        assert_eq!(
+            workloads
+                .iter()
+                .filter(|workload| workload.memory_pressure)
+                .count(),
+            3
+        );
+        assert!(
+            workloads
+                .iter()
+                .any(|workload| workload.operation == CalibrationOperation::ChainedBroadcastAdd)
+        );
+    }
+
+    #[test]
+    fn memory_pressure_calibration_estimates_chained_working_set() {
+        let workload = memory_chained_add_workload(MemoryPressureTier::Quick, 128, 256);
+        let element_count = 128 * 256;
+        assert_eq!(
+            workload.peak_live_bytes_estimate().expect("peak"),
+            element_count * DType::F64.item_size() * 5
+        );
+        assert_eq!(
+            workload
+                .allocation_churn_bytes_estimate()
+                .expect("allocation churn"),
+            element_count * DType::F64.item_size() * 2
+        );
+    }
+
+    #[test]
+    fn memory_pressure_calibration_refuses_over_limit_tier() {
+        let mut options = options_for_mode(CalibrationMode::Quick);
+        options.include_memory_pressure = true;
+        options.max_memory_pressure_bytes = 1;
+        let err = calibration_workloads(&options).expect_err("over limit");
+        assert!(err.contains("above limit"));
+    }
+
+    #[test]
+    fn memory_pressure_calibration_report_marks_tier_fields() {
+        let mut options = options_for_mode(CalibrationMode::Quick);
+        options.include_memory_pressure = true;
+        options.thread_counts = vec![2];
+        let workloads = vec![memory_broadcast_add_workload(
+            MemoryPressureTier::Quick,
+            4,
+            4,
+        )];
+        let report = build_report(&options, &workloads).expect("report");
+        assert!(report.include_memory_pressure);
+        assert_eq!(report.memory_pressure_tier, "quick");
+        let entry = &report.entries[0];
+        assert!(entry.memory_pressure);
+        assert_eq!(entry.tier, "memory_quick");
+        assert_eq!(
+            entry.telemetry.allocation_churn_bytes_estimate_per_run,
+            entry.allocation_churn_bytes_estimate_per_run
+        );
+        assert_eq!(entry.telemetry.memory_pressure_tier, Some("memory_quick"));
     }
 }
