@@ -31,19 +31,19 @@ subsystem: `ufunc dispatch + gufunc signature`
 
 | lane | fixture family | objective | owner bead |
 |---|---|---|---|
-| Fuzz/property | packet-E ufunc signature/override/reduction invariant corpus (planned) | detect parser, precedence, reduction-shape, and loop-registry contract violations | `bd-23m.16.5` |
-| Differential/metamorphic | packet-F ufunc/gufunc oracle corpus (planned) | enforce strict parity for dispatch/type-resolution and failure-class behavior | `bd-23m.16.6` |
-| E2E/replay | packet-G ufunc dispatch workflow scenarios (planned) | verify strict/hardened replay traceability and policy-forensics linkage | `bd-23m.16.7` |
+| Fuzz/property | packet-E ufunc signature/override/reduction invariant corpus (landed for current scope) | detect parser, precedence, reduction-shape, and loop-registry contract violations | `artifacts/phase2c/FNP-P2C-005/unit_property_evidence.json` |
+| Differential/metamorphic | packet-F ufunc/gufunc oracle corpus (landed for current scope) | enforce strict parity for dispatch/type-resolution and failure-class behavior | `artifacts/phase2c/FNP-P2C-005/differential_metamorphic_adversarial_evidence.json` |
+| E2E/replay | packet-G/H ufunc dispatch workflow scenarios (landed for current optimization/replay scope) | verify strict/hardened replay traceability and policy-forensics linkage | `artifacts/phase2c/FNP-P2C-005/workflow_scenario_packet005_opt_reliability.json` |
 
 ## Residual Risks and Compensating Controls
 
 | residual_id | residual risk | compensating controls | closure gate |
 |---|---|---|---|
 | `P2C005-RES-01` | `fnp-ufunc` does not yet cover the full legacy dispatch/signature boundary (notably custom-loop semantics). | keep unsupported semantics fail-closed and block parity promotion until packet-D boundary work lands | `bd-23m.16.4` + packet-E baseline tests |
-| `P2C005-RES-02` | packet-scoped signature/override/reduction property corpus is incomplete. | require packet-E suite with deterministic shrink/replay logging before parity claims | `bd-23m.16.5` |
-| `P2C005-RES-03` | differential coverage for dispatch/type-resolution/loop registry remains incomplete. | enforce packet-F oracle/adversarial fixtures and differential gate coverage | `bd-23m.16.6` |
-| `P2C005-RES-04` | packet-scoped replay forensics for ufunc journey paths are not yet fully encoded. | add packet-G scenario logs with required structured fields and reason-code linkage | `bd-23m.16.7` |
-| `P2C005-RES-05` | hardened budget/calibration thresholds are now profiled for packet-H hotspot behavior but not tuned for full corpus scale. | use packet-H profile/isomorphism evidence as calibration baseline and keep conservative fallback trigger active until packet-I sign-off | packet-I closure (`artifacts/phase2c/FNP-P2C-005/final_evidence_pack.json`) |
+| `P2C005-RES-02` | packet-scoped signature/override/reduction property corpus is landed for current scope but still needs broader custom-loop and gufunc edge coverage. | expand packet-E suite from the current deterministic shrink/replay baseline without weakening reason-code checks | `artifacts/phase2c/FNP-P2C-005/unit_property_evidence.json` |
+| `P2C005-RES-03` | differential coverage for dispatch/type-resolution/loop registry passes current fixtures and still needs full legacy loop-registry breadth. | expand packet-F oracle/adversarial fixtures and keep differential gate coverage mandatory | `artifacts/phase2c/FNP-P2C-005/differential_metamorphic_adversarial_evidence.json` |
+| `P2C005-RES-04` | packet-scoped replay forensics are encoded for the current ufunc journey but need more override/gufunc path breadth. | extend packet-G scenario logs while preserving required structured fields and reason-code linkage | `artifacts/phase2c/FNP-P2C-005/workflow_scenario_packet005_opt_reliability.json` |
+| `P2C005-RES-05` | hardened budget/calibration thresholds are now profiled for packet-H hotspot behavior but not tuned for full corpus scale. | use packet-H profile/isomorphism evidence as calibration baseline and keep conservative fallback trigger active for newly added corpus classes | `artifacts/phase2c/FNP-P2C-005/final_evidence_pack.json` |
 
 ## Budgeted Mode and Decision-Theoretic Controls
 
