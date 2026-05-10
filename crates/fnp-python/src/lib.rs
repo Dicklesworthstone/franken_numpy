@@ -11658,6 +11658,9 @@ fn nanmean(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
+    if a.values().is_empty() {
+        return fallback();
+    }
     let axis = match extract_axis_spec(py, axis_for_parse, "nanmean") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
@@ -11668,6 +11671,9 @@ fn nanmean(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
+    if contains_nan_value(&result) {
+        return fallback();
+    }
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -11965,6 +11971,9 @@ fn nanstd(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
+    if contains_nan_value(&result) {
+        return fallback();
+    }
     let output = build_numpy_array_from_ufunc(py, &result)?;
     if result.shape().is_empty() {
         return Ok(output.bind(py).get_item(())?.unbind());
@@ -13964,9 +13973,16 @@ fn conjugate(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn fmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let x1 = extract_numeric_array(py, x1.bind(py), "fmod(x1)")?;
-    let x2 = extract_numeric_array(py, x2.bind(py), "fmod(x2)")?;
-    let result = ufunc_fmod(&x1, &x2).map_err(map_ufunc_error)?;
+    let x1_array = extract_numeric_array(py, x1.bind(py), "fmod(x1)")?;
+    let x2_array = extract_numeric_array(py, x2.bind(py), "fmod(x2)")?;
+    if contains_zero_divisor(&x2_array) {
+        return Ok(py
+            .import("numpy")?
+            .getattr("fmod")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
+    }
+    let result = ufunc_fmod(&x1_array, &x2_array).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -14210,6 +14226,9 @@ fn native_binary_remainder_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "remainder(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "remainder(x2)")?;
+        if contains_zero_divisor(&x2) {
+            return core_numpy_passthrough(py, "remainder", args, kwargs);
+        }
         let result = ufunc_remainder(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_array_from_ufunc(py, &result)
     } else {
@@ -14547,6 +14566,9 @@ fn native_binary_divide_or_passthrough(
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "divide", args, kwargs),
         };
+        if contains_zero_divisor(&x2) {
+            return core_numpy_passthrough(py, "divide", args, kwargs);
+        }
         let result = match ufunc_divide(&x1, &x2) {
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "divide", args, kwargs),
@@ -14555,6 +14577,18 @@ fn native_binary_divide_or_passthrough(
     } else {
         core_numpy_passthrough(py, "divide", args, kwargs)
     }
+}
+
+fn is_zero_divisor_value(value: f64) -> bool {
+    (value.to_bits() & (u64::MAX >> 1)) == 0
+}
+
+fn contains_zero_divisor(array: &UFuncArray) -> bool {
+    array.values().iter().copied().any(is_zero_divisor_value)
+}
+
+fn contains_nan_value(array: &UFuncArray) -> bool {
+    array.values().iter().copied().any(f64::is_nan)
 }
 
 #[pyfunction]
@@ -22599,6 +22633,9 @@ fn mean(
         Ok(arr) => arr,
         Err(_) => return fallback(),
     };
+    if array.values().is_empty() {
+        return fallback();
+    }
 
     // Call native Rust reduce_mean
     let result = match array.reduce_mean(axis_val, keepdims) {
@@ -22836,6 +22873,9 @@ fn var(
         Ok(arr) => arr,
         Err(_) => return fallback(),
     };
+    if array.values().is_empty() {
+        return fallback();
+    }
 
     // Call native Rust reduce_var
     let result = match array.reduce_var(axis_val, keepdims, ddof) {

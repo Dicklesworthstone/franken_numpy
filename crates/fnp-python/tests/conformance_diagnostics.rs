@@ -111,6 +111,70 @@ cases = [
         ),
     ),
     (
+        "divide_float_zero_warning",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.divide(np.array([1.0]), np.array([0.0])),
+            lambda: np.divide(np.array([1.0]), np.array([0.0])),
+        ),
+    ),
+    (
+        "remainder_float_zero_warning",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.remainder(np.array([1.0]), np.array([0.0])),
+            lambda: np.remainder(np.array([1.0]), np.array([0.0])),
+        ),
+    ),
+    (
+        "mod_float_zero_warning",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.mod(np.array([1.0]), np.array([0.0])),
+            lambda: np.mod(np.array([1.0]), np.array([0.0])),
+        ),
+    ),
+    (
+        "fmod_float_zero_warning",
+        "arithmetic",
+        lambda: compare(
+            lambda: fnp.fmod(np.array([1.0]), np.array([0.0])),
+            lambda: np.fmod(np.array([1.0]), np.array([0.0])),
+        ),
+    ),
+    (
+        "mean_empty_runtime_warning",
+        "statistics",
+        lambda: compare(
+            lambda: fnp.mean(np.array([])),
+            lambda: np.mean(np.array([])),
+        ),
+    ),
+    (
+        "var_empty_runtime_warning",
+        "statistics",
+        lambda: compare(
+            lambda: fnp.var(np.array([])),
+            lambda: np.var(np.array([])),
+        ),
+    ),
+    (
+        "nanmean_all_nan_runtime_warning",
+        "statistics",
+        lambda: compare(
+            lambda: fnp.nanmean(np.array([np.nan])),
+            lambda: np.nanmean(np.array([np.nan])),
+        ),
+    ),
+    (
+        "nanstd_all_nan_runtime_warning",
+        "statistics",
+        lambda: compare(
+            lambda: fnp.nanstd(np.array([np.nan])),
+            lambda: np.nanstd(np.array([np.nan])),
+        ),
+    ),
+    (
         "array_bad_dtype_typeerror",
         "array-creation",
         lambda: compare(lambda: fnp.array([1], dtype="not-a-dtype"), lambda: np.array([1], dtype="not-a-dtype")),
