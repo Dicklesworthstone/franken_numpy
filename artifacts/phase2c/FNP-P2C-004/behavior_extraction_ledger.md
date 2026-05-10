@@ -28,24 +28,24 @@ Subsystem: `NDIter traversal/index semantics`
 5. Overlap-safety invariant: `copy_if_overlap` never permits unsafe read/write overlap without the documented opt-in assumptions.
 6. Flat-surface invariant: `flatiter`, `ndindex`, and `ndenumerate` preserve documented indexing/order/error semantics.
 
-## 3. Undefined or Under-Specified Edges (Tagged)
+## 3. Resolved Edges and Residual Breadth (Tagged)
 
-| Unknown ID | Description | Risk | Owner bead | Closure criteria |
+| Edge ID | Current status | Risk | Evidence owner | Residual criteria |
 |---|---|---|---|---|
-| `P2C004-U01` | `fnp-iter` crate is currently a stub; no dedicated iterator state machine exists yet. | high | `bd-23m.15.4` | Land iterator boundary skeleton with constructor, cursor, and mode-transition APIs plus baseline tests. |
-| `P2C004-U02` | Full parity for `op_axes`/`itershape` interactions (especially complex reductions and mixed-broadcast remaps) is not encoded in Rust contracts. | high | `bd-23m.15.2` | Contract table captures complete preconditions/postconditions/error taxonomy for op_axes and shaped iteration. |
-| `P2C004-U03` | Hardened policy for overlap-sensitive iterator operations (`copy_if_overlap`, writeback-like flows) lacks packet-scoped threat controls. | high | `bd-23m.15.3` | Threat model explicitly defines fail-closed/full-validate boundaries and required audit reason codes. |
-| `P2C004-U04` | Differential/adversarial corpus does not yet cover iterator-seeking and flatiter indexing edge matrix. | high | `bd-23m.15.6` | Add oracle-backed iterator fixture suites for seek bounds, op_axes errors, and flatiter indexing/assignment families. |
+| `P2C004-U01` | `fnp-iter` now exposes dedicated iterator state-machine surfaces through `NditerOptions`, `NditerPlan`, `Nditer`, cursor steps, `ndindex`, `ndenumerate`, flatiter validators, and transfer/overlap policy APIs. | low | packet-D/E evidence + `unit_property_evidence.json` | keep constructor, cursor, and mode-transition APIs green while expanding parity breadth |
+| `P2C004-U02` | `op_axes`/`itershape` contract boundaries are documented and guarded for the current packet scope; complex reductions and mixed-broadcast remaps remain residual parity breadth. | medium | contract table + packet-E evidence | expand preconditions/postconditions/error taxonomy with oracle fixtures for deeper remap cases |
+| `P2C004-U03` | Overlap-sensitive iterator operations have packet threat controls and replay/audit reason-code requirements; broader writeback-like flows remain monitored. | medium | risk note + `e2e_replay_forensics_evidence.json` | keep fail-closed/full-validate boundaries stable while adding writeback-like fixture coverage |
+| `P2C004-U04` | Differential, metamorphic, and adversarial corpus is packet-scoped for the current iterator matrix: 9 differential, 5 metamorphic, and 6 adversarial cases all pass. | medium | `differential_metamorphic_adversarial_evidence.json` | add deeper seek-bounds, op_axes error, and flatiter assignment families |
 | `P2C004-U05` | Packet-specific nditer/flatiter workflow journey traces are now present in the workflow corpus and require ongoing expansion as parity debt closes. | medium | `bd-23m.15.8` | Maintain and extend `nditer_packet_replay` + `nditer_packet_hostile_guardrails` scenarios with step-level logs and iterator fixture links. |
-| `P2C004-U06` | Exact parity for ndindex/ndenumerate non-integer-dimension/type-error nuances is not yet pinned in Rust tests. | medium | `bd-23m.15.5` | Unit/property suite asserts shape-validation and stream-equivalence behavior against legacy expectations. |
+| `P2C004-U06` | `ndindex`/`ndenumerate` stream-equivalence and shape-validation coverage exists for the current packet scope; non-integer-dimension/type-error nuance breadth remains residual. | medium | `unit_property_evidence.json` + packet-F fixtures | add targeted legacy-oracle cases for non-integer dimensions and error-message/class nuance |
 
-## 4. Planned Verification Hooks
+## 4. Verification Hooks
 
-| Verification lane | Planned hook | Artifact target |
+| Verification lane | Hook | Artifact target |
 |---|---|---|
-| Unit/property | Introduce iterator-state tests for constructor flags, seek transitions, index-mode coherence, and no-broadcast checks | `crates/fnp-iter/src/lib.rs` + packet-E test modules (`bd-23m.15.5`) |
-| Differential/metamorphic/adversarial | Build fixture corpus for nditer/flatiter/ndindex/ndenumerate behavior classes and compare against legacy oracle | `crates/fnp-conformance/fixtures/` + packet-F harness additions (`bd-23m.15.6`) |
-| E2E | `workflow_scenario_corpus.json` scenarios `nditer_packet_replay` and `nditer_packet_hostile_guardrails` exercise iterator construction/overlap/indexing guardrails with strict/hardened replay outputs | `scripts/e2e/run_workflow_scenario_gate.sh` + `artifacts/logs/` (`bd-23m.15.7`) |
+| Unit/property | iterator-state tests for constructor flags, seek transitions, index-mode coherence, no-broadcast checks, flatiter validators, and structured reason-code logs | `unit_property_evidence.json` + `crates/fnp-iter/src/lib.rs` |
+| Differential/metamorphic/adversarial | fixture corpus for nditer/flatiter/ndindex/ndenumerate behavior classes compared against legacy oracle | `differential_metamorphic_adversarial_evidence.json` + packet-004 iterator fixtures |
+| E2E | `workflow_scenario_corpus.json` scenarios `nditer_packet_replay` and `nditer_packet_hostile_guardrails` execute iterator construction/overlap/indexing guardrails with strict/hardened replay outputs | `e2e_replay_forensics_evidence.json` + `workflow_scenario_packet004_*` artifacts |
 | Structured logging | Enforce `fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code` on iterator test/e2e outputs | `artifacts/contracts/test_logging_contract_v1.json`, conformance gate outputs |
 
 ## 5. Method-Stack Artifacts and EV Gate
@@ -53,7 +53,7 @@ Subsystem: `NDIter traversal/index semantics`
 - Alien decision contract: any hardened-mode iterator policy intervention must carry explicit state/action/loss rationale and replay metadata.
 - Optimization gate: iterator performance changes require baseline/profile + single-lever change + behavior-isomorphism proof.
 - EV gate: optimization levers ship only when `EV >= 2.0`; otherwise remain explicit deferred debt.
-- RaptorQ scope: packet-I closure artifacts must include sidecar/scrub/decode-proof linkage for durable evidence bundles.
+- RaptorQ scope: packet-I closure artifacts include sidecar/scrub/decode-proof linkage for durable evidence bundles.
 
 ### Packet-H Closure (`bd-23m.15.8`)
 
