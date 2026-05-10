@@ -4,7 +4,8 @@
 - [ ] Not started
 - [~] In progress
 - [x] Done
-- [S] Skipped (architectural/impossible)
+- [D] Parity debt/deferred — observable NumPy behavior not yet closed
+- [A] Architecture note — no current behavior gap unless future evidence proves one
 
 ---
 
@@ -28,8 +29,8 @@
 - [x] Add tests: sum with initial, prod with initial
 
 ## GROUP 4: sum/prod/mean/var/std `dtype` parameter
-- [S] Skipped — would require internal accumulator dtype changes across all reduction paths
-- [S] The f64 internal representation already provides maximum precision for accumulation
+- [D] Deferred parity debt — NumPy exposes `dtype=` as observable API behavior even when f64 accumulation is internally precise
+- [D] Follow-up must define accumulator/result dtype semantics for integer, unsigned, float, bool, and complex reductions before this gap can be marked closed
 
 ## GROUP 5: percentile/quantile `keepdims` parameter
 - [x] Add `percentile_keepdims` method
@@ -39,11 +40,10 @@
 - [x] Add tests: axis keepdims, None axis keepdims
 
 ## GROUP 6: partition/argpartition `kind` parameter
-- [S] Skipped — only one algorithm ("introselect") exists, no alternative implementations
-- [S] The `kind` parameter in NumPy also only has one real option
+- [A] NumPy currently exposes one accepted algorithm token (`introselect`); parity work should still verify accepted/invalid token behavior and error text
 
 ## GROUP 7: unique `return_index/inverse/counts` with axis
-- [S] Skipped for now — unique_axis covers the main use case; combining with return_index/inverse/counts along axis is very complex
+- [D] Deferred parity debt — `unique_axis` covers unique slices only; combining `axis` with `return_index`, `return_inverse`, and `return_counts` remains NumPy-observable behavior
 
 ---
 
@@ -52,8 +52,8 @@
 - [x] reshape_order (F-order reshape)
 - [x] histogram_full (density, range, weights parameters)
 
-## ARCHITECTURAL DECISIONS (not implementing)
-- [S] `out` parameter on all functions — Rust arrays are immutable
-- [S] `order` on sort/partition — requires structured arrays
-- [S] `overwrite_input` on percentile/quantile — immutable by design
-- [S] `dtype` on reductions — f64 accumulation already provides max precision
+## KNOWN PARITY DEBT / ARCHITECTURE NOTES
+- [D] `out` parameter on array functions — Rust internals are immutable, but Python/NumPy-facing APIs still expose in-place output semantics that need explicit parity handling or documented wrapper delegation
+- [D] `order` on sort/partition — structured/object-array ordering remains observable NumPy behavior and should stay tracked as parity debt
+- [D] `overwrite_input` on percentile/quantile — immutable internals do not remove the need to match accepted parameter behavior and error surfaces
+- [D] `dtype` on reductions — f64 accumulation is an implementation detail; NumPy result dtype and accumulator dtype behavior remain parity debt
