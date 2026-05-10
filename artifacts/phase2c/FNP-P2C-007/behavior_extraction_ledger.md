@@ -34,14 +34,14 @@ Subsystem: `RNG core and constructor contract`
 | `P2C007-U03` | closed: packet-F differential/metamorphic/adversarial suites are packet-scoped for RNG constructor/state/jump/schema contracts with gate wiring evidence. | closed | `bd-23m.18.6` | closed by `artifacts/phase2c/FNP-P2C-007/differential_metamorphic_adversarial_evidence.json`, `rng_differential_report.json`, and gate reports. |
 | `P2C007-U04` | closed: packet-G replay/e2e scenarios include packet-specific RNG seed lineage traces across strict/hardened replay lanes. | closed | `bd-23m.18.7` | closed by `artifacts/phase2c/FNP-P2C-007/workflow_scenario_packet007_e2e.jsonl`, `workflow_scenario_packet007_artifact_index.json`, `workflow_scenario_packet007_reliability.json`, and `e2e_replay_forensics_evidence.json`. |
 | `P2C007-U05` | Constructor normalization across all supported seed input classes (including legacy adapters) remains unpinned in Rust tests. | medium | `bd-23m.18.2` + `bd-23m.18.5` | contract rows and packet-E tests lock accepted/rejected class behavior |
-| `P2C007-U06` | Exact state schema compatibility for algorithm-specific state payloads is not yet represented in Rust models. | medium | `bd-23m.18.4` + `bd-23m.18.6` | algorithm-specific state schema contracts and differential fixtures are codified |
+| `P2C007-U06` | Algorithm-specific state schema compatibility is represented for the packet-scoped PCG64, PCG64DXSM, MT19937, Philox, and SFC64 lanes; residual breadth remains for full legacy payload variants and future algorithm classes. | medium | `bd-23m.18.4` + `bd-23m.18.6` | keep current schema contracts and differential fixtures green while expanding payload breadth before any broader parity claim |
 | `P2C007-U07` | closed: packet-H optimization/profile lane for RNG fixture lookup dispatch is implemented with behavior-isomorphism proof artifacts. | closed | `bd-23m.18.8` | closed by `artifacts/phase2c/FNP-P2C-007/optimization_profile_report.json`, `optimization_profile_isomorphism_evidence.json`, `workflow_scenario_packet007_opt_e2e.jsonl`, `workflow_scenario_packet007_opt_artifact_index.json`, and `workflow_scenario_packet007_opt_reliability.json`. |
 
-## 4. Planned Verification Hooks
+## 4. Current Verification Hooks
 
-| Verification lane | Hook | Artifact target |
+| Verification lane | Current hook | Artifact target |
 |---|---|---|
-| Unit/property | deterministic seed/state/spawn/jump invariants for RNG constructors and bit-generator state model | `fnp-random` unit tests plus packet-E structured evidence |
+| Unit/property | deterministic seed/state/spawn/jump invariants for RNG constructors and bit-generator state model are packet-E gated with current `fnp-random` unit coverage | `artifacts/phase2c/FNP-P2C-007/unit_property_evidence.json`, `crates/fnp-random/src/lib.rs`, packet-E structured evidence |
 | Differential/metamorphic/adversarial | packet-F RNG fixture corpus is wired into differential/metamorphic/adversarial suites and gate runners with deterministic replay metadata | `artifacts/phase2c/FNP-P2C-007/differential_metamorphic_adversarial_evidence.json`, `crates/fnp-conformance/fixtures/oracle_outputs/rng_differential_report.json`, packet-F gate reports |
 | E2E | strict/hardened RNG workflow scenarios with seed lineage and replay metadata | `scripts/e2e/run_rng_contract_journey.sh`, `artifacts/phase2c/FNP-P2C-007/workflow_scenario_packet007_e2e.jsonl`, `workflow_scenario_packet007_artifact_index.json`, `workflow_scenario_packet007_reliability.json`, `e2e_replay_forensics_evidence.json` |
 | Optimization/isomorphism | packet-H profile-first single-lever optimization with checksum/lookup parity checks and workflow rerun | `crates/fnp-conformance/src/bin/generate_packet007_optimization_report.rs`, `artifacts/phase2c/FNP-P2C-007/optimization_profile_report.json`, `optimization_profile_isomorphism_evidence.json`, `workflow_scenario_packet007_opt_e2e.jsonl`, `workflow_scenario_packet007_opt_artifact_index.json`, `workflow_scenario_packet007_opt_reliability.json` |
@@ -52,7 +52,7 @@ Subsystem: `RNG core and constructor contract`
 - Alien decision contract: RNG policy mediation must record state/action/loss rationale with deterministic fallback behavior.
 - Optimization gate: RNG performance changes require baseline/profile + one-lever + behavior-isomorphism proof.
 - EV gate: policy/optimization levers ship only when `EV >= 2.0`; otherwise remain explicit deferred parity debt.
-- RaptorQ scope: packet-I RNG evidence bundle requires sidecar/scrub/decode-proof linkage for durable artifacts.
+- RaptorQ scope: packet-I RNG evidence bundle includes sidecar/scrub/decode-proof linkage through `parity_report.raptorq.json`, `parity_report.scrub_report.json`, `parity_report.decode_proof.json`, and `final_evidence_pack.json`.
 - Packet-F closure evidence: `artifacts/phase2c/FNP-P2C-007/differential_metamorphic_adversarial_evidence.json` captures RNG differential/metamorphic/adversarial parity and gate wiring status.
 - Packet-H closure evidence: `artifacts/phase2c/FNP-P2C-007/optimization_profile_report.json` and `optimization_profile_isomorphism_evidence.json` capture a promoted EV decision (`32.0`) with no lookup/isomorphism drift and packet-opt workflow replay proof artifacts.
 - Packet-I closure evidence: `fixture_manifest.json`, `parity_gate.yaml`, `parity_report.json`, `parity_report.raptorq.json`, `parity_report.scrub_report.json`, `parity_report.decode_proof.json`, and `final_evidence_pack.json` are now materialized with `packet_readiness_report.json` status `ready`.
