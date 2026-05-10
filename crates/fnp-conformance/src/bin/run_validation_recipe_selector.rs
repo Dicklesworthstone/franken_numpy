@@ -193,9 +193,12 @@ fn build_report(options: &Options) -> ValidationRecipeReport {
         .iter()
         .map(|label| label.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
+    let needs_porting_ledger_freshness =
+        needs_porting_ledger_freshness_recipe(&options.changed_paths, &labels);
     let docs_only = !options.changed_paths.is_empty()
         && options.crate_names.is_empty()
         && options.labels.is_empty()
+        && !needs_porting_ledger_freshness
         && options
             .changed_paths
             .iter()
@@ -244,6 +247,9 @@ fn build_report(options: &Options) -> ValidationRecipeReport {
         {
             insert_recipe(&mut recipes, packet_recipe(&labels, &options.changed_paths));
         }
+    }
+    if needs_porting_ledger_freshness {
+        insert_recipe(&mut recipes, porting_ledger_freshness_recipe());
     }
 
     if !unknown_paths.is_empty() {
@@ -311,6 +317,23 @@ fn is_docs_path(path: &str) -> bool {
 
 fn is_docs_only_path(path: &str) -> bool {
     is_docs_path(path) && !path.starts_with("artifacts/phase2c/")
+}
+
+fn needs_porting_ledger_freshness_recipe(paths: &[String], labels: &BTreeSet<String>) -> bool {
+    let phase2c_label = labels.iter().any(|label| {
+        matches!(label.as_str(), "phase2c" | "stale-evidence" | "fail-closed")
+            || label.starts_with("fnp-p2c-")
+    });
+    let relevant_path = paths.iter().any(|path| {
+        path == "artifacts/contracts/PORTING_ESSENCE_EXTRACTION_LEDGER_V1.md"
+            || path.starts_with("artifacts/phase2c/")
+            || path.ends_with("validate_phase2c_porting_ledger.rs")
+    });
+    let phase2c_context_label = labels
+        .iter()
+        .any(|label| matches!(label.as_str(), "validation" | "evidence"))
+        && relevant_path;
+    phase2c_label || relevant_path || phase2c_context_label
 }
 
 fn risk_level(
@@ -537,6 +560,34 @@ fn packet_recipe(labels: &BTreeSet<String>, paths: &[String]) -> ValidationRecip
     }
 }
 
+fn porting_ledger_freshness_recipe() -> ValidationRecipe {
+    ValidationRecipe {
+        id: "phase2c-porting-ledger-freshness".to_string(),
+        title: "Phase2C porting ledger freshness verifier".to_string(),
+        reason: "Phase2C control-plane or packet-evidence changes should prove the central porting ledger does not contain stale proof-status claims for validator-ready packets.".to_string(),
+        applies_to: vec![
+            "artifacts/contracts/PORTING_ESSENCE_EXTRACTION_LEDGER_V1.md".to_string(),
+            "artifacts/phase2c/FNP-P2C-*/packet_readiness_report.json".to_string(),
+        ],
+        commands: vec![
+            "rch exec -- cargo run -p fnp-conformance --bin validate_phase2c_porting_ledger -- --report-out target/phase2c_porting_ledger_freshness_report.json".to_string(),
+        ],
+        expected_reports: vec![
+            "target/phase2c_porting_ledger_freshness_report.json".to_string(),
+        ],
+        prerequisites: {
+            let mut prerequisites = common_rch_prerequisites();
+            prerequisites.push(
+                "Requires the central porting ledger and packet_readiness_report.json files for FNP-P2C-* packets.".to_string(),
+            );
+            prerequisites.push(
+                "Failure means at least one ready packet row still advertises stale anchor-only/open/partial/missing-artifact status; fix the ledger or packet report before proceeding.".to_string(),
+            );
+            prerequisites
+        },
+    }
+}
+
 fn packet_id_from_paths(paths: &[String]) -> Option<String> {
     paths.iter().find_map(|path| {
         path.split('/')
@@ -751,7 +802,66 @@ mod tests {
                 .iter()
                 .any(|command| command.contains("--packet-id FNP-P2C-009"))
         );
+        assert!(
+            report
+                .recipes
+                .iter()
+                .any(|recipe| recipe.id == "phase2c-porting-ledger-freshness")
+        );
         assert!(!report.workspace_required);
+    }
+
+    #[test]
+    fn validation_recipe_selector_exposes_porting_ledger_freshness_for_control_ledger() {
+        let report = report_for(&[
+            "--changed",
+            "artifacts/contracts/PORTING_ESSENCE_EXTRACTION_LEDGER_V1.md",
+        ]);
+
+        assert_eq!(report.risk_level, "manual");
+        let recipe = report
+            .recipes
+            .iter()
+            .find(|recipe| recipe.id == "phase2c-porting-ledger-freshness")
+            .expect("porting ledger freshness recipe");
+        assert!(
+            recipe
+                .commands
+                .iter()
+                .any(|command| command.contains("validate_phase2c_porting_ledger"))
+        );
+        assert!(recipe.commands.iter().any(|command| {
+            command.contains("target/phase2c_porting_ledger_freshness_report.json")
+        }));
+        assert!(
+            recipe
+                .expected_reports
+                .iter()
+                .any(|path| path == "target/phase2c_porting_ledger_freshness_report.json")
+        );
+        assert!(
+            recipe
+                .prerequisites
+                .iter()
+                .any(|prereq| prereq.contains("stale anchor-only/open/partial"))
+        );
+    }
+
+    #[test]
+    fn validation_recipe_selector_keeps_generic_validation_labels_out_of_phase2c_freshness() {
+        let report = report_for(&[
+            "--changed",
+            "crates/fnp-runtime/src/lib.rs",
+            "--label",
+            "validation",
+        ]);
+
+        assert!(
+            report
+                .recipes
+                .iter()
+                .all(|recipe| recipe.id != "phase2c-porting-ledger-freshness")
+        );
     }
 
     #[test]
