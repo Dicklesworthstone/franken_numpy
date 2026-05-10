@@ -21,30 +21,30 @@ Subsystem: `Ufunc dispatch + gufunc signature`
 3. Override precedence invariant: no inversion in override vs built-in dispatch ordering.
 4. Error-shape invariant: signature parse failures and conflict failures remain class-stable.
 
-## 3. Undefined or Under-Specified Edges (Tagged)
+## 3. Resolved Edges and Residual Breadth (Tagged)
 
-| Unknown ID | Description | Risk | Owner bead | Closure criteria |
+| Edge ID | Current status | Risk | Evidence owner | Residual criteria |
 |---|---|---|---|---|
 | `P2C005-U01` | Exact diagnostic string stability for signature parse errors may drift across legacy micro-revisions. | medium | `bd-23m.16.6` | Differential harness stores normalized error-class taxonomy and verifies containment rules instead of exact full-string equality. |
-| `P2C005-U02` | Full custom-loop registration semantics for user dtypes are not yet represented in Rust boundary. | high | `bd-23m.16.4` | Add loop registry model and conformance fixtures for registration + dispatch resolution. |
-| `P2C005-U03` | Override dispatch interactions with mixed subclass hierarchies need explicit precedence matrix. | high | `bd-23m.16.5` | Add unit/property suite with subclass permutation matrix + structured logs (`reason_code=override_precedence`). |
-| `P2C005-U04` | gufunc signature edge cases with optional dimensions (`?`) need explicit shrink strategy for minimal counterexamples. | medium | `bd-23m.16.5` | Add property-based signature corpus and deterministic shrink replay fields (`seed`, `artifact_refs`). |
+| `P2C005-U02` | Custom-loop registration semantics for user dtypes remain residual breadth beyond the current packet matrix. | high | packet-D/F evidence | add loop registry model and conformance fixtures for registration + dispatch resolution |
+| `P2C005-U03` | Override dispatch interactions have packet-scoped logging and targeted coverage; mixed subclass hierarchy breadth remains residual. | medium | `unit_property_evidence.json` + `differential_metamorphic_adversarial_evidence.json` | expand subclass permutation matrix while preserving `reason_code=override_precedence` structured logs |
+| `P2C005-U04` | Gufunc signature edge cases have current fixture coverage; optional-dimension (`?`) shrink breadth remains residual. | medium | `unit_property_evidence.json` + packet-F evidence | add deeper property-based signature corpus with deterministic shrink replay fields (`seed`, `artifact_refs`) |
 
-## 4. Planned Verification Hooks
+## 4. Verification Hooks
 
-| Verification lane | Planned hook | Artifact target |
+| Verification lane | Hook | Artifact target |
 |---|---|---|
-| Unit/property | Signature parse corpus + override precedence property tests + deterministic shrink replay | `crates/fnp-conformance/fixtures/ufunc_signature_property_cases.json` (planned), structured JSONL logs |
-| Differential/metamorphic/adversarial | Extend ufunc differential suite with signature/override/gufunc adversarial fixtures and relation checks | `crates/fnp-conformance/src/ufunc_differential.rs`, `crates/fnp-conformance/fixtures/ufunc_adversarial_cases.json` |
-| E2E | Add ufunc dispatch scenario journey with strict/hardened replay and failure-forensics links | `scripts/e2e/run_ufunc_dispatch_journey.sh` (planned) |
-| Structured logging | Ensure all packet tests emit `fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code` | `artifacts/contracts/test_logging_contract_v1.json`, `scripts/e2e/run_test_contract_gate.sh` |
+| Unit/property | signature parse corpus, override precedence properties, deterministic replay-log checks, and reason-code registry lock | `unit_property_evidence.json` |
+| Differential/metamorphic/adversarial | ufunc differential suite with signature/override/gufunc adversarial fixtures and targeted relation checks | `differential_metamorphic_adversarial_evidence.json` |
+| E2E/workflow | strict/hardened workflow replay and optimization-isomorphism evidence for current ufunc dispatch paths | `workflow_scenario_packet005_opt_*` artifacts + `optimization_profile_isomorphism_evidence.json` |
+| Structured logging | ensure packet tests emit `fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code` | `artifacts/contracts/test_logging_contract_v1.json`, test-contract gate outputs |
 
 ## 5. Method-Stack Artifacts and EV Gate
 
 - Alien decision contract: dispatch/override policy decisions must log state, action, and expected-loss rationale when policy mediation occurs.
 - Optimization gate: no dispatch optimization accepted without baseline/profile + single-lever + isomorphism proof artifact.
 - EV gate: dispatch optimization levers promoted only when `EV >= 2.0`; otherwise tracked as deferred research.
-- RaptorQ scope: durable packet evidence bundle for `FNP-P2C-005` must include sidecar/scrub/decode-proof links at packet-I closure.
+- RaptorQ scope: durable packet evidence bundle for `FNP-P2C-005` includes sidecar/scrub/decode-proof links at packet-I closure.
 
 ### Packet-H Closure (`bd-23m.16.8`)
 
