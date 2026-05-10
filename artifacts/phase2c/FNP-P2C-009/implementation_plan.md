@@ -3,52 +3,49 @@
 packet_id: `FNP-P2C-009`  
 subsystem: `NPY/NPZ IO contract`
 
-## 1. Crate and Module Boundary Skeleton
+## 1. Crate and Module Boundary State
 
-| Crate | Planned module boundary | Responsibility | Public surface contract |
+| Crate | Landed module boundary | Responsibility | Public surface contract |
 |---|---|---|---|
-| `crates/fnp-io` | `npy_magic_version` (packet-D planned boundary; crate currently stub) | encode/decode magic/version bytes and fail-closed version validation | magic/version parser contract (`P2C009-R01`) |
-| `crates/fnp-io` | `npy_header_codec` (packet-D planned boundary) | header read/write schema validation (`shape`, `fortran_order`, `descr`) and bounded header-size checks | header parse/write contract (`P2C009-R02`) |
-| `crates/fnp-io` | `dtype_descr_codec` (packet-D planned boundary) | deterministic descriptor encode/decode boundaries for supported dtype classes | descriptor roundtrip contract (`P2C009-R03`) |
-| `crates/fnp-io` | `npy_reader` (packet-D planned boundary) | `.npy` ingest pipeline including payload-count checks and C/F reshape semantics | read contract (`P2C009-R05`) |
-| `crates/fnp-io` | `npy_writer` (packet-D planned boundary) | `.npy` write pipeline including contiguous/non-contiguous handling and policy-gated object payloads | write contract (`P2C009-R04`) |
-| `crates/fnp-io` | `npy_memmap_adapter` (packet-D planned boundary) | memmap open/create boundary with mode and object-dtype restrictions | memmap contract (`P2C009-R07`) |
-| `crates/fnp-io` | `npz_archive_reader` (packet-D planned boundary) | lazy archive member loading and key-mapping semantics | archive read contract (`P2C009-R09`) |
-| `crates/fnp-io` | `npz_archive_writer` (packet-D planned boundary) | archive write behavior for positional/keyword entries, compression mode, and collision checks | archive write contract (`P2C009-R09`) |
-| `crates/fnp-io` | `io_load_dispatch` + `pickle_policy_gate` (packet-D planned boundary) | deterministic branch selection for `.npz`/`.npy`/pickle and explicit `allow_pickle` policy gating | dispatch/policy contracts (`P2C009-R06`, `P2C009-R08`) |
+| `crates/fnp-io` | `NpyHeader`, header/version helpers, descriptor validation | encode/decode magic/version bytes; validate header schema (`shape`, `fortran_order`, `descr`) and bounded header sizes | magic/header/descriptor contracts (`P2C009-R01`, `P2C009-R02`, `P2C009-R03`) |
+| `crates/fnp-io` | `read_npy_bytes`, `write_npy_bytes`, `write_npy_bytes_with_version`, `save`, `load` | `.npy` read/write pipeline including payload-count checks, header version selection, and C/F layout metadata | read/write contracts (`P2C009-R04`, `P2C009-R05`) |
+| `crates/fnp-io` | `NpzEntry`, `NpzCompression`, `read_npz_bytes`, `write_npz_bytes`, `savez`, `savez_compressed`, `load_npz` | archive member loading, key mapping, compression mode handling, and duplicate/collision validation | archive read/write contract (`P2C009-R09`) |
+| `crates/fnp-io` | `classify_load_dispatch`, `load_auto`, `enforce_pickle_policy` | deterministic branch selection for `.npz`/`.npy`/pickle and explicit `allow_pickle` policy gating | dispatch/policy contracts (`P2C009-R06`, `P2C009-R08`) |
+| `crates/fnp-io` | `loadtxt`, `loadtxt_usecols`, `loadtxt_unpack`, `genfromtxt`, `genfromtxt_full` | text IO parsing, delimiter/comment handling, use-column selection, missing-value handling, and unpack semantics | text IO contract (`P2C009-R10`) |
+| `crates/fnp-io` | `MemmapArray`, `memmap_npy`, `open_memmap` | memmap open/create boundary with mode, dtype, and object-payload restrictions | memmap contract (`P2C009-R07`) |
 | `crates/fnp-runtime` | policy/audit decision context (existing) | strict/hardened fail-closed mediation with reason-code and evidence logging for IO packet decisions | `decide_and_record_with_context` integration from IO harnesses |
-| `crates/fnp-conformance` | `io_packet_suite` (packet-F planned boundary) | fixture-driven differential/metamorphic/adversarial IO coverage (header, roundtrip, archive, policy) | packet-F IO runner + fixture manifests (planned) |
-| `crates/fnp-conformance` | workflow scenario integration (existing + packet-G extension) | strict/hardened replay scenarios linking IO ingest/save flows to downstream workflows | packet-G IO scenario entries in workflow corpus (planned) |
+| `crates/fnp-conformance` | `io_diagnostics`, packet fixture artifacts, `npy_npz_diagnostic` tests | fixture-driven differential/metamorphic/adversarial IO coverage (header, roundtrip, archive, policy) | packet-F IO diagnostics and parity report artifacts |
+| `crates/fnp-conformance` | workflow scenario corpus entries `io_packet_replay` and `io_packet_hostile_guardrails` | strict/hardened replay scenarios linking IO ingest/save flows to downstream workflows | packet-G IO scenario evidence |
 
-## 2. Implementation Sequence (D-Stage to I-Stage)
+## 2. Implementation Sequence (Current D-I Baseline to Breadth Expansion)
 
-1. Land packet-D `fnp-io` module skeletons (`npy_magic_version`, `npy_header_codec`, `dtype_descr_codec`, `npy_reader`, `npy_writer`, `npy_memmap_adapter`, `npz_archive_reader`, `npz_archive_writer`, `io_load_dispatch`, `pickle_policy_gate`) with explicit TODO gates for deferred parity debt.
-2. Define packet reason-code taxonomy aligned with contract rows `P2C009-R01`..`R10`.
-3. Implement deterministic magic/version + header schema boundaries with fail-closed behavior for unknown/incompatible metadata.
-4. Implement descriptor codec and `.npy` read/write pathways with deterministic count/reshape and truncated-payload failure semantics.
-5. Implement dispatch/pickle policy boundaries for `.npz`/`.npy`/pickle route selection and explicit `allow_pickle` gating.
-6. Implement `.npz` archive boundaries (key naming, collision checks, lazy member read path, compression mode handling).
-7. Implement memmap boundary with deterministic mode and dtype restrictions.
-8. Add packet-F IO conformance harness placeholders and fixture schemas for malformed-header, roundtrip, archive, and policy lanes.
-9. Add packet-G workflow scenario placeholders linking IO fixture IDs to replay/e2e scripts.
-10. Wire packet IO policy decisions into runtime audit context (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`).
+1. Preserve the landed packet-D `fnp-io` boundaries for header/version validation, descriptor handling, `.npy` roundtrip, `.npz` archive handling, load dispatch, pickle policy, text IO, and memmap entrypoints.
+2. Keep packet reason-code taxonomy aligned with contract rows `P2C009-R01`..`R10`.
+3. Maintain deterministic magic/version + header schema boundaries with fail-closed behavior for unknown/incompatible metadata.
+4. Maintain descriptor codec and `.npy` read/write pathways with deterministic count/reshape and truncated-payload failure semantics.
+5. Maintain dispatch/pickle policy boundaries for `.npz`/`.npy`/pickle route selection and explicit `allow_pickle` gating.
+6. Maintain `.npz` archive boundaries for key naming, collision checks, member read paths, and compression mode handling.
+7. Maintain memmap boundaries with deterministic mode and dtype restrictions.
+8. Expand packet-F IO conformance breadth from the landed diagnostic fixtures toward broader malformed-header, roundtrip, archive, text, and policy lanes.
+9. Extend packet-G workflow scenarios beyond `io_packet_replay` and `io_packet_hostile_guardrails` when new IO fixture IDs land.
+10. Preserve packet IO policy decisions in runtime audit context (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`).
 11. Gate packet-H optimization work behind baseline/profile/isomorphism evidence.
-12. Close packet-I with parity summary + risk + durability sidecar/scrub/decode-proof artifacts.
+12. Preserve packet-I readiness with parity summary, risk notes, durability sidecars, scrub artifacts, and decode-proof artifacts.
 
 ## 3. Public Surface Contract Notes
 
-- Packet-D additions remain clean-room and contract-driven (no compatibility shims).
+- Landed packet-D boundaries remain clean-room and contract-driven (no compatibility shims).
 - Unknown or incompatible IO semantics remain fail-closed in strict and hardened modes.
 - Read/write/dispatch/archive outcomes must remain deterministic for fixed inputs.
-- No `unsafe` pathways are introduced by the packet-D planning boundary.
+- No `unsafe` pathways are introduced by the packet-D IO boundary.
 
 ## 4. Instrumentation Insertion Points
 
 | Lane | Insertion point | Evidence artifact target |
 |---|---|---|
-| Unit/property | packet-E tests in `fnp-io` parser/reader/writer/archive/memmap modules | packet-E invariant logs + coverage artifacts |
-| Differential/metamorphic/adversarial | packet-F IO runner + fixture manifests in `crates/fnp-conformance` | packet-F parity/differential reports |
-| E2E/replay | packet-G workflow scenario corpus + e2e scripts in `scripts/e2e/` | replay logs under `artifacts/logs/` |
+| Unit/property | `crates/fnp-io/src/lib.rs`, `crates/fnp-io/tests/metamorphic_io.rs`, `crates/fnp-io/tests/npy_npz_diagnostic.rs` | packet-E invariant logs + coverage artifacts |
+| Differential/metamorphic/adversarial | `crates/fnp-io/tests/npy_numpy_conformance.rs`, `crates/fnp-conformance/src/io_diagnostics.rs`, packet fixtures | packet-F parity/differential reports |
+| E2E/replay | workflow scenarios `io_packet_replay` and `io_packet_hostile_guardrails` plus e2e scripts in `scripts/e2e/` | replay logs under `artifacts/logs/` |
 | Runtime policy audit | IO packet suites using runtime decision/audit integration | security gate + policy evidence ledger outputs |
 
 ## 5. Structured Logging Emission Points
@@ -77,14 +74,15 @@ All emissions must include:
 - Replay/security logs: `artifacts/logs/`
 - Durability artifacts: `artifacts/raptorq/` + packet-I packet-local outputs
 
-## 7. Compile-Safe Skeleton Validation
+## 7. Evidence Refresh Validation
 
-- Planning-stage validation rules:
+- Evidence-refresh validation rules:
   - no behavior-changing IO parser/writer migration is shipped in this bead;
+  - packet boundaries describe the current landed IO implementation;
   - packet contract and reason-code taxonomy remain internally consistent;
-  - packet validator may remain `not_ready` until downstream E-I artifacts land.
+  - packet validator reports `ready` with no missing artifacts, fields, or parse errors.
 - Validation command (offloaded via `rch`):  
-  `rch exec -- cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-009`
+  `rch exec -- env CARGO_TARGET_DIR=/data/projects/.cargo-target-franken_numpy-NavyPine-ns5i7 CARGO_INCREMENTAL=0 cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-009`
 
 ## 8. Alien Recommendation Contract Guardrails
 
@@ -101,4 +99,4 @@ All emissions must include:
 - Baseline comparator to beat/restore:
   - last green `rch exec -- cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-009` report,
   - plus last green packet-linked security/workflow gate artifacts.
-- If comparator fails, restore prior planning baseline and re-run packet validation before continuing.
+- If comparator fails, restore prior evidence-refresh baseline and re-run packet validation before continuing.
