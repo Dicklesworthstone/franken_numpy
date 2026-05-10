@@ -344,6 +344,27 @@ elif case_id == "correlate_same_asymmetric":
         np.array([3.0, -1.0, 2.0]),
         mode="same",
     ))
+elif case_id == "gradient_axis0_2d":
+    emit(np.gradient(
+        np.array([[1.0, 2.0, 3.0], [4.0, 8.0, 16.0], [9.0, 18.0, 36.0]]),
+        axis=0,
+    ))
+elif case_id == "gradient_axis1_2d":
+    emit(np.gradient(
+        np.array([[1.0, 3.0, 6.0, 10.0], [2.0, 5.0, 11.0, 23.0]]),
+        axis=1,
+    ))
+elif case_id == "gradient_uniform_edge_order2":
+    emit(np.gradient(
+        np.array([0.0, 1.0, 4.0, 9.0, 16.0]),
+        edge_order=2,
+    ))
+elif case_id == "gradient_nonuniform_edge_order2":
+    emit(np.gradient(
+        np.array([0.0, 1.0, 9.0, 36.0]),
+        np.array([0.0, 1.0, 3.0, 6.0]),
+        edge_order=2,
+    ))
 elif case_id == "meshgrid_xy_x":
     grids = np.meshgrid(
         np.array([1.0, 2.0]),
@@ -703,6 +724,50 @@ fn sampling_ops_match_live_numpy_reference() {
         "correlate_same_asymmetric",
         correlate_same.shape(),
         correlate_same.values(),
+        1e-12,
+    );
+}
+
+#[test]
+fn gradient_ops_match_live_numpy_reference() {
+    let axis0 = array(&[3, 3], &[1.0, 2.0, 3.0, 4.0, 8.0, 16.0, 9.0, 18.0, 36.0]);
+    let axis0_gradient = axis0.gradient_axis(Some(0)).expect("gradient axis=0");
+    assert_oracle_match(
+        "gradient_axis0_2d",
+        axis0_gradient.shape(),
+        axis0_gradient.values(),
+        1e-12,
+    );
+
+    let axis1 = array(&[2, 4], &[1.0, 3.0, 6.0, 10.0, 2.0, 5.0, 11.0, 23.0]);
+    let axis1_gradient = axis1.gradient_axis(Some(1)).expect("gradient axis=1");
+    assert_oracle_match(
+        "gradient_axis1_2d",
+        axis1_gradient.shape(),
+        axis1_gradient.values(),
+        1e-12,
+    );
+
+    let quadratic = array(&[5], &[0.0, 1.0, 4.0, 9.0, 16.0]);
+    let edge_order2 = quadratic
+        .gradient_advanced(None, 2, None)
+        .expect("uniform edge_order=2 gradient");
+    assert_oracle_match(
+        "gradient_uniform_edge_order2",
+        edge_order2.shape(),
+        edge_order2.values(),
+        1e-12,
+    );
+
+    let nonuniform = array(&[4], &[0.0, 1.0, 9.0, 36.0]);
+    let coords = [0.0, 1.0, 3.0, 6.0];
+    let nonuniform_edge_order2 = nonuniform
+        .gradient_advanced(None, 2, Some(&coords))
+        .expect("nonuniform edge_order=2 gradient");
+    assert_oracle_match(
+        "gradient_nonuniform_edge_order2",
+        nonuniform_edge_order2.shape(),
+        nonuniform_edge_order2.values(),
         1e-12,
     );
 }
