@@ -25,9 +25,9 @@ subsystem: `stride-tricks and broadcasting API`
 
 | lane | fixture family | objective | owner bead |
 |---|---|---|---|
-| Fuzz/property | packet-E stride/broadcast invariant corpus (planned) | detect malformed shape, overlap-risk, and no-broadcast invariant violations with shrinkable counterexamples | `bd-23m.17.5` |
-| Differential/metamorphic | packet-F oracle corpus for stride-tricks/broadcast API (planned) | enforce strict parity for success/failure classes and shape/readonly outcomes | `bd-23m.17.6` |
-| E2E/replay | packet-G stride-tricks + iterator workflow scenarios (planned) | verify strict/hardened replay and forensics traceability in integration paths | `bd-23m.17.7` |
+| Fuzz/property | packet-E stride/broadcast invariant corpus | detect malformed shape, overlap-risk, and no-broadcast invariant violations with shrinkable counterexamples | `bd-23m.17.5` |
+| Differential/metamorphic | packet-F oracle corpus for stride-tricks/broadcast API | enforce strict parity for success/failure classes and shape/readonly outcomes | `bd-23m.17.6` |
+| E2E/replay | packet-G stride-tricks + iterator workflow scenarios | verify strict/hardened replay and forensics traceability in integration paths | `bd-23m.17.7` |
 
 ## Residual Risks and Compensating Controls
 
@@ -91,6 +91,7 @@ subsystem: `stride-tricks and broadcasting API`
 - `artifacts/phase2c/FNP-P2C-006/parity_report.raptorq.json`
 - `artifacts/phase2c/FNP-P2C-006/parity_report.scrub_report.json`
 - `artifacts/phase2c/FNP-P2C-006/parity_report.decode_proof.json`
+- `artifacts/phase2c/FNP-P2C-006/final_evidence_pack.json`
 - `artifacts/phase2c/FNP-P2C-006/packet_readiness_report.json`
 - `artifacts/raptorq/conformance_bundle_v1.sidecar.json` (program-level baseline reference)
 - `artifacts/raptorq/conformance_bundle_v1.scrub_report.json` (program-level baseline reference)
