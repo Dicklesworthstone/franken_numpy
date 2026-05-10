@@ -30,7 +30,7 @@ subsystem: `RNG core and constructor contract`
 
 | lane | fixture family | objective | owner bead |
 |---|---|---|---|
-| Fuzz/property | packet-E RNG invariant corpus (planned) | detect constructor/state/spawn/jump determinism and schema edge violations | `bd-23m.18.5` |
+| Fuzz/property | packet-E RNG invariant corpus (implemented) | preserve landed constructor/state/spawn/jump determinism and schema-edge invariant evidence; expand fixture breadth when new supported RNG classes land | `bd-23m.18.5` |
 | Differential/metamorphic | packet-F RNG oracle corpus (implemented) | enforce strict parity for constructor/state/jump witness classes with gate-wired suite evidence | `bd-23m.18.6` |
 | E2E/replay | packet-G RNG workflow scenarios (implemented) | verify strict/hardened replay traceability and seed lineage forensics with packet-local artifact indexing and deterministic replay commands | `bd-23m.18.7` |
 
