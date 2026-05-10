@@ -26,14 +26,14 @@ This map captures concrete legacy NumPy anchors for reshape legality, `-1` infer
 
 ## Legacy-to-Rust Anchor Table
 
-| Legacy path | Symbol/anchor | Role in observable behavior | Planned Rust boundary |
+| Legacy path | Symbol/anchor | Role in observable behavior | Current Rust boundary |
 |---|---|---|---|
 | `legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c:200` | `PyArray_Newshape` | Public reshape entrypoint; enforces reshape order policy and delegates legality checks | `crates/fnp-ndarray/src/lib.rs` reshape legality kernel (`fix_unknown_dimension`, `element_count`) |
-| `legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c:246` | `_fix_unknown_dimension` callsite | Applies single-unknown-dimension inference and element-count consistency gate | `crates/fnp-ndarray/src/lib.rs:85` (`fix_unknown_dimension`) |
-| `legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c:271` | `_attempt_nocopy_reshape` callsite | Determines whether reshape can preserve buffer aliasing without copy | Packet-D implementation boundary (`bd-23m.12.4`) in `fnp-ndarray` |
-| `legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c:325` | `PyArray_Reshape` | Backward-compatible reshape API wrapper over `PyArray_Newshape` | `fnp-ndarray` public reshape adapter (planned in packet D) |
-| `legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c:360` | `_attempt_nocopy_reshape` | Alias-sensitive stride recomputation logic for no-copy transitions | `fnp-ndarray` alias/view legality module (planned in packet D/E) |
-| `legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c:467` | `_fix_unknown_dimension` | Canonical `-1` inference + size mismatch rejection (`cannot reshape ...`) | `crates/fnp-ndarray/src/lib.rs:85` with `ShapeError::IncompatibleElementCount` |
+| `legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c:246` | `_fix_unknown_dimension` callsite | Applies single-unknown-dimension inference and element-count consistency gate | `crates/fnp-ndarray/src/lib.rs:163` (`fix_unknown_dimension`) |
+| `legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c:271` | `_attempt_nocopy_reshape` callsite | Determines whether reshape can preserve buffer aliasing without copy | `NdLayout` view legality (`as_strided`, `broadcast_to`, `has_internal_overlap`) plus packet residual breadth tracking |
+| `legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c:325` | `PyArray_Reshape` | Backward-compatible reshape API wrapper over `PyArray_Newshape` | `fnp-ndarray` shape primitives and `fnp-python` wrapper parity paths built on current SCE contracts |
+| `legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c:360` | `_attempt_nocopy_reshape` | Alias-sensitive stride recomputation logic for no-copy transitions | `NdLayout::as_strided` bounds/negative-stride checks and overlap/read-only policy, with exact no-copy breadth still tracked as packet-local residual risk |
+| `legacy_numpy_code/numpy/numpy/_core/src/multiarray/shape.c:467` | `_fix_unknown_dimension` | Canonical `-1` inference + size mismatch rejection (`cannot reshape ...`) | `crates/fnp-ndarray/src/lib.rs:163` with `ShapeError::IncompatibleElementCount` |
 
 ## Oracle Test Anchors
 
@@ -50,12 +50,22 @@ This map captures concrete legacy NumPy anchors for reshape legality, `-1` infer
 
 | Rust path | Anchor | Coverage note |
 |---|---|---|
-| `crates/fnp-ndarray/src/lib.rs:43` | `broadcast_shape` / `broadcast_shapes` | deterministic broadcast legality and incompatibility rejection |
-| `crates/fnp-ndarray/src/lib.rs:85` | `fix_unknown_dimension` | single `-1` inference and element-count compatibility checks |
-| `crates/fnp-ndarray/src/lib.rs:133` | `contiguous_strides` | C/F contiguous stride derivation with overflow checks |
-| `crates/fnp-ndarray/src/lib.rs:223` | stride + `-1` inference unit tests | packet-local happy/edge behavior witnesses |
-| `crates/fnp-conformance/src/lib.rs:207` | `run_shape_stride_suite` | fixture-driven conformance check for broadcast + stride cases |
+| `crates/fnp-ndarray/src/lib.rs:97` | `broadcast_shape` | deterministic pairwise broadcast legality and incompatibility rejection |
+| `crates/fnp-ndarray/src/lib.rs:149` | `broadcast_shapes` | deterministic multi-input broadcast shape synthesis |
+| `crates/fnp-ndarray/src/lib.rs:157` | `element_count` | checked element cardinality for reshape compatibility |
+| `crates/fnp-ndarray/src/lib.rs:163` | `fix_unknown_dimension` | single `-1` inference and element-count compatibility checks |
+| `crates/fnp-ndarray/src/lib.rs:211` | `contiguous_strides` | C/F contiguous stride derivation with overflow checks |
+| `crates/fnp-ndarray/src/lib.rs:249` | `broadcast_strides` | zero-stride synthesis for broadcasted views |
+| `crates/fnp-ndarray/src/lib.rs:342` | `NdLayout` | shape/stride/item-size view contract with writeability and overlap metadata |
+| `crates/fnp-ndarray/src/lib.rs:372` | `NdLayout::as_strided` | bounds-checked strided view construction, including negative strides and overlap detection |
+| `crates/fnp-ndarray/src/lib.rs:391` | `NdLayout::broadcast_to` | broadcasted layout construction with zero-stride and overlap policy |
+| `crates/fnp-ndarray/src/lib.rs:726` | stride + `-1` inference unit tests | packet-local happy/edge behavior witnesses |
+| `crates/fnp-conformance/src/lib.rs:207` | `run_shape_stride_suite` | fixture-driven conformance check for broadcast + stride cases with replay fields |
 | `crates/fnp-conformance/fixtures/shape_stride_cases.json:1` | `shape_stride` fixture corpus | initial differential-like corpus for packet family |
+| `artifacts/phase2c/FNP-P2C-001/unit_property_evidence.json:1` | packet-E evidence | 8 shape invariant unit tests, 49 broadcast property checks, 3 fixture cases, structured log field coverage |
+| `artifacts/phase2c/FNP-P2C-001/differential_metamorphic_adversarial_evidence.json:1` | packet-F evidence | 10 differential cases, 26 metamorphic checks, and 7 adversarial checks all passing |
+| `artifacts/phase2c/FNP-P2C-001/e2e_replay_forensics_evidence.json:1` | packet-G evidence | 400 strict/hardened workflow checks covering replay and hostile guardrails |
+| `artifacts/phase2c/FNP-P2C-001/final_evidence_pack.json:1` | packet-I evidence | strict/hardened parity signals at 1.0 with no waivers and packet validation as a passing gate |
 
 ## Graveyard and FrankenSuite Mapping
 
@@ -66,6 +76,6 @@ This map captures concrete legacy NumPy anchors for reshape legality, `-1` infer
 
 ## Notes for Follow-on Packet Steps
 
-- Packet B must formalize strict/hardened invariant tables for alias-sensitive reshape transitions currently tracked as open ambiguity.
-- Packet E/F must expand beyond current fixture slices to full differential/metamorphic/adversarial coverage for reshape legality and broadcast edge matrices.
-- Packet G must attach replay-ready scenario traces linking shape-law failures to fixture IDs and reason codes.
+- Packet B/B-plus invariant tables are present in the current packet contract artifacts; future edits should keep strict/hardened rows aligned with the SCE contract.
+- Packet E/F have baseline unit/property, differential, metamorphic, and adversarial coverage. Remaining debt is breadth for exact NumPy no-copy reshape alias/view parity and larger broadcast edge matrices.
+- Packet G has replay-ready scenario traces with fixture IDs and reason codes. Remaining debt is scenario breadth as new shape-law failures are discovered.
