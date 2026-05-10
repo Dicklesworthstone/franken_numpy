@@ -29,15 +29,15 @@ subsystem: `NDIter traversal/index semantics`
 
 | lane | fixture family | objective | owner bead |
 |---|---|---|---|
-| Fuzz/property | packet-E iterator invariant corpus (planned) | discover malformed constructor/state/seek/overlap edge cases with shrinkable counterexamples | `bd-23m.15.5` |
-| Differential/metamorphic | packet-F nditer/flatiter/index-stream oracle corpus (planned) | enforce strict parity for success/failure classes and traversal/index streams | `bd-23m.15.6` |
+| Fuzz/property | landed iterator invariant corpus + packet-E expansion | discover malformed constructor/state/seek/overlap edge cases with shrinkable counterexamples | `bd-23m.15.5` |
+| Differential/metamorphic | landed NumPy smoke checks for iterator state/external-loop chunks + packet-F corpus expansion | enforce strict parity for success/failure classes and traversal/index streams | `bd-23m.15.6` |
 | E2E/replay | packet-G iterator workflow scenarios `nditer_packet_replay` + `nditer_packet_hostile_guardrails` | verify strict/hardened replay traceability and policy-forensics linkage | `bd-23m.15.7` |
 
 ## Residual Risks and Compensating Controls
 
 | residual_id | residual risk | compensating controls | closure gate |
 |---|---|---|---|
-| `P2C004-RES-01` | `fnp-iter` is still a stub, so full iterator state-machine parity is not yet implemented. | Keep unsupported iterator semantics fail-closed and block promotion until packet-D boundary skeleton lands. | `bd-23m.15.4` + packet-E baseline tests |
+| `P2C004-RES-01` | The `fnp-iter` NDIter core is implemented, but full `op_axes`/`itershape`/buffered operand parity is not yet closure-complete. | Keep unsupported iterator semantics fail-closed and require packet-local differential fixtures before promotion. | packet-E/F baseline expansion |
 | `P2C004-RES-02` | Full `op_axes`/`itershape` parity matrix remains partially unpinned in differential fixtures. | Expand contract rows + adversarial fixture taxonomy for complex remap/reduction shapes. | `bd-23m.15.6` |
 | `P2C004-RES-03` | Overlap-policy edge behavior can regress as scenario breadth grows across parity debt. | Maintain packet-G overlap replay scenarios with deterministic reason-code linkage and add profile-backed regressions checks. | `bd-23m.15.8` |
 | `P2C004-RES-04` | Error-text parity for all iterator edge cases is not yet closure-complete. | Maintain strict class/family parity gates and track message-level drift as explicit parity debt. | packet-I parity sign-off |
@@ -118,7 +118,7 @@ owner: `packet-004-maintainers`
 follow_up_gate: `bd-23m.11 readiness drill + packet-I residual risk review`
 
 follow_up_actions:
-- expand packet-004 workflow scenario breadth for iterator seek, overlap-policy, and hostile flatiter workflows before readiness drill sign-off.
+- expand packet-004 workflow scenario breadth for `op_axes`/`itershape`, iterator seek, overlap-policy, and hostile flatiter workflows before readiness drill sign-off.
 - recalibrate hardened iterator budget thresholds against the full adversarial iterator corpus and document drift trends.
 
 ## Rollback Handle

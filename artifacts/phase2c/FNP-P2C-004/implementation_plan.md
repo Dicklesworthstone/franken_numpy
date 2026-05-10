@@ -3,49 +3,53 @@
 packet_id: `FNP-P2C-004`  
 subsystem: `NDIter traversal/index semantics`
 
-## 1. Crate and Module Boundary Skeleton
+## 1. Crate and Module Boundary State
 
-| Crate | Planned module boundary | Responsibility | Public surface contract |
+| Crate | Boundary | Responsibility | Public surface contract |
 |---|---|---|---|
-| `crates/fnp-iter` | `nditer_state` (packet-D planned boundary; crate currently stub) | iterator constructor/state machine for flags/op_flags/op_axes/itershape, reset/seek/index-mode transitions | `NDIteratorBuilder`, `NDIterator`, `reset`, `goto_index`, `goto_multi_index`, `set_iterrange` (planned) |
-| `crates/fnp-iter` | `nditer_traversal_cursor` (packet-D planned boundary) | deterministic traversal cursor exposing `multi_index`, `c_index`, `f_index`, and external-loop compatible stepping | cursor/introspection APIs used by packet-E/F fixtures (planned) |
-| `crates/fnp-iter` | `flatiter_surface` (packet-D/E planned boundary) | flat iterator indexing/assignment compatibility envelope with stable error taxonomy | flat indexing/assignment contract entrypoints (planned) |
+| `crates/fnp-iter` | `NditerPlan` / `Nditer` (packet-D core landed) | iterator constructor/state machine for shape/order/external-loop planning, reset/seek/index-mode transitions, and deterministic step emission | `NditerPlan::new`, `linear_index_to_multi_index`, `multi_index_to_linear_index`, `Nditer::reset`, `set_iterindex`, `set_multi_index`, `iterindex`, `multi_index`, `Iterator<Item = NditerStep>` |
+| `crates/fnp-iter` | Python oracle bridge (packet-F baseline landed) | NumPy-backed comparison lane for local iterator state and external-loop chunk behavior | `nditer_python`, `nditer_python_with_interpreter`, `PythonNditer::steps`, `steps_from_iterindex`, `steps_from_multi_index` |
+| `crates/fnp-iter` | flatiter/index-stream surface (packet-D/E landed core, expansion ongoing) | flat iterator indexing/assignment compatibility envelope with stable error taxonomy | `FlatIter`, `FlatIndex`, `ndindex`, `ndenumerate`, transfer-plan helpers, overlap-policy helpers |
 | `crates/fnp-ndarray` | `shape_stride_core` (existing in `src/lib.rs`) | canonical shape/broadcast/stride calculus used by iterator planning and legality checks | `broadcast_shape`, `broadcast_shapes`, `contiguous_strides`, `element_count`, `NdLayout` |
-| `crates/fnp-ufunc` | `iterator_adapter` (packet-D planned boundary) | migration seam from local odometer traversal to shared iterator cursor without semantic drift | adapter surface for `elementwise_binary`/reduction traversal (planned) |
-| `crates/fnp-conformance` | `nditer_packet_suite` (packet-F planned boundary) | fixture-driven differential/metamorphic/adversarial coverage for iterator constructor/traversal/index/flatiter contracts | packet-F runner and packet-local fixture manifests (planned) |
-| `crates/fnp-conformance` | workflow scenario integration (existing + packet-G extension) | strict/hardened replay scenarios linking differential fixtures and e2e scripts | packet-G scenario entries in workflow corpus (planned) |
+| `crates/fnp-ufunc` | iterator-adjacent traversal adapters (migration ongoing) | migration seam from local odometer traversal to shared iterator cursor without semantic drift | current ufunc traversal remains behavior-preserving while packet integration expands |
+| `crates/fnp-conformance` | iterator smoke and packet evidence (packet-F baseline landed) | fixture-driven differential/metamorphic/adversarial coverage for iterator constructor/traversal/index/flatiter contracts | NumPy oracle smoke coverage for iterindex/multi-index progression, seek, and external-loop chunks; packet-local fixture breadth remains parity debt |
+| `crates/fnp-conformance` | workflow scenario integration (existing + packet-G extension) | strict/hardened replay scenarios linking differential fixtures and e2e scripts | packet-G scenario entries in workflow corpus; iterator-specific breadth expansion remains parity debt |
 | `crates/fnp-runtime` | policy/audit context (existing) | strict/hardened fail-closed mediation with reason-code and evidence logging for iterator policy decisions | `decide_and_record_with_context` integration from packet harnesses |
 
-## 2. Implementation Sequence (D-Stage to I-Stage)
+## 2. Implementation Sequence (Current D/F Baseline to I-Stage)
 
-1. Land packet-D module skeleton in `fnp-iter` (`nditer_state`, traversal cursor, flatiter boundary), with explicit TODO gates for deferred parity debt.
-2. Define constructor and state-transition error taxonomy aligned with contract rows `P2C004-R01`..`P2C004-R11`.
-3. Wire `fnp-iter` planning APIs to `fnp-ndarray` shape/stride primitives for deterministic legality checks.
-4. Introduce `fnp-ufunc` adapter seam so current traversal logic can migrate to iterator cursor incrementally without behavior changes in this bead.
-5. Add packet-F conformance harness placeholders and fixture schemas for iterator differential/metamorphic/adversarial suites.
-6. Add packet-G workflow scenario placeholders linking iterator fixture IDs to replay/e2e scripts and structured logging paths.
-7. Connect iterator policy decisions to runtime audit context (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`).
-8. Promote packet-H optimization artifacts only after baseline/profile/isomorphism evidence is available.
+1. Keep the landed packet-D `fnp-iter` core green: `NditerPlan`, `Nditer`, reset/seek, multi-index conversion, external-loop chunking, flatiter/index-stream helpers, and stable `NditerError` reason codes.
+2. Maintain constructor and state-transition error taxonomy alignment with contract rows `P2C004-R01`..`P2C004-R11`; unsupported option combinations must fail closed rather than silently degrade.
+3. Continue wiring iterator planning APIs through `fnp-ndarray` shape/stride primitives for deterministic legality checks.
+4. Expand `fnp-ufunc` adapter coverage so local odometer traversal can migrate to iterator cursor usage incrementally without behavior changes.
+5. Broaden packet-F conformance from the landed NumPy smoke checks into packet-local differential/metamorphic/adversarial fixtures for `op_axes`, `itershape`, no-broadcast, overlap, and flatiter assignment cases.
+6. Extend packet-G workflow scenarios linking iterator fixture IDs to replay/e2e scripts and structured logging paths.
+7. Connect iterator policy decisions to runtime audit context (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`) for hostile and replay lanes.
+8. Keep packet-H optimization artifacts gated by baseline/profile/isomorphism evidence.
 9. Close packet-I with parity summary + risk + durability sidecar/scrub/decode-proof artifacts.
 
 ## 3. Public Surface Contract Notes
 
 - Existing authoritative primitives remain:
+  - `NditerPlan`
+  - `Nditer`
+  - `NditerStep`
+  - `nditer_python_with_interpreter`
   - `broadcast_shape`
   - `broadcast_shapes`
   - `contiguous_strides`
   - `element_count`
   - `NdLayout`
-- Packet-D additions must remain contract-driven and clean-room (no compatibility shims).
+- Packet-D additions remain contract-driven and clean-room (no compatibility shims).
 - Unknown or incompatible iterator semantics remain fail-closed in both strict and hardened modes.
-- No `unsafe` pathways are introduced by the packet-D boundary skeleton.
+- No `unsafe` pathways are introduced by the packet-D iterator core.
 
 ## 4. Instrumentation Insertion Points
 
 | Lane | Insertion point | Evidence artifact target |
 |---|---|---|
-| Unit/property | `crates/fnp-iter/src/lib.rs` + packet-E test additions | packet-E test evidence + reason-code matrix |
-| Differential/metamorphic/adversarial | packet-F runner additions under `crates/fnp-conformance` + packet fixtures | packet-F parity reports and fixture manifests |
+| Unit/property | `crates/fnp-iter/src/lib.rs` + `crates/fnp-iter/tests/metamorphic_iter.rs` + packet-E test additions | packet-E test evidence + reason-code matrix |
+| Differential/metamorphic/adversarial | NumPy iterator smoke checks in `crates/fnp-conformance/tests/smoke.rs` + packet-F runner additions under `crates/fnp-conformance` + packet fixtures | packet-F parity reports and fixture manifests |
 | E2E/replay | packet-G workflow scenario corpus + e2e scripts in `scripts/e2e/` | replay logs under `artifacts/logs/` |
 | Runtime policy audit | `fnp-runtime` decision/audit logging from packet suites | security gate and policy evidence ledger outputs |
 
@@ -73,14 +77,14 @@ All emissions must include:
 - Replay/security logs: `artifacts/logs/`
 - Durability artifacts: `artifacts/raptorq/` + packet-I packet-local outputs
 
-## 7. Compile-Safe Skeleton Validation
+## 7. Evidence Refresh Validation
 
 - Planning-stage validation rules:
-  - no behavior-changing API migration is shipped in this bead;
+  - no behavior-changing API migration is shipped by evidence refreshes;
   - packet boundaries and reason-code taxonomy remain internally consistent;
-  - packet validator continues to report complete artifact fields for `FNP-P2C-004` (packet status may remain `not_ready` until downstream E-I artifacts land).
+  - packet validator continues to report complete artifact fields for `FNP-P2C-004`.
 - Validation command (offloaded via `rch`):  
-  `rch exec -- cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-004`
+  `rch cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-004`
 
 ## 8. Alien Recommendation Contract Guardrails
 
@@ -95,6 +99,6 @@ All emissions must include:
 - Rollback command path:  
   `git restore --source <last-green-commit> -- artifacts/phase2c/FNP-P2C-004/implementation_plan.md`
 - Baseline comparator to beat/restore:
-  - last green `rch exec -- cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-004` report,
+  - last green `rch cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-004` report,
   - plus last green packet-linked security/workflow gate artifacts.
 - If comparator fails, restore the prior planning baseline and re-run packet validation before continuing.
