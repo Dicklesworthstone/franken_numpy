@@ -23,17 +23,17 @@ subsystem: `dtype descriptors and promotion`
 
 | lane | fixture family | objective | owner bead |
 |---|---|---|---|
-| Fuzz/property | packet-E dtype property corpus (planned) | detect cast-table and normalization invariant violations with shrinkable counterexamples | `bd-23m.13.5` |
-| Differential/metamorphic | packet-F dtype promotion/cast oracle corpus (planned) | enforce strict parity for promotion/cast outcomes and failure classes | `bd-23m.13.6` |
-| E2E/replay | packet-G mixed-dtype pipeline scenarios (planned) | verify strict/hardened replay and policy-forensics traceability | `bd-23m.13.7` |
+| Fuzz/property | packet-E dtype property corpus | detect cast-table and normalization invariant violations with replayable structured logs | `unit_property_evidence.json` |
+| Differential/metamorphic | packet-F dtype promotion/cast oracle corpus | enforce strict parity for promotion/cast outcomes and failure classes across the current fixture matrix | `differential_metamorphic_adversarial_evidence.json` |
+| E2E/replay | packet-G mixed-dtype pipeline scenarios | verify strict/hardened replay and policy-forensics traceability through dtype fixture journeys | `e2e_replay_forensics_evidence.json` + `workflow_scenario_packet002_*` artifacts |
 
 ## Residual Risks and Compensating Controls
 
 | residual_id | residual risk | compensating controls | closure gate |
 |---|---|---|---|
 | `P2C002-RES-01` | Full legacy cast-table parity remains incomplete beyond scoped subset | keep out-of-scope cast combinations fail-closed and explicitly logged | `bd-23m.13.4` + `bd-23m.13.5` |
-| `P2C002-RES-02` | Structured dtype cast semantics not yet fully represented in packet fixtures | enforce strict contract rows + expand unit/property + differential coverage | `bd-23m.13.5` and `bd-23m.13.6` |
-| `P2C002-RES-03` | Promotion edge behavior for exotic/weak scalar interactions may drift without full oracle matrix | add metamorphic permutation checks and deterministic drift gates | `bd-23m.13.6` strict drift gate green |
+| `P2C002-RES-02` | Structured dtype cast semantics have current packet coverage but not full legacy breadth | enforce strict contract rows + expand unit/property + differential coverage | packet-E/F evidence green plus expanded structured-dtype oracle matrix |
+| `P2C002-RES-03` | Promotion edge behavior for exotic/weak scalar interactions may drift without full oracle matrix | maintain metamorphic permutation checks and deterministic drift gates | packet-F strict drift gate green plus expanded weak-scalar fixtures |
 
 ## oracle_tests
 
@@ -43,8 +43,10 @@ subsystem: `dtype descriptors and promotion`
 
 ## raptorq_artifacts
 
-- `artifacts/phase2c/FNP-P2C-002/parity_report.raptorq.json` (planned at packet-I)
-- `artifacts/phase2c/FNP-P2C-002/parity_report.decode_proof.json` (planned at packet-I)
+- `artifacts/phase2c/FNP-P2C-002/parity_report.raptorq.json`
+- `artifacts/phase2c/FNP-P2C-002/parity_report.scrub_report.json`
+- `artifacts/phase2c/FNP-P2C-002/parity_report.decode_proof.json`
+- `artifacts/phase2c/FNP-P2C-002/final_evidence_pack.json`
 - `artifacts/raptorq/conformance_bundle_v1.sidecar.json` (program-level baseline reference)
 - `artifacts/raptorq/conformance_bundle_v1.scrub_report.json` (program-level baseline reference)
 - `artifacts/raptorq/conformance_bundle_v1.decode_proof.json` (program-level baseline reference)
