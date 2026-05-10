@@ -129,6 +129,66 @@ impl PortingLedgerFreshnessReport {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Phase2cEvidenceConvergencePacket {
+    pub packet_id: String,
+    pub readiness_status: String,
+    pub missing_artifacts_count: usize,
+    pub missing_fields_count: usize,
+    pub parse_errors_count: usize,
+    pub ledger_status_summary: String,
+    pub residual_debt_summary: String,
+    pub required_artifact_paths: Vec<String>,
+    pub stale_diagnostics_count: usize,
+    pub suggested_next_action: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Phase2cEvidenceConvergenceReport {
+    pub schema_version: u8,
+    pub ledger_path: String,
+    pub phase2c_root: String,
+    pub packet_count: usize,
+    pub ready_packet_count: usize,
+    pub stale_packet_count: usize,
+    pub packets: Vec<Phase2cEvidenceConvergencePacket>,
+    pub checked_at_unix_ms: u128,
+}
+
+impl Phase2cEvidenceConvergenceReport {
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        let mut lines = vec![
+            "# Phase2C Evidence Convergence Report".to_string(),
+            String::new(),
+            format!("- packet_count: {}", self.packet_count),
+            format!("- ready_packet_count: {}", self.ready_packet_count),
+            format!("- stale_packet_count: {}", self.stale_packet_count),
+            String::new(),
+            "| packet_id | readiness | missing artifacts | missing fields | parse errors | stale diagnostics | ledger status | residual debt | suggested next action |".to_string(),
+            "|---|---:|---:|---:|---:|---:|---|---|---|".to_string(),
+        ];
+
+        for packet in &self.packets {
+            lines.push(format!(
+                "| `{}` | {} | {} | {} | {} | {} | {} | {} | {} |",
+                packet.packet_id,
+                packet.readiness_status,
+                packet.missing_artifacts_count,
+                packet.missing_fields_count,
+                packet.parse_errors_count,
+                packet.stale_diagnostics_count,
+                markdown_escape_table_cell(&packet.ledger_status_summary),
+                markdown_escape_table_cell(&packet.residual_debt_summary),
+                markdown_escape_table_cell(&packet.suggested_next_action),
+            ));
+        }
+
+        lines.push(String::new());
+        lines.join("\n")
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FixtureManifest {
@@ -771,6 +831,100 @@ pub fn write_porting_ledger_freshness_report(
         .map_err(|err| format!("failed writing {}: {err}", output_path.display()))
 }
 
+pub fn build_phase2c_evidence_convergence_report(
+    ledger_path: &Path,
+    phase2c_root: &Path,
+) -> Result<Phase2cEvidenceConvergenceReport, String> {
+    let ledger = fs::read_to_string(ledger_path)
+        .map_err(|err| format!("failed reading {}: {err}", ledger_path.display()))?;
+    let readiness_reports = read_ready_packet_reports(phase2c_root)?;
+    let rows = parse_packet_rows(&ledger);
+    let freshness_report = validate_phase2c_porting_ledger(ledger_path, phase2c_root)?;
+    let stale_counts = stale_diagnostic_counts_by_packet(&freshness_report);
+
+    let mut packets = Vec::new();
+    for (packet_id, readiness) in &readiness_reports {
+        let row = rows.get(packet_id);
+        let stale_diagnostics_count = *stale_counts.get(packet_id).unwrap_or(&0);
+        let readiness_is_clean = readiness.is_ready()
+            && readiness.missing_artifacts.is_empty()
+            && readiness.missing_fields.is_empty()
+            && readiness.parse_errors.is_empty();
+
+        packets.push(Phase2cEvidenceConvergencePacket {
+            packet_id: packet_id.clone(),
+            readiness_status: readiness.status.clone(),
+            missing_artifacts_count: readiness.missing_artifacts.len(),
+            missing_fields_count: readiness.missing_fields.len(),
+            parse_errors_count: readiness.parse_errors.len(),
+            ledger_status_summary: row
+                .map(|packet_row| packet_row.current_evidence_refs.clone())
+                .unwrap_or_else(|| "missing central ledger row".to_string()),
+            residual_debt_summary: row
+                .map(|packet_row| packet_row.parity_debt_status.clone())
+                .unwrap_or_else(|| "missing central ledger row".to_string()),
+            required_artifact_paths: required_artifact_paths(phase2c_root, packet_id),
+            stale_diagnostics_count,
+            suggested_next_action: suggested_convergence_action(
+                readiness_is_clean,
+                row.is_some(),
+                stale_diagnostics_count,
+            )
+            .to_string(),
+        });
+    }
+
+    packets.sort_by(|lhs, rhs| lhs.packet_id.cmp(&rhs.packet_id));
+
+    Ok(Phase2cEvidenceConvergenceReport {
+        schema_version: 1,
+        ledger_path: ledger_path.display().to_string(),
+        phase2c_root: phase2c_root.display().to_string(),
+        packet_count: packets.len(),
+        ready_packet_count: packets
+            .iter()
+            .filter(|packet| {
+                packet.readiness_status == "ready"
+                    && packet.missing_artifacts_count == 0
+                    && packet.missing_fields_count == 0
+                    && packet.parse_errors_count == 0
+            })
+            .count(),
+        stale_packet_count: packets
+            .iter()
+            .filter(|packet| packet.stale_diagnostics_count > 0)
+            .count(),
+        packets,
+        checked_at_unix_ms: now_unix_ms(),
+    })
+}
+
+pub fn write_phase2c_evidence_convergence_report_json(
+    output_path: &Path,
+    report: &Phase2cEvidenceConvergenceReport,
+) -> Result<(), String> {
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+    let raw = serde_json::to_string_pretty(report)
+        .map_err(|err| format!("failed serializing convergence report: {err}"))?;
+    fs::write(output_path, raw)
+        .map_err(|err| format!("failed writing {}: {err}", output_path.display()))
+}
+
+pub fn write_phase2c_evidence_convergence_report_markdown(
+    output_path: &Path,
+    report: &Phase2cEvidenceConvergenceReport,
+) -> Result<(), String> {
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("failed creating {}: {err}", parent.display()))?;
+    }
+    fs::write(output_path, report.to_markdown())
+        .map_err(|err| format!("failed writing {}: {err}", output_path.display()))
+}
+
 #[derive(Debug, Clone)]
 struct PacketLedgerRow {
     line_number: usize,
@@ -888,11 +1042,56 @@ fn stale_packet_status_phrases() -> Vec<String> {
     .collect()
 }
 
+fn stale_diagnostic_counts_by_packet(
+    report: &PortingLedgerFreshnessReport,
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for diagnostic in &report.diagnostics {
+        *counts.entry(diagnostic.packet_id.clone()).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn required_artifact_paths(phase2c_root: &Path, packet_id: &str) -> Vec<String> {
+    REQUIRED_FILES
+        .iter()
+        .map(|required| {
+            phase2c_root
+                .join(packet_id)
+                .join(required)
+                .display()
+                .to_string()
+        })
+        .collect()
+}
+
+fn suggested_convergence_action(
+    readiness_is_clean: bool,
+    has_ledger_row: bool,
+    stale_diagnostics_count: usize,
+) -> &'static str {
+    if !readiness_is_clean {
+        "complete required packet artifacts before using the central ledger as ready evidence"
+    } else if !has_ledger_row {
+        "add the ready packet to the central Phase2C porting ledger"
+    } else if stale_diagnostics_count > 0 {
+        "refresh stale central-ledger status text to match ready packet evidence"
+    } else {
+        "no stale-evidence action; continue burning down explicit residual parity debt"
+    }
+}
+
+fn markdown_escape_table_cell(value: &str) -> String {
+    value.replace('|', "\\|").replace('\n', " ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        PacketReadinessReport, validate_phase2c_packet, validate_phase2c_porting_ledger,
-        write_packet_readiness_report, write_porting_ledger_freshness_report,
+        PacketReadinessReport, build_phase2c_evidence_convergence_report, validate_phase2c_packet,
+        validate_phase2c_porting_ledger, write_packet_readiness_report,
+        write_phase2c_evidence_convergence_report_json,
+        write_phase2c_evidence_convergence_report_markdown, write_porting_ledger_freshness_report,
     };
     use std::fs;
     use std::path::Path;
@@ -1147,5 +1346,111 @@ mod tests {
         let out = root.join("report.json");
         write_porting_ledger_freshness_report(&out, &report).expect("write report");
         assert!(out.exists());
+    }
+
+    #[test]
+    fn convergence_report_summarizes_clean_ready_packet() {
+        let root = temp_dir("convergence_clean");
+        let phase2c_root = root.join("artifacts/phase2c");
+        let ledger_path = root.join("PORTING_ESSENCE_EXTRACTION_LEDGER_V1.md");
+        write_readiness_report(&phase2c_root, "FNP-P2C-004", "ready", Vec::new());
+        write(
+            &ledger_path,
+            &packet_ledger_row(
+                "FNP-P2C-004",
+                "final_evidence_pack.json and packet_readiness_report.json",
+                "ready: packet evidence validator-clean; residual iterator breadth remains explicit",
+            ),
+        );
+
+        let report = build_phase2c_evidence_convergence_report(&ledger_path, &phase2c_root)
+            .expect("build convergence report");
+        assert_eq!(report.packet_count, 1);
+        assert_eq!(report.ready_packet_count, 1);
+        assert_eq!(report.stale_packet_count, 0);
+
+        let packet = report.packets.first().expect("one packet report");
+        assert_eq!(packet.packet_id, "FNP-P2C-004");
+        assert_eq!(packet.readiness_status, "ready");
+        assert_eq!(packet.missing_artifacts_count, 0);
+        assert_eq!(packet.missing_fields_count, 0);
+        assert_eq!(packet.parse_errors_count, 0);
+        assert!(packet.ledger_status_summary.contains("final_evidence_pack"));
+        assert!(packet.residual_debt_summary.contains("residual iterator"));
+        assert_eq!(
+            packet.required_artifact_paths.len(),
+            super::REQUIRED_FILES.len()
+        );
+        assert_eq!(
+            packet.suggested_next_action,
+            "no stale-evidence action; continue burning down explicit residual parity debt"
+        );
+
+        let json_out = root.join("convergence.json");
+        let markdown_out = root.join("convergence.md");
+        write_phase2c_evidence_convergence_report_json(&json_out, &report).expect("write json");
+        write_phase2c_evidence_convergence_report_markdown(&markdown_out, &report)
+            .expect("write markdown");
+        assert!(json_out.exists());
+        assert!(markdown_out.exists());
+        assert!(
+            fs::read_to_string(markdown_out)
+                .expect("read markdown")
+                .contains("| `FNP-P2C-004` | ready |")
+        );
+    }
+
+    #[test]
+    fn convergence_report_recommends_refresh_for_stale_ready_packet() {
+        let root = temp_dir("convergence_stale");
+        let phase2c_root = root.join("artifacts/phase2c");
+        let ledger_path = root.join("PORTING_ESSENCE_EXTRACTION_LEDGER_V1.md");
+        write_readiness_report(&phase2c_root, "FNP-P2C-005", "ready", Vec::new());
+        write(
+            &ledger_path,
+            &packet_ledger_row(
+                "FNP-P2C-005",
+                "anchor-only evidence; missing artifacts",
+                "open / partial",
+            ),
+        );
+
+        let report = build_phase2c_evidence_convergence_report(&ledger_path, &phase2c_root)
+            .expect("build convergence report");
+        let packet = report.packets.first().expect("one packet report");
+        assert_eq!(report.stale_packet_count, 1);
+        assert!(packet.stale_diagnostics_count > 0);
+        assert_eq!(
+            packet.suggested_next_action,
+            "refresh stale central-ledger status text to match ready packet evidence"
+        );
+    }
+
+    #[test]
+    fn convergence_report_recommends_artifact_completion_for_not_ready_packet() {
+        let root = temp_dir("convergence_not_ready");
+        let phase2c_root = root.join("artifacts/phase2c");
+        let ledger_path = root.join("PORTING_ESSENCE_EXTRACTION_LEDGER_V1.md");
+        write_readiness_report(
+            &phase2c_root,
+            "FNP-P2C-006",
+            "not_ready",
+            vec!["parity_report.json".to_string()],
+        );
+        write(
+            &ledger_path,
+            &packet_ledger_row("FNP-P2C-006", "anchor-only evidence", "open / partial"),
+        );
+
+        let report = build_phase2c_evidence_convergence_report(&ledger_path, &phase2c_root)
+            .expect("build convergence report");
+        let packet = report.packets.first().expect("one packet report");
+        assert_eq!(report.ready_packet_count, 0);
+        assert_eq!(report.stale_packet_count, 0);
+        assert_eq!(packet.missing_artifacts_count, 1);
+        assert_eq!(
+            packet.suggested_next_action,
+            "complete required packet artifacts before using the central ledger as ready evidence"
+        );
     }
 }
