@@ -25,31 +25,31 @@ Subsystem: `Stride-tricks and broadcasting API`
 5. No-broadcast invariant: operands marked non-broadcastable cannot be implicitly expanded.
 6. Iterator traversal invariant: compatible strides and exposed shape remain consistent with iterator traversal order.
 
-## 3. Undefined or Under-Specified Edges (Tagged)
+## 3. Resolved Edges and Residual Breadth (Tagged)
 
-| Unknown ID | Description | Risk | Owner bead | Closure criteria |
+| Edge ID | Current status | Risk | Evidence owner | Residual criteria |
 |---|---|---|---|---|
 | `P2C006-U01` | Legacy warning behavior around `broadcast_arrays` writeability (`FutureWarning`/`DeprecationWarning`) is subtle and version-sensitive. | medium | `bd-23m.17.2` | Contract table formalizes warning-class handling and reason-code normalization policy for strict/hardened replay. |
-| `P2C006-U02` | Full `op_axes` remap semantics and reduction-axis markers in iterator paths are not yet represented in Rust. | high | `bd-23m.17.4` | Rust module boundary skeleton encodes axis-remap, forced-reduction, and no-broadcast decision points with explicit tests. |
-| `P2C006-U03` | High-arity broadcast behavior (`>64` args) needs explicit parity corpus and mismatch minimization strategy. | medium | `bd-23m.17.6` | Differential/adversarial fixtures include high-arity cases and reproducer artifacts with stable reduction to minimal failing tuples. |
-| `P2C006-U04` | Exact policy for dangerous writeable overlapping stride views (`as_strided`) in hardened mode needs closure. | high | `bd-23m.17.3` | Threat model + allowlist contract defines fail-closed/full-validate boundaries for overlap-risk operations. |
-| `P2C006-U05` | End-to-end replay narratives for stride-tricks + iterator interoperability are absent. | medium | `bd-23m.17.7` | Add e2e journey scripts with deterministic replay metadata and links to unit/differential artifacts. |
+| `P2C006-U02` | `op_axes` remap and reduction-axis marker coverage exists for the current packet scope; full iterator-path parity breadth remains residual. | high | packet-D/F evidence | expand oracle fixtures for axis-remap, forced-reduction, and no-broadcast decision points |
+| `P2C006-U03` | High-arity broadcast behavior has current differential/adversarial coverage, including high-rank broadcast fixture evidence. | medium | `differential_metamorphic_adversarial_evidence.json` | extend `>64` operand corpus and mismatch minimization artifacts |
+| `P2C006-U04` | Dangerous writeable overlapping stride-view policy has threat controls and Packet-H replay/isomorphism evidence; broader overlap integrations remain monitored. | medium | risk note + workflow artifacts | keep fail-closed/full-validate boundaries stable while adding deeper overlap-risk replay coverage |
+| `P2C006-U05` | End-to-end replay narratives for stride-tricks + iterator interoperability are present through packet workflow artifacts. | low | `workflow_scenario_packet006_*` artifacts | expand journey breadth for hostile broadcast/stride and iterator-sensitive view integrations |
 
-## 4. Planned Verification Hooks
+## 4. Verification Hooks
 
-| Verification lane | Planned hook | Artifact target |
+| Verification lane | Hook | Artifact target |
 |---|---|---|
-| Unit/property | Add stride-tricks API law tests: readonly, no-broadcast mismatch classes, dtype-preservation, and high-arity broadcast-shapes | `crates/fnp-conformance/fixtures/shape_stride_cases.json` expansion + packet-E tests (`bd-23m.17.5`) |
-| Differential/metamorphic/adversarial | Compare `broadcast_to`/`broadcast_arrays`/`broadcast_shapes` results and error families against oracle across adversarial shape corpora | `crates/fnp-conformance/src/ufunc_differential.rs` packet-F extension + dedicated fixture corpus (`bd-23m.17.6`) |
-| E2E | Add packet journey spanning `as_strided` -> broadcast operations -> iterator-consuming operation with strict/hardened replay logs | `scripts/e2e/run_workflow_scenario_gate.sh` scenario additions (`bd-23m.17.7`) |
-| Structured logging | Ensure tests and e2e artifacts emit `fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code` | `artifacts/contracts/test_logging_contract_v1.json`, `crates/fnp-conformance/src/lib.rs` runtime log plumbing |
+| Unit/property | stride-tricks API law tests for readonly, no-broadcast mismatch classes, dtype preservation, high-arity broadcast shapes, and reason-code logging | packet-E evidence and `crates/fnp-conformance/fixtures/shape_stride_cases.json` |
+| Differential/metamorphic/adversarial | `broadcast_to`/`broadcast_arrays`/`broadcast_shapes` result and error-family comparisons against oracle across adversarial shape corpora | `differential_metamorphic_adversarial_evidence.json` |
+| E2E/workflow | packet journeys spanning `as_strided`, broadcast operations, and iterator-consuming paths with strict/hardened replay logs | `workflow_scenario_packet006_*` artifacts |
+| Structured logging | ensure tests and e2e artifacts emit `fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code` | `artifacts/contracts/test_logging_contract_v1.json`, test-contract gate outputs |
 
 ## 5. Method-Stack Artifacts and EV Gate
 
 - Alien decision contract: any hardened-mode mitigation on stride-tricks/broadcast boundaries must record state, action, expected-loss rationale, and replay metadata.
 - Optimization gate: no stride/broadcast optimization accepted without baseline/profile + one lever + isomorphism proof.
 - EV gate: optimization levers promoted only when `EV >= 2.0`; otherwise tracked as deferred parity debt.
-- RaptorQ scope: packet closure (`bd-23m.17.9`) must include sidecar/scrub/decode-proof for final evidence bundle.
+- RaptorQ scope: packet closure (`bd-23m.17.9`) includes sidecar/scrub/decode-proof for final evidence bundle.
 
 ### Packet-H Closure (`bd-23m.17.8`)
 
