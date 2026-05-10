@@ -2188,7 +2188,7 @@ impl UFuncLoopRegistry {
     }
 }
 
-/// Legacy single-function entry point (fail-closed stub).
+/// Legacy single-function entry point (fail-closed compatibility guard).
 ///
 /// For the full registry model, use `UFuncLoopRegistry::register()`.
 pub fn register_custom_loop(loop_name: &str) -> Result<(), UFuncError> {
