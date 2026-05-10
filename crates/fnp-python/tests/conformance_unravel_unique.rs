@@ -437,19 +437,27 @@ print(np.array_equal(result, expected))
 }
 
 #[test]
-fn unique_values_sorted() -> Result<(), String> {
+fn unique_values_matches_numpy_set_semantics() -> Result<(), String> {
+    // numpy 2.x's unique_values follows the Array API standard, which only
+    // requires set equality — not sorted output. fnp.unique_values must
+    // match numpy's actual return order (whatever it is) and produce the
+    // same multiset as numpy when sorted.
     let script = fnp_script(
         r#"
 a = np.array([5, 3, 1, 4, 2])
 result = fnp.unique_values(a)
 expected = np.unique_values(a)
-is_sorted = np.all(result[:-1] <= result[1:])
-print(np.array_equal(result, expected) and is_sorted)
+print(np.array_equal(result, expected) and
+      np.array_equal(np.sort(result), np.sort(expected)))
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unique_values should be sorted");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique_values must match numpy's return order and set"
+    );
     Ok(())
 }
 
@@ -491,6 +499,11 @@ print(np.array_equal(result, expected))
 
 #[test]
 fn unique_functions_consistent() -> Result<(), String> {
+    // numpy 2.x's unique_all/unique_counts/unique_inverse return sorted
+    // values, but unique_values follows the Array API spec and is allowed
+    // to be unsorted. So the cross-function invariant is set equality on
+    // values plus exact equality on counts/inverse_indices (which use the
+    // canonical sorted ordering).
     let script = fnp_script(
         r#"
 a = np.array([1, 2, 2, 3, 1, 4, 3, 2])
@@ -498,8 +511,10 @@ all_result = fnp.unique_all(a)
 counts_result = fnp.unique_counts(a)
 inverse_result = fnp.unique_inverse(a)
 values_result = fnp.unique_values(a)
-match = (np.array_equal(all_result.values, values_result) and
+match = (np.array_equal(np.sort(all_result.values), np.sort(values_result)) and
+         np.array_equal(all_result.values, counts_result.values) and
          np.array_equal(all_result.counts, counts_result.counts) and
+         np.array_equal(all_result.values, inverse_result.values) and
          np.array_equal(all_result.inverse_indices, inverse_result.inverse_indices))
 print(match)
 "#
