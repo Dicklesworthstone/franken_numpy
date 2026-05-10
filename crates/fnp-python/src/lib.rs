@@ -7646,12 +7646,13 @@ fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, indices, axis=None))]
+#[pyo3(signature = (a, indices, axis=None, mode="raise"))]
 fn take(
     py: Python<'_>,
     a: Py<PyAny>,
     indices: Py<PyAny>,
     axis: Option<isize>,
+    mode: &str,
 ) -> PyResult<Py<PyAny>> {
     let a_for_fallback = a.clone_ref(py);
     let indices_for_fallback = indices.clone_ref(py);
@@ -7661,6 +7662,7 @@ fn take(
         if let Some(axis) = axis {
             kwargs.set_item("axis", axis)?;
         }
+        kwargs.set_item("mode", mode)?;
         Ok(numpy
             .getattr("take")?
             .call(
@@ -7669,6 +7671,9 @@ fn take(
             )?
             .unbind())
     };
+    if mode != "raise" {
+        return fallback();
+    }
     let a = extract_numeric_array(py, a.bind(py), "take(a)")?;
     let (indices_shape, flat_indices) =
         extract_take_indices(py, indices.bind(py), "take(indices)")?;
@@ -9627,9 +9632,28 @@ fn compress(
     a: Py<PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Py<PyAny>> {
+    let condition_for_fallback = condition.clone_ref(py);
+    let a_for_fallback = a.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        if let Some(axis) = axis {
+            kwargs.set_item("axis", axis)?;
+        }
+        Ok(numpy
+            .getattr("compress")?
+            .call(
+                (condition_for_fallback.bind(py), a_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
     let condition = extract_condition_mask(py, condition.bind(py), "compress(condition)")?;
     let a = extract_numeric_array(py, a.bind(py), "compress(a)")?;
-    let result = a.compress(&condition, axis).map_err(map_ufunc_error)?;
+    let result = match a.compress(&condition, axis) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -17438,11 +17462,6 @@ fn loadtxt(
     let text: String = if let Ok(s) = fname_bound.extract::<String>() {
         // Treat as file path.
         match std::fs::read_to_string(&s) {
-            Ok(value) => value,
-            Err(_) => return fallback(py),
-        }
-    } else if let Ok(result) = fname_bound.call_method0("read") {
-        match result.extract::<String>() {
             Ok(value) => value,
             Err(_) => return fallback(py),
         }
@@ -41059,7 +41078,13 @@ mod tests {
                 "int64",
             );
             let indices = numeric_array(py, vec![vec![2_i64, 0_i64], vec![1_i64, 1_i64]], "int64");
-            let actual = take(py, arr.clone().unbind(), indices.clone().unbind(), None)?;
+            let actual = take(
+                py,
+                arr.clone().unbind(),
+                indices.clone().unbind(),
+                None,
+                "raise",
+            )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("take", (arr, indices))?;
 
@@ -41093,6 +41118,7 @@ mod tests {
                 arr.clone().unbind(),
                 index.clone_ref(py).into(),
                 Some(1),
+                "raise",
             )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method(
@@ -41130,7 +41156,13 @@ mod tests {
                 "int64",
             );
             let indices = numeric_array(py, vec![vec![2_i64, 0_i64], vec![1_i64, 1_i64]], "int64");
-            let actual = take(py, arr.clone().unbind(), indices.clone().unbind(), Some(1))?;
+            let actual = take(
+                py,
+                arr.clone().unbind(),
+                indices.clone().unbind(),
+                Some(1),
+                "raise",
+            )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method(
                 "take",
@@ -41164,7 +41196,13 @@ mod tests {
             let large = (1_u64 << 63) + 5;
             let arr = numeric_array(py, vec![large, 7_u64, 9_u64], "uint64");
             let indices = numeric_array(py, vec![0_i64, 2_i64], "int64");
-            let actual = take(py, arr.clone().unbind(), indices.clone().unbind(), None)?;
+            let actual = take(
+                py,
+                arr.clone().unbind(),
+                indices.clone().unbind(),
+                None,
+                "raise",
+            )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("take", (arr, indices))?;
 

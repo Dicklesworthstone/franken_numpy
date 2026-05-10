@@ -233,12 +233,7 @@ pub fn expectations_from_diagnostic_cases(cases: &[DiagnosticCase]) -> Vec<Diver
 
 #[must_use]
 pub fn default_diagnostic_expectations() -> Vec<DivergenceExpectation> {
-    vec![DivergenceExpectation {
-        case_id: "fnp-python-indexing-text-io-diagnostic-classes".to_string(),
-        surface: "fnp-python indexing/text IO diagnostics".to_string(),
-        disposition: DivergenceDisposition::ParityDebt,
-        ledger_id: "PD-09EPN".to_string(),
-    }]
+    Vec::new()
 }
 
 #[must_use]

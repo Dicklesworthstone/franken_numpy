@@ -229,6 +229,22 @@ cases = [
         lambda: compare(lambda: fnp.take(np.array([1, 2]), [5]), lambda: np.take(np.array([1, 2]), [5])),
     ),
     (
+        "take_bad_mode_valueerror",
+        "indexing",
+        lambda: compare(
+            lambda: fnp.take(np.array([1, 2]), [0], mode="not-a-mode"),
+            lambda: np.take(np.array([1, 2]), [0], mode="not-a-mode"),
+        ),
+    ),
+    (
+        "compress_axis_oob_axiserror",
+        "indexing",
+        lambda: compare(
+            lambda: fnp.compress([True, False], np.array([[1, 2], [3, 4]]), axis=5),
+            lambda: np.compress([True, False], np.array([[1, 2], [3, 4]]), axis=5),
+        ),
+    ),
+    (
         "take_along_axis_oob_indexerror",
         "indexing",
         lambda: compare(
@@ -312,6 +328,14 @@ cases = [
         lambda: compare(
             lambda: fnp.choose([0, 1], [np.array([1, 2]), np.array([3, 4])], mode="not-a-mode"),
             lambda: np.choose([0, 1], [np.array([1, 2]), np.array([3, 4])], mode="not-a-mode"),
+        ),
+    ),
+    (
+        "loadtxt_bad_token_valueerror",
+        "text-io",
+        lambda: compare(
+            lambda: fnp.loadtxt(io.StringIO("a b")),
+            lambda: np.loadtxt(io.StringIO("a b")),
         ),
     ),
     (
