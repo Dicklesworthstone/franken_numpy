@@ -22,30 +22,30 @@ Subsystem: `Dtype descriptors and promotion`
 4. Error-class stability invariant: incompatible promotion and cast-failure classes remain stable across strict/hardened modes.
 5. Descriptor normalization invariant: canonical parse output for supported dtype identifiers is unique and deterministic.
 
-## 3. Undefined or Under-Specified Edges (Tagged)
+## 3. Resolved Edges and Residual Breadth (Tagged)
 
-| Unknown ID | Description | Risk | Owner bead | Closure criteria |
+| Edge ID | Current status | Risk | Evidence owner | Residual criteria |
 |---|---|---|---|---|
-| `P2C002-U01` | Full legacy cast-table parity is not yet represented (current Rust matrix is intentionally scoped subset). | high | `bd-23m.13.4` | Expand descriptor/cast matrix implementation plan with explicit legacy-matrix closure path. |
-| `P2C002-U02` | Structured dtype cast semantics and alias-sensitive field behavior are only partially represented in scoped fixtures. | high | `bd-23m.13.5` | Unit/property suites include structured dtype cast invariants with reason-coded logs. |
-| `P2C002-U03` | Differential oracle coverage for edge promotion failures and scalar-metadata interactions is incomplete. | medium | `bd-23m.13.6` | Differential/metamorphic fixtures cover incompatible-pair and scalar-promotion edge classes. |
-| `P2C002-U04` | Hardened policy boundaries for descriptor metadata abuse need packet-specific threat controls. | high | `bd-23m.13.3` | Threat model locks fail-closed and bounded-recovery controls with executable hooks. |
+| `P2C002-U01` | Current packet matrix has unit/property and differential coverage for scoped promotion/cast lanes; full legacy cast-table parity remains residual. | high | packet-E/F evidence | expand descriptor/cast matrix coverage toward the full legacy table while preserving fail-closed unknown pairs |
+| `P2C002-U02` | Structured dtype cast semantics have current packet coverage but not full legacy alias-sensitive field breadth. | high | unit/property + risk note | extend structured dtype oracle fixtures and reason-coded logs for alias-sensitive field behavior |
+| `P2C002-U03` | Differential/metamorphic/adversarial coverage exists for current incompatible-pair and scalar-promotion edge classes. | medium | `differential_metamorphic_adversarial_evidence.json` | deepen exotic dtype, weak-scalar, and scalar-metadata interaction matrices |
+| `P2C002-U04` | Descriptor metadata abuse is covered by packet-specific fail-closed threat controls and executable security/test gates. | medium | risk note + final evidence pack | recalibrate hardened metadata normalization and cast-policy budgets against broader adversarial corpora |
 
-## 4. Planned Verification Hooks
+## 4. Verification Hooks
 
-| Verification lane | Planned hook | Artifact target |
+| Verification lane | Hook | Artifact target |
 |---|---|---|
-| Unit/property | Extend `fnp-dtype` promotion/cast properties across expanded matrix and failure taxonomy | `crates/fnp-dtype/src/lib.rs` + packet-E additions |
-| Differential/metamorphic/adversarial | Add dtype oracle cases for incompatible/common-type resolution and cast-failure categories | `crates/fnp-conformance/fixtures/dtype_promotion_cases.json` + packet-F expansions |
-| E2E | Add mixed-dtype pipeline replay scenario with strict/hardened audit trail | packet-G scenario scripts + `artifacts/logs/` |
-| Structured logging | enforce `fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code` | `artifacts/contracts/test_logging_contract_v1.json`, packet-E/G hooks |
+| Unit/property | `fnp-dtype` promotion/cast properties across scoped matrix and failure taxonomy | `artifacts/phase2c/FNP-P2C-002/unit_property_evidence.json`, `crates/fnp-dtype/src/lib.rs`, `crates/fnp-conformance/fixtures/dtype_promotion_cases.json` |
+| Differential/metamorphic/adversarial | dtype oracle cases for incompatible/common-type resolution, scalar-promotion edges, and adversarial cast-failure categories | `artifacts/phase2c/FNP-P2C-002/differential_metamorphic_adversarial_evidence.json`, `crates/fnp-conformance/fixtures/packet002_dtype/*` |
+| E2E/workflow | mixed-dtype pipeline replay scenarios with strict/hardened audit trail | `artifacts/phase2c/FNP-P2C-002/e2e_replay_forensics_evidence.json`, `scripts/e2e/run_dtype_contract_journey.sh`, workflow scenario artifacts |
+| Structured logging | `fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code` coverage in dtype tests and workflow gates | `artifacts/contracts/test_logging_contract_v1.json`, packet-E/F/G evidence, test-contract gate outputs |
 
 ## 5. Method-Stack Artifacts and EV Gate
 
 - Alien decision contract: any policy mediation at descriptor/cast boundaries must record state/action/loss rationale.
 - Optimization gate: promotion/cast optimizations require baseline/profile + one-lever + isomorphism proof.
 - EV gate: optimization levers advance only when `EV >= 2.0`; otherwise remain deferred debt.
-- RaptorQ scope: packet-I parity bundles require sidecar/scrub/decode-proof linkage.
+- RaptorQ scope: packet-I parity bundles include sidecar/scrub/decode-proof linkage.
 
 ## 6. Rollback Handle
 
