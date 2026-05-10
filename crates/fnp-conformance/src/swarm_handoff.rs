@@ -50,6 +50,21 @@ pub enum SwarmReadiness {
     Blocked,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelCalibrationEvidenceStatus {
+    Missing,
+    Stale,
+    Fresh,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParallelCalibrationEvidence {
+    pub status: ParallelCalibrationEvidenceStatus,
+    pub required_reports: Vec<String>,
+    pub note: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SwarmHandoffBead {
     pub id: String,
@@ -68,6 +83,7 @@ pub struct SwarmHandoffBead {
     pub related_conformance_shards: Vec<ConformanceShardHint>,
     pub likely_artifact_outputs: Vec<String>,
     pub proof_expectations: Vec<String>,
+    pub parallel_calibration_evidence: Option<ParallelCalibrationEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -307,6 +323,8 @@ pub fn build_swarm_handoff_report_from_inputs(
 
         let labels = sorted(issue.labels.clone());
         let related_conformance_shards = conformance_shards_for_issue(issue, &manifest);
+        let parallel_calibration_evidence =
+            parallel_calibration_evidence_for_issue(repo_root, issue);
         rows.push(SwarmHandoffBead {
             id: issue.id.clone(),
             title: issue.title.clone(),
@@ -329,6 +347,7 @@ pub fn build_swarm_handoff_report_from_inputs(
             related_conformance_shards,
             likely_artifact_outputs: artifact_outputs_for_issue(issue),
             proof_expectations: proof_expectations_for_issue(issue),
+            parallel_calibration_evidence,
         });
     }
 
@@ -541,6 +560,17 @@ fn reservation_globs_for_issue(issue: &IssueRecord) -> Vec<String> {
         globs.insert("crates/fnp-conformance/src/swarm_handoff.rs".to_string());
         globs.insert("crates/fnp-conformance/src/bin/generate_swarm_handoff_report.rs".to_string());
     }
+    if is_parallel_calibration_issue(issue) {
+        globs.insert(
+            "crates/fnp-conformance/src/bin/run_parallel_calibration_matrix.rs".to_string(),
+        );
+        globs.insert("crates/fnp-conformance/src/bin/run_parallel_speedup_verdict.rs".to_string());
+        globs.insert(
+            "crates/fnp-conformance/src/bin/run_parallel_thread_recommendations.rs".to_string(),
+        );
+        globs.insert("crates/fnp-ufunc/src/lib.rs".to_string());
+        globs.insert("crates/fnp-ufunc/tests/metamorphic_math.rs".to_string());
+    }
     if globs.is_empty() {
         globs.insert("crates/fnp-conformance/src/**".to_string());
     }
@@ -568,6 +598,13 @@ fn rch_commands_for_issue(issue: &IssueRecord, shards: &[ConformanceShardHint]) 
     if text.contains("raptorq") {
         commands.insert("rch exec -- cargo run -p fnp-conformance --bin run_raptorq_gate -- --report-path target/raptorq_stress_report.json --coverage-floor 1.0".to_string());
     }
+    if is_parallel_calibration_issue(issue) {
+        commands.insert("rch exec -- cargo run -p fnp-conformance --bin run_parallel_calibration_matrix -- --quick --samples 3 --threads 1,2,4 --report-path target/parallel_calibration_matrix.json".to_string());
+        commands.insert("rch exec -- cargo run -p fnp-conformance --bin run_parallel_speedup_verdict -- --calibration-path target/parallel_calibration_matrix.json --verdict-out target/parallel_speedup_verdict.json".to_string());
+        commands.insert("rch exec -- cargo run -p fnp-conformance --bin run_parallel_thread_recommendations -- --calibration-path target/parallel_calibration_matrix.json --recommendation-out target/parallel_thread_recommendations.json".to_string());
+        commands.insert("rch exec -- cargo run -p fnp-conformance --bin run_parallel_calibration_matrix -- --quick --include-memory-pressure --memory-pressure-tier quick --samples 1 --threads 2 --report-path target/parallel_memory_pressure_calibration.json".to_string());
+        commands.insert("rch exec -- cargo run -p fnp-conformance --bin run_parallel_calibration_matrix -- --large-host --include-memory-pressure --memory-pressure-tier large-host --allow-large-host-memory-pressure --samples 3 --threads 2,4,8 --report-path target/parallel_calibration_large_host.json".to_string());
+    }
     commands.insert("rch exec -- cargo check -p fnp-conformance --all-targets".to_string());
     commands.into_iter().collect()
 }
@@ -585,6 +622,9 @@ fn artifact_outputs_for_issue(issue: &IssueRecord) -> Vec<String> {
     if text.contains("performance") || text.contains("many-core") {
         outputs.insert("target/parallel_budget_report.json".to_string());
     }
+    if is_parallel_calibration_issue(issue) {
+        outputs.extend(parallel_calibration_report_paths());
+    }
     outputs.into_iter().collect()
 }
 
@@ -600,7 +640,101 @@ fn proof_expectations_for_issue(issue: &IssueRecord) -> Vec<String> {
     if issue_text(issue).contains("idea-wizard") {
         expectations.insert("preserve linkage to the idea-wizard many-core graph".to_string());
     }
+    if is_parallel_calibration_issue(issue) {
+        expectations.insert("run quick calibration, verdict, recommendation, and memory-pressure proof before enabling a parallel lane".to_string());
+        expectations.insert("run large-host memory-pressure calibration only with explicit --allow-large-host-memory-pressure on a memory-rich host".to_string());
+        expectations.insert(
+            "unsafe speedup verdict entries keep the candidate serial or proof-pending".to_string(),
+        );
+    }
     expectations.into_iter().collect()
+}
+
+fn is_parallel_calibration_issue(issue: &IssueRecord) -> bool {
+    let text = issue_text(issue);
+    text.contains("parallel")
+        || text.contains("many-core")
+        || text.contains("many_core")
+        || text.contains("calibration")
+        || text.contains("speedup")
+        || text.contains("thread recommendation")
+}
+
+fn parallel_calibration_report_paths() -> Vec<String> {
+    vec![
+        "target/parallel_calibration_matrix.json".to_string(),
+        "target/parallel_speedup_verdict.json".to_string(),
+        "target/parallel_thread_recommendations.json".to_string(),
+        "target/parallel_memory_pressure_calibration.json".to_string(),
+        "target/parallel_calibration_large_host.json".to_string(),
+    ]
+}
+
+fn parallel_calibration_source_paths() -> Vec<&'static str> {
+    vec![
+        "crates/fnp-conformance/src/bin/run_parallel_calibration_matrix.rs",
+        "crates/fnp-conformance/src/bin/run_parallel_speedup_verdict.rs",
+        "crates/fnp-conformance/src/bin/run_parallel_thread_recommendations.rs",
+        "crates/fnp-ufunc/src/lib.rs",
+        "crates/fnp-ufunc/tests/metamorphic_math.rs",
+    ]
+}
+
+fn parallel_calibration_evidence_for_issue(
+    repo_root: &Path,
+    issue: &IssueRecord,
+) -> Option<ParallelCalibrationEvidence> {
+    if !is_parallel_calibration_issue(issue) {
+        return None;
+    }
+    let required_reports = parallel_calibration_report_paths();
+    let missing_report = required_reports
+        .iter()
+        .any(|path| !repo_root.join(path).exists());
+    if missing_report {
+        return Some(ParallelCalibrationEvidence {
+            status: ParallelCalibrationEvidenceStatus::Missing,
+            required_reports,
+            note: "parallel calibration evidence is missing or incomplete; run the quick calibration, verdict, recommendation, and memory-pressure recipe before opt-in".to_string(),
+        });
+    }
+
+    let newest_source = parallel_calibration_source_paths()
+        .into_iter()
+        .filter_map(|path| modified_time(repo_root.join(path).as_path()))
+        .max();
+    let oldest_report = required_reports
+        .iter()
+        .filter_map(|path| modified_time(repo_root.join(path).as_path()))
+        .min();
+    let status = if newest_source
+        .zip(oldest_report)
+        .is_some_and(|(source, report)| source > report)
+    {
+        ParallelCalibrationEvidenceStatus::Stale
+    } else {
+        ParallelCalibrationEvidenceStatus::Fresh
+    };
+    let note = match status {
+        ParallelCalibrationEvidenceStatus::Missing => {
+            "parallel calibration evidence is missing or incomplete; run the quick calibration, verdict, recommendation, and memory-pressure recipe before opt-in"
+        }
+        ParallelCalibrationEvidenceStatus::Stale => {
+            "parallel calibration reports exist but are older than a relevant source file; rerun the recipe before opt-in"
+        }
+        ParallelCalibrationEvidenceStatus::Fresh => {
+            "all expected parallel calibration reports exist under target/ and are newer than the checked source files"
+        }
+    };
+    Some(ParallelCalibrationEvidence {
+        status,
+        required_reports,
+        note: note.to_string(),
+    })
+}
+
+fn modified_time(path: &Path) -> Option<std::time::SystemTime> {
+    path.metadata().ok()?.modified().ok()
 }
 
 fn idea_wizard_graph(issues: &[IssueRecord], bv: &BvRobotEnvelope) -> IdeaWizardGraph {
@@ -665,8 +799,8 @@ fn relative_display(repo_root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        SWARM_HANDOFF_SCHEMA_VERSION, SwarmReadiness, build_swarm_handoff_report_from_inputs,
-        bv_robot_command,
+        ParallelCalibrationEvidenceStatus, SWARM_HANDOFF_SCHEMA_VERSION, SwarmReadiness,
+        build_swarm_handoff_report_from_inputs, bv_robot_command,
     };
     use std::path::Path;
 
@@ -762,6 +896,65 @@ mod tests {
                 .idea_wizard_graph
                 .note
                 .contains("never creates or mutates beads")
+        );
+    }
+
+    #[test]
+    fn swarm_handoff_report_exposes_parallel_calibration_evidence() {
+        let report = build_swarm_handoff_report_from_inputs(
+            Path::new("/repo"),
+            ISSUES,
+            "fixture",
+            BV,
+            MANIFEST,
+            Path::new("/repo/.beads/issues.jsonl"),
+            Path::new("/repo/artifacts/contracts/conformance_suite_manifest_v1.json"),
+        )
+        .expect("report");
+        let idea_epic = report
+            .beads
+            .iter()
+            .find(|bead| bead.id == "idea-epic")
+            .expect("idea epic bead");
+        let evidence = idea_epic
+            .parallel_calibration_evidence
+            .as_ref()
+            .expect("parallel calibration evidence");
+
+        assert_eq!(evidence.status, ParallelCalibrationEvidenceStatus::Missing);
+        assert!(evidence.required_reports.iter().any(|path| {
+            path == "target/parallel_calibration_matrix.json"
+                || path == "target/parallel_speedup_verdict.json"
+        }));
+        assert!(
+            idea_epic
+                .rch_validation_commands
+                .iter()
+                .any(|command| command.contains("run_parallel_calibration_matrix"))
+        );
+        assert!(
+            idea_epic
+                .rch_validation_commands
+                .iter()
+                .any(|command| command.contains("run_parallel_speedup_verdict"))
+        );
+        assert!(
+            idea_epic
+                .rch_validation_commands
+                .iter()
+                .any(|command| command.contains("run_parallel_thread_recommendations"))
+        );
+        assert!(
+            idea_epic
+                .likely_artifact_outputs
+                .iter()
+                .any(|path| path == "target/parallel_speedup_verdict.json")
+        );
+        assert!(
+            idea_epic
+                .proof_expectations
+                .iter()
+                .any(|proof| proof.contains("large-host memory-pressure calibration"))
         );
     }
 

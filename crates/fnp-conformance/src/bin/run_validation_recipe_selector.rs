@@ -195,10 +195,13 @@ fn build_report(options: &Options) -> ValidationRecipeReport {
         .collect::<BTreeSet<_>>();
     let needs_porting_ledger_freshness =
         needs_porting_ledger_freshness_recipe(&options.changed_paths, &labels);
+    let needs_parallel_calibration =
+        needs_parallel_calibration_recipe(&options.changed_paths, &labels, &crates);
     let docs_only = !options.changed_paths.is_empty()
         && options.crate_names.is_empty()
         && options.labels.is_empty()
         && !needs_porting_ledger_freshness
+        && !needs_parallel_calibration
         && options
             .changed_paths
             .iter()
@@ -250,6 +253,12 @@ fn build_report(options: &Options) -> ValidationRecipeReport {
     }
     if needs_porting_ledger_freshness {
         insert_recipe(&mut recipes, porting_ledger_freshness_recipe());
+    }
+    if needs_parallel_calibration {
+        insert_recipe(
+            &mut recipes,
+            parallel_calibration_recipe(&options.changed_paths, &labels),
+        );
     }
 
     if !unknown_paths.is_empty() {
@@ -334,6 +343,30 @@ fn needs_porting_ledger_freshness_recipe(paths: &[String], labels: &BTreeSet<Str
         .any(|label| matches!(label.as_str(), "validation" | "evidence"))
         && relevant_path;
     phase2c_label || relevant_path || phase2c_context_label
+}
+
+fn needs_parallel_calibration_recipe(
+    paths: &[String],
+    labels: &BTreeSet<String>,
+    crates: &BTreeSet<String>,
+) -> bool {
+    let parallel_label = labels.iter().any(|label| {
+        matches!(
+            label.as_str(),
+            "parallel" | "many-core" | "many_core" | "perf" | "performance" | "benchmark"
+        )
+    });
+    let parallel_path = paths.iter().any(|path| {
+        path.contains("run_parallel_")
+            || path.contains("parallel_calibration")
+            || path.contains("parallel_speedup")
+            || path.contains("parallel_thread_recommendations")
+    });
+    let parallel_crate_context = parallel_label
+        && crates
+            .iter()
+            .any(|crate_name| matches!(crate_name.as_str(), "fnp-ufunc" | "fnp-conformance"));
+    parallel_label || parallel_path || parallel_crate_context
 }
 
 fn risk_level(
@@ -533,6 +566,41 @@ fn performance_recipe() -> ValidationRecipe {
             "target/performance_budget_gate.json".to_string(),
         ],
         prerequisites: common_rch_prerequisites(),
+    }
+}
+
+fn parallel_calibration_recipe(paths: &[String], labels: &BTreeSet<String>) -> ValidationRecipe {
+    let applies_to = if paths.is_empty() {
+        labels.iter().cloned().collect()
+    } else {
+        paths.to_vec()
+    };
+    ValidationRecipe {
+        id: "parallel-calibration-proof".to_string(),
+        title: "Parallel calibration proof path".to_string(),
+        reason: "Parallel or many-core surfaces need calibration, speedup verdict, thread recommendation, and memory-pressure evidence before any execution opt-in.".to_string(),
+        applies_to,
+        commands: vec![
+            "rch exec -- cargo run -p fnp-conformance --bin run_parallel_calibration_matrix -- --quick --samples 3 --threads 1,2,4 --report-path target/parallel_calibration_matrix.json".to_string(),
+            "rch exec -- cargo run -p fnp-conformance --bin run_parallel_speedup_verdict -- --calibration-path target/parallel_calibration_matrix.json --verdict-out target/parallel_speedup_verdict.json".to_string(),
+            "rch exec -- cargo run -p fnp-conformance --bin run_parallel_thread_recommendations -- --calibration-path target/parallel_calibration_matrix.json --recommendation-out target/parallel_thread_recommendations.json".to_string(),
+            "rch exec -- cargo run -p fnp-conformance --bin run_parallel_calibration_matrix -- --quick --include-memory-pressure --memory-pressure-tier quick --samples 1 --threads 2 --report-path target/parallel_memory_pressure_calibration.json".to_string(),
+            "rch exec -- cargo run -p fnp-conformance --bin run_parallel_calibration_matrix -- --large-host --include-memory-pressure --memory-pressure-tier large-host --allow-large-host-memory-pressure --samples 3 --threads 2,4,8 --report-path target/parallel_calibration_large_host.json".to_string(),
+        ],
+        expected_reports: vec![
+            "target/parallel_calibration_matrix.json".to_string(),
+            "target/parallel_speedup_verdict.json".to_string(),
+            "target/parallel_thread_recommendations.json".to_string(),
+            "target/parallel_memory_pressure_calibration.json".to_string(),
+            "target/parallel_calibration_large_host.json".to_string(),
+        ],
+        prerequisites: {
+            let mut prerequisites = common_rch_prerequisites();
+            prerequisites.push("Run the quick calibration and verdict path first; it is the default proof for ordinary workers.".to_string());
+            prerequisites.push("Run the large-host command only on a memory-rich host; it intentionally requires --allow-large-host-memory-pressure.".to_string());
+            prerequisites.push("A speedup verdict with unsafe entries means the candidate must stay serial or proof-pending.".to_string());
+            prerequisites
+        },
     }
 }
 
@@ -885,6 +953,59 @@ mod tests {
                 .commands
                 .iter()
                 .any(|command| command.contains("run_io_diagnostics"))
+        );
+    }
+
+    #[test]
+    fn validation_recipe_selector_parallel_recipe_exposes_calibration_commands() {
+        let report = report_for(&[
+            "--changed",
+            "crates/fnp-ufunc/src/lib.rs",
+            "--label",
+            "parallel",
+        ]);
+        let recipe = report
+            .recipes
+            .iter()
+            .find(|recipe| recipe.id == "parallel-calibration-proof")
+            .expect("parallel calibration recipe");
+
+        assert!(recipe.commands.iter().all(|command| {
+            command.starts_with("rch exec -- cargo run -p fnp-conformance --bin run_parallel_")
+        }));
+        assert!(recipe.commands.iter().any(|command| {
+            command.contains("run_parallel_calibration_matrix")
+                && command.contains("--report-path target/parallel_calibration_matrix.json")
+        }));
+        assert!(
+            recipe
+                .commands
+                .iter()
+                .any(|command| command.contains("run_parallel_speedup_verdict"))
+        );
+        assert!(recipe.commands.iter().any(|command| {
+            command.contains("run_parallel_thread_recommendations")
+                && command.contains("target/parallel_thread_recommendations.json")
+        }));
+        assert!(recipe.commands.iter().any(|command| {
+            command.contains("--include-memory-pressure")
+                && command.contains("target/parallel_memory_pressure_calibration.json")
+        }));
+        assert!(recipe.commands.iter().any(|command| {
+            command.contains("--large-host")
+                && command.contains("--allow-large-host-memory-pressure")
+        }));
+        assert!(
+            recipe
+                .expected_reports
+                .iter()
+                .any(|path| path == "target/parallel_speedup_verdict.json")
+        );
+        assert!(
+            recipe
+                .prerequisites
+                .iter()
+                .any(|prereq| prereq.contains("large-host command only"))
         );
     }
 }
