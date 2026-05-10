@@ -3,31 +3,31 @@
 packet_id: `FNP-P2C-003`  
 subsystem: `strided transfer semantics`
 
-## 1. Crate and Module Boundary Skeleton
+## 1. Crate and Module Boundary Status
 
-| Crate | Planned module boundary | Responsibility | Public surface contract |
+| Crate | Module boundary | Responsibility | Current surface contract |
 |---|---|---|---|
 | `crates/fnp-iter` | `transfer_selector` (packet-D core landed) | deterministic transfer-loop selection based on dtype/alignment/stride context | `TransferSelectorInput`, `select_transfer_class`, `TransferContext`, `select_transfer_loop` |
 | `crates/fnp-iter` | `transfer_overlap_guard` (packet-D/E core landed) | overlap-aware direction/copy mediation and alias-policy checks | `overlap_copy_policy`, `NditerTransferFlags`, transfer decision reason-code mapping |
 | `crates/fnp-iter` | `flatiter_transfer` (packet-D/E core landed) | flatiter read/write transfer semantics for integer/slice/fancy/bool indexing classes | `FlatIterIndex`, `resolve_flatiter_indices`, `validate_flatiter_read`, `validate_flatiter_write` |
-| `crates/fnp-ufunc` | `transfer_executor` (packet-D planned boundary) | migration seam from current broadcast-odometer traversal to reusable transfer-selector/guard stack | adapter seam for `elementwise_binary`/reduction transfer pathways (planned) |
+| `crates/fnp-ufunc` | transfer traversal adapter seam (current) | current broadcast-odometer traversal remains behavior-preserving while broader migration to reusable transfer selectors stays residual integration debt | `elementwise_binary`/reduction traversal remains the comparator path for transfer-adjacent evidence |
 | `crates/fnp-dtype` | `cast_policy_core` (existing in `src/lib.rs`) | cast compatibility policy primitives used by transfer gating | `promote`, `can_cast_lossless` |
 | `crates/fnp-ndarray` | `shape_stride_core` (existing in `src/lib.rs`) | shape/broadcast/stride legality primitives used by transfer traversal planning | `broadcast_shape`, `broadcast_shapes`, `contiguous_strides`, `NdLayout` |
-| `crates/fnp-conformance` | `transfer_packet_suite` (packet-F planned boundary) | packet-specific differential/metamorphic/adversarial transfer fixtures and parity checks | packet-F transfer runner entrypoints (planned) |
-| `crates/fnp-conformance` | workflow scenario integration (existing + packet-G extension) | strict/hardened replay scenarios with transfer fixture linkage | packet-G transfer scenarios in workflow corpus (planned) |
+| `crates/fnp-conformance` | `transfer_packet_suite` (packet-E/F landed) | packet-specific unit/property, differential, metamorphic, and adversarial transfer fixtures and parity checks | `unit_property_evidence.json` and `differential_metamorphic_adversarial_evidence.json` |
+| `crates/fnp-conformance` | workflow scenario integration (packet-G/H landed) | strict/hardened replay scenarios with transfer fixture linkage and optimization-isomorphism evidence | `workflow_scenario_packet003_*` artifacts and optimization profile evidence |
 | `crates/fnp-runtime` | policy/audit decision context (existing) | strict/hardened fail-closed mediation with reason-code and artifact linkage for transfer decisions | `decide_and_record_with_context` integration from transfer harnesses |
 
-## 2. Implementation Sequence (D-Stage to I-Stage)
+## 2. Maintenance Sequence (Post-I Evidence Baseline)
 
-1. Keep the landed packet-D transfer selector/overlap guard/flatiter transfer boundaries in `fnp-iter` green.
-2. Define transfer reason-code taxonomy and strict/hardened decision boundaries from `P2C003-R01`..`R10`.
-3. Wire transfer selector inputs to `fnp-dtype` cast policy and `fnp-ndarray` stride/broadcast primitives.
-4. Introduce `fnp-ufunc` adapter seam so current traversal can incrementally migrate without behavior drift.
-5. Expand packet-F transfer fixture schemas and runners in `fnp-conformance`.
-6. Expand packet-G workflow scenarios linking transfer fixture IDs + e2e scripts and artifact refs.
-7. Connect transfer policy decisions to runtime audit context fields (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`).
-8. Gate packet-H optimization work behind baseline/profile/isomorphism evidence artifacts.
-9. Close packet-I with parity summary + risk + durability sidecar/scrub/decode-proof linkage.
+1. Keep the landed packet-D transfer selector, overlap guard, and flatiter transfer boundaries in `fnp-iter` green.
+2. Preserve the reason-code taxonomy and strict/hardened decision boundaries from `P2C003-R01`..`R10`.
+3. Maintain transfer selector inputs against `fnp-dtype` cast policy and `fnp-ndarray` stride/broadcast primitives.
+4. Treat broader `fnp-ufunc` migration to reusable transfer selectors as integration debt that requires behavior-isomorphism proof before landing.
+5. Expand packet-E/F fixture breadth for grouped, subarray, and fixed-width string/unicode transfer families without weakening current gates.
+6. Expand packet-G workflow scenario breadth for overlap, where-mask, and flatiter transfer journeys while preserving replay-complete structured fields.
+7. Keep transfer policy decisions linked to runtime audit context fields (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`).
+8. Gate future packet-H optimization changes behind fresh baseline/profile/isomorphism evidence artifacts.
+9. Preserve packet-I parity summary, risk, durability sidecar, scrub report, and decode-proof linkage.
 
 ## 3. Public Surface Contract Notes
 
@@ -46,10 +46,10 @@ subsystem: `strided transfer semantics`
 
 | Lane | Insertion point | Evidence artifact target |
 |---|---|---|
-| Unit/property | packet-E additions in `fnp-iter`/`fnp-ufunc` transfer tests | packet-E transfer invariant logs + coverage artifacts |
-| Differential/metamorphic/adversarial | packet-F transfer runner + fixture manifests in `crates/fnp-conformance` | packet-F parity/differential reports |
-| E2E/replay | packet-G workflow scenario corpus + e2e scripts in `scripts/e2e/` | replay logs under `artifacts/logs/` |
-| Runtime policy audit | transfer suites using runtime decision/audit integration | security gate + policy evidence ledger outputs |
+| Unit/property | packet-E additions in `fnp-iter`/`fnp-ufunc` transfer tests | `unit_property_evidence.json` |
+| Differential/metamorphic/adversarial | packet-F transfer runner + fixture manifests in `crates/fnp-conformance` | `differential_metamorphic_adversarial_evidence.json` |
+| E2E/replay | packet-G workflow scenario corpus + e2e scripts in `scripts/e2e/` | `e2e_replay_forensics_evidence.json` and `workflow_scenario_packet003_*` artifacts |
+| Runtime policy audit | transfer suites using runtime decision/audit integration | security gate + policy evidence ledger outputs referenced by `final_evidence_pack.json` |
 
 ## 5. Structured Logging Emission Points
 
@@ -78,10 +78,10 @@ All emissions must include:
 
 ## 7. Compile-Safe Skeleton Validation
 
-- Planning-stage validation rules:
-  - no behavior-changing transfer migration is shipped in this bead;
+- Maintenance validation rules:
+  - no behavior-changing transfer migration is shipped in this documentation bead;
   - packet contract/reason-code taxonomy remains internally consistent;
-  - packet validator continues reporting complete artifact fields for `FNP-P2C-003` (status may remain `not_ready` until downstream E-I artifacts land).
+  - packet validator reports `FNP-P2C-003` as ready with zero missing artifacts, missing fields, or parse errors.
 - Validation command (offloaded via `rch`):  
   `rch exec -- cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2C-003`
 

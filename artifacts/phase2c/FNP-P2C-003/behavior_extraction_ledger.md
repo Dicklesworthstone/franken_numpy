@@ -26,24 +26,24 @@ Subsystem: `strided transfer semantics`
 5. Flatiter transfer invariant: indexing/assignment transfer pathways preserve stable error taxonomy and value movement classes.
 6. Strict/hardened parity invariant: hardened mode may add bounded validation and audit details but cannot change public success/failure class for covered contracts.
 
-## 3. Undefined or Under-Specified Edges (Tagged)
+## 3. Resolved Edges and Residual Breadth (Tagged)
 
-| Unknown ID | Description | Risk | Owner bead | Closure criteria |
+| Edge ID | Current status | Risk | Evidence owner | Residual criteria |
 |---|---|---|---|---|
-| `P2C003-U01` | `fnp-iter` has no transfer-loop selector/state machine; transfer semantics currently live indirectly in ad-hoc ufunc traversal code. | high | `bd-23m.14.4` | land module boundary skeleton with explicit transfer selector interfaces and state transition model |
-| `P2C003-U02` | Overlap and where-mask transfer invariants lack packet-scoped unit/property coverage in Rust. | high | `bd-23m.14.5` | packet-E suite covers overlap/where/same-value invariant families with structured logs |
-| `P2C003-U03` | Differential/adversarial oracle corpus for transfer families (grouped/subarray/flatiter transfer) is not yet packet-scoped. | high | `bd-23m.14.6` | packet-F fixtures and runner additions cover transfer class matrix and adversarial cases |
-| `P2C003-U04` | Workflow replay does not yet include packet transfer journeys with reason-code-linked artifacts. | medium | `bd-23m.14.7` | packet-G scenarios emit replay-complete structured fields and transfer fixture links |
-| `P2C003-U05` | String/unicode specialized transfer parity (zero-pad/truncate/copyswap) is not yet represented in Rust behavior suites. | medium | `bd-23m.14.5` + `bd-23m.14.6` | add packet-E/F test matrix for fixed-width string transfer classes |
-| `P2C003-U06` | Exact mapping from legacy same-value cast context to Rust runtime policy reason-code taxonomy is unpinned. | medium | `bd-23m.14.2` + `bd-23m.14.3` | contract rows + threat model explicitly define reason-code mapping and fail-closed policy |
+| `P2C003-U01` | `fnp-iter` now exposes transfer-loop selector/state-machine boundaries through `TransferContext` and `select_transfer_loop`; `select_transfer_class`, overlap guards, and flatiter validators remain the packet-D/E surface. | low | packet-D/E evidence + `unit_property_evidence.json` | broaden integration into `fnp-ufunc` only with behavior-isomorphism proof |
+| `P2C003-U02` | Overlap, where-mask, same-value, and flatiter invariants have packet-scoped unit/property evidence with structured log requirements. | low | `unit_property_evidence.json` | expand case breadth without relaxing current invariant gates |
+| `P2C003-U03` | Differential, metamorphic, and adversarial oracle corpus is packet-scoped for the current transfer matrix: 10 differential, 5 metamorphic, and 6 adversarial cases all pass. | medium | `differential_metamorphic_adversarial_evidence.json` | add deeper grouped, subarray, and fixed-width string/unicode families |
+| `P2C003-U04` | Workflow replay includes packet-specific transfer journeys with reason-code-linked artifacts and deterministic wrapper paths. | low | `e2e_replay_forensics_evidence.json` + `workflow_scenario_packet003_*` artifacts | expand journey breadth for overlap, where-mask, and flatiter scenarios |
+| `P2C003-U05` | Fixed-width string/unicode specialized transfer parity has initial selector coverage; full zero-pad/truncate/copyswap oracle breadth remains residual parity debt. | medium | packet-E/F transfer evidence | add broader packet-E/F matrix for fixed-width string transfer classes |
+| `P2C003-U06` | Same-value cast reason-code taxonomy is represented in contract/risk rows and packet evidence; full legacy context breadth remains monitored. | medium | contract table + `final_evidence_pack.json` | keep fail-closed policy stable while expanding same-value cast fixtures |
 
-## 4. Planned Verification Hooks
+## 4. Verification Hooks
 
-| Verification lane | Planned hook | Artifact target |
+| Verification lane | Hook | Artifact target |
 |---|---|---|
-| Unit/property | transfer invariants for overlap direction, mask isolation, same-value rejection, grouped/subarray movement classes | packet-E test modules in `fnp-iter`/`fnp-ufunc` with structured logs |
-| Differential/metamorphic/adversarial | transfer fixture corpus for overlap/where/cast/flatiter paths vs legacy oracle | packet-F fixtures + runner extensions in `crates/fnp-conformance` |
-| E2E | strict/hardened transfer journey scenarios with replay/forensics links | packet-G workflow scenarios + `artifacts/logs/` outputs |
+| Unit/property | transfer invariants for overlap direction, mask isolation, same-value rejection, flatiter, and selected grouped/subarray movement classes | `unit_property_evidence.json` |
+| Differential/metamorphic/adversarial | transfer fixture corpus for overlap/where/cast/flatiter paths vs legacy oracle | `differential_metamorphic_adversarial_evidence.json` + `crates/fnp-conformance/fixtures/packet003_transfer/` |
+| E2E | strict/hardened transfer journey scenarios with replay/forensics links | `e2e_replay_forensics_evidence.json` + `workflow_scenario_packet003_*` outputs |
 | Structured logging | enforce required fields on packet transfer test outputs (`fixture_id`, `seed`, `mode`, `env_fingerprint`, `artifact_refs`, `reason_code`) | `artifacts/contracts/TESTING_AND_LOGGING_CONVENTIONS_V1.md` + packet-E/F/G logs |
 
 ## 5. Method-Stack Artifacts and EV Gate
@@ -51,7 +51,7 @@ Subsystem: `strided transfer semantics`
 - Alien decision contract: transfer-policy mediation must record state/action/loss rationale and deterministic fallback path.
 - Optimization gate: transfer performance changes require baseline/profile + one-lever + behavior-isomorphism proof.
 - EV gate: optimization/policy levers advance only when `EV >= 2.0`; otherwise remain explicit deferred parity debt.
-- RaptorQ scope: packet-I durability bundle must include sidecar/scrub/decode-proof linkage for packet transfer artifacts.
+- RaptorQ scope: packet-I durability bundle includes sidecar/scrub/decode-proof linkage for packet transfer artifacts.
 
 ## 6. Rollback Handle
 
