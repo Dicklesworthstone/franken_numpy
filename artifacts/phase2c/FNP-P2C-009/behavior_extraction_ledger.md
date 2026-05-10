@@ -24,30 +24,30 @@ Subsystem: `NPY/NPZ IO contract`
 4. Dispatch invariant: `np.load` route selection (`npz`/`npy`/pickle) is deterministic for identical byte prefixes and policy inputs.
 5. Archive key invariant: `.npz` key naming and lazy access behavior remain deterministic for fixed input argument order.
 
-## 3. Undefined or Under-Specified Edges (Tagged)
+## 3. Resolved Edges and Residual Breadth (Tagged)
 
-| Unknown ID | Description | Risk | Owner bead | Closure criteria |
+| Edge ID | Current status | Risk | Evidence owner | Residual criteria |
 |---|---|---|---|---|
 | `P2C009-U01` | Exact warning-message parity for Python-2 header fallback/filtering paths may vary by legacy revision. | medium | `bd-23m.20.6` | differential harness verifies failure/warning class containment instead of full-string equality. |
-| `P2C009-U02` | Full cross-platform file-like/mmap edge behavior (pathlib/duck-typed handles/OS-specific modes) is not yet scoped in Rust boundaries. | high | `bd-23m.20.4` | packet-D boundary explicitly models supported handle classes and fail-closed behavior for unsupported cases. |
-| `P2C009-U03` | Complete `.npz` duplicate-name and archive-member ordering corner cases are not yet represented in packet fixtures. | high | `bd-23m.20.5` | packet-E unit/property corpus adds ordering/duplicate-key matrix with deterministic replay fields. |
-| `P2C009-U04` | Parser acceptance boundary for hostile large headers and malformed descriptor payloads needs adversarial fixture saturation. | high | `bd-23m.20.3` | threat model + packet-F adversarial fixtures demonstrate fail-closed coverage for hostile metadata envelopes. |
+| `P2C009-U02` | Supported handle and memmap constraints are modeled for the packet scope; wider cross-platform pathlib, duck-typed handle, and OS-mode breadth remains residual. | high | packet-D/E evidence | expand file-like and memmap replay matrices when new platform-specific edge classes are admitted |
+| `P2C009-U03` | `.npz` key naming, duplicate rejection, and member-order invariants have unit/property and optimization isomorphism evidence. | medium | packet-E/H evidence | deepen duplicate-name, archive-member ordering, compression, and hostile-size fixture breadth |
+| `P2C009-U04` | Hostile header, malformed descriptor, pickle-policy, and archive-contract boundaries have packet-E/F coverage and fail-closed reason codes. | medium | risk note + adversarial fixtures | continue saturating large-header and malformed descriptor corpora as new IO envelopes are found |
 
-## 4. Planned Verification Hooks
+## 4. Verification Hooks
 
-| Verification lane | Planned hook | Artifact target |
+| Verification lane | Hook | Artifact target |
 |---|---|---|
-| Unit/property | header parse corpus + roundtrip laws + pickle policy gates + archive key contracts | `crates/fnp-conformance/fixtures/io_property_cases.json` (planned), structured JSONL logs |
-| Differential/metamorphic/adversarial | fixture-driven IO differential/metamorphic/adversarial suite execution with reason-code mismatch artifacts | `crates/fnp-conformance/fixtures/io_differential_cases.json`, `crates/fnp-conformance/fixtures/io_metamorphic_cases.json`, `crates/fnp-conformance/fixtures/io_adversarial_cases.json`, `crates/fnp-conformance/fixtures/oracle_outputs/io_differential_report.json` |
-| E2E | packet-009 workflow scenarios replaying golden and hostile IO lanes with step-level forensics logging | `scripts/e2e/run_io_contract_journey.sh`, `scripts/e2e/run_workflow_scenario_gate.sh`, `crates/fnp-conformance/fixtures/workflow_scenario_corpus.json` scenarios `io_packet_replay` / `io_packet_hostile_guardrails`, `artifacts/phase2c/FNP-P2C-009/e2e_replay_forensics_evidence.json` |
-| Structured logging | enforce mandatory logging fields for all packet IO tests and gates | `artifacts/contracts/test_logging_contract_v1.json`, `scripts/e2e/run_test_contract_gate.sh` |
+| Unit/property | header parse, roundtrip, pickle policy, memmap, archive key, and reason-code law coverage | `artifacts/phase2c/FNP-P2C-009/unit_property_evidence.json`, `crates/fnp-io/src/lib.rs` tests |
+| Differential/metamorphic/adversarial | fixture-driven IO differential/metamorphic/adversarial suite execution with reason-code mismatch artifacts | `crates/fnp-conformance/fixtures/io_differential_cases.json`, `crates/fnp-conformance/fixtures/io_metamorphic_cases.json`, `crates/fnp-conformance/fixtures/io_adversarial_cases.json`, oracle output artifacts |
+| E2E/workflow | packet-009 workflow scenarios replaying golden and hostile IO lanes with step-level forensics logging | `scripts/e2e/run_io_contract_journey.sh`, `scripts/e2e/run_workflow_scenario_gate.sh`, `artifacts/phase2c/FNP-P2C-009/e2e_replay_forensics_evidence.json`, `workflow_scenario_packet009_*` artifacts |
+| Structured logging | mandatory logging fields for packet IO tests and gates | `artifacts/contracts/test_logging_contract_v1.json`, packet-E evidence, test-contract gate outputs |
 
 ## 5. Method-Stack Artifacts and EV Gate
 
 - Alien decision contract: parser and policy mediation decisions must log state, action, and expected-loss rationale where compatibility/security mediation occurs.
 - Optimization gate: no IO parsing/perf optimization is accepted without baseline/profile + single-lever + isomorphism proof artifact.
 - EV gate: IO optimization levers are promoted only when `EV >= 2.0`; otherwise tracked as deferred research debt.
-- RaptorQ scope: packet `FNP-P2C-009` durable evidence bundle must include sidecar/scrub/decode-proof links at packet-I closure.
+- RaptorQ scope: packet `FNP-P2C-009` durable evidence bundle includes sidecar/scrub/decode-proof links from packet-I closure.
 
 ### Packet-H Closure (`bd-23m.20.8`)
 
