@@ -33,7 +33,7 @@ subsystem: `stride-tricks and broadcasting API`
 
 | residual_id | residual risk | compensating controls | closure gate |
 |---|---|---|---|
-| `P2C006-RES-01` | Full iterator parity (`fnp-iter`) is not implemented yet, increasing risk of silent traversal divergence once integrated. | keep iterator-sensitive semantics explicitly fail-closed where unsupported; require contract-row mapping before implementation | `bd-23m.17.4` + `bd-23m.17.5` |
+| `P2C006-RES-01` | The `fnp-iter` NDIter core is implemented, but packet-006 still needs stride-tricks integration coverage for iterator-sensitive broadcast/view paths. | Keep unsupported iterator-sensitive semantics explicitly fail-closed; require contract-row mapping and packet-local differential fixtures before promotion. | packet-E/F baseline expansion |
 | `P2C006-RES-02` | High-arity broadcast behavior (`>64` inputs) may drift without dedicated oracle corpora. | add targeted differential corpus and high-arity metamorphic invariants | `bd-23m.17.6` |
 | `P2C006-RES-03` | Warning-level compatibility around `broadcast_arrays` writeability path remains subtle/version-sensitive. | lock class/family parity in contract rows and capture explicit reason codes in replay logs | `bd-23m.17.5` + `bd-23m.17.6` |
 | `P2C006-RES-04` | Overlap-risk policy for dangerous stride views may regress without integration-level replay. | require packet-G e2e forensics scenarios and strict/hardened comparison logs | `bd-23m.17.7` |
@@ -102,7 +102,7 @@ owner: `packet-006-maintainers`
 follow_up_gate: `bd-23m.11 readiness drill + packet-I residual risk review`
 
 follow_up_actions:
-- expand packet-006 workflow scenario breadth for broadcast/stride hostile journeys before readiness sign-off.
+- expand packet-006 workflow scenario breadth for broadcast/stride hostile journeys and iterator-sensitive view integration before readiness sign-off.
 - recalibrate hardened broadcast/stride budget thresholds against the full adversarial corpus and document drift trends.
 
 ## Rollback Handle
