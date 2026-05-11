@@ -9665,9 +9665,27 @@ fn compress(
 
 #[pyfunction]
 fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let condition = extract_numeric_array(py, condition.bind(py), "extract(condition)")?;
-    let arr = extract_numeric_array(py, arr.bind(py), "extract(arr)")?;
-    let result = UFuncArray::extract(&condition, &arr).map_err(map_ufunc_error)?;
+    let condition_for_fallback = condition.clone_ref(py);
+    let arr_for_fallback = arr.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        Ok(numpy
+            .getattr("extract")?
+            .call1((condition_for_fallback.bind(py), arr_for_fallback.bind(py)))?
+            .unbind())
+    };
+    let condition = match extract_numeric_array(py, condition.bind(py), "extract(condition)") {
+        Ok(condition) => condition,
+        Err(_) => return fallback(),
+    };
+    let arr = match extract_numeric_array(py, arr.bind(py), "extract(arr)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    let result = match UFuncArray::extract(&condition, &arr) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
     build_numpy_array_from_ufunc(py, &result)
 }
 

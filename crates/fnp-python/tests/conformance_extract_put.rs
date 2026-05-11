@@ -88,7 +88,11 @@ print(np.array_equal(result, expected) and len(result) == 0)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "extract all false should return empty array");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "extract all false should return empty array"
+    );
     Ok(())
 }
 
@@ -105,7 +109,11 @@ print(np.array_equal(result, expected) and np.array_equal(result, arr))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "extract all true should return all elements");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "extract all true should return all elements"
+    );
     Ok(())
 }
 
@@ -122,7 +130,74 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "extract float array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "extract float array should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn extract_string_payload_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array([True, False, True])
+arr = np.array(["alpha", "beta", "gamma"])
+result = fnp.extract(condition, arr)
+expected = np.extract(condition, arr)
+print(np.array_equal(result, expected) and result.dtype == expected.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "extract should preserve NumPy string payload behavior"
+    );
+    Ok(())
+}
+
+#[test]
+fn extract_string_condition_truthiness_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array(["", "x", "0"])
+arr = np.array([10, 20, 30])
+result = fnp.extract(condition, arr)
+expected = np.extract(condition, arr)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "extract should match NumPy string condition truthiness"
+    );
+    Ok(())
+}
+
+#[test]
+fn extract_object_condition_truthiness_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array([object(), None, 1], dtype=object)
+arr = np.array([10, 20, 30])
+result = fnp.extract(condition, arr)
+expected = np.extract(condition, arr)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "extract should match NumPy object condition truthiness"
+    );
     Ok(())
 }
 
@@ -177,7 +252,11 @@ print(np.array_equal(a, b))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "put negative indices should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "put negative indices should match numpy"
+    );
     Ok(())
 }
 
@@ -275,7 +354,11 @@ print(np.array_equal(a, b))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "putmask scalar value should broadcast");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "putmask scalar value should broadcast"
+    );
     Ok(())
 }
 
@@ -310,7 +393,11 @@ print(np.array_equal(a, original))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "putmask all false should not modify array");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "putmask all false should not modify array"
+    );
     Ok(())
 }
 
@@ -333,6 +420,10 @@ print(np.array_equal(extract_result, where_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "extract should be equivalent to where + indexing");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "extract should be equivalent to where + indexing"
+    );
     Ok(())
 }
