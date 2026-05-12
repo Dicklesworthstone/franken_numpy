@@ -43,7 +43,9 @@
 - [A] NumPy currently exposes one accepted algorithm token (`introselect`); parity work should still verify accepted/invalid token behavior and error text
 
 ## GROUP 7: unique `return_index/inverse/counts` with axis
-- [D] Deferred parity debt — `unique_axis` covers unique slices only; combining `axis` with `return_index`, `return_inverse`, and `return_counts` remains NumPy-observable behavior
+- [x] Add `unique_axis_with_info(axis, return_index, return_inverse, return_counts)` on UFuncArray
+- [x] Return NumPy-shaped `return_index`, `return_inverse`, and `return_counts` metadata for unique axis slices
+- [x] Cover large-integer sidecars, signed-zero representatives, and NaN slice distinctness
 
 ---
 

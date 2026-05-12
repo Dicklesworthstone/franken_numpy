@@ -2529,6 +2529,13 @@ pub struct UFuncArray {
     integer_sidecar: Option<IntegerSidecar>,
 }
 
+pub type UniqueInfo = (
+    UFuncArray,
+    Option<UFuncArray>,
+    Option<UFuncArray>,
+    Option<UFuncArray>,
+);
+
 impl PartialEq for UFuncArray {
     fn eq(&self, other: &Self) -> bool {
         self.shape == other.shape
@@ -20670,28 +20677,92 @@ impl UFuncArray {
         (unique, indices, inverse, counts)
     }
 
+    fn usize_metadata_array(shape: Vec<usize>, values: &[usize]) -> Self {
+        Self {
+            shape,
+            values: values.iter().map(|&value| value as f64).collect(),
+            dtype: DType::I64,
+            integer_sidecar: None,
+        }
+    }
+
+    fn unique_axis_metadata(
+        return_index: bool,
+        return_inverse: bool,
+        return_counts: bool,
+        first_indices: &[usize],
+        inverse_by_axis: &[usize],
+        counts: &[usize],
+    ) -> (Option<Self>, Option<Self>, Option<Self>) {
+        let indices = if return_index {
+            Some(Self::usize_metadata_array(
+                vec![first_indices.len()],
+                first_indices,
+            ))
+        } else {
+            None
+        };
+        let inverse = if return_inverse {
+            Some(Self::usize_metadata_array(
+                vec![inverse_by_axis.len()],
+                inverse_by_axis,
+            ))
+        } else {
+            None
+        };
+        let counts = if return_counts {
+            Some(Self::usize_metadata_array(vec![counts.len()], counts))
+        } else {
+            None
+        };
+        (indices, inverse, counts)
+    }
+
     /// Find unique sub-arrays along an axis (`np.unique(a, axis=...)`).
     ///
     /// For a 2-D array with `axis=0`, returns unique rows. With `axis=1`, unique columns.
     /// Rows/columns are compared elementwise and returned in sorted order.
     pub fn unique_axis(&self, axis: isize) -> Result<Self, UFuncError> {
+        let (values, _, _, _) = self.unique_axis_with_info(axis, false, false, false)?;
+        Ok(values)
+    }
+
+    /// Return unique sub-arrays along an axis plus optional index/inverse/count metadata.
+    ///
+    /// Mirrors `np.unique(a, axis=..., return_index=..., return_inverse=..., return_counts=...)`.
+    pub fn unique_axis_with_info(
+        &self,
+        axis: isize,
+        return_index: bool,
+        return_inverse: bool,
+        return_counts: bool,
+    ) -> Result<UniqueInfo, UFuncError> {
         if self.shape.len() < 2 {
-            return Ok(self.unique());
+            return Ok(self.unique_with_info(return_index, return_inverse, return_counts));
         }
         let ax = normalize_axis(axis, self.shape.len())?;
         let axis_len = self.shape[ax];
         if axis_len == 0 {
-            return Ok(self.clone());
+            let empty: Vec<usize> = Vec::new();
+            let (indices, inverse, counts) = Self::unique_axis_metadata(
+                return_index,
+                return_inverse,
+                return_counts,
+                &empty,
+                &empty,
+                &empty,
+            );
+            return Ok((self.clone(), indices, inverse, counts));
         }
+        let outer: usize =
+            fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+        let inner: usize =
+            fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
 
         if self.dtype == DType::I64
             && let Some(IntegerSidecar::I64(values)) =
                 self.synthesized_integer_sidecar("unique_axis")?
         {
-            let outer: usize =
-                fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-            let inner: usize =
-                fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
             let mut slices: Vec<(Vec<i64>, usize)> = Vec::with_capacity(axis_len);
             for a in 0..axis_len {
                 let mut slice_vals = Vec::with_capacity(outer * inner);
@@ -20704,16 +20775,30 @@ impl UFuncArray {
             }
 
             slices.sort_by(|a, b| a.0.cmp(&b.0));
-            slices.dedup_by(|a, b| a.0 == b.0);
+            let mut groups: Vec<(Vec<i64>, usize, usize)> = Vec::new();
+            let mut inverse_by_axis = vec![0usize; axis_len];
+            for (key, original_a) in slices {
+                if let Some(group_idx) = groups.len().checked_sub(1)
+                    && groups[group_idx].0 == key
+                {
+                    groups[group_idx].1 = groups[group_idx].1.min(original_a);
+                    groups[group_idx].2 += 1;
+                    inverse_by_axis[original_a] = group_idx;
+                    continue;
+                }
+                let group_idx = groups.len();
+                groups.push((key, original_a, 1));
+                inverse_by_axis[original_a] = group_idx;
+            }
 
-            let unique_count = slices.len();
+            let unique_count = groups.len();
             let mut new_shape = self.shape.clone();
             new_shape[ax] = unique_count;
             let total = new_shape.iter().product::<usize>();
             let mut out_values = vec![0.0; total];
             let mut source_indices = vec![0; total];
 
-            for (new_a, (_, original_a)) in slices.iter().enumerate() {
+            for (new_a, (_, original_a, _)) in groups.iter().enumerate() {
                 for o in 0..outer {
                     for i in 0..inner {
                         let dst = o * unique_count * inner + new_a * inner + i;
@@ -20724,22 +20809,33 @@ impl UFuncArray {
                 }
             }
 
-            return Ok(Self {
+            let values = Self {
                 shape: new_shape,
                 values: out_values,
                 dtype: self.dtype,
                 integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-            });
+            };
+            let first_indices: Vec<usize> = groups
+                .iter()
+                .map(|(_, original_a, _)| *original_a)
+                .collect();
+            let counts_vec: Vec<usize> = groups.iter().map(|(_, _, count)| *count).collect();
+            let (indices, inverse, counts) = Self::unique_axis_metadata(
+                return_index,
+                return_inverse,
+                return_counts,
+                &first_indices,
+                &inverse_by_axis,
+                &counts_vec,
+            );
+
+            return Ok((values, indices, inverse, counts));
         }
 
         if self.dtype == DType::U64
             && let Some(IntegerSidecar::U64(values)) =
                 self.synthesized_integer_sidecar("unique_axis")?
         {
-            let outer: usize =
-                fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-            let inner: usize =
-                fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
             let mut slices: Vec<(Vec<u64>, usize)> = Vec::with_capacity(axis_len);
             for a in 0..axis_len {
                 let mut slice_vals = Vec::with_capacity(outer * inner);
@@ -20752,16 +20848,30 @@ impl UFuncArray {
             }
 
             slices.sort_by(|a, b| a.0.cmp(&b.0));
-            slices.dedup_by(|a, b| a.0 == b.0);
+            let mut groups: Vec<(Vec<u64>, usize, usize)> = Vec::new();
+            let mut inverse_by_axis = vec![0usize; axis_len];
+            for (key, original_a) in slices {
+                if let Some(group_idx) = groups.len().checked_sub(1)
+                    && groups[group_idx].0 == key
+                {
+                    groups[group_idx].1 = groups[group_idx].1.min(original_a);
+                    groups[group_idx].2 += 1;
+                    inverse_by_axis[original_a] = group_idx;
+                    continue;
+                }
+                let group_idx = groups.len();
+                groups.push((key, original_a, 1));
+                inverse_by_axis[original_a] = group_idx;
+            }
 
-            let unique_count = slices.len();
+            let unique_count = groups.len();
             let mut new_shape = self.shape.clone();
             new_shape[ax] = unique_count;
             let total = new_shape.iter().product::<usize>();
             let mut out_values = vec![0.0; total];
             let mut source_indices = vec![0; total];
 
-            for (new_a, (_, original_a)) in slices.iter().enumerate() {
+            for (new_a, (_, original_a, _)) in groups.iter().enumerate() {
                 for o in 0..outer {
                     for i in 0..inner {
                         let dst = o * unique_count * inner + new_a * inner + i;
@@ -20772,19 +20882,30 @@ impl UFuncArray {
                 }
             }
 
-            return Ok(Self {
+            let values = Self {
                 shape: new_shape,
                 values: out_values,
                 dtype: self.dtype,
                 integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-            });
+            };
+            let first_indices: Vec<usize> = groups
+                .iter()
+                .map(|(_, original_a, _)| *original_a)
+                .collect();
+            let counts_vec: Vec<usize> = groups.iter().map(|(_, _, count)| *count).collect();
+            let (indices, inverse, counts) = Self::unique_axis_metadata(
+                return_index,
+                return_inverse,
+                return_counts,
+                &first_indices,
+                &inverse_by_axis,
+                &counts_vec,
+            );
+
+            return Ok((values, indices, inverse, counts));
         }
 
         // Collect each slice as a Vec<f64> for comparison
-        let outer: usize =
-            fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
-        let inner: usize =
-            fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
         let mut slices: Vec<(Vec<f64>, usize)> = Vec::with_capacity(axis_len);
         for a in 0..axis_len {
             let mut slice_vals = Vec::with_capacity(outer * inner);
@@ -20796,37 +20917,66 @@ impl UFuncArray {
             slices.push((slice_vals, a));
         }
 
-        // Sort by slice content. Signed zeros compare equal here so stable sorting
-        // preserves the first original representative, matching NumPy.
+        // Sort by slice content. Signed zeros compare equal here; the scan below
+        // keeps the first original representative for each equivalence group.
         slices.sort_by(|a, b| Self::float_axis_unique_slice_cmp(&a.0, &b.0));
 
         // Deduplicate with signed-zero equivalence but NaN lane distinctness.
-        slices.dedup_by(|a, b| Self::float_axis_unique_slice_eq(&a.0, &b.0));
+        let mut groups: Vec<(Vec<f64>, usize, usize)> = Vec::new();
+        let mut inverse_by_axis = vec![0usize; axis_len];
+        for (key, original_a) in slices {
+            if let Some(group_idx) = groups.len().checked_sub(1)
+                && Self::float_axis_unique_slice_eq(&groups[group_idx].0, &key)
+            {
+                groups[group_idx].1 = groups[group_idx].1.min(original_a);
+                groups[group_idx].2 += 1;
+                inverse_by_axis[original_a] = group_idx;
+                continue;
+            }
+            let group_idx = groups.len();
+            groups.push((key, original_a, 1));
+            inverse_by_axis[original_a] = group_idx;
+        }
 
-        let unique_count = slices.len();
+        let unique_count = groups.len();
         let mut new_shape = self.shape.clone();
         new_shape[ax] = unique_count;
         let total = new_shape.iter().product::<usize>();
         let mut values = vec![0.0; total];
         let mut source_indices = vec![0; total];
 
-        for (new_a, (slice_vals, original_a)) in slices.iter().enumerate() {
+        for (new_a, (_, original_a, _)) in groups.iter().enumerate() {
             for o in 0..outer {
                 for i in 0..inner {
                     let dst = o * unique_count * inner + new_a * inner + i;
-                    values[dst] = slice_vals[o * inner + i];
                     let src = o * axis_len * inner + original_a * inner + i;
+                    values[dst] = self.values[src];
                     source_indices[dst] = src;
                 }
             }
         }
 
-        Ok(Self {
+        let values = Self {
             shape: new_shape,
             values,
             dtype: self.dtype,
             integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
-        })
+        };
+        let first_indices: Vec<usize> = groups
+            .iter()
+            .map(|(_, original_a, _)| *original_a)
+            .collect();
+        let counts_vec: Vec<usize> = groups.iter().map(|(_, _, count)| *count).collect();
+        let (indices, inverse, counts) = Self::unique_axis_metadata(
+            return_index,
+            return_inverse,
+            return_counts,
+            &first_indices,
+            &inverse_by_axis,
+            &counts_vec,
+        );
+
+        Ok((values, indices, inverse, counts))
     }
 
     /// Test whether each element of `self` is in `test_elements`. Returns a boolean array.
@@ -57752,6 +57902,47 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn unique_axis_rows_with_index_inverse_counts() {
+        let a = UFuncArray::new(
+            vec![5, 2],
+            vec![2.0, 0.0, 1.0, 0.0, 2.0, 0.0, 1.0, 0.0, 3.0, 0.0],
+            DType::F64,
+        )
+        .unwrap();
+
+        let (values, indices, inverse, counts) =
+            a.unique_axis_with_info(0, true, true, true).unwrap();
+
+        assert_eq!(values.shape(), &[3, 2]);
+        assert_eq!(values.values(), &[1.0, 0.0, 2.0, 0.0, 3.0, 0.0]);
+        assert_eq!(indices.expect("indices").values(), &[1.0, 0.0, 4.0]);
+        assert_eq!(
+            inverse.expect("inverse").values(),
+            &[1.0, 0.0, 1.0, 0.0, 2.0]
+        );
+        assert_eq!(counts.expect("counts").values(), &[2.0, 2.0, 1.0]);
+    }
+
+    #[test]
+    fn unique_axis_cols_with_index_inverse_counts() {
+        let a = UFuncArray::new(
+            vec![2, 4],
+            vec![2.0, 1.0, 2.0, 1.0, 9.0, 8.0, 9.0, 8.0],
+            DType::F64,
+        )
+        .unwrap();
+
+        let (values, indices, inverse, counts) =
+            a.unique_axis_with_info(1, true, true, true).unwrap();
+
+        assert_eq!(values.shape(), &[2, 2]);
+        assert_eq!(values.values(), &[1.0, 2.0, 8.0, 9.0]);
+        assert_eq!(indices.expect("indices").values(), &[1.0, 0.0]);
+        assert_eq!(inverse.expect("inverse").values(), &[1.0, 0.0, 1.0, 0.0]);
+        assert_eq!(counts.expect("counts").values(), &[2.0, 2.0]);
+    }
+
+    #[test]
     fn unique_axis_preserves_large_integer_sidecar_values() {
         let large = (1_u64 << 53) + 13;
         let a = UFuncArray::from_storage(
@@ -57767,6 +57958,28 @@ print(json.dumps(payload))
             r.to_storage().unwrap(),
             ArrayStorage::U64(vec![1, large, 7, 9])
         );
+    }
+
+    #[test]
+    fn unique_axis_metadata_preserves_large_integer_sidecar_values() {
+        let large = 1_u64 << 53;
+        let a = UFuncArray::from_storage(
+            vec![3, 2],
+            ArrayStorage::U64(vec![large + 1, 1, large, 1, large + 1, 1]),
+        )
+        .unwrap();
+
+        let (values, indices, inverse, counts) =
+            a.unique_axis_with_info(0, true, true, true).unwrap();
+
+        assert_eq!(values.shape(), &[2, 2]);
+        assert_eq!(
+            values.to_storage().unwrap(),
+            ArrayStorage::U64(vec![large, 1, large + 1, 1])
+        );
+        assert_eq!(indices.expect("indices").values(), &[1.0, 0.0]);
+        assert_eq!(inverse.expect("inverse").values(), &[1.0, 0.0, 1.0]);
+        assert_eq!(counts.expect("counts").values(), &[1.0, 2.0]);
     }
 
     #[test]
@@ -57807,6 +58020,45 @@ print(json.dumps(payload))
         let r = a.unique_axis(0).unwrap();
         assert_eq!(r.values(), &[0.0, 1.0]);
         assert_eq!(r.values()[0].to_bits(), 0.0f64.to_bits());
+    }
+
+    #[test]
+    fn unique_axis_metadata_preserves_first_signed_zero_representative() {
+        let a =
+            UFuncArray::new(vec![3, 2], vec![0.0, 1.0, -0.0, 1.0, 2.0, 1.0], DType::F64).unwrap();
+
+        let (values, indices, inverse, counts) =
+            a.unique_axis_with_info(0, true, true, true).unwrap();
+
+        assert_eq!(values.shape(), &[2, 2]);
+        assert_eq!(values.values(), &[0.0, 1.0, 2.0, 1.0]);
+        assert_eq!(values.values()[0].to_bits(), 0.0f64.to_bits());
+        assert_eq!(indices.expect("indices").values(), &[0.0, 2.0]);
+        assert_eq!(inverse.expect("inverse").values(), &[0.0, 0.0, 1.0]);
+        assert_eq!(counts.expect("counts").values(), &[2.0, 1.0]);
+    }
+
+    #[test]
+    fn unique_axis_metadata_keeps_nan_slices_distinct() {
+        let a = UFuncArray::new(
+            vec![3, 2],
+            vec![f64::NAN, 1.0, f64::NAN, 1.0, 1.0, 1.0],
+            DType::F64,
+        )
+        .unwrap();
+
+        let (values, indices, inverse, counts) =
+            a.unique_axis_with_info(0, true, true, true).unwrap();
+
+        assert_eq!(values.shape(), &[3, 2]);
+        assert_eq!(&values.values()[0..2], &[1.0, 1.0]);
+        assert!(values.values()[2].is_nan());
+        assert_eq!(values.values()[3], 1.0);
+        assert!(values.values()[4].is_nan());
+        assert_eq!(values.values()[5], 1.0);
+        assert_eq!(indices.expect("indices").values(), &[2.0, 0.0, 1.0]);
+        assert_eq!(inverse.expect("inverse").values(), &[1.0, 2.0, 0.0]);
+        assert_eq!(counts.expect("counts").values(), &[1.0, 1.0, 1.0]);
     }
 
     #[test]
