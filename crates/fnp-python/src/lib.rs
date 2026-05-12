@@ -8264,20 +8264,34 @@ fn frombuffer(
             .unbind());
     }
 
-    let parsed_dtype = extract_python_dtype(py, dtype, DType::F64, "frombuffer(dtype)")?;
-    if dtype_item_size(parsed_dtype).is_none() {
+    let numpy_frombuffer = || -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", parsed_dtype.name())?;
+        if let Some(dtype_val) = dtype.as_ref() {
+            kwargs.set_item("dtype", dtype_val.bind(py))?;
+        }
         kwargs.set_item("count", count)?;
         kwargs.set_item("offset", offset)?;
-        return Ok(numpy
+        Ok(numpy
             .getattr("frombuffer")?
             .call((buffer.bind(py),), Some(&kwargs))?
-            .unbind());
+            .unbind())
+    };
+
+    let dtype_for_parse = dtype.as_ref().map(|dtype_val| dtype_val.clone_ref(py));
+    let parsed_dtype =
+        match extract_python_dtype(py, dtype_for_parse, DType::F64, "frombuffer(dtype)") {
+            Ok(dtype) => dtype,
+            Err(_) => return numpy_frombuffer(),
+        };
+    if dtype_item_size(parsed_dtype).is_none() {
+        return numpy_frombuffer();
     };
 
     let bytes = collect_frombuffer_bytes(py, buffer.bind(py), offset)?;
-    let storage = storage_from_bytes(&bytes, parsed_dtype, count)?;
+    let storage = match storage_from_bytes(&bytes, parsed_dtype, count) {
+        Ok(storage) => storage,
+        Err(_) => return numpy_frombuffer(),
+    };
 
     build_numpy_array_from_storage(py, &[storage.len()], storage)
 }
