@@ -21,9 +21,13 @@
 #![allow(dead_code)]
 
 use pyo3::Bound;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyModule, PyTuple};
+use pyo3::types::{PyDict, PyList, PyModule, PyTuple};
+use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use fnp_python::fnp_python;
@@ -33,6 +37,8 @@ use fnp_python::fnp_python;
 /// embedded CPython VM is single-threaded, and numpy's own module state
 /// is not thread-safe in our re-entrant helpers.
 pub static PY_MUTEX: Mutex<()> = Mutex::new(());
+
+static NUMPY_SITE_PATHS: OnceLock<Result<Vec<String>, String>> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequirementLevel {
@@ -151,12 +157,9 @@ where
     let _guard = PY_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
     Python::initialize();
     Python::attach(|py| {
-        let numpy = match py.import("numpy") {
-            Ok(numpy) => numpy,
-            Err(err) => {
-                panic!("NumPy oracle must be importable for fnp-python conformance tests: {err}")
-            }
-        };
+        let numpy = import_numpy_oracle(py).unwrap_or_else(|err| {
+            panic!("NumPy oracle must be importable for fnp-python conformance tests: {err}")
+        });
         let module = PyModule::new(py, "fnp_python_conformance")
             .unwrap_or_else(|err| panic!("failed to create fnp-python conformance module: {err}"));
         fnp_python(&module)
@@ -164,6 +167,238 @@ where
         f(py, module, numpy)
             .unwrap_or_else(|err| panic!("fnp-python conformance callback failed: {err}"));
     });
+}
+
+fn import_numpy_oracle(py: Python<'_>) -> PyResult<Bound<'_, PyModule>> {
+    if let Ok(numpy) = py.import("numpy") {
+        return Ok(numpy);
+    }
+
+    let embedded_python = embedded_python_selector(py)?;
+    let site_paths = NUMPY_SITE_PATHS
+        .get_or_init(|| resolve_numpy_site_paths(&embedded_python))
+        .clone()
+        .map_err(PyRuntimeError::new_err)?;
+    let sys_path = py.import("sys")?.getattr("path")?.cast_into::<PyList>()?;
+    for path in site_paths.iter().rev() {
+        sys_path.insert(0, path)?;
+    }
+
+    py.import("numpy")
+}
+
+fn embedded_python_selector(py: Python<'_>) -> PyResult<String> {
+    let version_info = py.import("sys")?.getattr("version_info")?;
+    let major: u8 = version_info.get_item(0)?.extract()?;
+    let minor: u8 = version_info.get_item(1)?.extract()?;
+    Ok(format!("python{major}.{minor}"))
+}
+
+fn resolve_numpy_site_paths(embedded_python: &str) -> Result<Vec<String>, String> {
+    let python = resolve_numpy_oracle_python(embedded_python)?;
+    let output = Command::new(&python)
+        .args([
+            "-c",
+            "import sysconfig; print('\\n'.join(dict.fromkeys(p for p in [sysconfig.get_path('purelib'), sysconfig.get_path('platlib')] if p)))",
+        ])
+        .output()
+        .map_err(|error| format!("failed to query NumPy site paths from {python}: {error}"))?;
+    if !output.status.success() {
+        return Err(command_failure("python sysconfig site path probe", &output));
+    }
+
+    let paths: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if paths.is_empty() {
+        return Err(format!(
+            "NumPy oracle Python {python} reported no site-packages paths"
+        ));
+    }
+    Ok(paths)
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn is_default_python_selector(value: &str) -> bool {
+    matches!(value.trim(), "python" | "python3")
+}
+
+fn python_imports_numpy(python: &str) -> bool {
+    Command::new(python)
+        .args([
+            "-c",
+            "import importlib.util; raise SystemExit(0 if importlib.util.find_spec('numpy') else 1)",
+        ])
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+fn target_dir() -> PathBuf {
+    let path = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target"));
+    if path.is_absolute() {
+        path
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn target_numpy_venv_python(embedded_python: &str) -> PathBuf {
+    let tag: String = embedded_python
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect();
+    target_dir().join(format!(
+        "fnp-python-conformance-numpy-venv-{tag}/bin/python3"
+    ))
+}
+
+fn command_failure(command_name: &str, output: &std::process::Output) -> String {
+    format!(
+        "{command_name} failed (stdout={} stderr={})",
+        String::from_utf8_lossy(&output.stdout).trim(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )
+}
+
+fn bootstrap_target_numpy_venv(
+    python_path: &Path,
+    bootstrap_python: &str,
+) -> Result<String, String> {
+    let venv_dir = python_path.parent().and_then(Path::parent).ok_or_else(|| {
+        format!(
+            "invalid fnp-python NumPy venv path {}",
+            python_path.display()
+        )
+    })?;
+
+    if python_path.is_file() && python_imports_numpy(&python_path.display().to_string()) {
+        return Ok(python_path.display().to_string());
+    }
+
+    if Command::new("uv")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+    {
+        let create = Command::new("uv")
+            .arg("venv")
+            .arg("--allow-existing")
+            .arg("--python")
+            .arg(bootstrap_python)
+            .arg(venv_dir)
+            .output()
+            .map_err(|error| format!("failed to create fnp-python NumPy venv via uv: {error}"))?;
+        if !create.status.success() {
+            return Err(command_failure("uv venv", &create));
+        }
+
+        let install = Command::new("uv")
+            .arg("pip")
+            .arg("install")
+            .arg("--python")
+            .arg(python_path)
+            .arg("numpy")
+            .output()
+            .map_err(|error| {
+                format!("failed to install NumPy into fnp-python venv via uv: {error}")
+            })?;
+        if !install.status.success() {
+            return Err(command_failure("uv pip install numpy", &install));
+        }
+    } else {
+        let create = Command::new(bootstrap_python)
+            .arg("-m")
+            .arg("venv")
+            .arg(venv_dir)
+            .output()
+            .map_err(|error| {
+                format!("failed to create fnp-python NumPy venv via {bootstrap_python}: {error}")
+            })?;
+        if !create.status.success() {
+            return Err(command_failure("python -m venv", &create));
+        }
+
+        let install = Command::new(python_path)
+            .arg("-m")
+            .arg("pip")
+            .arg("install")
+            .arg("numpy")
+            .output()
+            .map_err(|error| format!("failed to install NumPy into fnp-python venv: {error}"))?;
+        if !install.status.success() {
+            return Err(command_failure("python -m pip install numpy", &install));
+        }
+    }
+
+    let resolved = python_path.display().to_string();
+    if python_imports_numpy(&resolved) {
+        Ok(resolved)
+    } else {
+        Err(format!(
+            "bootstrapped fnp-python NumPy venv does not import numpy: {}",
+            python_path.display()
+        ))
+    }
+}
+
+fn python_version_selector(python: &str) -> Result<String, String> {
+    let output = Command::new(python)
+        .args([
+            "-c",
+            "import sys; print(f'python{sys.version_info[0]}.{sys.version_info[1]}')",
+        ])
+        .output()
+        .map_err(|error| format!("failed to query Python version from {python}: {error}"))?;
+    if !output.status.success() {
+        return Err(command_failure("python version probe", &output));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn resolve_numpy_oracle_python(embedded_python: &str) -> Result<String, String> {
+    if let Some(configured) = env_nonempty("FNP_ORACLE_PYTHON")
+        && !is_default_python_selector(&configured)
+    {
+        if python_imports_numpy(&configured)
+            && python_version_selector(&configured).as_deref() == Ok(embedded_python)
+        {
+            return Ok(configured);
+        }
+        return Err(format!(
+            "configured FNP_ORACLE_PYTHON={configured:?} cannot supply NumPy for embedded {embedded_python}; unset it to allow target-dir bootstrap"
+        ));
+    }
+
+    let bootstrap_python = env_nonempty("PYO3_PYTHON").unwrap_or_else(|| {
+        if python_version_selector(embedded_python).as_deref() == Ok(embedded_python) {
+            embedded_python.to_string()
+        } else if python_version_selector("python3").as_deref() == Ok(embedded_python) {
+            "python3".to_string()
+        } else {
+            embedded_python.to_string()
+        }
+    });
+    if python_imports_numpy(&bootstrap_python) {
+        return Ok(bootstrap_python);
+    }
+
+    bootstrap_target_numpy_venv(
+        &target_numpy_venv_python(embedded_python),
+        &bootstrap_python,
+    )
 }
 
 /// Run a single parity case with pre-resolved function objects so the

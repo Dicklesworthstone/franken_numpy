@@ -23,6 +23,17 @@ fn np_int_1d<'py>(
     py.import("numpy")?.getattr("array")?.call1((items,))
 }
 
+fn np_int_1d_dtype<'py>(
+    py: Python<'py>,
+    items: Vec<i64>,
+    dtype: &str,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", numpy.getattr(dtype)?)?;
+    numpy.getattr("array")?.call((items,), Some(&kwargs))
+}
+
 fn np_float_1d<'py>(
     py: Python<'py>,
     items: Vec<f64>,
@@ -50,6 +61,27 @@ fn axis_keepdims<'py>(
 ) -> PyResult<Option<pyo3::Bound<'py, PyDict>>> {
     let kw = PyDict::new(py);
     kw.set_item("axis", axis)?;
+    kw.set_item("keepdims", keepdims)?;
+    Ok(Some(kw))
+}
+
+fn dtype_kwargs<'py>(py: Python<'py>, dtype: &str) -> PyResult<Option<pyo3::Bound<'py, PyDict>>> {
+    let numpy = py.import("numpy")?;
+    let kw = PyDict::new(py);
+    kw.set_item("dtype", numpy.getattr(dtype)?)?;
+    Ok(Some(kw))
+}
+
+fn axis_dtype_keepdims<'py>(
+    py: Python<'py>,
+    axis: i64,
+    dtype: &str,
+    keepdims: bool,
+) -> PyResult<Option<pyo3::Bound<'py, PyDict>>> {
+    let numpy = py.import("numpy")?;
+    let kw = PyDict::new(py);
+    kw.set_item("axis", axis)?;
+    kw.set_item("dtype", numpy.getattr(dtype)?)?;
     kw.set_item("keepdims", keepdims)?;
     Ok(Some(kw))
 }
@@ -132,6 +164,35 @@ fn conformance_reductions_matrix() {
             |py| PyTuple::new(py, [np_int_1d(py, vec![])?]),
             no_kwargs,
         );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-sum-explicit-dtype-float32",
+            "sum",
+            RequirementLevel::Must,
+            CompareMode::Close,
+            t,
+            |py| PyTuple::new(py, [np_int_1d_dtype(py, vec![1, 2, 3, 4, 5], "int16")?]),
+            |py| dtype_kwargs(py, "float32"),
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-sum-axis-explicit-dtype-keepdims",
+            "sum",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_int_2d(py, vec![vec![1, 2], vec![3, 4], vec![5, 6]])?],
+                )
+            },
+            |py| axis_dtype_keepdims(py, 0, "int64", true),
+        );
 
         // ─── prod ───────────────────────────────────────────────────────
         run_case(
@@ -157,6 +218,18 @@ fn conformance_reductions_matrix() {
             t,
             |py| PyTuple::new(py, [np_int_1d(py, vec![])?]),
             no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-prod-explicit-dtype-float64",
+            "prod",
+            RequirementLevel::Must,
+            CompareMode::Close,
+            t,
+            |py| PyTuple::new(py, [np_int_1d_dtype(py, vec![2, 3, 4], "int16")?]),
+            |py| dtype_kwargs(py, "float64"),
         );
 
         // ─── min / max ──────────────────────────────────────────────────
@@ -214,6 +287,18 @@ fn conformance_reductions_matrix() {
             t,
             |py| PyTuple::new(py, [np_int_2d(py, vec![vec![1, 2, 3], vec![4, 5, 6]])?]),
             |py| axis_kwargs(py, 1),
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-mean-explicit-dtype-float32",
+            "mean",
+            RequirementLevel::Must,
+            CompareMode::Close,
+            t,
+            |py| PyTuple::new(py, [np_int_1d_dtype(py, vec![1, 2, 3, 4, 5], "int16")?]),
+            |py| dtype_kwargs(py, "float32"),
         );
         run_case(
             py,
@@ -278,6 +363,18 @@ fn conformance_reductions_matrix() {
                 kw.set_item("ddof", 1_i64)?;
                 Ok(Some(kw))
             },
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-var-explicit-dtype-float32",
+            "var",
+            RequirementLevel::Must,
+            CompareMode::Close,
+            t,
+            |py| PyTuple::new(py, [np_int_1d_dtype(py, vec![1, 2, 3, 4, 5], "int16")?]),
+            |py| dtype_kwargs(py, "float32"),
         );
 
         // ─── ptp ────────────────────────────────────────────────────────
@@ -404,6 +501,18 @@ fn conformance_reductions_matrix() {
             py,
             &module,
             &numpy,
+            "reductions-cumsum-explicit-dtype-int64",
+            "cumsum",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| PyTuple::new(py, [np_int_1d_dtype(py, vec![1, 2, 3, 4, 5], "int16")?]),
+            |py| dtype_kwargs(py, "int64"),
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
             "reductions-cumprod-1d",
             "cumprod",
             RequirementLevel::Must,
@@ -411,6 +520,18 @@ fn conformance_reductions_matrix() {
             t,
             |py| PyTuple::new(py, [np_int_1d(py, vec![1, 2, 3, 4])?]),
             no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-cumprod-explicit-dtype-float64",
+            "cumprod",
+            RequirementLevel::Must,
+            CompareMode::Close,
+            t,
+            |py| PyTuple::new(py, [np_int_1d_dtype(py, vec![2, 3, 4], "int16")?]),
+            |py| dtype_kwargs(py, "float64"),
         );
 
         // ─── NaN propagation in float reducers ──────────────────────────
@@ -456,6 +577,23 @@ fn conformance_reductions_matrix() {
                 )
             },
             no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-nansum-explicit-dtype-float32",
+            "nansum",
+            RequirementLevel::Must,
+            CompareMode::Close,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_float_1d(py, vec![1.0, f64::NAN, 3.0, f64::NAN, 5.0])?],
+                )
+            },
+            |py| dtype_kwargs(py, "float32"),
         );
         run_case(
             py,
