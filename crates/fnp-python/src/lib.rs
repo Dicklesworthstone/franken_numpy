@@ -9697,27 +9697,72 @@ fn select(
     choicelist: Py<PyAny>,
     default: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let condlist = extract_numeric_array_sequence(py, condlist.bind(py), "select(condlist)")?;
-    let choicelist = extract_numeric_array_sequence(py, choicelist.bind(py), "select(choicelist)")?;
+    let condlist_for_fallback = condlist.clone_ref(py);
+    let choicelist_for_fallback = choicelist.clone_ref(py);
+    let default_for_fallback = default.as_ref().map(|value| value.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let select_fn = numpy.getattr("select")?;
+        if let Some(default) = default_for_fallback.as_ref() {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("default", default.bind(py))?;
+            Ok(select_fn
+                .call(
+                    (
+                        condlist_for_fallback.bind(py),
+                        choicelist_for_fallback.bind(py),
+                    ),
+                    Some(&kwargs),
+                )?
+                .unbind())
+        } else {
+            Ok(select_fn
+                .call1((
+                    condlist_for_fallback.bind(py),
+                    choicelist_for_fallback.bind(py),
+                ))?
+                .unbind())
+        }
+    };
+
+    let condlist = match extract_numeric_array_sequence(py, condlist.bind(py), "select(condlist)") {
+        Ok(condlist) => condlist,
+        Err(_) => return fallback(),
+    };
+    let choicelist =
+        match extract_numeric_array_sequence(py, choicelist.bind(py), "select(choicelist)") {
+            Ok(choicelist) => choicelist,
+            Err(_) => return fallback(),
+        };
 
     if condlist.len() != choicelist.len() {
-        return Err(PyValueError::new_err(
-            "select: condlist and choicelist must have the same length",
-        ));
+        return fallback();
     }
     if condlist.is_empty() {
-        return Err(PyValueError::new_err("select: condlist must be non-empty"));
+        return fallback();
+    }
+    if condlist
+        .iter()
+        .any(|condition| condition.dtype() != DType::Bool)
+    {
+        return fallback();
     }
 
     let mut result = match default {
-        Some(default) => extract_numeric_array(py, default.bind(py), "select(default)")?,
+        Some(default) => match extract_numeric_array(py, default.bind(py), "select(default)") {
+            Ok(default) => default,
+            Err(_) => return fallback(),
+        },
         None => {
             UFuncArray::from_storage(vec![], ArrayStorage::I64(vec![0])).map_err(map_ufunc_error)?
         }
     };
 
     for (condition, choice) in condlist.iter().zip(choicelist.iter()).rev() {
-        result = UFuncArray::where_select(condition, choice, &result).map_err(map_ufunc_error)?;
+        result = match UFuncArray::where_select(condition, choice, &result) {
+            Ok(result) => result,
+            Err(_) => return fallback(),
+        };
     }
 
     build_numpy_array_from_ufunc(py, &result)

@@ -53,7 +53,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "apply_along_axis sum should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_along_axis sum should match numpy"
+    );
     Ok(())
 }
 
@@ -69,7 +73,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "apply_along_axis mean should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_along_axis mean should match numpy"
+    );
     Ok(())
 }
 
@@ -85,7 +93,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "apply_along_axis 3d should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_along_axis 3d should match numpy"
+    );
     Ok(())
 }
 
@@ -101,7 +113,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "apply_along_axis negative axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_along_axis negative axis should match numpy"
+    );
     Ok(())
 }
 
@@ -121,7 +137,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "apply_over_axes sum single axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_over_axes sum single axis should match numpy"
+    );
     Ok(())
 }
 
@@ -137,7 +157,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "apply_over_axes sum multiple axes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_over_axes sum multiple axes should match numpy"
+    );
     Ok(())
 }
 
@@ -153,7 +177,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "apply_over_axes mean should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_over_axes mean should match numpy"
+    );
     Ok(())
 }
 
@@ -212,7 +240,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "select with default should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "select with default should match numpy"
+    );
     Ok(())
 }
 
@@ -230,7 +262,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "select three conditions should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "select three conditions should match numpy"
+    );
     Ok(())
 }
 
@@ -252,6 +288,76 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+#[test]
+fn select_string_choices_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condlist = [np.array([True, False, True])]
+choicelist = [np.array(["alpha", "beta", "gamma"])]
+result = fnp.select(condlist, choicelist, default="fallback")
+expected = np.select(condlist, choicelist, default="fallback")
+print(np.array_equal(result, expected) and np.array_equal([result.dtype.str], [expected.dtype.str]))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "select should preserve NumPy string choice behavior"
+    );
+    Ok(())
+}
+
+#[test]
+fn select_string_default_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condlist = [np.array([True, False, True])]
+choicelist = [np.array([10, 20, 30])]
+result = fnp.select(condlist, choicelist, default="fallback")
+expected = np.select(condlist, choicelist, default="fallback")
+print(np.array_equal(result, expected) and np.array_equal([result.dtype.str], [expected.dtype.str]))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "select should preserve NumPy string default promotion"
+    );
+    Ok(())
+}
+
+#[test]
+fn select_rejects_non_bool_numeric_condition_like_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def classify(func):
+    try:
+        func()
+    except Exception as exc:
+        return type(exc).__name__
+    return "ok"
+
+condlist = [np.array([0, 1, 0])]
+choicelist = [np.array([10, 20, 30])]
+result = classify(lambda: fnp.select(condlist, choicelist, default=-1))
+expected = classify(lambda: np.select(condlist, choicelist, default=-1))
+print(result in (expected,))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "select should reject non-bool numeric conditions like NumPy"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Relationship tests
 // ─────────────────────────────────────────────────────────────────────────────
@@ -268,7 +374,11 @@ print(np.array_equal(apply_result, direct_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "apply_along_axis sum should equal direct sum");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_along_axis sum should equal direct sum"
+    );
     Ok(())
 }
 
@@ -286,6 +396,10 @@ print(np.array_equal(select_result, where_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "select should equal where for single condition");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "select should equal where for single condition"
+    );
     Ok(())
 }
