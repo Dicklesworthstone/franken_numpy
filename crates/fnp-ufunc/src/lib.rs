@@ -2188,24 +2188,6 @@ impl UFuncLoopRegistry {
     }
 }
 
-/// Legacy single-function entry point (fail-closed compatibility guard).
-///
-/// For the full registry model, use `UFuncLoopRegistry::register()`.
-pub fn register_custom_loop(loop_name: &str) -> Result<(), UFuncError> {
-    let loop_name = loop_name.trim();
-    if loop_name.is_empty() {
-        return Err(UFuncError::LoopRegistryInvalid {
-            detail: "custom loop name must not be empty".to_string(),
-        });
-    }
-
-    Err(UFuncError::LoopRegistryInvalid {
-        detail: format!(
-            "standalone loop registration unsupported; use UFuncLoopRegistry::register() for '{loop_name}'"
-        ),
-    })
-}
-
 pub fn plan_binary_dispatch(
     lhs: &UFuncArray,
     rhs: &UFuncArray,
@@ -34254,10 +34236,10 @@ mod tests {
         pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
         plan_binary_dispatch, plan_binary_dispatch_with_registry,
         plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
-        reduce_frompyfunc_values, register_custom_loop, resolve_override_dispatch, scimath_arccos,
-        scimath_arcsin, scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn,
-        scimath_power, scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex,
-        spacing, take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
+        reduce_frompyfunc_values, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
+        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
+        scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
+        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
         validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
@@ -36284,14 +36266,6 @@ print(json.dumps(payload))
         ));
     }
 
-    #[test]
-    fn custom_loop_registration_is_fail_closed() {
-        let err = register_custom_loop("fused_add_loop")
-            .expect_err("standalone registration is unsupported");
-        assert!(matches!(err, UFuncError::LoopRegistryInvalid { .. }));
-        assert_eq!(err.reason_code(), "ufunc_loop_registry_invalid");
-    }
-
     // -----------------------------------------------------------------------
     // UFuncLoopRegistry model tests (P2C005-U02)
     // -----------------------------------------------------------------------
@@ -36724,18 +36698,6 @@ print(json.dumps(payload))
             err,
             UFuncError::OverridePrecedenceViolation { .. }
         ));
-    }
-
-    #[test]
-    fn custom_loop_registration_rejects_empty_name() {
-        let err = register_custom_loop("").expect_err("empty loop name should fail");
-        assert!(matches!(err, UFuncError::LoopRegistryInvalid { .. }));
-    }
-
-    #[test]
-    fn custom_loop_registration_rejects_whitespace_only() {
-        let err = register_custom_loop("   ").expect_err("whitespace loop name should fail");
-        assert!(matches!(err, UFuncError::LoopRegistryInvalid { .. }));
     }
 
     // -----------------------------------------------------------------------

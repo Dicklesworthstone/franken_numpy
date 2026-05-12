@@ -69,10 +69,9 @@
 
 ## Intentional Design Decisions
 
-1. **`register_custom_loop()` fail-closed stub** (`fnp-ufunc`): Always returns `Err` directing callers to `UFuncLoopRegistry::register()`. This is deliberate — the registry-based API is the canonical entry point; the standalone function exists only for discovery and always rejects registration.
-2. **`empty()` / `empty_like()` delegate to `zeros()`**: In safe Rust (`#![forbid(unsafe_code)]`), there is no uninitialized memory. These functions correctly zero-fill, matching NumPy's observed behavior for freshly allocated arrays.
-3. **Dtype promotion exhaustive match**: All 324 DType pairs are explicitly handled in `promote()` with no catch-all fallback. The compiler enforces exhaustiveness — adding a new DType variant will cause a compile error until promotion rules are added for it.
-4. **Oracle pure-Python fallback**: When real NumPy is unavailable, `fnp-conformance` falls back to a simplified Python reimplementation. Set `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` to enforce real NumPy. The `oracle_source` field in capture results records which oracle was used.
+1. **`empty()` / `empty_like()` delegate to `zeros()`**: In safe Rust (`#![forbid(unsafe_code)]`), there is no uninitialized memory. These functions correctly zero-fill, matching NumPy's observed behavior for freshly allocated arrays.
+2. **Dtype promotion exhaustive match**: All 324 DType pairs are explicitly handled in `promote()` with no catch-all fallback. The compiler enforces exhaustiveness — adding a new DType variant will cause a compile error until promotion rules are added for it.
+3. **Oracle pure-Python fallback**: When real NumPy is unavailable, `fnp-conformance` falls back to a simplified Python reimplementation. Set `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` to enforce real NumPy. The `oracle_source` field in capture results records which oracle was used.
 
 ## API Surface Inventory
 
