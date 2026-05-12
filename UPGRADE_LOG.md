@@ -41,7 +41,7 @@
 - **Updated (this session):** flate2 1.0.35 -> 1.1.9, sha2 0.10.9 -> 0.11.0, criterion 0.5.1 -> 0.8.2 (dev), ftui 0.2.1 -> 0.3.1 (feature-gated), pyo3 0.23.5 -> 0.28.3.
 - **Skipped (already latest):** half 2.7.1, bytemuck 1.25.0, serde 1.0.228, serde_json 1.0.149, base64 0.22.1, serde_yaml_ng 0.10.0.
 - **Failed:** 0 (no rollbacks).
-- **Needs attention:** pre-existing test drift listed below. The pyo3 0.28 cleanup notes are resolved against the current tree.
+- **Needs attention:** pre-existing non-fnp-python test drift listed below. The pyo3 0.28 cleanup notes and previously listed fnp-python parity failures are resolved against the current tree.
 
 ### Failed (this session)
 
@@ -52,9 +52,9 @@ _None — all 5 target deps updated cleanly. Circuit breakers never tripped._
 - **pyo3 0.28: `.downcast()` -> `.cast()` cleanup is resolved in the current tree.** A targeted scan of `crates/fnp-python/src/lib.rs` and `crates/fnp-python/tests` finds no remaining `.downcast` or `.downcast_into` call sites, so this is no longer deferred upgrade debt.
 - **pyo3 0.28: `#[pyclass]` `FromPyObject` behavior change is resolved in the current tree.** Clone pyclasses that need explicit extraction policy now use `skip_from_py_object`, including `NditerStep`, `SeedSequence`, and bit-generator wrapper classes. A focused `cargo check -p fnp-python --all-targets` run under pyo3 0.28.3 is clean.
 - **pyo3 0.28: `#[pyclass]` Sync requirement is resolved for the current surface.** The previously flagged `PyRClass` and `PyCClass` objects are zero-sized marker classes, and the focused pyo3 0.28.3 all-targets check is clean. If future free-threaded Python packaging adds state to these classes, track that as new work.
-- **Pre-existing test drift (NOT caused by this session's upgrades; flagged for visibility only):**
+- **pyo3 0.28: previously listed fnp-python test drift is resolved in the current tree.** Focused remote revalidation passes: `wrappers_match_numpy` covers the hermite and laguerre wrapper filters 5/5 on `vmi1227854`, and `ma_count_matches_numpy_across_axis_and_keepdims` passes 1/1 on `vmi1156319` (worker-side exit 0; local artifact retrieval lagged after the result).
+- **Pre-existing non-fnp-python test drift (NOT caused by this session's upgrades; flagged for visibility only):**
   - `fnp-conformance`: `test_contracts::tests::test_contract_suite_is_green`, `tests::test_contract_suite_is_green`, `tests::core_suites_are_green` all fail with `linalg_differential_cases invalid fixture id linalg_cholesky_solve_identity_L_returns_b`. The ID is defined in `fixtures/linalg_differential_cases.json` but missing from the linalg fixture ID registry.
-  - `fnp-python`: `tests::hermite_wrappers_match_numpy` (physicist vs probabilist Hermite convention), `tests::laguerre_wrappers_match_numpy`, `tests::ma_count_matches_numpy_across_axis_and_keepdims` (AttributeError: 'int' has no attribute 'dtype') — owned by respective wrapper implementations.
   - `frankenlibc-membrane` (transitive via asupersync): `runtime_math::localization_chooser::observe_throughput_below_strict_budget` — flaky timing budget test on shared build hosts.
 
 ### Asupersync bump (separate commit, aadd732)
@@ -87,7 +87,7 @@ _None — all 5 target deps updated cleanly. Circuit breakers never tripped._
   - `PyObject` alias deprecated; use `Py<PyAny>`. `GILOnceCell` -> `PyOnceLock`.
 - **Bump result:** compiles cleanly after a **2-line edit** in `crates/fnp-python/src/lib.rs` (swap `pyo3::prepare_freethreaded_python()` for `Python::initialize()` and `Python::with_gil(|py| ...)` for `Python::attach(|py| ...)` in the single `with_python` test helper). Everything else (1.2 MB of pyo3 code in `crates/fnp-python/src/lib.rs`) still compiles, including all 16 `_bound`-suffixed call sites — turns out the `_bound` suffix survives as an alias in the pyo3 0.28.x line via deprecation shims (only warnings, no errors).
 - **Lockfile:** pyo3 0.23.5 -> 0.28.3, pyo3-build-config / pyo3-ffi / pyo3-macros / pyo3-macros-backend all 0.23.5 -> 0.28.3. target-lexicon 0.12.16 -> 0.13.5. Removes indoc 2.0.7 and unindent 0.2.4.
-- **Tests:** `rch exec -- cargo test -p fnp-python --lib` runs 323 tests: **320 pass, 3 fail**. All 3 failures are pre-existing numerical assertion drift in NumPy-parity tests (`hermite_wrappers_match_numpy`, `laguerre_wrappers_match_numpy`, `ma_count_matches_numpy_across_axis_and_keepdims`) that compare hard-coded expected arrays against our implementation. Example: hermite gives `[2.0, 6.5, 1.0, 1.5]` where the test expects `[4.0, 13.0, 2.0, 3.0]` (exactly 2x — classic physicist vs probabilist Hermite convention mismatch). pyo3 does not change arithmetic; these failures are owned by the respective wrapper implementations, not this bump.
+- **Tests:** The original bump lane recorded three fnp-python parity failures, but current focused revalidation shows those named failures are no longer open in the current tree. `rch exec -- cargo test -p fnp-python --lib wrappers_match_numpy -- --nocapture` passed 5/5 remotely on `vmi1227854`, covering the hermite and laguerre wrapper filters. `rch exec -- cargo test -p fnp-python --lib ma_count_matches_numpy_across_axis_and_keepdims -- --nocapture` passed 1/1 worker-side on `vmi1156319` before local artifact retrieval lagged.
 - **`Needs Attention` items logged separately below.**
 
 #### ftui: 0.2.1 -> 0.3.1 (fnp-runtime, feature-gated optional)
