@@ -41,7 +41,7 @@
 - **Updated (this session):** flate2 1.0.35 -> 1.1.9, sha2 0.10.9 -> 0.11.0, criterion 0.5.1 -> 0.8.2 (dev), ftui 0.2.1 -> 0.3.1 (feature-gated), pyo3 0.23.5 -> 0.28.3.
 - **Skipped (already latest):** half 2.7.1, bytemuck 1.25.0, serde 1.0.228, serde_json 1.0.149, base64 0.22.1, serde_yaml_ng 0.10.0.
 - **Failed:** 0 (no rollbacks).
-- **Needs attention:** pre-existing non-fnp-python test drift listed below. The pyo3 0.28 cleanup notes and previously listed fnp-python parity failures are resolved against the current tree.
+- **Needs attention:** pre-existing transitive timing drift listed below. The pyo3 0.28 cleanup notes and previously listed fnp-python/fnp-conformance failures are resolved against the current tree.
 
 ### Failed (this session)
 
@@ -53,8 +53,8 @@ _None — all 5 target deps updated cleanly. Circuit breakers never tripped._
 - **pyo3 0.28: `#[pyclass]` `FromPyObject` behavior change is resolved in the current tree.** Clone pyclasses that need explicit extraction policy now use `skip_from_py_object`, including `NditerStep`, `SeedSequence`, and bit-generator wrapper classes. A focused `cargo check -p fnp-python --all-targets` run under pyo3 0.28.3 is clean.
 - **pyo3 0.28: `#[pyclass]` Sync requirement is resolved for the current surface.** The previously flagged `PyRClass` and `PyCClass` objects are zero-sized marker classes, and the focused pyo3 0.28.3 all-targets check is clean. If future free-threaded Python packaging adds state to these classes, track that as new work.
 - **pyo3 0.28: previously listed fnp-python test drift is resolved in the current tree.** Focused remote revalidation passes: `wrappers_match_numpy` covers the hermite and laguerre wrapper filters 5/5 on `vmi1227854`, and `ma_count_matches_numpy_across_axis_and_keepdims` passes 1/1 on `vmi1156319` (worker-side exit 0; local artifact retrieval lagged after the result).
-- **Pre-existing non-fnp-python test drift (NOT caused by this session's upgrades; flagged for visibility only):**
-  - `fnp-conformance`: `test_contracts::tests::test_contract_suite_is_green`, `tests::test_contract_suite_is_green`, `tests::core_suites_are_green` all fail with `linalg_differential_cases invalid fixture id linalg_cholesky_solve_identity_L_returns_b`. The ID is defined in `fixtures/linalg_differential_cases.json` but missing from the linalg fixture ID registry.
+- **fnp-conformance: previously listed linalg fixture-registry drift is resolved in the current tree.** The old `linalg_cholesky_solve_identity_L_returns_b` ID is absent from current fixtures/source, `test_contract_suite_is_green` passes 2/2 remotely on `vmi1153651`, and `core_suites_are_green` passes 1/1 worker-side on `vmi1156319` (local artifact retrieval lagged after the result).
+- **Pre-existing transitive test drift (NOT caused by this session's upgrades; flagged for visibility only):**
   - `frankenlibc-membrane` (transitive via asupersync): `runtime_math::localization_chooser::observe_throughput_below_strict_budget` — flaky timing budget test on shared build hosts.
 
 ### Asupersync bump (separate commit, aadd732)
@@ -107,7 +107,7 @@ _None — all 5 target deps updated cleanly. Circuit breakers never tripped._
 
 - **Research:** sha2 0.11 updates to `digest` 0.11 and converts hash types (`Sha256`, `Sha512`, ...) from type aliases to newtype structs. Module reorg: `compress256`/`compress512` moved to `block_api`. Features `asm`/`asm-aarch64`/`loongarch64_asm`/`compress`/`soft`/`force-soft-compact`/`std` removed; new `alloc` feature. MSRV bumped to 1.85 (we're on edition 2024/nightly — fine).
 - **fnp-conformance usage audit:** only `use sha2::{Digest, Sha256};` + `Sha256::digest(bytes)` / `Sha256::new()` / `hasher.update(...)` / `hasher.finalize()`. These APIs are preserved in 0.11 via the `Digest` trait; the newtype conversion does not affect this call style. Transitive removals: `block-buffer`, `cpufeatures`, `crypto-common`, `digest 0.10.x`, `generic-array 0.14.x` (all replaced by digest 0.11 / hybrid-array internals).
-- **Verified:** `cargo check -p fnp-conformance --all-targets` passes cleanly. Targeted `cargo test -p fnp-conformance --lib raptorq` (4 tests that exercise the sha2 code paths via `raptorq_artifacts::sha256_hex`) passes 4/4. A broader `cargo test -p fnp-conformance --lib` shows 3 pre-existing failures in `test_contracts::*test_contract_suite_is_green` and `tests::core_suites_are_green` — all complaining about `linalg_differential_cases invalid fixture id linalg_cholesky_solve_identity_L_returns_b`, which is a fixture-registry / data-file issue entirely unrelated to sha2. Confirmed by grep: the failing ID is only defined in `fixtures/linalg_differential_cases.json` and is not registered in the linalg fixture ID enum — pre-existing breakage owned by another agent / the linalg team.
+- **Verified:** `cargo check -p fnp-conformance --all-targets` passes cleanly. Targeted `cargo test -p fnp-conformance --lib raptorq` (4 tests that exercise the sha2 code paths via `raptorq_artifacts::sha256_hex`) passes 4/4. Current focused revalidation shows the previously recorded broader fnp-conformance failures are resolved: `cargo test -p fnp-conformance --lib test_contract_suite_is_green -- --nocapture` passed 2/2 remotely on `vmi1153651`, and `cargo test -p fnp-conformance --lib core_suites_are_green -- --nocapture` passed 1/1 worker-side on `vmi1156319`.
 
 ---
 
