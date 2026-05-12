@@ -30,7 +30,7 @@
 
 ## GROUP 4: sum/prod/mean/var/std `dtype` parameter
 - [D] Deferred parity debt — NumPy exposes `dtype=` as observable API behavior even when f64 accumulation is internally precise
-- [D] Follow-up must define accumulator/result dtype semantics for integer, unsigned, float, bool, and complex reductions before this gap can be marked closed
+- [D] Python FFI explicit `dtype=` keyword conformance is covered for `sum`, `prod`, `mean`, `std`, and `var`; remaining follow-up must define Rust-core accumulator/result dtype semantics for integer, unsigned, float, bool, and complex reductions before this gap can be marked closed
 
 ## GROUP 5: percentile/quantile `keepdims` parameter
 - [x] Add `percentile_keepdims` method
