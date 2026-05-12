@@ -41,7 +41,7 @@
 - **Updated (this session):** flate2 1.0.35 -> 1.1.9, sha2 0.10.9 -> 0.11.0, criterion 0.5.1 -> 0.8.2 (dev), ftui 0.2.1 -> 0.3.1 (feature-gated), pyo3 0.23.5 -> 0.28.3.
 - **Skipped (already latest):** half 2.7.1, bytemuck 1.25.0, serde 1.0.228, serde_json 1.0.149, base64 0.22.1, serde_yaml_ng 0.10.0.
 - **Failed:** 0 (no rollbacks).
-- **Needs attention:** pyo3 0.28 deprecation cleanup (40 `.downcast()` -> `.cast()` call sites; `#[pyclass]` `FromPyObject`/`Sync` audit). Documented in `Needs Attention` below.
+- **Needs attention:** pyo3 0.28 `#[pyclass]` `FromPyObject`/`Sync` audit. The earlier `.downcast()` -> `.cast()` cleanup is no longer pending in the current tree.
 
 ### Failed (this session)
 
@@ -49,7 +49,7 @@ _None — all 5 target deps updated cleanly. Circuit breakers never tripped._
 
 ### Needs Attention (this session)
 
-- **pyo3 0.28: 40 `.downcast()` -> `.cast()` deprecation warnings in `crates/fnp-python/src/lib.rs`.** These are *deprecation warnings only*, not errors — the crate still compiles clean and tests run. Call-site count is large (40+), so per the library-updater rule "Fix if <5 call sites, else log for user" this is deferred to a dedicated cleanup pass rather than being mixed into a version-bump commit. Easy mechanical change: replace `.downcast::<T>()` / `.downcast_into::<T>()` patterns with `.cast::<T>()` / `.cast_into::<T>()`.
+- **pyo3 0.28: `.downcast()` -> `.cast()` cleanup is resolved in the current tree.** A targeted scan of `crates/fnp-python/src/lib.rs` and `crates/fnp-python/tests` finds no remaining `.downcast` or `.downcast_into` call sites, so this is no longer deferred upgrade debt.
 - **pyo3 0.28: `#[pyclass]` `FromPyObject` behavior change.** The deprecated `HasAutomaticFromPyObject` const is triggered in at least one `#[pyclass]` that implements `Clone`. When pyo3 drops the automatic implementation, affected classes need `#[pyclass(from_py_object)]` (opt-in) or `#[pyclass(skip_from_py_object)]`. Audit needed; deferred.
 - **pyo3 0.28: `#[pyclass]` Sync requirement for free-threaded Python.** `PyRClass` and `PyCClass` emit `"unsendable, but is being dropped on another thread"` runtime diagnostics at test teardown (non-fatal, cosmetic under CPython's GIL). For full free-threaded compatibility in the future, these classes need to be audited for thread-safety and made `Sync`. Not blocking today.
 - **Pre-existing test drift (NOT caused by this session's upgrades; flagged for visibility only):**
