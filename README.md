@@ -956,7 +956,7 @@ Performance budgets are enforced by the G7 gate, which measures p50/p95/p99 late
 
 What works and what doesn't:
 
-- **Not a full Python package.** FrankenNumPy is still primarily a Rust library. There is no `pip install frankennumpy` packaging story today, but the workspace now includes an early `fnp-python` extension module exposing `PyNditer`, `frompyfunc`, `vectorize`, `digitize`, `searchsorted`, `interp`, `where`, `flatnonzero`, `argwhere`, `count_nonzero`, `isposinf`, `isneginf`, `signbit`, `isnan`, `isinf`, `isfinite`, `spacing`, `sign`, `floor`, `ceil`, `degrees`, `radians`, `sinc`, `copysign`, `nextafter`, `hypot`, `ldexp`, `logaddexp`, `logaddexp2`, `frexp`, `modf`, `nan_to_num`, `take`, `take_along_axis`, `compress`, `extract`, `select`, and `choose`.
+- **Not a full Python package.** FrankenNumPy is still primarily a Rust library. There is no `pip install frankennumpy` packaging story today, but the workspace now includes an early `fnp-python` extension module exposing `PyNditer`, `frompyfunc`, `vectorize`, `digitize`, `bincount`, `searchsorted`, `interp`, `trapezoid`, `trapz`, `where`, `flatnonzero`, `argwhere`, `count_nonzero`, `isposinf`, `isneginf`, `signbit`, `isnan`, `isinf`, `isfinite`, `spacing`, `sign`, `floor`, `ceil`, `degrees`, `radians`, `sinc`, `copysign`, `nextafter`, `hypot`, `ldexp`, `logaddexp`, `logaddexp2`, `frexp`, `modf`, `nan_to_num`, `take`, `take_along_axis`, `compress`, `extract`, `select`, `choose`, and additional NumPy-compatible wrapper surfaces.
 - **No BLAS/LAPACK backend.** Linear algebra uses pure-Rust implementations (Householder QR, Golub-Kahan SVD, implicit shifted QR for eigenvalues). Competitive with BLAS for small matrices; slower for large ones. Future BLAS linkage is planned.
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats with a trailing dimension of 2. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac-bd)+(ad+bc)i`, but the interleaved representation adds overhead compared to native complex types.
 - **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Adding SVD would require `fnp-linalg` as a dependency of `fnp-random` (currently zero-dependency).
@@ -1000,7 +1000,7 @@ What works and what doesn't:
 ## FAQ
 
 **Is this a drop-in replacement for NumPy?**
-Not yet. It reimplements NumPy's semantics in Rust for correctness verification and eventual use as a Rust-native array library. A Python FFI bridge is planned but not implemented.
+Not yet. It reimplements NumPy's semantics in Rust for correctness verification and eventual use as a Rust-native array library. An early `fnp-python` FFI bridge exists and exposes a growing wrapper surface, but it is not a packaged drop-in NumPy replacement yet.
 
 **How do you verify parity with NumPy?**
 Oracle tests: we run the same operations with the same inputs in both NumPy and FrankenNumPy, comparing outputs to floating-point tolerance. For RNG, the comparison is bit-exact.
