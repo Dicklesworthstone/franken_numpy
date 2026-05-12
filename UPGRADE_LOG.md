@@ -41,21 +41,20 @@
 - **Updated (this session):** flate2 1.0.35 -> 1.1.9, sha2 0.10.9 -> 0.11.0, criterion 0.5.1 -> 0.8.2 (dev), ftui 0.2.1 -> 0.3.1 (feature-gated), pyo3 0.23.5 -> 0.28.3.
 - **Skipped (already latest):** half 2.7.1, bytemuck 1.25.0, serde 1.0.228, serde_json 1.0.149, base64 0.22.1, serde_yaml_ng 0.10.0.
 - **Failed:** 0 (no rollbacks).
-- **Needs attention:** pre-existing transitive timing drift listed below. The pyo3 0.28 cleanup notes and previously listed fnp-python/fnp-conformance failures are resolved against the current tree.
+- **Needs attention:** none remaining for this session. The pyo3 0.28 cleanup notes and previously listed fnp-python/fnp-conformance/runtime timing failures are resolved against the current tree.
 
 ### Failed (this session)
 
 _None — all 5 target deps updated cleanly. Circuit breakers never tripped._
 
-### Needs Attention (this session)
+### Current Resolution Notes (this session)
 
 - **pyo3 0.28: `.downcast()` -> `.cast()` cleanup is resolved in the current tree.** A targeted scan of `crates/fnp-python/src/lib.rs` and `crates/fnp-python/tests` finds no remaining `.downcast` or `.downcast_into` call sites, so this is no longer deferred upgrade debt.
 - **pyo3 0.28: `#[pyclass]` `FromPyObject` behavior change is resolved in the current tree.** Clone pyclasses that need explicit extraction policy now use `skip_from_py_object`, including `NditerStep`, `SeedSequence`, and bit-generator wrapper classes. A focused `cargo check -p fnp-python --all-targets` run under pyo3 0.28.3 is clean.
 - **pyo3 0.28: `#[pyclass]` Sync requirement is resolved for the current surface.** The previously flagged `PyRClass` and `PyCClass` objects are zero-sized marker classes, and the focused pyo3 0.28.3 all-targets check is clean. If future free-threaded Python packaging adds state to these classes, track that as new work.
 - **pyo3 0.28: previously listed fnp-python test drift is resolved in the current tree.** Focused remote revalidation passes: `wrappers_match_numpy` covers the hermite and laguerre wrapper filters 5/5 on `vmi1227854`, and `ma_count_matches_numpy_across_axis_and_keepdims` passes 1/1 on `vmi1156319` (worker-side exit 0; local artifact retrieval lagged after the result).
 - **fnp-conformance: previously listed linalg fixture-registry drift is resolved in the current tree.** The old `linalg_cholesky_solve_identity_L_returns_b` ID is absent from current fixtures/source, `test_contract_suite_is_green` passes 2/2 remotely on `vmi1153651`, and `core_suites_are_green` passes 1/1 worker-side on `vmi1156319` (local artifact retrieval lagged after the result).
-- **Pre-existing transitive test drift (NOT caused by this session's upgrades; flagged for visibility only):**
-  - `frankenlibc-membrane` (transitive via asupersync): `runtime_math::localization_chooser::observe_throughput_below_strict_budget` — flaky timing budget test on shared build hosts.
+- **fnp-runtime/asupersync: previously listed transitive timing drift is resolved in the current tree.** `cargo test -p fnp-runtime --all-features -- --nocapture` passes remotely on `vmi1153651`: 58 lib tests, 43 golden runtime tests, 32 comprehensive runtime tests, and doc-tests all pass.
 
 ### Asupersync bump (separate commit, aadd732)
 
@@ -88,13 +87,13 @@ _None — all 5 target deps updated cleanly. Circuit breakers never tripped._
 - **Bump result:** compiles cleanly after a **2-line edit** in `crates/fnp-python/src/lib.rs` (swap `pyo3::prepare_freethreaded_python()` for `Python::initialize()` and `Python::with_gil(|py| ...)` for `Python::attach(|py| ...)` in the single `with_python` test helper). Everything else (1.2 MB of pyo3 code in `crates/fnp-python/src/lib.rs`) still compiles, including all 16 `_bound`-suffixed call sites — turns out the `_bound` suffix survives as an alias in the pyo3 0.28.x line via deprecation shims (only warnings, no errors).
 - **Lockfile:** pyo3 0.23.5 -> 0.28.3, pyo3-build-config / pyo3-ffi / pyo3-macros / pyo3-macros-backend all 0.23.5 -> 0.28.3. target-lexicon 0.12.16 -> 0.13.5. Removes indoc 2.0.7 and unindent 0.2.4.
 - **Tests:** The original bump lane recorded three fnp-python parity failures, but current focused revalidation shows those named failures are no longer open in the current tree. `rch exec -- cargo test -p fnp-python --lib wrappers_match_numpy -- --nocapture` passed 5/5 remotely on `vmi1227854`, covering the hermite and laguerre wrapper filters. `rch exec -- cargo test -p fnp-python --lib ma_count_matches_numpy_across_axis_and_keepdims -- --nocapture` passed 1/1 worker-side on `vmi1156319` before local artifact retrieval lagged.
-- **`Needs Attention` items logged separately below.**
+- **Resolved drift:** The original bump lane's deferred PyO3 cleanup, fnp-python parity drift, fnp-conformance registry drift, and transitive runtime timing flake have all been revalidated against the current tree.
 
 #### ftui: 0.2.1 -> 0.3.1 (fnp-runtime, feature-gated optional)
 
 - **Research:** ftui 0.3.1 is the latest stable on crates.io (published 2026-04-12), described as "FrankenTUI public facade and prelude." The 0.3.x line introduces `ftui-a11y`, `ftui-backend`, `ftui-i18n`, `ftui-runtime` subcrates and splits responsibilities further. In fnp-runtime, the `frankentui` feature is now a concrete optional integration surface: it keeps the stable `ui_tag() -> "frankentui"` diagnostic tag and exposes `capability_snapshot()` entries wired to public ftui types (`ftui::Buffer`, `ftui::Frame`, `ftui::Theme`, and `ftui::TerminalCapabilities`).
 - **Lockfile churn:** ftui + ftui-core/layout/render/style/text/widgets 0.2.1 -> 0.3.1; new crates `ftui-a11y 0.3.1`, `ftui-backend 0.3.1`, `ftui-i18n 0.3.1`, `ftui-runtime 0.3.1`; removes `itertools 0.10.5` (old internal dep).
-- **Verified:** `cargo check -p fnp-runtime --features frankentui --all-targets` clean. `cargo test -p fnp-runtime --all-features --lib` 55/55 pass. A broader `cargo test -p fnp-runtime --all-features` flaked in a **transitive** asupersync internal crate `frankenlibc-membrane::runtime_math::localization_chooser::observe_throughput_below_strict_budget` (timing budget 2000ns exceeded by 55ns on a shared build host). That is unrelated to ftui and is a performance-regression test owned by the asupersync project.
+- **Verified:** `cargo check -p fnp-runtime --features frankentui --all-targets` clean. `cargo test -p fnp-runtime --all-features --lib` 55/55 pass. Current broader revalidation also passes: `cargo test -p fnp-runtime --all-features -- --nocapture` passed remotely on `vmi1153651`, covering 58 lib tests, 43 golden runtime tests, 32 comprehensive runtime tests, and doc-tests. The previously recorded transitive asupersync timing flake no longer reproduces in this lane.
 
 #### criterion: 0.5.1 -> 0.8.2 (fnp-conformance, dev-dependency)
 
