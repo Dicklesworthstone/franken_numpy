@@ -148,6 +148,7 @@ required = [
     "repair_symbols",
     "total_symbols",
     "dropped_symbol_scenario",
+    "recovery_matrix",
     "replay_command",
 ]
 if not isinstance(stress, dict):
@@ -159,6 +160,17 @@ if stress["input_hash"] != stress["recovered_hash"]:
     raise SystemExit("raptorq stress report hash mismatch")
 if not stress["dropped_symbol_scenario"]:
     raise SystemExit("raptorq stress report missing dropped-symbol scenario")
+matrix = stress.get("recovery_matrix")
+if not isinstance(matrix, list) or not matrix:
+    raise SystemExit("raptorq stress report missing recovery matrix")
+if stress.get("source_symbols", 0) >= 2 and stress.get("repair_symbols", 0) >= 2:
+    if not any(item.get("dropped_count", 0) >= 2 and item.get("recovery_success") for item in matrix):
+        raise SystemExit("raptorq stress report missing successful two-symbol recovery scenario")
+for item in matrix:
+    if item.get("recovery_success") is not True:
+        raise SystemExit(f"raptorq stress recovery scenario failed: {item}")
+    if item.get("recovered_hash") != stress["input_hash"]:
+        raise SystemExit(f"raptorq stress recovery scenario hash mismatch: {item}")
 PY
 
 echo "[raptorq-stress-gate] completed"

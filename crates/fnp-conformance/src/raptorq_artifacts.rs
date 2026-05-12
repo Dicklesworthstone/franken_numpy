@@ -191,8 +191,19 @@ pub struct RaptorQStressReport {
     pub total_symbols: usize,
     pub dropped_symbol_scenario: Option<String>,
     pub recovery_symbols_used: usize,
+    pub recovery_matrix: Vec<RaptorQRecoveryScenario>,
     pub replay_command: String,
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RaptorQRecoveryScenario {
+    pub dropped_count: usize,
+    pub dropped_symbols: Vec<String>,
+    pub recovery_symbols_used: usize,
+    pub recovery_success: bool,
+    pub recovered_hash: Option<String>,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -386,6 +397,10 @@ fn symbol_kind_rank(kind: &str) -> u8 {
     }
 }
 
+fn symbol_label(record: &RaptorQSymbolRecord) -> String {
+    format!("sbn={} esi={} kind={}", record.sbn, record.esi, record.kind)
+}
+
 fn decode_payload_from_records(
     sidecar: &RaptorQSidecar,
     records: &[RaptorQSymbolRecord],
@@ -517,7 +532,7 @@ pub fn scrub_and_write_reports_with_config(
 
     let dropped_symbol = drop_index.map(|idx| {
         let rec = &sidecar.symbols[idx];
-        format!("sbn={} esi={} kind={}", rec.sbn, rec.esi, rec.kind)
+        symbol_label(rec)
     });
 
     let status = if full_match && recovery_success {
@@ -570,6 +585,63 @@ pub fn scrub_and_write_reports_with_config(
         .map_err(|err| format!("failed writing {}: {err}", decode_proof_path.display()))?;
 
     Ok((scrub_report, decode_proof))
+}
+
+fn source_symbol_indexes(sidecar: &RaptorQSidecar) -> Vec<usize> {
+    sidecar
+        .symbols
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, record)| (record.kind == "source").then_some(idx))
+        .collect()
+}
+
+fn recovery_scenario(sidecar: &RaptorQSidecar, drop_indexes: &[usize]) -> RaptorQRecoveryScenario {
+    let mut records = sidecar.symbols.clone();
+    let mut sorted_drop_indexes = drop_indexes.to_vec();
+    sorted_drop_indexes.sort_unstable();
+    sorted_drop_indexes.dedup();
+
+    let dropped_symbols = sorted_drop_indexes
+        .iter()
+        .filter_map(|idx| sidecar.symbols.get(*idx).map(symbol_label))
+        .collect::<Vec<_>>();
+
+    for idx in sorted_drop_indexes.iter().rev() {
+        if *idx < records.len() {
+            let _removed = records.remove(*idx);
+        }
+    }
+
+    let recovery = decode_payload_from_records(sidecar, &records);
+    let (recovery_success, recovered_hash, error) = match recovery {
+        Ok(bytes) => {
+            let hash = sha256_hex(&bytes);
+            (hash == sidecar.source_hash, Some(hash), None)
+        }
+        Err(err) => (false, None, Some(err)),
+    };
+
+    RaptorQRecoveryScenario {
+        dropped_count: dropped_symbols.len(),
+        dropped_symbols,
+        recovery_symbols_used: records.len(),
+        recovery_success,
+        recovered_hash,
+        error,
+    }
+}
+
+fn build_recovery_matrix(sidecar: &RaptorQSidecar) -> Vec<RaptorQRecoveryScenario> {
+    let source_indexes = source_symbol_indexes(sidecar);
+    if source_indexes.is_empty() {
+        return Vec::new();
+    }
+
+    let max_drop = source_indexes.len().min(sidecar.repair_symbols).min(2);
+    (1..=max_drop)
+        .map(|drop_count| recovery_scenario(sidecar, &source_indexes[..drop_count]))
+        .collect()
 }
 
 pub fn generate_bundle_sidecar_and_reports(
@@ -798,6 +870,7 @@ pub fn run_raptorq_stress_gate(
     )?;
 
     let recovered_hash = proof.recovered_hash.clone().unwrap_or_default();
+    let recovery_matrix = build_recovery_matrix(&sidecar);
     let mut diagnostics = Vec::new();
     if sidecar.source_hash != input_hash {
         diagnostics
@@ -813,6 +886,24 @@ pub fn run_raptorq_stress_gate(
         || proof.recovered_hash.as_deref() != Some(input_hash.as_str())
     {
         diagnostics.push("decode proof hashes did not match deterministic input hash".to_string());
+    }
+    if recovery_matrix.is_empty() {
+        diagnostics
+            .push("recovery matrix did not run any deterministic loss scenarios".to_string());
+    }
+    if recovery_matrix.iter().any(|scenario| {
+        !scenario.recovery_success
+            || scenario.recovered_hash.as_deref() != Some(input_hash.as_str())
+    }) {
+        diagnostics.push("recovery matrix contains a failed or mismatched decode".to_string());
+    }
+    if sidecar.source_symbols >= 2
+        && sidecar.repair_symbols >= 2
+        && !recovery_matrix
+            .iter()
+            .any(|scenario| scenario.dropped_count >= 2 && scenario.recovery_success)
+    {
+        diagnostics.push("recovery matrix did not prove two-symbol source loss".to_string());
     }
 
     let status = if diagnostics.is_empty() {
@@ -844,6 +935,7 @@ pub fn run_raptorq_stress_gate(
         total_symbols: sidecar.total_symbols,
         dropped_symbol_scenario: proof.dropped_symbol,
         recovery_symbols_used: proof.recovery_symbols_used,
+        recovery_matrix,
         replay_command: config.replay_command.clone(),
         diagnostics,
     };
@@ -911,6 +1003,50 @@ pub fn validate_raptorq_stress_report(report: &RaptorQStressReport) -> Result<()
     }
     if report.recovery_symbols_used == 0 {
         return Err("raptorq stress report must record recovery symbol usage".to_string());
+    }
+    if report.recovery_matrix.is_empty() {
+        return Err("raptorq stress report must record a recovery matrix".to_string());
+    }
+    if report.source_symbols >= 2
+        && report.repair_symbols >= 2
+        && !report
+            .recovery_matrix
+            .iter()
+            .any(|scenario| scenario.dropped_count >= 2 && scenario.recovery_success)
+    {
+        return Err(
+            "raptorq stress recovery matrix must include a successful two-symbol loss scenario"
+                .to_string(),
+        );
+    }
+    for scenario in &report.recovery_matrix {
+        if scenario.dropped_count == 0 {
+            return Err(
+                "raptorq stress recovery scenario must drop at least one symbol".to_string(),
+            );
+        }
+        if scenario.dropped_count != scenario.dropped_symbols.len() {
+            return Err(format!(
+                "raptorq stress recovery scenario dropped_count mismatch count={} symbols={}",
+                scenario.dropped_count,
+                scenario.dropped_symbols.len()
+            ));
+        }
+        if scenario.recovery_symbols_used == 0 {
+            return Err("raptorq stress recovery scenario must record symbol usage".to_string());
+        }
+        if !scenario.recovery_success {
+            return Err(format!(
+                "raptorq stress recovery scenario failed for {:?}: {:?}",
+                scenario.dropped_symbols, scenario.error
+            ));
+        }
+        if scenario.recovered_hash.as_deref() != Some(report.input_hash.as_str()) {
+            return Err(format!(
+                "raptorq stress recovery scenario hash mismatch for {:?}",
+                scenario.dropped_symbols
+            ));
+        }
     }
     if !report.replay_command.contains("run_raptorq_gate") {
         return Err(
@@ -1545,6 +1681,20 @@ mod tests {
         );
         assert!(report.dropped_symbol_scenario.is_some());
         assert!(report.recovery_symbols_used > 0);
+        assert!(!report.recovery_matrix.is_empty());
+        assert!(report.recovery_matrix.iter().all(|scenario| {
+            scenario.recovery_success
+                && scenario.recovered_hash.as_deref() == Some(report.input_hash.as_str())
+                && scenario.dropped_count == scenario.dropped_symbols.len()
+        }));
+        if report.source_symbols >= 2 && report.repair_symbols >= 2 {
+            assert!(
+                report
+                    .recovery_matrix
+                    .iter()
+                    .any(|scenario| scenario.dropped_count >= 2)
+            );
+        }
         assert!(report.replay_command.contains("run_raptorq_gate"));
         validate_raptorq_stress_report(&report).expect("stress report validates");
     }
@@ -1557,6 +1707,20 @@ mod tests {
         let err =
             validate_raptorq_stress_report(&report).expect_err("hash mismatch should fail closed");
         assert!(err.contains("recovered hash mismatch"));
+    }
+
+    #[test]
+    fn run_raptorq_gate_stress_report_validation_fails_closed_on_recovery_matrix_hash_mismatch() {
+        let mut report = small_stress_report("stress_matrix_hash_mismatch");
+        report
+            .recovery_matrix
+            .first_mut()
+            .expect("recovery matrix scenario")
+            .recovered_hash = Some("1".repeat(64));
+
+        let err = validate_raptorq_stress_report(&report)
+            .expect_err("matrix hash mismatch should fail closed");
+        assert!(err.contains("recovery scenario hash mismatch"));
     }
 
     #[test]

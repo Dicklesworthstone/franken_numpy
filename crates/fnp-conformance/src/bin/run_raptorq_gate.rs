@@ -418,8 +418,8 @@ mod tests {
         replay_command,
     };
     use fnp_conformance::raptorq_artifacts::{
-        RAPTORQ_STRESS_REPORT_SCHEMA_VERSION, RaptorQParallelismConfig, RaptorQStressMode,
-        RaptorQStressReport,
+        RAPTORQ_STRESS_REPORT_SCHEMA_VERSION, RaptorQParallelismConfig, RaptorQRecoveryScenario,
+        RaptorQStressMode, RaptorQStressReport,
     };
     use std::path::PathBuf;
 
@@ -488,6 +488,27 @@ mod tests {
             total_symbols: 20,
             dropped_symbol_scenario: Some("sbn=0 esi=0 kind=source".to_string()),
             recovery_symbols_used: 19,
+            recovery_matrix: vec![
+                RaptorQRecoveryScenario {
+                    dropped_count: 1,
+                    dropped_symbols: vec!["sbn=0 esi=0 kind=source".to_string()],
+                    recovery_symbols_used: 19,
+                    recovery_success: true,
+                    recovered_hash: Some("a".repeat(64)),
+                    error: None,
+                },
+                RaptorQRecoveryScenario {
+                    dropped_count: 2,
+                    dropped_symbols: vec![
+                        "sbn=0 esi=0 kind=source".to_string(),
+                        "sbn=0 esi=1 kind=source".to_string(),
+                    ],
+                    recovery_symbols_used: 18,
+                    recovery_success: true,
+                    recovered_hash: Some("a".repeat(64)),
+                    error: None,
+                },
+            ],
             replay_command: "cargo run -p fnp-conformance --bin run_raptorq_gate".to_string(),
             diagnostics: Vec::new(),
         };
@@ -532,6 +553,7 @@ mod tests {
             "repair_symbols",
             "total_symbols",
             "dropped_symbol_scenario",
+            "recovery_matrix",
             "replay_command",
         ] {
             assert!(stress.contains_key(field), "missing stress field {field}");
