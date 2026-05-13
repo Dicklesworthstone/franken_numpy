@@ -18,6 +18,8 @@ exclude = [
   "crates/fnp-iter/fuzz",
   "crates/fnp-io/fuzz",
   "crates/fnp-ufunc/fuzz",
+  "crates/fnp-random/fuzz",
+  "crates/fnp-linalg/fuzz",
 ]
 
 [workspace.package]

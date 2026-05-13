@@ -1,0 +1,38 @@
+[package]
+name = "fnp-linalg-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.fnp-linalg]
+path = ".."
+
+[[bin]]
+name = "fuzz_cholesky_nxn"
+path = "fuzz_targets/fuzz_cholesky_nxn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_det_nxn"
+path = "fuzz_targets/fuzz_det_nxn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_qr_mxn"
+path = "fuzz_targets/fuzz_qr_mxn.rs"
+test = false
+doc = false
+bench = false

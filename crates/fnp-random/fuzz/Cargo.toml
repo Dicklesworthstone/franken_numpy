@@ -1,0 +1,31 @@
+[package]
+name = "fnp-random-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[workspace]
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.fnp-random]
+path = ".."
+
+[[bin]]
+name = "fuzz_from_u64_seed"
+path = "fuzz_targets/fuzz_from_u64_seed.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_seed_sequence"
+path = "fuzz_targets/fuzz_seed_sequence.rs"
+test = false
+doc = false
+bench = false
