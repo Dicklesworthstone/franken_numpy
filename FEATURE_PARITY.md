@@ -17,7 +17,7 @@
 | Core math (ufunc) | parity_green | Extensive ufunc coverage green; frexp, modf, gcd, lcm, divmod, isposinf, isneginf, bitwise_count, sort_complex, and related edge-case parity are implemented | — |
 | Reductions | parity_green | sum, prod, min, max, mean, var, std, argmin, argmax, cumsum, cumprod, count_nonzero(axis), nansum/nanprod/nanmin/nanmax/nanmean | — |
 | Sorting/searching | parity_green | sort, argsort, searchsorted(side,sorter), partition, argpartition, unique, unique_all/counts/inverse/values, where_nonzero, isin(invert) | — |
-| Set operations | parity_green | union1d, intersect1d, setdiff1d, setxor1d, in1d | — |
+| Set operations | parity_green | union1d, intersect1d, setdiff1d, setxor1d, isin (replaces deprecated/removed in1d) | — |
 | Indexing | parity_green | take, put, choose, compress, diagonal, triu/tril, indices, nonzero, flatnonzero, unravel_index, ravel_multi_index | — |
 | Polynomial: power series | parity_green | polyval, polyder, polyint, polyfit, polymul, polyadd, polysub, polydiv, polyroots | — |
 | Polynomial: Chebyshev | parity_green | chebval, chebadd, chebsub, chebmul, chebdiv, chebder, chebint, chebroots, chebfromroots, chebfit, cheb2poly, poly2cheb | — |
@@ -91,7 +91,7 @@
 
 **Sorting/searching**: sort, argsort, searchsorted, partition, argpartition, unique, unique_all, unique_counts, unique_inverse, unique_values, nonzero, flatnonzero, where_nonzero, argwhere, isin, extract, place, select, piecewise
 
-**Set operations**: union1d, intersect1d, setdiff1d, setxor1d, in1d
+**Set operations**: union1d, intersect1d, setdiff1d, setxor1d, isin (numpy 2.x replacement for the deprecated/removed in1d)
 
 **Polynomials**: polyval, polyfit, polyder, polyint, polymul, polyadd, polysub, polydiv, polyroots, chebval, chebadd, chebsub, chebmul, chebdiv, chebder, chebint, chebroots, chebfromroots, chebfit, cheb2poly, poly2cheb, legval, legder, legint, legfit, hermval, hermeval, hermder, hermint, hermfit, hermefit, lagval, lagder, lagint, lagfit
 
