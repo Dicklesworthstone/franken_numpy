@@ -42,7 +42,7 @@ This test iterates `np.__all__` at run-time and asserts every name is reachable 
 
 ## Conformance coverage gates
 
-Beyond `fnp_python_covers_full_numpy_all`, the parity wave landed dozens of focused conformance tests under `crates/fnp-python/tests/conformance_*.rs`. The API coverage gate `cargo run -p fnp-conformance --bin run_fnp_python_api_coverage -- --fail-on-missing` reports `exports=624 covered=574 missing=0 excluded=50 orphan_suites=0` as of 2026-05-13.
+Beyond `fnp_python_covers_full_numpy_all`, the parity wave landed dozens of focused conformance tests under `crates/fnp-python/tests/conformance_*.rs`. The API coverage gate `cargo run -p fnp-conformance --bin run_fnp_python_api_coverage -- --fail-on-missing` reports `exports=633 covered=599 missing=0 excluded=34 orphan_suites=0` as of 2026-05-13.
 
 ## What's still NOT in scope here
 
