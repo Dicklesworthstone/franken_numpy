@@ -26305,6 +26305,14 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 m.add(name, &submod)?;
             }
         }
+        // np.mgrid / np.ogrid are class instances supporting bracket-indexing
+        // syntax (np.mgrid[0:3, 0:3]). Re-export them verbatim so
+        // fnp_python.mgrid[...] / fnp_python.ogrid[...] resolve identically.
+        for name in ["mgrid", "ogrid"] {
+            if let Ok(grid) = numpy.getattr(name) {
+                m.add(name, &grid)?;
+            }
+        }
     }
 
     {
