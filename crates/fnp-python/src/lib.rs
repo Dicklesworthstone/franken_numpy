@@ -26285,6 +26285,14 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("linalg", linalg)?;
     }
 
+    // numpy.strings (45+ string element-wise functions). Re-export the
+    // upstream submodule verbatim — every function is numpy semantics and
+    // there is no implementation to substitute, so passing through preserves
+    // 100% parity (including any deprecation/version-gated behaviors).
+    if let Ok(np_strings) = py.import("numpy")?.getattr("strings") {
+        m.add("strings", &np_strings)?;
+    }
+
     {
         let ma = PyModule::new(py, "ma")?;
         // ma_* prefixed (7).
