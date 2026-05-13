@@ -42484,11 +42484,33 @@ mod tests {
             let module = PyModule::new(py, "fnp_python_test")?;
             fnp_python(&module)?;
 
-            let err = module
-                .getattr("mgrid")?
-                .get_item(0_i64.into_pyobject(py)?.into_any())
-                .unwrap_err();
-            assert!(err.is_instance_of::<PyTypeError>(py));
+            // Now that fnp_python.mgrid / fnp_python.ogrid are re-exports of
+            // numpy's MGridClass / OGridClass instances, non-slice indexing
+            // raises whatever numpy raises today (AttributeError on `.step`
+            // access in numpy 2.x). The contract we care about is "non-slice
+            // indexing is rejected with SOME exception that matches numpy
+            // exactly," not a specific error class.
+            let numpy = match py.import("numpy") {
+                Ok(n) => n,
+                Err(_) => return Ok(()),
+            };
+
+            for grid_name in ["mgrid", "ogrid"] {
+                let ours_err = module
+                    .getattr(grid_name)?
+                    .get_item(0_i64.into_pyobject(py)?.into_any())
+                    .unwrap_err();
+                let theirs_err = numpy
+                    .getattr(grid_name)?
+                    .get_item(0_i64.into_pyobject(py)?.into_any())
+                    .unwrap_err();
+                let ours_type = ours_err.get_type(py).qualname()?.to_string();
+                let theirs_type = theirs_err.get_type(py).qualname()?.to_string();
+                assert_eq!(
+                    ours_type, theirs_type,
+                    "fnp.{grid_name}[int] error class must match numpy",
+                );
+            }
 
             let bad_index = 0_i64.into_pyobject(py)?.into_any().unbind();
             let mixed_slice = slice_object(
@@ -42498,8 +42520,13 @@ mod tests {
                 None,
             )?;
             let mixed_key = PyTuple::new(py, [bad_index.bind(py), mixed_slice.bind(py)])?;
-            let err = module.getattr("ogrid")?.get_item(&mixed_key).unwrap_err();
-            assert!(err.is_instance_of::<PyTypeError>(py));
+            let ours_err = module.getattr("ogrid")?.get_item(&mixed_key).unwrap_err();
+            let theirs_err = numpy.getattr("ogrid")?.get_item(&mixed_key).unwrap_err();
+            assert_eq!(
+                ours_err.get_type(py).qualname()?.to_string(),
+                theirs_err.get_type(py).qualname()?.to_string(),
+                "fnp.ogrid[(int, slice)] error class must match numpy",
+            );
             Ok(())
         });
     }
