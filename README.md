@@ -93,7 +93,7 @@ let perm = rng.permutation(&data)?;             // Fisher-Yates via random_inter
 
 ## API Surface
 
-Over 1,000 public functions across 10 crates covering the full NumPy API:
+**1,500+ public Rust functions across 10 crates, exposing 100% of `numpy.__all__` (499/499 names) through the `fnp_python` Python module.** Coverage is structurally enforced by a conformance test (`fnp_python_covers_full_numpy_all`) that iterates `numpy.__all__` and fails CI if any name regresses. See [`audit_numpy_reality.md`](audit_numpy_reality.md) for the coverage progression and lock-in details.
 
 | Category | Functions (highlights) |
 |---|---|
@@ -341,7 +341,7 @@ The conformance crate is the quality backbone with four layers:
 
 FrankenNumPy's security posture covers more than memory safety:
 
-- **Zero unsafe Rust.** All 10 crates declare `#![forbid(unsafe_code)]`. The 250,000+ lines of Rust contain zero unsafe blocks.
+- **Zero unsafe Rust.** All 10 crates declare `#![forbid(unsafe_code)]`. The 300,000+ lines of Rust contain zero unsafe blocks.
 - **Fail-closed by default.** Unknown wire formats, unrecognized dtype descriptors, and metadata schema violations cause explicit errors, not silent fallbacks.
 - **Bounded resource consumption.** NPY header parsing caps at 64 KB. NPZ archives cap at 4,096 members and 2 GB uncompressed. Memmap validation retries cap at 64. These prevent denial-of-service via crafted inputs.
 - **Pickle rejection.** Object dtype arrays that could execute arbitrary code during deserialization require explicit opt-in, matching NumPy's `allow_pickle` security gate.
@@ -1009,7 +1009,7 @@ Oracle tests: we run the same operations with the same inputs in both NumPy and 
 We use Rust Edition 2024 features. The toolchain is pinned to a specific nightly date for reproducibility.
 
 **Why zero unsafe code?**
-Memory safety is a core value. All 10 crates declare `#![forbid(unsafe_code)]`. The 250,000+ lines of Rust contain zero unsafe blocks.
+Memory safety is a core value. All 10 crates declare `#![forbid(unsafe_code)]`. The 300,000+ lines of Rust contain zero unsafe blocks.
 
 **How fast is it?**
 Performance is not the primary goal in this phase. Correctness and parity come first. That said, the release profile uses `opt-level = 3`, LTO, and single codegen unit.
