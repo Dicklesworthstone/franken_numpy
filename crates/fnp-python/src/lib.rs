@@ -26285,12 +26285,26 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.add("linalg", linalg)?;
     }
 
-    // numpy.strings (45+ string element-wise functions). Re-export the
-    // upstream submodule verbatim — every function is numpy semantics and
-    // there is no implementation to substitute, so passing through preserves
-    // 100% parity (including any deprecation/version-gated behaviors).
-    if let Ok(np_strings) = py.import("numpy")?.getattr("strings") {
-        m.add("strings", &np_strings)?;
+    // Re-export upstream numpy submodules whose entire surface is pure numpy
+    // semantics with no fnp engine substitute. Each is m.add(name, &np_submod)
+    // verbatim, mirroring how m.add("linalg", ...) is wired but without a
+    // wrapping PyModule layer (these have no native overlays):
+    //   numpy.strings   - 45+ string element-wise ops
+    //   numpy.char      - 53 char-array ops (older sibling of numpy.strings)
+    //   numpy.rec       - record-array helpers (fromarrays, fromrecords, ...)
+    //   numpy.emath     - complex-valued analogs of log/sqrt/arccos/...
+    //   numpy.matrixlib - matrix-class helpers (asmatrix, bmat, ...)
+    //
+    // Doing this in one block keeps the pattern auditable and the failure mode
+    // graceful (a missing submodule on older numpys silently no-ops instead of
+    // breaking the whole pymodule init).
+    {
+        let numpy = py.import("numpy")?;
+        for name in ["strings", "char", "rec", "emath", "matrixlib"] {
+            if let Ok(submod) = numpy.getattr(name) {
+                m.add(name, &submod)?;
+            }
+        }
     }
 
     {
