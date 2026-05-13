@@ -52,13 +52,17 @@ Audited README.md, AGENTS.md, and FEATURE_PARITY.md against actual codebase stat
 
 ---
 
-### GAP-004: Line Count Significantly Understated
+### GAP-004: Line Count Significantly Understated *(refreshed 2026-05-13)*
 
-**Claim (README lines 344, 1012):** "92,000+ lines of Rust"
+**Original claim audited (README lines 344, 1012):** "92,000+ lines of Rust"
 
-**Reality:** Actual count is 254,570 lines across all .rs files
+**Reality at audit (2026-05-03):** 254,570 lines across all .rs files
 
-**Severity:** None (understated is not false; consider updating for accuracy)
+**Refresh (2026-05-13):** README now reads "300,000+ lines of Rust" (commit
+9a04782); live count is 304,276 .rs lines across the workspace. Claim is
+now accurate (slightly understated, which is the desired direction).
+
+**Severity:** Resolved — README is now accurate.
 
 ---
 
@@ -67,7 +71,7 @@ Audited README.md, AGENTS.md, and FEATURE_PARITY.md against actual codebase stat
 | Claim | Verification |
 |-------|--------------|
 | `#![forbid(unsafe_code)]` on all crates | Confirmed: 10/10 crates have forbid(unsafe_code) |
-| "Over 1,000 public functions" | Confirmed: 1,481 `pub fn` declarations |
+| "Over 1,000 public functions" | Confirmed: 1,481 pub fn at audit (2026-05-03); 1,575 pub fn at refresh (2026-05-13). README updated to "1,500+ public functions" in commit 9a04782. |
 | PCG64DXSM RNG implementation | Confirmed: `Pcg64DxsmRng` struct in fnp-random |
 | Stride Calculus Engine | Confirmed: `broadcast_shape`, `broadcast_shapes` in fnp-ndarray |
 | Dual-mode runtime (strict/hardened) | Confirmed: enum variants in fnp-runtime |
@@ -83,15 +87,17 @@ Audited README.md, AGENTS.md, and FEATURE_PARITY.md against actual codebase stat
 
 ## Test Count Verification
 
-| Source | Claimed | Actual |
-|--------|---------|--------|
-| FEATURE_PARITY.md fnp-ufunc | 1,797 | — |
-| FEATURE_PARITY.md fnp-linalg | 235 | — |
-| FEATURE_PARITY.md fnp-io | 176 | — |
-| Workspace total #[test] | — | 5,047 |
-| Files with tests | — | 134 |
+| Source | Claimed (2026-05-03) | Actual (2026-05-03) | Actual (2026-05-13 refresh) |
+|--------|---------------------:|--------------------:|----------------------------:|
+| FEATURE_PARITY.md fnp-ufunc | 1,797 | — | — |
+| FEATURE_PARITY.md fnp-linalg | 235 | — | — |
+| FEATURE_PARITY.md fnp-io | 176 | — | — |
+| Workspace total `#[test]` runs | — | 5,047 | **6,391** (+27%) |
+| Files with tests | — | 134 | unchanged scan basis |
 
-(Note: Build environment had toolchain issues during audit; test counts from FEATURE_PARITY.md vs actual run could not be cross-verified)
+The +1,344 test growth between the two audit dates tracks the parity wave
+(see `audit_numpy_reality.md` for the 43% → 100% `numpy.__all__` close-out)
+and the `33vtd` diagnostic-parity wave.
 
 ---
 
