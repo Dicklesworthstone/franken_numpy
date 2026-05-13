@@ -253,6 +253,11 @@ def emit(value):
 
 subnormal = np.nextafter(np.float64(0.0), np.float64(1.0))
 
+def numpy_trapezoid(*args, **kwargs):
+    if hasattr(np, "trapezoid"):
+        return np.trapezoid(*args, **kwargs)
+    return np.trapz(*args, **kwargs)
+
 if case_id == "ufunc_add_broadcast":
     emit(np.add(
         np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]),
@@ -321,9 +326,9 @@ elif case_id == "random_pcg64dxsm_integers":
     rng = np.random.Generator(np.random.PCG64DXSM(12345))
     emit(rng.integers(-3, 7, size=8))
 elif case_id == "trapz_axis0":
-    emit(np.trapz(np.array([[1.0, 2.0], [3.0, 4.0], [7.0, 11.0]]), dx=0.5, axis=0))
+    emit(numpy_trapezoid(np.array([[1.0, 2.0], [3.0, 4.0], [7.0, 11.0]]), dx=0.5, axis=0))
 elif case_id == "trapezoid_axis0":
-    emit(np.trapezoid(np.array([[1.0, 2.0], [3.0, 4.0], [7.0, 11.0]]), dx=0.5, axis=0))
+    emit(numpy_trapezoid(np.array([[1.0, 2.0], [3.0, 4.0], [7.0, 11.0]]), dx=0.5, axis=0))
 elif case_id == "interp_left_right":
     emit(np.interp(
         np.array([-1.0, 0.25, 1.75, 4.0]),
@@ -738,6 +743,16 @@ fn version_specific_trapezoid_reference_is_gated_by_live_numpy_version() {
         .expect("trapz alias should stay behaviorally equivalent");
     assert_eq!(alias.shape(), actual.shape());
     assert_eq!(alias.values(), actual.values());
+}
+
+#[test]
+fn legacy_trapz_oracle_case_uses_live_numpy_fallback() {
+    let y = array(&[3, 2], &[1.0, 2.0, 3.0, 4.0, 7.0, 11.0]);
+    let alias = y
+        .trapz(0.5, Some(0))
+        .expect("trapz alias should stay behaviorally equivalent");
+
+    assert_oracle_match("trapz_axis0", alias.shape(), alias.values(), 1e-12);
 }
 
 #[test]
