@@ -103,7 +103,7 @@ let perm = rng.permutation(&data)?;             // Fisher-Yates via random_inter
 | **Binary math** | `add`, `subtract`, `multiply`, `divide`, `floor_divide`, `remainder`, `power`, `fmod`, `arctan2`, `gcd`, `lcm`, `bitwise_and/or/xor`, comparisons (34 total) |
 | **Reductions** | `sum`, `prod`, `min`, `max`, `mean`, `var`, `std`, `argmin`, `argmax`, `cumsum`, `cumprod`, `all`, `any`, `count_nonzero`, `nansum`, `nanmin`, `nanmax`, `ptp` (22 total) |
 | **Sorting** | `sort`, `argsort`, `searchsorted`, `partition`, `argpartition`, `unique`, `unique_all/counts/inverse/values` |
-| **Set operations** | `union1d`, `intersect1d`, `setdiff1d`, `setxor1d`, `in1d`, `isin` |
+| **Set operations** | `union1d`, `intersect1d`, `setdiff1d`, `setxor1d`, `isin` |
 | **Linear algebra** | `solve`, `det`, `inv`, `eig`, `svd`, `qr`, `cholesky`, `lstsq`, `norm`, `matrix_rank`, `matrix_power`, `multi_dot`, `pinv`, `cond`, `slogdet`, `funm` |
 | **Random** | Statistical distributions plus permutation/state helpers via PCG64DXSM: `normal`, `uniform`, `binomial`, `poisson`, `gamma`, `beta`, `hypergeometric`, `multinomial`, `dirichlet`, `vonmises`, `zipf`, etc. |
 | **FFT** | `fft`, `ifft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `rfft`, `irfft`, `fftfreq`, `rfftfreq`, `fftshift` |
