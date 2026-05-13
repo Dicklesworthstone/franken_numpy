@@ -213,6 +213,45 @@ print(ok)
 }
 
 #[test]
+fn fnp_python_covers_full_numpy_all() -> Result<(), String> {
+    // End-of-parity-wave gate: after this commit, every name in
+    // numpy.__all__ must be reachable via fnp_python. This is the
+    // structural lock that catches any future regression that
+    // accidentally drops a re-export.
+    let script = fnp_script(
+        r#"
+missing = [n for n in np.__all__ if not hasattr(fnp, n)]
+print(len(missing), missing[:10])
+print(missing == [])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let last = result.lines().last().unwrap_or("").trim();
+    assert_eq!(
+        last, "True",
+        "every name in numpy.__all__ must be reachable via fnp_python; got: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn core_and_f2py_identity_equal_to_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+print(fnp.core is np.core and fnp.f2py is np.f2py)
+"#
+        .into(),
+    );
+    assert_eq!(
+        numpy_oracle(&script)?.trim(),
+        "True",
+        "fnp.core / fnp.f2py must be identity-equal to numpy's"
+    );
+    Ok(())
+}
+
+#[test]
 fn array_namespace_info_callable_via_fnp() -> Result<(), String> {
     let script = fnp_script(
         r#"

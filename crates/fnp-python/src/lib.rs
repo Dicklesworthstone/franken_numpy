@@ -26355,6 +26355,11 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "getbufsize",
             "nested_iters",
             "from_dlpack",
+            // Final two numpy.__all__ entries — submodules whose init has
+            // already happened as part of `import numpy as np`, so re-export
+            // is a pure pointer assignment with no extra side effects.
+            "core",
+            "f2py",
         ] {
             if let Ok(attr) = numpy.getattr(name) {
                 m.add(name, &attr)?;
