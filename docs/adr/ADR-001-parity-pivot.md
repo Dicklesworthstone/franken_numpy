@@ -78,7 +78,7 @@ First baseline generated 2026-04-10 with 37 workloads:
 ### README's Disclaimed Limitations
 
 The README explicitly defers four capabilities:
-1. **Python FFI / pip-installable** - "planned but not implemented"
+1. **Python packaging / drop-in installability** - an early `fnp-python` PyO3 bridge exists, but there is still no `pip install frankennumpy` packaging story or packaged drop-in NumPy replacement.
 2. **BLAS/LAPACK backend** - "competitive with BLAS for small matrices; slower for large ones"
 3. **Multi-threading** - single-threaded execution
 4. **Native i64/u64 > 2^53 arithmetic** - uses f64 intermediary
@@ -122,7 +122,7 @@ Pivot to Phase 3 when ALL of the following are true:
 
 ### New Work Streams for Phase 3
 
-1. **Python FFI (PyO3)** - Make FNP pip-installable
+1. **Python packaging and FFI hardening** - package the existing `fnp-python` PyO3 bridge and widen coverage toward drop-in installability
 2. **BLAS Backend Integration** - Link OpenBLAS/MKL for linalg hot paths
 3. **SIMD Vectorization** - Safe SIMD via `std::simd` (nightly) or `portable_simd`
 4. **Multi-threading** - Rayon for parallel reductions/matmul
@@ -137,14 +137,14 @@ Pivot to Phase 3 when ALL of the following are true:
 
 ## Appendix: Draft Beads for Phase 3
 
-### Draft Bead 1: Python FFI via PyO3
+### Draft Bead 1: Python Packaging and FFI Hardening
 
-**Title:** Implement Python FFI bindings via PyO3 for pip-installable package
+**Title:** Package and harden the existing PyO3 bridge for a pip-installable preview
 **Priority:** P1
 **Scope:** 
-- Create `fnp-python` crate with PyO3 bindings
-- Expose UFuncArray, Generator, and core ops to Python
-- Package as `franken-numpy` on PyPI
+- Add repo-root Python packaging metadata for the existing `crates/fnp-python` PyO3 extension module.
+- Continue exposing UFuncArray, Generator, and core ops through `fnp-python` until the documented wrapper surface is packaged and tested.
+- Package as a preview `franken-numpy` distribution only after import, wheel, and parity smoke tests are reproducible.
 - Design questions:
   - Zero-copy vs copy semantics for array interchange?
   - NumPy buffer protocol support?
