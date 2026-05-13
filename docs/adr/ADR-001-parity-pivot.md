@@ -8,13 +8,13 @@
 
 ## Context
 
-### Current State (2026-04-10)
+### Historical State Snapshot (2026-04-10)
 
-FrankenNumPy has achieved all foundational milestones documented in the README:
+This snapshot captured the repo state when the pivot ADR was drafted. It is historical context, not the live tracker or test count; use `bv --robot-triage` and current validation output for present-day counts.
 - **9 crates**, ~113K lines of safe Rust, zero `unsafe` blocks
 - **~2,960 tests** passing across the workspace
 - **372 oracle-verified fixture cases** with 1:1 input/oracle alignment
-- **50 beads closed** to date
+- **50 beads closed** in the tracker snapshot at the time
 - **Stride Calculus Engine (SCE)** operational
 - **Dual-mode runtime** (strict/hardened) implemented
 - **RaptorQ-everywhere durability** for all artifacts
