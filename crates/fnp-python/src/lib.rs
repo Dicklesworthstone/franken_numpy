@@ -26333,6 +26333,28 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             "show_config",
             "show_runtime",
             "info",
+            // Remaining numpy.__all__ entries that have no fnp engine
+            // substitute — re-export verbatim. (Skips: numpy.core and
+            // numpy.f2py because their heavy submodule init / Python state
+            // can disturb the host process; revisit separately if needed.)
+            "iterable",
+            "ndim",
+            "size",
+            "packbits",
+            "unpackbits",
+            "fromfunction",
+            "pow",
+            "typecodes",
+            "typename",
+            "sctypeDict",
+            "ScalarType",
+            "__array_namespace_info__",
+            "typing",
+            "ctypeslib",
+            "test",
+            "getbufsize",
+            "nested_iters",
+            "from_dlpack",
         ] {
             if let Ok(attr) = numpy.getattr(name) {
                 m.add(name, &attr)?;
