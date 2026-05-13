@@ -13,9 +13,66 @@ so that readers can quickly find what changed in the subsystem they care about.
 
 ---
 
-## [Unreleased] — development head (2026-02-13 through 2026-03-21)
+## [Unreleased] — development head (2026-02-13 through 2026-05-13)
 
-210 commits on `main`. No formal release tags exist yet.
+`main` branch, no formal release tags yet. After 2026-03-21 the entries
+below summarize work by capability area rather than by date range,
+since many commits ship across multiple areas in a single session.
+
+### NumPy surface parity (April–May 2026)
+
+Closed the long-standing gap between the README's "drop-in NumPy
+compatibility" claim and the actual reachable surface of `fnp_python`.
+Coverage progression:
+
+| Date       | Covered / 499 | Share  |
+|------------|--------------:|-------:|
+| 2026-04-22 |          216  |  43.3% |
+| 2026-05-09 |         ~480  |  ~96%  |
+| 2026-05-13 |          499  | **100.0%** |
+
+The 100% baseline is structurally enforced by the conformance test
+`fnp_python_covers_full_numpy_all` (in
+`crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`),
+which iterates `numpy.__all__` at run time and fails CI if any name
+regresses. See [`audit_numpy_reality.md`](audit_numpy_reality.md) for
+the architectural choices that drove the close-out.
+
+Representative parity-wave bead IDs (each shipped its own focused
+conformance file under `crates/fnp-python/tests/conformance_*.rs`):
+
+  - `wcoth` — `savetxt` + `tofile`
+  - `86iws` — `recfunctions_merge_arrays` single-field flattening fix
+  - `qe1i5` — `count_nonzero` scalar return type
+  - `ydixp` — `unique_values` numpy 2.x set semantics
+  - `vek3z` / `ghsx4` / `bntjh` — Array API: `unstack`, `permute_dims`, `vecdot`
+  - `tmg0c` — `fromregex`, `min_scalar_type`, `get_printoptions`, `mintypecode`
+  - `4t0ql` — `numpy.strings` submodule
+  - `xdxvn` — `numpy.char` / `numpy.rec` / `numpy.emath` / `numpy.matrixlib`
+  - `r1xmi` — `numpy.mgrid` / `numpy.ogrid`
+  - `cp8xw` — `s_` / `index_exp` / `newaxis` / `False_` / `True_` /
+            `errstate` / `seterr` family / `show_config` / `show_runtime` / `info`
+  - `t3eb4` — `iterable`, `ndim`, `size`, `packbits`, `unpackbits`,
+            `fromfunction`, `pow` (ufunc alias), `typecodes`, `typename`,
+            `sctypeDict`, `ScalarType`, `typing` submodule, `ctypeslib`
+            submodule, `test`, `getbufsize`, `nested_iters`, `from_dlpack`
+  - `dm9bn` — `numpy.core` and `numpy.f2py` (final 2) and the lock-in test
+  - `0xpje` — `fnp_python.__doc__` + `fnp_python.__numpy_version__`
+
+### Diagnostic parity wave (May 2026)
+
+Epic `33vtd` ("Diagnostic parity and upstream drift wave") shipped the
+diagnostic oracle schema, dtype/shape diagnostic gates, IO parser
+diagnostic gates, an fnp-python warnings/exceptions shard, a
+cross-version NumPy drift matrix, the divergence ledger doc and checker,
+the structured-dtype + recfunctions oracle corpus expansion, and an
+agent-readable validation recipe selector. See `docs/DIVERGENCES.md`
+and `crates/fnp-conformance/src/divergence_ledger.rs`.
+
+### Pre-2026-03-21 details preserved below
+
+The dated capability sections below are unchanged; they cover the
+2026-02-13 through 2026-03-21 window in detail.
 
 ---
 
