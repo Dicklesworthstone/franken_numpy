@@ -22447,13 +22447,13 @@ fn take_along_axis(
 }
 
 // ---------------------------------------------------------------------------
-// Reality-check (k74v.8) — 31 core numpy passthrough wrappers.
+// Historical reality-check (k74v.8) - 31 core numpy passthrough wrappers.
 //
 // Each wrapper forwards all args + kwargs to `numpy.<name>`, preserving the
-// full numpy signature surface without re-typing it. Coverage goal: closes
-// ~31 of the 183-name numpy.__all__ gap identified in vhd5's audit (pushes
-// fnp_python from 63.9% → ~70% of numpy.__all__). The helper `core_numpy_passthrough`
-// amortises the common work so each #[pyfunction] is a 3-line trampoline.
+// full numpy signature surface without re-typing it. This was one tranche of
+// the numpy.__all__ coverage closure; coverage is now locked at 499/499 by
+// fnp_python_covers_full_numpy_all. The helper `core_numpy_passthrough`
+// amortizes the common work so each #[pyfunction] is a 3-line trampoline.
 // ---------------------------------------------------------------------------
 
 fn core_numpy_passthrough(
@@ -23916,13 +23916,14 @@ fn exp2(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 // ---------------------------------------------------------------------------
-// Reality-check (k74v.1) — 41 core numpy ufunc passthrough wrappers.
+// Historical reality-check (k74v.1) - 41 core numpy ufunc passthrough wrappers.
 //
 // All forward *args, **kwargs verbatim via core_numpy_passthrough so the full
 // ufunc signature surface (out=, where=, dtype=, casting=, subok=, ...) is
 // preserved without re-typing it. Array-API aliases (acos/asin/atan/...) are
-// provided alongside the numpy-native arc* names. Closes 41 of the remaining
-// numpy.__all__ gap per the k74v REALITY-CHECK-EPIC.
+// provided alongside the numpy-native arc* names. This wrapper group was part
+// of the numpy.__all__ closure wave; current coverage is enforced by
+// fnp_python_covers_full_numpy_all rather than a live partial-gap count.
 // ---------------------------------------------------------------------------
 
 // Trig (Array-API aliases for arc*/inverse trig — numpy exposes both).
@@ -24455,13 +24456,13 @@ fn linalg_vector_norm(
 }
 
 // ---------------------------------------------------------------------------
-// Reality-check (k74v.2) — ~45 core numpy function passthrough wrappers.
+// Historical reality-check (k74v.2) - core numpy function passthrough wrappers.
 //
-// All forward *args, **kwargs verbatim via core_numpy_passthrough. Closes a
-// large chunk of the remaining numpy.__all__ gap per the k74v
-// REALITY-CHECK-EPIC. Groups: casting/dtype predicates, array-API aliases
-// for existing ufuncs, atleast_Nd family, nan-cumulative variants, busday
-// calendar functions, string-format helpers, repr/str helpers.
+// All forward *args, **kwargs verbatim via core_numpy_passthrough. This group
+// was part of the numpy.__all__ closure wave; the surface is now structurally
+// locked by fnp_python_covers_full_numpy_all. Groups: casting/dtype predicates,
+// array-API aliases for existing ufuncs, atleast_Nd family, nan-cumulative
+// variants, busday calendar functions, string-format helpers, repr/str helpers.
 // ---------------------------------------------------------------------------
 
 // Casting / dtype predicates (6).
