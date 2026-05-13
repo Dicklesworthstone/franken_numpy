@@ -19618,6 +19618,40 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
+#[pyo3(signature = (x, /, *, axis=0))]
+fn unstack(py: Python<'_>, x: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("unstack")?
+        .call((x.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a, axes))]
+fn permute_dims(py: Python<'_>, a: Py<PyAny>, axes: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("permute_dims")?
+        .call1((a.bind(py), axes.bind(py)))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (x1, x2, /, *, axis=-1_i64))]
+fn vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("axis", axis)?;
+    Ok(numpy
+        .getattr("vecdot")?
+        .call((x1.bind(py), x2.bind(py)), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn eye(
     py: Python<'_>,
@@ -25660,6 +25694,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(testing_assert_array_equal, m)?)?;
     m.add_function(wrap_pyfunction!(matrix_transpose, m)?)?;
     m.add_function(wrap_pyfunction!(svdvals, m)?)?;
+    m.add_function(wrap_pyfunction!(unstack, m)?)?;
+    m.add_function(wrap_pyfunction!(permute_dims, m)?)?;
+    m.add_function(wrap_pyfunction!(vecdot, m)?)?;
     m.add_function(wrap_pyfunction!(eye, m)?)?;
     m.add_function(wrap_pyfunction!(identity, m)?)?;
     m.add_function(wrap_pyfunction!(logspace, m)?)?;
