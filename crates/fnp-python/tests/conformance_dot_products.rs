@@ -143,7 +143,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tensordot axes tuple should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensordot axes tuple should match numpy"
+    );
     Ok(())
 }
 
@@ -180,7 +184,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unwrap large jump should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unwrap large jump should match numpy"
+    );
     Ok(())
 }
 
@@ -253,7 +261,11 @@ print(np.allclose(vdot_result, dot_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "vdot should equal dot for real arrays");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "vdot should equal dot for real arrays"
+    );
     Ok(())
 }
 

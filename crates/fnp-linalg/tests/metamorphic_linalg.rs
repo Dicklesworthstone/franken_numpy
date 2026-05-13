@@ -14,8 +14,8 @@
 //! - Norm: ||A||_F^2 = trace(A^T @ A)
 
 use fnp_linalg::{
-    cholesky_nxn, det_2x2, det_nxn, inv_2x2, inv_nxn, matrix_norm_frobenius,
-    qr_nxn, solve_2x2, solve_nxn, svd_nxn, trace_nxn,
+    cholesky_nxn, det_2x2, det_nxn, inv_2x2, inv_nxn, matrix_norm_frobenius, qr_nxn, solve_2x2,
+    solve_nxn, svd_nxn, trace_nxn,
 };
 
 const EPSILON: f64 = 1e-10;
@@ -256,9 +256,8 @@ fn mr_det_product_is_product_det_2x2() {
 
 #[test]
 fn mr_det_inv_is_reciprocal_nxn() {
-    let matrices: Vec<(Vec<f64>, usize)> = vec![
-        (vec![4.0, 2.0, 1.0, 2.0, 5.0, 3.0, 1.0, 3.0, 6.0], 3),
-    ];
+    let matrices: Vec<(Vec<f64>, usize)> =
+        vec![(vec![4.0, 2.0, 1.0, 2.0, 5.0, 3.0, 1.0, 3.0, 6.0], 3)];
 
     for (a, n) in &matrices {
         let det_a = det_nxn(a, *n).unwrap();
@@ -362,9 +361,8 @@ fn mr_qr_reconstructs_original() {
 
 #[test]
 fn mr_q_is_orthogonal() {
-    let matrices: Vec<(Vec<f64>, usize)> = vec![
-        (vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0], 3),
-    ];
+    let matrices: Vec<(Vec<f64>, usize)> =
+        vec![(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0], 3)];
 
     for (a, n) in &matrices {
         let (q, _) = qr_nxn(a, *n).unwrap();

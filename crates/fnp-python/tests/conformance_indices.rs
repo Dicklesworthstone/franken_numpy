@@ -82,7 +82,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "indices with dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "indices with dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -101,7 +105,11 @@ print(all(np.array_equal(r, e) for r, e in zip(result, expected)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diag_indices basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag_indices basic should match numpy"
+    );
     Ok(())
 }
 
@@ -116,7 +124,11 @@ print(all(np.array_equal(r, e) for r, e in zip(result, expected)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diag_indices with ndim should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag_indices with ndim should match numpy"
+    );
     Ok(())
 }
 
@@ -135,7 +147,11 @@ print(all(np.array_equal(r, e) for r, e in zip(result, expected)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tril_indices basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tril_indices basic should match numpy"
+    );
     Ok(())
 }
 
@@ -150,7 +166,11 @@ print(all(np.array_equal(r, e) for r, e in zip(result, expected)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tril_indices with k should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tril_indices with k should match numpy"
+    );
     Ok(())
 }
 
@@ -165,7 +185,11 @@ print(all(np.array_equal(r, e) for r, e in zip(result, expected)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "triu_indices basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "triu_indices basic should match numpy"
+    );
     Ok(())
 }
 
@@ -180,7 +204,11 @@ print(all(np.array_equal(r, e) for r, e in zip(result, expected)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "triu_indices with k should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "triu_indices with k should match numpy"
+    );
     Ok(())
 }
 
@@ -201,7 +229,11 @@ print(np.array_equal(a, b))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "fill_diagonal basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fill_diagonal basic should match numpy"
+    );
     Ok(())
 }
 
@@ -218,7 +250,11 @@ print(np.array_equal(a, b))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "fill_diagonal array val should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fill_diagonal array val should match numpy"
+    );
     Ok(())
 }
 
@@ -257,7 +293,11 @@ print(np.array_equal(dst, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "copyto with where should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "copyto with where should match numpy"
+    );
     Ok(())
 }
 
@@ -278,7 +318,11 @@ print(np.array_equal(diag_values, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diag_indices should extract diagonal");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag_indices should extract diagonal"
+    );
     Ok(())
 }
 
@@ -296,6 +340,10 @@ print(total == n * n)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tril + triu should cover all elements");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tril + triu should cover all elements"
+    );
     Ok(())
 }

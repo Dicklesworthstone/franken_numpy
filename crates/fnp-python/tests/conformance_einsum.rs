@@ -101,7 +101,11 @@ print(np.array_equal(result, expected) and np.array_equal(result, np.sum(a, axis
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum sum axis 0 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum sum axis 0 should match numpy"
+    );
     Ok(())
 }
 
@@ -206,7 +210,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum batch matmul should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum batch matmul should match numpy"
+    );
     Ok(())
 }
 
@@ -228,7 +236,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum with optimize=greedy should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum with optimize=greedy should match numpy"
+    );
     Ok(())
 }
 
@@ -247,7 +259,11 @@ print(np.array_equal(out_fnp, out_np))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum with out parameter should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum with out parameter should match numpy"
+    );
     Ok(())
 }
 
@@ -264,7 +280,11 @@ print(result == expected and isinstance(result, np.floating))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum with dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum with dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -286,7 +306,11 @@ print(path_fnp == path_np)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum_path basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum_path basic should match numpy"
+    );
     Ok(())
 }
 
@@ -304,7 +328,11 @@ print(path_fnp == path_np)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum_path greedy should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum_path greedy should match numpy"
+    );
     Ok(())
 }
 
@@ -322,7 +350,11 @@ print(path_fnp == path_np)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum_path optimal should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum_path optimal should match numpy"
+    );
     Ok(())
 }
 
@@ -342,7 +374,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum implicit mode should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum implicit mode should match numpy"
+    );
     Ok(())
 }
 
@@ -359,6 +395,10 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum implicit matmul should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum implicit matmul should match numpy"
+    );
     Ok(())
 }

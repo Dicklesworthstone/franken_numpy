@@ -166,7 +166,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diag extract main diagonal should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag extract main diagonal should match numpy"
+    );
     Ok(())
 }
 
@@ -198,7 +202,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diag extract k=-1 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag extract k=-1 should match numpy"
+    );
     Ok(())
 }
 
@@ -214,7 +222,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diag construct from 1d should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag construct from 1d should match numpy"
+    );
     Ok(())
 }
 
@@ -230,7 +242,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diag construct with k=1 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag construct with k=1 should match numpy"
+    );
     Ok(())
 }
 
@@ -266,7 +282,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diagflat 2d (flattens) should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diagflat 2d (flattens) should match numpy"
+    );
     Ok(())
 }
 
@@ -333,6 +353,10 @@ print(np.array_equal(v, extracted))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diag(diag(v)) should return v for 1d input");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag(diag(v)) should return v for 1d input"
+    );
     Ok(())
 }

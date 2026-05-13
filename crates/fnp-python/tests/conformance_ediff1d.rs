@@ -119,7 +119,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ediff1d with to_begin scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ediff1d with to_begin scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -135,7 +139,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ediff1d with to_end scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ediff1d with to_end scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -151,7 +159,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ediff1d with to_begin array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ediff1d with to_begin array should match numpy"
+    );
     Ok(())
 }
 
@@ -167,7 +179,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ediff1d with to_end array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ediff1d with to_end array should match numpy"
+    );
     Ok(())
 }
 
@@ -183,7 +199,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ediff1d with both to_begin and to_end should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ediff1d with both to_begin and to_end should match numpy"
+    );
     Ok(())
 }
 
@@ -203,7 +223,11 @@ print(len(result) == 0 and len(expected) == 0)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ediff1d single element returns empty array");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ediff1d single element returns empty array"
+    );
     Ok(())
 }
 
@@ -219,7 +243,11 @@ print(len(result) == 0 and len(expected) == 0)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ediff1d empty array returns empty array");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ediff1d empty array returns empty array"
+    );
     Ok(())
 }
 

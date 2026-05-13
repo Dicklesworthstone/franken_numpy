@@ -32,7 +32,10 @@ fn mr_advance_equivalence_pcg64dxsm_small() {
         let seq_vals: Vec<u64> = (0..10).map(|_| rng_seq.next_u64()).collect();
         let adv_vals: Vec<u64> = (0..10).map(|_| rng_adv.next_u64()).collect();
 
-        assert_eq!(seq_vals, adv_vals, "advance(100) should match 100 sequential calls for seed {seed}");
+        assert_eq!(
+            seq_vals, adv_vals,
+            "advance(100) should match 100 sequential calls for seed {seed}"
+        );
     }
 }
 
@@ -49,7 +52,10 @@ fn mr_advance_equivalence_pcg64dxsm_large() {
     let seq_vals: Vec<u64> = (0..5).map(|_| rng_seq.next_u64()).collect();
     let adv_vals: Vec<u64> = (0..5).map(|_| rng_adv.next_u64()).collect();
 
-    assert_eq!(seq_vals, adv_vals, "advance(10000) should match 10000 sequential calls");
+    assert_eq!(
+        seq_vals, adv_vals,
+        "advance(10000) should match 10000 sequential calls"
+    );
 }
 
 #[test]
@@ -138,7 +144,11 @@ fn mr_fill_u64_length_correct() {
 
     for len in [0, 1, 10, 100, 1000] {
         let filled = rng.fill_u64(len);
-        assert_eq!(filled.len(), len, "fill_u64({len}) should return exactly {len} elements");
+        assert_eq!(
+            filled.len(),
+            len,
+            "fill_u64({len}) should return exactly {len} elements"
+        );
     }
 }
 
@@ -150,7 +160,10 @@ fn mr_fill_u64_deterministic() {
     let fill1 = rng1.fill_u64(100);
     let fill2 = rng2.fill_u64(100);
 
-    assert_eq!(fill1, fill2, "fill_u64 should be deterministic for same seed");
+    assert_eq!(
+        fill1, fill2,
+        "fill_u64 should be deterministic for same seed"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -240,7 +253,10 @@ fn mr_state_roundtrip_preserves_sequence() {
     let mut restored = Pcg64DxsmRng::from_state_entries(&state).expect("restore");
     let actual: Vec<u64> = (0..20).map(|_| restored.next_u64()).collect();
 
-    assert_eq!(expected, actual, "state roundtrip should preserve RNG position");
+    assert_eq!(
+        expected, actual,
+        "state roundtrip should preserve RNG position"
+    );
 }
 
 #[test]
@@ -276,7 +292,10 @@ fn mr_advance_then_fill_equals_skip_then_fill() {
     }
     let fill2 = rng2.fill_u64(20);
 
-    assert_eq!(fill1, fill2, "advance then fill should equal sequential skip then fill");
+    assert_eq!(
+        fill1, fill2,
+        "advance then fill should equal sequential skip then fill"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

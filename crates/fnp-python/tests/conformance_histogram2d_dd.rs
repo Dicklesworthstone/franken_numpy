@@ -55,7 +55,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram2d basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram2d basic should match numpy"
+    );
     Ok(())
 }
 
@@ -73,7 +77,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram2d with int bins should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram2d with int bins should match numpy"
+    );
     Ok(())
 }
 
@@ -91,7 +99,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram2d with tuple bins should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram2d with tuple bins should match numpy"
+    );
     Ok(())
 }
 
@@ -109,7 +121,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram2d with range should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram2d with range should match numpy"
+    );
     Ok(())
 }
 
@@ -128,7 +144,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram2d density should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram2d density should match numpy"
+    );
     Ok(())
 }
 
@@ -147,7 +167,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram2d with weights should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram2d with weights should match numpy"
+    );
     Ok(())
 }
 
@@ -167,7 +191,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram2d with explicit edges should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram2d with explicit edges should match numpy"
+    );
     Ok(())
 }
 
@@ -231,7 +259,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogramdd with range should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogramdd with range should match numpy"
+    );
     Ok(())
 }
 
@@ -252,7 +284,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogramdd density should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogramdd density should match numpy"
+    );
     Ok(())
 }
 
@@ -273,7 +309,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogramdd with weights should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogramdd with weights should match numpy"
+    );
     Ok(())
 }
 
@@ -293,7 +333,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogramdd with different bins per dimension should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogramdd with different bins per dimension should match numpy"
+    );
     Ok(())
 }
 
@@ -313,7 +357,11 @@ print(np.sum(H) == len(x))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram2d sum should equal sample count");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram2d sum should equal sample count"
+    );
     Ok(())
 }
 
@@ -328,7 +376,11 @@ print(np.sum(H) == len(sample))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogramdd sum should equal sample count");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogramdd sum should equal sample count"
+    );
     Ok(())
 }
 
@@ -348,7 +400,11 @@ print(np.isclose(integral, 1.0, atol=0.1))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram2d density should approximately integrate to 1");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram2d density should approximately integrate to 1"
+    );
     Ok(())
 }
 
@@ -370,6 +426,10 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogramdd should be consistent with histogram2d for 2D data");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogramdd should be consistent with histogram2d for 2D data"
+    );
     Ok(())
 }

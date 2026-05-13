@@ -117,7 +117,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sort with negatives should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sort with negatives should match numpy"
+    );
     Ok(())
 }
 
@@ -243,7 +247,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "searchsorted basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "searchsorted basic should match numpy"
+    );
     Ok(())
 }
 
@@ -260,7 +268,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "searchsorted left should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "searchsorted left should match numpy"
+    );
     Ok(())
 }
 
@@ -277,7 +289,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "searchsorted right should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "searchsorted right should match numpy"
+    );
     Ok(())
 }
 
@@ -293,7 +309,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "searchsorted scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "searchsorted scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -345,7 +365,11 @@ print(len(result) == len(expected) and result[0].size == 0 and expected[0].size 
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "nonzero all zeros should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nonzero all zeros should match numpy"
+    );
     Ok(())
 }
 
@@ -397,7 +421,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "count_nonzero axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "count_nonzero axis should match numpy"
+    );
     Ok(())
 }
 
@@ -451,6 +479,10 @@ print(len(nz_indices) == count)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "len(nonzero) should equal count_nonzero");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "len(nonzero) should equal count_nonzero"
+    );
     Ok(())
 }

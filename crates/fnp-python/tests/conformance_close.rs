@@ -88,7 +88,11 @@ print(result == expected == False)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "allclose not close should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "allclose not close should match numpy"
+    );
     Ok(())
 }
 
@@ -105,7 +109,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "allclose custom rtol should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "allclose custom rtol should match numpy"
+    );
     Ok(())
 }
 
@@ -122,7 +130,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "allclose custom atol should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "allclose custom atol should match numpy"
+    );
     Ok(())
 }
 
@@ -140,7 +152,11 @@ print(result == expected == False)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "allclose with nan default should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "allclose with nan default should match numpy"
+    );
     Ok(())
 }
 
@@ -157,7 +173,11 @@ print(result == expected == True)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "allclose equal_nan=True should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "allclose equal_nan=True should match numpy"
+    );
     Ok(())
 }
 
@@ -212,7 +232,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose custom rtol should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose custom rtol should match numpy"
+    );
     Ok(())
 }
 
@@ -229,7 +253,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose custom atol should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose custom atol should match numpy"
+    );
     Ok(())
 }
 
@@ -246,7 +274,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose with nan default should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose with nan default should match numpy"
+    );
     Ok(())
 }
 
@@ -263,7 +295,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose equal_nan=True should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose equal_nan=True should match numpy"
+    );
     Ok(())
 }
 

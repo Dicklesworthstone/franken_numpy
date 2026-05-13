@@ -53,7 +53,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "may_share_memory same array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "may_share_memory same array should match numpy"
+    );
     Ok(())
 }
 
@@ -70,7 +74,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "may_share_memory different arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "may_share_memory different arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -87,7 +95,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "may_share_memory view should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "may_share_memory view should match numpy"
+    );
     Ok(())
 }
 
@@ -107,7 +119,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "shares_memory same array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "shares_memory same array should match numpy"
+    );
     Ok(())
 }
 
@@ -124,7 +140,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "shares_memory different arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "shares_memory different arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -141,7 +161,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "shares_memory view should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "shares_memory view should match numpy"
+    );
     Ok(())
 }
 
@@ -162,7 +186,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "result_type int+float should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "result_type int+float should match numpy"
+    );
     Ok(())
 }
 
@@ -177,7 +205,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "result_type dtypes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "result_type dtypes should match numpy"
+    );
     Ok(())
 }
 
@@ -192,7 +224,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "result_type scalars should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "result_type scalars should match numpy"
+    );
     Ok(())
 }
 
@@ -210,7 +246,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "result_type multiple should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "result_type multiple should match numpy"
+    );
     Ok(())
 }
 
@@ -249,6 +289,10 @@ print(shares == False and may_share == False)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "both should be False for different arrays");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "both should be False for different arrays"
+    );
     Ok(())
 }

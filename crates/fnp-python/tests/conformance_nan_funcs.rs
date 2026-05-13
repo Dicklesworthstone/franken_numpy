@@ -338,7 +338,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "nanmedian 2d axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nanmedian 2d axis should match numpy"
+    );
     Ok(())
 }
 
@@ -358,7 +362,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "nanpercentile basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nanpercentile basic should match numpy"
+    );
     Ok(())
 }
 
@@ -374,7 +382,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "nanquantile basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nanquantile basic should match numpy"
+    );
     Ok(())
 }
 
@@ -394,7 +406,11 @@ print(np.allclose(nanmean_result, mean_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "nanmean without NaN should equal mean");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nanmean without NaN should equal mean"
+    );
     Ok(())
 }
 
@@ -426,6 +442,10 @@ print(np.allclose(percentile, median))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "nanpercentile 50 should equal nanmedian");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nanpercentile 50 should equal nanmedian"
+    );
     Ok(())
 }

@@ -5,9 +5,12 @@
 //! - Distribution sampling (normal, uniform, exponential, integers)
 //! - Array generation at various sizes
 
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use fnp_random::{
+    BitGenerator, BitGeneratorKind, Generator, Pcg64DxsmRng, Pcg64Rng, PhiloxRng, SeedSequence,
+    Sfc64Rng,
+};
 use std::hint::black_box;
-use criterion::{criterion_group, criterion_main, Criterion, BenchmarkId, Throughput};
-use fnp_random::{Generator, BitGenerator, BitGeneratorKind, Pcg64Rng, Pcg64DxsmRng, PhiloxRng, Sfc64Rng, SeedSequence};
 
 fn seed_sequence() -> SeedSequence {
     SeedSequence::new(&[42]).unwrap()
@@ -23,13 +26,9 @@ fn bench_pcg64_next_u64(c: &mut Criterion) {
 
     let mut rng = Pcg64Rng::from_seed_sequence(&seed_sequence()).unwrap();
 
-    group.bench_function("next_u64", |b| {
-        b.iter(|| black_box(rng.next_u64()))
-    });
+    group.bench_function("next_u64", |b| b.iter(|| black_box(rng.next_u64())));
 
-    group.bench_function("next_f64", |b| {
-        b.iter(|| black_box(rng.next_f64()))
-    });
+    group.bench_function("next_f64", |b| b.iter(|| black_box(rng.next_f64())));
 
     group.finish();
 }
@@ -40,13 +39,9 @@ fn bench_pcg64dxsm_next_u64(c: &mut Criterion) {
 
     let mut rng = Pcg64DxsmRng::from_seed_sequence(&seed_sequence()).unwrap();
 
-    group.bench_function("next_u64", |b| {
-        b.iter(|| black_box(rng.next_u64()))
-    });
+    group.bench_function("next_u64", |b| b.iter(|| black_box(rng.next_u64())));
 
-    group.bench_function("next_f64", |b| {
-        b.iter(|| black_box(rng.next_f64()))
-    });
+    group.bench_function("next_f64", |b| b.iter(|| black_box(rng.next_f64())));
 
     group.finish();
 }
@@ -57,13 +52,9 @@ fn bench_philox_next_u64(c: &mut Criterion) {
 
     let mut rng = PhiloxRng::from_seed_sequence(&seed_sequence()).unwrap();
 
-    group.bench_function("next_u64", |b| {
-        b.iter(|| black_box(rng.next_u64()))
-    });
+    group.bench_function("next_u64", |b| b.iter(|| black_box(rng.next_u64())));
 
-    group.bench_function("next_f64", |b| {
-        b.iter(|| black_box(rng.next_f64()))
-    });
+    group.bench_function("next_f64", |b| b.iter(|| black_box(rng.next_f64())));
 
     group.finish();
 }
@@ -74,13 +65,9 @@ fn bench_sfc64_next_u64(c: &mut Criterion) {
 
     let mut rng = Sfc64Rng::from_seed_sequence(&seed_sequence()).unwrap();
 
-    group.bench_function("next_u64", |b| {
-        b.iter(|| black_box(rng.next_u64()))
-    });
+    group.bench_function("next_u64", |b| b.iter(|| black_box(rng.next_u64())));
 
-    group.bench_function("next_f64", |b| {
-        b.iter(|| black_box(rng.next_f64()))
-    });
+    group.bench_function("next_f64", |b| b.iter(|| black_box(rng.next_f64())));
 
     group.finish();
 }

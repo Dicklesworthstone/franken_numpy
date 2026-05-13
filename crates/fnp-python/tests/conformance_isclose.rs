@@ -52,7 +52,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose exact equal should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose exact equal should match numpy"
+    );
     Ok(())
 }
 
@@ -69,7 +73,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose within tolerance should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose within tolerance should match numpy"
+    );
     Ok(())
 }
 
@@ -86,7 +94,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose outside tolerance should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose outside tolerance should match numpy"
+    );
     Ok(())
 }
 
@@ -103,7 +115,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose custom rtol should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose custom rtol should match numpy"
+    );
     Ok(())
 }
 
@@ -120,7 +136,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose custom atol should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose custom atol should match numpy"
+    );
     Ok(())
 }
 
@@ -141,7 +161,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose nan default should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose nan default should match numpy"
+    );
     Ok(())
 }
 
@@ -158,7 +182,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose equal_nan=True should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose equal_nan=True should match numpy"
+    );
     Ok(())
 }
 
@@ -179,7 +207,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose inf equal should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose inf equal should match numpy"
+    );
     Ok(())
 }
 
@@ -196,7 +228,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose inf not equal should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose inf not equal should match numpy"
+    );
     Ok(())
 }
 
@@ -217,7 +253,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose broadcast scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose broadcast scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -234,7 +274,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose broadcast 2d should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose broadcast 2d should match numpy"
+    );
     Ok(())
 }
 
@@ -255,7 +299,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose int arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose int arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -272,6 +320,10 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isclose mixed dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isclose mixed dtype should match numpy"
+    );
     Ok(())
 }

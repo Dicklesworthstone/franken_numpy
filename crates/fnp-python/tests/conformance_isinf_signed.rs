@@ -53,7 +53,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isposinf basic values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isposinf basic values should match numpy"
+    );
     Ok(())
 }
 
@@ -69,7 +73,11 @@ print(np.array_equal(result, expected) and np.all(result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isposinf all positive inf should be True");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isposinf all positive inf should be True"
+    );
     Ok(())
 }
 
@@ -85,7 +93,11 @@ print(np.array_equal(result, expected) and not np.any(result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isposinf for negative inf should be False");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isposinf for negative inf should be False"
+    );
     Ok(())
 }
 
@@ -101,7 +113,11 @@ print(np.array_equal(result, expected) and not np.any(result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isposinf for finite values should be False");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isposinf for finite values should be False"
+    );
     Ok(())
 }
 
@@ -133,7 +149,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isposinf 2d array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isposinf 2d array should match numpy"
+    );
     Ok(())
 }
 
@@ -149,7 +169,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isposinf empty array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isposinf empty array should match numpy"
+    );
     Ok(())
 }
 
@@ -169,7 +193,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isneginf basic values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isneginf basic values should match numpy"
+    );
     Ok(())
 }
 
@@ -185,7 +213,11 @@ print(np.array_equal(result, expected) and np.all(result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isneginf all negative inf should be True");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isneginf all negative inf should be True"
+    );
     Ok(())
 }
 
@@ -201,7 +233,11 @@ print(np.array_equal(result, expected) and not np.any(result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isneginf for positive inf should be False");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isneginf for positive inf should be False"
+    );
     Ok(())
 }
 
@@ -217,7 +253,11 @@ print(np.array_equal(result, expected) and not np.any(result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isneginf for finite values should be False");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isneginf for finite values should be False"
+    );
     Ok(())
 }
 
@@ -249,7 +289,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isneginf 2d array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isneginf 2d array should match numpy"
+    );
     Ok(())
 }
 
@@ -265,7 +309,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isneginf empty array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isneginf empty array should match numpy"
+    );
     Ok(())
 }
 
@@ -284,7 +332,11 @@ print(np.array_equal(complement, isinf))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isposinf | isneginf should equal isinf");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isposinf | isneginf should equal isinf"
+    );
     Ok(())
 }
 
@@ -302,6 +354,10 @@ print(not np.any(overlap))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "isposinf and isneginf should be mutually exclusive");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "isposinf and isneginf should be mutually exclusive"
+    );
     Ok(())
 }

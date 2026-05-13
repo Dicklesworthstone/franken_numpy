@@ -291,7 +291,10 @@ print(is_permutation and is_sorted)
         .into(),
     );
     let output = numpy_oracle(&script)?;
-    assert_eq!(output, "True", "lexsort result should be valid sorting permutation");
+    assert_eq!(
+        output, "True",
+        "lexsort result should be valid sorting permutation"
+    );
     Ok(())
 }
 

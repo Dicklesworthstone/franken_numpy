@@ -57,7 +57,11 @@ print(np.allclose(x, result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "transpose(transpose(x)) should equal x");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "transpose(transpose(x)) should equal x"
+    );
     Ok(())
 }
 
@@ -73,7 +77,11 @@ print(np.allclose(x, result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "transpose(transpose(x)) should equal x for 3D");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "transpose(transpose(x)) should equal x for 3D"
+    );
     Ok(())
 }
 
@@ -90,7 +98,11 @@ print(np.allclose(result1, result2))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sort(reverse(x)) should equal sort(x)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sort(reverse(x)) should equal sort(x)"
+    );
     Ok(())
 }
 
@@ -123,7 +135,11 @@ print(np.allclose(result, x))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "negative(negative(x)) should equal x");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "negative(negative(x)) should equal x"
+    );
     Ok(())
 }
 
@@ -139,7 +155,11 @@ print(np.allclose(result, x, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "exp(log(x)) should equal x for positive x");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "exp(log(x)) should equal x for positive x"
+    );
     Ok(())
 }
 
@@ -171,7 +191,11 @@ print(np.allclose(result, 1.0, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sin(x)**2 + cos(x)**2 should equal 1");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sin(x)**2 + cos(x)**2 should equal 1"
+    );
     Ok(())
 }
 
@@ -187,7 +211,11 @@ print(np.allclose(result, x, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "arcsin(sin(x)) should equal x for x in [-pi/2, pi/2]");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arcsin(sin(x)) should equal x for x in [-pi/2, pi/2]"
+    );
     Ok(())
 }
 
@@ -203,7 +231,11 @@ print(np.allclose(result, x, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "arccos(cos(x)) should equal x for x in [0, pi]");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arccos(cos(x)) should equal x for x in [0, pi]"
+    );
     Ok(())
 }
 
@@ -219,7 +251,11 @@ print(np.allclose(result, x, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "arctan(tan(x)) should equal x for x in (-pi/2, pi/2)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arctan(tan(x)) should equal x for x in (-pi/2, pi/2)"
+    );
     Ok(())
 }
 
@@ -236,7 +272,11 @@ print(np.allclose(result, 1.0, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cosh(x)**2 - sinh(x)**2 should equal 1");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cosh(x)**2 - sinh(x)**2 should equal 1"
+    );
     Ok(())
 }
 
@@ -252,7 +292,11 @@ print(np.allclose(result, x, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sqrt(square(x)) should equal x for positive x");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sqrt(square(x)) should equal x for positive x"
+    );
     Ok(())
 }
 
@@ -289,7 +333,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "maximum(x,y) + minimum(x,y) should equal x + y");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "maximum(x,y) + minimum(x,y) should equal x + y"
+    );
     Ok(())
 }
 
@@ -310,7 +358,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "fmax(x,y) + fmin(x,y) should equal x + y for non-NaN");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fmax(x,y) + fmin(x,y) should equal x + y for non-NaN"
+    );
     Ok(())
 }
 
@@ -361,7 +413,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "hypot(x,y)**2 should equal x**2 + y**2");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "hypot(x,y)**2 should equal x**2 + y**2"
+    );
     Ok(())
 }
 
@@ -380,7 +436,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "arctan2(y,x) should equal arctan(y/x) for positive x");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arctan2(y,x) should equal arctan(y/x) for positive x"
+    );
     Ok(())
 }
 
@@ -432,7 +492,11 @@ print(np.allclose(result, x, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "log1p(expm1(x)) should equal x for small x");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "log1p(expm1(x)) should equal x for small x"
+    );
     Ok(())
 }
 
@@ -466,7 +530,11 @@ print(np.allclose(clipped, composed, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip(x, lo, hi) == minimum(maximum(x, lo), hi)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip(x, lo, hi) == minimum(maximum(x, lo), hi)"
+    );
     Ok(())
 }
 
@@ -499,7 +567,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp(x, x) should equal x + log(2)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp(x, x) should equal x + log(2)"
+    );
     Ok(())
 }
 
@@ -515,7 +587,11 @@ print(np.allclose(result, x, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sign(x) * abs(x) should equal x for non-zero x");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sign(x) * abs(x) should equal x for non-zero x"
+    );
     Ok(())
 }
 
@@ -531,7 +607,11 @@ print(np.allclose(result, x, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "copysign(abs(x), x) should equal x for non-zero x");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "copysign(abs(x), x) should equal x for non-zero x"
+    );
     Ok(())
 }
 
@@ -549,7 +629,11 @@ print(np.allclose(result1, expected) and np.allclose(result2, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "hypot(x, 0) and hypot(0, x) should equal abs(x)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "hypot(x, 0) and hypot(0, x) should equal abs(x)"
+    );
     Ok(())
 }
 
@@ -584,7 +668,11 @@ print(np.all(result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "floor(x) + 1 > x unless x is integer");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor(x) + 1 > x unless x is integer"
+    );
     Ok(())
 }
 
@@ -600,7 +688,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cumsum([1,1,1,...]) should equal [1,2,3,...]");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cumsum([1,1,1,...]) should equal [1,2,3,...]"
+    );
     Ok(())
 }
 
@@ -617,7 +709,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "prod(exp(x)) should equal exp(sum(x))");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "prod(exp(x)) should equal exp(sum(x))"
+    );
     Ok(())
 }
 
@@ -640,7 +736,11 @@ print(np.allclose(result1, result2))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "where(cond, x, y) == where(~cond, y, x)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where(cond, x, y) == where(~cond, y, x)"
+    );
     Ok(())
 }
 
@@ -710,7 +810,11 @@ print(len(indices[0]) == count)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "len(where(cond)[0]) == count_nonzero(cond)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "len(where(cond)[0]) == count_nonzero(cond)"
+    );
     Ok(())
 }
 
@@ -729,7 +833,11 @@ print(np.allclose(result1, result2))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "2D where(cond, x, y) == where(~cond, y, x)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "2D where(cond, x, y) == where(~cond, y, x)"
+    );
     Ok(())
 }
 
@@ -785,7 +893,11 @@ print(np.allclose(via_einsum, via_matmul))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum('ij,jk->ik', A, B) == matmul(A, B)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum('ij,jk->ik', A, B) == matmul(A, B)"
+    );
     Ok(())
 }
 
@@ -839,7 +951,11 @@ print(np.allclose(total_direct, total_via_axes))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sum(A) == sum(sum(sum(A, axis=0), axis=0), axis=0)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum(A) == sum(sum(sum(A, axis=0), axis=0), axis=0)"
+    );
     Ok(())
 }
 
@@ -900,7 +1016,11 @@ else:
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "around(around(x, n), n) == around(x, n)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "around(around(x, n), n) == around(x, n)"
+    );
     Ok(())
 }
 
@@ -1003,7 +1123,11 @@ print(all_equal and count_in_segment == count_total)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "searchsorted left/right brackets all equal elements");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "searchsorted left/right brackets all equal elements"
+    );
     Ok(())
 }
 
@@ -1027,7 +1151,11 @@ else:
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "insertion at searchsorted index preserves sortedness");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "insertion at searchsorted index preserves sortedness"
+    );
     Ok(())
 }
 
@@ -1116,7 +1244,11 @@ print(left_ok and right_ok)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "partition maintains left <= pivot <= right");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "partition maintains left <= pivot <= right"
+    );
     Ok(())
 }
 
@@ -1252,7 +1384,11 @@ print(np.allclose(A, reconstructed))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "A == U @ diag(s) @ Vh (SVD reconstruction)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "A == U @ diag(s) @ Vh (SVD reconstruction)"
+    );
     Ok(())
 }
 
@@ -1270,7 +1406,11 @@ print(np.allclose(eigvals_A, eigvals_AT))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "eigvals(A) == eigvals(A.T) (up to ordering)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "eigvals(A) == eigvals(A.T) (up to ordering)"
+    );
     Ok(())
 }
 
@@ -1307,7 +1447,11 @@ print(np.allclose(A, reconstructed))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "A == L @ L.T (Cholesky reconstruction)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "A == L @ L.T (Cholesky reconstruction)"
+    );
     Ok(())
 }
 
@@ -1537,7 +1681,11 @@ print(np.allclose(r1, r2))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "corrcoef is scale invariant for positive scales");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "corrcoef is scale invariant for positive scales"
+    );
     Ok(())
 }
 

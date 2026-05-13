@@ -53,7 +53,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tile 1d with scalar reps should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tile 1d with scalar reps should match numpy"
+    );
     Ok(())
 }
 
@@ -69,7 +73,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tile 1d with tuple reps should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tile 1d with tuple reps should match numpy"
+    );
     Ok(())
 }
 
@@ -85,7 +93,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tile 2d with scalar reps should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tile 2d with scalar reps should match numpy"
+    );
     Ok(())
 }
 
@@ -101,7 +113,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tile 2d with 2d reps should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tile 2d with 2d reps should match numpy"
+    );
     Ok(())
 }
 
@@ -149,7 +165,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tile with zero reps should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tile with zero reps should match numpy"
+    );
     Ok(())
 }
 
@@ -165,7 +185,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tile with higher dim reps should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tile with higher dim reps should match numpy"
+    );
     Ok(())
 }
 
@@ -185,7 +209,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "repeat 1d with scalar repeats should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "repeat 1d with scalar repeats should match numpy"
+    );
     Ok(())
 }
 
@@ -201,7 +229,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "repeat 1d with array repeats should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "repeat 1d with array repeats should match numpy"
+    );
     Ok(())
 }
 
@@ -217,7 +249,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "repeat 2d without axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "repeat 2d without axis should match numpy"
+    );
     Ok(())
 }
 
@@ -265,7 +301,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "repeat float array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "repeat float array should match numpy"
+    );
     Ok(())
 }
 
@@ -281,7 +321,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "repeat empty array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "repeat empty array should match numpy"
+    );
     Ok(())
 }
 
@@ -297,7 +341,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "repeat with zero repeats should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "repeat with zero repeats should match numpy"
+    );
     Ok(())
 }
 
@@ -313,7 +361,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "repeat with negative axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "repeat with negative axis should match numpy"
+    );
     Ok(())
 }
 
@@ -329,6 +381,10 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "repeat with variable repeats along axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "repeat with variable repeats along axis should match numpy"
+    );
     Ok(())
 }

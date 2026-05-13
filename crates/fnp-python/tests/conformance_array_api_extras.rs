@@ -53,7 +53,11 @@ print(len(ours) == len(theirs) and
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unstack default axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unstack default axis should match numpy"
+    );
     Ok(())
 }
 
@@ -112,7 +116,11 @@ print(len(ours) == len(theirs) and
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unstack on 1D array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unstack on 1D array should match numpy"
+    );
     Ok(())
 }
 

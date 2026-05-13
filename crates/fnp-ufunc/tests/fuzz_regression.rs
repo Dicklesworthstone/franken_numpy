@@ -1,6 +1,6 @@
 //! Regression tests from fuzzing and edge case probing.
 
-use fnp_ufunc::{parse_gufunc_signature, parse_fixed_signature_string, DateTimeUnit};
+use fnp_ufunc::{DateTimeUnit, parse_fixed_signature_string, parse_gufunc_signature};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DateTimeUnit::parse edge cases
@@ -62,13 +62,19 @@ fn gufunc_signature_simple() {
 #[test]
 fn gufunc_signature_empty_string_rejected() {
     let result = parse_gufunc_signature(Some(""), None);
-    assert!(result.is_err(), "empty string should be rejected as invalid signature");
+    assert!(
+        result.is_err(),
+        "empty string should be rejected as invalid signature"
+    );
 }
 
 #[test]
 fn gufunc_signature_whitespace_only_rejected() {
     let result = parse_gufunc_signature(Some("   "), None);
-    assert!(result.is_err(), "whitespace-only should be rejected as invalid signature");
+    assert!(
+        result.is_err(),
+        "whitespace-only should be rejected as invalid signature"
+    );
 }
 
 #[test]
@@ -105,13 +111,19 @@ fn gufunc_signature_long_input() {
 #[test]
 fn gufunc_signature_conflict_same_value() {
     let result = parse_gufunc_signature(Some("(n)->()"), Some("(n)->()"));
-    assert!(result.is_err(), "providing both sig and signature should error even if same");
+    assert!(
+        result.is_err(),
+        "providing both sig and signature should error even if same"
+    );
 }
 
 #[test]
 fn gufunc_signature_conflict_different_values() {
     let result = parse_gufunc_signature(Some("(n)->()"), Some("(m)->()"));
-    assert!(result.is_err(), "providing both sig and signature should error");
+    assert!(
+        result.is_err(),
+        "providing both sig and signature should error"
+    );
 }
 
 #[test]

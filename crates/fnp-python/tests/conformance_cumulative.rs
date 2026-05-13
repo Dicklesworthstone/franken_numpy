@@ -69,7 +69,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cumsum 2d no axis should flatten and match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cumsum 2d no axis should flatten and match numpy"
+    );
     Ok(())
 }
 
@@ -153,7 +157,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cumprod 2d no axis should flatten and match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cumprod 2d no axis should flatten and match numpy"
+    );
     Ok(())
 }
 
@@ -169,7 +177,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cumprod 2d axis=0 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cumprod 2d axis=0 should match numpy"
+    );
     Ok(())
 }
 
@@ -185,7 +197,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cumprod 2d axis=1 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cumprod 2d axis=1 should match numpy"
+    );
     Ok(())
 }
 
@@ -217,7 +233,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cumprod with zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cumprod with zero should match numpy"
+    );
     Ok(())
 }
 
@@ -237,7 +257,11 @@ print(cumsum_result[-1] == sum_result)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "last cumsum element should equal sum");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "last cumsum element should equal sum"
+    );
     Ok(())
 }
 
@@ -253,7 +277,11 @@ print(cumprod_result[-1] == prod_result)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "last cumprod element should equal prod");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "last cumprod element should equal prod"
+    );
     Ok(())
 }
 

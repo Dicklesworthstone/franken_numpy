@@ -160,7 +160,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "outer 2d flattened should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "outer 2d flattened should match numpy"
+    );
     Ok(())
 }
 

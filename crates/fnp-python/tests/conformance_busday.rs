@@ -33,10 +33,7 @@ fn np_datetime64_array<'py>(
     let numpy = py.import("numpy")?;
     let arr_fn = numpy.getattr("array")?;
     let dt64 = numpy.getattr("datetime64")?;
-    let date_objs: Vec<_> = dates
-        .iter()
-        .map(|d| dt64.call1((*d,)).unwrap())
-        .collect();
+    let date_objs: Vec<_> = dates.iter().map(|d| dt64.call1((*d,)).unwrap()).collect();
     arr_fn.call1((date_objs,))
 }
 
@@ -204,7 +201,8 @@ fn conformance_busday_matrix() {
             CompareMode::Strict,
             t,
             |py| {
-                let dates = np_datetime64_array(py, vec!["2024-01-15", "2024-01-16", "2024-01-17"])?;
+                let dates =
+                    np_datetime64_array(py, vec!["2024-01-15", "2024-01-16", "2024-01-17"])?;
                 PyTuple::new(py, [dates, 1_i64.into_pyobject(py)?.into_any()])
             },
             no_kwargs,

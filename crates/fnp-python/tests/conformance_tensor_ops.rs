@@ -54,7 +54,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tensorsolve basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensorsolve basic should match numpy"
+    );
     Ok(())
 }
 
@@ -72,7 +76,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tensorsolve with axes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensorsolve with axes should match numpy"
+    );
     Ok(())
 }
 
@@ -106,7 +114,11 @@ print(np.allclose(reconstructed, b))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tensorsolve solution should satisfy equation");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensorsolve solution should satisfy equation"
+    );
     Ok(())
 }
 
@@ -207,6 +219,10 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tensorinv float64 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensorinv float64 should match numpy"
+    );
     Ok(())
 }

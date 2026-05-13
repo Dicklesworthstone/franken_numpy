@@ -600,10 +600,10 @@ pub mod frankentui_integration {
 #[cfg(test)]
 mod tests {
     use super::{
-        decide_and_record, decide_and_record_with_context, decide_compatibility,
-        decide_compatibility_from_wire, evaluate_policy_override, expected_loss_for_action,
-        posterior_incompatibility, CompatibilityClass, DecisionAction, DecisionAuditContext,
-        DecisionLossModel, EvidenceLedger, RuntimeMode,
+        CompatibilityClass, DecisionAction, DecisionAuditContext, DecisionLossModel,
+        EvidenceLedger, RuntimeMode, decide_and_record, decide_and_record_with_context,
+        decide_compatibility, decide_compatibility_from_wire, evaluate_policy_override,
+        expected_loss_for_action, posterior_incompatibility,
     };
 
     #[test]

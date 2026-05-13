@@ -89,7 +89,10 @@ fn test_strided_negative_2d_axis1() {
 fn test_strided_negative_both_axes() {
     let layout = NdLayout::contiguous(vec![3, 4], 8, MemoryOrder::C).unwrap();
     let view = layout.as_strided(vec![3, 4], vec![-32, -8]);
-    assert!(view.is_ok(), "negative strides on both axes should be valid");
+    assert!(
+        view.is_ok(),
+        "negative strides on both axes should be valid"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

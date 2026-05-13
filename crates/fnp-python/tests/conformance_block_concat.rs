@@ -198,7 +198,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "kron different shapes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "kron different shapes should match numpy"
+    );
     Ok(())
 }
 
@@ -238,6 +242,10 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "kron with identity should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "kron with identity should match numpy"
+    );
     Ok(())
 }

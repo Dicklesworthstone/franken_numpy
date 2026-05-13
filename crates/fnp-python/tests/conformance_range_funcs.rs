@@ -67,7 +67,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "arange start stop should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arange start stop should match numpy"
+    );
     Ok(())
 }
 
@@ -112,7 +116,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "arange negative step should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arange negative step should match numpy"
+    );
     Ok(())
 }
 
@@ -146,7 +154,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "linspace endpoint=False should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "linspace endpoint=False should match numpy"
+    );
     Ok(())
 }
 
@@ -161,7 +173,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "linspace single point should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "linspace single point should match numpy"
+    );
     Ok(())
 }
 
@@ -176,7 +192,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "linspace many points should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "linspace many points should match numpy"
+    );
     Ok(())
 }
 
@@ -210,7 +230,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logspace custom base should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logspace custom base should match numpy"
+    );
     Ok(())
 }
 
@@ -225,7 +249,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logspace endpoint=False should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logspace endpoint=False should match numpy"
+    );
     Ok(())
 }
 
@@ -259,7 +287,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "geomspace endpoint=False should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "geomspace endpoint=False should match numpy"
+    );
     Ok(())
 }
 
@@ -274,7 +306,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "geomspace small range should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "geomspace small range should match numpy"
+    );
     Ok(())
 }
 
@@ -294,7 +330,11 @@ print(np.allclose(linspace_result, arange_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "linspace should match arange for equivalent params");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "linspace should match arange for equivalent params"
+    );
     Ok(())
 }
 
@@ -310,6 +350,10 @@ print(np.allclose(logspace_result, geomspace_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logspace should relate to geomspace via powers");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logspace should relate to geomspace via powers"
+    );
     Ok(())
 }

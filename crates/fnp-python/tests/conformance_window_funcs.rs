@@ -241,7 +241,11 @@ print(bart[0] < 0.1 and bart[-1] < 0.1)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bartlett endpoints should be near zero");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bartlett endpoints should be near zero"
+    );
     Ok(())
 }
 
@@ -259,6 +263,10 @@ print(np.argmax(ham) == mid and np.argmax(hann) == mid)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "hamming and hanning should peak at center");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "hamming and hanning should peak at center"
+    );
     Ok(())
 }

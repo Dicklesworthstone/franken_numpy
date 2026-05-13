@@ -471,7 +471,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "arcsin(sin(arcsin(x))) should equal arcsin(x)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arcsin(sin(arcsin(x))) should equal arcsin(x)"
+    );
     Ok(())
 }
 

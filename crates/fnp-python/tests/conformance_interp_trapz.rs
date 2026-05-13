@@ -90,7 +90,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "interp outside bounds should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "interp outside bounds should match numpy"
+    );
     Ok(())
 }
 
@@ -108,7 +112,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "interp with left/right should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "interp with left/right should match numpy"
+    );
     Ok(())
 }
 
@@ -125,7 +133,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "interp single point should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "interp single point should match numpy"
+    );
     Ok(())
 }
 
@@ -247,7 +259,11 @@ print(np.allclose(result, fp))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "interp at exact points should return exact values");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "interp at exact points should return exact values"
+    );
     Ok(())
 }
 
@@ -265,6 +281,10 @@ print(np.allclose(result, 20.0))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "trapz of constant should equal width * height");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "trapz of constant should equal width * height"
+    );
     Ok(())
 }

@@ -10,7 +10,7 @@
 //! Finding: fnp-iter had ZERO metamorphic tests despite containing
 //! complex index manipulation logic that has rich invariant properties.
 
-use fnp_iter::{ndindex, NditerOrder, NditerOptions, NditerPlan};
+use fnp_iter::{NditerOptions, NditerOrder, NditerPlan, ndindex};
 use std::collections::HashSet;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -178,12 +178,13 @@ fn mr_ndindex_bounds_2d() {
     let indices = ndindex(&shape).unwrap();
 
     for idx in &indices {
-        assert_eq!(idx.len(), shape.len(), "index should have same ndim as shape");
+        assert_eq!(
+            idx.len(),
+            shape.len(),
+            "index should have same ndim as shape"
+        );
         for (&i, &dim) in idx.iter().zip(shape.iter()) {
-            assert!(
-                i < dim,
-                "index {idx:?} out of bounds for shape {shape:?}"
-            );
+            assert!(i < dim, "index {idx:?} out of bounds for shape {shape:?}");
         }
     }
 }
@@ -270,7 +271,11 @@ fn mr_boundary_indices_2d() {
     assert_eq!(first, vec![0, 0], "first index should be [0, 0]");
 
     let last = plan.linear_index_to_multi_index(total - 1).unwrap();
-    assert_eq!(last, vec![3, 4], "last index should be [3, 4] for shape [4, 5]");
+    assert_eq!(
+        last,
+        vec![3, 4],
+        "last index should be [3, 4] for shape [4, 5]"
+    );
 }
 
 #[test]
@@ -283,7 +288,11 @@ fn mr_boundary_indices_3d() {
     assert_eq!(first, vec![0, 0, 0], "first index should be [0, 0, 0]");
 
     let last = plan.linear_index_to_multi_index(total - 1).unwrap();
-    assert_eq!(last, vec![1, 2, 3], "last index should be [1, 2, 3] for shape [2, 3, 4]");
+    assert_eq!(
+        last,
+        vec![1, 2, 3],
+        "last index should be [1, 2, 3] for shape [2, 3, 4]"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -292,12 +301,7 @@ fn mr_boundary_indices_3d() {
 
 #[test]
 fn mr_element_count_matches_shape_product() {
-    for shape in [
-        vec![10],
-        vec![5, 6],
-        vec![3, 4, 5],
-        vec![2, 3, 4, 5],
-    ] {
+    for shape in [vec![10], vec![5, 6], vec![3, 4, 5], vec![2, 3, 4, 5]] {
         let plan = NditerPlan::new(shape.clone(), 8, NditerOptions::default()).unwrap();
         let expected: usize = shape.iter().product();
         assert_eq!(
@@ -329,13 +333,16 @@ fn regression_fuzz_crash_1bc73e4f_external_loop_zero_elem() {
     // must not exceed element_count. Previously returned Vec::new() whose product
     // is 1 (identity), violating the invariant 1 <= 0.
     for shape in [
-        vec![0usize, 5],      // zero in first dim (F-order inner loop)
-        vec![5, 0],           // zero in second dim
-        vec![0],              // single zero dim
-        vec![3, 0, 4],        // zero in middle
+        vec![0usize, 5], // zero in first dim (F-order inner loop)
+        vec![5, 0],      // zero in second dim
+        vec![0],         // single zero dim
+        vec![3, 0, 4],   // zero in middle
     ] {
         for order in [NditerOrder::C, NditerOrder::F] {
-            let opts = NditerOptions { order, external_loop: true };
+            let opts = NditerOptions {
+                order,
+                external_loop: true,
+            };
             let plan = NditerPlan::new(shape.clone(), 8, opts).unwrap();
             let total = plan.element_count();
             let iter_total: usize = plan.iteration_shape().iter().product();

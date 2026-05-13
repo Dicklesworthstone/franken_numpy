@@ -53,7 +53,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "reciprocal float64 basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reciprocal float64 basic should match numpy"
+    );
     Ok(())
 }
 
@@ -69,7 +73,11 @@ print(np.allclose(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "reciprocal float32 should match numpy dtype and values");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reciprocal float32 should match numpy dtype and values"
+    );
     Ok(())
 }
 
@@ -85,7 +93,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "reciprocal int64 should use integer division");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reciprocal int64 should use integer division"
+    );
     Ok(())
 }
 
@@ -101,7 +113,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "reciprocal negative values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reciprocal negative values should match numpy"
+    );
     Ok(())
 }
 
@@ -124,7 +140,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "reciprocal special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reciprocal special values should match numpy"
+    );
     Ok(())
 }
 
@@ -140,7 +160,11 @@ print(np.allclose(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "reciprocal 2d array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reciprocal 2d array should match numpy"
+    );
     Ok(())
 }
 
@@ -156,7 +180,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "reciprocal empty array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reciprocal empty array should match numpy"
+    );
     Ok(())
 }
 
@@ -172,6 +200,10 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "reciprocal large values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reciprocal large values should match numpy"
+    );
     Ok(())
 }

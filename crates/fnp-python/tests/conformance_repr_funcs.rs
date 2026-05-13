@@ -97,7 +97,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "base_repr negative should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "base_repr negative should match numpy"
+    );
     Ok(())
 }
 
@@ -116,7 +120,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "binary_repr basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "binary_repr basic should match numpy"
+    );
     Ok(())
 }
 
@@ -131,7 +139,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "binary_repr width should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "binary_repr width should match numpy"
+    );
     Ok(())
 }
 
@@ -146,7 +158,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "binary_repr negative should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "binary_repr negative should match numpy"
+    );
     Ok(())
 }
 
@@ -165,7 +181,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "format_float_positional basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "format_float_positional basic should match numpy"
+    );
     Ok(())
 }
 
@@ -180,7 +200,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "format_float_positional precision should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "format_float_positional precision should match numpy"
+    );
     Ok(())
 }
 
@@ -199,7 +223,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "format_float_scientific basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "format_float_scientific basic should match numpy"
+    );
     Ok(())
 }
 
@@ -214,7 +242,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "format_float_scientific precision should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "format_float_scientific precision should match numpy"
+    );
     Ok(())
 }
 
@@ -233,7 +265,11 @@ print(base2 == binary)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "base_repr base 2 should equal binary_repr");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "base_repr base 2 should equal binary_repr"
+    );
     Ok(())
 }
 

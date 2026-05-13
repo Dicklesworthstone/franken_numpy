@@ -67,7 +67,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "around decimals=2 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "around decimals=2 should match numpy"
+    );
     Ok(())
 }
 
@@ -83,7 +87,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "around decimals=-2 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "around decimals=-2 should match numpy"
+    );
     Ok(())
 }
 
@@ -99,7 +107,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "around integer input should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "around integer input should match numpy"
+    );
     Ok(())
 }
 
@@ -187,7 +199,11 @@ print(result.dtype == expected.dtype and np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "around should preserve float32 dtype");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "around should preserve float32 dtype"
+    );
     Ok(())
 }
 

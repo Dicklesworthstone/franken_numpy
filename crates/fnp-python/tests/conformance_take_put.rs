@@ -107,7 +107,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "take_along_axis basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take_along_axis basic should match numpy"
+    );
     Ok(())
 }
 
@@ -124,7 +128,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "take_along_axis argsort should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take_along_axis argsort should match numpy"
+    );
     Ok(())
 }
 
@@ -146,7 +154,11 @@ print(np.array_equal(a, b))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "put_along_axis basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "put_along_axis basic should match numpy"
+    );
     Ok(())
 }
 
@@ -165,7 +177,11 @@ print(np.array_equal(a, b))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "put_along_axis values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "put_along_axis values should match numpy"
+    );
     Ok(())
 }
 
@@ -203,6 +219,10 @@ print(np.all(sorted_a[:, :-1] <= sorted_a[:, 1:]))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "take_along_axis with argsort should sort");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take_along_axis with argsort should sort"
+    );
     Ok(())
 }

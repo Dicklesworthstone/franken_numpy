@@ -57,7 +57,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp basic values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp basic values should match numpy"
+    );
     Ok(())
 }
 
@@ -74,7 +78,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp different values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp different values should match numpy"
+    );
     Ok(())
 }
 
@@ -91,7 +99,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp large values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp large values should match numpy"
+    );
     Ok(())
 }
 
@@ -108,7 +120,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp negative values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp negative values should match numpy"
+    );
     Ok(())
 }
 
@@ -125,7 +141,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp mixed signs should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp mixed signs should match numpy"
+    );
     Ok(())
 }
 
@@ -150,7 +170,11 @@ print(all(check(result[i], expected[i]) for i in range(len(result))))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp inf handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp inf handling should match numpy"
+    );
     Ok(())
 }
 
@@ -169,7 +193,11 @@ print(np.array_equal(np.isnan(result), np.isnan(expected)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp nan handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp nan handling should match numpy"
+    );
     Ok(())
 }
 
@@ -186,7 +214,11 @@ print(np.allclose(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp broadcast should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp broadcast should match numpy"
+    );
     Ok(())
 }
 
@@ -203,7 +235,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp very large difference should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp very large difference should match numpy"
+    );
     Ok(())
 }
 
@@ -224,7 +260,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp2 basic values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp2 basic values should match numpy"
+    );
     Ok(())
 }
 
@@ -241,7 +281,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp2 different values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp2 different values should match numpy"
+    );
     Ok(())
 }
 
@@ -258,7 +302,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp2 large values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp2 large values should match numpy"
+    );
     Ok(())
 }
 
@@ -275,7 +323,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp2 negative values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp2 negative values should match numpy"
+    );
     Ok(())
 }
 
@@ -292,7 +344,11 @@ print(np.allclose(result, expected, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp2 mixed signs should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp2 mixed signs should match numpy"
+    );
     Ok(())
 }
 
@@ -317,7 +373,11 @@ print(all(check(result[i], expected[i]) for i in range(len(result))))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp2 inf handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp2 inf handling should match numpy"
+    );
     Ok(())
 }
 
@@ -336,7 +396,11 @@ print(np.array_equal(np.isnan(result), np.isnan(expected)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp2 nan handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp2 nan handling should match numpy"
+    );
     Ok(())
 }
 
@@ -353,7 +417,11 @@ print(np.allclose(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp2 broadcast should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp2 broadcast should match numpy"
+    );
     Ok(())
 }
 
@@ -370,7 +438,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp2 empty array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp2 empty array should match numpy"
+    );
     Ok(())
 }
 
@@ -387,6 +459,10 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp empty array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp empty array should match numpy"
+    );
     Ok(())
 }

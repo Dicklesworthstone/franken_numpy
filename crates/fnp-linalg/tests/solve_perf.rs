@@ -81,10 +81,7 @@ fn cholesky_solve_multi_correctness_single_rhs() {
     let ax = matmul_axb(&a, &x, 2, 1);
 
     for i in 0..2 {
-        assert!(
-            (ax[i] - b[i]).abs() < 1e-12,
-            "Single RHS: A*X != B at {i}"
-        );
+        assert!((ax[i] - b[i]).abs() < 1e-12, "Single RHS: A*X != B at {i}");
     }
 }
 
@@ -102,7 +99,11 @@ fn cholesky_solve_multi_perf_baseline() {
 
     assert_eq!(x.len(), n * m, "Output should have correct size");
     let ax = matmul_axb(&a, &x, n, m);
-    let max_err = ax.iter().zip(b.iter()).map(|(a, b)| (a - b).abs()).fold(0.0, f64::max);
+    let max_err = ax
+        .iter()
+        .zip(b.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0, f64::max);
     assert!(max_err < 1e-8, "Solution error too large: {max_err}");
 
     eprintln!("cholesky_solve_multi (n={n}, m={m}) took: {duration:?}, max_err: {max_err:.2e}");

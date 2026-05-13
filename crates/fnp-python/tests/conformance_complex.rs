@@ -69,7 +69,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "real of real array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "real of real array should match numpy"
+    );
     Ok(())
 }
 
@@ -105,7 +109,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "imag of real array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "imag of real array should match numpy"
+    );
     Ok(())
 }
 
@@ -141,7 +149,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "conjugate complex should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "conjugate complex should match numpy"
+    );
     Ok(())
 }
 
@@ -157,7 +169,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "conj of real array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "conj of real array should match numpy"
+    );
     Ok(())
 }
 
@@ -178,7 +194,11 @@ print(np.allclose(z, reconstructed))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "real + imag*1j should reconstruct original");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "real + imag*1j should reconstruct original"
+    );
     Ok(())
 }
 

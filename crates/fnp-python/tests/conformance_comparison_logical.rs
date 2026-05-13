@@ -55,7 +55,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "equal basic arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "equal basic arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -72,7 +76,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "equal with broadcast should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "equal with broadcast should match numpy"
+    );
     Ok(())
 }
 
@@ -93,7 +101,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "not_equal basic arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "not_equal basic arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -110,7 +122,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "not_equal with nan should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "not_equal with nan should match numpy"
+    );
     Ok(())
 }
 
@@ -131,7 +147,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "greater basic arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "greater basic arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -147,7 +167,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "greater scalar broadcast should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "greater scalar broadcast should match numpy"
+    );
     Ok(())
 }
 
@@ -168,7 +192,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "greater_equal basic arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "greater_equal basic arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -184,7 +212,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "greater_equal scalar broadcast should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "greater_equal scalar broadcast should match numpy"
+    );
     Ok(())
 }
 
@@ -205,7 +237,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "less basic arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "less basic arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -221,7 +257,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "less scalar broadcast should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "less scalar broadcast should match numpy"
+    );
     Ok(())
 }
 
@@ -242,7 +282,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "less_equal basic arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "less_equal basic arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -258,7 +302,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "less_equal scalar broadcast should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "less_equal scalar broadcast should match numpy"
+    );
     Ok(())
 }
 
@@ -279,7 +327,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical_and basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical_and basic should match numpy"
+    );
     Ok(())
 }
 
@@ -296,7 +348,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical_and numeric arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical_and numeric arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -334,7 +390,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical_or numeric arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical_or numeric arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -355,7 +415,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical_xor basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical_xor basic should match numpy"
+    );
     Ok(())
 }
 
@@ -372,7 +436,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical_xor numeric arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical_xor numeric arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -392,7 +460,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical_not basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical_not basic should match numpy"
+    );
     Ok(())
 }
 
@@ -408,7 +480,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical_not numeric arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical_not numeric arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -477,7 +553,11 @@ print(np.array_equal(result_eq, expected_eq) and np.array_equal(result_gt, expec
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison with inf should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison with inf should match numpy"
+    );
     Ok(())
 }
 
@@ -494,6 +574,10 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison 2d arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison 2d arrays should match numpy"
+    );
     Ok(())
 }

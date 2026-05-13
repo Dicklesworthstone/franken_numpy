@@ -51,7 +51,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "meshgrid 2 arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "meshgrid 2 arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -70,7 +74,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "meshgrid 3 arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "meshgrid 3 arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -88,7 +96,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "meshgrid indexing=xy should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "meshgrid indexing=xy should match numpy"
+    );
     Ok(())
 }
 
@@ -106,7 +118,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "meshgrid indexing=ij should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "meshgrid indexing=ij should match numpy"
+    );
     Ok(())
 }
 
@@ -124,7 +140,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "meshgrid sparse=True should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "meshgrid sparse=True should match numpy"
+    );
     Ok(())
 }
 
@@ -142,7 +162,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "meshgrid float arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "meshgrid float arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -160,7 +184,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "meshgrid with linspace should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "meshgrid with linspace should match numpy"
+    );
     Ok(())
 }
 
@@ -177,7 +205,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "meshgrid single array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "meshgrid single array should match numpy"
+    );
     Ok(())
 }
 
@@ -215,6 +247,10 @@ print(shape_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "meshgrid ij shapes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "meshgrid ij shapes should match numpy"
+    );
     Ok(())
 }

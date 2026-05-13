@@ -12,10 +12,10 @@
 //! These tests port NumPy iterator semantics verification to Rust.
 
 use fnp_iter::{
-    overlap_copy_policy, resolve_flatiter_indices, select_transfer_class,
-    validate_flatiter_read, validate_flatiter_write, validate_nditer_flags,
     FlatIterContractError, FlatIterIndex, NditerTransferFlags, OverlapAction,
-    TransferClass, TransferError, TransferSelectorInput, TRANSFER_PACKET_REASON_CODES,
+    TRANSFER_PACKET_REASON_CODES, TransferClass, TransferError, TransferSelectorInput,
+    overlap_copy_policy, resolve_flatiter_indices, select_transfer_class, validate_flatiter_read,
+    validate_flatiter_write, validate_nditer_flags,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -138,18 +138,12 @@ fn transfer_class_rejects_non_multiple_stride() {
 
 #[test]
 fn overlap_disjoint_src_before_dst() {
-    assert_eq!(
-        overlap_copy_policy(0, 100, 50),
-        Ok(OverlapAction::NoCopy)
-    );
+    assert_eq!(overlap_copy_policy(0, 100, 50), Ok(OverlapAction::NoCopy));
 }
 
 #[test]
 fn overlap_disjoint_dst_before_src() {
-    assert_eq!(
-        overlap_copy_policy(100, 0, 50),
-        Ok(OverlapAction::NoCopy)
-    );
+    assert_eq!(overlap_copy_policy(100, 0, 50), Ok(OverlapAction::NoCopy));
 }
 
 #[test]

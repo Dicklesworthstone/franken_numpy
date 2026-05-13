@@ -213,7 +213,11 @@ print(np.allclose(result, 3))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "polyval at 0 should equal constant term");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "polyval at 0 should equal constant term"
+    );
     Ok(())
 }
 
@@ -251,7 +255,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "polyadd same degree should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "polyadd same degree should match numpy"
+    );
     Ok(())
 }
 
@@ -326,7 +334,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "polymul by constant should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "polymul by constant should match numpy"
+    );
     Ok(())
 }
 
@@ -364,7 +376,11 @@ print(np.allclose(q, expected_q) and np.allclose(r, expected_r, atol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "polydiv no remainder should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "polydiv no remainder should match numpy"
+    );
     Ok(())
 }
 
@@ -402,7 +418,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "polyfit quadratic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "polyfit quadratic should match numpy"
+    );
     Ok(())
 }
 
@@ -420,7 +440,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "polyfit with weights should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "polyfit with weights should match numpy"
+    );
     Ok(())
 }
 
@@ -437,6 +461,10 @@ print(np.allclose(y, y_pred))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "polyfit then polyval should recover y");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "polyfit then polyval should recover y"
+    );
     Ok(())
 }

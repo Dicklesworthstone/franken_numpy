@@ -160,8 +160,9 @@ fn diff_2d_axis_matches_numpy() -> Result<(), String> {
     ];
 
     for (arr_expr, axis) in &test_cases {
-        let script =
-            format!("import numpy as np; print(np.diff({arr_expr}, axis={axis}).flatten().tolist())");
+        let script = format!(
+            "import numpy as np; print(np.diff({arr_expr}, axis={axis}).flatten().tolist())"
+        );
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
@@ -335,8 +336,7 @@ fn diff_empty_array_matches_numpy() -> Result<(), String> {
     let script = "import numpy as np; print(np.diff(np.array([], dtype=np.float64)).tolist())";
     let numpy_result = numpy_oracle(script)?;
 
-    let rust_script =
-        fnp_script("print(fnp.diff(np.array([], dtype=np.float64)).tolist())".into());
+    let rust_script = fnp_script("print(fnp.diff(np.array([], dtype=np.float64)).tolist())".into());
     let rust_result = numpy_oracle(&rust_script)?;
 
     assert_eq!(
@@ -350,8 +350,7 @@ fn diff_empty_array_matches_numpy() -> Result<(), String> {
 
 #[test]
 fn gradient_empty_array_raises_valueerror() -> Result<(), String> {
-    let numpy_script =
-        "import numpy as np\ntry:\n    np.gradient(np.array([], dtype=np.float64))\n    print('no error')\nexcept ValueError:\n    print('ValueError')";
+    let numpy_script = "import numpy as np\ntry:\n    np.gradient(np.array([], dtype=np.float64))\n    print('no error')\nexcept ValueError:\n    print('ValueError')";
     let numpy_result = numpy_oracle(numpy_script)?;
 
     let rust_script = fnp_script(
@@ -365,7 +364,11 @@ fn gradient_empty_array_raises_valueerror() -> Result<(), String> {
         rust_result.trim(),
         "gradient empty array error behavior mismatch"
     );
-    assert_eq!(numpy_result.trim(), "ValueError", "numpy should raise ValueError");
+    assert_eq!(
+        numpy_result.trim(),
+        "ValueError",
+        "numpy should raise ValueError"
+    );
 
     Ok(())
 }

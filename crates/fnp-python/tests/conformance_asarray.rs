@@ -52,7 +52,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asarray from list should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asarray from list should match numpy"
+    );
     Ok(())
 }
 
@@ -67,7 +71,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asarray from nested list should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asarray from nested list should match numpy"
+    );
     Ok(())
 }
 
@@ -82,7 +90,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asarray with dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asarray with dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -97,7 +109,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asarray from scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asarray from scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -113,7 +129,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asarray from array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asarray from array should match numpy"
+    );
     Ok(())
 }
 
@@ -132,7 +152,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asanyarray from list should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asanyarray from list should match numpy"
+    );
     Ok(())
 }
 
@@ -147,7 +171,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asanyarray with dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asanyarray with dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -163,7 +191,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asanyarray from array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asanyarray from array should match numpy"
+    );
     Ok(())
 }
 
@@ -182,7 +214,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "fromstring with sep should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fromstring with sep should match numpy"
+    );
     Ok(())
 }
 
@@ -197,7 +233,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "fromstring with dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fromstring with dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -212,7 +252,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "fromstring comma sep should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fromstring comma sep should match numpy"
+    );
     Ok(())
 }
 
@@ -227,7 +271,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "fromstring with count should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fromstring with count should match numpy"
+    );
     Ok(())
 }
 
@@ -247,7 +295,11 @@ print(np.array_equal(asarray_result, asanyarray_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asarray and asanyarray should be equivalent for lists");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asarray and asanyarray should be equivalent for lists"
+    );
     Ok(())
 }
 
@@ -263,6 +315,10 @@ print(result.shape == a.shape and result.dtype == a.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asarray should preserve existing array");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asarray should preserve existing array"
+    );
     Ok(())
 }

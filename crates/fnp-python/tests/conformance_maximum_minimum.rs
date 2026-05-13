@@ -99,15 +99,12 @@ fn maximum_basic_arrays_match_numpy() -> Result<(), String> {
     ];
 
     for (x1_expr, x2_expr) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.maximum({x1_expr}, {x2_expr}).tolist())"
-        );
+        let script =
+            format!("import numpy as np; print(np.maximum({x1_expr}, {x2_expr}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
-        let rust_script = fnp_script(format!(
-            "print(fnp.maximum({x1_expr}, {x2_expr}).tolist())"
-        ));
+        let rust_script = fnp_script(format!("print(fnp.maximum({x1_expr}, {x2_expr}).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result)?;
 
@@ -131,15 +128,12 @@ fn minimum_basic_arrays_match_numpy() -> Result<(), String> {
     ];
 
     for (x1_expr, x2_expr) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.minimum({x1_expr}, {x2_expr}).tolist())"
-        );
+        let script =
+            format!("import numpy as np; print(np.minimum({x1_expr}, {x2_expr}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
-        let rust_script = fnp_script(format!(
-            "print(fnp.minimum({x1_expr}, {x2_expr}).tolist())"
-        ));
+        let rust_script = fnp_script(format!("print(fnp.minimum({x1_expr}, {x2_expr}).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result)?;
 
@@ -474,13 +468,10 @@ print(fnp.minimum(x1, x2).tolist())
 
 #[test]
 fn maximum_empty_array_match_numpy() -> Result<(), String> {
-    let script =
-        "import numpy as np; print(np.maximum(np.array([]), np.array([])).tolist())";
+    let script = "import numpy as np; print(np.maximum(np.array([]), np.array([])).tolist())";
     let numpy_result = numpy_oracle(script)?;
 
-    let rust_script = fnp_script(
-        "print(fnp.maximum(np.array([]), np.array([])).tolist())".into(),
-    );
+    let rust_script = fnp_script("print(fnp.maximum(np.array([]), np.array([])).tolist())".into());
     let rust_result = numpy_oracle(&rust_script)?;
 
     assert_eq!(
@@ -494,13 +485,10 @@ fn maximum_empty_array_match_numpy() -> Result<(), String> {
 
 #[test]
 fn minimum_empty_array_match_numpy() -> Result<(), String> {
-    let script =
-        "import numpy as np; print(np.minimum(np.array([]), np.array([])).tolist())";
+    let script = "import numpy as np; print(np.minimum(np.array([]), np.array([])).tolist())";
     let numpy_result = numpy_oracle(script)?;
 
-    let rust_script = fnp_script(
-        "print(fnp.minimum(np.array([]), np.array([])).tolist())".into(),
-    );
+    let rust_script = fnp_script("print(fnp.minimum(np.array([]), np.array([])).tolist())".into());
     let rust_result = numpy_oracle(&rust_script)?;
 
     assert_eq!(

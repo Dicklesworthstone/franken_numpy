@@ -158,7 +158,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "subtract negative result should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "subtract negative result should match numpy"
+    );
     Ok(())
 }
 
@@ -269,7 +273,11 @@ print(np.array_equal(np.isinf(result), np.isinf(expected)) and
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "divide by zero should match numpy inf/nan pattern");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divide by zero should match numpy inf/nan pattern"
+    );
     Ok(())
 }
 
@@ -417,7 +425,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "floor_divide basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor_divide basic should match numpy"
+    );
     Ok(())
 }
 
@@ -434,7 +446,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "floor_divide negative should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor_divide negative should match numpy"
+    );
     Ok(())
 }
 
@@ -455,7 +471,11 @@ print(np.array_equal(result, a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "add then subtract should return original");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "add then subtract should return original"
+    );
     Ok(())
 }
 
@@ -472,7 +492,11 @@ print(np.allclose(result, a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "multiply then divide should return original");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "multiply then divide should return original"
+    );
     Ok(())
 }
 
@@ -488,7 +512,11 @@ print(np.array_equal(result, a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "double negative should return original");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "double negative should return original"
+    );
     Ok(())
 }
 
@@ -505,6 +533,10 @@ print(np.array_equal(reconstructed, a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "floor_divide and mod should reconstruct original");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor_divide and mod should reconstruct original"
+    );
     Ok(())
 }

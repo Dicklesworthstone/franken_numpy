@@ -54,7 +54,11 @@ print(np.allclose(q, qe) and np.allclose(r, re))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "divmod float64 basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divmod float64 basic should match numpy"
+    );
     Ok(())
 }
 
@@ -71,7 +75,11 @@ print(np.allclose(q, qe) and np.allclose(r, re))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "divmod negative dividend should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divmod negative dividend should match numpy"
+    );
     Ok(())
 }
 
@@ -88,7 +96,11 @@ print(np.allclose(q, qe) and np.allclose(r, re))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "divmod negative divisor should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divmod negative divisor should match numpy"
+    );
     Ok(())
 }
 
@@ -105,7 +117,11 @@ print(np.allclose(q, qe) and np.allclose(r, re))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "divmod both negative should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divmod both negative should match numpy"
+    );
     Ok(())
 }
 
@@ -167,7 +183,11 @@ print(q_match and r_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "divmod special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divmod special values should match numpy"
+    );
     Ok(())
 }
 
@@ -185,7 +205,11 @@ print(np.allclose(q, qe) and np.allclose(r, re) and np.allclose(r, 0.0))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "divmod exact division should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divmod exact division should match numpy"
+    );
     Ok(())
 }
 
@@ -243,7 +267,11 @@ print(q_match and r_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "divmod negative inf divisor should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divmod negative inf divisor should match numpy"
+    );
     Ok(())
 }
 
@@ -261,6 +289,10 @@ print(np.allclose(q, qe, rtol=1e-10) and np.allclose(r, re, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "divmod large numbers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divmod large numbers should match numpy"
+    );
     Ok(())
 }

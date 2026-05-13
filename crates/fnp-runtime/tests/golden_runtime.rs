@@ -5,9 +5,9 @@
 //! deliberate review of behavior changes.
 
 use fnp_runtime::{
-    CompatibilityClass, DecisionAction, DecisionLossModel, RuntimeMode,
-    decide_compatibility, decide_compatibility_from_wire, evaluate_policy_override,
-    expected_loss_for_action, posterior_incompatibility,
+    CompatibilityClass, DecisionAction, DecisionLossModel, RuntimeMode, decide_compatibility,
+    decide_compatibility_from_wire, evaluate_policy_override, expected_loss_for_action,
+    posterior_incompatibility,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -21,7 +21,10 @@ fn golden_runtime_mode_from_wire_strict() {
 
 #[test]
 fn golden_runtime_mode_from_wire_hardened() {
-    assert_eq!(RuntimeMode::from_wire("hardened"), Some(RuntimeMode::Hardened));
+    assert_eq!(
+        RuntimeMode::from_wire("hardened"),
+        Some(RuntimeMode::Hardened)
+    );
 }
 
 #[test]
@@ -281,7 +284,10 @@ fn golden_decide_from_wire_whitespace_tolerant() {
 fn golden_posterior_known_compatible_low_risk() {
     let (posterior, terms) =
         posterior_incompatibility(CompatibilityClass::KnownCompatible, 0.1, 0.5);
-    assert!(posterior < 0.01, "posterior should be very low: {posterior}");
+    assert!(
+        posterior < 0.01,
+        "posterior should be very low: {posterior}"
+    );
     assert_eq!(terms.len(), 2);
     assert_eq!(terms[0].name, "prior_class_log_odds");
     assert_eq!(terms[1].name, "risk_vs_threshold_llr");
@@ -289,16 +295,20 @@ fn golden_posterior_known_compatible_low_risk() {
 
 #[test]
 fn golden_posterior_known_compatible_high_risk() {
-    let (posterior, _) =
-        posterior_incompatibility(CompatibilityClass::KnownCompatible, 0.9, 0.5);
-    assert!(posterior > 0.01 && posterior < 0.5, "posterior should be moderate: {posterior}");
+    let (posterior, _) = posterior_incompatibility(CompatibilityClass::KnownCompatible, 0.9, 0.5);
+    assert!(
+        posterior > 0.01 && posterior < 0.5,
+        "posterior should be moderate: {posterior}"
+    );
 }
 
 #[test]
 fn golden_posterior_known_incompatible() {
-    let (posterior, _) =
-        posterior_incompatibility(CompatibilityClass::KnownIncompatible, 0.1, 0.5);
-    assert!(posterior > 0.9, "posterior should be very high: {posterior}");
+    let (posterior, _) = posterior_incompatibility(CompatibilityClass::KnownIncompatible, 0.1, 0.5);
+    assert!(
+        posterior > 0.9,
+        "posterior should be very high: {posterior}"
+    );
 }
 
 #[test]
@@ -318,35 +328,50 @@ fn golden_posterior_unknown_class() {
 fn golden_expected_loss_allow_low_posterior() {
     let model = DecisionLossModel::default();
     let loss = expected_loss_for_action(DecisionAction::Allow, 0.01, model);
-    assert!(loss < 2.0, "allow with low posterior should have low loss: {loss}");
+    assert!(
+        loss < 2.0,
+        "allow with low posterior should have low loss: {loss}"
+    );
 }
 
 #[test]
 fn golden_expected_loss_allow_high_posterior() {
     let model = DecisionLossModel::default();
     let loss = expected_loss_for_action(DecisionAction::Allow, 0.99, model);
-    assert!(loss > 90.0, "allow with high posterior should have high loss: {loss}");
+    assert!(
+        loss > 90.0,
+        "allow with high posterior should have high loss: {loss}"
+    );
 }
 
 #[test]
 fn golden_expected_loss_fail_closed_low_posterior() {
     let model = DecisionLossModel::default();
     let loss = expected_loss_for_action(DecisionAction::FailClosed, 0.01, model);
-    assert!(loss > 100.0, "fail_closed with low posterior should have high loss: {loss}");
+    assert!(
+        loss > 100.0,
+        "fail_closed with low posterior should have high loss: {loss}"
+    );
 }
 
 #[test]
 fn golden_expected_loss_fail_closed_high_posterior() {
     let model = DecisionLossModel::default();
     let loss = expected_loss_for_action(DecisionAction::FailClosed, 0.99, model);
-    assert!(loss < 5.0, "fail_closed with high posterior should have low loss: {loss}");
+    assert!(
+        loss < 5.0,
+        "fail_closed with high posterior should have low loss: {loss}"
+    );
 }
 
 #[test]
 fn golden_expected_loss_full_validate_moderate() {
     let model = DecisionLossModel::default();
     let loss = expected_loss_for_action(DecisionAction::FullValidate, 0.5, model);
-    assert!(loss > 2.0 && loss < 4.0, "full_validate at 0.5 should be moderate: {loss}");
+    assert!(
+        loss > 2.0 && loss < 4.0,
+        "full_validate at 0.5 should be moderate: {loss}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

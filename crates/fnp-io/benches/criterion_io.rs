@@ -8,9 +8,9 @@
 //!
 //! These operations are critical for data persistence workflows.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use fnp_io::{
-    read_npy_bytes, read_npz_bytes, write_npy_bytes, write_npz_bytes, IOSupportedDType, NpyHeader,
+    IOSupportedDType, NpyHeader, read_npy_bytes, read_npz_bytes, write_npy_bytes, write_npz_bytes,
 };
 
 fn generate_f64_data(n: usize) -> Vec<u8> {
@@ -54,12 +54,16 @@ fn bench_read_npy(c: &mut Criterion) {
         let npy_bytes = write_npy_bytes(&header, &data, false).expect("write");
 
         group.throughput(Throughput::Bytes(npy_bytes.len() as u64));
-        group.bench_with_input(BenchmarkId::new("elements", n), &npy_bytes, |bench, payload| {
-            bench.iter(|| {
-                let result = read_npy_bytes(black_box(payload), false);
-                black_box(result)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("elements", n),
+            &npy_bytes,
+            |bench, payload| {
+                bench.iter(|| {
+                    let result = read_npy_bytes(black_box(payload), false);
+                    black_box(result)
+                });
+            },
+        );
     }
 
     group.finish();

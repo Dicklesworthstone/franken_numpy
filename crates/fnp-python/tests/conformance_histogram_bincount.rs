@@ -69,7 +69,11 @@ print(np.array_equal(hist, np_hist) and np.allclose(edges, np_edges))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram with bins should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram with bins should match numpy"
+    );
     Ok(())
 }
 
@@ -85,7 +89,11 @@ print(np.array_equal(hist, np_hist) and np.allclose(edges, np_edges))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram with range should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram with range should match numpy"
+    );
     Ok(())
 }
 
@@ -102,7 +110,11 @@ print(np.array_equal(hist, np_hist) and np.allclose(edges, np_edges))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram with explicit edges should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram with explicit edges should match numpy"
+    );
     Ok(())
 }
 
@@ -118,7 +130,11 @@ print(np.allclose(hist, np_hist) and np.allclose(edges, np_edges))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram density should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram density should match numpy"
+    );
     Ok(())
 }
 
@@ -155,7 +171,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bincount with weights should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bincount with weights should match numpy"
+    );
     Ok(())
 }
 
@@ -171,7 +191,11 @@ print(np.array_equal(result, expected) and len(result) == 5)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bincount with minlength should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bincount with minlength should match numpy"
+    );
     Ok(())
 }
 
@@ -242,7 +266,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "digitize decreasing bins should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "digitize decreasing bins should match numpy"
+    );
     Ok(())
 }
 
@@ -261,7 +289,11 @@ print(np.sum(hist) == len(a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram sum should equal array length");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram sum should equal array length"
+    );
     Ok(())
 }
 
@@ -276,7 +308,11 @@ print(np.sum(result) == len(a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bincount sum should equal array length");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bincount sum should equal array length"
+    );
     Ok(())
 }
 
@@ -293,6 +329,10 @@ print(np.array_equal(digitize_result, searchsorted_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "digitize should equal searchsorted for increasing bins");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "digitize should equal searchsorted for increasing bins"
+    );
     Ok(())
 }

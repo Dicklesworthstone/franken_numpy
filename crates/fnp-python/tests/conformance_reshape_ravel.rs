@@ -149,7 +149,11 @@ print(np.allclose(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "reshape float array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reshape float array should match numpy"
+    );
     Ok(())
 }
 
@@ -249,7 +253,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ravel float array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ravel float array should match numpy"
+    );
     Ok(())
 }
 

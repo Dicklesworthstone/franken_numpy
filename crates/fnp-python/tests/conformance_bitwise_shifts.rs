@@ -53,7 +53,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise_left_shift basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise_left_shift basic should match numpy"
+    );
     Ok(())
 }
 
@@ -70,7 +74,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise_left_shift array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise_left_shift array should match numpy"
+    );
     Ok(())
 }
 
@@ -90,7 +98,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise_right_shift basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise_right_shift basic should match numpy"
+    );
     Ok(())
 }
 
@@ -107,7 +119,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise_right_shift array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise_right_shift array should match numpy"
+    );
     Ok(())
 }
 
@@ -127,7 +143,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise_count basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise_count basic should match numpy"
+    );
     Ok(())
 }
 
@@ -143,7 +163,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise_count int64 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise_count int64 should match numpy"
+    );
     Ok(())
 }
 
@@ -163,7 +187,11 @@ print(np.array_equal(a, back))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "left then right shift should restore original");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "left then right shift should restore original"
+    );
     Ok(())
 }
 

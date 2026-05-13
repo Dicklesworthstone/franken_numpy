@@ -91,7 +91,10 @@ fn floats_close(a: &[f64], b: &[f64], rel_tol: f64) -> bool {
 #[test]
 fn gcd_basic_arrays_match_numpy() -> Result<(), String> {
     let test_cases = vec![
-        ("np.array([12, 24, 36, 48, 60])", "np.array([8, 16, 24, 32, 40])"),
+        (
+            "np.array([12, 24, 36, 48, 60])",
+            "np.array([8, 16, 24, 32, 40])",
+        ),
         ("np.array([100, 200, 300])", "np.array([50, 75, 100])"),
         ("np.array([7, 11, 13, 17])", "np.array([3, 5, 7, 11])"),
         ("np.array([0, 5, 10, 15])", "np.array([5, 5, 5, 5])"),
@@ -99,15 +102,11 @@ fn gcd_basic_arrays_match_numpy() -> Result<(), String> {
     ];
 
     for (x1_expr, x2_expr) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.gcd({x1_expr}, {x2_expr}).tolist())"
-        );
+        let script = format!("import numpy as np; print(np.gcd({x1_expr}, {x2_expr}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
-        let rust_script = fnp_script(format!(
-            "print(fnp.gcd({x1_expr}, {x2_expr}).tolist())"
-        ));
+        let rust_script = fnp_script(format!("print(fnp.gcd({x1_expr}, {x2_expr}).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result)?;
 
@@ -130,15 +129,11 @@ fn lcm_basic_arrays_match_numpy() -> Result<(), String> {
     ];
 
     for (x1_expr, x2_expr) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.lcm({x1_expr}, {x2_expr}).tolist())"
-        );
+        let script = format!("import numpy as np; print(np.lcm({x1_expr}, {x2_expr}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
-        let rust_script = fnp_script(format!(
-            "print(fnp.lcm({x1_expr}, {x2_expr}).tolist())"
-        ));
+        let rust_script = fnp_script(format!("print(fnp.lcm({x1_expr}, {x2_expr}).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result)?;
 
@@ -401,8 +396,7 @@ print(fnp.lcm(a, b).tolist())
 
 #[test]
 fn gcd_empty_array_match_numpy() -> Result<(), String> {
-    let script =
-        "import numpy as np; print(np.gcd(np.array([], dtype=int), np.array([], dtype=int)).tolist())";
+    let script = "import numpy as np; print(np.gcd(np.array([], dtype=int), np.array([], dtype=int)).tolist())";
     let numpy_result = numpy_oracle(script)?;
 
     let rust_script = fnp_script(
@@ -421,8 +415,7 @@ fn gcd_empty_array_match_numpy() -> Result<(), String> {
 
 #[test]
 fn lcm_empty_array_match_numpy() -> Result<(), String> {
-    let script =
-        "import numpy as np; print(np.lcm(np.array([], dtype=int), np.array([], dtype=int)).tolist())";
+    let script = "import numpy as np; print(np.lcm(np.array([], dtype=int), np.array([], dtype=int)).tolist())";
     let numpy_result = numpy_oracle(script)?;
 
     let rust_script = fnp_script(

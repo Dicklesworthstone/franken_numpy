@@ -71,7 +71,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "concatenate 2d axis=0 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "concatenate 2d axis=0 should match numpy"
+    );
     Ok(())
 }
 
@@ -88,7 +92,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "concatenate 2d axis=1 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "concatenate 2d axis=1 should match numpy"
+    );
     Ok(())
 }
 
@@ -106,7 +114,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "concatenate multiple arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "concatenate multiple arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -123,7 +135,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "concatenate axis=None should flatten and match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "concatenate axis=None should flatten and match numpy"
+    );
     Ok(())
 }
 
@@ -223,7 +239,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "append single value should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "append single value should match numpy"
+    );
     Ok(())
 }
 
@@ -239,7 +259,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "append 2d no axis should flatten and match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "append 2d no axis should flatten and match numpy"
+    );
     Ok(())
 }
 
@@ -275,7 +299,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "insert single value should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "insert single value should match numpy"
+    );
     Ok(())
 }
 
@@ -291,7 +319,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "insert multiple values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "insert multiple values should match numpy"
+    );
     Ok(())
 }
 
@@ -307,7 +339,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "insert at beginning should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "insert at beginning should match numpy"
+    );
     Ok(())
 }
 
@@ -343,7 +379,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "delete single index should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "delete single index should match numpy"
+    );
     Ok(())
 }
 
@@ -359,7 +399,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "delete multiple indices should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "delete multiple indices should match numpy"
+    );
     Ok(())
 }
 
@@ -407,6 +451,10 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "delete negative index should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "delete negative index should match numpy"
+    );
     Ok(())
 }

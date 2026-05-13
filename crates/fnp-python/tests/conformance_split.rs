@@ -54,7 +54,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "split equal parts should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "split equal parts should match numpy"
+    );
     Ok(())
 }
 
@@ -71,7 +75,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "split with indices should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "split with indices should match numpy"
+    );
     Ok(())
 }
 
@@ -126,7 +134,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "array_split unequal parts should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "array_split unequal parts should match numpy"
+    );
     Ok(())
 }
 
@@ -143,7 +155,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "array_split with indices should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "array_split with indices should match numpy"
+    );
     Ok(())
 }
 
@@ -277,7 +293,11 @@ print(np.array_equal(result, a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "split then concatenate should be identity");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "split then concatenate should be identity"
+    );
     Ok(())
 }
 
@@ -293,7 +313,11 @@ print(np.array_equal(result, a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "hsplit then hstack should be identity");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "hsplit then hstack should be identity"
+    );
     Ok(())
 }
 
@@ -309,7 +333,11 @@ print(np.array_equal(result, a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "vsplit then vstack should be identity");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "vsplit then vstack should be identity"
+    );
     Ok(())
 }
 

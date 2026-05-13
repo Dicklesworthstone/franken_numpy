@@ -126,21 +126,20 @@ fn arctan2_arrays_match_numpy() -> Result<(), String> {
             "np.array([1.0, -1.0, 1.0, -1.0])",
             "np.array([1.0, 1.0, -1.0, -1.0])",
         ),
-        ("np.array([0.0, 0.0, 1.0, -1.0])", "np.array([1.0, -1.0, 0.0, 0.0])"),
+        (
+            "np.array([0.0, 0.0, 1.0, -1.0])",
+            "np.array([1.0, -1.0, 0.0, 0.0])",
+        ),
         ("np.linspace(-1, 1, 10)", "np.linspace(-1, 1, 10)"),
         ("np.linspace(-10, 10, 20)", "np.ones(20)"),
     ];
 
     for (y_expr, x_expr) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.arctan2({y_expr}, {x_expr}).tolist())"
-        );
+        let script = format!("import numpy as np; print(np.arctan2({y_expr}, {x_expr}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
-        let rust_script = fnp_script(format!(
-            "print(fnp.arctan2({y_expr}, {x_expr}).tolist())"
-        ));
+        let rust_script = fnp_script(format!("print(fnp.arctan2({y_expr}, {x_expr}).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result)?;
 
@@ -246,9 +245,9 @@ print(fnp.arctan2(y, x).tolist())
 #[test]
 fn arctan2_pi_values_match_numpy() -> Result<(), String> {
     let test_cases = vec![
-        ("0.0", "1.0", 0.0),           // 0
-        ("1.0", "0.0", std::f64::consts::FRAC_PI_2), // pi/2
-        ("0.0", "-1.0", std::f64::consts::PI),       // pi
+        ("0.0", "1.0", 0.0),                           // 0
+        ("1.0", "0.0", std::f64::consts::FRAC_PI_2),   // pi/2
+        ("0.0", "-1.0", std::f64::consts::PI),         // pi
         ("-1.0", "0.0", -std::f64::consts::FRAC_PI_2), // -pi/2
     ];
 
@@ -310,13 +309,10 @@ print(fnp.arctan2(y, x).tolist())
 
 #[test]
 fn arctan2_empty_array_match_numpy() -> Result<(), String> {
-    let script =
-        "import numpy as np; print(np.arctan2(np.array([]), np.array([])).tolist())";
+    let script = "import numpy as np; print(np.arctan2(np.array([]), np.array([])).tolist())";
     let numpy_result = numpy_oracle(script)?;
 
-    let rust_script = fnp_script(
-        "print(fnp.arctan2(np.array([]), np.array([])).tolist())".into(),
-    );
+    let rust_script = fnp_script("print(fnp.arctan2(np.array([]), np.array([])).tolist())".into());
     let rust_result = numpy_oracle(&rust_script)?;
 
     assert_eq!(
@@ -330,7 +326,8 @@ fn arctan2_empty_array_match_numpy() -> Result<(), String> {
 
 #[test]
 fn arctan2_dtype_match_numpy() -> Result<(), String> {
-    let script = "import numpy as np; print(np.arctan2(np.array([1, 2, 3]), np.array([1, 2, 3])).dtype)";
+    let script =
+        "import numpy as np; print(np.arctan2(np.array([1, 2, 3]), np.array([1, 2, 3])).dtype)";
     let numpy_result = numpy_oracle(script)?;
 
     let rust_script =

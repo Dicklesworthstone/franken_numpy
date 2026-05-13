@@ -235,11 +235,11 @@ fn render_public_api_snapshot() -> Result<String, Box<dyn Error>> {
     push_array(&mut out, "ptp_all", &ptp_input.ptp(None)?)?;
     push_array(&mut out, "ptp_axis1", &ptp_input.ptp(Some(1))?)?;
 
-    let cov_input = UFuncArray::new(vec![3, 4], vec![
-        1.0, 2.0, 3.0, 4.0,
-        2.0, 4.0, 6.0, 8.0,
-        0.5, 1.0, 1.5, 2.0,
-    ], DType::F64)?;
+    let cov_input = UFuncArray::new(
+        vec![3, 4],
+        vec![1.0, 2.0, 3.0, 4.0, 2.0, 4.0, 6.0, 8.0, 0.5, 1.0, 1.5, 2.0],
+        DType::F64,
+    )?;
     push_array(&mut out, "cov_3x4", &cov_input.cov()?)?;
     push_array(&mut out, "corrcoef_3x4", &cov_input.corrcoef()?)?;
 
@@ -248,12 +248,20 @@ fn render_public_api_snapshot() -> Result<String, Box<dyn Error>> {
     push_array(&mut out, "nansum_all", &nan_input.nansum(None, false)?)?;
     push_array(&mut out, "nanmean_all", &nan_input.nanmean(None, false)?)?;
 
-    let nan_2d = UFuncArray::new(vec![2, 3], vec![1.0, f64::NAN, 3.0, 4.0, 5.0, f64::NAN], DType::F64)?;
+    let nan_2d = UFuncArray::new(
+        vec![2, 3],
+        vec![1.0, f64::NAN, 3.0, 4.0, 5.0, f64::NAN],
+        DType::F64,
+    )?;
     push_array(&mut out, "nansum_axis1", &nan_2d.nansum(Some(1), false)?)?;
     push_array(&mut out, "nanmean_axis0", &nan_2d.nanmean(Some(0), false)?)?;
 
     out.push_str("## histogram and binning\n");
-    let hist_input = UFuncArray::new(vec![10], vec![0.5, 1.2, 2.3, 2.7, 3.1, 3.5, 4.2, 4.8, 5.1, 5.9], DType::F64)?;
+    let hist_input = UFuncArray::new(
+        vec![10],
+        vec![0.5, 1.2, 2.3, 2.7, 3.1, 3.5, 4.2, 4.8, 5.1, 5.9],
+        DType::F64,
+    )?;
     let (counts, edges) = hist_input.histogram(5)?;
     push_array(&mut out, "histogram_5bins_counts", &counts)?;
     push_array(&mut out, "histogram_5bins_edges", &edges)?;
@@ -262,13 +270,25 @@ fn render_public_api_snapshot() -> Result<String, Box<dyn Error>> {
     let (edge_counts, _) = hist_input.histogram_edges(&bin_edges)?;
     push_array(&mut out, "histogram_custom_edges_counts", &edge_counts)?;
 
-    let bincount_input = UFuncArray::new(vec![8], vec![0.0, 1.0, 2.0, 0.0, 1.0, 0.0, 3.0, 2.0], DType::I64)?;
+    let bincount_input = UFuncArray::new(
+        vec![8],
+        vec![0.0, 1.0, 2.0, 0.0, 1.0, 0.0, 3.0, 2.0],
+        DType::I64,
+    )?;
     push_array(&mut out, "bincount_simple", &bincount_input.bincount()?)?;
 
     let digitize_x = UFuncArray::new(vec![5], vec![0.5, 1.5, 2.5, 3.5, 4.5], DType::F64)?;
     let digitize_bins = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64)?;
-    push_array(&mut out, "digitize_default", &digitize_x.digitize(&digitize_bins)?)?;
-    push_array(&mut out, "digitize_right", &digitize_x.digitize_right(&digitize_bins, true)?)?;
+    push_array(
+        &mut out,
+        "digitize_default",
+        &digitize_x.digitize(&digitize_bins)?,
+    )?;
+    push_array(
+        &mut out,
+        "digitize_right",
+        &digitize_x.digitize_right(&digitize_bins, true)?,
+    )?;
 
     if out.ends_with("\n\n") {
         out.pop();

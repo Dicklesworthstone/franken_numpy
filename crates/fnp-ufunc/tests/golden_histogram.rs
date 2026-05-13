@@ -26,7 +26,11 @@ fn render_histogram_snapshot() -> Result<String, Box<dyn Error>> {
     // ────────────────────────────────────────────────────────────────────────
     out.push_str("## histogram basic\n");
 
-    let data = UFuncArray::new(vec![10], vec![0.5, 1.2, 2.3, 3.1, 4.5, 5.8, 6.2, 7.9, 8.1, 9.5], DType::F64)?;
+    let data = UFuncArray::new(
+        vec![10],
+        vec![0.5, 1.2, 2.3, 3.1, 4.5, 5.8, 6.2, 7.9, 8.1, 9.5],
+        DType::F64,
+    )?;
     let (counts, edges) = data.histogram(5)?;
     push_array(&mut out, "hist_5bins_counts", &counts)?;
     push_array(&mut out, "hist_5bins_edges", &edges)?;
@@ -57,7 +61,11 @@ fn render_histogram_snapshot() -> Result<String, Box<dyn Error>> {
     push_scalar(&mut out, "hist_auto_nbins", counts_auto.shape()[0] as f64)?;
 
     let (counts_sturges, _edges_sturges) = large_data.histogram_auto("sturges")?;
-    push_scalar(&mut out, "hist_sturges_nbins", counts_sturges.shape()[0] as f64)?;
+    push_scalar(
+        &mut out,
+        "hist_sturges_nbins",
+        counts_sturges.shape()[0] as f64,
+    )?;
 
     let (counts_sqrt, _edges_sqrt) = large_data.histogram_auto("sqrt")?;
     push_scalar(&mut out, "hist_sqrt_nbins", counts_sqrt.shape()[0] as f64)?;
@@ -67,11 +75,19 @@ fn render_histogram_snapshot() -> Result<String, Box<dyn Error>> {
     // ────────────────────────────────────────────────────────────────────────
     out.push_str("## bincount\n");
 
-    let indices = UFuncArray::new(vec![8], vec![0.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 5.0], DType::I64)?;
+    let indices = UFuncArray::new(
+        vec![8],
+        vec![0.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 5.0],
+        DType::I64,
+    )?;
     let bc = indices.bincount()?;
     push_array(&mut out, "bincount_basic", &bc)?;
 
-    let weights = UFuncArray::new(vec![8], vec![0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 0.1, 0.2], DType::F64)?;
+    let weights = UFuncArray::new(
+        vec![8],
+        vec![0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 0.1, 0.2],
+        DType::F64,
+    )?;
     let bc_weighted = indices.bincount_with(Some(&weights), 0)?;
     push_array(&mut out, "bincount_weighted", &bc_weighted)?;
 

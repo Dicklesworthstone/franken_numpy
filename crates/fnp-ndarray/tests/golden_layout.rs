@@ -7,8 +7,8 @@
 //! tests for the core shape/stride computation functions.
 
 use fnp_ndarray::{
-    broadcast_shape, broadcast_shapes, broadcast_strides, contiguous_strides, element_count,
-    fix_unknown_dimension, MemoryOrder, NdLayout,
+    MemoryOrder, NdLayout, broadcast_shape, broadcast_shapes, broadcast_strides,
+    contiguous_strides, element_count, fix_unknown_dimension,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

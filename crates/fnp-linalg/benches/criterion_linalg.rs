@@ -13,10 +13,9 @@
 //! Finding: fnp-linalg (10,120 LOC) had ZERO benchmarks despite containing
 //! performance-critical numerical algorithms.
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use fnp_linalg::{
-    cholesky_nxn, det_nxn, eigvalsh_nxn, inv_nxn, matrix_norm_frobenius, qr_nxn, solve_nxn,
-    svd_nxn,
+    cholesky_nxn, det_nxn, eigvalsh_nxn, inv_nxn, matrix_norm_frobenius, qr_nxn, solve_nxn, svd_nxn,
 };
 
 fn generate_spd_matrix(n: usize) -> Vec<f64> {

@@ -311,6 +311,9 @@ print(match)
         .into(),
     );
     let output = numpy_oracle(&script)?;
-    assert_eq!(output, "True", "flatnotmasked_contiguous no masked mismatch");
+    assert_eq!(
+        output, "True",
+        "flatnotmasked_contiguous no masked mismatch"
+    );
     Ok(())
 }

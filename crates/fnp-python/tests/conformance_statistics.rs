@@ -86,7 +86,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "corrcoef rowvar=False should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "corrcoef rowvar=False should match numpy"
+    );
     Ok(())
 }
 
@@ -192,7 +196,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "average with weights should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "average with weights should match numpy"
+    );
     Ok(())
 }
 
@@ -208,7 +216,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "average 2d axis=0 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "average 2d axis=0 should match numpy"
+    );
     Ok(())
 }
 
@@ -224,7 +236,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "average 2d axis=1 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "average 2d axis=1 should match numpy"
+    );
     Ok(())
 }
 
@@ -278,7 +294,11 @@ print(np.allclose(cov_xx, var_x))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cov of single array should equal variance");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cov of single array should equal variance"
+    );
     Ok(())
 }
 
@@ -294,6 +314,10 @@ print(np.allclose(avg, mean))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "average without weights should equal mean");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "average without weights should equal mean"
+    );
     Ok(())
 }

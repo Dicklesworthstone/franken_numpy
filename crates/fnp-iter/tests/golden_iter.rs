@@ -3,10 +3,9 @@
 //! These tests verify that core iterator functions produce stable, expected outputs.
 
 use fnp_iter::{
-    ndindex, ndenumerate, overlap_copy_policy, select_transfer_class,
-    validate_nditer_flags, resolve_flatiter_indices,
-    FlatIterIndex, NditerTransferFlags, OverlapAction, TransferClass,
-    TransferSelectorInput,
+    FlatIterIndex, NditerTransferFlags, OverlapAction, TransferClass, TransferSelectorInput,
+    ndenumerate, ndindex, overlap_copy_policy, resolve_flatiter_indices, select_transfer_class,
+    validate_nditer_flags,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -28,10 +27,7 @@ fn golden_ndindex_scalar() {
 #[test]
 fn golden_ndindex_1d() {
     let result = ndindex(&[4]).unwrap();
-    assert_eq!(
-        result,
-        vec![vec![0], vec![1], vec![2], vec![3]]
-    );
+    assert_eq!(result, vec![vec![0], vec![1], vec![2], vec![3]]);
 }
 
 #[test]
@@ -40,8 +36,12 @@ fn golden_ndindex_2d() {
     assert_eq!(
         result,
         vec![
-            vec![0, 0], vec![0, 1], vec![0, 2],
-            vec![1, 0], vec![1, 1], vec![1, 2],
+            vec![0, 0],
+            vec![0, 1],
+            vec![0, 2],
+            vec![1, 0],
+            vec![1, 1],
+            vec![1, 2],
         ]
     );
 }
@@ -52,10 +52,14 @@ fn golden_ndindex_3d() {
     assert_eq!(
         result,
         vec![
-            vec![0, 0, 0], vec![0, 0, 1],
-            vec![0, 1, 0], vec![0, 1, 1],
-            vec![1, 0, 0], vec![1, 0, 1],
-            vec![1, 1, 0], vec![1, 1, 1],
+            vec![0, 0, 0],
+            vec![0, 0, 1],
+            vec![0, 1, 0],
+            vec![0, 1, 1],
+            vec![1, 0, 0],
+            vec![1, 0, 1],
+            vec![1, 1, 0],
+            vec![1, 1, 1],
         ]
     );
 }
@@ -81,11 +85,7 @@ fn golden_ndenumerate_1d() {
     let result = ndenumerate(&[3], &[10.0, 20.0, 30.0]).unwrap();
     assert_eq!(
         result,
-        vec![
-            (vec![0], 10.0),
-            (vec![1], 20.0),
-            (vec![2], 30.0),
-        ]
+        vec![(vec![0], 10.0), (vec![1], 20.0), (vec![2], 30.0),]
     );
 }
 
@@ -124,7 +124,10 @@ fn golden_transfer_class_contiguous() {
         cast_is_lossless: true,
         same_value_cast: false,
     };
-    assert_eq!(select_transfer_class(input).unwrap(), TransferClass::Contiguous);
+    assert_eq!(
+        select_transfer_class(input).unwrap(),
+        TransferClass::Contiguous
+    );
 }
 
 #[test]
@@ -138,7 +141,10 @@ fn golden_transfer_class_strided() {
         cast_is_lossless: true,
         same_value_cast: false,
     };
-    assert_eq!(select_transfer_class(input).unwrap(), TransferClass::Strided);
+    assert_eq!(
+        select_transfer_class(input).unwrap(),
+        TransferClass::Strided
+    );
 }
 
 #[test]
@@ -152,7 +158,10 @@ fn golden_transfer_class_strided_cast() {
         cast_is_lossless: false,
         same_value_cast: false,
     };
-    assert_eq!(select_transfer_class(input).unwrap(), TransferClass::StridedCast);
+    assert_eq!(
+        select_transfer_class(input).unwrap(),
+        TransferClass::StridedCast
+    );
 }
 
 #[test]
@@ -262,7 +271,15 @@ fn golden_flatiter_single() {
 
 #[test]
 fn golden_flatiter_slice() {
-    let result = resolve_flatiter_indices(10, &FlatIterIndex::Slice { start: 2, stop: 6, step: 2 }).unwrap();
+    let result = resolve_flatiter_indices(
+        10,
+        &FlatIterIndex::Slice {
+            start: 2,
+            stop: 6,
+            step: 2,
+        },
+    )
+    .unwrap();
     assert_eq!(result, vec![2, 4]);
 }
 
@@ -288,6 +305,14 @@ fn golden_flatiter_out_of_bounds() {
 
 #[test]
 fn golden_flatiter_step_2() {
-    let result = resolve_flatiter_indices(10, &FlatIterIndex::Slice { start: 0, stop: 8, step: 2 }).unwrap();
+    let result = resolve_flatiter_indices(
+        10,
+        &FlatIterIndex::Slice {
+            start: 0,
+            stop: 8,
+            step: 2,
+        },
+    )
+    .unwrap();
     assert_eq!(result, vec![0, 2, 4, 6]);
 }

@@ -253,7 +253,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "outer 2d should match numpy (flattens input)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "outer 2d should match numpy (flattens input)"
+    );
     Ok(())
 }
 
@@ -330,7 +334,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tensordot default should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensordot default should match numpy"
+    );
     Ok(())
 }
 
@@ -385,7 +393,11 @@ print(np.array_equal(dot_result, matmul_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "dot and matmul should be equivalent for 2d arrays");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "dot and matmul should be equivalent for 2d arrays"
+    );
     Ok(())
 }
 
@@ -402,7 +414,11 @@ print(inner_result == dot_result)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "inner and dot should be equivalent for 1d arrays");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "inner and dot should be equivalent for 1d arrays"
+    );
     Ok(())
 }
 
@@ -419,6 +435,10 @@ print(np.array_equal(cross_ab, -cross_ba))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cross product should be antisymmetric");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cross product should be antisymmetric"
+    );
     Ok(())
 }

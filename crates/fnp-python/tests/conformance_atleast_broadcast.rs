@@ -52,7 +52,11 @@ print(np.array_equal(result, expected) and result.ndim >= 1)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "atleast_1d scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "atleast_1d scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -99,7 +103,11 @@ print(len(result) == len(expected) and all(np.array_equal(r, e) for r, e in zip(
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "atleast_1d multiple should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "atleast_1d multiple should match numpy"
+    );
     Ok(())
 }
 
@@ -118,7 +126,11 @@ print(np.array_equal(result, expected) and result.ndim >= 2)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "atleast_2d scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "atleast_2d scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -165,7 +177,11 @@ print(len(result) == len(expected) and all(np.array_equal(r, e) for r, e in zip(
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "atleast_2d multiple should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "atleast_2d multiple should match numpy"
+    );
     Ok(())
 }
 
@@ -184,7 +200,11 @@ print(np.array_equal(result, expected) and result.ndim >= 3)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "atleast_3d scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "atleast_3d scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -252,7 +272,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "broadcast_to basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_to basic should match numpy"
+    );
     Ok(())
 }
 
@@ -267,7 +291,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "broadcast_to scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_to scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -283,7 +311,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "broadcast_to column should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_to column should match numpy"
+    );
     Ok(())
 }
 
@@ -320,7 +352,11 @@ print(len(result) == len(expected) and all(np.array_equal(r, e) for r, e in zip(
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "broadcast_arrays basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_arrays basic should match numpy"
+    );
     Ok(())
 }
 
@@ -338,7 +374,11 @@ print(len(result) == len(expected) and all(np.array_equal(r, e) for r, e in zip(
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "broadcast_arrays three should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_arrays three should match numpy"
+    );
     Ok(())
 }
 
@@ -355,7 +395,11 @@ print(len(result) == len(expected) and all(np.array_equal(r, e) for r, e in zip(
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "broadcast_arrays same shape should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_arrays same shape should match numpy"
+    );
     Ok(())
 }
 
@@ -377,7 +421,11 @@ print(r1.ndim >= 1 and r2.ndim >= 2 and r3.ndim >= 3)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "atleast functions should increase dimensions");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "atleast functions should increase dimensions"
+    );
     Ok(())
 }
 
@@ -393,7 +441,11 @@ print(result.shape == target_shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "broadcast_to should produce target shape");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_to should produce target shape"
+    );
     Ok(())
 }
 
@@ -411,6 +463,10 @@ print(len(set(shapes)) == 1)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "broadcast_arrays results should have same shape");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_arrays results should have same shape"
+    );
     Ok(())
 }

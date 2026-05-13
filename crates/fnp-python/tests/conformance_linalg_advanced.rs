@@ -55,7 +55,11 @@ print(np.allclose(fnp_pinv, np_pinv, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "pinv of invertible matrix should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "pinv of invertible matrix should match numpy"
+    );
     Ok(())
 }
 
@@ -71,7 +75,11 @@ print(np.allclose(fnp_pinv, np_pinv, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "pinv of rectangular matrix should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "pinv of rectangular matrix should match numpy"
+    );
     Ok(())
 }
 
@@ -87,7 +95,11 @@ print(np.allclose(fnp_pinv, np_pinv, rtol=1e-8))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "pinv of singular matrix should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "pinv of singular matrix should match numpy"
+    );
     Ok(())
 }
 
@@ -107,7 +119,11 @@ print(np.allclose(fnp_eig, np_eig, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "eigvals of symmetric matrix should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "eigvals of symmetric matrix should match numpy"
+    );
     Ok(())
 }
 
@@ -123,7 +139,11 @@ print(np.allclose(fnp_eig, np_eig, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "eigvals of diagonal matrix should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "eigvals of diagonal matrix should match numpy"
+    );
     Ok(())
 }
 
@@ -143,7 +163,11 @@ print(fnp_sign == np_sign and np.allclose(fnp_logdet, np_logdet, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "slogdet with positive det should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "slogdet with positive det should match numpy"
+    );
     Ok(())
 }
 
@@ -159,7 +183,11 @@ print(fnp_sign == np_sign and np.allclose(fnp_logdet, np_logdet, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "slogdet with negative det should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "slogdet with negative det should match numpy"
+    );
     Ok(())
 }
 
@@ -175,7 +203,11 @@ print(fnp_sign == np_sign and np.allclose(fnp_logdet, np_logdet, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "slogdet of identity should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "slogdet of identity should match numpy"
+    );
     Ok(())
 }
 
@@ -195,7 +227,11 @@ print(fnp_rank == np_rank)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "matrix_rank of full rank matrix should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "matrix_rank of full rank matrix should match numpy"
+    );
     Ok(())
 }
 
@@ -211,7 +247,11 @@ print(fnp_rank == np_rank)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "matrix_rank of rank-deficient matrix should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "matrix_rank of rank-deficient matrix should match numpy"
+    );
     Ok(())
 }
 
@@ -227,7 +267,11 @@ print(fnp_rank == np_rank == 0)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "matrix_rank of zero matrix should be 0");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "matrix_rank of zero matrix should be 0"
+    );
     Ok(())
 }
 
@@ -247,7 +291,11 @@ print(np.allclose(fnp_pow, np_pow, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "matrix_power with positive exponent should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "matrix_power with positive exponent should match numpy"
+    );
     Ok(())
 }
 
@@ -263,7 +311,11 @@ print(np.allclose(fnp_pow, np_pow, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "matrix_power with exponent 0 should be identity");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "matrix_power with exponent 0 should be identity"
+    );
     Ok(())
 }
 
@@ -279,7 +331,11 @@ print(np.allclose(fnp_pow, np_pow, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "matrix_power with -1 should be inverse");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "matrix_power with -1 should be inverse"
+    );
     Ok(())
 }
 
@@ -305,7 +361,11 @@ print(s_match and recon_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "svd of square matrix should reconstruct original");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "svd of square matrix should reconstruct original"
+    );
     Ok(())
 }
 
@@ -322,7 +382,11 @@ print(np.allclose(fnp_s, np_s, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "svd singular values of wide matrix should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "svd singular values of wide matrix should match numpy"
+    );
     Ok(())
 }
 
@@ -339,7 +403,11 @@ print(np.allclose(fnp_s, np_s, rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "svd singular values of tall matrix should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "svd singular values of tall matrix should match numpy"
+    );
     Ok(())
 }
 
@@ -360,7 +428,11 @@ print(np.allclose(result, np.eye(2), rtol=1e-10))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "A @ pinv(A) should be identity for invertible A");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "A @ pinv(A) should be identity for invertible A"
+    );
     Ok(())
 }
 

@@ -52,7 +52,11 @@ print(result.shape == expected.shape and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "empty 1d shape/dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "empty 1d shape/dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -67,7 +71,11 @@ print(result.shape == expected.shape and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "empty 2d shape/dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "empty 2d shape/dtype should match numpy"
+    );
     Ok(())
 }
 

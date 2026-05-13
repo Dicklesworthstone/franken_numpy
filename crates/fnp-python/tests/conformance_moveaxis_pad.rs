@@ -69,7 +69,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "moveaxis single to single should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "moveaxis single to single should match numpy"
+    );
     Ok(())
 }
 
@@ -85,7 +89,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "moveaxis multiple should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "moveaxis multiple should match numpy"
+    );
     Ok(())
 }
 
@@ -101,7 +109,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "moveaxis negative should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "moveaxis negative should match numpy"
+    );
     Ok(())
 }
 
@@ -153,7 +165,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "pad constant value should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "pad constant value should match numpy"
+    );
     Ok(())
 }
 
@@ -253,7 +269,11 @@ print(np.array_equal(moveaxis_result, transpose_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "moveaxis should equal transpose for 2d swap");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "moveaxis should equal transpose for 2d swap"
+    );
     Ok(())
 }
 

@@ -13,9 +13,9 @@
 //! the coverage gap identified in tick-26 project analysis.
 
 use fnp_runtime::{
-    decide_and_record, decide_compatibility, decide_compatibility_from_wire,
-    evaluate_policy_override, CompatibilityClass, DecisionAction, DecisionAuditContext,
-    DecisionLossModel, EvidenceLedger, RuntimeMode,
+    CompatibilityClass, DecisionAction, DecisionAuditContext, DecisionLossModel, EvidenceLedger,
+    RuntimeMode, decide_and_record, decide_compatibility, decide_compatibility_from_wire,
+    evaluate_policy_override,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -29,7 +29,10 @@ fn runtime_mode_from_wire_strict() {
 
 #[test]
 fn runtime_mode_from_wire_hardened() {
-    assert_eq!(RuntimeMode::from_wire("hardened"), Some(RuntimeMode::Hardened));
+    assert_eq!(
+        RuntimeMode::from_wire("hardened"),
+        Some(RuntimeMode::Hardened)
+    );
 }
 
 #[test]
@@ -158,12 +161,7 @@ fn strict_mode_fails_known_incompatible() {
 
 #[test]
 fn strict_mode_fails_unknown() {
-    let action = decide_compatibility(
-        RuntimeMode::Strict,
-        CompatibilityClass::Unknown,
-        0.0,
-        0.5,
-    );
+    let action = decide_compatibility(RuntimeMode::Strict, CompatibilityClass::Unknown, 0.0, 0.5);
     assert_eq!(action, DecisionAction::FailClosed);
 }
 

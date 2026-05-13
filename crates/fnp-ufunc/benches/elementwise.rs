@@ -1,6 +1,6 @@
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use fnp_dtype::DType;
-use fnp_ufunc::{add, divide, multiply, subtract, UFuncArray};
+use fnp_ufunc::{UFuncArray, add, divide, multiply, subtract};
 
 fn make_array(n: usize) -> UFuncArray {
     let values: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 + 1.0).collect();

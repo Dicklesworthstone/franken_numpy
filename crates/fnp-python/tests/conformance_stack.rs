@@ -54,7 +54,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "stack 1d default axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "stack 1d default axis should match numpy"
+    );
     Ok(())
 }
 
@@ -122,7 +126,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "stack negative axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "stack negative axis should match numpy"
+    );
     Ok(())
 }
 
@@ -139,7 +147,11 @@ print(np.allclose(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "stack float arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "stack float arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -194,7 +206,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "vstack mixed dimensions should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "vstack mixed dimensions should match numpy"
+    );
     Ok(())
 }
 
@@ -210,7 +226,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "vstack single array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "vstack single array should match numpy"
+    );
     Ok(())
 }
 
@@ -264,7 +284,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "hstack single array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "hstack single array should match numpy"
+    );
     Ok(())
 }
 
@@ -335,7 +359,11 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "dstack single array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "dstack single array should match numpy"
+    );
     Ok(())
 }
 
@@ -356,7 +384,11 @@ print(np.array_equal(vstack_result, row_stack_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "vstack and row_stack should be equivalent");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "vstack and row_stack should be equivalent"
+    );
     Ok(())
 }
 
@@ -375,6 +407,10 @@ print(np.array_equal(hstack_result, hstack_expected) and np.array_equal(column_s
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "hstack and column_stack 1d should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "hstack and column_stack 1d should match numpy"
+    );
     Ok(())
 }

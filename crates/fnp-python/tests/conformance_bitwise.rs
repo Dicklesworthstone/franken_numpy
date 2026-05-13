@@ -54,7 +54,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise_and basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise_and basic should match numpy"
+    );
     Ok(())
 }
 
@@ -71,7 +75,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise_and broadcast should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise_and broadcast should match numpy"
+    );
     Ok(())
 }
 
@@ -109,7 +117,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise_or bool arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise_or bool arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -130,7 +142,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise_xor basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise_xor basic should match numpy"
+    );
     Ok(())
 }
 
@@ -146,7 +162,11 @@ print(np.array_equal(result, expected) and np.all(result == 0))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise_xor with self should be zero");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise_xor with self should be zero"
+    );
     Ok(())
 }
 
@@ -183,7 +203,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "left_shift scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "left_shift scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -204,7 +228,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "right_shift basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "right_shift basic should match numpy"
+    );
     Ok(())
 }
 
@@ -220,7 +248,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "right_shift scalar should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "right_shift scalar should match numpy"
+    );
     Ok(())
 }
 
@@ -280,7 +312,11 @@ print(np.array_equal(result_and, expected_and) and np.array_equal(result_or, exp
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise large numbers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise large numbers should match numpy"
+    );
     Ok(())
 }
 

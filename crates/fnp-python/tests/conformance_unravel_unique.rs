@@ -52,7 +52,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unravel_index scalar 2d should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unravel_index scalar 2d should match numpy"
+    );
     Ok(())
 }
 
@@ -67,7 +71,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unravel_index scalar 3d should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unravel_index scalar 3d should match numpy"
+    );
     Ok(())
 }
 
@@ -83,7 +91,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unravel_index array indices should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unravel_index array indices should match numpy"
+    );
     Ok(())
 }
 
@@ -98,7 +110,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unravel_index fortran order should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unravel_index fortran order should match numpy"
+    );
     Ok(())
 }
 
@@ -113,7 +129,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unravel_index zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unravel_index zero should match numpy"
+    );
     Ok(())
 }
 
@@ -130,7 +150,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unravel_index last element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unravel_index last element should match numpy"
+    );
     Ok(())
 }
 
@@ -145,7 +169,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unravel_index 1d shape should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unravel_index 1d shape should match numpy"
+    );
     Ok(())
 }
 
@@ -164,7 +192,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ravel_multi_index basic 2d should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ravel_multi_index basic 2d should match numpy"
+    );
     Ok(())
 }
 
@@ -179,7 +211,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ravel_multi_index basic 3d should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ravel_multi_index basic 3d should match numpy"
+    );
     Ok(())
 }
 
@@ -194,7 +230,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ravel_multi_index array coords should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ravel_multi_index array coords should match numpy"
+    );
     Ok(())
 }
 
@@ -209,7 +249,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ravel_multi_index fortran order should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ravel_multi_index fortran order should match numpy"
+    );
     Ok(())
 }
 
@@ -224,7 +268,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ravel_multi_index zero coords should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ravel_multi_index zero coords should match numpy"
+    );
     Ok(())
 }
 
@@ -241,7 +289,11 @@ print(result == expected == 3 * 4 * 5 - 1)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ravel_multi_index last element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ravel_multi_index last element should match numpy"
+    );
     Ok(())
 }
 
@@ -256,7 +308,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ravel_multi_index mode clip should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ravel_multi_index mode clip should match numpy"
+    );
     Ok(())
 }
 
@@ -271,7 +327,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ravel_multi_index mode wrap should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ravel_multi_index mode wrap should match numpy"
+    );
     Ok(())
 }
 
@@ -332,7 +392,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unique_all floats should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique_all floats should match numpy"
+    );
     Ok(())
 }
 
@@ -354,7 +418,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unique_counts basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique_counts basic should match numpy"
+    );
     Ok(())
 }
 
@@ -372,7 +440,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unique_counts single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique_counts single element should match numpy"
+    );
     Ok(())
 }
 
@@ -394,7 +466,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unique_inverse basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique_inverse basic should match numpy"
+    );
     Ok(())
 }
 
@@ -412,7 +488,11 @@ print(np.array_equal(reconstructed_fnp, a) and np.array_equal(reconstructed_np, 
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unique_inverse should allow reconstruction");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique_inverse should allow reconstruction"
+    );
     Ok(())
 }
 
@@ -432,7 +512,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unique_values basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique_values basic should match numpy"
+    );
     Ok(())
 }
 
@@ -473,7 +557,11 @@ print(np.array_equal(result, expected) and len(result) == 0)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unique_values empty should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique_values empty should match numpy"
+    );
     Ok(())
 }
 
@@ -489,7 +577,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unique_values strings should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique_values strings should match numpy"
+    );
     Ok(())
 }
 
@@ -521,6 +613,10 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "unique functions should be consistent");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique functions should be consistent"
+    );
     Ok(())
 }

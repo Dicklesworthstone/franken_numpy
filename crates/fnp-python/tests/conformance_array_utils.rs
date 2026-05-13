@@ -71,7 +71,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "array_equal different should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "array_equal different should match numpy"
+    );
     Ok(())
 }
 
@@ -88,7 +92,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "array_equal different shape should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "array_equal different shape should match numpy"
+    );
     Ok(())
 }
 
@@ -126,7 +134,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "array_equiv broadcastable should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "array_equiv broadcastable should match numpy"
+    );
     Ok(())
 }
 
@@ -178,7 +190,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "around negative decimals should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "around negative decimals should match numpy"
+    );
     Ok(())
 }
 
@@ -269,7 +285,11 @@ print(np.array_equal(result, expected) and result.flags['C_CONTIGUOUS'])
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ascontiguousarray already contiguous should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ascontiguousarray already contiguous should match numpy"
+    );
     Ok(())
 }
 
@@ -285,7 +305,11 @@ print(np.array_equal(result, expected) and result.flags['C_CONTIGUOUS'])
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ascontiguousarray from fortran should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ascontiguousarray from fortran should match numpy"
+    );
     Ok(())
 }
 
@@ -305,7 +329,11 @@ print(np.array_equal(result, expected) and result.flags['F_CONTIGUOUS'])
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asfortranarray basic should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asfortranarray basic should match numpy"
+    );
     Ok(())
 }
 
@@ -321,7 +349,11 @@ print(np.array_equal(result, expected) and result.flags['F_CONTIGUOUS'])
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "asfortranarray already fortran should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "asfortranarray already fortran should match numpy"
+    );
     Ok(())
 }
 
@@ -343,7 +375,11 @@ print(eq_result == False and equiv_result == True)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "array_equal vs array_equiv broadcasting behavior");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "array_equal vs array_equiv broadcasting behavior"
+    );
     Ok(())
 }
 
@@ -359,6 +395,10 @@ print(b[0] == 1)  # copy should be unaffected
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "modifying original should not affect copy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "modifying original should not affect copy"
+    );
     Ok(())
 }

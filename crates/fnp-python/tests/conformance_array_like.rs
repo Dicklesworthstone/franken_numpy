@@ -69,7 +69,11 @@ print(result.shape == expected.shape and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "empty_like with dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "empty_like with dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -105,7 +109,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ones_like with dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ones_like with dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -157,7 +165,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "zeros_like with dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "zeros_like with dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -273,7 +285,11 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "full_like with dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "full_like with dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -289,7 +305,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "full_like float array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "full_like float array should match numpy"
+    );
     Ok(())
 }
 
@@ -309,7 +329,11 @@ print(np.array_equal(ones, full_ones))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ones_like should equal full_like(a, 1)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ones_like should equal full_like(a, 1)"
+    );
     Ok(())
 }
 
@@ -325,7 +349,11 @@ print(np.array_equal(zeros, full_zeros))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "zeros_like should equal full_like(a, 0)");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "zeros_like should equal full_like(a, 0)"
+    );
     Ok(())
 }
 
@@ -342,6 +370,10 @@ print(ones.shape == a.shape and zeros.shape == a.shape and full.shape == a.shape
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "*_like functions should preserve shape");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "*_like functions should preserve shape"
+    );
     Ok(())
 }

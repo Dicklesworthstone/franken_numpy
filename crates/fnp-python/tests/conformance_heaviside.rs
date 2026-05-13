@@ -120,9 +120,8 @@ fn heaviside_different_h0_values_match_numpy() -> Result<(), String> {
     let test_cases = vec![0.0, 0.5, 1.0, 0.25, 0.75, -0.5, 2.0];
 
     for h0 in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.heaviside(np.array([-1, 0, 1]), {h0}).tolist())"
-        );
+        let script =
+            format!("import numpy as np; print(np.heaviside(np.array([-1, 0, 1]), {h0}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
@@ -321,13 +320,11 @@ print(fnp.heaviside(x, h0).tolist())
 
 #[test]
 fn heaviside_empty_array_match_numpy() -> Result<(), String> {
-    let script =
-        "import numpy as np; print(np.heaviside(np.array([]), np.array([])).tolist())";
+    let script = "import numpy as np; print(np.heaviside(np.array([]), np.array([])).tolist())";
     let numpy_result = numpy_oracle(script)?;
 
-    let rust_script = fnp_script(
-        "print(fnp.heaviside(np.array([]), np.array([])).tolist())".into(),
-    );
+    let rust_script =
+        fnp_script("print(fnp.heaviside(np.array([]), np.array([])).tolist())".into());
     let rust_result = numpy_oracle(&rust_script)?;
 
     assert_eq!(
@@ -405,8 +402,7 @@ fn heaviside_dtype_match_numpy() -> Result<(), String> {
     let script = "import numpy as np; print(np.heaviside(np.array([-1, 0, 1]), 0.5).dtype)";
     let numpy_result = numpy_oracle(script)?;
 
-    let rust_script =
-        fnp_script("print(fnp.heaviside(np.array([-1, 0, 1]), 0.5).dtype)".into());
+    let rust_script = fnp_script("print(fnp.heaviside(np.array([-1, 0, 1]), 0.5).dtype)".into());
     let rust_result = numpy_oracle(&rust_script)?;
 
     assert_eq!(

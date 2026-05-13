@@ -69,7 +69,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "percentile multiple should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "percentile multiple should match numpy"
+    );
     Ok(())
 }
 
@@ -85,7 +89,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "percentile 2d axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "percentile 2d axis should match numpy"
+    );
     Ok(())
 }
 
@@ -121,7 +129,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "quantile multiple should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "quantile multiple should match numpy"
+    );
     Ok(())
 }
 
@@ -173,7 +185,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "median even count should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "median even count should match numpy"
+    );
     Ok(())
 }
 
@@ -277,7 +293,11 @@ print(np.allclose(q, p))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "quantile 0.5 should equal percentile 50");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "quantile 0.5 should equal percentile 50"
+    );
     Ok(())
 }
 

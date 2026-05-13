@@ -8,10 +8,10 @@
 //! - contiguous_strides: compute C-order strides
 //! - NdLayout operations: as_strided, broadcast_to, is_contiguous
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use fnp_ndarray::{
-    broadcast_shape, broadcast_shapes, broadcast_strides, can_broadcast, contiguous_strides,
-    element_count, MemoryOrder, NdLayout,
+    MemoryOrder, NdLayout, broadcast_shape, broadcast_shapes, broadcast_strides, can_broadcast,
+    contiguous_strides, element_count,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -33,9 +33,13 @@ fn bench_can_broadcast(c: &mut Criterion) {
     ];
 
     for (name, lhs, rhs) in cases {
-        group.bench_with_input(BenchmarkId::new("shapes", name), &(lhs, rhs), |b, (l, r)| {
-            b.iter(|| can_broadcast(black_box(l), black_box(r)));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("shapes", name),
+            &(lhs, rhs),
+            |b, (l, r)| {
+                b.iter(|| can_broadcast(black_box(l), black_box(r)));
+            },
+        );
     }
 
     group.finish();
@@ -57,9 +61,13 @@ fn bench_broadcast_shape(c: &mut Criterion) {
     ];
 
     for (name, lhs, rhs) in cases {
-        group.bench_with_input(BenchmarkId::new("shapes", name), &(lhs, rhs), |b, (l, r)| {
-            b.iter(|| broadcast_shape(black_box(l), black_box(r)));
-        });
+        group.bench_with_input(
+            BenchmarkId::new("shapes", name),
+            &(lhs, rhs),
+            |b, (l, r)| {
+                b.iter(|| broadcast_shape(black_box(l), black_box(r)));
+            },
+        );
     }
 
     group.finish();
@@ -273,9 +281,18 @@ fn bench_ndlayout_nbytes(c: &mut Criterion) {
     let mut group = c.benchmark_group("NdLayout_nbytes");
 
     let layouts = [
-        ("small_1d", NdLayout::contiguous(vec![100], 8, MemoryOrder::C).unwrap()),
-        ("medium_2d", NdLayout::contiguous(vec![100, 100], 8, MemoryOrder::C).unwrap()),
-        ("large_3d", NdLayout::contiguous(vec![100, 100, 100], 8, MemoryOrder::C).unwrap()),
+        (
+            "small_1d",
+            NdLayout::contiguous(vec![100], 8, MemoryOrder::C).unwrap(),
+        ),
+        (
+            "medium_2d",
+            NdLayout::contiguous(vec![100, 100], 8, MemoryOrder::C).unwrap(),
+        ),
+        (
+            "large_3d",
+            NdLayout::contiguous(vec![100, 100, 100], 8, MemoryOrder::C).unwrap(),
+        ),
     ];
 
     for (name, layout) in layouts {

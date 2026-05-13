@@ -97,13 +97,15 @@ fn float_power_basic_match_numpy() -> Result<(), String> {
         ("np.array([2.0, 3.0, 4.0])", "np.array([2.0, 2.0, 2.0])"),
         ("np.array([1.0, 2.0, 3.0])", "np.array([0.0, 0.0, 0.0])"),
         ("np.array([4.0, 9.0, 16.0])", "np.array([0.5, 0.5, 0.5])"),
-        ("np.array([10.0, 100.0, 1000.0])", "np.array([1.0, 2.0, 3.0])"),
+        (
+            "np.array([10.0, 100.0, 1000.0])",
+            "np.array([1.0, 2.0, 3.0])",
+        ),
     ];
 
     for (x1_expr, x2_expr) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.float_power({x1_expr}, {x2_expr}).tolist())"
-        );
+        let script =
+            format!("import numpy as np; print(np.float_power({x1_expr}, {x2_expr}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
@@ -155,15 +157,17 @@ print(fnp.float_power(x1, x2).tolist())
 #[test]
 fn remainder_basic_match_numpy() -> Result<(), String> {
     let test_cases = vec![
-        ("np.array([5.0, 6.0, 7.0, 8.0])", "np.array([2.0, 2.0, 2.0, 2.0])"),
+        (
+            "np.array([5.0, 6.0, 7.0, 8.0])",
+            "np.array([2.0, 2.0, 2.0, 2.0])",
+        ),
         ("np.array([10.0, 20.0, 30.0])", "np.array([3.0, 7.0, 11.0])"),
         ("np.array([1.5, 2.5, 3.5])", "np.array([1.0, 1.0, 1.0])"),
     ];
 
     for (x1_expr, x2_expr) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.remainder({x1_expr}, {x2_expr}).tolist())"
-        );
+        let script =
+            format!("import numpy as np; print(np.remainder({x1_expr}, {x2_expr}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
@@ -216,21 +220,20 @@ print(fnp.remainder(x1, x2).tolist())
 #[test]
 fn fmod_basic_match_numpy() -> Result<(), String> {
     let test_cases = vec![
-        ("np.array([5.0, 6.0, 7.0, 8.0])", "np.array([2.0, 2.0, 2.0, 2.0])"),
+        (
+            "np.array([5.0, 6.0, 7.0, 8.0])",
+            "np.array([2.0, 2.0, 2.0, 2.0])",
+        ),
         ("np.array([10.0, 20.0, 30.0])", "np.array([3.0, 7.0, 11.0])"),
         ("np.array([1.5, 2.5, 3.5])", "np.array([1.0, 1.0, 1.0])"),
     ];
 
     for (x1_expr, x2_expr) in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.fmod({x1_expr}, {x2_expr}).tolist())"
-        );
+        let script = format!("import numpy as np; print(np.fmod({x1_expr}, {x2_expr}).tolist())");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_vals = parse_float_list(&numpy_result)?;
 
-        let rust_script = fnp_script(format!(
-            "print(fnp.fmod({x1_expr}, {x2_expr}).tolist())"
-        ));
+        let rust_script = fnp_script(format!("print(fnp.fmod({x1_expr}, {x2_expr}).tolist())"));
         let rust_result = numpy_oracle(&rust_script)?;
         let rust_vals = parse_float_list(&rust_result)?;
 
@@ -505,13 +508,11 @@ print(fnp.float_power(x1, x2).flatten().tolist())
 
 #[test]
 fn float_power_empty_array_match_numpy() -> Result<(), String> {
-    let script =
-        "import numpy as np; print(np.float_power(np.array([]), np.array([])).tolist())";
+    let script = "import numpy as np; print(np.float_power(np.array([]), np.array([])).tolist())";
     let numpy_result = numpy_oracle(script)?;
 
-    let rust_script = fnp_script(
-        "print(fnp.float_power(np.array([]), np.array([])).tolist())".into(),
-    );
+    let rust_script =
+        fnp_script("print(fnp.float_power(np.array([]), np.array([])).tolist())".into());
     let rust_result = numpy_oracle(&rust_script)?;
 
     assert_eq!(
