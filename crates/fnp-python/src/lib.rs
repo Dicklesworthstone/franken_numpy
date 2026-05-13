@@ -25966,6 +25966,31 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // workspace manifest propagates automatically.
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
 
+    // Module docstring (numpy parity: numpy.__doc__). Brief; the full
+    // architecture overview lives in README.md and audit_numpy_reality.md.
+    m.setattr(
+        "__doc__",
+        "fnp_python — drop-in Python surface for FrankenNumPy.\n\
+         \n\
+         Exposes every name in numpy.__all__ (499 names, 100% coverage,\n\
+         structurally locked by the fnp_python_covers_full_numpy_all\n\
+         conformance test). Common ufuncs and reductions run on the\n\
+         pure-Rust fnp-ufunc / fnp-ndarray / fnp-linalg / fnp-io engines;\n\
+         everything else falls back to numpy for drop-in semantics.\n\
+         \n\
+         See README.md and audit_numpy_reality.md for architecture\n\
+         and coverage details.",
+    )?;
+
+    // Underlying numpy version used at compile-introspection time. Lets\n
+    // downstream code branch on np-version differences without re-importing\n
+    // numpy from a possibly-different environment.
+    if let Ok(numpy) = py.import("numpy")
+        && let Ok(ver) = numpy.getattr("__version__")
+    {
+        m.setattr("__numpy_version__", &ver)?;
+    }
+
     // numpy top-level constants (numpy.__all__ reality-check). Values
     // pinned to match numpy: pi, e, euler_gamma, inf, nan, little_endian.
     m.add("pi", std::f64::consts::PI)?;
