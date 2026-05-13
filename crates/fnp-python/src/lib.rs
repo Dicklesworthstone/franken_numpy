@@ -19652,6 +19652,64 @@ fn vecdot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>, axis: i64) -> PyResult<P
 }
 
 #[pyfunction]
+#[pyo3(signature = (file, regexp, dtype, encoding=None))]
+fn fromregex(
+    py: Python<'_>,
+    file: Py<PyAny>,
+    regexp: Py<PyAny>,
+    dtype: Py<PyAny>,
+    encoding: Option<&str>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(enc) = encoding {
+        kwargs.set_item("encoding", enc)?;
+    }
+    Ok(numpy
+        .getattr("fromregex")?
+        .call(
+            (file.bind(py), regexp.bind(py), dtype.bind(py)),
+            Some(&kwargs),
+        )?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (a,))]
+fn min_scalar_type(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("min_scalar_type")?
+        .call1((a.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = ())]
+fn get_printoptions(py: Python<'_>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("get_printoptions")?.call0()?.unbind())
+}
+
+#[pyfunction]
+#[pyo3(signature = (typechars, typeset="GDFgdf", default="d"))]
+fn mintypecode(
+    py: Python<'_>,
+    typechars: Py<PyAny>,
+    typeset: &str,
+    default: &str,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("typeset", typeset)?;
+    kwargs.set_item("default", default)?;
+    Ok(numpy
+        .getattr("mintypecode")?
+        .call((typechars.bind(py),), Some(&kwargs))?
+        .unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn eye(
     py: Python<'_>,
@@ -25697,6 +25755,10 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(unstack, m)?)?;
     m.add_function(wrap_pyfunction!(permute_dims, m)?)?;
     m.add_function(wrap_pyfunction!(vecdot, m)?)?;
+    m.add_function(wrap_pyfunction!(fromregex, m)?)?;
+    m.add_function(wrap_pyfunction!(min_scalar_type, m)?)?;
+    m.add_function(wrap_pyfunction!(get_printoptions, m)?)?;
+    m.add_function(wrap_pyfunction!(mintypecode, m)?)?;
     m.add_function(wrap_pyfunction!(eye, m)?)?;
     m.add_function(wrap_pyfunction!(identity, m)?)?;
     m.add_function(wrap_pyfunction!(logspace, m)?)?;
