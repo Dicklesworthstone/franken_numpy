@@ -26313,6 +26313,31 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 m.add(name, &grid)?;
             }
         }
+        // Index-trick helpers (s_, index_exp, newaxis), bool singletons
+        // (False_, True_), error-handling state (errstate, seterr/geterr/
+        // seterrcall/geterrcall), and diagnostic helpers
+        // (show_config/show_runtime/info). Re-export verbatim from numpy so
+        // fnp_python users can use them without `import numpy as np`. Missing
+        // attributes silently no-op on older numpys.
+        for name in [
+            "s_",
+            "index_exp",
+            "newaxis",
+            "False_",
+            "True_",
+            "errstate",
+            "seterr",
+            "geterr",
+            "seterrcall",
+            "geterrcall",
+            "show_config",
+            "show_runtime",
+            "info",
+        ] {
+            if let Ok(attr) = numpy.getattr(name) {
+                m.add(name, &attr)?;
+            }
+        }
     }
 
     {
