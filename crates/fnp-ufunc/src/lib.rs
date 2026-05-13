@@ -20981,7 +20981,8 @@ impl UFuncArray {
 
     /// Test whether each element of `self` is in `test_elements`. Returns a boolean array.
     ///
-    /// Mimics `np.in1d(ar1, ar2)`.
+    /// Mimics `np.isin(ar1, ar2)` (formerly `np.in1d` before numpy 2.0;
+    /// `np.in1d` was deprecated in numpy 1.25 and removed in numpy 2.0).
     pub fn in1d(&self, test_elements: &Self) -> Self {
         if self.dtype == DType::I64
             && test_elements.dtype == DType::I64
