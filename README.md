@@ -246,7 +246,7 @@ Every decision is logged to an `EvidenceLedger` with timestamp, mode, class, evi
 
 ### Ufunc Dispatch (`fnp-ufunc`)
 
-The ufunc engine is the largest crate (~30,000 lines) and implements the array operation layer:
+The ufunc engine is the largest crate (~60,000 lines) and implements the array operation layer:
 
 **35 binary operations** — `Add`, `Sub`, `Mul`, `Div`, `Power`, `FloorDivide`, `Remainder`, `Fmod`, `Minimum`, `Maximum`, `Fmax`, `Fmin`, `Copysign`, `Heaviside`, `Nextafter`, `Arctan2`, `Hypot`, `Logaddexp`, `Logaddexp2`, `Ldexp`, `FloatPower`, `BitwiseAnd/Or/Xor`, `LeftShift`, `RightShift`, `LogicalAnd/Or/Xor`, and 6 comparison ops.
 
@@ -924,7 +924,7 @@ franken_numpy/
 │   ├── fnp-dtype/                     # Dtype taxonomy, promotion table, cast policy
 │   ├── fnp-ndarray/                   # Stride Calculus Engine (SCE)
 │   ├── fnp-iter/                      # Transfer semantics, overlap-safe iteration
-│   ├── fnp-ufunc/                     # 1,000+ array operations, reductions, einsum
+│   ├── fnp-ufunc/                     # 800+ array operations, reductions, einsum
 │   ├── fnp-linalg/                    # solve, eig, svd, qr, cholesky, lstsq, etc.
 │   ├── fnp-random/                    # Statistical distributions + generator helpers, PCG64DXSM, bit-exact parity
 │   ├── fnp-io/                        # NPY/NPZ read/write, text I/O, DEFLATE
