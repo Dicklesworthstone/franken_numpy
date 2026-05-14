@@ -47879,7 +47879,8 @@ mod tests {
             let numpy = py.import("numpy")?;
             let numpy_eigh = numpy.getattr("linalg")?.getattr("eigh")?;
             let allclose = numpy.getattr("allclose")?;
-            let abs_fn = numpy.getattr("abs")?;
+            let abs_fn = module.getattr("abs")?;
+            let numpy_abs = numpy.getattr("abs")?;
 
             // Compare eigenvalues exactly via allclose; compare eigenvector
             // matrices via abs() then allclose since the sign of an
@@ -47893,7 +47894,7 @@ mod tests {
                         "eigh eigenvalues diverged"
                     );
                     let a_vecs = abs_fn.call1((actual.getattr("eigenvectors")?,))?;
-                    let e_vecs = abs_fn.call1((expected.getattr("eigenvectors")?,))?;
+                    let e_vecs = numpy_abs.call1((expected.getattr("eigenvectors")?,))?;
                     assert!(
                         allclose.call1((&a_vecs, &e_vecs))?.extract::<bool>()?,
                         "eigh |eigenvectors| diverged"
