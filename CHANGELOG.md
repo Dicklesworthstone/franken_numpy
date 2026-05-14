@@ -69,6 +69,46 @@ the structured-dtype + recfunctions oracle corpus expansion, and an
 agent-readable validation recipe selector. See `docs/DIVERGENCES.md`
 and `crates/fnp-conformance/src/divergence_ledger.rs`.
 
+### Fuzz infrastructure expansion (May 2026)
+
+The fuzz harness footprint grew from 4 fuzz crates to 6, and from
+mostly-unseeded targets to **214 curated edge-case seeds across 21
+fuzz targets**. Bead IDs:
+
+  - `62oir` — new `fnp-random/fuzz` (Pcg64Rng/Pcg64DxsmRng seed entropy,
+    SeedSequence::new) and `fnp-linalg/fuzz` (cholesky_nxn, det_nxn,
+    qr_mxn for arbitrary f64 matrices up to 16-32 dim).
+  - `aaq0g` — 32 curated seeds for the new fuzz crates: u64-seed edge
+    cases (0/1/u64::MAX/alt-bits), SeedSequence entropy variants,
+    SPD Hilbert matrix, singular matrix, NaN/±Inf, subnormal,
+    rectangular m×n QR shapes.
+  - `s46p2` — 45 seeds for existing byte-driven fnp-dtype/fnp-io
+    targets (fuzz_dtype_parse, fuzz_min_scalar_type, fuzz_fromstring,
+    fuzz_loadtxt) covering dtype strings (i4/<f8/V16/U10/datetime64
+    units), f64 specials, text-parsing edge cases.
+  - `8fftx` — 19 Arbitrary-format seeds for fnp-dtype Arbitrary-derive
+    targets (fuzz_can_cast, fuzz_result_type) covering same-kind
+    upcasts, narrowing, complex drop, datetime/timedelta aliasing.
+  - `cv45i` — 31 seeds for fnp-ufunc string parsers
+    (fuzz_parse_gufunc_signature, fuzz_datetime_unit_parse) covering
+    matmul/dot/outer/scalar-vector + every canonical datetime64 unit.
+  - `i8ipt` — 15 seeds for fnp-ndarray fuzz_broadcast_shape and
+    fuzz_fix_unknown_dim covering identity/scalar/3D/zero-dim cases
+    and -1-placeholder reshape edge cases.
+  - `y3dhc` — 46 NPY/NPZ binary seeds for fnp-io binary parsers
+    (fuzz_npy, fuzz_npz, fuzz_load_auto, fuzz_header) generated via
+    numpy.save / numpy.savez / numpy.savez_compressed plus
+    handcrafted malformed inputs (truncated magic, future version,
+    corrupt ZIP EOCD).
+  - `diqz3` — 11 seeds for fnp-iter/fuzz_ndindex covering empty/1D-8D
+    shape boundaries and the 100k-cap edge.
+  - `m5y8s` — 15 seeds for fnp-ufunc/fuzz_parse_fixed_signature
+    covering signature shapes (unary/binary/multi-output, all dtype
+    letters) and adversarial cases (no arrow, double arrow, unicode).
+
+The seed corpora are committed under each `fuzz/corpus/<target>/seed_*`
+per the existing .gitignore exemption.
+
 ### Pre-2026-03-21 details preserved below
 
 The dated capability sections below are unchanged; they cover the
