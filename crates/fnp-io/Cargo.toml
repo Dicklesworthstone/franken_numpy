@@ -1,8 +1,8 @@
 [package]
 name = "fnp-io"
-version = "0.1.0"
-edition = "2024"
-license-file = "../../LICENSE"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
 
 [dependencies]
 bytemuck = "1.25.0"
