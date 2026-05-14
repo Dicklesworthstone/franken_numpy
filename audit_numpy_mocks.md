@@ -22,9 +22,15 @@ The cosmetic `.unwrap()` inventory has grown with the codebase: from **43 sites*
 | Production `.unwrap()` — `fnp-conformance` fixture/oracle code | **42** at April audit; **115** at 2026-05-14 refresh | Most growth is in the diagnostic-oracle and structured-dtype-corpus expansion that landed under the `33vtd` epic. Pattern unchanged: still all on statically-correct invariants in fixture-capture code that never runs on production paths. See §B below. |
 | AST-grep scan for suspiciously short functions (`fn $NAME($$$) -> $RET { $SINGLE }`) | hits are all legitimate | `default()` constructors, `Display::fmt`, simple accessors like `all_numeric_dtypes()` and `is_malformed_probability_input`. None are stubs. |
 
-## Findings (draft beads — to file when DB contention clears)
+## Historical findings (originally drafted as beads — resolution status as of 2026-05-14)
 
-### A. Bead 1 — single einsum parser unwrap
+The April audit drafted three beads "to file when DB contention clears." DB contention is long resolved (1220+ beads filed since). Status of each:
+
+  - **Bead 1 (einsum unwrap):** **RESOLVED ORGANICALLY.** The `.unwrap()` was rewritten to `let Some((prefix, _)) = sub.split_once("...") else { return Err(...) }` at `crates/fnp-ufunc/src/lib.rs:19013`. No bead was filed; the fix landed as part of broader cleanup.
+  - **Bead 2 (fixture unwrap cluster):** **STILL OPEN AS POLICY.** Site count grew from 42 → 115 (see refreshed counts above). Recommendation unchanged: cosmetic, no real-mock signal, low-priority `.expect()` migration. No bead filed because it remains low-impact churn; would be appropriate as a multi-hour batch task only.
+  - **Bead 3 (audit record bead):** **NOT NEEDED.** The audit document itself (this file) is now referenced from README.md, CHANGELOG.md, and the structural lock-in conformance test commentary in `crates/fnp-python/src/lib.rs`. The auditability function is served without a bead pointer.
+
+### A. Bead 1 — single einsum parser unwrap (RESOLVED in 2026-05 cleanup)
 
 - **Title:** `[MOCK] fnp-ufunc einsum split_once unwrap should use expect()`
 - **Type:** `task`
