@@ -1,10 +1,12 @@
-# fnp-* mock-code-finder audit — 2026-04-22
+# fnp-* mock-code-finder audit — 2026-04-22 (refreshed 2026-05-14)
 
 Scanned `fnp-dtype`, `fnp-ndarray`, `fnp-iter`, `fnp-ufunc`, `fnp-linalg`, `fnp-random`, `fnp-io`, `fnp-runtime`, `fnp-conformance`, `fnp-python` — production code only (`#[cfg(test)]` blocks excluded). Audit by CC agent in franken_numpy swarm, invoking the `mock-code-finder` skill.
 
 ## Summary
 
-**Zero real stubs/mocks/TODOs in the numpy implementation.** AGENTS.md characterises remaining gaps as "parity debt, not feature cuts"; this audit confirms that at the code level. The only findings are ~43 cosmetic `.unwrap()` calls in fixture/parser code that should be `.expect("...")` for better panic diagnostics.
+**Still zero real stubs/mocks/TODOs in the numpy implementation** as of the 2026-05-14 refresh. AGENTS.md characterises remaining gaps as "parity debt, not feature cuts"; this audit confirms that at the code level. The headline finding has held through the May 2026 parity wave that took `numpy.__all__` coverage from 43.3% to 100%.
+
+The cosmetic `.unwrap()` inventory has grown with the codebase: from **43 sites** at the original audit (2026-04-22) to **115 sites** in `fnp-conformance/src/**` alone today. Crate growth (304k Rust lines vs 254k in April) explains the increase; all checked sites remain on statically-correct invariants (fixture/parser code, non-empty Vec, matching DType, constant seeds) and not on user-reachable paths.
 
 ## Detection matrix
 
@@ -16,8 +18,8 @@ Scanned `fnp-dtype`, `fnp-ndarray`, `fnp-iter`, `fnp-ufunc`, `fnp-linalg`, `fnp-
 | `sleep()` / `thread::sleep` / fake-work patterns | **0** | One legitimate `std::time::Duration::from_secs(10)` in `crates/fnp-conformance/src/raptorq_artifacts.rs:245` (RaptorQ `block_timeout` config value). |
 | pyo3 / numpy delegation stubs in impl crates | **0** | `fnp-python` delegates by design (it is the parity oracle surface); every other `fnp-*` crate is self-contained Rust. |
 | `numpy.*` references in impl crates | docstrings + 1 legitimate embed | All references are either doc comments explaining numpy semantics, or the embedded-Python snippet in `fnp-io` that reads `numpy.lib.format.open_memmap` for memmap parity. |
-| Production `.unwrap()` — impl crates (excl. `fnp-conformance`) | **1** | See §A below. |
-| Production `.unwrap()` — `fnp-conformance` fixture/oracle code | **42** | See §B below. |
+| Production `.unwrap()` — impl crates (excl. `fnp-conformance`) | **1** at April audit; current scan unchanged (other unwraps now under `#[cfg(test)]`) | See §A below. The einsum site has since been rewritten to `let Some(...) = ... else { return Err(...) }` — no longer an unwrap (see `crates/fnp-ufunc/src/lib.rs:19013`). |
+| Production `.unwrap()` — `fnp-conformance` fixture/oracle code | **42** at April audit; **115** at 2026-05-14 refresh | Most growth is in the diagnostic-oracle and structured-dtype-corpus expansion that landed under the `33vtd` epic. Pattern unchanged: still all on statically-correct invariants in fixture-capture code that never runs on production paths. See §B below. |
 | AST-grep scan for suspiciously short functions (`fn $NAME($$$) -> $RET { $SINGLE }`) | hits are all legitimate | `default()` constructors, `Display::fmt`, simple accessors like `all_numeric_dtypes()` and `is_malformed_probability_input`. None are stubs. |
 
 ## Findings (draft beads — to file when DB contention clears)
