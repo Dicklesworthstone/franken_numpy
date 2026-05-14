@@ -67102,7 +67102,7 @@ mod tests {
 
             // Round-trip identities.
             //   sin(arcsin(x)) == x for x in [-1, 1]
-            //   tan(arctan(x)) == x for x in real line  (numpy.tan, not yet wrapped)
+            //   tan(arctan(x)) == x for x in real line
             //   sinh(arcsinh(x)) == x for x in real line
             //   tanh(arctanh(x)) == x for x in (-1, 1)
             let sin_of_arcsin = module.getattr("sin")?.call1((module
@@ -67113,7 +67113,7 @@ mod tests {
                 .extract()?;
             assert!(ok_rt1, "sin(arcsin(x)) round-trip");
 
-            let tan_of_arctan = numpy
+            let tan_of_arctan = module
                 .getattr("tan")?
                 .call1((module.getattr("arctan")?.call1((real_line.clone(),))?,))?;
             let ok_rt2: bool = allclose.call1((&tan_of_arctan, &real_line))?.extract()?;
