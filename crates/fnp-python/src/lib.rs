@@ -64480,7 +64480,7 @@ mod tests {
             );
             // Both imaginary parts must sum to ~0 (conjugate pair) and
             // be of magnitude 1.
-            let ours_abs = numpy.getattr("abs")?.call1((ours_i.clone(),))?;
+            let ours_abs = module.getattr("abs")?.call1((ours_i.clone(),))?;
             let expected_abs = array_fn.call1((vec![1.0_f64, 1.0],))?;
             let ok_abs: bool = allclose.call1((&ours_abs, &expected_abs))?.extract()?;
             assert!(ok_abs, "roots of x^2+1 must have magnitude 1");
