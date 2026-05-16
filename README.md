@@ -976,7 +976,7 @@ Not yet as a pip-installable package, but the surface coverage is now complete: 
 Oracle tests: we run the same operations with the same inputs in both NumPy and FrankenNumPy, comparing outputs to floating-point tolerance. For RNG, the comparison is bit-exact.
 
 **Why Rust nightly?**
-We use Rust Edition 2024 features. The toolchain is pinned to a specific nightly date for reproducibility.
+We use Rust Edition 2024 features. The toolchain is pinned to `nightly-2026-02-20` for reproducibility — see `rust-toolchain.toml` and the `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`, which is the single source of truth for the CI gates.
 
 **Why zero unsafe code?**
 Memory safety is a core value. All 10 crates declare `#![forbid(unsafe_code)]`. The 300,000+ lines of Rust contain zero unsafe blocks.
