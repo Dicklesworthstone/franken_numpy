@@ -787,7 +787,7 @@ let restored = Generator::from_pickle_payload(payload)?;
 
 `GeneratorPicklePayload` captures the bit-generator state (seed, counter, algorithm tag, schema version) and optionally the `SeedSequence` snapshot for spawn lineage tracking. The `RandomState` wrapper provides legacy compatibility with NumPy's older `numpy.random.RandomState` API.
 
-**Seed material** accepts multiple forms: `None` (random), `U64(seed)`, `U32Words(vec)`, `SeedSequence`, or direct `State { seed, counter }` for exact state restoration. This matches NumPy's flexible seeding interface where `default_rng(12345)`, `default_rng([1, 2, 3])`, and `default_rng(SeedSequence(42))` all work.
+**Seed material** accepts multiple forms: `None` (a deterministic default seed `0xC0DE_CAFE_F00D_BAAD` — see `DEFAULT_RNG_SEED` in `fnp-random`; this is a known divergence from NumPy's OS-entropy default), `U64(seed)`, `U32Words(vec)`, `SeedSequence`, or direct `State { seed, counter }` for exact state restoration. The explicit-seed forms match NumPy's flexible seeding interface — `default_rng(12345)`, `default_rng([1, 2, 3])`, and `default_rng(SeedSequence(42))` all work bit-exactly.
 
 ---
 
