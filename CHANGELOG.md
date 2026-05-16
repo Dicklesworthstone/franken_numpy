@@ -111,7 +111,7 @@ per the existing .gitignore exemption.
 
 ### Workspace metadata + crates.io publish-readiness (May 2026)
 
-12-bead consolidation wave that prepared the workspace for a future
+13-bead consolidation wave that prepared the workspace for a future
 crates.io publish:
 
   - `j65bv` — 9 of 10 crates now inherit `version` / `edition` /
