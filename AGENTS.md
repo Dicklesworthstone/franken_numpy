@@ -45,6 +45,13 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
+## Current state (2026-05-16)
+
+- `fnp_python` covers **100% of `numpy.__all__`** (499/499 names) — see [`audit_numpy_reality.md`](audit_numpy_reality.md) for architecture + coverage progression.
+- Coverage is **structurally locked** by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`; this test fails CI if any name regresses.
+- Workspace runs 6,392 tests across 10 crates (see [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the per-crate breakdown).
+- No real stubs/mocks/TODOs in production code (see [`audit_numpy_mocks.md`](audit_numpy_mocks.md)).
+
 ## Toolchain: Rust & Cargo
 
 We only use **Cargo** in this project, NEVER any other package manager.
