@@ -27,7 +27,7 @@
 | Pad modes | parity_green | constant, edge, reflect, symmetric, wrap, linear_ramp, maximum, minimum, mean, median, empty | — |
 | Financial | parity_green | fv, pv, pmt, ppmt, ipmt, nper, rate, npv, irr, mirr | — |
 | Statistics | parity_green | histogram, histogram_bin_edges, bincount, digitize, percentile, quantile, median, average, corrcoef, cov | — |
-| FFT | parity_green | fft, ifft, fft2, ifft2, fftn, ifftn, rfft, irfft, fftfreq, rfftfreq, fftshift, ifftshift | — |
+| FFT | parity_green | fft, ifft, fft2, ifft2, fftn, ifftn, rfft, irfft, rfft2, irfft2, rfftn, irfftn, hfft, ihfft, fftfreq, rfftfreq, fftshift, ifftshift | — |
 | Gradient/diff | parity_green | gradient, diff, ediff1d, cross, trapezoid, trapz compatibility alias | — |
 | Interpolation | parity_green | interp (1-D linear) | — |
 | Windowing | parity_green | bartlett, blackman, hamming, hanning, kaiser | — |
