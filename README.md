@@ -838,6 +838,7 @@ Every feature family is `parity_green`:
 
 | Feature Family | Status |
 |---|---|
+| `numpy.__all__` Python surface (499/499 names) | parity_green (structurally locked) |
 | Shape/stride/view semantics | parity_green |
 | Broadcasting legality | parity_green |
 | Dtype promotion/casting | parity_green |
