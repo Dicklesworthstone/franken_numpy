@@ -17,8 +17,10 @@ so that readers can quickly find what changed in the subsystem they care about.
 
 **Headline milestone (2026-05-13):** `fnp-python` now covers **100% of
 `numpy.__all__`** (499/499 names), structurally locked by the
-`fnp_python_covers_full_numpy_all` conformance test so any regression
-fails CI. See `audit_numpy_reality.md` for the 43.3% → 100% progression.
+`fnp_python_covers_full_numpy_all` conformance test in
+`crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs` so
+any regression fails CI. See `audit_numpy_reality.md` for the 43.3% →
+100% progression.
 
 `main` branch, no formal release tags yet. After 2026-03-21 the entries
 below summarize work by capability area rather than by date range,
