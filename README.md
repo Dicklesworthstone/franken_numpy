@@ -135,6 +135,16 @@ cargo test --workspace --all-features
 
 **Requirements:** Rust nightly (pinned in `rust-toolchain.toml` to `nightly-2026-02-20`).
 
+**For Python access** (the `fnp_python` module exposing 100% of `numpy.__all__`), build the PyO3 `cdylib` and load the compiled `.so` directly:
+
+```bash
+cargo build -p fnp-python --release --features python-extension
+# The cdylib lands at target/release/libfnp_python.so — rename to
+# fnp_python.so (or .pyd on Windows) and put it on PYTHONPATH.
+```
+
+There is no `pip install frankennumpy` wheel/PyPI flow yet — packaging is the only residual gap (see the FAQ and `audit_numpy_reality.md`).
+
 ---
 
 ## Architecture
