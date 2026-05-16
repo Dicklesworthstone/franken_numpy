@@ -9,6 +9,9 @@ Current policy: no fnp-python diagnostic mismatch is accepted as an intentional
 NumPy divergence. The table below lists active tracked parity debt discovered
 while building the diagnostic parity wave.
 
+**Active rows: 0** (as of 2026-05-16). The two resolution notes below the table
+record beads that previously held entries; they remain for provenance.
+
 | ID | Disposition | Surface | Affected behavior | NumPy scope | Strict behavior | Hardened behavior | Follow-up | Evidence |
 |---|---|---|---|---|---|---|---|---|
 
