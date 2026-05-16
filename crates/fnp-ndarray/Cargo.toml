@@ -13,7 +13,7 @@ description = "Shape, stride, broadcast, and view-legality primitives for Franke
 [dependencies]
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.6", features = ["html_reports"] }
 
 [[bench]]
 name = "criterion_ndarray"
