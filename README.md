@@ -928,6 +928,7 @@ franken_numpy/
 │   ├── fnp-linalg/                    # solve, eig, svd, qr, cholesky, lstsq, etc.
 │   ├── fnp-random/                    # Statistical distributions + generator helpers, PCG64DXSM, bit-exact parity
 │   ├── fnp-io/                        # NPY/NPZ read/write, text I/O, DEFLATE
+│   ├── fnp-python/                    # PyO3 bindings, 100% numpy.__all__ surface
 │   ├── fnp-conformance/               # Oracle capture, differential harness, benchmarks
 │   └── fnp-runtime/                   # Strict/hardened mode, evidence ledger
 ├── legacy_numpy_code/numpy/           # Behavioral oracle (upstream NumPy source)
