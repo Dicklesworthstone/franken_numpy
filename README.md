@@ -370,7 +370,7 @@ Hybrid approach supporting arbitrary input lengths:
 - **Power-of-two lengths:** Cooley-Tukey decimation-in-time (DIT). Recursively splits into even/odd subsequences, applies butterfly operations with twiddle factors `exp(-2*pi*i*k/N)`.
 - **Non-power-of-two lengths:** Bluestein's chirp-Z transform. Rewrites the DFT as a convolution, zero-pads to the next power of two, uses Cooley-Tukey for the convolution, then extracts the result.
 
-All transforms (`fft`, `ifft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `rfft`, `irfft`) build on these two primitives. Multi-dimensional transforms apply 1-D FFTs sequentially along each axis. `fftfreq` and `rfftfreq` compute the frequency bin centers; `fftshift`/`ifftshift` rearrange zero-frequency to the center.
+All transforms — including `fft`, `ifft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `rfft`, `irfft`, `rfft2`, `irfft2`, `rfftn`, `irfftn`, and the Hermitian-symmetric `hfft`/`ihfft` — build on these two primitives. Multi-dimensional transforms apply 1-D FFTs sequentially along each axis. `fftfreq` and `rfftfreq` compute the frequency bin centers; `fftshift`/`ifftshift` rearrange zero-frequency to the center.
 
 ### Signal Processing
 
