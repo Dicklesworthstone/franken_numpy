@@ -134,6 +134,8 @@ crates.io publish:
     match the CI workflow exactly.
   - `62b26` — `release-perf` profile drops redundant `opt-level=3` and
     `strip=false` (already implied by `inherits=release`).
+  - `ypb8t` — `ci.yml` consolidates 8 hard-coded `nightly-2026-02-20`
+    toolchain values to a single `env.RUST_TOOLCHAIN` variable.
 
 ### Pre-2026-03-21 details preserved below
 
