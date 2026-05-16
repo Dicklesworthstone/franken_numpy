@@ -62,10 +62,12 @@
 | fnp-runtime | 131 | Mode split, fail-closed decoding, override-audit gate, risk-aware decision engine, evidence ledger |
 | **Total** | **6,392** | Sum across all 10 crates (live count as of 2026-05-16) |
 
-## Remaining Gaps (Python-specific, low priority)
+## Remaining Gaps (distribution + observability, not surface)
 
-1. Python packaging/distribution is still incomplete: there is no `pip install frankennumpy` wheel/PyPI flow yet, so users still build the `fnp-python` extension locally even though top-level `numpy.__all__` coverage is structurally locked.
-2. Expanded CI matrix for alternate oracle environments and longer-horizon benchmark trend regression
+Surface parity is locked at 100% (`numpy.__all__`, 499/499). What remains is operational, not API:
+
+1. **Python packaging/distribution.** No `pip install frankennumpy` wheel/PyPI flow yet; users still build the `fnp-python` extension locally. This is the difference between "library that exposes the full surface" and "drop-in NumPy replacement" — the surface itself is complete and CI-locked.
+2. **Expanded CI matrix** for alternate oracle environments and longer-horizon benchmark trend regression.
 
 ## Intentional Design Decisions
 
