@@ -87,7 +87,7 @@ now accurate (slightly understated, which is the desired direction).
 
 ## Test Count Verification
 
-| Source | Claimed (2026-05-03) | Actual (2026-05-03) | Actual (2026-05-13 refresh) |
+| Source | Claimed (2026-05-03) | Actual (2026-05-03) | Actual (2026-05-16 refresh) |
 |--------|---------------------:|--------------------:|----------------------------:|
 | FEATURE_PARITY.md fnp-ufunc | 1,797 | — | — |
 | FEATURE_PARITY.md fnp-linalg | 235 | — | — |
