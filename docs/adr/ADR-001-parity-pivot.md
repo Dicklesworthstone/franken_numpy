@@ -2,7 +2,9 @@
 
 ## Status
 
-**PROPOSED** (awaiting user decision)
+**PROPOSED — Partially Superseded by Events** (awaiting user decision on Phase 3 pivot)
+
+Update 2026-05-16: The parity track this ADR considered pivoting *away from* has since reached 100% numpy.__all__ coverage (see audit_numpy_reality.md). The proposal's core question — should the project move on to Phase 3 (FFI / BLAS / Threading) — remains open for decision, but the empirical case has changed: the parity surface that looked stalled in April is now complete and structurally locked.
 
 ---
 
