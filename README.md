@@ -537,6 +537,7 @@ The G8 CI gate (`scripts/e2e/run_raptorq_gate.sh`) enforces that all required bu
 | `rng_reproducibility_drift` | Code change silently alters RNG output sequences | RNG differential + metamorphic + adversarial suites |
 | `linalg_shape_tolerance_abuse` | Ill-conditioned matrix causes wrong result | Linalg differential + metamorphic suites |
 | `linalg_backend_bridge_tampering` | Backend produces wrong result for well-conditioned input | Linalg adversarial + crash signature suites |
+| `linalg_policy_unknown_metadata` | Unknown linalg-policy metadata silently bypasses fail-closed enforcement | Linalg adversarial suite |
 | `corrupt_durable_artifact` | Bit-rot or tampering in stored conformance artifacts | RaptorQ decode proof hash gate |
 | `policy_override_abuse` | Unauthorized bypass of compatibility gates | Runtime policy adversarial + explicit audited override |
 
