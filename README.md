@@ -331,7 +331,7 @@ The conformance crate is the quality backbone with four layers:
 
 2. **Metamorphic testing.** Verifies algebraic identities that must hold regardless of input: `a + b = b + a`, `a * 1 = a`, `sum(a) = sum(sort(a))`, etc. 13 identities tested.
 
-3. **Adversarial fuzzing.** Tests behavior on hostile inputs: NaN-filled arrays, extreme shapes (0-d, empty, very large), denormalized floats, integer overflow, and malformed NPY headers.
+3. **Adversarial fuzzing.** Tests behavior on hostile inputs: NaN-filled arrays, extreme shapes (0-d, empty, very large), denormalized floats, integer overflow, and malformed NPY headers. 21 fuzz targets across 6 crates with 214 curated seed corpus files — see [docs/FUZZING.md](docs/FUZZING.md) for the onboarding guide.
 
 4. **Witness stability.** Hardcoded expected values for every RNG distribution ensure that code changes don't silently alter output sequences. When an algorithm is intentionally changed (e.g., porting Lemire's method), the witness values are regenerated from the new implementation.
 
