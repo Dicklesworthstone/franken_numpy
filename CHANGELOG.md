@@ -144,7 +144,7 @@ The dated capability sections below are unchanged; they cover the
 
 ### Array Operations (`fnp-ufunc`)
 
-The ufunc crate is the largest subsystem (~30,000 lines, 1,249 tests). It grew
+The ufunc crate is the largest subsystem (~60,000 lines, 2,191 tests). It grew
 from a stub on day one to 35 binary operations, 42 unary operations, and 22+
 reductions.
 
