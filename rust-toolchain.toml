@@ -1,3 +1,5 @@
 [toolchain]
-channel = "nightly"
+# Pinned to match .github/workflows/ci.yml (dtolnay/rust-toolchain@master with
+# toolchain=nightly-2026-02-20). Update both files together when bumping.
+channel = "nightly-2026-02-20"
 components = ["rustfmt", "clippy"]
