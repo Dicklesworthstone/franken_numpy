@@ -376,7 +376,7 @@ All transforms — including `fft`, `ifft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `r
 
 - **`convolve(a, v)`:** Direct O(n*m) convolution; defaults to `full` mode (output length n+m-1) and supports `same` and `valid` via `convolve_mode(a, v, mode)`. Flips the kernel and slides it across the input.
 - **`correlate(a, v)`:** Cross-correlation implemented as `convolve(a, v[::-1])`.
-- **`convolve2d` / `correlate2d`:** Full 2-D convolution with output shape `(h1+h2-1, w1+w2-1)`.
+- **`convolve2d` / `correlate2d`:** Full 2-D convolution with output shape `(h1+h2-1, w1+w2-1)`. `correlate2d` is implemented as `convolve2d` with the kernel reversed along both axes (the same flip-then-convolve relationship as the 1-D pair).
 
 ### Numerical Differentiation and Interpolation
 
