@@ -647,7 +647,7 @@ FrankenNumPy implements the full set of NumPy's array construction and manipulat
 | `zeros(shape)` | Array filled with 0.0 |
 | `ones(shape)` | Array filled with 1.0 |
 | `full(shape, val)` | Array filled with arbitrary value |
-| `empty(shape)` | Uninitialized array (filled with 0.0 in practice) |
+| `empty(shape)` | Allocates and zero-fills (safe-Rust forbids uninitialized memory; matches NumPy's observed behavior for freshly allocated arrays) |
 | `eye(n, m, k)` | Identity-like matrix with diagonal offset `k` |
 | `identity(n)` | Square identity matrix (delegates to `eye`) |
 | `diag(v, k)` | 1-D input: construct diagonal matrix. 2-D input: extract diagonal. |
