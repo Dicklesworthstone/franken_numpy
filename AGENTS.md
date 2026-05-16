@@ -51,6 +51,7 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 - Coverage is **structurally locked** by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`; this test fails CI if any name regresses.
 - Workspace runs 6,392 tests across 10 crates (see [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the per-crate breakdown).
 - No real stubs/mocks/TODOs in production code (see [`audit_numpy_mocks.md`](audit_numpy_mocks.md)).
+- Active tracked divergences: 1 row in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) (fnp-random `SeedMaterial::None` uses a fixed default seed instead of OS entropy — bead `franken_numpy-ucc2o`).
 
 ## Toolchain: Rust & Cargo
 
