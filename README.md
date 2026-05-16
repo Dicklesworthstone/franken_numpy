@@ -35,7 +35,7 @@ FrankenNumPy rebuilds NumPy's semantics from scratch in safe Rust with two non-n
 | Stride calculus | Evolved over decades | Clean-room deterministic engine (SCE) |
 | Runtime modes | Single mode | Strict (max compat) + Hardened (safety guards) |
 | Conformance | Self-referential | Differential oracle against real NumPy |
-| Test coverage | pytest suite | Extensive Rust test coverage + 8-gate CI topology |
+| Test coverage | pytest suite | 6,392 Rust tests across 10 crates + 8-gate CI topology |
 
 ---
 
