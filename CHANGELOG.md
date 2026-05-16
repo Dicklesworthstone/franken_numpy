@@ -136,6 +136,10 @@ crates.io publish:
     `strip=false` (already implied by `inherits=release`).
   - `ypb8t` — `ci.yml` consolidates 8 hard-coded `nightly-2026-02-20`
     toolchain values to a single `env.RUST_TOOLCHAIN` variable.
+  - `lmhu7` — `AGENTS.md` gains a "Current state (2026-05-16)" section
+    pointing at audit_numpy_reality / FEATURE_PARITY / audit_numpy_mocks.
+  - `nvtyj` — `docs/FUZZING.md` onboarding doc covering all 6 fuzz
+    crates / 21 targets / 214 curated seed files; linked from README.
 
 ### Pre-2026-03-21 details preserved below
 
