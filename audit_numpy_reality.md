@@ -2,7 +2,7 @@
 
 Comparing the Python-facing surface exposed by `fnp_python` against `numpy.__all__` (NumPy 2.x). Refreshed after the May 2026 parity wave closed the original gap; lock-in is structural via the `fnp_python_covers_full_numpy_all` conformance test, which iterates `numpy.__all__` and fails CI if any name regresses. **This is now a steady-state baseline plus regression-protection note, not a gap list.**
 
-## Vision (from README.md)
+## Vision (from README.md § The Solution, item 1)
 
 > "Absolute behavioral compatibility with legacy NumPy. Not a subset, not 'inspired by.' The full API, edge cases and all."
 
