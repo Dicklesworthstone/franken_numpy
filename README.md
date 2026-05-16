@@ -106,7 +106,7 @@ let perm = rng.permutation(&data)?;             // Fisher-Yates via random_inter
 | **Set operations** | `union1d`, `intersect1d`, `setdiff1d`, `setxor1d`, `isin` |
 | **Linear algebra** | `solve`, `det`, `inv`, `eig`, `svd`, `qr`, `cholesky`, `lstsq`, `norm`, `matrix_rank`, `matrix_power`, `multi_dot`, `pinv`, `cond`, `slogdet`, `funm` |
 | **Random** | Statistical distributions plus permutation/state helpers via PCG64DXSM: `normal`, `uniform`, `binomial`, `poisson`, `gamma`, `beta`, `hypergeometric`, `multinomial`, `dirichlet`, `vonmises`, `zipf`, etc. |
-| **FFT** | `fft`, `ifft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `rfft`, `irfft`, `fftfreq`, `rfftfreq`, `fftshift` |
+| **FFT** | `fft`, `ifft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `rfft`, `irfft`, `rfft2`, `irfft2`, `rfftn`, `irfftn`, `hfft`, `ihfft`, `fftfreq`, `rfftfreq`, `fftshift`, `ifftshift` |
 | **Statistics** | `histogram`, `percentile`, `quantile`, `median`, `average`, `corrcoef`, `cov`, `bincount`, `digitize` |
 | **Polynomials** | Chebyshev, Legendre, Hermite, Laguerre families + power series (33 functions) |
 | **String arrays** | 33 `numpy.char` functions |
