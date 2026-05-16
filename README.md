@@ -624,7 +624,7 @@ Random-generation methods available on `Generator`, grouped by family:
 
 **Discrete:** `binomial`, `geometric`, `hypergeometric`, `logseries`, `negative_binomial`, `poisson`, `zipf`
 
-**Multivariate:** `dirichlet`, `multinomial`, `multivariate_normal`
+**Multivariate:** `dirichlet`, `multinomial`, `multivariate_normal`, `multivariate_hypergeometric`
 
 **Uniform:** `random` (float [0,1)), `uniform` (float [low,high)), `integers` (int [low,high))
 
