@@ -166,6 +166,7 @@ cargo test -p fnp-ufunc
 cargo test -p fnp-linalg
 cargo test -p fnp-random
 cargo test -p fnp-io
+cargo test -p fnp-python
 cargo test -p fnp-conformance
 cargo test -p fnp-runtime
 
