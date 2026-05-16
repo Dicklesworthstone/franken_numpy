@@ -954,7 +954,7 @@ franken_numpy/
 FrankenNumPy prioritizes correctness over speed in this phase, but the architecture is designed for future optimization:
 
 - **Release profile**: `opt-level = 3`, LTO, single codegen unit, stripped symbols.
-- **Contiguous reduction kernel**: Axis reductions on contiguous data avoid per-element index computation. A targeted optimization pass reduced axis-reduction latency by ~56% (p50/p95/p99 deltas of ~90% on contiguous workloads).
+- **Contiguous reduction kernel**: Axis reductions on contiguous data avoid per-element index computation. A targeted optimization pass (commit `d9cfe90`, 2026-02-13) reduced axis-reduction latency by ~56% (p50/p95/p99 deltas of ~90% on contiguous workloads). See `artifacts/optimization/` and `artifacts/baselines/` for the proof bundle.
 - **Broadcast index mapping**: Output-to-source index mapping uses incremental odometer updates instead of full unravel/remap per element.
 - **2x2 fast paths**: Linear algebra has specialized 2x2 implementations that bypass general NxN overhead for the most common small matrix case.
 - **Horner's method**: Polynomial evaluation and Stirling series use Horner's form for numerical stability and minimal multiplications.
