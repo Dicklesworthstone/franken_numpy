@@ -974,7 +974,7 @@ What works and what doesn't:
 - **No `pip install frankennumpy` packaging story yet.** The Python surface is reached today by building the `fnp-python` extension via `maturin develop` or by loading the compiled `.so` directly. FrankenNumPy is still primarily a Rust library; the pyproject.toml + wheel + PyPI publishing flow is future work. *Coverage itself is no longer a limitation*: the `fnp_python` module reaches **100% of `numpy.__all__`** (499/499 names), structurally locked by the `fnp_python_covers_full_numpy_all` conformance test. See [`audit_numpy_reality.md`](audit_numpy_reality.md) for the architecture (engine fast-paths plus numpy passthrough for surfaces with no engine substitute) and the bead trail of the parity wave.
 - **No BLAS/LAPACK backend.** Linear algebra uses pure-Rust implementations (Householder QR, Golub-Kahan SVD, implicit shifted QR for eigenvalues). Competitive with BLAS for small matrices; slower for large ones. Future BLAS linkage is planned.
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats with a trailing dimension of 2. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac-bd)+(ad+bc)i`, but the interleaved representation adds overhead compared to native complex types.
-- **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Adding SVD would require `fnp-linalg` as a dependency of `fnp-random` (currently zero-dependency).
+- **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Adding SVD would require pulling `fnp-linalg` into `fnp-random`'s dependency graph (currently `fnp-random` has no external crates.io dependencies and only depends on `fnp-ndarray` within the workspace).
 - **`multivariate_hypergeometric` uses sequential draws.** NumPy uses the `random_mvhg_marginals` algorithm.
 - **Single-threaded.** All operations are single-threaded. The `asupersync` async runtime integration is optional and used only for conformance pipeline orchestration, not for parallel array computation.
 - **f64 internal representation.** `UFuncArray` stores numeric values as `Vec<f64>` internally for arithmetic. For i64/u64 values > 2^53, an `IntegerSidecar` preserves exact integer values through storage round-trips (`from_storage` / `to_storage`). Arithmetic on large integers still uses f64 approximation.
@@ -999,7 +999,7 @@ Memory safety is a core value. All 10 crates declare `#![forbid(unsafe_code)]`. 
 Performance is not the primary goal in this phase. Correctness and parity come first. That said, the release profile uses `opt-level = 3`, LTO, and single codegen unit.
 
 **Can I use just the RNG crate?**
-Yes. `fnp-random` has zero dependencies and produces bit-exact NumPy-compatible random sequences from a given seed.
+Yes. `fnp-random` pulls zero external crates.io dependencies (only depends on `fnp-ndarray` within the workspace) and produces bit-exact NumPy-compatible random sequences from a given seed.
 
 ---
 
