@@ -12,6 +12,8 @@
 
 `array API -> shape/stride engine (SCE) -> dispatcher -> kernels -> IO`
 
+The `fnp-python` PyO3 bindings sit above this chain as the Python-facing surface, exposing the array API to NumPy callers without altering the canonical Rust layering below it.
+
 ## 3. Crate Map
 
 - `fnp-dtype`: dtype taxonomy, promotion table, cast policy primitives.
