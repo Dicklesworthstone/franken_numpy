@@ -3,6 +3,11 @@ name = "fnp-ufunc"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Elementwise and reduction operations: arithmetic, transcendentals, comparisons, ufuncs, gufuncs."
 
 [dependencies]
