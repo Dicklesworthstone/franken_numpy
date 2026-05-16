@@ -14,7 +14,7 @@ description = "Pure-Rust linear algebra: SVD, QR, Cholesky, eigendecomposition, 
 fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }
 
 [dev-dependencies]
-criterion = "0.6"
+criterion.workspace = true
 
 [[bench]]
 name = "criterion_linalg"

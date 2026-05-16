@@ -14,7 +14,7 @@ description = "NumPy dtype model: scalar types, casting rules, promotion table, 
 half = "2.7.1"
 
 [dev-dependencies]
-criterion = "0.6"
+criterion.workspace = true
 
 [[bench]]
 name = "dtype_ops"

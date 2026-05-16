@@ -14,7 +14,7 @@ description = "NumPy-parity RNG: PCG64DXSM, distributions, oracle-verified deter
 fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }
 
 [dev-dependencies]
-criterion = "0.6"
+criterion.workspace = true
 
 [[bench]]
 name = "random_ops"
