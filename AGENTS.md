@@ -267,6 +267,7 @@ franken_numpy/
 │   ├── fnp-linalg/                    # Linear algebra adapters, scoped solver contracts
 │   ├── fnp-random/                    # Deterministic RNG streams, state schemas
 │   ├── fnp-io/                        # npy/npz parser + writer with hardened boundary checks
+│   ├── fnp-python/                    # PyO3 bindings, 100% numpy.__all__ surface
 │   ├── fnp-conformance/               # Differential harness, adversarial harness, oracle capture, benchmarks, RaptorQ artifacts
 │   └── fnp-runtime/                   # Mode split, fail-closed decoding, override-audit gate, evidence ledger
 ├── legacy_numpy_code/numpy/           # Behavioral oracle (upstream: github.com/numpy/numpy)
