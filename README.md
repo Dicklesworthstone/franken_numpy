@@ -4,7 +4,7 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy - memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **Memory-safe, clean-room NumPy reimplementation in Rust.**<br>
-  Zero unsafe code. Extensive conformance coverage. Bit-exact RNG parity. Every feature family green.
+  Zero unsafe code. 6,392 conformance tests. 100% of `numpy.__all__` (499/499) structurally locked. Bit-exact RNG parity.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202026--02--20-orange)
   ![Tests](https://img.shields.io/badge/tests-6%2C392%20passing-brightgreen)
