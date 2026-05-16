@@ -1,6 +1,6 @@
 # Fuzzing FrankenNumPy
 
-The workspace ships **6 fuzz crates** with **21 fuzz targets** and **214 curated seed corpus files** as of 2026-05-16. Every fuzz crate is excluded from the main workspace (see `Cargo.toml` `[workspace] exclude`) so normal `cargo` commands don't pull in `libfuzzer-sys`.
+The workspace ships **7 fuzz crates** with **27 fuzz targets** and **~200 curated seed corpus files** as of 2026-05-16. Every fuzz crate is excluded from the main workspace (see `Cargo.toml` `[workspace] exclude`) so normal `cargo` commands don't pull in `libfuzzer-sys`.
 
 ## Prerequisites
 
