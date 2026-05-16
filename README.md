@@ -114,7 +114,7 @@ let perm = rng.permutation(&data)?;             // Fisher-Yates via random_inter
 | **I/O** | `load`, `save`, `savez`, `savez_compressed`, `loadtxt`, `savetxt`, `genfromtxt`, `fromfile`, `tofile` |
 | **Masked arrays** | `MaskedArray` with reshape, transpose, concatenate, comparison ops, `filled`, `compressed`, `anom` |
 | **Datetime** | `DatetimeArray`, `TimedeltaArray` with arithmetic, `busday_count`, `busday_offset`, `is_busday` |
-| **Misc** | `einsum`, `tensordot`, `kron`, `dot`, `matmul`, `outer`, `inner`, `vdot`, `convolve`, `correlate`, `gradient`, `diff`, `interp`, `clip`, `where`, `select`, `piecewise` |
+| **Tensor + general ops** | `einsum`, `tensordot`, `kron`, `dot`, `matmul`, `outer`, `inner`, `vdot`, `convolve`, `correlate`, `gradient`, `diff`, `interp`, `clip`, `where`, `select`, `piecewise` |
 
 ---
 
