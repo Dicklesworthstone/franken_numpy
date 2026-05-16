@@ -1,4 +1,4 @@
-# fnp-* reality-check — numpy.__all__ coverage — 2026-05-13
+# fnp-* reality-check — numpy.__all__ coverage — 2026-05-13 (touched 2026-05-16)
 
 Comparing the Python-facing surface exposed by `fnp_python` against `numpy.__all__` (NumPy 2.x). Refreshed after the May 2026 parity wave closed the original gap. **This is now a steady-state baseline plus regression-protection note, not a gap list.**
 
