@@ -970,7 +970,7 @@ What works and what doesn't:
 ## FAQ
 
 **Is this a drop-in replacement for NumPy?**
-Not yet. It reimplements NumPy's semantics in Rust for correctness verification and eventual use as a Rust-native array library. An early `fnp-python` FFI bridge exists and exposes a growing wrapper surface, but it is not a packaged drop-in NumPy replacement yet.
+Not yet as a pip-installable package, but the surface coverage is now complete: `fnp-python` exposes **100% of `numpy.__all__`** (499/499 names), structurally locked by the `fnp_python_covers_full_numpy_all` conformance test so any regression fails CI. What remains for a true drop-in is packaging (wheels, distribution) and broader bit-exact behavioral parity per symbol — not surface gaps.
 
 **How do you verify parity with NumPy?**
 Oracle tests: we run the same operations with the same inputs in both NumPy and FrankenNumPy, comparing outputs to floating-point tolerance. For RNG, the comparison is bit-exact.
