@@ -1,7 +1,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use std::hint::black_box;
 use fnp_dtype::DType;
 use fnp_ufunc::{UFuncArray, add, divide, multiply, subtract};
+use std::hint::black_box;
 
 fn make_array(n: usize) -> UFuncArray {
     let values: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 + 1.0).collect();

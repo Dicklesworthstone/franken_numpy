@@ -14,9 +14,10 @@
 //! performance-critical numerical algorithms.
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use std::hint::black_box;
 use fnp_linalg::{
-    cholesky_nxn, det_nxn, eigvalsh_nxn, inv_nxn, matrix_norm_frobenius, qr_nxn, solve_nxn, svd_nxn};
+    cholesky_nxn, det_nxn, eigvalsh_nxn, inv_nxn, matrix_norm_frobenius, qr_nxn, solve_nxn, svd_nxn,
+};
+use std::hint::black_box;
 
 fn generate_spd_matrix(n: usize) -> Vec<f64> {
     let mut a = vec![0.0; n * n];
