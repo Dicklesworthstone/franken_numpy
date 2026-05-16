@@ -26,6 +26,11 @@ exclude = [
 edition = "2024"
 version = "0.1.0"
 license-file = "LICENSE"
+repository = "https://github.com/Dicklesworthstone/franken_numpy"
+homepage = "https://github.com/Dicklesworthstone/franken_numpy"
+readme = "README.md"
+keywords = ["numpy", "scientific", "numerical", "array", "ndarray"]
+categories = ["science", "mathematics", "data-structures"]
 
 # Profiling profile: optimized + debug symbols + frame pointers for flamegraphs
 [profile.release-perf]
