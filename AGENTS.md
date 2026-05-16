@@ -258,7 +258,7 @@ Layering principles:
 
 ```
 franken_numpy/
-├── Cargo.toml                         # Workspace root
+├── Cargo.toml                         # Workspace root (10 crates)
 ├── crates/
 │   ├── fnp-dtype/                     # Dtype taxonomy, promotion table, cast policy primitives
 │   ├── fnp-ndarray/                   # Shape legality, stride calculus, reshape/broadcast contracts
