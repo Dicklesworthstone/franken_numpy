@@ -3,6 +3,7 @@ name = "fnp-iter"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
+description = "NumPy-compatible iteration primitives: nditer, flatiter, ndindex, and stride-aware planners."
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }

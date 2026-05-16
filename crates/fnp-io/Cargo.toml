@@ -3,6 +3,7 @@ name = "fnp-io"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
+description = "NumPy file format I/O: NPY/NPZ load and save, text I/O, with bounded resource consumption."
 
 [dependencies]
 bytemuck = "1.25.0"

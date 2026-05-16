@@ -3,6 +3,7 @@ name = "fnp-linalg"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
+description = "Pure-Rust linear algebra: SVD, QR, Cholesky, eigendecomposition, solvers, norms."
 
 [dependencies]
 fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }

@@ -3,6 +3,7 @@ name = "fnp-runtime"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
+description = "Dual-mode runtime: strict and hardened policy, evidence ledger, decision audit."
 
 [features]
 default = []

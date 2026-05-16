@@ -3,6 +3,7 @@ name = "fnp-python"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
+description = "PyO3 module exposing the full numpy.__all__ surface for drop-in fnp_python use."
 
 [lib]
 name = "fnp_python"

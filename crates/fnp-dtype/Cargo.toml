@@ -3,6 +3,7 @@ name = "fnp-dtype"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
+description = "NumPy dtype model: scalar types, casting rules, promotion table, and parser for FrankenNumPy."
 
 [dependencies]
 half = "2.7.1"

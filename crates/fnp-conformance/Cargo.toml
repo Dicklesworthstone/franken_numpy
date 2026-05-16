@@ -3,6 +3,7 @@ name = "fnp-conformance"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
+description = "Differential conformance harness: numpy oracle capture, fixtures, drift detection."
 
 [dependencies]
 fnp-dtype = { path = "../fnp-dtype", version = "0.1.0" }
