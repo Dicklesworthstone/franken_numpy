@@ -7,7 +7,7 @@
   Zero unsafe code. Extensive conformance coverage. Bit-exact RNG parity. Every feature family green.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202024-orange)
-  ![Tests](https://img.shields.io/badge/tests-extensive%20coverage-brightgreen)
+  ![Tests](https://img.shields.io/badge/tests-6%2C392%20passing-brightgreen)
   ![Unsafe](https://img.shields.io/badge/unsafe-0%20blocks-blue)
   ![License](https://img.shields.io/badge/license-MIT-green)
 </div>
