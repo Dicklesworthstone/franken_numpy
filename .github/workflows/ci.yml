@@ -1,5 +1,8 @@
 name: CI Gate Topology
 
+# main is the canonical branch; master is a passive mirror (per AGENTS.md
+# RULE 0). CI runs on main only; the mirror push from main updates master
+# without re-triggering CI.
 on:
   push:
     branches: [main]
