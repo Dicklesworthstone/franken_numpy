@@ -232,4 +232,4 @@ _None — all 5 target deps updated cleanly. Circuit breakers never tripped._
 
 ### Validation
 - `cargo check --workspace --all-targets` — Pass
-- `cargo test --workspace` — Pass (All 1600+ tests green)
+- `cargo test --workspace` — Pass (All tests green at time of writing (workspace total has since grown to 6,392 as of 2026-05-16))
