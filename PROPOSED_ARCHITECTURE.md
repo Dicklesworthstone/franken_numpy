@@ -21,6 +21,7 @@
 - `fnp-linalg`: linear algebra adapters and scoped solver contracts.
 - `fnp-random`: deterministic RNG streams and state schemas.
 - `fnp-io`: npy/npz parser + writer with hardened boundary checks.
+- `fnp-python`: PyO3 bindings exposing 100% of `numpy.__all__` (499/499 names) with structural CI lock-in.
 - `fnp-conformance`: differential harness, adversarial policy harness, security-contract validator, oracle capture, benchmark + RaptorQ artifact tooling.
 - `fnp-runtime`: mode split, fail-closed wire decoding, explicit override-audit gate, decision/evidence ledger, policy gate orchestration.
 
