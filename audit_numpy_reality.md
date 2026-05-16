@@ -82,4 +82,4 @@ PY
 ## Notes
 
 - The lock-in conformance test runs against the *live* numpy version on the build host, so the parity guarantee holds as numpy evolves. New names that numpy adds to `__all__` will fail the test until they are explicitly added to the re-export block in `crates/fnp-python/src/lib.rs`.
-- Prior version of this document (2026-04-22) recorded 43.3% coverage and proposed a "close the gap" multi-session program. That program is now complete; the bead trail is in `.beads/issues.jsonl` (search for `franken_numpy-vek3z`, `ghsx4`, `bntjh`, `tmg0c`, `4t0ql`, `xdxvn`, `r1xmi`, `cp8xw`, `t3eb4`, `dm9bn`).
+- Prior version of this document (2026-04-22) recorded 43.3% coverage and proposed a "close the gap" multi-session program. That program is now complete; the bead trail is in `.beads/issues.jsonl` (search for `franken_numpy-vek3z`, `ghsx4`, `bntjh`, `tmg0c`, `4t0ql`, `xdxvn`, `r1xmi`, `cp8xw`, `t3eb4`, `dm9bn`, `0xpje`).
