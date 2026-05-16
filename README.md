@@ -794,6 +794,7 @@ Current per-crate counts move over time; see `FEATURE_PARITY.md` for the live in
 | `fnp-conformance` | Differential parity, metamorphic identities, adversarial fuzzing, witness stability, and matmul conformance |
 | `fnp-ndarray` | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides, F-order, and edge cases |
 | `fnp-iter` | Transfer-loop selection, NDIter traversal/broadcast/overlap contracts, flatiter indexing/assignment, and enumeration helpers |
+| `fnp-python` | PyO3 surface parity across the 499 names in `numpy.__all__`, plus the `fnp_python_covers_full_numpy_all` structural lock-in test |
 | `fnp-runtime` | Mode split, fail-closed decoding, override-audit gates, risk-aware decisions, and evidence-ledger behavior |
 
 ### Oracle Test Strategy
