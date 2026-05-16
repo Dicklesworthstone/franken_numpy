@@ -109,6 +109,32 @@ fuzz targets**. Bead IDs:
 The seed corpora are committed under each `fuzz/corpus/<target>/seed_*`
 per the existing .gitignore exemption.
 
+### Workspace metadata + crates.io publish-readiness (May 2026)
+
+12-bead consolidation wave that prepared the workspace for a future
+crates.io publish:
+
+  - `j65bv` — 9 of 10 crates now inherit `version` / `edition` /
+    `license-file` from `[workspace.package]` (the tenth, fnp-python,
+    already did).
+  - `dqoz0` — every crate has a per-crate `description` field.
+  - `7k1h3` — `[workspace.package]` gained `repository`, `homepage`,
+    `readme`, `keywords`, `categories`.
+  - `gto3b` — each crate wires the 5 new fields via `.workspace = true`.
+  - `dcjb7` + `voj6z` — criterion versions reduced from 3 (0.5/0.6/0.8.2)
+    to 1 (0.6), plus the `criterion::black_box` → `std::hint::black_box`
+    deprecation cleanup. -144 lines from Cargo.lock as the criterion-plot
+    chain dropped out.
+  - `0ovft` / `fowyr` / `ndzpa` — `serde_json`, `serde`, and `criterion`
+    promoted to `[workspace.dependencies]`; each crate references via
+    `.workspace = true`.
+  - `ekzhv` — Cargo.toml profile comment moved back to its rightful home
+    after the workspace.dependencies block was inserted.
+  - `ihevd` — `rust-toolchain.toml` pinned to `nightly-2026-02-20` to
+    match the CI workflow exactly.
+  - `62b26` — `release-perf` profile drops redundant `opt-level=3` and
+    `strip=false` (already implied by `inherits=release`).
+
 ### Pre-2026-03-21 details preserved below
 
 The dated capability sections below are unchanged; they cover the
