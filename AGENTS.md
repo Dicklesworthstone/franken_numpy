@@ -207,6 +207,9 @@ cargo run -p fnp-conformance --bin run_test_contract_gate
 cargo run -p fnp-conformance --bin run_workflow_scenario_gate
 cargo run -p fnp-conformance --bin run_divergence_ledger -- --fail-on-missing
 cargo run -p fnp-conformance --bin run_fnp_python_api_coverage -- --fail-on-missing
+cargo run -p fnp-conformance --bin run_diagnostic_oracle
+cargo run -p fnp-conformance --bin run_oracle_drift_matrix
+cargo run -p fnp-conformance --bin run_io_diagnostics
 cargo run -p fnp-conformance --bin validate_phase2c_stale_claims
 scripts/e2e/run_performance_budget_gate.sh
 scripts/e2e/run_security_policy_gate.sh
