@@ -69,11 +69,11 @@ The April audit drafted three beads "to file when DB contention clears." DB cont
 ## Detection commands (reproducible)
 
 ```bash
-# Keyword scan
+# Keyword scan (covers all 10 fnp-* crates including fnp-python)
 rg -n --type rust "TODO|FIXME|HACK|XXX|STUB|PLACEHOLDER|MOCK|DUMMY|FAKE" \
   crates/fnp-dtype crates/fnp-ndarray crates/fnp-iter crates/fnp-ufunc \
   crates/fnp-linalg crates/fnp-random crates/fnp-io crates/fnp-conformance \
-  crates/fnp-runtime
+  crates/fnp-runtime crates/fnp-python
 
 # Unimplemented macros
 rg -n --type rust "unimplemented!|todo!\(|panic!\(\"not implemented" crates/fnp-*/src
@@ -85,9 +85,9 @@ for f in crates/fnp-*/src/*.rs crates/fnp-*/src/bin/*.rs; do
   [ "$prod_unwraps" -gt 0 ] && echo "$prod_unwraps $f"
 done | sort -rn
 
-# Structural scan
+# Structural scan (all 10 fnp-* impl crates including fnp-python + fnp-conformance)
 ast-grep run -l Rust -p 'fn $NAME($$$) -> $RET { $SINGLE }' --json \
-  | jq -r '.[] | select(.file | test("crates/fnp-(dtype|ndarray|iter|ufunc|linalg|random|io|runtime)/src")) | "\(.file):\(.range.start.line)"'
+  | jq -r '.[] | select(.file | test("crates/fnp-(dtype|ndarray|iter|ufunc|linalg|random|io|runtime|python|conformance)/src")) | "\(.file):\(.range.start.line)"'
 ```
 
 ## Notes
