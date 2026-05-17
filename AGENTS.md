@@ -211,6 +211,7 @@ cargo run -p fnp-conformance --bin run_diagnostic_oracle
 cargo run -p fnp-conformance --bin run_oracle_drift_matrix
 cargo run -p fnp-conformance --bin run_io_diagnostics
 cargo run -p fnp-conformance --bin validate_phase2c_stale_claims
+scripts/e2e/run_ci_gate_topology.sh        # runs all 8 gates G1-G8 in order + closing P2C-001..009 packet sweep
 scripts/e2e/run_performance_budget_gate.sh
 scripts/e2e/run_security_policy_gate.sh
 scripts/e2e/run_test_contract_gate.sh
