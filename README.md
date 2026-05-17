@@ -1930,7 +1930,7 @@ The workspace ships **7 fuzz crates** with **27 fuzz targets** and **~200 curate
 ```bash
 cargo install cargo-fuzz
 cd crates/fnp-io/fuzz
-cargo +nightly fuzz run fuzz_npy -- -max_total_time=300
+cargo +nightly-2026-02-20 fuzz run fuzz_npy -- -max_total_time=300
 ```
 
 ---
