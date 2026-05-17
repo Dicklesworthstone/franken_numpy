@@ -14,7 +14,7 @@ The measuring stick is `numpy.__all__` — the 499 names NumPy publishes as its 
 - `numpy.__all__` ∩ `fnp_python`: **499** (**100.0%** of numpy's top-level surface is reachable as `fnp_python.<name>`)
 - `numpy.__all__` \ `fnp_python` (gap): **0** (0%)
 - Names in `fnp_python` that are NOT in `numpy.__all__`: ~130 internal helpers and flat-namespace aliases (`linalg_*`, `ma_*`, etc.) used by conformance tests; not user-facing surface. The live count is reported by the API coverage gate (`exports / covered / excluded / missing`) — at the 2026-05-13 snapshot: `exports=633`, `covered=599`, `excluded=34`, `missing=0`.
-- Underlying Rust surface (orthogonal to the Python surface): **~1,470 `pub fn` declarations** across `crates/fnp-*/src/lib.rs` (verified 2026-05-16 via `rg -c 'pub fn ' crates/*/src/lib.rs`). The Python surface is a curated re-exposure of this Rust surface plus identity-equal numpy fallbacks for the remaining `numpy.__all__` names.
+- Underlying Rust surface (orthogonal to the Python surface): **1,575 `pub fn` declarations** across the library code of all 10 crates (verified 2026-05-16 via `find crates/*/src -name '*.rs' -not -path '*/bin/*' -exec grep -hE '^\s*pub fn ' {} + | wc -l`). An earlier scope here (`rg -c 'pub fn ' crates/*/src/lib.rs`) reported "~1,470" but that only walks each crate's `lib.rs` and skips 17 sibling `.rs` files in `crates/fnp-conformance/src/` (diagnostic_oracle, workflow_scenarios, contract_schema, ...) plus `crates/fnp-random/src/ziggurat.rs`. The Python surface is a curated re-exposure of this Rust surface plus identity-equal numpy fallbacks for the remaining `numpy.__all__` names.
 
 ## Coverage progression
 
