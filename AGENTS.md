@@ -276,7 +276,7 @@ franken_numpy/
 │   ├── fnp-dtype/                     # Dtype taxonomy, promotion table, cast policy primitives
 │   ├── fnp-ndarray/                   # Shape legality, stride calculus, reshape/broadcast contracts
 │   ├── fnp-iter/                      # Transfer semantics, overlap-safe iteration, Nditer state machine
-│   ├── fnp-ufunc/                     # 800+ array operations, reductions, einsum, masked arrays
+│   ├── fnp-ufunc/                     # 850+ array operations, reductions, einsum, masked arrays
 │   ├── fnp-linalg/                    # solve, eig, svd, qr, cholesky, lstsq, batched, complex
 │   ├── fnp-random/                    # 5 bit generators, distributions, PCG64DXSM bit-exact parity
 │   ├── fnp-io/                        # NPY/NPZ read/write, text I/O, DEFLATE, memmap
