@@ -26,13 +26,13 @@ The fuzz crates require nightly Rust pinned to `nightly-2026-02-20` (matching `r
 
 ```bash
 cd crates/fnp-io/fuzz
-cargo +nightly fuzz run fuzz_npy
+cargo +nightly-2026-02-20 fuzz run fuzz_npy
 ```
 
-Add `-- -max_total_time=300` to bound the run (5 minutes). Crashes land in `artifacts/<target>/crash-*` and can be reproduced via:
+Use the explicit `+nightly-2026-02-20` (the workspace pin) rather than bare `+nightly`, which resolves to the latest installed nightly and can drift from CI. Add `-- -max_total_time=300` to bound the run (5 minutes). Crashes land in `artifacts/<target>/crash-*` and can be reproduced via:
 
 ```bash
-cargo +nightly fuzz run fuzz_npy artifacts/fuzz_npy/crash-<hash>
+cargo +nightly-2026-02-20 fuzz run fuzz_npy artifacts/fuzz_npy/crash-<hash>
 ```
 
 ## Seed corpus convention
