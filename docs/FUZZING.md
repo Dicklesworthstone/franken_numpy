@@ -8,7 +8,7 @@ The workspace ships **7 fuzz crates** with **27 fuzz targets** and **200 curated
 cargo install cargo-fuzz
 ```
 
-The fuzz crates require nightly Rust (matching `rust-toolchain.toml` / `env.RUST_TOOLCHAIN` in CI). The host workspace already pins nightly, so no extra setup is needed.
+The fuzz crates require nightly Rust pinned to `nightly-2026-02-20` (matching `rust-toolchain.toml` / `env.RUST_TOOLCHAIN` in `.github/workflows/ci.yml`). The host workspace already pins it, so no extra setup is needed — but if you see a `libfuzzer-sys` compile error after changing toolchains, re-pin and rebuild.
 
 ## Fuzz crate inventory
 
