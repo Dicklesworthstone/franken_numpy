@@ -57,18 +57,20 @@ This audit measures Python-surface parity. It does not measure:
 ## Reproduction
 
 ```bash
+# Build the cdylib (respects $CARGO_TARGET_DIR; otherwise defaults to target/):
+cargo build -p fnp-python --release --features python-extension
+
 python3 - <<'PY'
-import importlib.util, os
+import importlib.util, glob, os
 import numpy as np
-candidates = []
-for d in ('/data/projects/.cargo-target-fnp-pinkdesert-verify/debug/deps',
-          '/data/projects/.cargo-target-fnp-cc-array-api/debug/deps'):
-    if not os.path.isdir(d):
-        continue
-    for f in os.listdir(d):
-        if f.startswith('libfnp_python') and f.endswith('.so'):
-            candidates.append(os.path.join(d, f))
-candidates.sort()
+target = os.environ.get('CARGO_TARGET_DIR', 'target')
+# Match the cdylib across platforms (.so on Linux, .dylib on macOS, .pyd on Windows).
+candidates = sorted(
+    glob.glob(f'{target}/release/deps/libfnp_python*.so')
+    + glob.glob(f'{target}/release/deps/libfnp_python*.dylib')
+    + glob.glob(f'{target}/release/fnp_python.pyd')
+)
+assert candidates, f'No fnp_python cdylib found under {target}/release/; build first.'
 spec = importlib.util.spec_from_file_location('fnp_python', candidates[-1])
 fnp = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fnp)
