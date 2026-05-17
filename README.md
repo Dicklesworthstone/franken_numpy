@@ -98,8 +98,10 @@ use fnp_ufunc::{BinaryOp, UFuncArray};
 
 // Build an array and z-score normalize it.
 let data = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64)?;
-let mean = data.reduce_mean(None, false)?;
-let std  = data.reduce_std(None, false, 0)?;
+let mean = data.reduce_mean(None, false)?;       // shape [] (0-dim scalar)
+let std  = data.reduce_std(None, false, 0)?;     // shape [] (0-dim scalar)
+// NumPy auto-broadcasts scalars; the explicit Rust API requires
+// broadcasting the 0-dim mean/std to [5] before elementwise ops.
 let z = data
     .elementwise_binary(&mean.broadcast_to(&[5])?, BinaryOp::Sub)?
     .elementwise_binary(&std .broadcast_to(&[5])?, BinaryOp::Div)?;
