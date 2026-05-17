@@ -1824,7 +1824,7 @@ FrankenNumPy is profile-driven: every optimization is paired with a baseline, a 
 - **Contiguous reduction kernel.** Axis reductions on contiguous data avoid per-element index computation. A targeted optimization pass (commit `d9cfe90`, 2026-02-13) reduced axis-reduction latency by ~56% (p50/p95/p99 deltas of ~90% on contiguous workloads). See `artifacts/optimization/` and `artifacts/baselines/` for the proof bundle.
 - **Broadcast index mapping.** Output-to-source index mapping uses an incremental odometer instead of full unravel/remap per element.
 - **2×2 fast paths.** Linear algebra has specialized 2×2 implementations that bypass general NxN overhead for the most common small-matrix case.
-- **Horner's method.** Polynomial evaluation and Stirling series use Horner form for numerical stability and minimal multiplications.
+- **Horner's method.** Polynomial evaluation uses Horner form for numerical stability and minimal multiplications. The Stirling-series helpers in `fnp-random` (`logfactorial` for `k > 125` and the binomial BTPE acceptance path) use the same evaluation style.
 - **Ziggurat sampling.** Normal and exponential random variates use Ziggurat (same as NumPy), which accepts ~97% of samples on the first try.
 
 The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencies for ufunc and reduction sentinel workloads and rejects regressions. The cross-engine benchmark (`run_cross_engine_benchmark`) compares directly against NumPy.
