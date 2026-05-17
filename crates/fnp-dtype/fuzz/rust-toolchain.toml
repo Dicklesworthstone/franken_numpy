@@ -1,0 +1,8 @@
+[toolchain]
+# Mirrors the workspace pin at /rust-toolchain.toml. Fuzz crates are excluded
+# from the parent workspace ([workspace] exclude in /Cargo.toml), so the parent
+# pin does not reach them; this file makes `cargo fuzz run` use the right
+# nightly without requiring an explicit `+nightly-2026-02-20` on every call.
+# Bump together with /rust-toolchain.toml.
+channel = "nightly-2026-02-20"
+components = ["rustfmt", "clippy"]
