@@ -141,8 +141,11 @@ cargo test --workspace --all-features
 
 ```bash
 cargo build -p fnp-python --release --features python-extension
-# The cdylib lands at target/release/libfnp_python.so — rename to
-# fnp_python.so (or .pyd on Windows) and put it on PYTHONPATH.
+# Cdylib extension varies by platform:
+#   Linux:   target/release/libfnp_python.so    → rename to fnp_python.so
+#   macOS:   target/release/libfnp_python.dylib → rename to fnp_python.so
+#   Windows: target/release/fnp_python.dll      → rename to fnp_python.pyd
+# Put the renamed file on PYTHONPATH.
 ```
 
 There is no `pip install frankennumpy` wheel/PyPI flow yet — packaging is the only residual gap (see the FAQ and `audit_numpy_reality.md`).
