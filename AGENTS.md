@@ -49,7 +49,7 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 - `fnp_python` covers **100% of `numpy.__all__`** (499/499 names) — see [`audit_numpy_reality.md`](audit_numpy_reality.md) for architecture + coverage progression.
 - Coverage is **structurally locked** by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`; this test fails CI if any name regresses.
-- Workspace runs 6,392 tests across 10 crates (see [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the per-crate breakdown).
+- Workspace runs 6,392 tests across 10 crates (see [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the per-crate breakdown). Underlying Rust surface: 1,575 `pub fn` declarations across `crates/*/src/**/*.rs`.
 - Bead tracker stands at ~1,337 closed beads as of 2026-05-16; live count via `br list --status=closed --limit 10000 --json | jq length`.
 - No real stubs/mocks/TODOs in production code (see [`audit_numpy_mocks.md`](audit_numpy_mocks.md)).
 - Active tracked divergences: 1 row in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) (fnp-random `SeedMaterial::None` uses a fixed default seed instead of OS entropy — bead `franken_numpy-ucc2o`).
