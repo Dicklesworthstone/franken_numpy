@@ -1,5 +1,7 @@
 # PROPOSED_ARCHITECTURE
 
+> **Status note (2026-05-16):** This document is the early architecture plan written when the codebase was at the FNP-P2C-005 slice (Section 6 below still describes that snapshot). The plan's principles, layering, SCE contract, runtime mode matrix, and optimization governance remain accurate. The "Current implementation" line items in §6 are now severely understated — fnp-ufunc has grown from 4 elementwise ops + 1 reduction to 35 binary / 43 unary / 30+ reduction methods + FFT + einsum + masked / string / datetime arrays + polynomials. For the live per-crate inventory see README's "Workspace and Crate Map" section, and for the 100% numpy.__all__ surface achievement see `audit_numpy_reality.md`.
+
 ## 1. Architecture Principles
 
 1. Spec-first implementation from extraction packets.
