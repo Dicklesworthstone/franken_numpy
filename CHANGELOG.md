@@ -440,9 +440,14 @@ SFC64) plus an internal `DeterministicRng` for tests, and the full
   [ee17681](https://github.com/Dicklesworthstone/franken_numpy/commit/ee1768141ce11f8a23228e4a351efef539a04503),
   [509055b](https://github.com/Dicklesworthstone/franken_numpy/commit/509055b1ed331590db3c21ab86ca7344a6dd42ce)
 - Add SFC64 small-fast-counting bit generator with NumPy-parity output
-  and `SeedSequence` seeding, bringing the production bit-generator
-  count to 5 (PCG64, PCG64DXSM, MT19937, Philox, SFC64). The set is
+  and `SeedSequence` seeding, completing the production bit-generator
+  set to 5 (PCG64, PCG64DXSM, MT19937, Philox, SFC64). Landed in the
+  same commit as the Philox addition above (2026-03-21). The set is
   enumerated under `pub enum BitGeneratorKind` in `crates/fnp-random/src/lib.rs`.
+  Pickle state-restore for Philox/SFC64 hardened to require all state
+  entries present (2026-03-25).
+  [ee17681](https://github.com/Dicklesworthstone/franken_numpy/commit/ee1768141ce11f8a23228e4a351efef539a04503),
+  [2d358b2](https://github.com/Dicklesworthstone/franken_numpy/commit/2d358b2de785c7a1e1f90f61bfe47157f6e16cbf)
 - Add RNG state serialization (`get_state` / `set_state`) and harden `.npy`
   header parsing against allocation bombs.
   [9894042](https://github.com/Dicklesworthstone/franken_numpy/commit/989404292d75fc5c103eb0f1ae08b99488c84b94)
