@@ -2166,7 +2166,7 @@ FrankenNumPy stands on the shoulders of some specific design lineages worth ackn
 | Project | What we learned from it |
 |---|---|
 | **[NumPy](https://github.com/numpy/numpy)** itself | The behavioral specification we're targeting, and the source of every algorithm correspondence in the [Algorithm References](#algorithm-references-and-citations) section. NumPy is also the oracle in every differential-conformance run: there is no FrankenNumPy without a real NumPy on the build host. |
-| **[NEP 19 — RNG Policy](https://numpy.org/neps/nep-0019-rng-policy.html)** (Melissa O'Neill et al.) | The `SeedSequence` design. The hierarchical `spawn(n)` contract, the entropy-pool mixing, the schema-versioned state payload all came from NEP 19. We re-implement; we do not re-design. |
+| **[NEP 19 — RNG Policy](https://numpy.org/neps/nep-0019-rng-policy.html)** (Robert Kern, 2018) | The stream-stability policy that made it acceptable to introduce new bit generators (PCG64, PCG64DXSM, Philox, SFC64) alongside MT19937 without surprising existing users. The `SeedSequence` API NumPy ships alongside the NEP is itself derived from Melissa O'Neill's C++11 `std::seed_seq` (per the copyright header on `numpy/random/bit_generator.pyx`); we re-implement that design directly from the upstream source: hierarchical `spawn(n)`, entropy-pool mixing, schema-versioned state payload. |
 | **[NEP 1 — A Simple File Format for NumPy Arrays](https://numpy.org/neps/nep-0001-npy-format.html)** (Robert Kern) | The `.npy` binary format. Bit-exact round-trip is our promise; the spec is the contract. NPY 2.0 extends NPY 1.0 to support headers larger than 65,535 bytes. |
 | **[CPython](https://github.com/python/cpython)** | Source of truth for Python-level behavior wrappers like `numpy.testing` and the exception hierarchy that `fnp_python.exceptions` mirrors. |
 | **[ndarray](https://github.com/rust-ndarray/ndarray)** (bluss et al.) | The "what does idiomatic Rust N-D arrays look like?" reference. `ndarray` made different design choices (statically-known dimensionality via `Ix`, BLAS via `ndarray-linalg`, generic over element types). We departed from them to target NumPy semantics. |
@@ -2190,7 +2190,7 @@ FrankenNumPy is a clean-room port. We re-implemented the algorithms by reading t
 - **Mersenne Twister (MT19937):** M. Matsumoto and T. Nishimura, *Mersenne Twister: A 623-dimensionally equidistributed uniform pseudo-random number generator*, ACM TOMACS 8(1), 1998.
 - **Philox:** J. K. Salmon et al., *Parallel Random Numbers: As Easy as 1, 2, 3*, SC'11.
 - **SFC64:** C. Doty-Humphrey, *PractRand*, 2014 (Small Fast Counting generator).
-- **SeedSequence:** M. E. O'Neill, design described in NumPy NEP 19 *Random Number Generator Policy*, 2018.
+- **SeedSequence:** adapted from M. E. O'Neill's C++11 `std::seed_seq` (2015); shipped in NumPy's `bit_generator.pyx` alongside the broader RNG-policy framework formalized in NEP 19 (R. Kern, 2018).
 - **Lemire bounded integers:** D. Lemire, *Fast Random Integer Generation in an Interval*, ACM TOMS 45(1), 2019.
 - **Ziggurat sampling:** G. Marsaglia and W. Tsang, *The Ziggurat Method for Generating Random Variables*, J. Stat. Software 5(8), 2000.
 - **BTPE binomial:** V. Kachitvichyanukul and B. W. Schmeiser, *Binomial random variate generation*, CACM 31(2), 1988.
