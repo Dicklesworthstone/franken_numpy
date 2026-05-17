@@ -1229,7 +1229,7 @@ The general rule: **arithmetic propagates NaN, reductions propagate NaN unless t
 
 ### Per-dtype storage cost
 
-The 14 numeric / string variants of `pub enum ArrayStorage` (in `crates/fnp-dtype/src/lib.rs`):
+The 16 variants of `pub enum ArrayStorage` (in `crates/fnp-dtype/src/lib.rs`); the table below groups the signed/unsigned integer pairs into one row each for brevity:
 
 | DType | `ArrayStorage` variant | Bytes per element |
 |---|---|---|
