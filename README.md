@@ -2143,6 +2143,20 @@ If you want to understand how FrankenNumPy works at the source level, here are t
 
 The largest crate (`fnp-ufunc` at 59k lines) sits in one file because the ufunc dispatch table is centralized; splitting it would scatter the dispatcher and obscure the structure.
 
+**Finding a function fast.** With 1,500+ public functions across the workspace, ripgrep is the navigation tool of choice:
+
+```bash
+# Find a pub fn by name (across all crates):
+rg -n 'pub fn <name>' crates/
+
+# Find the impl block on UFuncArray that defines a method:
+rg -nB1 -A1 'impl UFuncArray' crates/fnp-ufunc/
+
+# Find every test exercising a name:
+rg -n 'fn .*<name>' crates/*/tests/ crates/*/src/lib.rs
+```
+
+
 ---
 
 ## Inspirations and Prior Art
