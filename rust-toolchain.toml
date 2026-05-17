@@ -1,5 +1,6 @@
 [toolchain]
-# Pinned to match .github/workflows/ci.yml env.RUST_TOOLCHAIN.
-# Bump in both files together when updating the workspace nightly.
+# Pinned to match .github/workflows/ci.yml env.RUST_TOOLCHAIN (line 24).
+# README, AGENTS.md, and docs/FUZZING.md all quote the channel string;
+# bump in all four locations together when updating the workspace nightly.
 channel = "nightly-2026-02-20"
 components = ["rustfmt", "clippy"]
