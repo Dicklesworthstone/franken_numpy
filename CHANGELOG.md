@@ -411,8 +411,10 @@ methods, batch operations, and complex number support.
 
 ### Random Number Generation (`fnp-random`)
 
-Bit-exact parity with NumPy across 40 oracle-verified distributions, three bit
-generators, and the full `SeedSequence` hierarchy.
+Bit-exact parity with NumPy across 40+ oracle-verified distributions,
+**five production bit generators** (PCG64, PCG64DXSM, MT19937, Philox,
+SFC64) plus an internal `DeterministicRng` for tests, and the full
+`SeedSequence` hierarchy.
 
 #### Bit Generators
 
@@ -432,6 +434,10 @@ generators, and the full `SeedSequence` hierarchy.
   and deserialization (2026-03-21).
   [ee17681](https://github.com/Dicklesworthstone/franken_numpy/commit/ee1768141ce11f8a23228e4a351efef539a04503),
   [509055b](https://github.com/Dicklesworthstone/franken_numpy/commit/509055b1ed331590db3c21ab86ca7344a6dd42ce)
+- Add SFC64 small-fast-counting bit generator with NumPy-parity output
+  and `SeedSequence` seeding, bringing the production bit-generator
+  count to 5 (PCG64, PCG64DXSM, MT19937, Philox, SFC64). The set is
+  enumerated under `pub enum BitGeneratorKind` in `crates/fnp-random/src/lib.rs`.
 - Add RNG state serialization (`get_state` / `set_state`) and harden `.npy`
   header parsing against allocation bombs.
   [9894042](https://github.com/Dicklesworthstone/franken_numpy/commit/989404292d75fc5c103eb0f1ae08b99488c84b94)
