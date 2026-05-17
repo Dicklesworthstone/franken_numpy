@@ -71,10 +71,12 @@ The April audit drafted three beads "to file when DB contention clears." DB cont
 ## Detection commands (reproducible)
 
 ```bash
-# Keyword scan (covers all 10 fnp-* crates including fnp-python)
-# Filter out codebase_hygiene.rs — it contains those keywords as regex
-# strings used to detect them, which would otherwise self-match.
+# Keyword scan (covers all 10 fnp-* crates including fnp-python).
+# Scope per Summary above: lib + bin only, no tests/. The -g filters
+# exclude integration-test dirs and codebase_hygiene.rs (which contains
+# the keywords as regex strings used to detect them — would self-match).
 rg -n --type rust "TODO|FIXME|HACK|XXX|STUB|PLACEHOLDER|MOCK|DUMMY|FAKE" \
+  -g '!*/tests/*' \
   -g '!codebase_hygiene.rs' \
   crates/fnp-dtype crates/fnp-ndarray crates/fnp-iter crates/fnp-ufunc \
   crates/fnp-linalg crates/fnp-random crates/fnp-io crates/fnp-conformance \
