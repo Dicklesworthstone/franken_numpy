@@ -93,7 +93,8 @@ This is the wrong tool if your bottleneck is large dense matmul on >2,000×2,000
 ### Rust
 
 ```rust
-use fnp_ufunc::{UFuncArray, DType, BinaryOp};
+use fnp_dtype::DType;
+use fnp_ufunc::{BinaryOp, UFuncArray};
 
 // Build an array and z-score normalize it.
 let data = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64)?;
@@ -170,7 +171,7 @@ use fnp_random::{BitGenerator, BitGeneratorKind, Generator, SeedSequence};
 let mut rng_a = Generator::from_pcg64_dxsm(42)?;
 let _ = rng_a.standard_normal(1000);          // advance the stream
 
-let payload = rng_a.to_pickle_payload();      // serializable snapshot
+let payload = rng_a.to_pickle_payload();      // in-process snapshot (typed Rust struct)
 let mut rng_b = Generator::from_pickle_payload(payload)?;
 assert_eq!(rng_a.standard_normal(50), rng_b.standard_normal(50));
 
@@ -184,7 +185,7 @@ let _streams: Vec<BitGenerator> = children
     .collect::<Result<_, _>>()?;
 ```
 
-The same `to_pickle_payload` / `from_pickle_payload` round-trip is reachable from Python on `fnp_python.random.Generator`, and the bytes are interoperable across Rust and Python.
+`GeneratorPicklePayload` is a typed in-memory struct (`Debug + Clone + PartialEq + Eq`); it carries the bit-generator state schema-version plus the optional `SeedSequence` snapshot. There is no built-in byte serialization today, so cross-process persistence requires an explicit transport layer. The structured types make adding one (or layering serde derives behind a feature flag) straightforward.
 
 ### Fail-closed I/O on hostile input
 
@@ -1114,7 +1115,7 @@ A concrete checklist for "make my numerical pipeline bit-reproducible from a fre
 2. **Pin every dependency.** Use exact `=x.y.z` constraints in `Cargo.toml`, not caret/tilde. Commit `Cargo.lock`.
 3. **Use an explicit RNG seed.** `Generator::from_pcg64_dxsm(seed)` for new code; never rely on `SeedMaterial::None`.
 4. **Spawn child streams for parallelism, not OS entropy.** `let mut parent = SeedSequence::new(&[seed])?; let children = parent.spawn(n_workers)?;` gives each worker a child stream. The full lineage is captured in the spawn counter, so child indices reproduce.
-5. **Capture the full generator state.** Before any non-deterministic side-effect, `generator.to_pickle_payload()` and store the payload alongside your results. `from_pickle_payload` reconstructs the *exact* state.
+5. **Capture the full generator state.** Before any non-deterministic side-effect, call `generator.to_pickle_payload()` to obtain a typed snapshot struct; `from_pickle_payload` reconstructs the *exact* state in-process. For cross-process persistence you currently need to layer your own transport over the payload's public fields.
 6. **Use `errstate` rather than global `seterr` for short-lived overrides.** Global `seterr` is process-wide; `errstate` is RAII-scoped and restores prior state on drop.
 7. **Round-trip via `save` / `load` for canonical output.** The NPY format is byte-stable across runs; pickle and JSON formats are not.
 8. **Hash your inputs and outputs.** SHA-256 every fixture and every artifact. The `fnp-conformance` artifact-durability stack does this for you, but the pattern is portable.
@@ -1362,8 +1363,8 @@ let array = UFuncArray::new(shape, values, DType::F64)?;
 let result = array.reduce_mean(Some(0), false)?;     // axis-0 mean
 
 let out_bytes = save(
-    result.shape().to_vec(),
-    result.values().to_vec(),
+    result.shape(),                                  // &[usize] — borrows from result
+    result.values(),                                 // &[f64]   — borrows from result
     IOSupportedDType::F64,
 )?;
 std::fs::write("output.npy", out_bytes)?;
@@ -1453,29 +1454,29 @@ assert (data == restored).all()
 
 Hot operations land on the Rust engine. Surfaces with no engine substitute fall back to the same `numpy.ma`, `numpy.matrixlib`, etc. you would have called directly. The boundary is invisible to your code.
 
-### Recipe 5: capture a generator's state mid-stream and reload it later
+### Recipe 5: capture a generator's state mid-stream and resume it later
 
 ```rust
 use fnp_random::Generator;
 
 let mut rng = Generator::from_pcg64_dxsm(2026)?;
-let first_batch = rng.standard_normal(100);
+let _first_batch = rng.standard_normal(100);
 
-// Persist the exact state (schema-tagged for forward compatibility).
+// Snapshot the exact state into an in-memory payload.
 let snapshot = rng.to_pickle_payload();
-let serialized = serde_json::to_string(&snapshot)?;
-std::fs::write("rng_state.json", serialized)?;
 
-// ...later, in a different process...
-let snapshot_back: fnp_random::GeneratorPicklePayload =
-    serde_json::from_str(&std::fs::read_to_string("rng_state.json")?)?;
-let mut rng_resumed = Generator::from_pickle_payload(snapshot_back)?;
+// Hand the snapshot to another part of your program (or persist it via your
+// own transport — fnp-random does not ship a bytes serializer today; the
+// `GeneratorPicklePayload` struct exposes its fields so you can layer one
+// on top, or feed it through a serde derive behind your own feature flag).
+let mut rng_resumed = Generator::from_pickle_payload(snapshot)?;
 
-let second_batch = rng_resumed.standard_normal(100);
-// `second_batch` is exactly what the original `rng` would have produced next.
+let next_from_original = rng.standard_normal(50);
+let next_from_resumed  = rng_resumed.standard_normal(50);
+assert_eq!(next_from_original, next_from_resumed);
 ```
 
-The pickle-payload schema is forward-compatible: the payload carries an algorithm tag and a schema version, so future generator changes can deserialize older snapshots when the underlying bit generator is unchanged.
+The payload carries the bit-generator state plus the (optional) `SeedSequence` snapshot for spawn-lineage tracking. The bit-generator state includes a schema version, so a future generator change that preserves the underlying algorithm can still rehydrate older payloads.
 
 ---
 
