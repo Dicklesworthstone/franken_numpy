@@ -81,9 +81,12 @@ and `crates/fnp-conformance/src/divergence_ledger.rs`.
 
 ### Fuzz infrastructure expansion (May 2026)
 
-The fuzz harness footprint grew from 4 fuzz crates to 6, and from
-mostly-unseeded targets to **214 curated edge-case seeds across 21
-fuzz targets**. Bead IDs:
+The fuzz harness grew from 4 crates to **7** and from mostly-unseeded
+targets to **~200 curated edge-case seeds across 27 fuzz targets** (see
+[`docs/FUZZING.md`](docs/FUZZING.md) for the live inventory). All fuzz
+crates live under `crates/fnp-*/fuzz` and are excluded from the main
+workspace so normal `cargo` invocations don't pull in `libfuzzer-sys`.
+Representative seeding beads:
 
   - `62oir` — new `fnp-random/fuzz` (Pcg64Rng/Pcg64DxsmRng seed entropy,
     SeedSequence::new) and `fnp-linalg/fuzz` (cholesky_nxn, det_nxn,
@@ -148,8 +151,9 @@ crates.io publish:
     toolchain values to a single `env.RUST_TOOLCHAIN` variable.
   - `lmhu7` — `AGENTS.md` gains a "Current state (2026-05-16)" section
     pointing at audit_numpy_reality / FEATURE_PARITY / audit_numpy_mocks.
-  - `nvtyj` — `docs/FUZZING.md` onboarding doc covering all 6 fuzz
-    crates / 21 targets / 214 curated seed files; linked from README.
+  - `nvtyj` / `8mcj6` — `docs/FUZZING.md` onboarding doc and
+    headline-count refresh (7 fuzz crates / 27 targets / ~200 curated
+    seed files); linked from README.
 
 ### Pre-2026-03-21 details preserved below
 
