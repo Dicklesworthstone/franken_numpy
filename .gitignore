@@ -1,3 +1,7 @@
+# /target          — default cargo build output at workspace root
+# target_*/        — per-agent rch target dirs (e.g. target_rch_cloudy_<id>_<phase>); see other Franken* repos for examples
+# target-codex*/   — codex agent's target dirs (see lower in this file for the canonical entry)
+# **/*.rs.bk       — rustfmt backup leftovers
 /target
 target_*/
 **/*.rs.bk
