@@ -2255,7 +2255,7 @@ Major milestones in the order they landed. For the full per-commit history, see 
 | 2026-05-09 | `numpy.__all__` reaches ~96% reachable through the parity wave. |
 | **2026-05-13** | **100% of `numpy.__all__` reachable (499/499)**, structurally locked by `fnp_python_covers_full_numpy_all`. The headline milestone. |
 | 2026-05-14 | Mock/stub audit confirms zero TODO/FIXME/HACK/STUB/unimplemented across all 10 implementation crates. |
-| 2026-05-16 | Documentation precision wave: ~75-bead sweep across README, AGENTS.md, FEATURE_PARITY.md, audit docs, divergence ledger, fuzzing docs. |
+| 2026-05-16 | Documentation precision wave: 92 beads closed on this single date across README, AGENTS.md, FEATURE_PARITY.md, audit docs, divergence ledger, fuzzing docs. |
 | 2026-05-16 | Divergence ledger active rows: **1** (the `SeedMaterial::None` deterministic seed). Workspace fully green: 6,392 tests, all 10 crates passing, zero unsafe blocks. |
 
 In quantitative terms: **~650 commits in May 2026 alone**, **~1,880 commits since 2026-04-01**, **1,324 closed beads** as of 2026-05-16, all under a single git author working with a multi-agent swarm. (These are live numbers; the repository keeps moving.)
