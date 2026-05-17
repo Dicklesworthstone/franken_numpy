@@ -175,6 +175,8 @@ cargo test -p fnp-runtime
 cargo test --workspace --all-features
 ```
 
+Cost note: `fnp-ufunc` (2,191 tests, ~60k LOC) and `fnp-python` (2,127 tests) dominate workspace test time. When iterating on a focused change in another crate, prefer the targeted `-p` invocation. See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the live per-crate test counts.
+
 ### Test Categories
 
 | Crate | Focus Areas |
