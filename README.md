@@ -1058,7 +1058,7 @@ Every operation that can fail returns `Result<T, E>` with an explicit error type
 | `fnp-random` | `RngConstructorError` | `SeedMetadataInvalid` |
 | `fnp-random` | `RandomPolicyError` | `UnknownMetadata` |
 | `fnp-io` | `IOError` | `MagicInvalid`, `HeaderSchemaInvalid(&'static str)`, `DTypeDescriptorInvalid`, `WriteContractViolation(&'static str)`, `ReadPayloadIncomplete(&'static str)`, `PicklePolicyViolation`, `MemmapContractViolation(&'static str)`, `LoadDispatchInvalid(&'static str)`, `NpzArchiveContractViolation(&'static str)`, `PolicyUnknownMetadata(&'static str)` |
-| `fnp-runtime` | (return values, not a single enum) | `DecisionAction::FailClosed { reason }` carries the rejection reason; `OverrideAuditEvent` records explicit human bypass requests |
+| `fnp-runtime` | (return values, not a single enum) | `DecisionAction::FailClosed` is the rejection signal; the rejection reason travels alongside it on the enclosing `DecisionEvent` via `reason_code: String`. `OverrideAuditEvent` records explicit human bypass requests. |
 
 Four design points:
 
@@ -1525,40 +1525,51 @@ These cover most "wait, why does this behave that way?" questions in the first w
 
 ## Reading the Evidence Ledger
 
-The `EvidenceLedger` in `fnp-runtime` is the audit trail for every runtime decision. If you embed the dual-mode runtime, you get a structured record of *which* input class hit *which* code path with *what* posterior risk. The data model:
+The `EvidenceLedger` in `fnp-runtime` is the audit trail for every runtime decision. If you embed the dual-mode runtime, you get a structured record of *which* input class hit *which* code path with *what* posterior risk. The actual data model (verified against `crates/fnp-runtime/src/lib.rs`):
 
-```
-DecisionEvent {
-    timestamp:      RFC3339 UTC,
-    runtime_mode:   Strict | Hardened,
-    class:          KnownCompatible | KnownIncompatible | Unknown,
-    action:         Allow | FullValidate | FailClosed,
-    risk_score:     f64                  (log-likelihood ratio of incompatibility)
-    posterior_p:    f64                  (probability of incompatibility, 0..1)
-    evidence:       Vec<EvidenceTerm>    (each carrying a slug + weight)
-    audit_context:  optional reference   (request ID, fixture ID, etc.)
+```rust
+pub struct DecisionEvent {
+    pub ts_millis: u128,                       // milliseconds since the Unix epoch
+    pub mode: RuntimeMode,                     // Strict | Hardened
+    pub class: CompatibilityClass,             // KnownCompatible | KnownIncompatible | Unknown
+    pub risk_score: f64,                       // log-likelihood ratio of incompatibility
+    pub action: DecisionAction,                // Allow | FullValidate | FailClosed (reason travels via `reason_code` below)
+    pub posterior_incompatible: f64,           // probability of incompatibility, 0.0..=1.0
+    pub expected_loss_allow: f64,              // loss-model term for the Allow branch
+    pub expected_loss_full_validate: f64,      // loss-model term for the FullValidate branch
+    pub expected_loss_fail_closed: f64,        // loss-model term for the FailClosed branch
+    pub selected_expected_loss: f64,           // the minimum of the three (whichever branch we picked)
+    pub evidence_terms: Vec<EvidenceTerm>,     // per-evidence log-likelihood-ratio contributions
+    pub fixture_id: String,                    // correlates to the fixture, request, or call site
+    pub seed: u64,                             // RNG seed in effect (when relevant)
+    pub env_fingerprint: String,               // host/CPU/toolchain fingerprint
+    pub artifact_refs: Vec<String>,            // pointers to associated artifacts (sidecars, proofs)
+    pub reason_code: String,                   // stable slug, mirrors the per-error reason_code() pattern
+    pub note: String,                          // free-form annotation
+}
+
+pub struct EvidenceTerm {
+    pub name: &'static str,                    // e.g. "input.shape_within_bounds"
+    pub log_likelihood_ratio: f64,             // negative = pulls toward compatible; positive = toward incompatible
 }
 ```
 
-A typical ledger line (JSONL):
+`EvidenceLedger` itself is a thin `Vec<DecisionEvent>` with `record(...)`, `events() -> &[DecisionEvent]`, and `last()` methods. **There is no built-in JSON/JSONL serializer** — `DecisionEvent` derives only `Debug + Clone + PartialEq`, no serde. Embedders that need on-disk ledgers add their own writer over the public field accessors (the field set is stable across patches).
 
-```json
-{"ts":"2026-05-16T14:32:08.421Z","mode":"Hardened","class":"KnownCompatible","action":"FullValidate","risk":1.2,"posterior":0.041,"evidence":[{"slug":"input.shape_within_bounds","weight":-0.7},{"slug":"input.dtype_known","weight":-0.8},{"slug":"input.has_nan","weight":2.7}],"audit_ref":"fixture:ufunc.add.case_142"}
-```
-
-To consume this:
+When you read an event:
 
 - **`mode`** tells you which runtime mode was active. Strict skips most full-validate paths; Hardened opts into them on elevated risk.
 - **`class`** is the input classification. `Unknown` and `KnownIncompatible` always fail closed; `KnownCompatible` is the interesting case.
 - **`action`** is what we did. Compare against the [Runtime Mode Matrix](#how-it-works-per-crate-deep-dive) to confirm it matches the policy.
-- **`risk`** is a log-likelihood ratio. Higher means more evidence of incompatibility.
-- **`posterior`** is the probability of incompatibility under the loss-model decision rule. Values close to 0 mean "safe accept"; values close to 1 mean "definitely incompatible".
-- **`evidence`** is the breakdown: each `EvidenceTerm` adds (or subtracts) from the log-odds. Negative weights pull toward "compatible"; positive weights push toward "incompatible".
-- **`audit_ref`** lets you correlate ledger entries with upstream requests, fixtures, or override approvals.
+- **`risk_score`** is a log-likelihood ratio. Higher means more evidence of incompatibility.
+- **`posterior_incompatible`** is the probability of incompatibility under the loss-model decision rule. Values close to 0 mean "safe accept"; values close to 1 mean "definitely incompatible".
+- **`expected_loss_{allow, full_validate, fail_closed}`** show the three branches' loss-model evaluations; `selected_expected_loss` is the one that drove the choice. This makes the decision auditable end-to-end (you can see not just *what* we picked, but how the other branches scored).
+- **`evidence_terms`** is the breakdown: each `EvidenceTerm.log_likelihood_ratio` adds (negative) or subtracts (positive) from the log-odds. The naming convention is dotted-string slugs like `input.shape_within_bounds` or `input.has_nan`.
+- **`fixture_id` / `seed` / `env_fingerprint` / `artifact_refs` / `reason_code`** are the six fields that the Threat Model section requires every audit entry to carry. `note` is free-form context.
 
-Override events live in a separate `OverrideAuditEvent` stream so that explicit human bypasses of a fail-closed gate are auditable distinctly from automatic decisions. An override record always carries a justification slug + an audit reference (a ticket number, a PR link, etc.).
+Override events live in a separate `OverrideAuditEvent` stream so that explicit human bypasses of a fail-closed gate are auditable distinctly from automatic decisions. An override record's fields are: `ts_millis`, `mode`, `class`, `requested_deviation_class`, `packet_id`, `requested_by`, `reason_code`, `approved: bool`, `action`, `audit_ref`. The `requested_by` + `audit_ref` pair makes the human responsible for each override traceable to a ticket/PR.
 
-For pipelines that need cryptographic non-repudiation, the ledger output can be fed into the same RaptorQ artifact-durability stack (sidecar + scrub + decode proof) so a ledger snapshot survives single-symbol loss.
+For pipelines that need cryptographic non-repudiation, a serialized ledger snapshot can be fed into the same RaptorQ artifact-durability stack (sidecar + scrub + decode proof) so it survives single-symbol loss.
 
 ---
 
