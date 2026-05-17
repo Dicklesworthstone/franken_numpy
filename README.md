@@ -1087,7 +1087,7 @@ FrankenNumPy operations are single-threaded by default. The choice merits precis
 
 **No global mutable state in numeric ops.** The one exception is `fnp-ufunc`'s thread-local `FloatErrorState`, which is, as the name implies, per-thread. Configuring `errstate(divide=Raise)` on one thread does not affect another thread.
 
-**No parallel array kernels.** No internal Rayon / SIMD / thread-pool dispatch inside reductions, broadcasts, or matmul. The `reduce_sum_parallel` and `elementwise_binary_parallel` methods exist as opt-in entry points, but the default execution is serial. Multi-threaded execution is a Phase 3 candidate (ADR-001).
+**No parallel array kernels.** No internal Rayon / SIMD / thread-pool dispatch inside reductions, broadcasts, or matmul. The `reduce_sum_parallel` and `elementwise_binary_parallel` methods exist as opt-in entry points, but the default execution is serial. Three conformance bins help decide when to opt in: `run_parallel_calibration_matrix` (sweeps workload sizes), `run_parallel_speedup_verdict` (per-op verdict), and `run_parallel_thread_recommendations` (per-machine thread-count suggestion) — all under `crates/fnp-conformance/src/bin/`. Multi-threaded execution by default is a Phase 3 candidate (ADR-001).
 
 **Async story is observability-only.** When the optional `asupersync` feature is enabled in `fnp-runtime`, it powers RaptorQ encoding, telemetry channels, and cancellation-safe oracle capture; it does **not** schedule numerical kernels.
 
