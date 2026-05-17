@@ -30,7 +30,7 @@ The cosmetic `.unwrap()` inventory has grown with the codebase: from **43 sites*
 The April audit drafted three beads "to file when DB contention clears." DB contention is long resolved (1220+ beads filed since). Status of each:
 
   - **Bead 1 (einsum unwrap):** **RESOLVED ORGANICALLY.** The `.unwrap()` was rewritten to `let Some((prefix, _)) = sub.split_once("...") else { return Err(...) }` at `crates/fnp-ufunc/src/lib.rs:19013`. No bead was filed; the fix landed as part of broader cleanup.
-  - **Bead 2 (fixture unwrap cluster):** **STILL OPEN AS POLICY.** Site count grew from 42 → 115 (see refreshed counts above). Recommendation unchanged: cosmetic, no real-mock signal, low-priority `.expect()` migration. No bead filed because it remains low-impact churn; would be appropriate as a multi-hour batch task only.
+  - **Bead 2 (fixture unwrap cluster):** **TRACKED ONLY HERE — no bead filed.** Site count grew from 42 → 115 (see refreshed counts above). Recommendation unchanged: cosmetic, no real-mock signal, low-priority `.expect()` migration. Deliberately not filed as a bead because it would clutter the tracker with low-impact style debt; this row is the canonical record. Would be appropriate as a multi-hour batch task only.
   - **Bead 3 (audit record bead):** **NOT NEEDED.** The audit document itself (this file) is now referenced from README.md, CHANGELOG.md, and the structural lock-in conformance test commentary in `crates/fnp-python/src/lib.rs`. The auditability function is served without a bead pointer.
 
 ### A. Bead 1 — single einsum parser unwrap (RESOLVED in 2026-05 cleanup)
