@@ -32,3 +32,9 @@ criterion.workspace = true
 [[bench]]
 name = "criterion_core_ops"
 harness = false
+
+# Note: this crate's 47 binaries under src/bin/ are auto-discovered by
+# cargo (no [[bin]] entries needed). Add a new .rs file under src/bin/
+# and it becomes a `cargo run -p fnp-conformance --bin <name>` target
+# automatically. See README "Conformance Methodology Deep-Dive" for the
+# active workflow tools and the 27 historical phase2c one-shot generators.
