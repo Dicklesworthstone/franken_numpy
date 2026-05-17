@@ -190,6 +190,7 @@ Cost note: `fnp-ufunc` (2,191 tests, ~60k LOC) and `fnp-python` (2,127 tests) do
 | `fnp-random` | 5 production bit generators (PCG64, PCG64DXSM, MT19937, Philox, SFC64) + an internal `DeterministicRng` for tests, full `SeedSequence` / `SeedMaterial` hierarchy with spawn lineage, pickle payload round-trip, `RandomState` legacy wrapper, 40+ oracle-verified distributions with bit-exact PCG64DXSM parity vs NumPy |
 | `fnp-io` | npy/npz parser/writer, hardened boundary checks, adversarial input fuzzing |
 | `fnp-conformance` | Fixture-driven differential suites, oracle capture, adversarial/security policy harnesses, benchmark baselines, RaptorQ sidecar/scrub/decode proofs, workflow scenario gates |
+| `fnp-python` | PyO3 bindings exposing 100% of `numpy.__all__` (499/499 names) structurally locked by `fnp_python_covers_full_numpy_all`, plus 133 dedicated `conformance_*.rs` parity shards under `crates/fnp-python/tests/` |
 | `fnp-runtime` | Strict/hardened mode split, fail-closed wire decoding, override-audit gate, decision/evidence ledger |
 
 ### Conformance and Artifact Commands
