@@ -283,7 +283,7 @@ There is **no `pip install frankennumpy` wheel/PyPI flow yet**; packaging is the
 
 ## API Surface
 
-**~1,470 public Rust functions across 10 crates** (live `pub fn` count via ripgrep) plus an additional ~633 PyO3-attribute-macro-exposed names in `fnp-python`, together exposing **100% of `numpy.__all__` (499/499 names)** through the `fnp_python` Python module. Coverage is enforced by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`, which iterates `numpy.__all__` at run time against the live numpy on the build host. The per-function `crates/fnp-python/tests/conformance_*.rs` shards add another **133 dedicated parity files** on top of the surface lock.
+**1,575 public Rust functions across the 10 library crates** (verified live count of `pub fn ` declarations under `crates/*/src/**/*.rs`, excluding the `src/bin/` binary entry-points), exposing **100% of `numpy.__all__` (499/499 names)** through the `fnp_python` Python module. Coverage is enforced by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`, which iterates `numpy.__all__` at run time against the live numpy on the build host. The per-function `crates/fnp-python/tests/conformance_*.rs` shards add another **133 dedicated parity files** on top of the surface lock. The companion `run_fnp_python_api_coverage` gate independently tracks the Python-visible surface (`exports=633 covered=599 missing=0` as of 2026-05-13), of which the PyO3 wrappers and identity-equal numpy re-exports together hit every name in `numpy.__all__`.
 
 `fnp_python` also registers **12 PyO3 classes**: `Nditer` / `NditerStep` (iterator state machine), `FromPyFunc` / `Vectorize` (callable wrappers), and the `random` submodule's `SeedSequence`, `Generator`, `RandomState`, plus the 5 bit-generator classes `MT19937`, `PCG64`, `PCG64DXSM`, `Philox`, `SFC64`. The `mgrid`, `ogrid`, `r_`, and `c_` NumPy-style index objects are exposed as live singleton instances.
 
@@ -2143,7 +2143,7 @@ If you want to understand how FrankenNumPy works at the source level, here are t
 
 The largest crate (`fnp-ufunc` at 59k lines) sits in one file because the ufunc dispatch table is centralized; splitting it would scatter the dispatcher and obscure the structure.
 
-**Finding a function fast.** With ~1,470 `pub fn` declarations (plus ~633 PyO3-exposed names in `fnp-python`) across the workspace, ripgrep is the navigation tool of choice:
+**Finding a function fast.** With 1,575 `pub fn` declarations across the workspace's library code (`crates/*/src/**/*.rs`, excluding `src/bin/`), ripgrep is the navigation tool of choice:
 
 ```bash
 # Find a pub fn by name (across all crates):
