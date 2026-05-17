@@ -1831,7 +1831,7 @@ FrankenNumPy is profile-driven: every optimization is paired with a baseline, a 
 
 The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencies for ufunc and reduction sentinel workloads and rejects regressions. The cross-engine benchmark (`run_cross_engine_benchmark`) compares directly against NumPy.
 
-**Current cross-engine picture** (2026-04-10 baseline at `artifacts/baselines/cross_engine_benchmark_v1.json`, 37 workloads):
+**Current cross-engine picture** (2026-04-10 baseline at `artifacts/baselines/cross_engine_benchmark_v1.json`, 37 workloads — verified 2026-05-17 to be the most recent baseline on disk; later parity / metadata / fuzz work has not regenerated it, so ratios below reflect pre-May code paths):
 
 | Op family | Median ratio (FNP / NumPy) | Verdict |
 |---|---|---|
