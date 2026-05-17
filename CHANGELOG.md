@@ -155,6 +155,38 @@ crates.io publish:
     headline-count refresh (7 fuzz crates / 27 targets / ~200 curated
     seed files); linked from README.
 
+### Diagnostic parity and divergence ledger (April–May 2026)
+
+Epic `33vtd` shipped a structured diagnostic-oracle pipeline so that
+every warning, exception, and printed message we emit can be compared
+against the live NumPy reference. Notable pieces:
+
+  - **Diagnostic oracle schema + harness** under
+    `crates/fnp-conformance/src/diagnostic_oracle.rs` and the
+    `run_diagnostic_oracle` binary, with shards for dtype/shape, IO
+    parsers, and fnp-python warnings/exceptions.
+  - **Cross-version drift matrix** that captures the same fixture set
+    against multiple NumPy versions to detect upstream behavior shifts
+    (`run_oracle_drift_matrix`).
+  - **Divergence ledger** at [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md)
+    plus a machine-readable checker
+    (`cargo run -p fnp-conformance --bin run_divergence_ledger --
+    --fail-on-missing`). A diagnostic case can only be marked
+    `intentional_divergence` if it references a row in the ledger;
+    otherwise the gate fails closed. Active rows: **1** (as of
+    2026-05-16) — `franken_numpy-ucc2o` records that `fnp-random`'s
+    `SeedMaterial::None` / no-seed `default_rng()` uses a fixed
+    deterministic seed (`DEFAULT_RNG_SEED = 0xC0DE_CAFE_F00D_BAAD`)
+    rather than OS entropy, pending a decision on adding `getrandom`
+    as the crate's first external dependency.
+  - **Structured-dtype + recfunctions oracle corpus** expanded so
+    structured-dtype edge cases (record arrays, mixed-endian fields,
+    inner shapes) now get per-warning, per-exception, per-field
+    parity coverage.
+  - **Validation recipe selector** (`run_validation_recipe_selector`)
+    routes a fixture/case through the correct gate composition,
+    making agent-driven diagnostic checks one command away.
+
 ### Pre-2026-03-21 details preserved below
 
 The dated capability sections below are unchanged; they cover the
