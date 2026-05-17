@@ -1754,7 +1754,7 @@ G4  adversarial+security run_security_policy_gate.sh
 G5  test/logging contract run_test_contract_gate.sh
 G6  workflow forensics   run_workflow_scenario_gate.sh
 G7  performance budget   run_performance_budget_gate.sh
-G8  durability/decode    run_raptorq_gate.sh
+G8  durability/decode    cargo run -p fnp-conformance --bin run_raptorq_gate -- --retries 1 --flake-budget 0 --coverage-floor 1.0  (scripts/e2e/run_raptorq_gate.sh wraps this for local use)
 ```
 
 G3 enforces a real-numpy oracle via `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` and rejects `pure_python_fallback` output. After G8 the topology script also runs `validate_phase2c_packet --packet-id FNP-P2C-{001..009}` to confirm every P2C packet's readiness contract still passes — this is the durability-tail step that catches packet-contract drift.
