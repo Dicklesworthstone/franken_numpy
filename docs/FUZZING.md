@@ -65,6 +65,13 @@ fuzz crates pull in `libfuzzer-sys`, which we don't want bleeding into normal
 package fields) literally. Same reason applies to the per-fuzz
 `rust-toolchain.toml` shipped alongside.
 
+Each fuzz crate also commits its own `Cargo.lock` (7 lockfiles total, one per
+fuzz dir) — this is what makes a fuzz crash reproducible across machines.
+When reproducing a crash from an artifact, run `cargo fuzz run ...` from
+inside the fuzz dir so cargo picks up that crate's lockfile, not the root
+workspace's. Bumping `libfuzzer-sys` or other shared deps requires touching
+all 7 lockfiles together.
+
 ## Where to record findings
 
 A fuzz crash that exposes a real bug becomes a bead. The raw crash inputs that `cargo-fuzz` writes land under `crates/<crate>/fuzz/artifacts/<target>/crash-*` — copy the relevant crash bytes into a workspace-root `artifacts/<bead-id>/` directory (or attach them to the bead's `--description`) so the reproducer is permanent rather than living in a gitignored cargo-fuzz directory. A fuzz finding that exposes intentional or parity-debt divergence from NumPy belongs in [`DIVERGENCES.md`](DIVERGENCES.md) — that ledger is the machine-readable handoff point for diagnostic gates and accepts both `intentional` and `parity_debt` rows.
