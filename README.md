@@ -1747,7 +1747,7 @@ A bug that lives in NumPy too will pass (1) but fail (2). A bug that produces a 
 Eight ordered gates run from fast to heavy, defined in `.github/workflows/ci.yml`. All 8 are also runnable locally as a single command via `scripts/e2e/run_ci_gate_topology.sh`, which orchestrates the same sequence + a closing `validate_phase2c_packet` sweep over the 9 P2C packets:
 
 ```
-G1  fmt + lint           cargo fmt --check && cargo clippy -- -D warnings
+G1  fmt + lint           cargo fmt --check && cargo clippy --workspace --all-targets -- -D warnings
 G2  unit + property      cargo test --workspace --lib
 G3  oracle differential  capture_numpy_oracle → run_ufunc_differential (real numpy required)
 G4  adversarial+security run_security_policy_gate.sh
