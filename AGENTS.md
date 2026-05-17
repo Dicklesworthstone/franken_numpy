@@ -266,14 +266,14 @@ franken_numpy/
 ├── crates/
 │   ├── fnp-dtype/                     # Dtype taxonomy, promotion table, cast policy primitives
 │   ├── fnp-ndarray/                   # Shape legality, stride calculus, reshape/broadcast contracts
-│   ├── fnp-iter/                      # nditer-like traversal, overlap-safe iteration contracts
-│   ├── fnp-ufunc/                     # Ufunc dispatch, broadcasting execution, reductions
-│   ├── fnp-linalg/                    # Linear algebra adapters, scoped solver contracts
-│   ├── fnp-random/                    # Deterministic RNG streams, state schemas
-│   ├── fnp-io/                        # npy/npz parser + writer with hardened boundary checks
+│   ├── fnp-iter/                      # Transfer semantics, overlap-safe iteration, Nditer state machine
+│   ├── fnp-ufunc/                     # 800+ array operations, reductions, einsum, masked arrays
+│   ├── fnp-linalg/                    # solve, eig, svd, qr, cholesky, lstsq, batched, complex
+│   ├── fnp-random/                    # 5 bit generators, distributions, PCG64DXSM bit-exact parity
+│   ├── fnp-io/                        # NPY/NPZ read/write, text I/O, DEFLATE, memmap
 │   ├── fnp-python/                    # PyO3 bindings, 100% numpy.__all__ surface
-│   ├── fnp-conformance/               # Differential harness, adversarial harness, oracle capture, benchmarks, RaptorQ artifacts
-│   └── fnp-runtime/                   # Mode split, fail-closed decoding, override-audit gate, evidence ledger
+│   ├── fnp-conformance/               # Oracle capture, differential / metamorphic / adversarial / RaptorQ
+│   └── fnp-runtime/                   # Strict/hardened mode, evidence ledger, decision engine
 ├── legacy_numpy_code/numpy/           # Behavioral oracle (upstream: github.com/numpy/numpy)
 ├── artifacts/                         # Contract schemas, security controls, logs
 ├── scripts/                           # E2E gate scripts
