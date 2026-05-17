@@ -187,6 +187,56 @@ against the live NumPy reference. Notable pieces:
     routes a fixture/case through the correct gate composition,
     making agent-driven diagnostic checks one command away.
 
+### Documentation correctness polish wave (May 2026)
+
+A ~75-bead sweep across README.md, AGENTS.md, FEATURE_PARITY.md,
+audit_numpy_reality.md, audit_numpy_mocks.md, docs/DIVERGENCES.md,
+docs/FUZZING.md, PROPOSED_ARCHITECTURE.md and this CHANGELOG. The
+wave was specifically aimed at removing claims that had drifted past
+the implementation, and at adding precision where prose was vague.
+Representative entries:
+
+  - README hero subtitle now states **concrete numbers** (6,392 tests,
+    100% of `numpy.__all__`, zero unsafe blocks) instead of "extensive
+    conformance coverage" (`h0n92`); MIT license badge clarified to
+    MIT+Rider (`obyab`); Rust pin badge now names `nightly-2026-02-20`
+    explicitly (`75nl6`).
+  - **All 5 production bit generators** enumerated in the README
+    `Random` row (`2gah9`); the "None (random)" RNG claim corrected to
+    reflect the fixed deterministic default seed (`81e5e`); the
+    "zero-dep" claim refined to "no external crates.io deps, intra-
+    workspace fnp-ndarray only" (`vtt6c`).
+  - **All 18 FFT entry points** (including hfft/ihfft/rfft2/rfftn/
+    irfft2/irfftn) enumerated in both the README API Surface row
+    (`s4t0g`) and FEATURE_PARITY (`ng0nc`); convolve modes
+    full/same/valid documented (`g2bra`); correlate2d/convolve2d
+    symmetry made explicit (`biwgf`).
+  - README **Threat Model** restored the missing
+    `linalg_policy_unknown_metadata` row (12 claimed vs 11 listed →
+    12/12) (`7e9ol`); README API Surface now catalogs **all 12 PyO3
+    classes** registered by `fnp-python` (`5dfb6`); README Repository
+    Layout and AGENTS.md Repository Layout both restored the missing
+    `fnp-python` crate row (`0zk2h`, `be5p9`, `rcno9`).
+  - README Installation gained a "For Python access" subsection with
+    cdylib build hint tightened for Linux / macOS / Windows file
+    extensions (`bndjp`, `mnbz7`).
+  - AGENTS.md gained a "Current state (2026-05-16)" section that
+    surfaces the live divergence count and links the audit documents
+    (`lmhu7`, `yf0yl`), plus a testing cost hint so contributors know
+    `fnp-ufunc`/`fnp-python` dominate workspace test time (`saivr`).
+  - `audit_numpy_reality.md` pinned its vision quote to the exact
+    README anchor (`0yllc`) and surfaced the CI lock-in mechanism in
+    its headline tagline (`5hvay`); `audit_numpy_mocks.md` clarified
+    that the 115-unwrap row is fixture-only, not production crates
+    (`8iikg`), added the `println!`/`eprintln!`/`dbg!` matrix row
+    (`jr0hg`), and named all 10 crates explicitly (`mf2v3`).
+  - [`docs/adr/ADR-001-parity-pivot.md`](docs/adr/ADR-001-parity-pivot.md)
+    captures the 2026-04-10 proposal to pivot from parity grinding to
+    Phase 3 (FFI / BLAS / threading); a 2026-05-16 status update
+    notes that the parity track the ADR considered pivoting *away
+    from* has since reached 100% `numpy.__all__` coverage, so the
+    empirical case has materially changed.
+
 ### Pre-2026-03-21 details preserved below
 
 The dated capability sections below are unchanged; they cover the
