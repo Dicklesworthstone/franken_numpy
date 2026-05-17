@@ -56,4 +56,4 @@ A fuzz crash that exposes a real bug becomes a bead. The raw crash inputs that `
 
 ## Bead trail of the 2026-05 fuzz expansion
 
-Search `.beads/issues.jsonl` for the seeding wave: `62oir`, `aaq0g`, `s46p2`, `8fftx`, `cv45i`, `i8ipt`, `y3dhc`, `diqz3`, `m5y8s`. Each bead's close-reason in the JSONL lists the exact seed counts and target families that bead touched.
+Search `.beads/issues.jsonl` for the seeding wave: `62oir` (fnp-linalg/random fuzz infra), `aaq0g` (32 seeds for new fuzz crates), `s46p2` (45 seeds for fnp-dtype/io targets), `8fftx` (19 Arbitrary-format seeds), `cv45i` (31 seeds for fnp-ufunc string parsers), `i8ipt` (15 seeds for fnp-ndarray broadcast/reshape), `y3dhc` (46 NPY/NPZ binary seeds), `diqz3` (11 seeds for fnp-iter/fuzz_ndindex), `m5y8s` (15 seeds for fnp-ufunc/fuzz_parse_fixed_signature). All 9 verified present + closed in the JSONL as of 2026-05-17; each bead's close-reason lists the exact seed counts and target families that bead touched.
