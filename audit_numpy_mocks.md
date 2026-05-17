@@ -1,6 +1,6 @@
 # fnp-* mock-code-finder audit — 2026-04-22 (refreshed 2026-05-14)
 
-Scanned `fnp-dtype`, `fnp-ndarray`, `fnp-iter`, `fnp-ufunc`, `fnp-linalg`, `fnp-random`, `fnp-io`, `fnp-runtime`, `fnp-conformance`, `fnp-python` — production code only (`#[cfg(test)]` blocks excluded). Audit by CC agent in franken_numpy swarm, invoking the `mock-code-finder` skill.
+Scanned `fnp-dtype`, `fnp-ndarray`, `fnp-iter`, `fnp-ufunc`, `fnp-linalg`, `fnp-random`, `fnp-io`, `fnp-runtime`, `fnp-conformance`, `fnp-python` — production code only (`#[cfg(test)]` blocks excluded). Scope covers both `crates/fnp-*/src/*.rs` (lib code) and `crates/fnp-*/src/bin/*.rs` (CLI tools); test-only `crates/*/tests/` files are out of scope (they ARE test code by definition). See the Reproduction Recipe at the bottom of this file for the exact `find` / `rg` invocations. Audit by CC agent in franken_numpy swarm, invoking the `mock-code-finder` skill.
 
 ## Summary
 
