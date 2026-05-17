@@ -149,7 +149,7 @@ Every component crate includes inline `#[cfg(test)]` unit tests alongside the im
 - Edge cases (empty input, max values, boundary conditions)
 - Error conditions
 
-Cross-component integration tests live in crate-level `tests/` directories. The `fnp-conformance` crate contains the differential harness, adversarial policy harness, security-contract validator, oracle capture, and benchmark + RaptorQ artifact tooling.
+Cross-component integration tests live in crate-level `tests/` directories. The `fnp-conformance` crate contains the differential harness, adversarial policy harness, security-contract validator, oracle capture, and benchmark + RaptorQ artifact tooling. It also ships `tests/codebase_hygiene.rs` which uses `rg` (ripgrep) to enforce the no-stubs invariant — install `ripgrep` (`apt-get install ripgrep`, `brew install ripgrep`, or `cargo install ripgrep`) before running `cargo test -p fnp-conformance`, or the 8 hygiene tests will panic with "rg should be available".
 
 ### Unit Tests
 
