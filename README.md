@@ -363,7 +363,7 @@ See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the complete live parity matrix
 
 | Crate | Lines (src/) | Purpose |
 |---|---:|---|
-| `fnp-dtype` | 3,190 | 18 dtype variants, deterministic `const fn` promotion table covering all 324 pairs, 5 cast policies, `ArrayStorage` taxonomy, `IntegerSidecar` for lossless i64/u64 above 2^53 |
+| `fnp-dtype` | 3,190 | 18 dtype variants, deterministic `const fn` promotion table covering all 324 pairs, 5 cast policies, `ArrayStorage` taxonomy. (The `IntegerSidecar` mentioned later in this README lives in `fnp-ufunc`, not here, because it travels with `UFuncArray`.) |
 | `fnp-ndarray` | 1,531 | Stride Calculus Engine: shape→element_count, shape+order→strides, broadcast legality, reshape with `-1` inference, alias-sensitive transitions |
 | `fnp-iter` | 3,745 | Transfer-loop selector, overlap detection, `Nditer` / `NditerPlan` / `NditerStep` state machine with `iterindex` / `multi_index` / reset / seek / external-loop chunks, `nditer_python*` parity bridge |
 | `fnp-ufunc` | 59,299 | Largest crate. 35 binary ops, 43 unary ops, 30+ reduction methods, masked arrays, string arrays, datetime arrays, polynomial families, FFT primitives, einsum (`einsum`, `einsum_path`, `einsum_optimized`), float error state machine, NaN-correct reductions |
@@ -409,7 +409,7 @@ The `U64 + signed → F64` promotion is the most counterintuitive rule in the ta
 
 **Cast policy.** `can_cast(src, dst, casting)` supports all five NumPy casting modes: `"no"`, `"equiv"`, `"safe"`, `"same_kind"`, and `"unsafe"`. A `same_kind` cast cannot silently demote signed to unsigned.
 
-**IntegerSidecar.** For arrays whose `UFuncArray` storage is `Vec<f64>` but whose dtype is i64/u64, a sidecar preserves exact integer values through storage round-trips so values above 2^53 survive `from_storage` / `to_storage`. Arithmetic on such values still uses f64 approximation (see Limitations).
+**IntegerSidecar** (defined in `fnp-ufunc`, not `fnp-dtype`; it travels with `UFuncArray`'s storage rather than with the dtype itself)**.** For arrays whose `UFuncArray` storage is `Vec<f64>` but whose dtype is i64/u64, a sidecar preserves exact integer values through storage round-trips so values above 2^53 survive `from_storage` / `to_storage`. Arithmetic on such values still uses f64 approximation (see Limitations).
 
 **Promotion table at a glance.** All 324 (dtype × dtype) pairs are individually enumerated. The two-dimensional table is roughly symmetric and follows NumPy's "smallest type that holds both ranges, prefer floats over signed-unsigned widening that would lose precision" rule:
 
@@ -881,7 +881,7 @@ Determinism is a graded property; the README is explicit about which kind applie
 | Linalg outputs | **Behaviorally equivalent vs NumPy** up to tolerance; **bit-deterministic on a single platform**. | QR/SVD/Cholesky/eig values match NumPy within tolerance; on a given platform with a given Rust toolchain, repeating the call always yields the same bits. |
 | FFT outputs | **Behaviorally equivalent vs NumPy** up to tolerance; **deterministic** ordering of butterfly operations. | The Cooley–Tukey and Bluestein paths are deterministic; output values match NumPy within the per-fixture relative tolerance configured for the FFT differential cases (`fft_differential_cases.json`). |
 | IO round-trip | **Byte-deterministic.** | `save → load → save` is byte-for-byte identical to `numpy.save → numpy.load → numpy.save` for every supported dtype. |
-| Runtime decisions / evidence ledger | **Byte-deterministic** for a given input class, mode, and evidence vector. | The `DecisionLossModel` is a fixed set of constants; the posterior estimator is a closed-form Bayesian update; the same inputs produce the same `DecisionAction` and the same JSONL ledger entry. |
+| Runtime decisions / evidence ledger | **Deterministic** for a given input class, mode, and evidence vector. | The `DecisionLossModel` is a fixed set of constants; the posterior estimator is a closed-form Bayesian update; the same inputs produce the same `DecisionAction` and the same `DecisionEvent` field values (modulo the `ts_millis` wall-clock timestamp, which is the only non-determinism in the struct). Byte-determinism on disk depends on the embedder's chosen serializer, since `fnp-runtime` does not ship one (see [Reading the Evidence Ledger](#reading-the-evidence-ledger)). |
 | Conformance artifacts (fixtures, oracle outputs, RaptorQ sidecars) | **SHA-256-stable** across runs. | Every artifact bundle is content-hashed; the RaptorQ scrub gate verifies `expected_hash` matches `decoded_hash` (scrub report) and `recovered_hash` (decode proof). Grep `artifacts/raptorq/*.scrub_report.json` and `*.decode_proof.json` to inspect the hash fields directly. |
 
 **What is *not* deterministic:** the order of evaluation inside an `asupersync` task graph (when that optional feature is enabled), the wall-clock timestamp embedded in evidence-ledger entries, and the host-environment fingerprint captured at benchmark time. These are observability metadata, not numerical state.
@@ -1363,8 +1363,8 @@ let array = UFuncArray::new(shape, values, DType::F64)?;
 let result = array.reduce_mean(Some(0), false)?;     // axis-0 mean
 
 let out_bytes = save(
-    result.shape(),                                  // &[usize] — borrows from result
-    result.values(),                                 // &[f64]   — borrows from result
+    result.shape(),                                  // &[usize], borrows from result
+    result.values(),                                 // &[f64], borrows from result
     IOSupportedDType::F64,
 )?;
 std::fs::write("output.npy", out_bytes)?;
@@ -1466,7 +1466,7 @@ let _first_batch = rng.standard_normal(100);
 let snapshot = rng.to_pickle_payload();
 
 // Hand the snapshot to another part of your program (or persist it via your
-// own transport — fnp-random does not ship a bytes serializer today; the
+// own transport; fnp-random does not ship a bytes serializer today, but the
 // `GeneratorPicklePayload` struct exposes its fields so you can layer one
 // on top, or feed it through a serde derive behind your own feature flag).
 let mut rng_resumed = Generator::from_pickle_payload(snapshot)?;
@@ -1554,7 +1554,7 @@ pub struct EvidenceTerm {
 }
 ```
 
-`EvidenceLedger` itself is a thin `Vec<DecisionEvent>` with `record(...)`, `events() -> &[DecisionEvent]`, and `last()` methods. **There is no built-in JSON/JSONL serializer** — `DecisionEvent` derives only `Debug + Clone + PartialEq`, no serde. Embedders that need on-disk ledgers add their own writer over the public field accessors (the field set is stable across patches).
+`EvidenceLedger` itself is a thin `Vec<DecisionEvent>` with `record(...)`, `events() -> &[DecisionEvent]`, and `last()` methods. **There is no built-in JSON/JSONL serializer.** `DecisionEvent` derives only `Debug + Clone + PartialEq`, no serde. Embedders that need on-disk ledgers add their own writer over the public field accessors (the field set is stable across patches).
 
 When you read an event:
 
