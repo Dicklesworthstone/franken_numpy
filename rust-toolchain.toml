@@ -1,6 +1,12 @@
 [toolchain]
-# Pinned to match .github/workflows/ci.yml env.RUST_TOOLCHAIN (line 24).
-# README, AGENTS.md, and docs/FUZZING.md all quote the channel string;
-# bump in all four locations together when updating the workspace nightly.
+# Pinned to match .github/workflows/ci.yml env.RUST_TOOLCHAIN (line 24) and
+# the 7 sibling rust-toolchain.toml files under crates/<c>/fuzz/ (workspace-
+# excluded fuzz crates that can't inherit this pin automatically). README,
+# AGENTS.md, and docs/FUZZING.md also quote the channel string; bump in
+# all 11 locations together when updating the workspace nightly:
+#   1 root file (this one)
+#   7 fuzz files (crates/fnp-{dtype,io,iter,linalg,ndarray,random,ufunc}/fuzz/rust-toolchain.toml)
+#   1 CI env var (.github/workflows/ci.yml line 24)
+#   2 doc mentions (README, AGENTS.md)
 channel = "nightly-2026-02-20"
 components = ["rustfmt", "clippy"]
