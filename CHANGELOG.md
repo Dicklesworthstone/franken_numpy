@@ -4,8 +4,11 @@ All notable changes to FrankenNumPy are documented in this file.
 
 FrankenNumPy is a memory-safe, clean-room Rust reimplementation of NumPy. The
 workspace version is `0.1.0` (pre-release). There are no tagged releases or
-GitHub Releases yet; every entry below maps to a date range on the `main` branch.
-Representative commits link to
+GitHub Releases yet, although the May 2026 "Workspace metadata + crates.io
+publish-readiness" wave (see section below) completed the metadata side of
+publishing — what remains for a tag is the explicit decision to publish.
+Every entry below maps to a date range on the `main` branch. Representative
+commits link to
 `https://github.com/Dicklesworthstone/franken_numpy/commit/<hash>`.
 
 The sections below are organized by **capability area** rather than diff order,
