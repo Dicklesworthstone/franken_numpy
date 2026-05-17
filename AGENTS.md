@@ -184,7 +184,7 @@ Cost note: `fnp-ufunc` (2,191 tests, ~60k LOC) and `fnp-python` (2,127 tests) do
 |-------|-------------|
 | `fnp-dtype` | Dtype taxonomy, promotion table determinism, cast policy primitives |
 | `fnp-ndarray` | Shape legality, stride calculus (C/F contiguous), reshape `-1` inference, broadcast contracts, alias-sensitive transitions |
-| `fnp-iter` | nditer-like traversal, overlap-safe iteration contracts |
+| `fnp-iter` | Transfer-loop selector, overlap detection, `Nditer` / `NditerPlan` / `NditerStep` state machine with `iterindex` / `multi_index` / reset / seek / external-loop chunks, `nditer_python*` parity bridge against the live numpy nditer |
 | `fnp-ufunc` | 35 binary + 43 unary elementwise ops, 30+ reductions, FFT (Cooley-Tukey + Bluestein), einsum (`einsum`, `einsum_path`, `einsum_optimized`), masked / string / datetime arrays, polynomial families (power, Chebyshev, Legendre, Hermite, Laguerre), float error state machine, NaN-correct reductions |
 | `fnp-linalg` | Linear algebra adapters, scoped solver contracts |
 | `fnp-random` | 5 production bit generators (PCG64, PCG64DXSM, MT19937, Philox, SFC64) + an internal `DeterministicRng` for tests, full `SeedSequence` / `SeedMaterial` hierarchy with spawn lineage, pickle payload round-trip, `RandomState` legacy wrapper, 40+ oracle-verified distributions with bit-exact PCG64DXSM parity vs NumPy |
