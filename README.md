@@ -1748,7 +1748,7 @@ Eight ordered gates run from fast to heavy, defined in `.github/workflows/ci.yml
 
 ```
 G1  fmt + lint           cargo fmt --check && cargo clippy -- -D warnings
-G2  unit + property      cargo test --workspace
+G2  unit + property      cargo test --workspace --lib
 G3  oracle differential  capture_numpy_oracle → run_ufunc_differential (real numpy required)
 G4  adversarial+security run_security_policy_gate.sh
 G5  test/logging contract run_test_contract_gate.sh
