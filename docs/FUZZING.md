@@ -52,6 +52,17 @@ echo -n '<binary payload>' > crates/fnp-io/fuzz/corpus/fuzz_npy/seed_my_case
 
 CI does not run fuzzing on every PR; fuzz harness compile-checking is implicit in `cargo check --workspace --all-targets` because the corpus-bearing harness still has to build. Schedule a separate workflow if you want recurring coverage runs.
 
+## Why each fuzz crate's `Cargo.toml` repeats fields literally
+
+Each fuzz crate has its own `[workspace]` block (empty), making it a separate
+1-package workspace that is excluded from the root workspace via the parent
+`Cargo.toml`'s `[workspace] exclude` list. That isolation is deliberate — the
+fuzz crates pull in `libfuzzer-sys`, which we don't want bleeding into normal
+`cargo` invocations. The cost: the fuzz `Cargo.toml` files cannot use
+`.workspace = true` inheritance and must declare `edition = "2024"` (and other
+package fields) literally. Same reason applies to the per-fuzz
+`rust-toolchain.toml` shipped alongside.
+
 ## Where to record findings
 
 A fuzz crash that exposes a real bug becomes a bead. The raw crash inputs that `cargo-fuzz` writes land under `crates/<crate>/fuzz/artifacts/<target>/crash-*` — copy the relevant crash bytes into a workspace-root `artifacts/<bead-id>/` directory (or attach them to the bead's `--description`) so the reproducer is permanent rather than living in a gitignored cargo-fuzz directory. A fuzz finding that exposes intentional or parity-debt divergence from NumPy belongs in [`DIVERGENCES.md`](DIVERGENCES.md) — that ledger is the machine-readable handoff point for diagnostic gates and accepts both `intentional` and `parity_debt` rows.
