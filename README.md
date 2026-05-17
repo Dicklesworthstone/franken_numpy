@@ -1744,7 +1744,7 @@ A bug that lives in NumPy too will pass (1) but fail (2). A bug that produces a 
 
 ## CI Gate Topology
 
-Eight ordered gates run from fast to heavy, defined in `.github/workflows/ci.yml`. Ordering is enforced by GitHub Actions `needs:` chaining — `g2-unit-property` declares `needs: g1-fmt-lint`, `g3-differential` declares `needs: g2-unit-property`, and so on through `g8-durability-decode`, so a failure at any gate aborts every downstream gate. All 8 are also runnable locally as a single command via `scripts/e2e/run_ci_gate_topology.sh`, which orchestrates the same sequence + a closing `validate_phase2c_packet` sweep over the 9 P2C packets:
+Eight ordered gates run from fast to heavy, defined in `.github/workflows/ci.yml`. The workflow triggers on push to `main`, pull-request to `main`, and manual `workflow_dispatch`; a concurrency group cancels in-progress runs when a new commit lands on the same ref (`concurrency.cancel-in-progress: true`). Ordering is enforced by GitHub Actions `needs:` chaining — `g2-unit-property` declares `needs: g1-fmt-lint`, `g3-differential` declares `needs: g2-unit-property`, and so on through `g8-durability-decode`, so a failure at any gate aborts every downstream gate. All 8 are also runnable locally as a single command via `scripts/e2e/run_ci_gate_topology.sh`, which orchestrates the same sequence + a closing `validate_phase2c_packet` sweep over the 9 P2C packets:
 
 ```
 G1  fmt + lint           cargo fmt --check && cargo check --workspace --all-targets && cargo clippy --workspace --all-targets -- -D warnings
