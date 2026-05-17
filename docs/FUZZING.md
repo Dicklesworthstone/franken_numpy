@@ -50,6 +50,10 @@ echo -n '<binary payload>' > crates/fnp-io/fuzz/corpus/fuzz_npy/seed_my_case
 
 CI does not run fuzzing on every PR; fuzz harness compile-checking is implicit in `cargo check --workspace --all-targets` because the corpus-bearing harness still has to build. Schedule a separate workflow if you want recurring coverage runs.
 
+## Where to record findings
+
+A fuzz crash that exposes a real bug becomes a bead with the crash file in `artifacts/`. A fuzz finding that exposes intentional or parity-debt divergence from NumPy belongs in [`DIVERGENCES.md`](DIVERGENCES.md) — that ledger is the machine-readable handoff point for diagnostic gates and accepts both `intentional` and `parity_debt` rows.
+
 ## Bead trail of the 2026-05 fuzz expansion
 
 Search `.beads/issues.jsonl` for the seeding wave: `62oir`, `aaq0g`, `s46p2`, `8fftx`, `cv45i`, `i8ipt`, `y3dhc`, `diqz3`, `m5y8s`. Each bead's close-reason in the JSONL lists the exact seed counts and target families that bead touched.
