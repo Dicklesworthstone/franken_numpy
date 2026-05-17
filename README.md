@@ -1842,7 +1842,7 @@ The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencie
 | Sorting | 1.90× | Acceptable |
 | Statistics | 2.79× | Yellow |
 | Matmul | 3.40× | Yellow |
-| FFT | 10.56× | Mixed (power-of-2 fast, non-power-of-2 slow) |
+| FFT | 10.56× | Mixed: the 2 FFT workloads are `fft_power2_medium` at 0.50× (FNP wins) and `fft_non_power2_medium` at 20.63× (Bluestein chirp-Z slow path) — median of the two is 10.56× |
 | Ufunc broadcast | 13.53× | Red, large-scale |
 | Ufunc elementwise | 30.76× | Red, large-scale |
 
