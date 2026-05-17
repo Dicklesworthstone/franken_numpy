@@ -60,7 +60,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 - **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-02-20` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml workspace with `workspace = true` pattern
-- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`). If narrow unsafe usage is unavoidable, isolate it behind audited interfaces and tests.
+- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates. `fnp-python` is the lone opt-out because PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point — but its source still contains zero hand-written `unsafe` blocks (verified by ripgrep). If narrow unsafe usage ever becomes unavoidable in any other crate, isolate it behind audited interfaces and tests.
 
 ### Key Dependencies
 
