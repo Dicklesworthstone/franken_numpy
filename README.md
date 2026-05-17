@@ -779,7 +779,7 @@ Ten time-value-of-money functions using closed-form annuity algebra where possib
 
 ### Polynomial Systems
 
-Five complete polynomial families, each with evaluation, arithmetic, calculus, fitting, and basis conversion:
+Five polynomial families (Power series, Chebyshev, Legendre, Hermite, Laguerre), with Hermite represented in both **physicist** and **probabilist** normalizations as separate submodules. Counting that way, six rows below, matching NumPy's own `numpy.polynomial.{polynomial, chebyshev, legendre, hermite, hermite_e, laguerre}` enumeration. Each row carries the full evaluation, arithmetic, calculus, fitting, and basis-conversion suite:
 
 | Family | Basis | Key operations |
 |---|---|---|
