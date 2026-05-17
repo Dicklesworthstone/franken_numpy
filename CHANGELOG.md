@@ -189,12 +189,14 @@ against the live NumPy reference. Notable pieces:
 
 ### Documentation correctness polish wave (May 2026)
 
-A ~75-bead sweep across README.md, AGENTS.md, FEATURE_PARITY.md,
-audit_numpy_reality.md, audit_numpy_mocks.md, docs/DIVERGENCES.md,
-docs/FUZZING.md, PROPOSED_ARCHITECTURE.md and this CHANGELOG. The
-wave was specifically aimed at removing claims that had drifted past
-the implementation, and at adding precision where prose was vague.
-Representative entries:
+A 92-bead sweep closed on 2026-05-16 alone, touching README.md,
+AGENTS.md, FEATURE_PARITY.md, audit_numpy_reality.md,
+audit_numpy_mocks.md, docs/DIVERGENCES.md, docs/FUZZING.md,
+PROPOSED_ARCHITECTURE.md and this CHANGELOG. (Count verified by
+`br list --status=closed --limit 10000 --json` filtered on
+`closed_at >= 2026-05-16`.) The wave was aimed at removing claims
+that had drifted past the implementation, and at adding precision
+where prose was vague. Representative entries:
 
   - README hero subtitle now states **concrete numbers** (6,392 tests,
     100% of `numpy.__all__`, zero unsafe blocks) instead of "extensive
