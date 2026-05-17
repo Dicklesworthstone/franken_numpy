@@ -29,13 +29,15 @@
 - [Complete Distribution List](#complete-distribution-list) · [Array Manipulation Toolkit](#array-manipulation-toolkit)
 - [Shared Memory and Views](#shared-memory-and-views) · [Float Error State Machine](#float-error-state-machine)
 - [Error Taxonomy](#error-taxonomy) · [Threading and Concurrency Model](#threading-and-concurrency-model) · [Versioning and Compatibility Promises](#versioning-and-compatibility-promises) · [Reproducibility Recipe](#reproducibility-recipe) · [Multi-Agent Development Process](#multi-agent-development-process)
+- [SCE Invariants in Detail](#sce-invariants-in-detail) · [NaN Semantics Cheat Sheet](#nan-semantics-cheat-sheet) · [Memory Footprint and Allocation Patterns](#memory-footprint-and-allocation-patterns) · [How to Investigate a Parity Issue](#how-to-investigate-a-parity-issue)
+- [NumPy Submodule Coverage Matrix](#numpy-submodule-coverage-matrix) · [Cookbook](#cookbook) · [Migrating from NumPy: A Checklist](#migrating-from-numpy-a-checklist) · [Common Pitfalls](#common-pitfalls) · [Reading the Evidence Ledger](#reading-the-evidence-ledger)
 - [Security Model](#security-model) · [Threat Model](#threat-model) · [Phase2C Extraction Packets](#phase2c-extraction-packets)
 - [Test Coverage](#test-coverage) · [Conformance Methodology Deep-Dive](#conformance-methodology-deep-dive) · [CI Gate Topology](#ci-gate-topology) · [Conformance Pipeline](#conformance-pipeline)
 - [Performance](#performance) · [Artifact Durability (RaptorQ)](#artifact-durability-raptorq) · [Divergence Ledger](#divergence-ledger) · [Fuzzing](#fuzzing)
 - [Parity Status](#parity-status) · [Comparison with Other Rust Array Libraries](#comparison-with-other-rust-array-libraries) · [Repository Layout](#repository-layout)
-- [Limitations](#limitations) · [Roadmap (Phase 3 candidates)](#roadmap-phase-3-candidates)
+- [Limitations](#limitations) · [Roadmap (Phase 3 candidates)](#roadmap-phase-3-candidates) · [Anti-Goals](#anti-goals) · [Performance Levers Applied So Far](#performance-levers-applied-so-far)
 - [What "Clean-Room" Means Here](#what-clean-room-means-here) · [F-order vs C-order in Practice](#f-order-vs-c-order-in-practice) · [Reading the Source Code](#reading-the-source-code)
-- [Algorithm References and Citations](#algorithm-references-and-citations) · [Glossary](#glossary) · [FAQ](#faq)
+- [Inspirations and Prior Art](#inspirations-and-prior-art) · [Algorithm References and Citations](#algorithm-references-and-citations) · [Glossary](#glossary) · [Project Timeline at a Glance](#project-timeline-at-a-glance) · [FAQ](#faq)
 - [About Contributions](#about-contributions) · [License](#license)
 
 ---
@@ -46,10 +48,10 @@ NumPy is the bedrock of scientific Python. It is also 30 years of C and Cython c
 
 ## The Solution
 
-FrankenNumPy rebuilds NumPy's behavior from scratch in safe Rust with two non-negotiable goals:
+FrankenNumPy rebuilds NumPy's behavior from scratch in safe Rust with two goals:
 
-1. **Absolute behavioral compatibility** with legacy NumPy. Not a subset, not "inspired by." The full API, edge cases and all.
-2. **A rigorous architecture** with formal contracts, a deterministic shape/stride engine, a dual-mode runtime (strict / hardened), and differential conformance against a real NumPy oracle on every CI run.
+1. **Full behavioral compatibility** with legacy NumPy. Not a subset, not "inspired by." The full API, edge cases and all.
+2. **A tighter architecture** with formal contracts, a deterministic shape/stride engine, a dual-mode runtime (strict / hardened), and differential conformance against a real NumPy oracle on every CI run.
 
 The full Python surface is reachable today through the `fnp_python` PyO3 extension, with engine fast-paths in safe Rust for performance-relevant operations and identity-preserving fallback to numpy for the rest. Coverage is structurally enforced by the `fnp_python_covers_full_numpy_all` conformance test, which iterates `numpy.__all__` at run time against the live numpy on the build host.
 
@@ -63,17 +65,17 @@ FrankenNumPy is not trying to replace NumPy for every workload tomorrow. It targ
 | **Reproducibility-critical pipelines** (regulatory ML, scientific publication, financial backtesting) that need **bit-exact RNG and dtype-deterministic promotion** across machines and across NumPy versions. PCG64DXSM streams are bit-exact vs upstream NumPy; the 324-pair promotion table is exhaustively explicit. |
 | **Security-conscious systems** that read untrusted `.npy` / `.npz` from third parties. NumPy's C parsers are an attack surface; the `fnp-io` parsers are bounded, fail-closed, and fuzzed. |
 | **Embedded / kiosk-style Rust deployments** that want NumPy-shaped APIs without dragging a Python interpreter into the build. |
-| **Library authors writing differential-test oracles** against their own numerical code. The `fnp-conformance` crate is a reusable oracle harness — it captures NumPy reference output and compares against any implementation, not just FrankenNumPy. |
-| **Researchers studying NumPy semantics.** Every shape transformation, dtype promotion, and ufunc dispatch decision is implemented as a small, readable, fully-tested Rust function. The codebase is a deliberately legible specification of NumPy's actual behavior. |
-| **NumPy users who want a drop-in Python module** with native-speed hot paths and numpy fallback everywhere else. (Caveat: no pip wheel yet — you build locally for now. See Limitations.) |
+| **Library authors writing differential-test oracles** against their own numerical code. The `fnp-conformance` crate is a reusable oracle harness; it captures NumPy reference output and compares against any implementation, not just FrankenNumPy. |
+| **Researchers studying NumPy semantics.** Every shape transformation, dtype promotion, and ufunc dispatch decision is implemented as a small, readable, fully tested Rust function. The codebase is a legible specification of NumPy's actual behavior. |
+| **NumPy users who want a drop-in Python module** with native-speed hot paths and numpy fallback everywhere else. (Caveat: no pip wheel yet; you build locally for now. See Limitations.) |
 
-It is **not** the right tool if your bottleneck is large dense-matmul on >2,000×2,000 matrices with OpenBLAS already linked, or if you need GPU acceleration today. Those gaps are explicit limitations and tracked in the Roadmap.
+This is the wrong tool if your bottleneck is large dense matmul on >2,000×2,000 matrices with OpenBLAS already linked, or if you need GPU acceleration today. Those gaps are documented in Limitations and tracked in the Roadmap.
 
 ## Why FrankenNumPy?
 
 | | NumPy (C / Cython) | FrankenNumPy (Rust) |
 |---|---|---|
-| Memory safety | Buffer overflows possible | 9 of 10 implementation crates declare `#![forbid(unsafe_code)]`; the 10th (`fnp-python`) contains zero unsafe blocks in its own source — the lint is opt-out only because PyO3 macros may expand into unsafe |
+| Memory safety | Buffer overflows possible | 9 of 10 implementation crates declare `#![forbid(unsafe_code)]`; the 10th (`fnp-python`) contains zero unsafe blocks in its own source. The lint is opt-out only because PyO3 macros may expand into unsafe |
 | `numpy.__all__` surface | Reference | 499/499 (100%), structurally locked by CI conformance test |
 | RNG parity | Reference | Bit-exact PCG64DXSM core stream, oracle-verified distributions |
 | NaN semantics | C-level behavior | Explicit propagation across reductions / sort / median / ptp |
@@ -146,7 +148,8 @@ print(rng.standard_normal(5))      # bit-exact NumPy parity
 ### Stride tricks: a 1-D sliding window with zero copy
 
 ```rust
-use fnp_ufunc::{UFuncArray, DType};
+use fnp_ufunc::UFuncArray;
+use fnp_dtype::DType;
 
 let signal = UFuncArray::new(vec![10], (0..10).map(|i| i as f64).collect(), DType::F64)?;
 
@@ -227,7 +230,7 @@ assert_eq!(geterr(), before);
 ## Design Philosophy
 
 1. **Parity debt, not feature cuts.** Surface parity is locked at 100% of `numpy.__all__`. Behavioral edge cases that still drift are tracked as parity debt to be closed, never as accepted scope reduction.
-2. **The Stride Calculus Engine (SCE) is the non-negotiable kernel.** Every shape transformation — broadcast, reshape, transpose, view aliasing, sliding-window — flows through a single deterministic Rust engine that owns all the legality rules. Replacing the SCE means replacing FrankenNumPy.
+2. **The Stride Calculus Engine (SCE) is the compatibility kernel.** Every shape transformation (broadcast, reshape, transpose, view aliasing, sliding window) flows through a single deterministic Rust engine that owns all the legality rules. Replacing the SCE means replacing FrankenNumPy.
 3. **Dual-mode runtime.** Strict mode maximizes observable NumPy compatibility with no behavior-altering repairs. Hardened mode preserves the API contract while adding safety guards and bounded defensive recovery for malformed inputs. Every decision lands in an evidence ledger with class / risk / action / loss-model context.
 4. **Fail-closed by default.** Unknown wire formats, unrecognized dtype descriptors, future metadata-version markers, and semantically incompatible inputs all cause explicit errors. There are no silent fallbacks past safety boundaries.
 5. **Oracle-verified, durably stored.** Every RNG distribution, every linalg decomposition, every reduction edge case is differentially compared to NumPy's actual output from the same seed. Every conformance bundle, benchmark baseline, and migration manifest is protected by a RaptorQ erasure-coded sidecar plus a machine-checked scrub and decode-proof.
@@ -265,7 +268,7 @@ np.__numpy_version__        # version of numpy used as fallback oracle
 np.linalg.solve([[3, 1], [1, 2]], [9, 8])
 ```
 
-There is **no `pip install frankennumpy` wheel/PyPI flow yet** — packaging is the only residual gap (see the FAQ and the Limitations section). The Python surface itself is complete and CI-locked.
+There is **no `pip install frankennumpy` wheel/PyPI flow yet**; packaging is the only residual gap (see the FAQ and the Limitations section). The Python surface itself is complete and CI-locked.
 
 ### Optional features
 
@@ -297,12 +300,12 @@ There is **no `pip install frankennumpy` wheel/PyPI flow yet** — packaging is 
 | **Random** | Five bit generators (`PCG64`, `PCG64DXSM`, `MT19937`, `Philox`, `SFC64`); `PCG64DXSM` is the default and the bit-exact NumPy-parity reference. 40+ oracle-verified distributions (`normal`, `uniform`, `binomial`, `poisson`, `gamma`, `beta`, `hypergeometric`, `multinomial`, `dirichlet`, `vonmises`, `zipf`, …) |
 | **FFT (18 entry points)** | `fft`, `ifft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `rfft`, `irfft`, `rfft2`, `irfft2`, `rfftn`, `irfftn`, `hfft`, `ihfft`, `fftfreq`, `rfftfreq`, `fftshift`, `ifftshift` |
 | **Statistics** | `histogram`, `histogram2d`, `histogramdd`, `histogram_bin_edges`, `bincount`, `digitize`, `percentile`, `quantile`, `median`, `average`, `corrcoef`, `cov` |
-| **Polynomials (5 families)** | Power series, Chebyshev, Legendre, Hermite (physicist + probabilist), Laguerre — full evaluation / arithmetic / calculus / root-finding / fitting / basis conversion suites |
+| **Polynomials (5 families)** | Power series, Chebyshev, Legendre, Hermite (physicist + probabilist), Laguerre. Full evaluation / arithmetic / calculus / root-finding / fitting / basis conversion suites |
 | **String arrays** | 33 elementwise `numpy.char` functions |
 | **Financial** | `fv`, `pv`, `pmt`, `ppmt`, `ipmt`, `nper`, `rate`, `npv`, `irr`, `mirr` |
 | **I/O** | `load`, `save`, `savez`, `savez_compressed`, `loadtxt`, `savetxt`, `genfromtxt`, `fromfile`, `tofile`, `fromstring`, `array2string`, memmap helpers |
 | **Masked arrays** | `MaskedArray` with reshape, transpose, concatenate, comparison ops, `filled`, `compressed`, `shrink_mask`, `anom`, `fix_invalid`, `is_masked`, `make_mask`, `mask_or` |
-| **Datetime / timedelta** | `DatetimeArray`, `TimedeltaArray` with arithmetic, comparison, `busday_count`, `busday_offset`, `is_busday` |
+| **Datetime / timedelta** | `UFuncArray` with `DType::DateTime64` / `DType::TimeDelta64`, built via `UFuncArray::from_datetime_strings` / `from_timedelta_strings`. Arithmetic, comparison, `busday_count`, `busday_offset`, `is_busday`. Units `ns`, `us`, `ms`, `s`, `min`, `h`, `D`, `W`, `M`, `Y` via `DateTimeUnit`. |
 | **Tensor + general ops** | `einsum`, `einsum_path`, `tensordot`, `kron`, `dot`, `matmul`, `vdot`, `inner`, `outer`, `convolve`, `correlate`, `gradient`, `diff`, `interp`, `clip`, `where`, `select`, `piecewise` |
 | **Scimath** | `scimath_sqrt`, `scimath_log`, `scimath_log2`, `scimath_log10`, `scimath_logn`, `scimath_power`, `scimath_arccos`, `scimath_arcsin`, `scimath_arctanh` (complex-aware extensions of real-domain math) |
 | **NumPy 2.0+ API** | `unique_all`, `unique_counts`, `unique_inverse`, `unique_values`, `permuted`, `matrix_transpose`, `cumulative_sum`, `cumulative_prod`, `trapezoid`, `unstack`, `vecdot` |
@@ -317,7 +320,7 @@ See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the complete live parity matrix
            ┌──────────────────────────────────────────────┐
            │              User API Layer                  │
            │   UFuncArray · MaskedArray · StringArray     │
-           │       DatetimeArray · TimedeltaArray         │
+           │ (datetime / timedelta = UFuncArray + DType)  │
            └───────────────────────┬──────────────────────┘
                                    │
        ┌───────────┬───────────────┼──────────────┬───────────┐
@@ -345,15 +348,17 @@ See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the complete live parity matrix
        - alias-safe view transitions
 ```
 
+(The only first-class user-facing array struct types in `fnp-ufunc` are `UFuncArray`, `MaskedArray`, and `StringArray`. Datetime and timedelta arrays are not separate struct types; they are `UFuncArray` instances with `DType::DateTime64` or `DType::TimeDelta64` and `ArrayStorage::I64` backing, with the unit (`ns`, `us`, `ms`, `s`, `min`, `h`, `D`, `W`, `M`, `Y`) carried on the dtype via `DateTimeUnit`.)
+
 `fnp-python` sits above the canonical chain as the Python-facing surface; it does not alter the layering below it.
 
-**`fnp-conformance` is the perpendicular axis** — it consumes every crate, captures NumPy oracle output, runs differential / metamorphic / adversarial / witness suites, generates RaptorQ artifacts, and exposes 47 dedicated binaries under `crates/fnp-conformance/src/bin/` that drive the CI gates.
+**`fnp-conformance` is the perpendicular axis.** It consumes every crate, captures NumPy oracle output, runs differential / metamorphic / adversarial / witness suites, generates RaptorQ artifacts, and exposes 47 dedicated binaries under `crates/fnp-conformance/src/bin/` that drive the CI gates.
 
 ---
 
 ## Workspace and Crate Map
 
-10 implementation crates, all under `crates/fnp-*`. 9 of the 10 declare `#![forbid(unsafe_code)]`; `fnp-python` is the lone exception, because PyO3's procedural macros may expand into unsafe as part of generating the cdylib entry point. In practice, the current `fnp-python` source contains zero hand-written `unsafe` blocks (verified by ripgrep) — the lint is opt-out, not invoked.
+10 implementation crates, all under `crates/fnp-*`. 9 of the 10 declare `#![forbid(unsafe_code)]`; `fnp-python` is the lone exception, because PyO3's procedural macros may expand into unsafe as part of generating the cdylib entry point. In practice, the current `fnp-python` source contains zero hand-written `unsafe` blocks (verified by ripgrep); the lint is opt-out, not invoked.
 
 | Crate | Lines (src/) | Purpose |
 |---|---:|---|
@@ -384,9 +389,9 @@ F16  F32  F64  Complex64  Complex128
 Str  DateTime64  TimeDelta64  Structured
 ```
 
-Each dtype maps to a type-safe `ArrayStorage` variant with native Rust containers — no flattened `Vec<u8>` reinterpretation. `I64` values live in `Vec<i64>`, `Complex128` values live in `Vec<(f64, f64)>`, `F16` uses the `half` crate's `f16` type, structured dtypes are described by typed `StructuredField` / `StructuredStorage`. Integer fidelity is preserved (no silent truncation through f64 for i64 values > 2^53), f32 identity is maintained, and complex numbers are stored as native interleaved pairs.
+Each dtype maps to a type-safe `ArrayStorage` variant with native Rust containers; no flattened `Vec<u8>` reinterpretation. `I64` values live in `Vec<i64>`, `Complex128` values live in `Vec<(f64, f64)>`, `F16` uses the `half` crate's `f16` type, structured dtypes are described by typed `StructuredField` / `StructuredStorage`. Integer fidelity is preserved (no silent truncation through f64 for i64 values > 2^53), f32 identity is maintained, and complex numbers are stored as native interleaved pairs.
 
-**Promotion table.** `promote(lhs, rhs)` is a deterministic `const fn`. All **324 dtype pairs are explicitly handled** with no catch-all fallback — adding a new dtype variant causes a compile error until promotion rules are added for it. Selected rules:
+**Promotion table.** `promote(lhs, rhs)` is a deterministic `const fn`. All **324 dtype pairs are explicitly handled** with no catch-all fallback; adding a new dtype variant causes a compile error until promotion rules are added for it. Selected rules:
 
 | LHS | RHS | Result | Why |
 |-----|-----|--------|-----|
@@ -427,13 +432,13 @@ C128   C128  C128   C128  C128  C128  C128  C128  C128  C128  C128  C128  C128  
 
 Read across the row for the left-hand operand and down to the column for the right-hand operand. The table is symmetric (`promote(a, b) == promote(b, a)`). Key patterns visible in the matrix:
 
-- **Signed × unsigned cross.** The result is the smallest signed type whose range covers both operands — so `U8 × I16 = I16`, but `U8 × I8 = I16` (no single 8-bit type holds both `-128..127` and `0..255`).
+- **Signed × unsigned cross.** The result is the smallest signed type whose range covers both operands, so `U8 × I16 = I16`, but `U8 × I8 = I16` (no single 8-bit type holds both `-128..127` and `0..255`).
 - **U64 × any signed = F64.** No NumPy integer type holds both `U64::MAX` and negative values, so the result widens to float.
 - **F32 × {I32, I64, U32, U64} = F64.** F32's 24-bit mantissa cannot exactly represent all 32/64-bit integers; F64 has 53 bits, which covers everything up to ±2^53.
 - **F16 × {I8, U8} = F16.** F16's 11-bit mantissa is enough for 8-bit ints; F16 × 16-bit ints widens to F32; F16 × 32/64-bit ints jumps to F64.
 - **Complex × small int = Complex64**, **Complex × large int = Complex128.** The same mantissa-precision logic as the float rows.
 
-(`Str`, `DateTime64`, `TimeDelta64`, and `Structured` follow same-family-only rules and are not shown in this 14×14 numeric sub-table.) The full enumeration is in `crates/fnp-dtype/src/lib.rs`; if a new variant is added to `enum DType`, the compiler refuses to build until the new row and column are filled in — there is no catch-all arm.
+(`Str`, `DateTime64`, `TimeDelta64`, and `Structured` follow same-family-only rules and are not shown in this 14×14 numeric sub-table.) The full enumeration is in `crates/fnp-dtype/src/lib.rs`; if a new variant is added to `enum DType`, the compiler refuses to build until the new row and column are filled in. There is no catch-all arm.
 
 ### Stride Calculus Engine (`fnp-ndarray`)
 
@@ -473,9 +478,9 @@ The iterator crate models NumPy's internal transfer-loop selector, the `nditer` 
 
 The largest crate (~60k LOC) and the heart of the array engine.
 
-**35 binary operations** — `Add`, `Sub`, `Mul`, `Div`, `Power`, `FloorDivide`, `Remainder`, `Fmod`, `Minimum`, `Maximum`, `Fmax`, `Fmin`, `Copysign`, `Heaviside`, `Nextafter`, `Arctan2`, `Hypot`, `Logaddexp`, `Logaddexp2`, `Ldexp`, `FloatPower`, `BitwiseAnd`, `BitwiseOr`, `BitwiseXor`, `LeftShift`, `RightShift`, `LogicalAnd`, `LogicalOr`, `LogicalXor`, and the six comparison operators.
+**35 binary operations:** `Add`, `Sub`, `Mul`, `Div`, `Power`, `FloorDivide`, `Remainder`, `Fmod`, `Minimum`, `Maximum`, `Fmax`, `Fmin`, `Copysign`, `Heaviside`, `Nextafter`, `Arctan2`, `Hypot`, `Logaddexp`, `Logaddexp2`, `Ldexp`, `FloatPower`, `BitwiseAnd`, `BitwiseOr`, `BitwiseXor`, `LeftShift`, `RightShift`, `LogicalAnd`, `LogicalOr`, `LogicalXor`, and the six comparison operators.
 
-**43 unary operations** — `Abs`, `Negative`, `Positive`, `Sign`, `Sqrt`, `Square`, `Exp`, `Log`, `Log2`, `Log10`, all trig and inverse trig, all hyperbolic and inverse hyperbolic, `Cbrt`, `Expm1`, `Log1p`, `Degrees`, `Radians`, `Floor`, `Ceil`, `Round`, `Rint`, `Trunc`, `Reciprocal`, `Spacing`, `Signbit`, `Isnan`, `Isinf`, `Isfinite`, `LogicalNot`, `Invert`, and more.
+**43 unary operations:** `Abs`, `Negative`, `Positive`, `Sign`, `Sqrt`, `Square`, `Exp`, `Log`, `Log2`, `Log10`, all trig and inverse trig, all hyperbolic and inverse hyperbolic, `Cbrt`, `Expm1`, `Log1p`, `Degrees`, `Radians`, `Floor`, `Ceil`, `Round`, `Rint`, `Trunc`, `Reciprocal`, `Spacing`, `Signbit`, `Isnan`, `Isinf`, `Isfinite`, `LogicalNot`, `Invert`, and more.
 
 Every binary operation goes through the same execution skeleton: compute the output shape via SCE's `broadcast_shape`, map output indices to source indices using broadcast strides (0-stride for size-1 dimensions), and apply the operation elementwise. The output-to-source index map uses an incremental odometer instead of a full unravel/remap per element.
 
@@ -504,15 +509,15 @@ Every binary operation goes through the same execution skeleton: compute the out
 
 **~100 public functions** organized into four tiers:
 
-**2×2 fast paths.** `solve_2x2`, `det_2x2`, `slogdet_2x2`, `inv_2x2`, `qr_2x2`, `svd_2x2`, `eigh_2x2`, `cholesky_2x2` — bypass the general NxN overhead for the smallest matrix size.
+**2×2 fast paths.** `solve_2x2`, `det_2x2`, `slogdet_2x2`, `inv_2x2`, `qr_2x2`, `svd_2x2`, `eigh_2x2`, `cholesky_2x2` bypass the general NxN overhead for the smallest matrix size.
 
 **NxN general algorithms.**
-- **QR** — Householder reflections with `qr_nxn` (reduced) and `qr_mxn` (rectangular)
-- **SVD** — Golub–Kahan bidiagonalization + implicit shifted QR; `svd_full(full_matrices)` for reduced or full
-- **Eigenvalues** — Hessenberg reduction + implicit shifted QR iteration; symmetric path uses tridiagonal reduction + implicit QL shifts (`eigvalsh_nxn`, `eigh_nxn`)
-- **LU** — Partial pivoting with `lu_factor_nxn` and `lu_solve`
-- **Cholesky** — Column-wise lower-triangular factorization
-- **Least squares** — `lstsq_svd` and `lstsq_nxn`; returns the full NumPy 4-tuple `(x, residuals, rank, singular_values)`
+- **QR:** Householder reflections with `qr_nxn` (reduced) and `qr_mxn` (rectangular)
+- **SVD:** Golub–Kahan bidiagonalization + implicit shifted QR; `svd_full(full_matrices)` for reduced or full
+- **Eigenvalues:** Hessenberg reduction + implicit shifted QR iteration; symmetric path uses tridiagonal reduction + implicit QL shifts (`eigvalsh_nxn`, `eigh_nxn`)
+- **LU:** Partial pivoting with `lu_factor_nxn` and `lu_solve`
+- **Cholesky:** Column-wise lower-triangular factorization
+- **Least squares:** `lstsq_svd` and `lstsq_nxn`; returns the full NumPy 4-tuple `(x, residuals, rank, singular_values)`
 
 **Spectral methods.** `expm_nxn` (matrix exponential via Padé approximation), `sqrtm_nxn`, `logm_nxn`, `funm_nxn` (general matrix function via Schur decomposition), `polar_nxn`, `schur_nxn`.
 
@@ -524,7 +529,7 @@ Eigenvalue sort order is ascending to match NumPy. Singularity checks use exact 
 
 ### Random Number Generation (`fnp-random`)
 
-The RNG crate achieves **bit-exact parity with NumPy** by porting every algorithm from NumPy's C source code. **`fnp-random` has zero external `crates.io` dependencies** — it depends only on `fnp-ndarray` within the workspace.
+The RNG crate achieves **bit-exact parity with NumPy** by porting every algorithm from NumPy's C source code. **`fnp-random` has zero external `crates.io` dependencies**; it depends only on `fnp-ndarray` within the workspace.
 
 **5 production bit generators**, enumerated under `pub enum BitGeneratorKind`:
 
@@ -634,14 +639,14 @@ Every decision is logged to an `EvidenceLedger` with timestamp, mode, class, evi
 The conformance crate is the quality backbone. **47 binaries** under `crates/fnp-conformance/src/bin/` drive the layered system:
 
 1. **Differential harness.** Captures NumPy's output for a fixture corpus (`capture_numpy_oracle`), then runs the same inputs through FrankenNumPy (`run_ufunc_differential`) and compares shapes, dtypes, and values with configurable tolerance. Covers ufunc, linalg, FFT, polynomial, string, masked-array, datetime, RNG, and I/O operations.
-2. **Metamorphic testing.** Verifies algebraic identities that must hold regardless of input: `a + b = b + a`, `a * 1 = a`, `sum(a) = sum(sort(a))`, FFT round-trips, etc. — 13+ identities.
-3. **Adversarial fuzzing and seeds.** Tests behavior on hostile inputs: NaN-filled arrays, extreme shapes, denormalized floats, integer overflow, malformed NPY headers, corrupt ZIP EOCDs. **27 fuzz targets** across **7 fuzz crates** with **~200 curated seed corpus files** — see [`docs/FUZZING.md`](docs/FUZZING.md).
+2. **Metamorphic testing.** Verifies algebraic identities that must hold regardless of input: `a + b = b + a`, `a * 1 = a`, `sum(a) = sum(sort(a))`, FFT round-trips, etc. (13+ identities).
+3. **Adversarial fuzzing and seeds.** Tests behavior on hostile inputs: NaN-filled arrays, extreme shapes, denormalized floats, integer overflow, malformed NPY headers, corrupt ZIP EOCDs. **27 fuzz targets** across **7 fuzz crates** with **~200 curated seed corpus files**; see [`docs/FUZZING.md`](docs/FUZZING.md).
 4. **Witness stability.** Hard-coded expected values for every RNG distribution ensure code changes don't silently alter output sequences. When an algorithm is intentionally changed, witness values are regenerated from the new implementation.
-5. **Diagnostic oracle.** A structured oracle for warnings, exceptions, and printed messages — `run_diagnostic_oracle`, `run_oracle_drift_matrix` (cross-version drift), `run_io_diagnostics`, plus the divergence-ledger checker (`run_divergence_ledger --fail-on-missing`).
+5. **Diagnostic oracle.** A structured oracle for warnings, exceptions, and printed messages: `run_diagnostic_oracle`, `run_oracle_drift_matrix` (cross-version drift), `run_io_diagnostics`, plus the divergence-ledger checker (`run_divergence_ledger --fail-on-missing`).
 6. **API coverage gate.** `run_fnp_python_api_coverage --fail-on-missing` reports `exports=633 covered=599 missing=0` against the full `numpy.__all__` surface plus internal helpers.
-7. **RaptorQ durability.** `generate_raptorq_sidecars`, `run_raptorq_gate`, `run_raptorq_stress_gate` — see the RaptorQ section below.
-8. **Performance baseline.** `generate_benchmark_baseline`, `run_performance_budget_gate`, `run_cross_engine_benchmark` — see the Performance section.
-9. **Security gate.** `run_security_gate`, `run_test_contract_gate`, `run_workflow_scenario_gate` — see the Threat Model section.
+7. **RaptorQ durability.** `generate_raptorq_sidecars`, `run_raptorq_gate`, `run_raptorq_stress_gate`. See the RaptorQ section below.
+8. **Performance baseline.** `generate_benchmark_baseline`, `run_performance_budget_gate`, `run_cross_engine_benchmark`. See the Performance section.
+9. **Security gate.** `run_security_gate`, `run_test_contract_gate`, `run_workflow_scenario_gate`. See the Threat Model section.
 
 ### Python Bindings (`fnp-python`)
 
@@ -663,7 +668,7 @@ When Python code accesses `fnp_python.some_attr` or `fnp_python.submodule.some_f
 |---|---|---|---|
 | **1. Native Rust function** | A `#[pyfunction]` exposed through `m.add_function(...)` that drives a Rust engine path (`fnp-ufunc`, `fnp-linalg`, `fnp-random`, …) and falls back to numpy only for unusual kwarg combinations | Performance-relevant hot paths and surfaces where the engine has a real implementation | `sum`, `mean`, `var`, `sort`, `searchsorted`, `digitize`, `where`, `linalg.solve`, `fft.fft`, polynomial families |
 | **2. Native PyO3 class** | A `#[pyclass]` registered via `m.add_class::<…>()` or live singleton instance via `m.add(name, instance)` | Classes that wrap Rust state (iterators, generators, seed sequences, grid objects) | `Generator`, `SeedSequence`, `Nditer`, `mgrid`, `ogrid`, `r_`, `c_` |
-| **3. Identity-equal numpy re-export** | `m.add(name, &numpy.getattr(name))` — the actual numpy attribute is rebound under the same name | Submodules and attributes whose semantics are pure numpy state and have no engine substitute | `numpy.strings`, `numpy.char`, `numpy.rec`, `numpy.emath`, `numpy.matrixlib`, `numpy.ma`, `numpy.testing`, `numpy.typing`, `numpy.ctypeslib`, `numpy.core`, `numpy.f2py`, plus the various constants and dtype scalars |
+| **3. Identity-equal numpy re-export** | `m.add(name, &numpy.getattr(name))`; the actual numpy attribute is rebound under the same name | Submodules and attributes whose semantics are pure numpy state and have no engine substitute | `numpy.strings`, `numpy.char`, `numpy.rec`, `numpy.emath`, `numpy.matrixlib`, `numpy.ma`, `numpy.testing`, `numpy.typing`, `numpy.ctypeslib`, `numpy.core`, `numpy.f2py`, plus the various constants and dtype scalars |
 
 Within a tier-1 wrapper, the fast-path-vs-fallback decision is itself tiered:
 
@@ -676,7 +681,7 @@ fast_path_for_common_shape(arg_dtype, common_kwargs)
 
 Two consequences:
 1. **`fnp_python.some_name is numpy.some_name`** is literally `True` for any name handled in tier 3. There is no wrapper, no copy, no version-skew risk.
-2. The fast-path-then-fallback gate is the natural place where the **conformance shards** under `crates/fnp-python/tests/conformance_*.rs` live. Each shard pins the exact kwargs that exercise the fast path, the exact kwargs that fall through, and the dtype combinations along both paths — so a regression on either side fails immediately.
+2. The fast-path-then-fallback gate is the natural place where the **conformance shards** under `crates/fnp-python/tests/conformance_*.rs` live. Each shard pins the exact kwargs that exercise the fast path, the exact kwargs that fall through, and the dtype combinations along both paths, so a regression on either side fails immediately.
 
 The structural lock-in test `fnp_python_covers_full_numpy_all` runs against the live `numpy.__all__` from the build host, so newly-added NumPy names show up immediately as CI failures rather than silently going unsupported.
 
@@ -697,7 +702,7 @@ All 18 transforms (`fft`, `ifft`, `fft2`, `ifft2`, `fftn`, `ifftn`, `rfft`, `irf
 
 - **`convolve(a, v, mode)`:** Direct O(n·m) convolution; supports `full` (default, length n+m−1), `same`, and `valid` modes. Flips the kernel and slides it across the input.
 - **`correlate(a, v)`:** Cross-correlation implemented as `convolve(a, v[::-1])`.
-- **`convolve2d` / `correlate2d`:** Full 2-D convolution with output shape `(h1+h2−1, w1+w2−1)`. `correlate2d` is implemented as `convolve2d` with the kernel reversed along both axes — the same flip-then-convolve relationship as the 1-D pair.
+- **`convolve2d` / `correlate2d`:** Full 2-D convolution with output shape `(h1+h2−1, w1+w2−1)`. `correlate2d` is implemented as `convolve2d` with the kernel reversed along both axes, the same flip-then-convolve relationship as the 1-D pair.
 
 ### Numerical Differentiation and Interpolation
 
@@ -796,7 +801,9 @@ Mask convention: `1.0` = masked (excluded), `0.0` = valid. Matches `numpy.ma`. O
 
 ### Datetime and Timedelta
 
-`DatetimeArray` and `TimedeltaArray` support full temporal arithmetic:
+Datetime and timedelta arrays are **not separate struct types**; they are `UFuncArray` instances with `DType::DateTime64` or `DType::TimeDelta64`, backed by `ArrayStorage::I64`. The time unit (one of `ns`, `us`, `ms`, `s`, `min`, `h`, `D`, `W`, `M`, `Y`) is carried on the dtype via the `DateTimeUnit` enum. Construct them via `UFuncArray::from_datetime_strings(values, unit)` or `from_timedelta_strings(values, unit)`.
+
+Full temporal arithmetic is supported through dispatch on the dtype:
 
 - Datetime − Datetime = Timedelta
 - Datetime + Timedelta = Datetime
@@ -816,7 +823,7 @@ Business-day helpers: `busday_count(start, end)`, `busday_offset(date, offset)`,
 
 ### Scimath (Complex-Domain Extensions)
 
-8 `numpy.lib.scimath` functions extend real-valued math to the complex domain for inputs outside the real function's natural domain — useful in signal processing and physics where negative square roots or out-of-range inverse trig naturally arise.
+8 `numpy.lib.scimath` functions extend real-valued math to the complex domain for inputs outside the real function's natural domain. Useful in signal processing and physics where negative square roots or out-of-range inverse trig naturally arise.
 
 | Function | Real domain | Extension |
 |---|---|---|
@@ -833,27 +840,27 @@ Business-day helpers: `busday_count(start, end)`, `busday_offset(date, offset)`,
 
 ## Numerical Stability and Precision Notes
 
-NumPy parity is not just "same answer, mostly." A library that aspires to bit-exact or behaviorally-equivalent output has to face concrete numerical-analysis choices.
+"Same answer, mostly" is not enough. A library that aspires to bit-exact or behaviorally-equivalent output has to face concrete numerical-analysis choices.
 
 **Summation strategy.** Reductions use a **two-tier compensated-summation policy** (`reduce_sum_values` in `crates/fnp-ufunc/src/lib.rs`):
 - Arrays with `≤ 1,000,000` finite values (or any non-finite value at all) use a straight linear sum. At those sizes naive accumulation has bounded error and the branch prediction wins on cost.
-- Arrays larger than `COMPENSATED_SUM_MIN_LEN = 1,000,000` switch to **Neumaier-compensated sum** — a Kahan variant that handles the `|value| > |running sum|` case correctly. Error stays at O(ε) per element instead of O(n·ε), which matters precisely at the sizes where naive summation drifts.
+- Arrays larger than `COMPENSATED_SUM_MIN_LEN = 1,000,000` switch to **Neumaier-compensated sum**, a Kahan variant that handles the `|value| > |running sum|` case correctly. Error stays at O(ε) per element instead of O(n·ε), which matters at the sizes where naive summation drifts.
 
 The same selector is used for strided axis reductions (`reduce_sum_strided`), so axis-wise sums on large contiguous chunks get the same compensation treatment. The contiguous-reduction fast path that drove the ~56% p50 latency improvement landed in commit `d9cfe90` (2026-02-13); the proof bundle is under `artifacts/optimization/`.
 
 **Polynomial evaluation.** Power-series, Chebyshev, Legendre, Hermite, and Laguerre evaluations all use Horner's method (or the Clenshaw recurrence for orthogonal bases). This minimizes multiplications and keeps the floating-point error proportional to the polynomial degree rather than to repeated powers of x.
 
-**Catastrophic cancellation.** Where NumPy uses identities to dodge cancellation (e.g. `log1p(x) ≈ x - x²/2 + x³/3` for small x, computed via the FMA-style libc routine), we use the same `f64::ln_1p`, `f64::exp_m1`, etc. — the standard-library backers are themselves carefully engineered to avoid cancellation. `nextafter`, `spacing`, and `signbit` route through libc-equivalent paths so denormals and signed zero are handled identically.
+**Catastrophic cancellation.** Where NumPy uses identities to dodge cancellation (e.g. `log1p(x) ≈ x - x²/2 + x³/3` for small x, computed via the FMA-style libc routine), we use the same `f64::ln_1p`, `f64::exp_m1`, etc.; the standard-library backers are themselves engineered to avoid cancellation. `nextafter`, `spacing`, and `signbit` route through libc-equivalent paths so denormals and signed zero are handled identically.
 
 **NaN propagation.** A dedicated oracle-test sweep verifies that NaN propagates through every reduction, every sort, every percentile/median/quantile, every cumulative operation, and every set operation; tests live in `crates/fnp-ufunc/tests/` and the metamorphic suite at `crates/fnp-ufunc/tests/metamorphic_math.rs` (e.g. `partition_contract_binary_mul_preserves_nan_and_signed_zero_bits`, `parallel_opt_in_sum_axis_matches_serial_for_nan_signed_zero_and_empty_axes`). Where NumPy's documented behavior is "NaN sorts to the end," we use the explicit `nan_last_cmp` ordering rather than relying on `partial_cmp().unwrap_or(Equal)` (which is a silent bug).
 
-**Signed zero.** `maximum(-0.0, 0.0)`, `heaviside(0.0, …)`, `floor_divide` of negative operands, `remainder`, `clip`, `divmod`, and `cummin`/`cummax` all preserve signed-zero semantics matching NumPy. These are explicit fixture cases in `fnp-ufunc/tests`.
+**Signed zero.** `maximum(-0.0, 0.0)`, `heaviside(0.0, ...)`, `floor_divide` of negative operands, `remainder`, `clip`, `divmod`, and `cummin`/`cummax` all preserve signed-zero semantics matching NumPy. These are explicit fixture cases in `fnp-ufunc/tests`.
 
 **Denormals.** No flush-to-zero. Subnormal inputs to ufuncs produce subnormal outputs, matching NumPy with denormals enabled (which is the default on most platforms). Fuzzer seeds include subnormal corners (smallest positive subnormal, largest subnormal, transition to normal) under `crates/fnp-dtype/fuzz/corpus`.
 
 **Linear algebra tolerances.** Singularity checks for `lu_factor`, `cholesky`, and triangular solve use exact zero (not an epsilon threshold), matching NumPy. Rank determination uses the largest singular value times machine epsilon times max(m, n), the standard SVD-based numerical-rank criterion. Conditioning is computed exactly through the SVD; no rank-1 approximations.
 
-**FFT precision.** Both Cooley–Tukey (power-of-two) and Bluestein chirp-Z (arbitrary length) implementations use `f64` throughout the recursion and synthesis steps. Twiddle and chirp factors are computed directly from `angle.cos()` / `angle.sin()` in double precision — no single-precision table tricks. The Bluestein chirp uses `exp(±i·π·k² / n)` derived inline. An `fft_mul` helper specifically protects against the case where a near-zero twiddle (e.g. `cos(π/2)` evaluating to ~6e-17 instead of 0) multiplies an `Inf` or `NaN` input: the result is forced to `0.0` when the twiddle is within `1e-14` of zero and the other operand is non-finite. This matches NumPy's behavior at multiples of π/2.
+**FFT precision.** Both Cooley–Tukey (power-of-two) and Bluestein chirp-Z (arbitrary length) implementations use `f64` throughout the recursion and synthesis steps. Twiddle and chirp factors are computed directly from `angle.cos()` / `angle.sin()` in double precision; no single-precision table tricks. The Bluestein chirp uses `exp(±i·π·k² / n)` derived inline. An `fft_mul` helper protects against the case where a near-zero twiddle (e.g. `cos(π/2)` evaluating to ~6e-17 instead of 0) multiplies an `Inf` or `NaN` input: the result is forced to `0.0` when the twiddle is within `1e-14` of zero and the other operand is non-finite. This matches NumPy's behavior at multiples of π/2.
 
 **RNG bit-exactness vs distribution shape.** The bit-exact contract holds for the core integer-emission stream (PCG64DXSM, MT19937, Philox, SFC64) and for the eight algorithm families ported verbatim from NumPy's C source (BTPE binomial, HRUA hypergeometric, PTRS Poisson, Marsaglia–Tsang gamma, Ziggurat normal/exponential, Lemire bounded ints, Fisher–Yates shuffle, Zipf rejection). Distribution methods built on top inherit bit-exactness when their algebra is identical.
 
@@ -1032,24 +1039,32 @@ let _guard = errstate(Some(FloatErrorMode::Ignore), None, None, None, None);
 
 ## Error Taxonomy
 
-Every operation that can fail returns `Result<T, E>` with an explicit error type — there are no hidden panics on user-reachable paths. The error types per crate are deliberately small and structured so that callers can match on the variant rather than parse a string. The full inventory:
+Every operation that can fail returns `Result<T, E>` with an explicit error type; there are no hidden panics on user-reachable paths. The exact variants per crate (verified against `crates/fnp-*/src/lib.rs`):
 
-| Crate | Error type | Representative variants |
+| Crate | Error type | Variants |
 |---|---|---|
-| `fnp-ndarray` | `ShapeError` | `ElementCountOverflow`, `InvalidShape`, `MismatchedShape`, `BroadcastIncompatible`, `IncompatibleReshape`, `OutOfBoundsView` |
-| `fnp-dtype` | `StorageError` | `IndexOutOfBounds`, `UnsupportedCast`, `StructuredFieldMismatch` |
-| `fnp-iter` | `TransferError`, `FlatIterContractError`, `NditerError` | Overlap conflicts, casting violations, iteration-state inconsistency |
-| `fnp-ufunc` | `UFuncError` | `Shape(ShapeError)` (wraps SCE errors), `Msg(String)` for value/parameter errors. The crate is large enough that string messages were chosen over deep enums; the value of the string is stable for assertions. |
-| `fnp-ufunc` (masked) | `MAError` | Mask shape mismatches, fill-value coercion failures, hard-mask violations |
-| `fnp-linalg` | `LinAlgError` | `Singular`, `NonSquare`, `IncompatibleShape`, `NonConverged`, `IndefiniteMatrix` (Cholesky) |
-| `fnp-random` | `SeedSequenceError`, `BitGeneratorError`, `RandomError`, `RngConstructorError`, `RandomPolicyError` | Seed-material malformed, distribution parameters out of domain (`p > 1`, `n < 0`, etc.), state-payload version mismatch |
-| `fnp-io` | `IOError` | `HeaderSchemaInvalid(&'static str)`, `UnsupportedDType`, `PayloadTruncated`, `ArchiveTooLarge`, `PickleRequired`, `TextParseError` |
+| `fnp-ndarray` | `ShapeError` | `InvalidItemSize`, `InvalidDimension(isize)`, `MultipleUnknownDimensions`, `Overflow`, `RankMismatch { expected, actual }`, `InvalidWindowDimension { axis, window, dim }`, `OutOfBoundsView { required_nbytes, available_nbytes }`, `IncompatibleBroadcast { lhs, rhs }`, `IncompatibleElementCount { old, new }` |
+| `fnp-dtype` | `StorageError` | `IndexOutOfBounds { index, len }`, `UnsupportedCast { from, to }`, `StructuredFieldMismatch { expected, got }` |
+| `fnp-iter` | `TransferError` | `SelectorInvalidContext(&'static str)`, `OverlapPolicyTriggered(&'static str)`, `WhereMaskContractViolation(&'static str)`, `SameValueCastRejected`, `StringWidthMismatch(&'static str)`, `SubarrayBroadcastContractViolation(&'static str)`, `FlatiterReadViolation(&'static str)`, `FlatiterWriteViolation(&'static str)`, `NditerOverlapPolicy(&'static str)`, `FpeCastError(&'static str)` |
+| `fnp-iter` | `FlatIterContractError` | `IndexingViolation(&'static str)` |
+| `fnp-iter` | `NditerError` | `InvalidConfiguration(&'static str)`, `MultiIndexViolation(&'static str)`, `NoBroadcastViolation(&'static str)`, `OverlapPolicyTriggered(&'static str)`, `NdindexShapeValidation(&'static str)`, `PythonBridgeFailure(String)` |
+| `fnp-ufunc` | `UFuncError` | `Shape(ShapeError)`, `InvalidInputLength { expected, actual }`, `AxisOutOfBounds { axis, ndim }`, `EmptyReduction { op }`, `FloatingPoint { kind, detail }`, `SignatureConflict { sig, signature }`, `SignatureParse { detail }`, `FixedSignatureInvalid { detail }`, `OverridePrecedenceViolation { detail }`, `DispatchResolutionFailed { detail }`, `TypeResolutionInvalid { detail }`, `ReductionContractViolation { detail }`, `LoopRegistryInvalid { detail }`, `PolicyUnknownMetadata { detail }`, `Msg(String)` (catch-all for one-off parameter errors) |
+| `fnp-ufunc` (masked) | `MAError` | `MaskShapeMismatch { data_shape, mask_shape }`, `UFunc(UFuncError)` (auto-wraps via `From`), `Msg(String)` |
+| `fnp-linalg` | `LinAlgError` | `ShapeContractViolation(&'static str)`, `SolverSingularity`, `CholeskyContractViolation(&'static str)`, `QrModeInvalid`, `SvdNonConvergence`, `SpectralConvergenceFailed`, `LstsqTupleContractViolation(&'static str)`, `NormDetRankPolicyViolation(&'static str)`, `BackendBridgeInvalid(&'static str)`, `PolicyUnknownMetadata(&'static str)` |
+| `fnp-random` | `RandomError` | `InvalidUpperBound`, `InvalidParameter` |
+| `fnp-random` | `SeedSequenceError` | `GenerateStateContractViolation`, `SpawnContractViolation` |
+| `fnp-random` | `BitGeneratorError` | `GeneratorBindingInvalid(&'static str)`, `InitFailed(&'static str)`, `SpawnContractViolation(&'static str)`, `JumpContractViolation(&'static str)`, `StateSchemaInvalid(&'static str)`, `PickleStateMismatch(&'static str)` |
+| `fnp-random` | `RngConstructorError` | `SeedMetadataInvalid` |
+| `fnp-random` | `RandomPolicyError` | `UnknownMetadata` |
+| `fnp-io` | `IOError` | `MagicInvalid`, `HeaderSchemaInvalid(&'static str)`, `DTypeDescriptorInvalid`, `WriteContractViolation(&'static str)`, `ReadPayloadIncomplete(&'static str)`, `PicklePolicyViolation`, `MemmapContractViolation(&'static str)`, `LoadDispatchInvalid(&'static str)`, `NpzArchiveContractViolation(&'static str)`, `PolicyUnknownMetadata(&'static str)` |
 | `fnp-runtime` | (return values, not a single enum) | `DecisionAction::FailClosed { reason }` carries the rejection reason; `OverrideAuditEvent` records explicit human bypass requests |
 
-Two design points are worth calling out:
+Four design points:
 
-1. **`UFuncError::Msg(String)` is intentional.** `fnp-ufunc` is the public-facing crate that touches the widest variety of parameter validation; encoding every variant exhaustively would balloon the enum without giving callers actionable structure. Callers should match `Err(UFuncError::Shape(_))` for structural errors and otherwise propagate. Where the underlying error has structure (shape, dtype, overlap), it's surfaced through a wrapped sub-error variant.
-2. **Error types compose through `From` impls.** A `ShapeError` from SCE flows up into `UFuncError::Shape(...)` automatically. A `BitGeneratorError` from `fnp-random` flows up into `RngConstructorError`. You don't need to write conversion glue.
+1. **Each crate uses a `reason_code()` method** on its error type (where applicable) that returns a stable `&'static str` slug: `linalg_solver_singularity`, `io_pickle_policy_violation`, `transfer_nditer_overlap_policy`, etc. The runtime evidence ledger and external monitoring systems use these to alert on specific failure modes without parsing display messages.
+2. **`&'static str` detail messages are the dominant carrier for context.** The variant tells you the error *category*, the static string tells you the *specific contract that was violated*. The string is stable across patches and safe to assert against in tests.
+3. **`UFuncError::Msg(String)` is the catch-all for one-off parameter errors** (off-by-one ranges, malformed kwargs) that don't yet have a dedicated structured variant. Most failures hit a structured variant; only the long tail of unstructured user-input checks lands in `Msg`. Callers should match `Err(UFuncError::Shape(_))` first, then the other structured variants, then `Msg` last.
+4. **Error types compose through `From` impls.** A `ShapeError` from SCE flows up into `UFuncError::Shape(...)` automatically. A `UFuncError` from a ufunc call flows up into `MAError::UFunc(...)` for masked-array operations. You don't need to write conversion glue.
 
 No public function in the implementation crates returns `Result<T, Box<dyn Error>>` or `anyhow::Error`. The crate boundary is part of the type contract.
 
@@ -1057,21 +1072,21 @@ No public function in the implementation crates returns `Result<T, Box<dyn Error
 
 ## Threading and Concurrency Model
 
-FrankenNumPy operations are single-threaded by default. The choice is deliberate and worth being precise about.
+FrankenNumPy operations are single-threaded by default. The choice merits precise description.
 
-**`Send` / `Sync` for the core types.** `UFuncArray` owns its `Vec<f64>` and is `Send + Sync` — you can move an array between threads or share it behind an `Arc` for concurrent reads. `MaskedArray`, `StringArray`, `DatetimeArray`, and `TimedeltaArray` follow the same pattern.
+**`Send` / `Sync` for the core types.** `UFuncArray` owns its `Vec<f64>` and is `Send + Sync`; you can move an array between threads or share it behind an `Arc` for concurrent reads. `MaskedArray` and `StringArray` follow the same pattern. Datetime/timedelta arrays are `UFuncArray` instances and inherit the same `Send + Sync`.
 
 **`UFuncArrayView` is `Send + Sync` only when read-only.** A view's backing store is `Arc<RwLock<Vec<f64>>>`; concurrent readers can hold a shared `RwLockReadGuard`. A writer acquires the exclusive lock for the duration of its mutation.
 
-**`Generator` and `BitGenerator` are `!Sync` by design.** They mutate state on every draw and are intended to be owned by a single thread. To parallelize RNG-driven work, spawn child streams via `SeedSequence::spawn(n)` and hand one to each worker — each child stream is statistically independent and individually reproducible. This matches NumPy's recommended pattern for parallel RNG.
+**`Generator` and `BitGenerator` are effectively single-thread.** Their inner state is plain integers (`u128` for PCG, the MT19937 state array, etc.), so the auto-derived `Send` and `Sync` impls apply, but every method that draws a value takes `&mut self`. Two threads cannot draw from the same generator without external locking, and you would not want them to: the draw order would become non-deterministic and the bit-exact-vs-NumPy contract would break. The right pattern for parallel RNG work is `SeedSequence::spawn(n)`, which hands each worker an independent child stream that remains individually reproducible. NumPy documents the same pattern.
 
-**`fnp-runtime`'s `EvidenceLedger` is `Sync`.** Multiple threads can append decision events concurrently; the ledger uses interior locking.
+**`fnp-runtime`'s `EvidenceLedger` has no interior locking.** It is `pub struct EvidenceLedger { events: Vec<DecisionEvent> }`, a plain `Vec` behind `&mut self` mutators. Multi-threaded appenders must wrap the ledger in their own `Mutex` / `RwLock`. The crate does not impose a synchronization model; that choice is left to the embedder.
 
 **No global mutable state in numeric ops.** The one exception is `fnp-ufunc`'s thread-local `FloatErrorState`, which is, as the name implies, per-thread. Configuring `errstate(divide=Raise)` on one thread does not affect another thread.
 
 **No parallel array kernels.** No internal Rayon / SIMD / thread-pool dispatch inside reductions, broadcasts, or matmul. The `reduce_sum_parallel` and `elementwise_binary_parallel` methods exist as opt-in entry points, but the default execution is serial. Multi-threaded execution is a Phase 3 candidate (ADR-001).
 
-**Async story is observability-only.** When the optional `asupersync` feature is enabled in `fnp-runtime`, it powers RaptorQ encoding, telemetry channels, and cancellation-safe oracle capture — it does **not** schedule numerical kernels.
+**Async story is observability-only.** When the optional `asupersync` feature is enabled in `fnp-runtime`, it powers RaptorQ encoding, telemetry channels, and cancellation-safe oracle capture; it does **not** schedule numerical kernels.
 
 ---
 
@@ -1085,7 +1100,7 @@ FrankenNumPy operations are single-threaded by default. The choice is deliberate
 | `.npy` / `.npz` round-trip | Promised for NPY 1.0 and 2.0 formats with every supported dtype. NumPy 3.0 will introduce a new format version; FrankenNumPy will follow once the format is finalized. |
 | Rust toolchain | Pinned to `nightly-2026-02-20` in both `rust-toolchain.toml` and `.github/workflows/ci.yml` (`env.RUST_TOOLCHAIN`). Bumps are scheduled, coordinated, and CI-verified before merge. |
 | Edition | Rust 2024. |
-| MSRV vs MSRRust | The minimum is also the maximum — we pin a specific nightly rather than supporting a range, because some used features (`let-chains`, certain `const fn` capabilities) graduated through nightly during the project's lifetime. |
+| MSRV vs MSRRust | The minimum is also the maximum. We pin a specific nightly rather than supporting a range, because some used features (`let-chains`, certain `const fn` capabilities) graduated through nightly during the project's lifetime. |
 | Public Rust API | Will likely receive a major reshape before `0.2.0`. Treat 0.x as exploratory; do not load-bear on `UFuncError` variant names or on undocumented method signatures yet. |
 | Python `fnp_python` API | Identical to the live numpy surface at build time. Code that runs against `numpy` will run against `fnp_python` with `import fnp_python as np`. |
 
@@ -1098,7 +1113,7 @@ A concrete checklist for "make my numerical pipeline bit-reproducible from a fre
 1. **Pin the toolchain.** Add `rust-toolchain.toml` with a specific nightly. We use `nightly-2026-02-20`.
 2. **Pin every dependency.** Use exact `=x.y.z` constraints in `Cargo.toml`, not caret/tilde. Commit `Cargo.lock`.
 3. **Use an explicit RNG seed.** `Generator::from_pcg64_dxsm(seed)` for new code; never rely on `SeedMaterial::None`.
-4. **Spawn child streams for parallelism, not OS entropy.** `let mut parent = SeedSequence::new(&[seed])?; let children = parent.spawn(n_workers)?;` — give each worker a child stream. The full lineage is captured in the spawn counter, so child indices reproduce.
+4. **Spawn child streams for parallelism, not OS entropy.** `let mut parent = SeedSequence::new(&[seed])?; let children = parent.spawn(n_workers)?;` gives each worker a child stream. The full lineage is captured in the spawn counter, so child indices reproduce.
 5. **Capture the full generator state.** Before any non-deterministic side-effect, `generator.to_pickle_payload()` and store the payload alongside your results. `from_pickle_payload` reconstructs the *exact* state.
 6. **Use `errstate` rather than global `seterr` for short-lived overrides.** Global `seterr` is process-wide; `errstate` is RAII-scoped and restores prior state on drop.
 7. **Round-trip via `save` / `load` for canonical output.** The NPY format is byte-stable across runs; pickle and JSON formats are not.
@@ -1115,17 +1130,434 @@ FrankenNumPy was built and continues to evolve under a multi-agent workflow. The
 
 | Tool | Purpose |
 |---|---|
-| **`br` (beads_rust)** | Dependency-aware issue tracker. Every change lands as a closed bead with the issue ID in the commit subject (`[franken_numpy-XXXX] ...`). 1,319 closed beads as of 2026-05-16. Issues live in `.beads/issues.jsonl` (checked in, JSONL-formatted, mergeable). |
+| **`br` (beads_rust)** | Dependency-aware issue tracker. Every change lands as a closed bead with the issue ID in the commit subject (`[franken_numpy-XXXX] ...`). 1,324 closed beads as of 2026-05-16. Issues live in `.beads/issues.jsonl` (checked in, JSONL-formatted, mergeable). |
 | **`bv`** | Graph-aware triage on top of `br`: PageRank, betweenness, critical-path, k-core, cycle detection. Used to pick "ready" work that unblocks the most downstream tasks. |
 | **MCP Agent Mail** | Inter-agent messaging plus advisory file reservations. Before editing a file, an agent reserves it with a TTL; conflicts are flagged before anyone wastes work. |
 | **`ubs` (Ultimate Bug Scanner)** | Pre-commit static-analysis pass. Catches common Rust bug classes (unwrap-on-Option, integer-overflow patterns, missing-error-handling) before they land. |
 | **`rch` (Remote Compilation Helper)** | Offloads heavy builds to a worker fleet. Important for a 304k-LOC workspace where local `cargo build --workspace` is expensive. |
 | **`ru`** | Multi-repo orchestration: sync, commit, push across related repos in one pass. |
-| **CASS / `cass`** | Cross-agent session search. Lets a fresh agent find what prior agents already learned about the same code — avoids re-solving solved problems. |
+| **CASS / `cass`** | Cross-agent session search. Lets a fresh agent find what prior agents already learned about the same code, so we avoid re-solving solved problems. |
 
 The pattern that makes this work: every change has a bead ID, every bead has a commit, every commit links back to the bead in its subject line. The graph is complete and queryable. Combined with the four-layer conformance system (differential / metamorphic / adversarial / witness) you get a tight feedback loop: code change → CI gates → bead closure → next ready work.
 
-None of this is required to *use* FrankenNumPy. The crates are stand-alone Rust libraries with no external `crates.io` dependencies on any of the multi-agent tooling. The methodology is documented because the repo is, deliberately, also a teaching artifact for the development process.
+None of this is required to *use* FrankenNumPy. The crates are stand-alone Rust libraries with no external `crates.io` dependencies on any of the multi-agent tooling. The methodology is documented because the repo doubles as a teaching artifact for the development process.
+
+---
+
+## SCE Invariants in Detail
+
+The Stride Calculus Engine enforces five hard contracts. They are the invariants every other crate depends on, so they merit understanding in detail.
+
+### Invariant 1: element-count conservation
+
+For any shape `s = [d0, d1, …, dn]`, the element count is `prod(d_i)` with checked multiplication. Overflow returns `ShapeError::Overflow`. This is the **first** check in any reshape, broadcast, or view-construction path: a shape that would address more elements than `usize::MAX` is rejected before any allocation is attempted.
+
+```
+element_count([2, 3, 4])     = 24
+element_count([0, 5])        = 0       (zero is legal: empty axis)
+element_count([usize::MAX, 2]) = Err(Overflow)
+```
+
+### Invariant 2: stride-from-shape is deterministic
+
+Given `shape` and `MemoryOrder`, `contiguous_strides` returns the unique stride vector for a contiguous layout. The function is a pure `const fn`-style computation: same inputs, same outputs, on every platform, regardless of compiler optimization level. C-order is the default; F-order is selected explicitly.
+
+```
+contiguous_strides([2, 3, 4], C) = [12, 4, 1]   (rightmost = 1)
+contiguous_strides([2, 3, 4], F) = [1, 2, 6]    (leftmost = 1)
+```
+
+### Invariant 3: broadcast legality is symmetric and associative
+
+Two shapes broadcast-compatible iff, aligned from the right, every pair of dimensions is equal or one is `1`. The output shape takes the max at each position. The relation is symmetric: `broadcast_shape(a, b) == broadcast_shape(b, a)`. It is associative: `broadcast_shapes([a, b, c])` reduces deterministically regardless of pairing order.
+
+```
+broadcast_shape([3, 1, 5], [4, 5])   = [3, 4, 5]   (right-align, mixed-rank)
+broadcast_shape([3, 4], [3, 5])      = Err(IncompatibleBroadcast)
+broadcast_shape([], [3])             = [3]         (0-D scalar broadcasts to anything)
+```
+
+### Invariant 4: `-1` inference has at most one degree of freedom
+
+`fix_unknown_dimension(shape, total_elements)` accepts a shape with at most one `-1` and infers it from the remaining dimensions. Two `-1`s return `ShapeError::MultipleUnknownDimensions`. A `-1` that doesn't divide evenly returns `ShapeError::IncompatibleElementCount`.
+
+```
+fix_unknown_dim([-1, 4], 24)    = [6, 4]
+fix_unknown_dim([-1, 5], 24)    = Err(IncompatibleElementCount { old: 24, new: 25 })
+fix_unknown_dim([-1, -1], 24)   = Err(MultipleUnknownDimensions)
+```
+
+### Invariant 5: view byte-spans must fit in the backing allocation
+
+`as_strided(shape, strides, offset)` and `sliding_window_view(window_shape)` compute the minimum and maximum reachable byte offset and verify the span fits in the buffer. A view that would address beyond the allocation is rejected (`ShapeError::OutOfBoundsView`), not silently zero-filled. Negative strides across multiple axes are handled by the same byte-span check.
+
+These five invariants are why SCE is called the compatibility kernel. Every other crate's correctness rests on them, and the conformance gates verify them on every CI run via the `FNP-P2C-001` (shape/reshape) and `FNP-P2C-006` (stride tricks) packets.
+
+---
+
+## NaN Semantics Cheat Sheet
+
+How each common operation handles NaN, verified against NumPy:
+
+| Operation | Input contains NaN → Result |
+|---|---|
+| `add`, `sub`, `mul`, `div` | NaN-in → NaN-out (per-element) |
+| `min`, `max` (reductions) | **NaN propagates** (uses `nan_min` / `nan_max`, not `f64::min` / `f64::max`) |
+| `argmin`, `argmax` | Returns index of first NaN if any; else index of min/max |
+| `sum`, `prod`, `mean`, `var`, `std` | NaN propagates (any NaN in → NaN out) |
+| `nansum`, `nanmean`, `nanstd`, etc. | NaN-aware: ignores NaN, reduces over remaining |
+| `cumsum`, `cumprod` | NaN propagates from first NaN forward |
+| `cummin`, `cummax` | NaN propagates through accumulator from first occurrence |
+| `sort`, `argsort` | **NaN sorts to end** (uses explicit `nan_last_cmp`, not `partial_cmp().unwrap_or(Equal)`) |
+| `partition`, `argpartition` | NaN treated as max; ends up in the upper partition |
+| `median`, `percentile`, `quantile` | **Early-return NaN** if any input is NaN |
+| `ptp` (peak-to-peak) | NaN propagates (both `UFuncArray` and `MaskedArray`) |
+| `unique` | NaN appears once in output (per NumPy convention; multiple NaNs collapse) |
+| `isin` | NaN matches NaN (numerically, NaN != NaN, but `isin` uses element equality semantics) |
+| `clip` | NaN propagates from value or bounds |
+| `where(cond, x, y)` | NaN propagates from selected branch |
+| `comparison ops` (==, <, >, ...) | Per IEEE 754: all comparisons with NaN are `False` |
+| `logical_and`, `logical_or` | Truthiness of NaN is `True` (matches NumPy boolean coercion) |
+| `equal_nan=True` parameters (in `allclose`, `array_equal`) | NaN compares equal to NaN |
+
+The general rule: **arithmetic propagates NaN, reductions propagate NaN unless they have `nan*` variants, sort puts NaN last, and median early-returns**. These are explicit fixture cases in `crates/fnp-ufunc/tests/` and were locked in by a correctness sweep documented in the CHANGELOG ("NaN Propagation" section).
+
+---
+
+## Memory Footprint and Allocation Patterns
+
+### Per-dtype storage cost
+
+The 14 numeric / string variants of `pub enum ArrayStorage` (in `crates/fnp-dtype/src/lib.rs`):
+
+| DType | `ArrayStorage` variant | Bytes per element |
+|---|---|---|
+| `Bool` | `Bool(Vec<bool>)` | 1 |
+| `I8` / `U8` | `I8(Vec<i8>)` / `U8(Vec<u8>)` | 1 |
+| `I16` / `U16` | `I16(Vec<i16>)` / `U16(Vec<u16>)` | 2 |
+| `I32` / `U32` | `I32(Vec<i32>)` / `U32(Vec<u32>)` | 4 |
+| `I64` / `U64` | `I64(Vec<i64>)` / `U64(Vec<u64>)` | 8 |
+| `F16` | `F16(Vec<half::f16>)` | 2 |
+| `F32` | `F32(Vec<f32>)` | 4 |
+| `F64` | `F64(Vec<f64>)` | 8 |
+| `Complex64` | `Complex64(Vec<(f32, f32)>)` interleaved | 8 |
+| `Complex128` | `Complex128(Vec<(f64, f64)>)` interleaved | 16 |
+| `Str` | `String(Vec<std::string::String>)` (heap-backed) | variable + 24-byte fat pointer per element |
+| `Structured` | `Structured(StructuredStorage)` typed by `StructuredField` definitions | variable per record |
+
+`DateTime64` and `TimeDelta64` dtypes are not separate `ArrayStorage` variants; they reuse `ArrayStorage::I64(Vec<i64>)` (8 bytes per element, ticks since epoch), with the time unit (`DateTimeUnit`) carried alongside the dtype. NaT is encoded as `i64::MIN`, matching NumPy.
+
+These are the natural Rust-side storage types; no `Vec<u8>` reinterpretation anywhere. A reader of `crates/fnp-dtype/src/lib.rs` can see exactly where each dtype's bytes live.
+
+### When operations copy vs view
+
+| Operation | Behavior |
+|---|---|
+| `reshape` to a contiguously-compatible shape | View (zero copy) when possible; copy when strides cannot be expressed |
+| `transpose` / `swapaxes` / `moveaxis` | Always a view (just a stride permutation) |
+| `broadcast_to` | View with zero strides on the broadcast axes |
+| `as_strided`, `sliding_window_view` | Always a view, bounds-checked |
+| `flatten` | Always copies (the result is always a fresh contiguous 1-D array) |
+| `ravel(order='C')` on a C-contiguous array | View |
+| `ravel(order='C')` on a non-contiguous array | Copy |
+| `copy()` / `array(a, copy=True)` | Always copies |
+| Arithmetic (`a + b`, `a * b`) | Always allocates a new output |
+| `reduce_*` methods | Always allocates a new output (typically a scalar or smaller array) |
+| `sort` / `argsort` / `partition` | Always allocates (non-mutating) |
+| In-place mutation via `MaskedArray::set_*`, `fill_diagonal`, `place`, `putmask` | No copy; mutates in place |
+
+`UFuncArrayView` uses an `Arc<RwLock<Vec<f64>>>` backing store, so multiple views into the same array share one allocation. The overlap-detection machinery prevents an in-place operation from corrupting another view that shares memory.
+
+### Two memory-safety guard rails
+
+1. **`MAX_HEADER_BYTES = 65,536`, `MAX_ARCHIVE_MEMBERS = 4,096`, `MAX_ARCHIVE_UNCOMPRESSED_BYTES = 2 GiB`, `MAX_TEXT_ELEMENTS = 16,777,216`.** Hard caps on `fnp-io` parser memory usage prevent untrusted inputs from triggering allocation bombs. These are public `pub const` values you can reference from your own code if you want the same bounds applied to layer-above text/binary parsers.
+2. **No uninitialized memory anywhere.** `#![forbid(unsafe_code)]` makes `MaybeUninit` and unchecked `Vec::set_len` unreachable. `empty(shape)` allocates and zero-fills; there is no analogue of NumPy's `np.empty` returning uninitialized bytes. The performance cost (zeroing vs not) is small and the safety benefit (no UB from reading uninitialized) is large.
+
+---
+
+## How to Investigate a Parity Issue
+
+A practical runbook for "I think FrankenNumPy and NumPy disagree on something."
+
+1. **Reproduce minimally.** Reduce the input to the smallest array that still shows the divergence. Most parity issues survive on 4-element arrays.
+2. **Run the operation under both** with the same explicit RNG seed if any randomness is involved:
+   ```rust
+   let mut rng = fnp_random::Generator::from_pcg64_dxsm(42)?;
+   let fnp_out = rng.<op>(...);
+   ```
+   ```python
+   rng = numpy.random.Generator(numpy.random.PCG64DXSM(42))
+   np_out = rng.<op>(...)
+   ```
+3. **Capture the oracle** via the conformance harness:
+   ```bash
+   FNP_REQUIRE_REAL_NUMPY_ORACLE=1 cargo run -p fnp-conformance --bin capture_numpy_oracle
+   ```
+   Add a fixture row to the relevant `*_input_cases.json` so the divergence is reproducible from a clean checkout.
+4. **Run the differential gate** for the relevant family:
+   ```bash
+   cargo run -p fnp-conformance --bin run_ufunc_differential   # for ufunc ops
+   ```
+   The output names the fixture, the expected value, and the observed value.
+5. **Check the divergence ledger** ([`docs/DIVERGENCES.md`](docs/DIVERGENCES.md)):
+   ```bash
+   cargo run -p fnp-conformance --bin run_divergence_ledger -- --fail-on-missing
+   ```
+   If the case is already known as `parity_debt` or `intentional`, the ledger row tells you why and what's planned.
+6. **If new**, the divergence is one of three things:
+   - **Bug in FrankenNumPy:** fix the kernel, regenerate witnesses if applicable, add a regression fixture.
+   - **Behavior we want to keep but document:** add a `parity_debt` row to `docs/DIVERGENCES.md` with bead ID and follow-up.
+   - **Bug in NumPy:** extremely rare, but it happens. Document with upstream issue link.
+7. **Regression-guard.** Whatever the resolution, leave a fixture, a witness, or a ledger row behind so the next agent (or your future self) doesn't re-investigate from scratch.
+
+The whole loop is built so investigation produces a permanent regression test, not just a one-off fix.
+
+---
+
+## NumPy Submodule Coverage Matrix
+
+How each `numpy.*` submodule is covered by `fnp_python`. The "Engine" column says whether the call resolves through a Rust kernel or whether it is a tier-3 identity re-export of the live numpy attribute (see [Python attribute resolution model](#python-attribute-resolution-model)).
+
+| Submodule | Engine | Notes |
+|---|---|---|
+| `numpy` (top-level) | Mixed | Tier-1 native wrappers for the hot surface (`sum`, `mean`, `var`, `sort`, `searchsorted`, `digitize`, `where`, `argwhere`, `take`, `put`, etc.); tier-3 re-exports for things like `np.True_`, `np.s_`, `np.newaxis` |
+| `numpy.fft` | **Native** | All 18 entry points run through the `fnp-ufunc` FFT kernel (Cooley–Tukey for power-of-two, Bluestein chirp-Z otherwise) |
+| `numpy.linalg` | **Native** | All decompositions, solvers, norms, batched ops run through `fnp-linalg` (Householder QR, Golub–Kahan SVD, implicit shifted QR for eig, etc.) |
+| `numpy.random` | **Native** | `Generator`, `RandomState`, `SeedSequence` and all 5 bit generators are native Rust classes; distributions run through the ported NumPy algorithms with bit-exact PCG64DXSM parity |
+| `numpy.polynomial` | **Native** | All 5 families (power, Chebyshev, Legendre, Hermite physicist + probabilist, Laguerre) with full eval / arithmetic / calculus / fitting suites |
+| `numpy.ma` | Re-export | Identity-equal to upstream numpy.ma; our own `MaskedArray` is reachable through the engine as well |
+| `numpy.char` | Re-export | Identity-equal; plus our own native `StringArray` with the 33 elementwise char functions reachable via the engine |
+| `numpy.strings` | Re-export | Re-export of upstream `numpy.strings` |
+| `numpy.rec` | Re-export | Re-export of upstream `numpy.rec` (record arrays) |
+| `numpy.emath` | Re-export | Re-export of upstream `numpy.emath` (we also expose scimath natively under top-level) |
+| `numpy.matrixlib` | Re-export | Re-export of upstream `numpy.matrixlib` |
+| `numpy.testing` | Re-export | Re-export of upstream `numpy.testing` |
+| `numpy.typing` | Re-export | Re-export of upstream `numpy.typing` |
+| `numpy.ctypeslib` | Re-export | Re-export of upstream `numpy.ctypeslib` |
+| `numpy.core` | Re-export | Re-export of upstream `numpy.core` (internal compatibility surface) |
+| `numpy.f2py` | Re-export | Re-export of upstream `numpy.f2py` |
+| `numpy.lib` | Mixed | Re-export by default; specific tier-1 wrappers where we have an engine path |
+| `numpy.dtypes` | Re-export | Re-export of upstream `numpy.dtypes` |
+| `numpy.exceptions` | Re-export | Re-export of upstream `numpy.exceptions` so exception identity is preserved |
+
+The mixed-tier-3 strategy is what enables the 100% surface guarantee: any name that exists on `numpy.<X>` exists on `fnp_python.<X>` automatically when it is exposed through a re-exported submodule. The structural-lock-in test verifies the same property for the top-level `numpy.__all__`.
+
+---
+
+## Cookbook
+
+Recipes for common Rust-side tasks. These complement the [Quick Example](#quick-example) and [More Worked Examples](#more-worked-examples) sections, focusing on idiomatic patterns rather than feature demos.
+
+### Recipe 1: load an `.npy`, do work, save the result
+
+```rust
+use fnp_io::{load, save, IOSupportedDType};
+use fnp_ufunc::UFuncArray;
+use fnp_dtype::DType;
+
+let bytes = std::fs::read("input.npy")?;
+let (shape, values, _dtype) = load(&bytes)?;          // bounded parser, fail-closed
+
+let array = UFuncArray::new(shape, values, DType::F64)?;
+let result = array.reduce_mean(Some(0), false)?;     // axis-0 mean
+
+let out_bytes = save(
+    result.shape().to_vec(),
+    result.values().to_vec(),
+    IOSupportedDType::F64,
+)?;
+std::fs::write("output.npy", out_bytes)?;
+```
+
+`load` enforces every bound (`MAX_HEADER_BYTES`, dtype-descriptor validation, payload completeness) before allocating; `save` produces NumPy-compatible bytes that round-trip exactly.
+
+### Recipe 2: parallel RNG with reproducible per-worker streams
+
+```rust
+use fnp_random::{BitGenerator, BitGeneratorKind, Generator, SeedSequence};
+use std::thread;
+
+let n_workers = 8;
+let mut root = SeedSequence::new(&[42u32])?;
+let child_seqs = root.spawn(n_workers)?;
+
+let handles: Vec<_> = child_seqs
+    .into_iter()
+    .enumerate()
+    .map(|(worker_id, ss)| {
+        thread::spawn(move || -> Result<_, Box<dyn std::error::Error + Send + Sync>> {
+            let bg = BitGenerator::from_seed_sequence(BitGeneratorKind::Pcg64Dxsm, &ss)?;
+            let mut rng = Generator::from_bit_generator(bg);
+            let samples = rng.standard_normal(10_000);
+            Ok((worker_id, samples))
+        })
+    })
+    .collect();
+
+for h in handles {
+    let (worker_id, samples) = h.join().unwrap()?;
+    println!("worker {worker_id}: first sample = {}", samples[0]);
+}
+```
+
+Each worker stream is statistically independent **and** individually reproducible; re-running with the same root seed produces the same per-worker draw sequences. This is how NumPy itself recommends parallelizing RNG-driven work.
+
+### Recipe 3: differential test against numpy from Rust
+
+```rust
+use fnp_ufunc::UFuncArray;
+use fnp_dtype::DType;
+
+#[test]
+fn fft_round_trip_matches_numpy_within_tolerance() -> Result<(), Box<dyn std::error::Error>> {
+    // Build a fixture deterministically.
+    let signal_values: Vec<f64> = (0..256).map(|i| (i as f64 * 0.1).sin()).collect();
+    let signal = UFuncArray::new(vec![256], signal_values, DType::F64)?;
+
+    // Forward then inverse FFT, should match the original to within FP tolerance.
+    let spectrum = signal.fft(None)?;
+    let recovered = spectrum.ifft()?;
+
+    for (i, (got, want)) in recovered
+        .values()
+        .chunks_exact(2)
+        .map(|c| c[0])
+        .zip(signal.values().iter().copied())
+        .enumerate()
+    {
+        let err = (got - want).abs();
+        assert!(err < 1e-12, "fft/ifft round-trip diverged at index {i}: |Δ| = {err:.3e}");
+    }
+    Ok(())
+}
+```
+
+The same pattern (build fixture → run kernel → run inverse → compare to original) is the basis for the metamorphic-test layer described in [Conformance Methodology Deep-Dive](#conformance-methodology-deep-dive).
+
+### Recipe 4: feed FrankenNumPy values into Python via PyO3
+
+```python
+import fnp_python as np
+
+# Native Rust fast-path for sorting; identity-equal numpy.ma for masked-array
+# operations that do not yet have an engine path.
+data = np.array([3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0])
+sorted_view = np.sort(data)                # Rust engine
+masked = np.ma.masked_greater(data, 4.0)   # numpy fallback (tier-3)
+
+# Save and round-trip via .npy. Bytes are identical to numpy.save / numpy.load.
+np.save("data.npy", data)
+restored = np.load("data.npy")
+assert (data == restored).all()
+```
+
+Hot operations land on the Rust engine. Surfaces with no engine substitute fall back to the same `numpy.ma`, `numpy.matrixlib`, etc. you would have called directly. The boundary is invisible to your code.
+
+### Recipe 5: capture a generator's state mid-stream and reload it later
+
+```rust
+use fnp_random::Generator;
+
+let mut rng = Generator::from_pcg64_dxsm(2026)?;
+let first_batch = rng.standard_normal(100);
+
+// Persist the exact state (schema-tagged for forward compatibility).
+let snapshot = rng.to_pickle_payload();
+let serialized = serde_json::to_string(&snapshot)?;
+std::fs::write("rng_state.json", serialized)?;
+
+// ...later, in a different process...
+let snapshot_back: fnp_random::GeneratorPicklePayload =
+    serde_json::from_str(&std::fs::read_to_string("rng_state.json")?)?;
+let mut rng_resumed = Generator::from_pickle_payload(snapshot_back)?;
+
+let second_batch = rng_resumed.standard_normal(100);
+// `second_batch` is exactly what the original `rng` would have produced next.
+```
+
+The pickle-payload schema is forward-compatible: the payload carries an algorithm tag and a schema version, so future generator changes can deserialize older snapshots when the underlying bit generator is unchanged.
+
+---
+
+## Migrating from NumPy: A Checklist
+
+A practical checklist for Python users moving an existing NumPy-based codebase to `fnp_python`.
+
+| Step | What to do | Why |
+|---|---|---|
+| 1 | `import fnp_python as np` (replace `import numpy as np`) | `fnp_python` re-exports the full `numpy.__all__`, so the import rename usually suffices. |
+| 2 | Run your existing test suite. | Most tests will pass unchanged because the surface is 1:1. |
+| 3 | Inspect failures for `is`-comparisons against numpy types (e.g. `type(x) is numpy.ndarray`). | The arrays returned from re-exported numpy functions ARE numpy ndarrays; those returned from Rust-engine fast paths might be the same. If `is`-comparisons break, switch to `isinstance(x, np.ndarray)`. |
+| 4 | Pin a specific seed everywhere that uses `np.random.default_rng()`. | `SeedMaterial::None` is currently deterministic in `fnp-random` (divergence ledger row `franken_numpy-ucc2o`); explicit seeds avoid surprise. |
+| 5 | Replace single-RNG parallel patterns with `SeedSequence.spawn(n)`. | If you've been calling `np.random.default_rng()` once per worker without seed spawning, you've been relying on OS entropy for stream independence; switch to explicit spawn so the behavior is reproducible AND parallel-safe. |
+| 6 | Audit your `.npy` / `.npz` consumers if you handle untrusted files. | The `fnp-io` parsers have hard bounds (`MAX_HEADER_BYTES = 65,536`, `MAX_ARCHIVE_MEMBERS = 4,096`, `MAX_ARCHIVE_UNCOMPRESSED_BYTES = 2 GiB`). If your existing pipeline relies on loading files larger than these bounds, document the gap before flipping over. |
+| 7 | If you use `np.empty()` with the expectation of uninitialized memory for speed, you now get zero-filled memory. | Safe Rust forbids uninitialized memory; the perf delta is small in practice but measurable for very large pre-allocations. |
+| 8 | If you use the C-extension API (`np.PyArray_*` from your own C extension), that surface is not exposed by `fnp_python`. | You'd need to keep using upstream numpy for those calls, or to invoke `fnp_python` via Python rather than via the C API. |
+| 9 | Cap any `errstate` or `seterr` usage to RAII scopes when possible. | The Rust-side `errstate()` is RAII-scoped per thread. Global `seterr` works but is process-wide and harder to reason about. |
+| 10 | Run a parity-test pass: pin a representative input, call the operation under both `numpy` and `fnp_python`, assert equality / closeness. | This gives you a regression net for the migration even if you don't adopt the upstream conformance harness. |
+
+Most codebases need only steps 1, 2, and 4. Steps 5–10 matter if you depend on specific semantics that the migration could perturb.
+
+---
+
+## Common Pitfalls
+
+Things that look broken but aren't, plus things that look fine but bite you later.
+
+| Pattern | What happens | What to do |
+|---|---|---|
+| `Generator::from_pcg64_dxsm(seed).standard_normal(5)`, calling it twice and expecting the same result | Second call gives the **next** 5 samples, not the first 5 again. The generator is stateful. | Build the generator inside the test/function; or `to_pickle_payload()` + `from_pickle_payload()` to rewind. |
+| `default_rng()` without a seed and expecting fresh randomness across runs | The result is **deterministic**; fixed default seed `0xC0DE_CAFE_F00D_BAAD` (divergence ledger row `franken_numpy-ucc2o`) | Pass an explicit seed; or accept the determinism as a feature. |
+| `np.empty((1_000_000,))` expecting uninitialized memory for benchmark realism | Result is **zero-filled** (safe Rust forbids uninit memory) | Benchmark realistically by writing into the buffer before timing reads. |
+| `reduce_mean(None, false)` on a float array, then asserting shape `[1]` | Result shape is `[]` (0-D scalar), not `[1]`. `keepdims=true` gives `[1, ...]` of all-ones. | Use `keepdims=true` if you want a shape-preserving reduction. |
+| Sorting an array containing NaN and expecting NaN in the middle | NaN sorts to **end** (NumPy convention). | Use `nansort_index` style explicit ordering if you need to filter out NaN first. |
+| Comparing two NaN values with `==` and getting `true` | `==` returns `false` for NaN (IEEE 754). | Use `f64::is_nan()` or `equal_nan=True` parameter in helpers like `allclose`. |
+| Passing a `Vec<f32>` where the API expects a `&[f64]` | Compile error. The API is strongly typed; there is no auto-coercion. | Use `as_slice()` and convert dtypes explicitly via `cast` / `astype`. |
+| Calling `binomial(10, 0.5, 100)` and forgetting `?` | Compile error: returns `Result<Vec<u64>, RandomError>`. | Add `?` or `.unwrap()` (test code) / explicit match (production). |
+| Building a view with `as_strided(shape, strides, offset)` that exceeds the backing allocation | Returns `Err(ShapeError::OutOfBoundsView { required_nbytes, available_nbytes })`, not UB. | Use the error to debug your stride math; the byte-span check is the safety net. |
+| Calling `f64` arithmetic on integer arrays > 2^53 and expecting exact results | f64 arithmetic loses precision above 2^53; `IntegerSidecar` preserves the original bits through storage round-trips but not through arithmetic. | Cast to a wider integer type at the right moment; see Limitations. |
+| Assuming `np.linalg.solve(A, b)` is BLAS-backed | It's pure Rust Householder QR / partial-pivot LU. Competitive for small matrices, slower for very large ones. | For massive matrices, Phase 3 BLAS linkage is on the roadmap; for now, batch via `batch_solve` where the broadcast is natural. |
+
+These cover most "wait, why does this behave that way?" questions in the first week of using FrankenNumPy.
+
+---
+
+## Reading the Evidence Ledger
+
+The `EvidenceLedger` in `fnp-runtime` is the audit trail for every runtime decision. If you embed the dual-mode runtime, you get a structured record of *which* input class hit *which* code path with *what* posterior risk. The data model:
+
+```
+DecisionEvent {
+    timestamp:      RFC3339 UTC,
+    runtime_mode:   Strict | Hardened,
+    class:          KnownCompatible | KnownIncompatible | Unknown,
+    action:         Allow | FullValidate | FailClosed,
+    risk_score:     f64                  (log-likelihood ratio of incompatibility)
+    posterior_p:    f64                  (probability of incompatibility, 0..1)
+    evidence:       Vec<EvidenceTerm>    (each carrying a slug + weight)
+    audit_context:  optional reference   (request ID, fixture ID, etc.)
+}
+```
+
+A typical ledger line (JSONL):
+
+```json
+{"ts":"2026-05-16T14:32:08.421Z","mode":"Hardened","class":"KnownCompatible","action":"FullValidate","risk":1.2,"posterior":0.041,"evidence":[{"slug":"input.shape_within_bounds","weight":-0.7},{"slug":"input.dtype_known","weight":-0.8},{"slug":"input.has_nan","weight":2.7}],"audit_ref":"fixture:ufunc.add.case_142"}
+```
+
+To consume this:
+
+- **`mode`** tells you which runtime mode was active. Strict skips most full-validate paths; Hardened opts into them on elevated risk.
+- **`class`** is the input classification. `Unknown` and `KnownIncompatible` always fail closed; `KnownCompatible` is the interesting case.
+- **`action`** is what we did. Compare against the [Runtime Mode Matrix](#how-it-works-per-crate-deep-dive) to confirm it matches the policy.
+- **`risk`** is a log-likelihood ratio. Higher means more evidence of incompatibility.
+- **`posterior`** is the probability of incompatibility under the loss-model decision rule. Values close to 0 mean "safe accept"; values close to 1 mean "definitely incompatible".
+- **`evidence`** is the breakdown: each `EvidenceTerm` adds (or subtracts) from the log-odds. Negative weights pull toward "compatible"; positive weights push toward "incompatible".
+- **`audit_ref`** lets you correlate ledger entries with upstream requests, fixtures, or override approvals.
+
+Override events live in a separate `OverrideAuditEvent` stream so that explicit human bypasses of a fail-closed gate are auditable distinctly from automatic decisions. An override record always carries a justification slug + an audit reference (a ticket number, a PR link, etc.).
+
+For pipelines that need cryptographic non-repudiation, the ledger output can be fed into the same RaptorQ artifact-durability stack (sidecar + scrub + decode proof) so a ledger snapshot survives single-symbol loss.
 
 ---
 
@@ -1230,13 +1662,13 @@ run_ufunc_differential: fixture → FrankenNumPy     → fnp_outputs.json
 
 The comparator is tiered: it first compares shapes, then dtypes, then values. Value comparison uses a per-test relative tolerance (default `1e-12` for f64, `1e-6` for f32) but accepts bit-exact equality when both implementations produce identical floats. The same skeleton powers `run_ufunc_differential`, the linalg/FFT/polynomial/string/masked/datetime/RNG/IO differential binaries, and the per-function shards under `crates/fnp-python/tests/conformance_*.rs`.
 
-**Why this catches bugs:** it surfaces any case where a function returns the wrong number, the wrong shape, or the wrong dtype — even when the function "looks right" on inspection.
+**Why this catches bugs:** it surfaces any case where a function returns the wrong number, the wrong shape, or the wrong dtype, even when the function "looks right" on inspection.
 
 **Why it isn't sufficient on its own:** a bug that exactly matches a corresponding bug in NumPy will pass differentially. Hence layers 2–4.
 
 ### 2. Metamorphic testing
 
-Verifies algebraic identities that must hold *regardless of input*. These don't depend on an oracle at all — they catch bugs that an oracle test couldn't, because they probe relationships, not values.
+Verifies algebraic identities that must hold *regardless of input*. These don't depend on an oracle at all; they catch bugs that an oracle test couldn't, because they probe relationships, not values.
 
 Representative identities (from `crates/fnp-conformance/src/metamorphic_*`):
 
@@ -1354,7 +1786,7 @@ FNP_ORACLE_PYTHON="$(pwd)/.venv-numpy314/bin/python3" \
 | Environment variable | Effect |
 |---|---|
 | `FNP_ORACLE_PYTHON` | Path to a Python interpreter with NumPy. Explicit non-default paths win over repo-local bootstrap. |
-| `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` | Require a real NumPy oracle. If `FNP_ORACLE_PYTHON` is unset (or left at `python3`), `capture_numpy_oracle` bootstraps and reuses `.venv-numpy314` automatically — preferring `uv`, then standard `venv` + `pip`, finally a user-site `pip install numpy` fallback when the worker lacks venv tooling. |
+| `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` | Require a real NumPy oracle. If `FNP_ORACLE_PYTHON` is unset (or left at `python3`), `capture_numpy_oracle` bootstraps and reuses `.venv-numpy314` automatically, preferring `uv`, then standard `venv` + `pip`, finally a user-site `pip install numpy` fallback when the worker lacks venv tooling. |
 
 Additional conformance / artifact commands:
 
@@ -1376,7 +1808,7 @@ cargo run -p fnp-conformance --bin run_fnp_python_api_coverage -- --fail-on-miss
 
 FrankenNumPy is profile-driven: every optimization is paired with a baseline, a single targeted lever, and a proof-backed delta artifact.
 
-- **Release profile:** `opt-level = 3`, `lto = true`, `codegen-units = 1`, `strip = true`. A `release-perf` profile (used for profiling) adds `lto = "thin"`, `debug = "line-tables-only"` for flamegraphs.
+- **Release profile.** The workspace `Cargo.toml` does not override `[profile.release]`, so Cargo's defaults apply (`opt-level = 3`, `lto = false`, `codegen-units = 16`, `strip = false`). The workspace adds one custom profile, `release-perf`, defined explicitly: `inherits = "release"`, `lto = "thin"`, `codegen-units = 1`, `debug = "line-tables-only"`. That is the right profile for flamegraph profiling. Downstream consumers that want full LTO are free to add `[profile.release] lto = true` in their own top-level Cargo.toml.
 - **Contiguous reduction kernel.** Axis reductions on contiguous data avoid per-element index computation. A targeted optimization pass (commit `d9cfe90`, 2026-02-13) reduced axis-reduction latency by ~56% (p50/p95/p99 deltas of ~90% on contiguous workloads). See `artifacts/optimization/` and `artifacts/baselines/` for the proof bundle.
 - **Broadcast index mapping.** Output-to-source index mapping uses an incremental odometer instead of full unravel/remap per element.
 - **2×2 fast paths.** Linear algebra has specialized 2×2 implementations that bypass general NxN overhead for the most common small-matrix case.
@@ -1385,7 +1817,7 @@ FrankenNumPy is profile-driven: every optimization is paired with a baseline, a 
 
 The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencies for ufunc and reduction sentinel workloads and rejects regressions. The cross-engine benchmark (`run_cross_engine_benchmark`) compares directly against NumPy.
 
-**Honest summary of the current cross-engine picture** (2026-04-10 baseline at `artifacts/baselines/cross_engine_benchmark_v1.json`, 37 workloads):
+**Current cross-engine picture** (2026-04-10 baseline at `artifacts/baselines/cross_engine_benchmark_v1.json`, 37 workloads):
 
 | Op family | Median ratio (FNP / NumPy) | Verdict |
 |---|---|---|
@@ -1400,18 +1832,18 @@ The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencie
 | Ufunc broadcast | 13.53× | Red, large-scale |
 | Ufunc elementwise | 30.76× | Red, large-scale |
 
-The red-band workloads are exactly the targets of the future Phase 3 work (SIMD, BLAS linkage, parallel execution) — see Roadmap. For small/medium arrays and for I/O / random / linalg / reductions the picture is already at or near parity.
+The red-band workloads are the targets of the future Phase 3 work (SIMD, BLAS linkage, parallel execution). See Roadmap. For small/medium arrays and for I/O / random / linalg / reductions the picture is already at or near parity.
 
 ### Benchmark methodology
 
-The cross-engine benchmark (`run_cross_engine_benchmark.sh`) is intentionally pedantic so that ratios published in this README are reproducible:
+The cross-engine benchmark (`run_cross_engine_benchmark.sh`) is pedantic by design, so that ratios published in this README are reproducible:
 
-- **Workload definition.** Every workload (`mul_f64_large`, `axis_reduction_axis0_3d`, `fft_pow2_1024`, …) is defined in `artifacts/contracts/cross_engine_benchmark_workloads_v1.yaml` with its operation name, input shape, dtype, fixed seed, and warmup/measurement iteration counts.
+- **Workload definition.** Every workload (`mul_f64_large`, `axis_reduction_axis0_3d`, `fft_pow2_1024`, ...) is defined in `artifacts/contracts/cross_engine_benchmark_workloads_v1.yaml` with its operation name, input shape, dtype, fixed seed, and warmup/measurement iteration counts.
 - **Same inputs both engines.** Inputs are constructed once from the fixed seed and passed to both NumPy and FrankenNumPy. There is no per-engine input randomness.
 - **Per-workload statistics.** For each workload we run a warmup pass (≥ 100 iterations on small ops, scaled down for slow ones), then a measurement pass, then record p50 / p95 / p99 latency and total bytes processed. Ratios reported in the table are p50 ratios.
 - **Environment fingerprint.** Every baseline records a fingerprint: hostname, CPU model, core count, cache sizes, kernel version, Rust toolchain version, NumPy version, BLAS backend NumPy linked against (`numpy.show_config()`), and the workload YAML hash. Two baselines are only compared when their environment fingerprints match.
 - **No NumPy fallback for the FNP side.** When we benchmark a tier-1 wrapper (see Python attribute resolution model), the benchmark forces the fast path: a fast-path-skipped run would be silently measuring numpy, not FrankenNumPy, and would be discarded.
-- **Acceptable-degradation gates.** The G7 performance budget gate (`run_performance_budget_gate`) doesn't gate the ratio against NumPy — it gates the ratio against our *previous* baseline. A 5% regression on a sentinel workload fails the gate; new improvements are recorded as a new baseline. The proof bundle (`artifacts/optimization/<commit>.json`) is checked in.
+- **Acceptable-degradation gates.** The G7 performance budget gate (`run_performance_budget_gate`) doesn't gate the ratio against NumPy; it gates the ratio against our *previous* baseline. A 5% regression on a sentinel workload fails the gate; new improvements are recorded as a new baseline. The proof bundle (`artifacts/optimization/<commit>.json`) is checked in.
 
 The 2026-04-10 cross-engine baseline currently published is the one ADR-001 quotes when discussing the case for Phase 3. A refresh after each major performance lever lands is part of the optimization governance pattern: baseline → profile → single lever → conformance check → re-baseline.
 
@@ -1419,7 +1851,7 @@ The 2026-04-10 cross-engine baseline currently published is the one ADR-001 quot
 
 ## Artifact Durability (RaptorQ)
 
-Every conformance artifact — fixture bundles, benchmark baselines, migration manifests, reproducibility ledgers, long-lived state snapshots — is protected by erasure-coding sidecars.
+Every conformance artifact (fixture bundles, benchmark baselines, migration manifests, reproducibility ledgers, long-lived state snapshots) is protected by erasure-coding sidecars.
 
 **Encoding.** Source data is hashed (SHA-256) and encoded into source + repair symbols using RaptorQ fountain codes. The sidecar records the codec parameters (symbol size, block count, repair overhead) alongside the encoded symbols in base64.
 
@@ -1443,7 +1875,7 @@ A conformance archive is only useful if you can prove, at any point in the futur
 
 RaptorQ encodes the artifact once into `k` source symbols plus `r` repair symbols; any `k + small_delta` symbols suffice to decode. The scrub gate verifies this property in CI: it deletes a symbol, runs decode, and verifies the SHA-256 of the decoded payload matches the pre-encoding hash. The decode proof is the machine-checkable receipt that this recovery actually worked, not just that the encoder ran.
 
-The `asupersync` RaptorQ primitives (`fnp-conformance` uses them for the sidecar pipeline) give us cancellation-safe encoding and structured telemetry — useful when a benchmark batch encodes a thousand workload outputs in parallel.
+The `asupersync` RaptorQ primitives (`fnp-conformance` uses them for the sidecar pipeline) give us cancellation-safe encoding and structured telemetry; useful when a benchmark batch encodes a thousand workload outputs in parallel.
 
 ---
 
@@ -1529,7 +1961,7 @@ FrankenNumPy is not the first Rust array library. It is the only one that target
 | [`nalgebra`](https://docs.rs/nalgebra) | Linear-algebra library with statically-sized vectors and matrices. Strong on geometry, graphics, robotics. | Your shapes are statically known and small, and you want the compiler to track them. Not a general N-D array library. |
 | [`polars`](https://docs.rs/polars) | DataFrame engine (Arrow-backed), columnar, vectorized. | You're doing dataframe-style analytics on tabular data, not numerical array math. |
 | [`burn`](https://docs.rs/burn) / [`candle`](https://docs.rs/candle-core) | Deep-learning tensor crates with autodiff and GPU backends. | You want autograd, GPU, or modern DL primitives. Tensor shape and dtype semantics differ deliberately from NumPy. |
-| **FrankenNumPy** | NumPy-faithful array library with `fnp_python` PyO3 surface, dual-mode runtime, evidence ledger, and oracle-verified differential conformance. | You explicitly need the NumPy semantic contract — exact promotion table, exact broadcast rules, exact RNG sequences, NumPy-compatible `.npy`/`.npz`. Or you're shipping a Rust app that needs to read/write data produced by NumPy on the other side of the wire. |
+| **FrankenNumPy** | NumPy-faithful array library with `fnp_python` PyO3 surface, dual-mode runtime, evidence ledger, and oracle-verified differential conformance. | You need the NumPy semantic contract: exact promotion table, exact broadcast rules, exact RNG sequences, NumPy-compatible `.npy`/`.npz`. Or you're shipping a Rust app that needs to read/write data produced by NumPy on the other side of the wire. |
 
 The three libraries above are excellent in their target domains; FrankenNumPy is not trying to compete with them on idiom or on GPU. It is the right tool for "I need an answer NumPy would have given," and the wrong tool for almost everything else.
 
@@ -1572,12 +2004,12 @@ franken_numpy/
 
 ## Limitations
 
-Honest about what doesn't work today.
+What doesn't work today.
 
 - **No `pip install frankennumpy` packaging story yet.** The Python surface is reached today by building the `fnp-python` PyO3 extension and putting the renamed cdylib on `PYTHONPATH`. The pyproject.toml + wheel + PyPI publishing flow is future work. *Surface coverage itself is no longer a limitation*: the `fnp_python` module reaches **100% of `numpy.__all__`** (499/499 names), structurally locked.
 - **No BLAS/LAPACK backend.** Linear algebra uses pure-Rust implementations (Householder QR, Golub–Kahan SVD, implicit shifted QR for eigenvalues). Competitive with BLAS for small matrices; slower for large ones. Optional BLAS linkage is a Phase 3 work-stream (ADR-001).
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac−bd)+(ad+bc)i`, but the interleaved representation adds overhead vs native complex types.
-- **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Switching would pull `fnp-linalg` into `fnp-random`'s dependency graph (currently `fnp-random` has zero external crates.io dependencies — only intra-workspace `fnp-ndarray`).
+- **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Switching would pull `fnp-linalg` into `fnp-random`'s dependency graph (currently `fnp-random` has zero external crates.io dependencies; only intra-workspace `fnp-ndarray`).
 - **`multivariate_hypergeometric` uses sequential draws.** NumPy uses the `random_mvhg_marginals` algorithm.
 - **Single-threaded.** All array operations are single-threaded. The `asupersync` integration is optional and used only for conformance pipeline orchestration, not parallel array computation. Multi-threading is a Phase 3 work-stream.
 - **f64 internal representation for `UFuncArray`.** Numeric values are stored as `Vec<f64>` internally for arithmetic. For i64/u64 values > 2^53, `IntegerSidecar` preserves exact integer values through storage round-trips; arithmetic on such values still uses f64 approximation. Native i64/u64 paths are a Phase 3 work-stream.
@@ -1598,20 +2030,63 @@ Honest about what doesn't work today.
 
 ---
 
+## Anti-Goals
+
+What FrankenNumPy explicitly will *not* try to be:
+
+| Anti-goal | Why |
+|---|---|
+| **A GPU array library.** | Out of scope. CUDA/ROCm/Metal are entire engineering programs in themselves. Use CuPy, JAX, PyTorch, or candle for GPU. |
+| **An autodifferentiation engine.** | Out of scope. Differentiable NumPy lives in JAX and PyTorch. We are about NumPy-semantic correctness, not gradient propagation. |
+| **A DataFrame.** | Use polars or pandas. Tabular ops (joins, group-by, columnar dtypes per column) are a different abstraction. |
+| **A symbolic computer-algebra system.** | Use SymPy. Symbolic differentiation, expression simplification, and arbitrary-precision rational arithmetic are not in scope. |
+| **A drop-in for `scipy`.** | `scipy.linalg`, `scipy.stats`, `scipy.signal`, etc. are vast surfaces with their own design decisions. We mirror NumPy, not SciPy. (Some overlap is unavoidable in `scimath`, polynomial families, statistical distributions, but it is incidental, not the goal.) |
+| **A reactive / streaming array library.** | No subscriptions, no observable updates, no "if you change A, recompute B." Arrays are values, not signals. |
+| **A backwards-compatibility wrapper for ancient NumPy.** | We track current NumPy (1.x late and 2.x). Pre-1.0 NumPy idioms are not preserved. |
+| **A formally-verified library.** | The conformance gates give very strong empirical assurance; formal verification (Coq / Lean / F\*) is a different project. |
+| **A `no_std` library.** | We use `std::collections`, `std::sync`, allocator-backed `Vec`, and standard error traits. Embedded users without `std` are not the target audience today. |
+| **A zero-allocation library.** | Numerical correctness comes first; we allocate `Vec<T>` freely. Pool-based, arena-based, or stack-allocated arrays are a different design point. |
+
+Saying these things explicitly saves everyone time. If your use case sits on the wrong side of one of these lines, FrankenNumPy is the wrong tool and there is no point waiting for it to grow into one.
+
+---
+
+## Performance Levers Applied So Far
+
+Concrete optimization passes that have landed, paired with what they bought. Each lever follows the optimization-governance pattern in [`PROPOSED_ARCHITECTURE.md`](PROPOSED_ARCHITECTURE.md): baseline → profile → single lever → conformance check → re-baseline → proof artifact.
+
+| Lever | What it does | Where | Effect |
+|---|---|---|---|
+| **Contiguous-axis reduction kernel** | Replaces per-element unravel/ravel with a stride-aware fast path | `reduce_sum_axis_contiguous` in `fnp-ufunc/src/lib.rs` | Axis reductions on contiguous data ~56% p50 faster; commit `d9cfe90` (2026-02-13). Proof bundle under `artifacts/optimization/` |
+| **Neumaier-compensated sum for large arrays** | Switches from naive accumulation to compensated sum above 1,000,000 finite elements | `reduce_sum_values`, `neumaier_sum_values` | Error stays at O(ε) per element instead of O(n·ε); no measurable runtime cost below threshold |
+| **Incremental odometer for broadcast index mapping** | Output-to-source mapping increments stride state in a loop instead of recomputing per element | Inside `elementwise_binary` and the broadcast view machinery | Cuts per-element overhead on broadcast ops; particularly noticeable at small-medium array sizes |
+| **2×2 linear-algebra fast paths** | Specialized closed-form `solve_2x2`, `det_2x2`, `inv_2x2`, `qr_2x2`, `svd_2x2`, `eigh_2x2`, `cholesky_2x2` | `fnp-linalg/src/lib.rs` | Avoids LU/Householder/QR overhead for the most common small-matrix case; dominant cost is the 2-line algebraic formula |
+| **Horner / Clenshaw polynomial evaluation** | Standard nested multiplication for power-series; orthogonal-polynomial recurrence for Chebyshev/Legendre/Hermite/Laguerre | Throughout `fnp-ufunc` polynomial section | Numerical stability + minimal multiplications |
+| **Ziggurat sampling for normal / exponential** | First-acceptance rate ~97%; rejected samples fall through to tail or wedge handling | `fnp-random/src/ziggurat.rs` | Matches NumPy's per-sample cost characteristic |
+| **Zero-copy view machinery via `Arc<RwLock<Vec<f64>>>`** | Transpose, broadcast, sliding-window all produce views, not copies | `UFuncArrayView` in `fnp-ufunc/src/lib.rs` | Eliminates allocation on shape-only operations |
+| **`Arc<[u8]>` for NPY payloads** | NPY load returns `Arc<[u8]>` rather than `Vec<u8>`; downstream consumers share the payload without cloning | `NpyArrayBytes` in `fnp-io` | Zero-copy sharing of loaded payloads (commit `3ed4487`) |
+| **8-element chunk processing for boolean mask count** | `count_true_mask` processes booleans in 8-element groups for vectorizable counting | `fnp-iter/src/lib.rs` | Helps the optimizer emit popcnt-style code |
+| **Bluestein chirp-Z FFT for non-power-of-2** | Rewrites arbitrary-length DFT as power-of-2 convolution; uses Cooley–Tukey for the convolution | `fft_dit` in `fnp-ufunc/src/lib.rs` | Lets every FFT length go through a single fast path |
+| **Constant-time dtype promotion** | All 324 dtype pairs in a `const fn` match expression with no runtime allocation | `pub const fn promote(...)` in `fnp-dtype/src/lib.rs` | Promotion lookup is a couple of branches, not a hashmap |
+
+Optimizations on the list for future work (not landed yet) are the SIMD/BLAS/parallel-execution items in the [Roadmap](#roadmap-phase-3-candidates). Every closed bead with a perf lever has a proof artifact in `artifacts/optimization/`; the same baseline/profile/lever/conformance/re-baseline cycle continues to apply.
+
+---
+
 ## What "Clean-Room" Means Here
 
 "Clean-room" appears repeatedly in this README; it deserves an unambiguous definition.
 
 **What we do:**
 - Read the published references behind every numerical algorithm (papers cited below).
-- Read NumPy's C source code for *behavior* — what inputs produce what outputs, edge cases, error paths, dtype promotion rules, RNG state schemas — but treat the C as a behavioral specification, not as code to translate.
+- Read NumPy's C source code for *behavior* (what inputs produce what outputs, edge cases, error paths, dtype promotion rules, RNG state schemas), but treat the C as a behavioral specification rather than as code to translate.
 - Write new Rust against that specification, structured idiomatically for Rust (enums, `Result`, `const fn`, no unsafe).
 - Verify the result against NumPy's actual output via the differential oracle. The conformance gate is the proof of behavioral equivalence; the source is not the artifact.
 
 **What this implies:**
 - The Rust code is original. There is no line-by-line translation of NumPy's C macros, no replicated header layouts, no copied comments.
 - License compatibility is straightforward: FrankenNumPy is MIT-with-rider (see `LICENSE`), independent of NumPy's BSD-3-Clause. The behavioral surface is interoperable; the codebases are not.
-- Algorithmic correctness comes from the *mathematics* + the *oracle*, not from the original implementation. When NumPy's C has a bug, our differential test surfaces it as a divergence to be triaged on its own merits — we do not silently inherit the bug.
+- Algorithmic correctness comes from the *mathematics* and the *oracle*, not from the original implementation. When NumPy's C has a bug, our differential test surfaces it as a divergence to be triaged on its own merits; we do not silently inherit the bug.
 - A reader of `crates/fnp-*/src/lib.rs` should be able to understand each kernel from first principles without needing to consult NumPy's C. The reader of the conformance harness gets the additional guarantee that the kernel matches NumPy's observable behavior.
 
 The `legacy_numpy_code/numpy/` directory is checked into the repo as a behavioral oracle for the conformance system; it is the upstream NumPy source for differential-testing reference only.
@@ -1631,7 +2106,7 @@ The choice matters in three concrete ways:
 2. **Interop with FORTRAN-style code.** SciPy's LAPACK bindings, OpenBLAS, and most numerical-linear-algebra libraries expect F-order matrices. NPY files default to C-order; `numpy.asfortranarray` (and FrankenNumPy's equivalent) makes a copy in F-order.
 3. **`reshape` ambiguity.** `reshape(shape, order='C')` walks elements in row-major order; `reshape(shape, order='F')` walks them column-major. The same shape can yield different element orderings.
 
-SCE's `contiguous_strides(shape, order)` computes the correct stride vector for either order. The `NdLayout` type tracks which order an array currently has. A view created from a C-order array via `transpose()` becomes F-order at zero cost — the transpose is just a stride permutation.
+SCE's `contiguous_strides(shape, order)` computes the correct stride vector for either order. The `NdLayout` type tracks which order an array currently has. A view created from a C-order array via `transpose()` becomes F-order at zero cost; the transpose is just a stride permutation.
 
 The reduce-axis contiguity rule shows up directly in the performance picture: axis-0 reductions on F-order arrays hit the same contiguous fast-path as axis-(-1) reductions on C-order arrays, because in both cases the inner loop walks unit-stride memory.
 
@@ -1641,20 +2116,41 @@ The reduce-axis contiguity rule shows up directly in the performance picture: ax
 
 If you want to understand how FrankenNumPy works at the source level, here are the natural entry points:
 
-| To understand… | Start at |
+| To understand... | Start at |
 |---|---|
 | Shape and stride arithmetic | `crates/fnp-ndarray/src/lib.rs` (1,531 lines). Small enough to read in one sitting. |
 | Dtype promotion rules | `crates/fnp-dtype/src/lib.rs` around `pub const fn promote(...)`. The whole 324-entry table is in one match expression. |
 | The transfer-loop selector | `crates/fnp-iter/src/lib.rs` around `TransferClass`, `TransferSelectorInput`, and `Nditer`. |
-| A representative ufunc | `crates/fnp-ufunc/src/lib.rs` — `elementwise_binary` (around line 5920) for the broadcast skeleton, `reduce_sum_values` (around line 25684) for the compensated-summation logic. |
-| Eigenvalue and SVD algorithms | `crates/fnp-linalg/src/lib.rs` — `svd_mxn`, `eig_nxn`, `qr_mxn` are stand-alone implementations of the Householder / Golub–Kahan / Francis machinery. |
-| RNG bit generators | `crates/fnp-random/src/lib.rs` — search for `Pcg64DxsmRng`, `Mt19937Rng`, `PhiloxRng`, `Sfc64Rng`, each in its own struct. The `Generator` API is in the second half of the file. |
-| NPY/NPZ binary format | `crates/fnp-io/src/lib.rs` — `pub fn save` and `pub fn load` are entry points; the header parser and writer sit next to them. |
+| A representative ufunc | `crates/fnp-ufunc/src/lib.rs`: `elementwise_binary` (around line 5920) for the broadcast skeleton, `reduce_sum_values` (around line 25684) for the compensated-summation logic. |
+| Eigenvalue and SVD algorithms | `crates/fnp-linalg/src/lib.rs`: `svd_mxn`, `eig_nxn`, `qr_mxn` are stand-alone implementations of the Householder / Golub–Kahan / Francis machinery. |
+| RNG bit generators | `crates/fnp-random/src/lib.rs`: search for `Pcg64DxsmRng`, `Mt19937Rng`, `PhiloxRng`, `Sfc64Rng`, each in its own struct. The `Generator` API is in the second half of the file. |
+| NPY/NPZ binary format | `crates/fnp-io/src/lib.rs`: `pub fn save` and `pub fn load` are entry points; the header parser and writer sit next to them. |
 | The runtime decision engine | `crates/fnp-runtime/src/lib.rs` is the smallest crate (1,672 lines); reading it end-to-end is a complete tour of the strict/hardened mode split and the evidence ledger. |
 | How parity is verified | `crates/fnp-conformance/src/lib.rs` plus the 47 binaries under `crates/fnp-conformance/src/bin/`. Start with `capture_numpy_oracle.rs` and `run_ufunc_differential.rs`. |
-| The PyO3 surface | `crates/fnp-python/src/lib.rs` — single 68k-line file because PyO3 wants all `#[pymodule]` bindings co-located. The structural lock-in test is at `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs::fnp_python_covers_full_numpy_all`. |
+| The PyO3 surface | `crates/fnp-python/src/lib.rs`: single 68k-line file because PyO3 wants all `#[pymodule]` bindings co-located. The structural lock-in test is at `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs::fnp_python_covers_full_numpy_all`. |
 
-The largest crate (`fnp-ufunc` at 59k lines) is intentionally one file because the ufunc dispatch table is centralized; splitting it would scatter the dispatcher and obscure the structure.
+The largest crate (`fnp-ufunc` at 59k lines) sits in one file because the ufunc dispatch table is centralized; splitting it would scatter the dispatcher and obscure the structure.
+
+---
+
+## Inspirations and Prior Art
+
+FrankenNumPy stands on the shoulders of some specific design lineages worth acknowledging.
+
+| Project | What we learned from it |
+|---|---|
+| **[NumPy](https://github.com/numpy/numpy)** itself | The behavioral specification we're targeting, and the source of every algorithm correspondence in the [Algorithm References](#algorithm-references-and-citations) section. NumPy is also the oracle in every differential-conformance run: there is no FrankenNumPy without a real NumPy on the build host. |
+| **[NEP 19 — RNG Policy](https://numpy.org/neps/nep-0019-rng-policy.html)** (Melissa O'Neill et al.) | The `SeedSequence` design. The hierarchical `spawn(n)` contract, the entropy-pool mixing, the schema-versioned state payload all came from NEP 19. We re-implement; we do not re-design. |
+| **[NEP 1 — A Simple File Format for NumPy Arrays](https://numpy.org/neps/nep-0001-npy-format.html)** (Robert Kern) | The `.npy` binary format. Bit-exact round-trip is our promise; the spec is the contract. NPY 2.0 extends NPY 1.0 to support headers larger than 65,535 bytes. |
+| **[CPython](https://github.com/python/cpython)** | Source of truth for Python-level behavior wrappers like `numpy.testing` and the exception hierarchy that `fnp_python.exceptions` mirrors. |
+| **[ndarray](https://github.com/rust-ndarray/ndarray)** (bluss et al.) | The "what does idiomatic Rust N-D arrays look like?" reference. `ndarray` made different design choices (statically-known dimensionality via `Ix`, BLAS via `ndarray-linalg`, generic over element types). We departed from them to target NumPy semantics. |
+| **[nalgebra](https://github.com/dimforge/nalgebra)** (Sébastien Crozet et al.) | The reference for "what fully-typed, statically-sized linear algebra looks like in Rust." Our `2×2 fast paths` borrow the spirit but not the typing; we keep dynamic shapes throughout because NumPy's contract is dynamic. |
+| **[RaptorQ (RFC 6330)](https://datatracker.ietf.org/doc/html/rfc6330)** | The fountain code that protects every conformance artifact. The IETF spec is the contract; the asupersync implementation is the engine. |
+| **[asupersync](https://github.com/Dicklesworthstone/asupersync)** | The optional structured-async runtime used in `fnp-runtime`'s observability pipelines and in `fnp-conformance`'s RaptorQ primitives. Not a runtime dependency of the numerical core. |
+| **[frankentui](https://github.com/Dicklesworthstone/frankentui)** | The optional terminal-native dashboards exposed via `fnp-runtime`'s `frankentui` feature. Same project family as FrankenNumPy; same "rewrite an established interface in safe Rust with explicit contracts" pattern. |
+| **[beads_rust](https://github.com/Dicklesworthstone/beads_rust)** (`br`) | The dependency-aware issue tracker that drives the multi-agent workflow described in [Multi-Agent Development Process](#multi-agent-development-process). Every closed bead is a contract we've fulfilled. |
+
+The "clean-room reimplementation of an established interface in safe Rust" pattern itself is widely used; FrankenNumPy is one of a family. See also Frankensearch (the Tantivy-on-steroids hybrid search engine), Frankentui (the terminal UI library), and the broader "Frankenstack" of memory-safe replacements for legacy infrastructure.
 
 ---
 
@@ -1664,43 +2160,43 @@ FrankenNumPy is a clean-room port. We re-implemented the algorithms by reading t
 
 **RNG and distributions**
 
-- **PCG64 / PCG64DXSM** — M. E. O'Neill, *PCG: A Family of Simple Fast Space-Efficient Statistically Good Algorithms for Random Number Generation*, 2014. DXSM is the variant NumPy 1.20+ ships as its high-quality default.
-- **Mersenne Twister (MT19937)** — M. Matsumoto and T. Nishimura, *Mersenne Twister: A 623-dimensionally equidistributed uniform pseudo-random number generator*, ACM TOMACS 8(1), 1998.
-- **Philox** — J. K. Salmon et al., *Parallel Random Numbers: As Easy as 1, 2, 3*, SC'11.
-- **SFC64** — C. Doty-Humphrey, *PractRand*, 2014 (Small Fast Counting generator).
-- **SeedSequence** — M. E. O'Neill, design described in NumPy NEP 19 *Random Number Generator Policy*, 2018.
-- **Lemire bounded integers** — D. Lemire, *Fast Random Integer Generation in an Interval*, ACM TOMS 45(1), 2019.
-- **Ziggurat sampling** — G. Marsaglia and W. Tsang, *The Ziggurat Method for Generating Random Variables*, J. Stat. Software 5(8), 2000.
-- **BTPE binomial** — V. Kachitvichyanukul and B. W. Schmeiser, *Binomial random variate generation*, CACM 31(2), 1988.
-- **HRUA hypergeometric** — E. Stadlober, *Sampling from Poisson, binomial and hypergeometric distributions: ratio of uniforms as a simple and fast alternative*, Math. Statist. Sektion 303, 1989.
-- **PTRS Poisson** — W. Hörmann, *The Transformed Rejection Method for Generating Poisson Random Variables*, Insurance: Math. Econ. 12, 1993.
-- **Marsaglia–Tsang gamma** — G. Marsaglia and W. Tsang, *A Simple Method for Generating Gamma Variables*, ACM TOMS 26(3), 2000.
+- **PCG64 / PCG64DXSM:** M. E. O'Neill, *PCG: A Family of Simple Fast Space-Efficient Statistically Good Algorithms for Random Number Generation*, 2014. DXSM is the variant NumPy 1.20+ ships as its high-quality default.
+- **Mersenne Twister (MT19937):** M. Matsumoto and T. Nishimura, *Mersenne Twister: A 623-dimensionally equidistributed uniform pseudo-random number generator*, ACM TOMACS 8(1), 1998.
+- **Philox:** J. K. Salmon et al., *Parallel Random Numbers: As Easy as 1, 2, 3*, SC'11.
+- **SFC64:** C. Doty-Humphrey, *PractRand*, 2014 (Small Fast Counting generator).
+- **SeedSequence:** M. E. O'Neill, design described in NumPy NEP 19 *Random Number Generator Policy*, 2018.
+- **Lemire bounded integers:** D. Lemire, *Fast Random Integer Generation in an Interval*, ACM TOMS 45(1), 2019.
+- **Ziggurat sampling:** G. Marsaglia and W. Tsang, *The Ziggurat Method for Generating Random Variables*, J. Stat. Software 5(8), 2000.
+- **BTPE binomial:** V. Kachitvichyanukul and B. W. Schmeiser, *Binomial random variate generation*, CACM 31(2), 1988.
+- **HRUA hypergeometric:** E. Stadlober, *Sampling from Poisson, binomial and hypergeometric distributions: ratio of uniforms as a simple and fast alternative*, Math. Statist. Sektion 303, 1989.
+- **PTRS Poisson:** W. Hörmann, *The Transformed Rejection Method for Generating Poisson Random Variables*, Insurance: Math. Econ. 12, 1993.
+- **Marsaglia–Tsang gamma:** G. Marsaglia and W. Tsang, *A Simple Method for Generating Gamma Variables*, ACM TOMS 26(3), 2000.
 
 **Linear algebra**
 
-- **Householder QR** — A. S. Householder, *Unitary triangularization of a nonsymmetric matrix*, J. ACM 5(4), 1958.
-- **Golub–Kahan bidiagonalization + implicit shifted QR for SVD** — G. H. Golub and W. Kahan, *Calculating the Singular Values and Pseudo-Inverse of a Matrix*, SIAM JNA 2(2), 1965; J. Demmel and W. Kahan, *Accurate singular values of bidiagonal matrices*, SIAM JSSC 11(5), 1990.
-- **Implicit QR for unsymmetric eigenvalues** — J. G. F. Francis, *The QR Transformation*, Comput. J. 4(3), 1961.
-- **Symmetric tridiagonal QL/QR** — H. Bowdler, R. S. Martin, C. Reinsch, J. H. Wilkinson, *The QR and QL algorithms for symmetric matrices*, Numer. Math. 11, 1968.
-- **Padé approximation for `expm`** — N. J. Higham, *The Scaling and Squaring Method for the Matrix Exponential Revisited*, SIAM JMAA 26(4), 2005.
-- **Matrix logarithm via Schur–Padé** — N. J. Higham and L. Lin, *A Schur–Padé Algorithm for Fractional Powers of a Matrix*, SIAM JMAA 32(3), 2011.
-- **Polar decomposition** — N. J. Higham, *Computing the Polar Decomposition with Applications*, SIAM JSSC 7(4), 1986.
+- **Householder QR:** A. S. Householder, *Unitary triangularization of a nonsymmetric matrix*, J. ACM 5(4), 1958.
+- **Golub–Kahan bidiagonalization + implicit shifted QR for SVD:** G. H. Golub and W. Kahan, *Calculating the Singular Values and Pseudo-Inverse of a Matrix*, SIAM JNA 2(2), 1965; J. Demmel and W. Kahan, *Accurate singular values of bidiagonal matrices*, SIAM JSSC 11(5), 1990.
+- **Implicit QR for unsymmetric eigenvalues:** J. G. F. Francis, *The QR Transformation*, Comput. J. 4(3), 1961.
+- **Symmetric tridiagonal QL/QR:** H. Bowdler, R. S. Martin, C. Reinsch, J. H. Wilkinson, *The QR and QL algorithms for symmetric matrices*, Numer. Math. 11, 1968.
+- **Padé approximation for `expm`:** N. J. Higham, *The Scaling and Squaring Method for the Matrix Exponential Revisited*, SIAM JMAA 26(4), 2005.
+- **Matrix logarithm via Schur–Padé:** N. J. Higham and L. Lin, *A Schur–Padé Algorithm for Fractional Powers of a Matrix*, SIAM JMAA 32(3), 2011.
+- **Polar decomposition:** N. J. Higham, *Computing the Polar Decomposition with Applications*, SIAM JSSC 7(4), 1986.
 
 **FFT**
 
-- **Cooley–Tukey decimation-in-time** — J. W. Cooley and J. W. Tukey, *An Algorithm for the Machine Calculation of Complex Fourier Series*, Math. Comp. 19(90), 1965.
-- **Bluestein chirp-Z** — L. I. Bluestein, *A linear filtering approach to the computation of the discrete Fourier transform*, IEEE Trans. AU 18(4), 1970.
+- **Cooley–Tukey decimation-in-time:** J. W. Cooley and J. W. Tukey, *An Algorithm for the Machine Calculation of Complex Fourier Series*, Math. Comp. 19(90), 1965.
+- **Bluestein chirp-Z:** L. I. Bluestein, *A linear filtering approach to the computation of the discrete Fourier transform*, IEEE Trans. AU 18(4), 1970.
 
 **Special functions, signal, statistics**
 
-- **Modified Bessel I0 for Kaiser windowing** — piecewise rational approximations from W. J. Cody, *Rational Chebyshev approximations for the modified Bessel functions I_0(x) and I_1(x)*, Math. Comp. 28(125), 1974.
-- **Histogram bin selection (Sturges, sqrt-choice, auto)** — H. A. Sturges, *The choice of a class interval*, J. ASA 21(153), 1926; D. Freedman and P. Diaconis, *On the histogram as a density estimator: L2 theory*, Z. Wahr. Verw. Gebiete 57, 1981.
-- **Polynomial evaluation (Horner) and orthogonal-polynomial recurrence (Clenshaw)** — W. G. Horner, *A new method of solving numerical equations of all orders, by continuous approximation*, Phil. Trans. R. Soc. 109, 1819; C. W. Clenshaw, *A note on the summation of Chebyshev series*, MTAC 9(51), 1955.
+- **Modified Bessel I0 for Kaiser windowing:** piecewise rational approximations from W. J. Cody, *Rational Chebyshev approximations for the modified Bessel functions I_0(x) and I_1(x)*, Math. Comp. 28(125), 1974.
+- **Histogram bin selection (Sturges, sqrt-choice, auto):** H. A. Sturges, *The choice of a class interval*, J. ASA 21(153), 1926; D. Freedman and P. Diaconis, *On the histogram as a density estimator: L2 theory*, Z. Wahr. Verw. Gebiete 57, 1981.
+- **Polynomial evaluation (Horner) and orthogonal-polynomial recurrence (Clenshaw):** W. G. Horner, *A new method of solving numerical equations of all orders, by continuous approximation*, Phil. Trans. R. Soc. 109, 1819; C. W. Clenshaw, *A note on the summation of Chebyshev series*, MTAC 9(51), 1955.
 
 **Format and infrastructure**
 
-- **NPY 1.0 / 2.0 binary format** — R. Kern, *NEP 1: A Simple File Format for NumPy Arrays*, 2007, plus the version-2.0 extension to support long headers.
-- **RaptorQ fountain code** — M. Luby, A. Shokrollahi, M. Watson, T. Stockhammer, L. Minder, *RaptorQ Forward Error Correction Scheme for Object Delivery*, IETF RFC 6330, 2011.
+- **NPY 1.0 / 2.0 binary format:** R. Kern, *NEP 1: A Simple File Format for NumPy Arrays*, 2007, plus the version-2.0 extension to support long headers.
+- **RaptorQ fountain code:** M. Luby, A. Shokrollahi, M. Watson, T. Stockhammer, L. Minder, *RaptorQ Forward Error Correction Scheme for Object Delivery*, IETF RFC 6330, 2011.
 
 Every kernel ported from one of these papers has at least one oracle test in the conformance suite that compares its output against NumPy's implementation of the same algorithm, at one or more curated seeds and input distributions.
 
@@ -1719,7 +2215,7 @@ Project-specific vocabulary used throughout the README, docs, and code comments:
 | **Override audit event** | A separate, narrowly-scoped record for any explicit human-requested bypass of a fail-closed gate. Always paired with an audit reference. |
 | **Parity debt** | A behavioral divergence from NumPy that is **scheduled to be closed**, not an accepted scope reduction. The `parity_debt` rows in `docs/DIVERGENCES.md` are the live tracker. |
 | **Intentional divergence** | A behavioral difference from NumPy that we deliberately accept. Currently: **zero** such rows in the divergence ledger. |
-| **Oracle** | The reference implementation we compare against — almost always a real NumPy on the build host. A `pure_python_fallback` oracle is rejected by the G3 gate. |
+| **Oracle** | The reference implementation we compare against; almost always a real NumPy on the build host. A `pure_python_fallback` oracle is rejected by the G3 gate. |
 | **Witness** | A hard-coded expected output for a specific RNG seed or kernel input. Witness comparison catches silent algorithmic drift even when the new output is mathematically valid. |
 | **Phase2C extraction packet** | One of nine domain-scoped specification bundles (FNP-P2C-001 through FNP-P2C-009). Each packet ships a fixture manifest, contract table, parity gate, risk note, and parity report with RaptorQ sidecar + decode proof. |
 | **Contract schema** | The `phase2c-contract-v1` schema that the packet readiness validator (`validate_phase2c_packet`) checks each packet against. A packet that is missing a required field is `not_ready`. |
@@ -1731,31 +2227,57 @@ Project-specific vocabulary used throughout the README, docs, and code comments:
 | **RaptorQ sidecar** | An auxiliary file alongside an artifact bundle containing the fountain-code encoding parameters plus base64-encoded source and repair symbols. |
 | **Scrub** | The process of decoding all symbols, computing the payload hash, dropping a symbol, and verifying that recovery from the remaining symbols still hashes to the same value. |
 | **Decode proof** | A machine-checkable record asserting that scrub succeeded (`recovery_success: true`). |
-| **PCG64DXSM** | The default bit generator. 128-bit state, 128-bit increment, DXSM output function — bit-exact match for NumPy's `numpy.random.PCG64DXSM`. |
-| **BTPE / HRUA / PTRS** | Distribution-specific rejection algorithms ported from NumPy's C source. BTPE = Binomial Transformed PEnalty; HRUA = Hypergeometric Ratio-of-Uniforms (Stadlober 1989); PTRS = Poisson Transformed Rejection (Hörmann 1993). |
+| **PCG64DXSM** | The default bit generator. 128-bit state, 128-bit increment, DXSM output function; bit-exact match for NumPy's `numpy.random.PCG64DXSM`. |
+| **BTPE / HRUA / PTRS** | Distribution-specific rejection algorithms ported from NumPy's C source. BTPE = Binomial / Triangle / Parallelogram / Exponential (Kachitvichyanukul & Schmeiser 1988); the four regions of the bounding-envelope rejection sampler. HRUA = Hypergeometric Ratio-of-Uniforms with Aliasing (Stadlober 1989). PTRS = Poisson Transformed Rejection (Hörmann 1993). |
 | **Lemire's method** | The bounded-integer rejection algorithm used by NumPy for `random_bounded_uint64`. Two-tier dispatch: 32-bit ranges use buffered `next_uint32`, larger ranges use 128-bit multiplication. |
-| **Bead / `br`** | An issue in the project's `beads_rust` tracker (`br ready`, `br close`, etc.). Used for dependency-aware work selection. As of 2026-05-16, 1,319 beads are closed. |
+| **Bead / `br`** | An issue in the project's `beads_rust` tracker (`br ready`, `br close`, etc.). Used for dependency-aware work selection. As of 2026-05-16, 1,324 beads are closed. |
 | **`bv`** | Graph-aware triage on top of the bead database (PageRank, betweenness, critical-path). |
 | **MCP Agent Mail** | The advisory file-reservation and inter-agent messaging system used during multi-agent development on this repo. Not a runtime dependency of FrankenNumPy itself. |
+
+---
+
+## Project Timeline at a Glance
+
+Major milestones in the order they landed. For the full per-commit history, see [`CHANGELOG.md`](CHANGELOG.md); for the live bead trail, see `.beads/issues.jsonl`.
+
+| Date | Milestone |
+|---|---|
+| **2026-02-13** | Project bootstrap: 9-crate workspace, Stride Calculus Engine, dual-mode runtime, 9 Phase2C extraction packets, conformance harness. First performance lever (contiguous reduction kernel) lands the same day. |
+| 2026-02-14 → 2026-02-18 | CI gate topology (G1–G8) wired up; security gate, workflow scenario gate, RaptorQ durability gate all online. Differential conformance against real NumPy enforced on every CI run. |
+| 2026-02-15 → 2026-02-21 | First major operator wave: `fnp-ufunc` grows from stub to 35 binary ops + 22 unary ops + reductions; `fnp-linalg` adds SVD, QR, eig, LU; `fnp-random` ships PCG64DXSM + MT19937 + SeedSequence; `fnp-io` ships NPY 1.0/2.0 + NPZ + DEFLATE. |
+| 2026-02-26 | Structured dtype support; complex dtype I/O. Golub–Kahan SVD lands. |
+| 2026-03-02 → 2026-03-12 | `ArrayStorage` bridge eliminates `Vec<u8>` reinterpretation; F16 support via `half` crate; complex linalg; safe memmap. Copy-on-write views with fine-grained memory overlap detection. |
+| 2026-03-15 → 2026-03-21 | NumPy-compatible BTPE binomial, HRUA hypergeometric, PTRS Poisson, Lemire bounded integers; NaN-propagation correctness sweep across all reductions, sorts, percentiles, ptp. Eigenvalue sort order fixed to ascending. Full `lstsq` 4-tuple. Philox bit generator. |
+| 2026-04-10 | First cross-engine benchmark baseline (37 workloads, ADR-001). Pivot proposal drafted but the parity track keeps going. |
+| 2026-04-22 | First `numpy.__all__` reality-check audit: 43.3% (216/499) reachable. Plan to close the gap is formed. |
+| 2026-04-24 | `numpy.random` parity epic closes: 41/56 MUST distributions at 73.2% compliance. |
+| 2026-04-24 | `numpy.polynomial` parity epic closes: 63/66 MUST at 95.5%. |
+| 2026-05-09 | `numpy.__all__` reaches ~96% reachable through the parity wave. |
+| **2026-05-13** | **100% of `numpy.__all__` reachable (499/499)**, structurally locked by `fnp_python_covers_full_numpy_all`. The headline milestone. |
+| 2026-05-14 | Mock/stub audit confirms zero TODO/FIXME/HACK/STUB/unimplemented across all 10 implementation crates. |
+| 2026-05-16 | Documentation precision wave: ~75-bead sweep across README, AGENTS.md, FEATURE_PARITY.md, audit docs, divergence ledger, fuzzing docs. |
+| 2026-05-16 | Divergence ledger active rows: **1** (the `SeedMaterial::None` deterministic seed). Workspace fully green: 6,392 tests, all 10 crates passing, zero unsafe blocks. |
+
+In quantitative terms: **~650 commits in May 2026 alone**, **~1,880 commits since 2026-04-01**, **1,324 closed beads** as of 2026-05-16, all under a single git author working with a multi-agent swarm. (These are live numbers; the repository keeps moving.)
 
 ---
 
 ## FAQ
 
 **Is this a drop-in replacement for NumPy?**
-Surface-wise yes — `fnp-python` exposes **100% of `numpy.__all__`** (499/499 names), structurally locked by `fnp_python_covers_full_numpy_all`. Distribution-wise not yet: there is no pip wheel today. See the Limitations section for the full packaging gap discussion.
+Surface-wise yes: `fnp-python` exposes **100% of `numpy.__all__`** (499/499 names), structurally locked by `fnp_python_covers_full_numpy_all`. Distribution-wise not yet: there is no pip wheel today. See the Limitations section for the full packaging gap discussion.
 
 **How do you verify parity with NumPy?**
 Oracle tests. We run the same operations with the same inputs in both NumPy and FrankenNumPy and compare outputs to floating-point tolerance. For RNG, the comparison is bit-exact. The G3 CI gate enforces `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` and rejects pure-Python fallback oracle output.
 
 **Why Rust nightly?**
-Rust Edition 2024. The toolchain is pinned to `nightly-2026-02-20` for reproducibility — see `rust-toolchain.toml` and the `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`, which is the single source of truth for the CI gates.
+Rust Edition 2024. The toolchain is pinned to `nightly-2026-02-20` for reproducibility; see `rust-toolchain.toml` and the `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`, which is the single source of truth for the CI gates.
 
 **Why zero unsafe code?**
-Memory safety is a core value. 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]`. `fnp-python` is the one that doesn't, because PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point — but in practice the current `fnp-python` source has zero hand-written unsafe blocks, so the workspace is unsafe-free today across all 10 crates. The lint is opt-out for `fnp-python`, not invoked.
+Memory safety is a core value. 9 of the 10 implementation crates declare `#![forbid(unsafe_code)]`. `fnp-python` is the one that doesn't, because PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point. In practice the current `fnp-python` source has zero hand-written unsafe blocks, so the workspace is unsafe-free today across all 10 crates. The lint is opt-out for `fnp-python`, not invoked.
 
 **How fast is it?**
-Profile-driven and honest: I/O, random, linalg, reductions, and sorting are at or near parity with NumPy. FFT is mixed (power-of-two fast, non-power-of-two slower). Large-scale elementwise/broadcast ufuncs are the main hotspot, with 10–30× ratios — exactly what the Phase 3 SIMD/BLAS work-streams target. Small/medium array workloads are competitive across the board.
+Profile-driven. I/O, random, linalg, reductions, and sorting are at or near parity with NumPy. FFT is mixed (power-of-two fast, non-power-of-two slower). Large-scale elementwise/broadcast ufuncs are the main hotspot, with 10–30× ratios; the Phase 3 SIMD/BLAS work-streams target these. Small/medium array workloads are competitive across the board.
 
 **Can I use just the RNG crate?**
 Yes. `fnp-random` pulls **zero external crates.io dependencies** (only depends on `fnp-ndarray` within the workspace) and produces bit-exact NumPy-compatible random sequences from a given seed.
@@ -1782,4 +2304,4 @@ Please don't take this the wrong way, but I do not accept outside contributions 
 
 ## License
 
-MIT with an OpenAI/Anthropic rider — see [`LICENSE`](LICENSE).
+MIT with an OpenAI/Anthropic rider. See [`LICENSE`](LICENSE).
