@@ -1130,7 +1130,7 @@ FrankenNumPy was built and continues to evolve under a multi-agent workflow. The
 
 | Tool | Purpose |
 |---|---|
-| **`br` (beads_rust)** | Dependency-aware issue tracker. Every change lands as a closed bead with the issue ID in the commit subject (`[franken_numpy-XXXX] ...`). 1,324 closed beads as of 2026-05-16. Issues live in `.beads/issues.jsonl` (checked in, JSONL-formatted, mergeable). |
+| **`br` (beads_rust)** | Dependency-aware issue tracker. Every change lands as a closed bead with the issue ID in the commit subject (`[franken_numpy-XXXX] ...`). 1,331 closed beads as of 2026-05-16. Issues live in `.beads/issues.jsonl` (checked in, JSONL-formatted, mergeable). |
 | **`bv`** | Graph-aware triage on top of `br`: PageRank, betweenness, critical-path, k-core, cycle detection. Used to pick "ready" work that unblocks the most downstream tasks. |
 | **MCP Agent Mail** | Inter-agent messaging plus advisory file reservations. Before editing a file, an agent reserves it with a TTL; conflicts are flagged before anyone wastes work. |
 | **`ubs` (Ultimate Bug Scanner)** | Pre-commit static-analysis pass. Catches common Rust bug classes (unwrap-on-Option, integer-overflow patterns, missing-error-handling) before they land. |
@@ -2230,7 +2230,7 @@ Project-specific vocabulary used throughout the README, docs, and code comments:
 | **PCG64DXSM** | The default bit generator. 128-bit state, 128-bit increment, DXSM output function; bit-exact match for NumPy's `numpy.random.PCG64DXSM`. |
 | **BTPE / HRUA / PTRS** | Distribution-specific rejection algorithms ported from NumPy's C source. BTPE = Binomial / Triangle / Parallelogram / Exponential (Kachitvichyanukul & Schmeiser 1988); the four regions of the bounding-envelope rejection sampler. HRUA = Hypergeometric Ratio-of-Uniforms with Aliasing (Stadlober 1989). PTRS = Poisson Transformed Rejection (Hörmann 1993). |
 | **Lemire's method** | The bounded-integer rejection algorithm used by NumPy for `random_bounded_uint64`. Two-tier dispatch: 32-bit ranges use buffered `next_uint32`, larger ranges use 128-bit multiplication. |
-| **Bead / `br`** | An issue in the project's `beads_rust` tracker (`br ready`, `br close`, etc.). Used for dependency-aware work selection. As of 2026-05-16, 1,324 beads are closed. |
+| **Bead / `br`** | An issue in the project's `beads_rust` tracker (`br ready`, `br close`, etc.). Used for dependency-aware work selection. As of 2026-05-16, 1,331 beads are closed. |
 | **`bv`** | Graph-aware triage on top of the bead database (PageRank, betweenness, critical-path). |
 | **MCP Agent Mail** | The advisory file-reservation and inter-agent messaging system used during multi-agent development on this repo. Not a runtime dependency of FrankenNumPy itself. |
 
@@ -2258,7 +2258,7 @@ Major milestones in the order they landed. For the full per-commit history, see 
 | 2026-05-16 | Documentation precision wave: 92 beads closed on this single date across README, AGENTS.md, FEATURE_PARITY.md, audit docs, divergence ledger, fuzzing docs. |
 | 2026-05-16 | Divergence ledger active rows: **1** (the `SeedMaterial::None` deterministic seed). Workspace fully green: 6,392 tests, all 10 crates passing, zero unsafe blocks. |
 
-In quantitative terms: **~650 commits in May 2026 alone**, **~1,880 commits since 2026-04-01**, **1,324 closed beads** as of 2026-05-16, all under a single git author working with a multi-agent swarm. (These are live numbers; the repository keeps moving.)
+In quantitative terms: **~650 commits in May 2026 alone**, **~1,880 commits since 2026-04-01**, **1,331 closed beads** as of 2026-05-16, all under a single git author working with a multi-agent swarm. (These are live numbers; the repository keeps moving.)
 
 ---
 
