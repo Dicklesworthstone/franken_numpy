@@ -26,14 +26,16 @@ The fuzz crates require nightly Rust pinned to `nightly-2026-02-20` (matching `r
 
 ```bash
 cd crates/fnp-io/fuzz
-cargo +nightly-2026-02-20 fuzz run fuzz_npy
+cargo fuzz run fuzz_npy
 ```
 
-Use the explicit `+nightly-2026-02-20` (the workspace pin) rather than bare `+nightly`, which resolves to the latest installed nightly and can drift from CI. Add `-- -max_total_time=300` to bound the run (5 minutes). Crashes land in `artifacts/<target>/crash-*` and can be reproduced via:
+Each fuzz crate ships its own `rust-toolchain.toml` mirroring `/rust-toolchain.toml`, so the workspace nightly pin (`nightly-2026-02-20`) applies automatically — no `+nightly` suffix needed. Add `-- -max_total_time=300` to bound the run (5 minutes). Crashes land in `artifacts/<target>/crash-*` and can be reproduced via:
 
 ```bash
-cargo +nightly-2026-02-20 fuzz run fuzz_npy artifacts/fuzz_npy/crash-<hash>
+cargo fuzz run fuzz_npy artifacts/fuzz_npy/crash-<hash>
 ```
+
+When updating the workspace nightly, bump all 8 `rust-toolchain.toml` files together (the root + 7 per-fuzz copies) plus the matching `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml` and the README/AGENTS.md mentions.
 
 ## Seed corpus convention
 
