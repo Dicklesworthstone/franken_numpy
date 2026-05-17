@@ -1584,7 +1584,7 @@ FrankenNumPy's security posture covers more than memory safety.
 - **Bounded resource consumption.** NPY header caps at 64 KB. NPZ archives cap at 4,096 members and 2 GiB uncompressed. Text I/O caps at 16,777,216 elements. Memmap validation retries cap at 64. These prevent denial of service via crafted inputs.
 - **Pickle rejection.** Object dtype arrays that could execute arbitrary code during deserialization require explicit `allow_pickle=true`, matching NumPy's security gate.
 - **Adversarial conformance.** The security gate (`run_security_gate`) tests exploit scenarios from a versioned threat matrix mapped to specific parser / IO / shape-validation boundaries.
-- **No production code mocks or stubs.** An automated audit ([`audit_numpy_mocks.md`](audit_numpy_mocks.md)) shows zero `TODO` / `FIXME` / `HACK` / `STUB` / `unimplemented!()` / `todo!()` anywhere in the 10 production crates, and zero production `.unwrap()` outside `fnp-conformance` fixture-harness code.
+- **No production code mocks or stubs.** Structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` — 8 `#[test]` functions that fail CI if `unimplemented!`, `todo!`, `FIXME`, `HACK`, `XXX`, or related stub markers appear in `crates/*/src/` (excluding the hygiene test itself and fuzz dirs). The human-readable audit at [`audit_numpy_mocks.md`](audit_numpy_mocks.md) is the companion document with per-site analysis: zero production `.unwrap()` outside `fnp-conformance` fixture-harness code.
 
 ---
 
