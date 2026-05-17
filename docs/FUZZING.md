@@ -5,10 +5,12 @@ The workspace ships **7 fuzz crates** with **27 fuzz targets** and **200 curated
 ## Prerequisites
 
 ```bash
-cargo install cargo-fuzz
+# Order matters: sync the pinned nightly first, then install cargo-fuzz with it.
+rustup toolchain install nightly-2026-02-20
+cargo +nightly-2026-02-20 install cargo-fuzz
 ```
 
-The fuzz crates require nightly Rust pinned to `nightly-2026-02-20` (matching `rust-toolchain.toml` / `env.RUST_TOOLCHAIN` in `.github/workflows/ci.yml`). The host workspace already pins it, so no extra setup is needed — but if you see a `libfuzzer-sys` compile error after changing toolchains, re-pin and rebuild.
+The fuzz crates require nightly Rust pinned to `nightly-2026-02-20` (matching `rust-toolchain.toml` / `env.RUST_TOOLCHAIN` in `.github/workflows/ci.yml`). Each fuzz crate ships its own `rust-toolchain.toml` mirroring that pin (see "Why each fuzz crate's `Cargo.toml` repeats fields literally" below), so once cargo-fuzz is installed, `cargo fuzz run` from any fuzz dir picks the right toolchain automatically — if you see a `libfuzzer-sys` compile error after changing toolchains, re-pin via `rustup toolchain install` and rebuild.
 
 ## Fuzz crate inventory
 
