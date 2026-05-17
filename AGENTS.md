@@ -185,7 +185,7 @@ Cost note: `fnp-ufunc` (2,191 tests, ~60k LOC) and `fnp-python` (2,127 tests) do
 | `fnp-dtype` | Dtype taxonomy, promotion table determinism, cast policy primitives |
 | `fnp-ndarray` | Shape legality, stride calculus (C/F contiguous), reshape `-1` inference, broadcast contracts, alias-sensitive transitions |
 | `fnp-iter` | nditer-like traversal, overlap-safe iteration contracts |
-| `fnp-ufunc` | Broadcasted binary elementwise ops (add/sub/mul/div), reduction sum (axis/keepdims), shape/value/dtype differential checks |
+| `fnp-ufunc` | 35 binary + 43 unary elementwise ops, 30+ reductions, FFT (Cooley-Tukey + Bluestein), einsum (`einsum`, `einsum_path`, `einsum_optimized`), masked / string / datetime arrays, polynomial families (power, Chebyshev, Legendre, Hermite, Laguerre), float error state machine, NaN-correct reductions |
 | `fnp-linalg` | Linear algebra adapters, scoped solver contracts |
 | `fnp-random` | Deterministic RNG streams, state schemas |
 | `fnp-io` | npy/npz parser/writer, hardened boundary checks, adversarial input fuzzing |
