@@ -13,7 +13,7 @@ The measuring stick is `numpy.__all__` — the 499 names NumPy publishes as its 
 - `numpy.__all__` names: **499**
 - `numpy.__all__` ∩ `fnp_python`: **499** (**100.0%** of numpy's top-level surface is reachable as `fnp_python.<name>`)
 - `numpy.__all__` \ `fnp_python` (gap): **0** (0%)
-- Names in `fnp_python` that are NOT in `numpy.__all__`: a small set of internal helpers and flat-namespace aliases (linalg_*, ma_*, etc.) used by conformance tests; not user-facing surface.
+- Names in `fnp_python` that are NOT in `numpy.__all__`: ~130 internal helpers and flat-namespace aliases (`linalg_*`, `ma_*`, etc.) used by conformance tests; not user-facing surface. The live count is reported by the API coverage gate (`exports / covered / excluded / missing`) — at the 2026-05-13 snapshot: `exports=633`, `covered=599`, `excluded=34`, `missing=0`.
 
 ## Coverage progression
 
