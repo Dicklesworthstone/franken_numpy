@@ -1757,7 +1757,7 @@ G7  performance budget   run_performance_budget_gate.sh
 G8  durability/decode    run_raptorq_gate.sh
 ```
 
-G3 enforces a real-numpy oracle via `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` and rejects `pure_python_fallback` output.
+G3 enforces a real-numpy oracle via `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` and rejects `pure_python_fallback` output. After G8 the topology script also runs `validate_phase2c_packet --packet-id FNP-P2C-{001..009}` to confirm every P2C packet's readiness contract still passes — this is the durability-tail step that catches packet-contract drift.
 
 Run all gates locally:
 
