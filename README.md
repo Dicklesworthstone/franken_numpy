@@ -637,7 +637,7 @@ Every decision is logged to an `EvidenceLedger` with timestamp, mode, class, evi
 
 ### Conformance Infrastructure (`fnp-conformance`)
 
-The conformance crate is the quality backbone. **47 binaries** under `crates/fnp-conformance/src/bin/` drive the layered system:
+The conformance crate is the quality backbone. **47 binaries** under `crates/fnp-conformance/src/bin/` drive the layered system. About 20 of the 47 are the active workflow tools (oracle capture, differential runners, drift matrices, ledger gates, API coverage gate, etc.) listed below; the remaining ~27 are one-shot phase2c evidence/optimization-report generators (`generate_packet001_final_evidence_pack` through `generate_packet009_*`, plus a few historical regenerators) that ran during the FNP-P2C-001..009 packet creation and produced checked-in artifacts under `artifacts/phase2c/`.
 
 1. **Differential harness.** Captures NumPy's output for a fixture corpus (`capture_numpy_oracle`), then runs the same inputs through FrankenNumPy (`run_ufunc_differential`) and compares shapes, dtypes, and values with configurable tolerance. Covers ufunc, linalg, FFT, polynomial, string, masked-array, datetime, RNG, and I/O operations.
 2. **Metamorphic testing.** Verifies algebraic identities that must hold regardless of input: `a + b = b + a`, `a * 1 = a`, `sum(a) = sum(sort(a))`, FFT round-trips, etc. (13+ identities).
