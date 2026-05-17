@@ -1759,6 +1759,8 @@ G8  durability/decode    cargo run -p fnp-conformance --bin run_raptorq_gate -- 
 
 G3 enforces a real-numpy oracle via `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` and rejects `pure_python_fallback` output. After G8 the topology script also runs `validate_phase2c_packet --packet-id FNP-P2C-{001..009}` to confirm every P2C packet's readiness contract still passes — this is the durability-tail step that catches packet-contract drift.
 
+Several gates accept environment-variable tuning; `.github/workflows/ci.yml` pins the strict CI values: G6 sets `FNP_WORKFLOW_RETRIES=0`, `FNP_WORKFLOW_FLAKE_BUDGET=0`, `FNP_WORKFLOW_COVERAGE_FLOOR=1.0`; G7 sets `FNP_PERF_CANDIDATE_BASELINE=/tmp/perf_candidate.json`, `FNP_PERF_MAX_P99_REGRESSION_RATIO=0.07`, `FNP_PERF_COVERAGE_FLOOR=1.0`. Local runs default to looser values unless overridden.
+
 Run all gates locally:
 
 ```bash
