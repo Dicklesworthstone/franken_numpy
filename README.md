@@ -1435,7 +1435,7 @@ fn fft_round_trip_matches_numpy_within_tolerance() -> Result<(), Box<dyn std::er
 
 The same pattern (build fixture → run kernel → run inverse → compare to original) is the basis for the metamorphic-test layer described in [Conformance Methodology Deep-Dive](#conformance-methodology-deep-dive).
 
-### Recipe 4: feed FrankenNumPy values into Python via PyO3
+### Recipe 4: call FrankenNumPy from Python (mixed Rust fast-paths + numpy fallback)
 
 ```python
 import fnp_python as np
