@@ -6,7 +6,7 @@ Scanned `fnp-dtype`, `fnp-ndarray`, `fnp-iter`, `fnp-ufunc`, `fnp-linalg`, `fnp-
 
 **Still zero real stubs/mocks/TODOs across all 10 `fnp-*` crates** (the 7 numeric impl crates — `fnp-dtype`, `fnp-ndarray`, `fnp-iter`, `fnp-ufunc`, `fnp-linalg`, `fnp-random`, `fnp-io` — plus `fnp-runtime` for mode/policy orchestration, `fnp-python` bindings, and `fnp-conformance` harness) as of the 2026-05-14 refresh. AGENTS.md characterises remaining gaps as "parity debt, not feature cuts"; this audit confirms that at the code level. The headline finding has held through the May 2026 parity wave that took `numpy.__all__` coverage from 43.3% to 100%.
 
-The cosmetic `.unwrap()` inventory has grown with the codebase: from **43 sites** at the original audit (2026-04-22) to **115 sites** in `fnp-conformance/src/**` alone today. Crate growth (304k Rust lines vs 254k in April) explains the increase; all checked sites remain on statically-correct invariants (fixture/parser code, non-empty Vec, matching DType, constant seeds) and not on user-reachable paths.
+The cosmetic `.unwrap()` inventory has grown with the codebase: from **43 sites** at the original audit (2026-04-22) to **115 sites** in `fnp-conformance/src/**` alone (re-verified 2026-05-17: still exactly 115 — `ufunc_differential.rs:65`, `lib.rs:47`, `bin/run_oracle_drift_matrix.rs:2`, `oracle_drift_matrix.rs:1`). Crate growth (304k Rust lines vs 254k in April) explains the increase; all checked sites remain on statically-correct invariants (fixture/parser code, non-empty Vec, matching DType, constant seeds) and not on user-reachable paths.
 
 ## Detection matrix
 
