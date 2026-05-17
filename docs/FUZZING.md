@@ -39,6 +39,8 @@ cargo fuzz run fuzz_npy artifacts/fuzz_npy/crash-<hash>
 
 When updating the workspace nightly, bump all 8 `rust-toolchain.toml` files together (the root + 7 per-fuzz copies) plus the matching `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml` and the README/AGENTS.md mentions.
 
+A fuzz target may contain deliberate `panic!()` calls as invariant assertions — if the harness reaches a state that should be impossible per the contract under test, panicking is the right signal to the fuzzer. Example: `crates/fnp-iter/fuzz/fuzz_targets/fuzz_transfer_class.rs:46` panics with `"item_size=0 should have returned an error"` because the prior validation step is supposed to reject item_size=0; if the panic ever fires, the fuzzer found a contradiction. These are not stubs.
+
 ## Seed corpus convention
 
 Curated seeds live under `<crate>/fuzz/corpus/<target>/seed_*`. The repo's `.gitignore` exempts `seed_*` files (auto-generated hash-named files are gitignored, but hand-authored seeds are tracked).
