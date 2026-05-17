@@ -95,6 +95,8 @@ let perm = rng.permutation(&data)?;             // Fisher-Yates via random_inter
 
 **1,500+ public Rust functions across 10 crates, exposing 100% of `numpy.__all__` (499/499 names) through the `fnp_python` Python module.** Coverage is structurally enforced by a conformance test (`fnp_python_covers_full_numpy_all`) that iterates `numpy.__all__` and fails CI if any name regresses. See [`audit_numpy_reality.md`](audit_numpy_reality.md) for the coverage progression and lock-in details.
 
+`fnp_python` also registers 12 PyO3 classes: `PyNditer` / `PyNditerStep` (iterator state machine), `PyFromPyFunc` / `PyVectorize` (callable wrappers), and the `random` submodule's `PySeedSequence`, `PyRandomGenerator`, `PyRandomState`, plus 5 bit-generator classes (`PyMt19937`, `PyPcg64`, `PyPcg64Dxsm`, `PyPhilox`, `PySfc64`).
+
 | Category | Functions (highlights) |
 |---|---|
 | **Array creation** | `zeros`, `ones`, `empty`, `full`, `arange`, `linspace`, `logspace`, `geomspace`, `eye`, `identity`, `diag`, `meshgrid`, `mgrid`, `ogrid`, `fromfunction`, `array` |
