@@ -189,14 +189,17 @@ against the live NumPy reference. Notable pieces:
 
 ### Documentation correctness polish wave (May 2026)
 
-A 92-bead sweep closed on 2026-05-16 alone, touching README.md,
-AGENTS.md, FEATURE_PARITY.md, audit_numpy_reality.md,
-audit_numpy_mocks.md, docs/DIVERGENCES.md, docs/FUZZING.md,
-PROPOSED_ARCHITECTURE.md and this CHANGELOG. (Count verified by
-`br list --status=closed --limit 10000 --json` filtered on
-`closed_at >= 2026-05-16`.) The wave was aimed at removing claims
-that had drifted past the implementation, and at adding precision
-where prose was vague. Representative entries:
+A documentation polish push spanning 2026-05-16 to 2026-05-17:
+92 beads closed on 2026-05-16 (the verified spike that the README's
+Project Timeline calls out) plus 18 follow-up beads on 2026-05-17,
+for ~110 beads total. Touched README.md, AGENTS.md,
+FEATURE_PARITY.md, audit_numpy_reality.md, audit_numpy_mocks.md,
+docs/DIVERGENCES.md, docs/FUZZING.md, PROPOSED_ARCHITECTURE.md and
+this CHANGELOG. (Counts reproducible from `.beads/issues.jsonl`:
+`grep -oE '"closed_at":"2026-05-1[67]T[^"]*"' .beads/issues.jsonl
+| wc -l` returns 110.) The wave was aimed at removing claims that
+had drifted past the implementation, and at adding precision where
+prose was vague. Representative entries:
 
   - README hero subtitle now states **concrete numbers** (6,392 tests,
     100% of `numpy.__all__`, zero unsafe blocks) instead of "extensive
