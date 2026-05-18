@@ -1633,7 +1633,7 @@ Each packet produces 8 artifact files: `legacy_anchor_map.md`, `contract_table.m
 
 ## Test Coverage
 
-Live counts as of 2026-05-16 (see [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the authoritative live inventory):
+Live counts as of 2026-05-16 (see [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the authoritative live inventory). The 6,392 test count below is split across **175 integration test files** (per `find crates -path '*/tests/*.rs'`): `fnp-python` 137 (133 conformance shards + `metamorphic_array_ops` + `e2e_workflow` + `golden_native_functions` + 1 helper), `fnp-ufunc` 9, `fnp-conformance` 5 (codebase_hygiene, concurrency_safety, numpy_reference_ops, profiling_baseline, smoke), `fnp-io` 5, `fnp-dtype` 4, `fnp-ndarray` 4, `fnp-linalg` 4, `fnp-iter` 3, `fnp-random` 2, `fnp-runtime` 2; plus inline `#[cfg(test)]` blocks in each crate's `src/lib.rs`:
 
 | Crate | Tests | Focus |
 |---|---:|---|
