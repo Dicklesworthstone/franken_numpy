@@ -16,7 +16,7 @@ so that readers can quickly find what changed in the subsystem they care about.
 
 ---
 
-## [Unreleased] — development head (2026-02-13 through 2026-05-17)
+## [Unreleased] — development head (2026-02-13 through 2026-05-18)
 
 **Headline milestone (2026-05-13):** `fnp-python` now covers **100% of
 `numpy.__all__`** (499/499 names), structurally locked by the
@@ -189,18 +189,19 @@ against the live NumPy reference. Notable pieces:
 
 ### Documentation correctness polish wave (May 2026)
 
-A documentation polish push spanning 2026-05-16 to 2026-05-17:
-92 beads closed on 2026-05-16 (the verified spike that the README's
-Project Timeline calls out) plus 33 follow-up beads on 2026-05-17
-as the wave kept going, for ~125 beads total at the time of this
-snapshot (still landing). Touched README.md, AGENTS.md,
-FEATURE_PARITY.md, audit_numpy_reality.md, audit_numpy_mocks.md,
-docs/DIVERGENCES.md, docs/FUZZING.md, PROPOSED_ARCHITECTURE.md and
-this CHANGELOG. (Counts reproducible from `.beads/issues.jsonl`:
-`grep -oE '"closed_at":"2026-05-1[67]T[^"]*"' .beads/issues.jsonl
-| wc -l` returns the running total.) The wave was aimed at removing
-claims that had drifted past the implementation, and at adding
-precision where prose was vague. Representative entries:
+A multi-day documentation polish push that started 2026-05-16 and
+is still landing. Per-day verified counts (via
+`grep -oE '"closed_at":"2026-05-1[678]T[^"]*"' .beads/issues.jsonl
+| wc -l`): **92** on 2026-05-16 (the spike the README's Project
+Timeline calls out), **93** on 2026-05-17, **5+** on 2026-05-18.
+Cumulative as of the 2026-05-18 snapshot: ~190 beads, still
+landing. Touched README.md, AGENTS.md, FEATURE_PARITY.md,
+audit_numpy_reality.md, audit_numpy_mocks.md, docs/DIVERGENCES.md,
+docs/FUZZING.md, PROPOSED_ARCHITECTURE.md and this CHANGELOG. The
+wave was aimed at removing claims that had drifted past the
+implementation, and at adding precision where prose was vague.
+Representative entries (from the 2026-05-16 spike — later days
+follow the same pattern):
 
   - README hero subtitle now states **concrete numbers** (6,392 tests,
     100% of `numpy.__all__`, zero unsafe blocks) instead of "extensive
