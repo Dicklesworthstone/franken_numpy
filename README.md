@@ -1684,7 +1684,9 @@ The comparator is tiered: it first compares shapes, then dtypes, then values. Va
 
 Verifies algebraic identities that must hold *regardless of input*. These don't depend on an oracle at all; they catch bugs that an oracle test couldn't, because they probe relationships, not values.
 
-Representative identities (from `crates/fnp-conformance/src/metamorphic_*`):
+The metamorphic suite is consistent across the workspace: every numeric crate ships a `tests/metamorphic_<area>.rs` file — `fnp-dtype/tests/metamorphic_dtype.rs`, `fnp-ndarray/tests/metamorphic_shapes.rs`, `fnp-iter/tests/metamorphic_iter.rs`, `fnp-ufunc/tests/metamorphic_math.rs`, `fnp-linalg/tests/metamorphic_linalg.rs`, `fnp-random/tests/metamorphic_rng.rs`, `fnp-io/tests/metamorphic_io.rs`, and `fnp-python/tests/metamorphic_array_ops.rs` — eight files, one per area, plus the cross-cutting identities under `crates/fnp-conformance/src/metamorphic_*`.
+
+Representative identities:
 
 | Identity | What it catches |
 |---|---|
