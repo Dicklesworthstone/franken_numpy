@@ -1075,7 +1075,7 @@ No public function in the implementation crates returns `Result<T, Box<dyn Error
 
 ## Threading and Concurrency Model
 
-FrankenNumPy operations are single-threaded by default. The choice merits precise description.
+FrankenNumPy operations are single-threaded by default. The choice merits precise description. Two integration test files exercise the model: `crates/fnp-ufunc/tests/concurrency_safety.rs` (verifies `UFuncArray` `Send`/`Sync` and parallel reduce/elementwise variants) and `crates/fnp-conformance/tests/concurrency_safety.rs` (verifies fnp-conformance's 4+ static `Mutex`/`OnceLock` combinations are thread-safe + deadlock-free).
 
 **`Send` / `Sync` for the core types.** `UFuncArray` owns its `Vec<f64>` and is `Send + Sync`; you can move an array between threads or share it behind an `Arc` for concurrent reads. `MaskedArray` and `StringArray` follow the same pattern. Datetime/timedelta arrays are `UFuncArray` instances and inherit the same `Send + Sync`.
 
