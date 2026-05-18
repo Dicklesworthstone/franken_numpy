@@ -1728,6 +1728,8 @@ Hard-coded "expected output" values for every RNG distribution and every algorit
 
 Example: the `standard_normal(5)` witness for `PCG64DXSM(12345)` is the exact 5-element float vector that NumPy produces from the same seed. When we intentionally change an algorithm (e.g. the 2026-03-15 BTPE binomial port), the witness values are *regenerated* from the new implementation and the diff is reviewed in the same commit. That diff is itself an artifact: the old vs new witness arrays appear in the commit, so any future drift is obvious.
 
+These witness arrays live in `golden_*.rs` files, one per crate: `fnp-dtype/tests/golden_dtype.rs`, `fnp-ndarray/tests/golden_layout.rs`, `fnp-iter/tests/golden_iter.rs`, `fnp-ufunc/tests/golden_histogram.rs`, `fnp-linalg/tests/golden_linalg.rs`, `fnp-random/tests/golden_rng.rs`, `fnp-io/tests/golden_text_io.rs`, `fnp-python/tests/golden_native_functions.rs`, `fnp-runtime/tests/golden_runtime.rs` — nine files, one per non-conformance crate.
+
 ### How the four layers compose
 
 ```
