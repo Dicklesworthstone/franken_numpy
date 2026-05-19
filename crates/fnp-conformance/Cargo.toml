@@ -19,6 +19,11 @@ fnp-ndarray = { path = "../fnp-ndarray", version = "0.1.0" }
 fnp-random = { path = "../fnp-random", version = "0.1.0" }
 fnp-runtime = { path = "../fnp-runtime", version = "0.1.0" }
 fnp-ufunc = { path = "../fnp-ufunc", version = "0.1.0" }
+# asupersync inherits default-features=false from the workspace pin (set that way
+# so fnp-runtime can use the dep as optional). Verified 2026-05-20 by running
+# `cargo test -p fnp-conformance --lib`: 215 tests pass without asupersync default
+# features. If a future change needs an asupersync default feature, switch this
+# line to the long form: `asupersync = { workspace = true, features = ["..."] }`.
 asupersync.workspace = true
 base64 = "0.22.1"
 serde = { workspace = true, features = ["derive"] }
