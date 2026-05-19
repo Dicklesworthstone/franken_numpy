@@ -25322,10 +25322,11 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // (polynomial, chebyshev, legendre, hermite, hermite_e,
         // laguerre, polyutils) also resolve to numpy's modules when available.
         let poly_getattr_src = pyo3::ffi::c_str!(
-            "_CLASS_NAMES = frozenset(('Polynomial','Chebyshev','Legendre','Hermite','HermiteE','Laguerre'))\n_FUNC_NAMES = frozenset(('set_default_printstyle','test'))\n_SUB_NAMES = frozenset(('polynomial','chebyshev','legendre','hermite','hermite_e','laguerre','polyutils'))\ndef __getattr__(name):\n    if name in _CLASS_NAMES or name in _FUNC_NAMES:\n        import numpy.polynomial as _p\n        return getattr(_p, name)\n    if name in _SUB_NAMES:\n        import importlib\n        return importlib.import_module('numpy.polynomial.' + name)\n    raise AttributeError(name)\n"
+            "_CLASS_NAMES = frozenset(('Polynomial','Chebyshev','Legendre','Hermite','HermiteE','Laguerre'))\n_FUNC_NAMES = frozenset(('set_default_printstyle','test'))\n_SUB_NAMES = frozenset(('polynomial','chebyshev','legendre','hermite','hermite_e','laguerre','polyutils'))\ndef __getattr__(name):\n    if name in _CLASS_NAMES or name in _FUNC_NAMES:\n        import numpy.polynomial as _p\n        return getattr(_p, name)\n    if name in _SUB_NAMES:\n        import importlib, sys\n        module = importlib.import_module('numpy.polynomial.' + name)\n        sys.modules[__name__ + '.' + name] = module\n        return module\n    raise AttributeError(name)\n"
         );
         let poly_dict = polynomial.dict();
         py.run(poly_getattr_src, Some(&poly_dict), None)?;
+        let sys_modules = py.import("sys")?.getattr("modules")?;
         // crid: eager subpackage install when numpy.polynomial is
         // importable. setattr each of the 6 subpackages so attribute
         // access (not __getattr__) resolves and dir() enumerates them.
@@ -25340,7 +25341,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
                 "polyutils",
             ] {
                 if let Ok(submod) = np_poly.getattr(sub) {
-                    polynomial.setattr(sub, submod)?;
+                    polynomial.setattr(sub, &submod)?;
+                    sys_modules.set_item(format!("{polynomial_qualified_name}.{sub}"), submod)?;
                 }
             }
             if let Ok(all_names) = np_poly.getattr("__all__") {
@@ -25358,9 +25360,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if polynomial.getattr("__all__").is_err() {
             polynomial.setattr("__all__", PyList::new(py, polynomial_root_names)?)?;
         }
-        py.import("sys")?
-            .getattr("modules")?
-            .set_item(&polynomial_qualified_name, &polynomial)?;
+        sys_modules.set_item(&polynomial_qualified_name, &polynomial)?;
         m.add_submodule(&polynomial)?;
         m.add("polynomial", polynomial)?;
     }
@@ -27862,10 +27862,14 @@ mod tests {
             if !numpy_available(py) {
                 return Ok(());
             }
-            let module = PyModule::new(py, "fnp_python_test_polynomial_nested")?;
+            let module_name = "fnp_python_test_polynomial_nested";
+            let module = PyModule::new(py, module_name)?;
+            let sys_modules = py.import("sys")?.getattr("modules")?;
+            sys_modules.set_item(module_name, &module)?;
             fnp_python(&module)?;
             let polynomial = module.getattr("polynomial")?;
             let np_poly = py.import("numpy.polynomial")?;
+            let import_module = py.import("importlib")?.getattr("import_module")?;
             for sub in [
                 "polynomial",
                 "chebyshev",
@@ -27880,6 +27884,15 @@ mod tests {
                 assert!(
                     ours.is(&theirs),
                     "fnp_python.polynomial.{sub} must BE numpy.polynomial.{sub}"
+                );
+                let alias = format!("{module_name}.polynomial.{sub}");
+                assert!(
+                    sys_modules.get_item(&alias)?.is(&theirs),
+                    "{alias} should be registered under sys.modules"
+                );
+                assert!(
+                    import_module.call1((&alias,))?.is(&theirs),
+                    "importlib.import_module({alias:?}) must return numpy.polynomial.{sub}"
                 );
             }
             // Round-trip: numpy.polynomial.chebyshev.chebadd is reachable
