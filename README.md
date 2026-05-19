@@ -273,6 +273,8 @@ np.linalg.solve([[3, 1], [1, 2]], [9, 8])
 
 There is **no `pip install frankennumpy` wheel/PyPI flow yet**; packaging is the only residual gap (see the FAQ and the Limitations section). The Python surface itself is complete and CI-locked.
 
+If you need `fnp-runtime`'s optional `asupersync` async integration or `frankentui` terminal dashboards (both default off), see the Optional features table immediately below for the per-feature cargo invocations.
+
 ### Optional features
 
 | Crate | Feature | Effect | Enable with |
