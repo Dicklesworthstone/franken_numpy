@@ -367,6 +367,8 @@ See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the complete live parity matrix
 
 10 implementation crates, all under `crates/fnp-*`. 9 of the 10 declare `#![forbid(unsafe_code)]`; `fnp-python` is the lone exception, because PyO3's procedural macros may expand into unsafe as part of generating the cdylib entry point. In practice, the current `fnp-python` source contains zero hand-written `unsafe` blocks (verified by ripgrep); the lint is opt-out, not invoked.
 
+External crate dependencies are pinned at the workspace root in `[workspace.dependencies]`: `serde 1.0.228` (3 consumer crates), `serde_json 1.0.149` (3 consumers), `criterion 0.6 with html_reports` (7 consumer bench crates), and `pyo3 0.28.3 with auto-initialize` (1 consumer — `fnp-python`). Each consumer references the pin via `.workspace = true`. Verified 2026-05-20 — no dead workspace deps.
+
 | Crate | Lines (src/) | Purpose |
 |---|---:|---|
 | `fnp-dtype` | 3,190 | 18 dtype variants, deterministic `const fn` promotion table covering all 324 pairs, 5 cast policies, `ArrayStorage` taxonomy. (The `IntegerSidecar` mentioned later in this README lives in `fnp-ufunc`, not here, because it travels with `UFuncArray`.) |
