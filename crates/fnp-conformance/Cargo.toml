@@ -25,10 +25,17 @@ fnp-ufunc = { path = "../fnp-ufunc", version = "0.1.0" }
 # features. If a future change needs an asupersync default feature, switch this
 # line to the long form: `asupersync = { workspace = true, features = ["..."] }`.
 asupersync.workspace = true
+# base64: RaptorQ sidecar payloads (artifact source + repair symbols are encoded
+# as base64 in the sidecar JSON; see crates/fnp-conformance/src/raptorq_artifacts.rs).
 base64 = "0.22.1"
+# serde / serde_json: oracle capture, fixture I/O, differential reports,
+# divergence ledger, P2C packet manifests — every artifact in the harness is JSON.
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+# serde_yaml_ng: YAML parsing for security_control_checks_v1.yaml +
+# cross_engine_benchmark_workloads_v1.yaml + hardened_mode_allowlist_v1.yaml.
 serde_yaml_ng = "0.10.0"
+# sha2: SHA-256 hashing for RaptorQ scrub-report / decode-proof verification.
 sha2 = "0.11.0"
 
 [dev-dependencies]
