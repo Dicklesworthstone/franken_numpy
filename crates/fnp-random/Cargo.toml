@@ -11,6 +11,10 @@ categories.workspace = true
 description = "NumPy-parity RNG: PCG64DXSM, distributions, oracle-verified deterministic streams."
 
 [dependencies]
+# fnp-ndarray: shape/stride scaffolding for the `*_shaped` distribution
+# variants (standard_normal_shaped, permutation_shaped, etc.). The non-shaped
+# variants don't depend on ndarray, but the shaped variants need the SCE
+# contracts to build correctly-strided output arrays.
 fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }
 
 [dev-dependencies]
