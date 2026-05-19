@@ -5,26 +5,35 @@
 
 use std::process::Command;
 
-fn grep_pattern(pattern: &str) -> usize {
+/// Run ripgrep with the given `pattern` and extra glob filters, return the
+/// total per-file match count summed across the workspace's `crates/` tree.
+///
+/// All callers share the same baseline flags: `-c` (count mode), `--type rust`,
+/// and the standard `!target/` / `!.rch-target/` excludes. Callers can pass
+/// additional `-g` glob patterns via `extra_globs` (e.g. positive includes
+/// like `"**/src/*.rs"`, or further excludes like `"!fuzz/"`).
+fn run_ripgrep(pattern: &str, extra_globs: &[&str]) -> usize {
     let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("crates dir");
 
+    let mut args: Vec<&str> = vec![
+        "-c",
+        pattern,
+        "--type",
+        "rust",
+        "-g",
+        "!target/",
+        "-g",
+        "!.rch-target/",
+    ];
+    for glob in extra_globs {
+        args.push("-g");
+        args.push(glob);
+    }
+
     let output = Command::new("rg")
-        .args([
-            "-c",
-            pattern,
-            "--type",
-            "rust",
-            "-g",
-            "!target/",
-            "-g",
-            "!.rch-target/",
-            "-g",
-            "!fuzz/",
-            "-g",
-            "!codebase_hygiene.rs",
-        ])
+        .args(&args)
         .arg(crates_dir)
         .output()
         .expect("rg should be available");
@@ -37,6 +46,13 @@ fn grep_pattern(pattern: &str) -> usize {
         .lines()
         .filter_map(|line| line.split(':').next_back()?.parse::<usize>().ok())
         .sum()
+}
+
+/// Default ripgrep helper used by the stub-marker / TODO / unimplemented tests.
+/// Excludes the `fuzz/` tree and this test file itself (the patterns it
+/// matches against would otherwise self-match).
+fn grep_pattern(pattern: &str) -> usize {
+    run_ripgrep(pattern, &["!fuzz/", "!codebase_hygiene.rs"])
 }
 
 #[test]
@@ -93,38 +109,7 @@ fn test_count_sanity_check() {
 
 #[test]
 fn no_fixme_hack_markers() {
-    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates dir");
-
-    let output = std::process::Command::new("rg")
-        .args([
-            "-c",
-            r"//.*\b(FIXME|HACK|XXX)\b",
-            "--type",
-            "rust",
-            "-g",
-            "!target/",
-            "-g",
-            "!.rch-target/",
-            "-g",
-            "!fuzz/",
-            "-g",
-            "!codebase_hygiene.rs",
-        ])
-        .arg(crates_dir)
-        .output()
-        .expect("rg should be available");
-
-    if !output.status.success() {
-        return;
-    }
-
-    let count: usize = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split(':').next_back()?.parse::<usize>().ok())
-        .sum();
-
+    let count = grep_pattern(r"//.*\b(FIXME|HACK|XXX)\b");
     assert_eq!(
         count, 0,
         "found {count} FIXME/HACK/XXX comment markers — address or convert to tracked issues"
@@ -133,36 +118,7 @@ fn no_fixme_hack_markers() {
 
 #[test]
 fn no_dbg_macros_in_library_code() {
-    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates dir");
-
-    let output = std::process::Command::new("rg")
-        .args([
-            "-c",
-            r"dbg!\(",
-            "--type",
-            "rust",
-            "-g",
-            "**/src/*.rs",
-            "-g",
-            "!target/",
-            "-g",
-            "!.rch-target/",
-        ])
-        .arg(crates_dir)
-        .output()
-        .expect("rg should be available");
-
-    if !output.status.success() {
-        return;
-    }
-
-    let count: usize = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split(':').next_back()?.parse::<usize>().ok())
-        .sum();
-
+    let count = run_ripgrep(r"dbg!\(", &["**/src/*.rs"]);
     assert_eq!(
         count, 0,
         "found {count} dbg! macros in library code — remove before release"
@@ -171,36 +127,7 @@ fn no_dbg_macros_in_library_code() {
 
 #[test]
 fn no_allow_unused_in_library_code() {
-    let crates_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates dir");
-
-    let output = std::process::Command::new("rg")
-        .args([
-            "-c",
-            r"#\[allow\(dead_code\)\]|#\[allow\(unused",
-            "--type",
-            "rust",
-            "-g",
-            "**/src/lib.rs",
-            "-g",
-            "!target/",
-            "-g",
-            "!.rch-target/",
-        ])
-        .arg(crates_dir)
-        .output()
-        .expect("rg should be available");
-
-    if !output.status.success() {
-        return;
-    }
-
-    let count: usize = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(|line| line.split(':').next_back()?.parse::<usize>().ok())
-        .sum();
-
+    let count = run_ripgrep(r"#\[allow\(dead_code\)\]|#\[allow\(unused", &["**/src/lib.rs"]);
     // Current inventory is 10 across fnp-conformance and fnp-python; keep this
     // as a regression guard until those compatibility helpers are retired.
     assert!(
