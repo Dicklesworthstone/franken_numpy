@@ -19,7 +19,7 @@
   - `serde_yaml_ng 0.10.0`
   - `sha2 0.11.0`
   - `base64 0.22.1`
-  - `criterion 0.8.2`
+  - `criterion 0.8.2` (later consolidated back down to `0.6` in the May 2026 workspace-metadata wave under beads `dcjb7` + `voj6z` — see Cargo.toml `[workspace.dependencies]` for current pin)
   - `half 2.7.1`
   - `bytemuck 1.25.0`
   - `flate2 1.1.9`
