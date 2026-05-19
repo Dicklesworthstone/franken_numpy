@@ -36,6 +36,7 @@ categories = ["science", "mathematics", "data-structures"]
 serde_json = "1.0.149"
 serde = { version = "1.0.228", features = ["derive"] }
 criterion = { version = "0.6", features = ["html_reports"] }
+pyo3 = { version = "0.28.3", features = ["auto-initialize"] }
 
 # Profiling profile: optimized + debug symbols + frame pointers for flamegraphs
 [profile.release-perf]
