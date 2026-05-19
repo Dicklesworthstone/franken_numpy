@@ -25119,6 +25119,7 @@ fn get_include(
 #[pymodule]
 pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
+    let parent_name = m.getattr("__name__")?.extract::<String>()?;
     m.add_class::<PyNditerStep>()?;
     m.add_class::<PyNditer>()?;
     m.add_class::<PyFromPyFunc>()?;
@@ -25129,6 +25130,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("c_", Py::new(py, PyCClass)?)?;
     {
         let random = PyModule::new(py, "random")?;
+        let random_qualified_name = format!("{parent_name}.random");
+        random.setattr("__name__", &random_qualified_name)?;
+        random.setattr("__package__", &parent_name)?;
         let random_public_names = [
             "beta",
             "binomial",
@@ -25259,6 +25263,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if random.getattr("__all__").is_err() {
             random.setattr("__all__", PyList::new(py, random_public_names)?)?;
         }
+        py.import("sys")?
+            .getattr("modules")?
+            .set_item(&random_qualified_name, &random)?;
         m.add_submodule(&random)?;
         m.add("random", random)?;
     }
@@ -25270,6 +25277,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // workers still satisfy attribute-existence probes and
         // resolve to the real class on first access.
         let polynomial = PyModule::new(py, "polynomial")?;
+        let polynomial_qualified_name = format!("{parent_name}.polynomial");
+        polynomial.setattr("__name__", &polynomial_qualified_name)?;
+        polynomial.setattr("__package__", &parent_name)?;
         let polynomial_root_names = [
             "set_default_printstyle",
             "polynomial",
@@ -25348,6 +25358,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         if polynomial.getattr("__all__").is_err() {
             polynomial.setattr("__all__", PyList::new(py, polynomial_root_names)?)?;
         }
+        py.import("sys")?
+            .getattr("modules")?
+            .set_item(&polynomial_qualified_name, &polynomial)?;
         m.add_submodule(&polynomial)?;
         m.add("polynomial", polynomial)?;
     }
@@ -26190,6 +26203,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     {
         let linalg = PyModule::new(py, "linalg")?;
+        let linalg_qualified_name = format!("{parent_name}.linalg");
+        linalg.setattr("__name__", &linalg_qualified_name)?;
+        linalg.setattr("__package__", &parent_name)?;
         let linalg_public_names = [
             "matrix_power",
             "solve",
@@ -26308,6 +26324,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let linalg_dict = linalg.dict();
         py.run(getattr_src, Some(&linalg_dict), None)?;
+        py.import("sys")?
+            .getattr("modules")?
+            .set_item(&linalg_qualified_name, &linalg)?;
         m.add_submodule(&linalg)?;
         // Also expose as top-level attribute so `fnp_python.linalg` resolves
         // via attribute access regardless of import style.
@@ -26398,6 +26417,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     {
         let ma = PyModule::new(py, "ma")?;
+        let ma_qualified_name = format!("{parent_name}.ma");
+        ma.setattr("__name__", &ma_qualified_name)?;
+        ma.setattr("__package__", &parent_name)?;
         // ma_* prefixed (7).
         for (numpy_name, flat_name) in [
             ("count", "ma_count"),
@@ -26588,12 +26610,18 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let ma_dict = ma.dict();
         py.run(ma_getattr_src, Some(&ma_dict), None)?;
+        py.import("sys")?
+            .getattr("modules")?
+            .set_item(&ma_qualified_name, &ma)?;
         m.add_submodule(&ma)?;
         m.add("ma", ma)?;
     }
 
     {
         let testing = PyModule::new(py, "testing")?;
+        let testing_qualified_name = format!("{parent_name}.testing");
+        testing.setattr("__name__", &testing_qualified_name)?;
+        testing.setattr("__package__", &parent_name)?;
         for (numpy_name, flat_name) in [
             ("assert_allclose", "testing_assert_allclose"),
             ("assert_equal", "testing_assert_equal"),
@@ -26695,6 +26723,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let testing_dict = testing.dict();
         py.run(testing_getattr_src, Some(&testing_dict), None)?;
+        py.import("sys")?
+            .getattr("modules")?
+            .set_item(&testing_qualified_name, &testing)?;
         m.add_submodule(&testing)?;
         m.add("testing", testing)?;
     }
@@ -26761,6 +26792,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let exceptions_dict = exceptions.dict();
         py.run(exceptions_getattr_src, Some(&exceptions_dict), None)?;
+        py.import("sys")?
+            .getattr("modules")?
+            .set_item(&exceptions_qualified_name, &exceptions)?;
         m.add_submodule(&exceptions)?;
         m.add("exceptions", exceptions)?;
     }
@@ -26841,6 +26875,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         );
         let dtypes_dict = dtypes_module.dict();
         py.run(dtypes_getattr_src, Some(&dtypes_dict), None)?;
+        py.import("sys")?
+            .getattr("modules")?
+            .set_item(&dtypes_qualified_name, &dtypes_module)?;
         m.add_submodule(&dtypes_module)?;
         m.add("dtypes", dtypes_module)?;
     }
@@ -33209,6 +33246,46 @@ mod tests {
                 );
             }
             let sys_modules = py.import("sys")?.getattr("modules")?;
+            assert!(
+                sys_modules
+                    .get_item(format!("{module_name}.random"))?
+                    .is(&module.getattr("random")?),
+                "fnp_python.random should be registered under sys.modules",
+            );
+            assert!(
+                sys_modules
+                    .get_item(format!("{module_name}.polynomial"))?
+                    .is(&module.getattr("polynomial")?),
+                "fnp_python.polynomial should be registered under sys.modules",
+            );
+            assert!(
+                sys_modules
+                    .get_item(format!("{module_name}.linalg"))?
+                    .is(&linalg),
+                "fnp_python.linalg should be registered under sys.modules",
+            );
+            assert!(
+                sys_modules.get_item(format!("{module_name}.ma"))?.is(&ma),
+                "fnp_python.ma should be registered under sys.modules",
+            );
+            assert!(
+                sys_modules
+                    .get_item(format!("{module_name}.testing"))?
+                    .is(&testing),
+                "fnp_python.testing should be registered under sys.modules",
+            );
+            assert!(
+                sys_modules
+                    .get_item(format!("{module_name}.exceptions"))?
+                    .is(&module.getattr("exceptions")?),
+                "fnp_python.exceptions should be registered under sys.modules",
+            );
+            assert!(
+                sys_modules
+                    .get_item(format!("{module_name}.dtypes"))?
+                    .is(&module.getattr("dtypes")?),
+                "fnp_python.dtypes should be registered under sys.modules",
+            );
             assert!(
                 sys_modules
                     .get_item(format!("{module_name}.lib"))?
