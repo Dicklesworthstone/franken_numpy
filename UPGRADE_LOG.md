@@ -1,5 +1,25 @@
 # Dependency Upgrade Log
 
+## 2026-05-20 Session (PinkDesert workspace.dependencies consolidation)
+
+**Date:** 2026-05-20  |  **Project:** franken_numpy  |  **Language:** Rust
+**Agent:** PinkDesert
+
+### Summary (this session)
+
+- No version bumps. This session consolidated existing pins into `[workspace.dependencies]`:
+  - **Earlier in the week:** `criterion`'s `html_reports` feature was lifted from `fnp-ndarray` (only consumer) to the workspace pin so all 7 bench crates get HTML output uniformly.
+  - **This session:** `pyo3 0.28.3 + auto-initialize` lifted from `fnp-python` to workspace pin.
+  - **This session:** `asupersync 0.3.1 + default-features=false` lifted from `fnp-runtime + fnp-conformance` to workspace pin. `default-features=false` had to be declared at the workspace level (not the inheritor) because cargo doesn't allow inheritors to override workspace `default-features`. `fnp-runtime` keeps `optional=true`; `fnp-conformance` now also inherits `default-features=false` (behavior change verified safe: 215 lib tests pass).
+- **No version changes** vs the 2026-04-22 baseline; current pins still match: pyo3 0.28.3, asupersync 0.3.1, ftui 0.3.1, serde 1.0.228, serde_json 1.0.149, serde_yaml_ng 0.10.0, sha2 0.11.0, base64 0.22.1, half 2.7.1, bytemuck 1.25.0, flate2 1.1.9. **criterion is the lone divergence**: 0.6 (consolidated from 0.5/0.6/0.8.2 in the May 2026 wave, see beads `dcjb7`+`voj6z`).
+- Validation: `cargo check --workspace` clean on fresh target (~37s); `cargo test -p fnp-conformance --lib` runs 215 tests, all pass.
+
+### Notes
+
+- After this session, `[workspace.dependencies]` has 5 entries (serde, serde_json, criterion, pyo3, asupersync). Consumer counts: serde=3, serde_json=3, criterion=7, pyo3=1, asupersync=2. No dead pins.
+
+---
+
 ## 2026-04-22 Session (cod-numpy no-op workspace sweep)
 
 **Date:** 2026-04-22  |  **Project:** franken_numpy  |  **Language:** Rust
