@@ -237,10 +237,21 @@ print(missing == [])
 
 #[test]
 fn fnp_python_top_level_all_matches_numpy_verbatim() -> Result<(), String> {
+    // Emit four signals so a failure points at the actual divergence rather
+    // than just "False":
+    //   1. presence (`hasattr`)
+    //   2. verbatim list equality (order-sensitive, the canonical contract)
+    //   3. sorted set-equality (catches order-only drift vs. content drift)
+    //   4. symmetric-diff names (only printed when sets differ, so the
+    //      diagnostic shows up exactly when it's useful)
     let script = fnp_script(
         r#"
 print(hasattr(fnp, '__all__'))
 print(fnp.__all__ == np.__all__)
+print(sorted(fnp.__all__) == sorted(np.__all__))
+missing = sorted(set(np.__all__) - set(fnp.__all__))
+extra = sorted(set(fnp.__all__) - set(np.__all__))
+print(f"missing={missing} extra={extra}")
 "#
         .into(),
     );
@@ -251,10 +262,13 @@ print(fnp.__all__ == np.__all__)
         "True",
         "fnp_python must expose top-level __all__; got: {result}"
     );
+    let verbatim = lines.next().unwrap_or("").trim();
+    let sorted_eq = lines.next().unwrap_or("").trim();
+    let diff_line = lines.next().unwrap_or("").trim();
     assert_eq!(
-        lines.next().unwrap_or("").trim(),
-        "True",
-        "fnp_python.__all__ must match numpy.__all__ verbatim; got: {result}"
+        verbatim, "True",
+        "fnp_python.__all__ must match numpy.__all__ verbatim (order-sensitive); \
+         sorted-equal={sorted_eq} {diff_line}; full output: {result}"
     );
     Ok(())
 }
