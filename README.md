@@ -1646,7 +1646,7 @@ Live counts as of 2026-05-16 (see [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for t
 | `fnp-dtype` | 257 | Dtype taxonomy, all 324 promotion pairs explicit, cast policy primitives, NumPy byte-width parsing |
 | `fnp-ndarray` | 221 | Shape legality, stride calculus, broadcast contracts, overlap detection, multi-axis negative strides, F-order, `required_view_nbytes` |
 | `fnp-iter` | 200 | Transfer-loop selector, NDIter traversal/broadcast/overlap contracts, stateful `Nditer` (`iterindex`/`multi_index`/reset/seek/external-loop), flatiter, ndindex |
-| `fnp-runtime` | 131 | Mode split, fail-closed decoding, override-audit gate, risk-aware decision engine, evidence ledger |
+| `fnp-runtime` | 131 | Mode split, fail-closed decoding, override-audit gate, risk-aware decision engine, evidence ledger. The 131-test count comes mainly from `tests/runtime_comprehensive.rs` (which closes the historical 0-tests-for-1527-LOC gap that was flagged in the tick-26 project analysis): covers `RuntimeMode` parsing/serialization, `CompatibilityClass` parsing/serialization, `DecisionAction` selection logic, `decide_compatibility()` Strict-vs-Hardened branching, `EvidenceLedger` recording, policy-override evaluation, probability clamping, and malformed-input handling. |
 | **Total** | **6,392** | Sum across all 10 crates |
 
 ### Oracle Test Strategy
