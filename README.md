@@ -1849,7 +1849,7 @@ FrankenNumPy is profile-driven: every optimization is paired with a baseline, a 
 - **Horner's method.** Polynomial evaluation uses Horner form for numerical stability and minimal multiplications. The Stirling-series helpers in `fnp-random` (`logfactorial` for `k > 125` and the binomial BTPE acceptance path) use the same evaluation style.
 - **Ziggurat sampling.** Normal and exponential random variates use Ziggurat (same as NumPy), which accepts ~97% of samples on the first try.
 
-The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencies for ufunc and reduction sentinel workloads and rejects regressions. The cross-engine benchmark (`run_cross_engine_benchmark`) compares directly against NumPy.
+The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencies for ufunc and reduction sentinel workloads and rejects regressions. The cross-engine benchmark (`run_cross_engine_benchmark`) compares directly against NumPy. A complementary per-crate Criterion layer also exists — 7 bench files (`fnp-dtype/benches/dtype_ops.rs`, `fnp-ndarray/benches/criterion_ndarray.rs`, `fnp-ufunc/benches/elementwise.rs`, `fnp-linalg/benches/criterion_linalg.rs`, `fnp-random/benches/random_ops.rs`, `fnp-io/benches/criterion_io.rs`, `fnp-conformance/benches/criterion_core_ops.rs`) runnable via `cargo bench -p <crate>` for tracking within-FrankenNumPy regressions without going through NumPy.
 
 **Current cross-engine picture** (2026-04-10 baseline at `artifacts/baselines/cross_engine_benchmark_v1.json`, 37 workloads — verified 2026-05-17 to be the most recent baseline on disk; later parity / metadata / fuzz work has not regenerated it, so ratios below reflect pre-May code paths):
 
