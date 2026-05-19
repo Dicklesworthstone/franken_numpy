@@ -16,7 +16,25 @@ so that readers can quickly find what changed in the subsystem they care about.
 
 ---
 
-## [Unreleased] — development head (2026-02-13 through 2026-05-18)
+## [Unreleased] — development head (2026-02-13 through 2026-05-19)
+
+### Documentation precision waves (May 17-19, 2026)
+
+Following the surface-parity close-out (2026-05-13) and the headline 2026-05-16
+documentation refresh, three further days of small-bead docs-precision sweeps
+shipped: 2026-05-17 (~93 beads) discovered `tests/codebase_hygiene.rs` (8-test
+structural enforcement for no-stubs), cataloged the per-crate `metamorphic_*.rs`
+(8 files) and `golden_*.rs` (9 files) suites, added 7 per-fuzz `rust-toolchain.toml`
+files mirroring the workspace pin, and surfaced `run_divergence_ledger` +
+`run_fnp_python_api_coverage` + the diagnostic-oracle bin family in AGENTS.md;
+2026-05-18 surfaced the `fnp-python/tests/common/mod.rs` 28KB shared harness
+(RequirementLevel + comparison modes + XFAIL), documented `fuzz_regression*.rs`
+as the third leg of the fuzz workflow, and added `e2e_workflow.rs` as the
+multi-function-pipeline test layer; 2026-05-19 refreshed live counts (closed
+beads 1,337 → 1,417). No code behavior changed in these waves — they're
+documentation precision, structural enforcement surfacing, and minor script
+portability fixes (`scripts/e2e/run_raptorq_gate.sh` gained an `rch`-fallback
+wrapper for parity with the 4 sibling gate scripts).
 
 **Headline milestone (2026-05-13):** `fnp-python` now covers **100% of
 `numpy.__all__`** (499/499 names), structurally locked by the
