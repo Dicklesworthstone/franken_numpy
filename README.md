@@ -281,6 +281,8 @@ There is **no `pip install frankennumpy` wheel/PyPI flow yet**; packaging is the
 | `fnp-runtime` | `asupersync` | Optional structured-async integration for conformance/artifact pipelines (gates 5 `#[cfg(feature = "asupersync")]` blocks in `fnp-runtime/src/lib.rs`) | `cargo build -p fnp-runtime --features asupersync` |
 | `fnp-runtime` | `frankentui` | Optional terminal-native dashboards for parity-drift and perf deltas (gates `#[cfg(feature = "frankentui")]` blocks) | `cargo build -p fnp-runtime --features frankentui` |
 
+**CI coverage caveat.** The G1–G8 gates run with default features only (no `--features` flags appear in `.github/workflows/ci.yml`). Building or testing with `asupersync` or `frankentui` enabled is not currently part of the CI matrix; if you change code under either feature flag, run `cargo check -p fnp-runtime --features asupersync,frankentui` locally before committing.
+
 ---
 
 ## API Surface
