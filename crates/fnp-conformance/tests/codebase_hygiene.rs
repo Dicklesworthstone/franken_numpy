@@ -79,6 +79,11 @@ fn no_not_implemented_panics() {
 
 #[test]
 fn test_count_sanity_check() {
+    // Regression-guard for total #[test] count across the workspace.
+    // README + FEATURE_PARITY cite ~6,392 tests; the >6,000 floor leaves
+    // a ~390-test buffer for legitimate refactor consolidation while
+    // still catching catastrophic test-deletion. When the cited count
+    // grows substantially (e.g. past 7,000), raise this floor in lockstep.
     let test_count = grep_pattern(r"#\[test\]");
     assert!(
         test_count > 6000,
