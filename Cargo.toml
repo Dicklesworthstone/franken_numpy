@@ -33,10 +33,15 @@ keywords = ["numpy", "scientific", "numerical", "array", "ndarray"]
 categories = ["science", "mathematics", "data-structures"]
 
 [workspace.dependencies]
+# Shared JSON encoding for conformance fixtures, reports, and evidence ledgers.
 serde_json = "1.0.149"
+# Derive-backed serialization for cross-crate contract and artifact data models.
 serde = { version = "1.0.228", features = ["derive"] }
+# Workspace benchmark harness for performance baselines and regression gates.
 criterion = { version = "0.6", features = ["html_reports"] }
+# CPython bridge used by the NumPy oracle wrappers and Python-facing parity tests.
 pyo3 = { version = "0.28.3", features = ["auto-initialize"] }
+# Optional structured async runtime for long-running conformance/artifact jobs.
 asupersync = { version = "0.3.1", default-features = false }
 
 # Profiling profile: optimized + debug symbols + frame pointers for flamegraphs
