@@ -1813,6 +1813,12 @@ FNP_ORACLE_PYTHON="$(pwd)/.venv-numpy314/bin/python3" \
 |---|---|
 | `FNP_ORACLE_PYTHON` | Path to a Python interpreter with NumPy. Explicit non-default paths win over repo-local bootstrap. |
 | `FNP_REQUIRE_REAL_NUMPY_ORACLE=1` | Require a real NumPy oracle. If `FNP_ORACLE_PYTHON` is unset (or left at `python3`), `capture_numpy_oracle` bootstraps and reuses `.venv-numpy314` automatically, preferring `uv`, then standard `venv` + `pip`, finally a user-site `pip install numpy` fallback when the worker lacks venv tooling. |
+| `FNP_WORKFLOW_RETRIES` / `_FLAKE_BUDGET` / `_COVERAGE_FLOOR` | G6 workflow-scenario gate tuning. CI pins to 0/0/1.0; local scripts default to 1/0/1.0. |
+| `FNP_PERF_CANDIDATE_BASELINE` / `_MAX_P99_REGRESSION_RATIO` / `_COVERAGE_FLOOR` | G7 performance-budget gate tuning. CI pins to `/tmp/perf_candidate.json` / `0.07` / `1.0`. |
+| `FNP_SECURITY_RETRIES` / `_FLAKE_BUDGET` / `_COVERAGE_FLOOR` | G4 security gate tuning. CI uses script defaults (1/0/1.0). |
+| `FNP_TEST_CONTRACT_RETRIES` / `_FLAKE_BUDGET` / `_COVERAGE_FLOOR` | G5 test-contract gate tuning. CI uses script defaults (1/0/1.0). |
+| `FNP_RAPTORQ_RETRIES` / `_FLAKE_BUDGET` / `_COVERAGE_FLOOR` / `_PARALLELISM` | G8 raptorq gate tuning. CI uses script defaults (1/0/1.0/1). |
+| `RUST_TOOLCHAIN` | CI workflow env var pinning the nightly channel (must match `rust-toolchain.toml`). Mirror when bumping nightly. |
 
 Additional conformance / artifact commands:
 
