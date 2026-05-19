@@ -11,6 +11,10 @@ categories.workspace = true
 description = "NumPy-compatible iteration primitives: nditer, flatiter, ndindex, and stride-aware planners."
 
 [dependencies]
+# serde / serde_json: serialization for `NditerPlan` / `NditerStep` snapshots
+# (used by the `nditer_python*` parity bridge to round-trip plan state into
+# Python for cross-engine comparison) plus diagnostic JSON output from
+# `validate_flatiter_read` / `validate_nditer_flags`.
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 
