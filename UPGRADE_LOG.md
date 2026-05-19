@@ -16,7 +16,7 @@
 
 ### Notes
 
-- After this session, `[workspace.dependencies]` has 5 entries (serde, serde_json, criterion, pyo3, asupersync). Consumer counts: serde=3, serde_json=3, criterion=7, pyo3=1, asupersync=2. No dead pins.
+- After this session, `[workspace.dependencies]` has 5 entries (serde, serde_json, criterion, pyo3, asupersync). Consumer counts: serde=3, serde_json=3, criterion=7, pyo3=1, asupersync=2. No dead pins. **Re-verified 2026-05-21**: all 5 entries still present, consumer counts unchanged, every pin still consumed by ≥1 crate via `.workspace=true`.
 
 ---
 
