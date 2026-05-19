@@ -19,7 +19,7 @@ fnp-ndarray = { path = "../fnp-ndarray", version = "0.1.0" }
 fnp-random = { path = "../fnp-random", version = "0.1.0" }
 fnp-runtime = { path = "../fnp-runtime", version = "0.1.0" }
 fnp-ufunc = { path = "../fnp-ufunc", version = "0.1.0" }
-asupersync = { version = "0.3.1" }
+asupersync.workspace = true
 base64 = "0.22.1"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
