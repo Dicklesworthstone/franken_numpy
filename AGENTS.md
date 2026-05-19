@@ -129,7 +129,10 @@ We do not care about backwards compatibility—we're in early development with n
 # Check for compiler errors and warnings (workspace-wide)
 cargo check --workspace --all-targets
 
-# Check for clippy lints (pedantic + nursery are enabled)
+# Check for clippy lints — workspace uses rustc/clippy default lint set
+# (no clippy.toml or per-crate clippy::pedantic/nursery opt-ins; verified
+# via grep). The G1 CI gate runs the same command + treats every clippy
+# warning as a hard error via `-D warnings`.
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Verify formatting
