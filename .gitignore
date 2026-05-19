@@ -136,6 +136,7 @@ nohup.out
 # Local agent runtime state — recurring untracked noise across rounds
 .claude/
 .rch-target/
+/.rch-target-*/
 # cargo-fuzz crash/minimization artifacts under any nested crate's fuzz dir
 **/fuzz/artifacts/
 # cargo-fuzz auto-generated hash-named corpus entries under any nested
