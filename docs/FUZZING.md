@@ -78,6 +78,8 @@ all 7 lockfiles together.
 
 A fuzz crash that exposes a real bug becomes a bead. The raw crash inputs that `cargo-fuzz` writes land under `crates/<crate>/fuzz/artifacts/<target>/crash-*` — copy the relevant crash bytes into a workspace-root `artifacts/<bead-id>/` directory (or attach them to the bead's `--description`) so the reproducer is permanent rather than living in a gitignored cargo-fuzz directory. A fuzz finding that exposes intentional or parity-debt divergence from NumPy belongs in [`DIVERGENCES.md`](DIVERGENCES.md) — that ledger is the machine-readable handoff point for diagnostic gates and accepts both `intentional` and `parity_debt` rows.
 
+Once a fuzz-found bug is fixed, pin the case as an integration test under `crates/<c>/tests/fuzz_regression*.rs` so it can never silently regress. Current regression files: `crates/fnp-ufunc/tests/fuzz_regression.rs` (DateTimeUnit::parse, gufunc/fixed signature parser edge cases) and `crates/fnp-io/tests/fuzz_regression_header.rs` (NPY header parser crash inputs). This is the third leg of the fuzz workflow: corpus → crash → regression test.
+
 ## Bead trail of the 2026-05 fuzz expansion
 
 Search `.beads/issues.jsonl` for the seeding wave: `62oir` (fnp-linalg/random fuzz infra), `aaq0g` (32 seeds for new fuzz crates), `s46p2` (45 seeds for fnp-dtype/io targets), `8fftx` (19 Arbitrary-format seeds), `cv45i` (31 seeds for fnp-ufunc string parsers), `i8ipt` (15 seeds for fnp-ndarray broadcast/reshape), `y3dhc` (46 NPY/NPZ binary seeds), `diqz3` (11 seeds for fnp-iter/fuzz_ndindex), `m5y8s` (15 seeds for fnp-ufunc/fuzz_parse_fixed_signature). All 9 verified present + closed in the JSONL as of 2026-05-17; each bead's close-reason lists the exact seed counts and target families that bead touched.
