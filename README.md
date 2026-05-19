@@ -1748,6 +1748,8 @@ The 133 `conformance_*.rs` shards under `crates/fnp-python/tests/` are powered b
 
 A bug that lives in NumPy too will pass (1) but fail (2). A bug that produces a different-but-plausible value will fail (1). A bug that crashes will fail (3). A bug that silently shifts an RNG stream will fail (4). The orthogonality is the point.
 
+On top of these four layers, `crates/fnp-python/tests/e2e_workflow.rs` exercises **multi-function pipelines** — chains of operations that should compose correctly together (`load → reshape → reduce → save`, RNG-backed Monte-Carlo loops, FFT round-trips with intermediate masking, etc.). The single-op layers can pass while a pipeline still produces wrong results from accumulated rounding, view aliasing, or dtype-promotion interactions; the e2e tests catch those compositional bugs.
+
 ---
 
 ## CI Gate Topology
