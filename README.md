@@ -2049,6 +2049,7 @@ What doesn't work today.
 - **f64 internal representation for `UFuncArray`.** Numeric values are stored as `Vec<f64>` internally for arithmetic. For i64/u64 values > 2^53, `IntegerSidecar` preserves exact integer values through storage round-trips; arithmetic on such values still uses f64 approximation. Native i64/u64 paths are a Phase 3 work-stream.
 - **`SeedMaterial::None` is deterministic.** A no-seed `default_rng()` uses a fixed default seed; NumPy uses OS entropy. Explicit-seed forms match NumPy bit-for-bit. See the Divergence Ledger.
 - **Large-scale ufunc-elementwise / ufunc-broadcast hotspots.** Without SIMD or BLAS, these workloads sit in the 10–30× range vs NumPy at large array sizes. Small/medium and contiguous workloads are at or near parity.
+- **`std`-only — no `no_std` support.** All 10 crates link to the Rust standard library; there are zero `#![no_std]` declarations and no `panic_handler` attributes in the workspace (verified via grep). The codebase uses `std::sync::{Arc, Mutex, RwLock, OnceLock}`, `std::time::SystemTime`, `std::fs`, `std::process::Command`, etc. throughout. Embedded / `no_std` targets are out of scope for this project.
 
 ---
 
