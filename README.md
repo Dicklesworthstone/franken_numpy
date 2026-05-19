@@ -1730,6 +1730,10 @@ Example: the `standard_normal(5)` witness for `PCG64DXSM(12345)` is the exact 5-
 
 These witness arrays live in `golden_*.rs` files, one per crate: `fnp-dtype/tests/golden_dtype.rs`, `fnp-ndarray/tests/golden_layout.rs`, `fnp-iter/tests/golden_iter.rs`, `fnp-ufunc/tests/golden_histogram.rs`, `fnp-linalg/tests/golden_linalg.rs`, `fnp-random/tests/golden_rng.rs`, `fnp-io/tests/golden_text_io.rs`, `fnp-python/tests/golden_native_functions.rs`, `fnp-runtime/tests/golden_runtime.rs` — nine files, one per non-conformance crate.
 
+### Shared harness for fnp-python conformance shards
+
+The 133 `conformance_*.rs` shards under `crates/fnp-python/tests/` are powered by a single ~28 KB shared helper at `crates/fnp-python/tests/common/mod.rs`. The harness declares each test case with a **RequirementLevel** (`Must` aborts the run on failure; `Should` and `May` print but continue) and a **comparison mode** (`Strict` for int/bool/dtype/shape exactness, `Close` for ULP-tolerant float arrays, `Surface` for tuple / scalar / structured-dtype parity, `Error` for raise-alignment tests). Known divergences flip to `XFAIL` via `CaseOutcome::ExpectedFail`. The output is a JSON-line verdict stream plus a per-RequirementLevel markdown summary — that's what makes the 133-shard surface compliance-matrix machine-readable.
+
 ### How the four layers compose
 
 ```
