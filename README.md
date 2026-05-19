@@ -2297,8 +2297,11 @@ Major milestones in the order they landed. For the full per-commit history, see 
 | 2026-05-14 | Mock/stub audit confirms zero TODO/FIXME/HACK/STUB/unimplemented across all 10 implementation crates. |
 | 2026-05-16 | Documentation precision wave: 92 beads closed on this single date across README, AGENTS.md, FEATURE_PARITY.md, audit docs, divergence ledger, fuzzing docs. |
 | 2026-05-16 | Divergence ledger active rows: **1** (the `SeedMaterial::None` deterministic seed). Workspace fully green: 6,392 tests, all 10 crates passing, zero unsafe blocks. |
+| 2026-05-17 | Continuation wave: 93 beads closed. Highlights: discovered + documented `tests/codebase_hygiene.rs` (8-test structural enforcement for no-stubs); cataloged the per-crate `metamorphic_*.rs` + `golden_*.rs` test suites; added 7 per-fuzz `rust-toolchain.toml` files to mirror workspace nightly pin; surfaced `run_divergence_ledger` + `run_fnp_python_api_coverage` + diagnostic-oracle bins in AGENTS.md. |
+| 2026-05-18 | Test-infrastructure surface wave: 5 beads. Surfaced `fnp-python/tests/common/mod.rs` 28KB shared harness (RequirementLevel + comparison modes); documented `fuzz_regression*.rs` as the third leg of the fuzz workflow; added `e2e_workflow.rs` as multi-function-pipeline test layer. |
+| 2026-05-19 | Ongoing daily docs-precision sweeps. Numbers below refreshed; see commit log for the per-day bead trail. |
 
-In quantitative terms: **~650 commits in May 2026 alone**, **~1,880 commits since 2026-04-01**, **1,337 closed beads** as of 2026-05-16, all under a single git author working with a multi-agent swarm. (These are live numbers; the repository keeps moving.)
+In quantitative terms: **~650 commits in May 2026 alone**, **~1,880 commits since 2026-04-01**, **1,417 closed beads** as of 2026-05-19, all under a single git author working with a multi-agent swarm. (These are live numbers; the repository keeps moving.)
 
 ---
 
