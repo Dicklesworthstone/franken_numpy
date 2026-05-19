@@ -275,11 +275,11 @@ There is **no `pip install frankennumpy` wheel/PyPI flow yet**; packaging is the
 
 ### Optional features
 
-| Crate | Feature | Effect |
-|---|---|---|
-| `fnp-python` | `python-extension` | Compile as PyO3 cdylib (default for the build above) |
-| `fnp-runtime` | `asupersync` | Optional structured-async integration for conformance/artifact pipelines |
-| `fnp-runtime` | `frankentui` | Optional terminal-native dashboards for parity-drift and perf deltas |
+| Crate | Feature | Effect | Enable with |
+|---|---|---|---|
+| `fnp-python` | `python-extension` | Compile as PyO3 cdylib (default for the build above) | `cargo build -p fnp-python --features python-extension` |
+| `fnp-runtime` | `asupersync` | Optional structured-async integration for conformance/artifact pipelines (gates 5 `#[cfg(feature = "asupersync")]` blocks in `fnp-runtime/src/lib.rs`) | `cargo build -p fnp-runtime --features asupersync` |
+| `fnp-runtime` | `frankentui` | Optional terminal-native dashboards for parity-drift and perf deltas (gates `#[cfg(feature = "frankentui")]` blocks) | `cargo build -p fnp-runtime --features frankentui` |
 
 ---
 
