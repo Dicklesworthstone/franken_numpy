@@ -25990,6 +25990,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         && let Ok(ver) = numpy.getattr("__version__")
     {
         m.setattr("__numpy_version__", &ver)?;
+        if let Ok(all_names) = numpy.getattr("__all__") {
+            m.setattr("__all__", all_names)?;
+        }
     }
 
     // numpy top-level constants (numpy.__all__ reality-check). Values

@@ -236,6 +236,30 @@ print(missing == [])
 }
 
 #[test]
+fn fnp_python_top_level_all_matches_numpy_verbatim() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+print(hasattr(fnp, '__all__'))
+print(fnp.__all__ == np.__all__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "fnp_python must expose top-level __all__; got: {result}"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "fnp_python.__all__ must match numpy.__all__ verbatim; got: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn core_and_f2py_identity_equal_to_numpy() -> Result<(), String> {
     let script = fnp_script(
         r#"
