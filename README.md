@@ -1349,7 +1349,7 @@ The mixed-tier-3 strategy is what enables the 100% surface guarantee: any name t
 
 ## Cookbook
 
-Recipes for common Rust-side tasks. These complement the [Quick Example](#quick-example) and [More Worked Examples](#more-worked-examples) sections, focusing on idiomatic patterns rather than feature demos.
+Recipes for common Rust-side tasks. These complement the [Quick Example](#quick-example) and [More Worked Examples](#more-worked-examples) sections, focusing on idiomatic patterns rather than feature demos. There is no top-level `examples/` directory today — the recipes below are paste-into-your-project snippets, not runnable Cargo examples. (If a workspace `examples/` tree becomes useful, mirror cargo's standard layout under each crate.)
 
 ### Recipe 1: load an `.npy`, do work, save the result
 
