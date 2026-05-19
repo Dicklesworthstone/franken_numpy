@@ -11,6 +11,9 @@ categories.workspace = true
 description = "NumPy dtype model: scalar types, casting rules, promotion table, and parser for FrankenNumPy."
 
 [dependencies]
+# half: f16 (binary16) and bf16 scalar support for the DType::F16 variant
+# and its storage/cast/promotion paths. Provides IEEE-754-compliant fp16
+# arithmetic that Rust's std library doesn't ship.
 half = "2.7.1"
 
 [dev-dependencies]
