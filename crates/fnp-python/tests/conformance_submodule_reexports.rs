@@ -33,9 +33,11 @@ fn fnp_script(body: String) -> String {
     let module_literal = format!("{module_path:?}");
     format!(
         "import importlib.util\n\
+         import sys\n\
          import numpy as np\n\
          spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
          fnp = importlib.util.module_from_spec(spec)\n\
+         sys.modules[spec.name] = fnp\n\
          spec.loader.exec_module(fnp)\n\
          {body}"
     )
