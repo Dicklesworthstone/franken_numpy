@@ -4,13 +4,31 @@
 //! error-handling functions (errstate, seterr, geterr, seterrcall, geterrcall),
 //! diagnostic functions (show_config, show_runtime, info).
 
-use std::process::Command;
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
-        .args(["-c", script])
-        .output()
+    let mut child = Command::new("python3")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| format!("python3 stdin pipe was unavailable\nScript: {script}"))?;
+        stdin
+            .write_all(script.as_bytes())
+            .map_err(|error| format!("failed to write python script: {error}\nScript: {script}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for python3: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
@@ -31,12 +49,22 @@ fn fnp_script(body: String) -> String {
     let module_literal = format!("{module_path:?}");
     format!(
         "import importlib.util\n\
+         import sys\n\
          import numpy as np\n\
          spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
          fnp = importlib.util.module_from_spec(spec)\n\
+         sys.modules[spec.name] = fnp\n\
          spec.loader.exec_module(fnp)\n\
          {body}"
     )
+}
+
+fn expect_equal(actual: &str, expected: &str, context: &str) -> Result<(), String> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("{context}; expected {expected:?}, got {actual:?}"))
+    }
 }
 
 #[test]
@@ -54,11 +82,11 @@ print(checks); print(all(checks.values()))
     );
     let result = numpy_oracle(&script)?;
     let last = result.lines().last().unwrap_or("").trim();
-    assert_eq!(
-        last, "True",
-        "index-trick helpers must be identity-equal to numpy; got: {result}"
-    );
-    Ok(())
+    expect_equal(
+        last,
+        "True",
+        &format!("index-trick helpers must be identity-equal to numpy; output: {result}"),
+    )
 }
 
 #[test]
@@ -69,12 +97,11 @@ print(fnp.False_ is np.False_ and fnp.True_ is np.True_)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.False_ / fnp.True_ must be the numpy singletons"
-    );
-    Ok(())
+        "fnp.False_ / fnp.True_ must be the numpy singletons",
+    )
 }
 
 #[test]
@@ -94,12 +121,11 @@ print(threw)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.errstate must propagate to numpy's global state"
-    );
-    Ok(())
+        "fnp.errstate must propagate to numpy's global state",
+    )
 }
 
 #[test]
@@ -120,12 +146,11 @@ print(same)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.seterr / fnp.geterr must share state with numpy"
-    );
-    Ok(())
+        "fnp.seterr / fnp.geterr must share state with numpy",
+    )
 }
 
 #[test]
@@ -144,12 +169,11 @@ print(same)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.seterrcall / fnp.geterrcall must share state with numpy"
-    );
-    Ok(())
+        "fnp.seterrcall / fnp.geterrcall must share state with numpy",
+    )
 }
 
 #[test]
@@ -162,12 +186,11 @@ print(fnp.show_config is np.show_config and fnp.show_runtime is np.show_runtime)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.show_config / fnp.show_runtime must be the numpy functions"
-    );
-    Ok(())
+        "fnp.show_config / fnp.show_runtime must be the numpy functions",
+    )
 }
 
 #[test]
@@ -184,10 +207,9 @@ print(len(out.getvalue()) > 0)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.info must run and produce output via numpy's implementation"
-    );
-    Ok(())
+        "fnp.info must run and produce output via numpy's implementation",
+    )
 }
