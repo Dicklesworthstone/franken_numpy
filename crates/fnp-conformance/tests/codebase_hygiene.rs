@@ -38,9 +38,14 @@ fn run_ripgrep(pattern: &str, extra_globs: &[&str]) -> usize {
         .output()
         .expect("rg should be available");
 
-    if !output.status.success() {
+    if output.status.code() == Some(1) {
         return 0;
     }
+    assert!(
+        output.status.success(),
+        "rg failed while scanning hygiene pattern {pattern:?}: {}",
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
 
     String::from_utf8_lossy(&output.stdout)
         .lines()
@@ -127,7 +132,10 @@ fn no_dbg_macros_in_library_code() {
 
 #[test]
 fn no_allow_unused_in_library_code() {
-    let count = run_ripgrep(r"#\[allow\(dead_code\)\]|#\[allow\(unused", &["**/src/lib.rs"]);
+    let count = run_ripgrep(
+        r"#\[allow\(dead_code\)\]|#\[allow\(unused",
+        &["**/src/lib.rs"],
+    );
     // Current inventory is 10 across fnp-conformance and fnp-python; keep this
     // as a regression guard until those compatibility helpers are retired.
     assert!(
