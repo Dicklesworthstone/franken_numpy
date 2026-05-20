@@ -26177,7 +26177,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         } else {
             fft_module.setattr("__all__", PyList::new(py, fft_names)?)?;
         }
-        let parent_name = m.getattr("__name__")?.extract::<String>()?;
         let qualified_name = format!("{parent_name}.fft");
         fft_module.setattr("__name__", &qualified_name)?;
         fft_module.setattr("__package__", &parent_name)?;
@@ -26738,7 +26737,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // fallback + explicit fallback list when numpy isn't importable
         // at module init).
         let exceptions = PyModule::new(py, "exceptions")?;
-        let parent_name = m.getattr("__name__")?.extract::<String>()?;
         let exceptions_qualified_name = format!("{parent_name}.exceptions");
         exceptions.setattr("__name__", &exceptions_qualified_name)?;
         exceptions.setattr("__package__", &parent_name)?;
@@ -26808,7 +26806,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
         // before numpy is on sys.path. PEP-562 __getattr__ fills in
         // anything we missed at lazy lookup time.
         let dtypes_module = PyModule::new(py, "dtypes")?;
-        let parent_name = m.getattr("__name__")?.extract::<String>()?;
         let dtypes_qualified_name = format!("{parent_name}.dtypes");
         dtypes_module.setattr("__name__", &dtypes_qualified_name)?;
         dtypes_module.setattr("__package__", &parent_name)?;
@@ -26885,7 +26882,6 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     {
         // numpy.lib.recfunctions — nested two levels deep.
         let lib_module = PyModule::new(py, "lib")?;
-        let parent_name = m.getattr("__name__")?.extract::<String>()?;
         let lib_qualified_name = format!("{parent_name}.lib");
         lib_module.setattr("__name__", &lib_qualified_name)?;
         lib_module.setattr("__package__", &parent_name)?;
