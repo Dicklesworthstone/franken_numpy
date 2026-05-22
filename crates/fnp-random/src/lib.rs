@@ -3582,12 +3582,6 @@ impl Generator {
         if shape_param == 0.0 {
             return Ok(vec![0.0; size]);
         }
-        if shape_param.is_nan() {
-            return Ok(vec![f64::NAN; size]);
-        }
-        if shape_param.is_infinite() {
-            return Ok(vec![f64::INFINITY; size]);
-        }
         Ok((0..size).map(|_| self.sample_gamma(shape_param)).collect())
     }
 
@@ -11510,6 +11504,29 @@ for child in rng.spawn(n_children):
             2.6281160439916977,
         ];
         assert_f64_seq("standard_gamma", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_standard_gamma_nonfinite_shape_advances_stream() {
+        let expected_after = [
+            0.888_337_197_310_043_6,
+            0.303_319_245_352_569_4,
+            0.440_032_955_585_861_1,
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+        ];
+
+        let mut nan_shape = oracle_gen();
+        let nan_values = nan_shape.standard_gamma(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+        let nan_after = nan_shape.random(5);
+        assert_f64_seq("standard_gamma_nan_after", &nan_after, &expected_after);
+
+        let mut infinite_shape = oracle_gen();
+        let infinite_values = infinite_shape.standard_gamma(f64::INFINITY, 3).unwrap();
+        assert!(infinite_values.iter().all(|value| *value == f64::INFINITY));
+        let infinite_after = infinite_shape.random(5);
+        assert_f64_seq("standard_gamma_inf_after", &infinite_after, &expected_after);
     }
 
     #[test]
