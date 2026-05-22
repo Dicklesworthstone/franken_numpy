@@ -25366,7 +25366,7 @@ fn isclose(
         Ok(r) => r,
         Err(_) => return fallback(),
     };
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 // NaN-aware cumulative (2).
