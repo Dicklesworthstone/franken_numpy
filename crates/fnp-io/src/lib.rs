@@ -2177,6 +2177,22 @@ fn parse_savetxt_precision(fmt: &str, spec: char) -> Option<usize> {
     digits.parse::<usize>().ok()
 }
 
+fn write_savetxt_int(output: &mut String, v: f64) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    if v.is_nan() {
+        return Err(IOError::WriteContractViolation(
+            "cannot convert float NaN to integer",
+        ));
+    }
+    if v.is_infinite() {
+        return Err(IOError::WriteContractViolation(
+            "cannot convert float infinity to integer",
+        ));
+    }
+    write!(output, "{}", v as i64).map_err(|_| IOError::WriteContractViolation("formatting failed"))
+}
+
 fn write_savetxt_exp(
     output: &mut String,
     v: f64,
@@ -2265,8 +2281,7 @@ pub fn savetxt(
                         .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
                 }
                 SaveTxtFormat::Int => {
-                    write!(output, "{}", v as i64)
-                        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+                    write_savetxt_int(&mut output, v)?;
                 }
                 SaveTxtFormat::Default => {
                     write!(output, "{v}")
@@ -5184,6 +5199,40 @@ mm.flush()
         };
         let output = savetxt(&values, 1, 3, &cfg).unwrap();
         assert_eq!(output, "NAN INF -INF\n");
+    }
+
+    #[test]
+    fn savetxt_integer_format_rejects_nan_like_numpy() {
+        let values = vec![f64::NAN];
+        let cfg = SaveTxtConfig {
+            fmt: "%d",
+            ..SaveTxtConfig::default()
+        };
+        let err = savetxt(&values, 1, 1, &cfg).unwrap_err();
+        assert_eq!(err.to_string(), "cannot convert float NaN to integer");
+    }
+
+    #[test]
+    fn savetxt_integer_format_rejects_infinities_like_numpy() {
+        let cfg = SaveTxtConfig {
+            fmt: "%i",
+            ..SaveTxtConfig::default()
+        };
+        for value in [f64::INFINITY, f64::NEG_INFINITY] {
+            let err = savetxt(&[value], 1, 1, &cfg).unwrap_err();
+            assert_eq!(err.to_string(), "cannot convert float infinity to integer");
+        }
+    }
+
+    #[test]
+    fn savetxt_integer_format_truncates_finite_fractional_values_like_numpy() {
+        let values = vec![1.9, -1.9];
+        let cfg = SaveTxtConfig {
+            fmt: "%d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 2, &cfg).unwrap();
+        assert_eq!(output, "1 -1\n");
     }
 
     #[test]
