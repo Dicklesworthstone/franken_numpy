@@ -2293,6 +2293,11 @@ pub fn genfromtxt_full(
             "'max_rows' must be at least 1.",
         ));
     }
+    if config.skip_footer > 0 && config.max_rows != usize::MAX {
+        return Err(IOError::ReadPayloadIncomplete(
+            "The keywords 'skip_footer' and 'max_rows' can not be specified at the same time.",
+        ));
+    }
 
     // Collect parsed rows after skip_header and comment stripping, then trim footer rows
     // from the remaining data lines to match NumPy's behavior.
@@ -5263,6 +5268,25 @@ mm.flush()
         let err = genfromtxt_full(text, &config).unwrap_err();
         assert_eq!(err.reason_code(), "io_read_payload_incomplete");
         assert_eq!(err.to_string(), "'max_rows' must be at least 1.");
+    }
+
+    #[test]
+    fn genfromtxt_full_rejects_skip_footer_with_max_rows_like_numpy() {
+        let text = "1,2\n3,4\n5,6\n";
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            filling_values: 0.0,
+            skip_footer: 1,
+            max_rows: 2,
+            ..GenFromTxtConfig::default()
+        };
+        let err = genfromtxt_full(text, &config).unwrap_err();
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+        assert_eq!(
+            err.to_string(),
+            "The keywords 'skip_footer' and 'max_rows' can not be specified at the same time."
+        );
     }
 
     #[test]
