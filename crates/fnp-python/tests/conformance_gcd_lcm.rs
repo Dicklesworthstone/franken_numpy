@@ -4,13 +4,30 @@
 //! - gcd(x1, x2): greatest common divisor, element-wise
 //! - lcm(x1, x2): least common multiple, element-wise
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
-        .args(["-c", script])
-        .output()
+    let mut child = Command::new("python3")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| format!("python3 stdin pipe should be available\nScript: {script}"))?
+        .write_all(script.as_bytes())
+        .map_err(|error| {
+            format!("failed to write Python oracle script: {error}\nScript: {script}")
+        })?;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for Python oracle: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
@@ -54,15 +71,13 @@ fn parse_float_list(s: &str) -> Result<Vec<f64>, String> {
         .filter(|t| !t.is_empty())
     {
         let t = token.trim().trim_end_matches('.');
-        let value = if t == "nan" || t == "NaN" {
-            f64::NAN
-        } else if t == "inf" || t == "Inf" {
-            f64::INFINITY
-        } else if t == "-inf" || t == "-Inf" {
-            f64::NEG_INFINITY
-        } else {
-            t.parse::<f64>()
-                .map_err(|error| format!("invalid float token {token:?} in {s:?}: {error}"))?
+        let value = match t {
+            "nan" | "NaN" => f64::NAN,
+            "inf" | "Inf" => f64::INFINITY,
+            "-inf" | "-Inf" => f64::NEG_INFINITY,
+            _ => t
+                .parse::<f64>()
+                .map_err(|error| format!("invalid float token {token:?} in {s:?}: {error}"))?,
         };
         values.push(value);
     }
@@ -555,21 +570,69 @@ print(fnp.gcd(a, a).tolist())
 #[test]
 fn gcd_lcm_scalar_return_type_matches_numpy() -> Result<(), String> {
     for func in &["gcd", "lcm"] {
-        let script = format!(
-            "import numpy as np; x = np.int64(12); y = np.int64(8); r = np.{func}(x, y); print(type(r).__name__, r)"
-        );
-        let numpy_result = numpy_oracle(&script)?;
+        for (label, x_expr, y_expr) in &[
+            ("python_int", "12", "8"),
+            ("np_int32", "np.int32(12)", "np.int32(8)"),
+            ("np_int64", "np.int64(12)", "np.int64(8)"),
+            ("np_uint64", "np.uint64(12)", "np.uint64(8)"),
+        ] {
+            let script = format!(
+                "import numpy as np; x = {x_expr}; y = {y_expr}; r = np.{func}(x, y); print(type(r).__name__, r.dtype.str, repr(r))"
+            );
+            let numpy_result = numpy_oracle(&script)?;
 
-        let rust_script = fnp_script(format!(
-            "x = np.int64(12); y = np.int64(8); r = fnp.{func}(x, y); print(type(r).__name__, r)"
-        ));
-        let rust_result = numpy_oracle(&rust_script)?;
+            let rust_script = fnp_script(format!(
+                "x = {x_expr}; y = {y_expr}; r = fnp.{func}(x, y); print(type(r).__name__, r.dtype.str, repr(r))"
+            ));
+            let rust_result = numpy_oracle(&rust_script)?;
 
-        assert_eq!(
-            numpy_result.trim(),
-            rust_result.trim(),
-            "{func} scalar return type mismatch\nnumpy: {numpy_result}\nfnp: {rust_result}"
-        );
+            assert_eq!(
+                numpy_result.trim(),
+                rust_result.trim(),
+                "{func} scalar return type mismatch for {label}\nnumpy: {numpy_result}\nfnp: {rust_result}"
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[test]
+fn gcd_lcm_integer_array_dtype_matches_numpy() -> Result<(), String> {
+    for func in &["gcd", "lcm"] {
+        for (label, x_expr, y_expr) in &[
+            (
+                "int32",
+                "np.array([12, 24, 36], dtype=np.int32)",
+                "np.array([8, 18, 30], dtype=np.int32)",
+            ),
+            (
+                "uint64",
+                "np.array([12, 24, 36], dtype=np.uint64)",
+                "np.array([8, 18, 30], dtype=np.uint64)",
+            ),
+            (
+                "mixed_signed",
+                "np.array([12, 24, 36], dtype=np.int16)",
+                "np.array([8, 18, 30], dtype=np.int64)",
+            ),
+        ] {
+            let script = format!(
+                "import numpy as np; r = np.{func}({x_expr}, {y_expr}); print(r.dtype.str, r.tolist())"
+            );
+            let numpy_result = numpy_oracle(&script)?;
+
+            let rust_script = fnp_script(format!(
+                "r = fnp.{func}({x_expr}, {y_expr}); print(r.dtype.str, r.tolist())"
+            ));
+            let rust_result = numpy_oracle(&rust_script)?;
+
+            assert_eq!(
+                numpy_result.trim(),
+                rust_result.trim(),
+                "{func} array dtype mismatch for {label}\nnumpy: {numpy_result}\nfnp: {rust_result}"
+            );
+        }
     }
 
     Ok(())

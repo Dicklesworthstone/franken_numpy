@@ -14945,7 +14945,7 @@ fn floor_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyA
         return fallback();
     }
     // Fall back to NumPy if divisor contains zero so RuntimeWarning is emitted
-    if b.values().iter().any(|&v| v == 0.0) {
+    if b.values().contains(&0.0) {
         return fallback();
     }
     let result = match a.elementwise_binary(&b, BinaryOp::FloorDivide) {
@@ -16548,7 +16548,7 @@ fn true_divide(
             return core_numpy_passthrough(py, "true_divide", args, kwargs);
         }
         // Fall back to NumPy if divisor contains zero so RuntimeWarning is emitted
-        if x2.values().iter().any(|&v| v == 0.0) {
+        if x2.values().contains(&0.0) {
             return core_numpy_passthrough(py, "true_divide", args, kwargs);
         }
         let result = match x1.elementwise_binary(&x2, BinaryOp::Div) {
