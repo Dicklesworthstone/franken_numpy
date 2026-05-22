@@ -249,3 +249,23 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+#[test]
+fn kron_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(2.0)
+y = np.float64(3.0)
+fnp_result = fnp.kron(x, y)
+np_result = np.kron(x, y)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "kron scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
