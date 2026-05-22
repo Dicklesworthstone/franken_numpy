@@ -4470,8 +4470,11 @@ impl Generator {
 
     /// Weibull distribution (matching NumPy: uses standard_exponential).
     pub fn weibull(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if a <= 0.0 {
+        if a < 0.0 || (a == 0.0 && a.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
+        }
+        if a == 0.0 {
+            return Ok(vec![0.0; size]);
         }
         Ok((0..size)
             .map(|_| self.sample_ziggurat_exponential().powf(1.0 / a))
@@ -8917,6 +8920,25 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let samples = rng.weibull(1.5, 1000).unwrap();
         assert!(samples.iter().all(|&v| v >= 0.0));
+    }
+
+    #[test]
+    fn weibull_shape_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.weibull(0.0, 4).unwrap(), vec![0.0; 4]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.weibull(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.weibull(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite = test_generator();
+        assert_eq!(infinite.weibull(f64::INFINITY, 3).unwrap(), vec![1.0; 3]);
     }
 
     // ── multivariate distribution tests ────────
