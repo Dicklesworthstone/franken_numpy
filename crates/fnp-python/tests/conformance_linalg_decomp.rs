@@ -2,13 +2,28 @@
 //!
 //! Tests qr, cholesky, eigh, eigvalsh, svdvals, inv, solve, lstsq, cond, multi_dot.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
-        .args(["-c", script])
-        .output()
+    let mut child = Command::new("python3")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| format!("python3 stdin should be available\nScript: {script}"))?
+        .write_all(script.as_bytes())
+        .map_err(|error| {
+            format!("failed to write NumPy oracle script: {error}\nScript: {script}")
+        })?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for NumPy oracle: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
@@ -74,7 +89,11 @@ print(np.allclose(fnp_recon, np_recon))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "qr square reconstruction should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "qr square reconstruction should match numpy"
+    );
     Ok(())
 }
 
@@ -113,7 +132,11 @@ print(np.allclose(fnp_recon, a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cholesky reconstruction should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cholesky reconstruction should match numpy"
+    );
     Ok(())
 }
 
@@ -214,7 +237,11 @@ print(np.allclose(product, np.eye(2)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "inv should produce identity when multiplied");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "inv should produce identity when multiplied"
+    );
     Ok(())
 }
 
@@ -352,7 +379,11 @@ print(np.allclose(fnp_result, sequential))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "multi_dot should equal sequential multiplication");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "multi_dot should equal sequential multiplication"
+    );
     Ok(())
 }
 
@@ -396,7 +427,11 @@ print(np.isinf(fnp_c) == np.isinf(np_c))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cond of singular matrix should be inf");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cond of singular matrix should be inf"
+    );
     Ok(())
 }
 
@@ -416,7 +451,11 @@ print(fnp_near_zero == np_near_zero)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "svdvals should identify rank deficiency");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "svdvals should identify rank deficiency"
+    );
     Ok(())
 }
 
@@ -434,7 +473,11 @@ print(np.allclose(fnp_x, np_x))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "lstsq overdetermined should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "lstsq overdetermined should match numpy"
+    );
     Ok(())
 }
 
@@ -453,6 +496,10 @@ print(np.allclose(a @ fnp_x, b))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "lstsq underdetermined should satisfy equation");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "lstsq underdetermined should satisfy equation"
+    );
     Ok(())
 }
