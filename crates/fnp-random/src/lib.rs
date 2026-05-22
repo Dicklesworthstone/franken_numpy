@@ -4828,7 +4828,7 @@ impl Generator {
         if df <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        if df.is_nan() || nonc.is_nan() {
+        if nonc.is_nan() {
             return Ok(vec![f64::NAN; size]);
         }
         if nonc == 0.0 {
@@ -12318,6 +12318,63 @@ for child in rng.spawn(n_children):
             3.6265665029968828,
         ];
         assert_f64_seq("noncentral_chisquare", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_noncentral_chisquare_nan_df_stream_parity() {
+        let expected_after_central = [
+            0.888_337_197_310_043_6,
+            0.303_319_245_352_569_4,
+            0.440_032_955_585_861_1,
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+        ];
+        let expected_after_mixture = [
+            0.378_851_142_176_928_95,
+            0.403_840_457_250_061_8,
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+            0.104_783_541_327_853_84,
+        ];
+        let expected_after_no_consume = [
+            0.932_081_690_319_876_3,
+            0.337_505_601_117_676_8,
+            0.216_981_970_195_010_64,
+            0.352_706_249_766_546_2,
+            0.550_105_102_114_212_7,
+        ];
+
+        let mut central = oracle_gen();
+        let central_values = central.noncentral_chisquare(f64::NAN, 0.0, 3).unwrap();
+        assert!(central_values.iter().all(|value| value.is_nan()));
+        let central_after = central.random(5);
+        assert_f64_seq(
+            "noncentral_chisquare_nan_df_zero_nonc_after",
+            &central_after,
+            &expected_after_central,
+        );
+
+        let mut mixture = oracle_gen();
+        let mixture_values = mixture.noncentral_chisquare(f64::NAN, 1.0, 3).unwrap();
+        assert!(mixture_values.iter().all(|value| value.is_nan()));
+        let mixture_after = mixture.random(5);
+        assert_f64_seq(
+            "noncentral_chisquare_nan_df_finite_nonc_after",
+            &mixture_after,
+            &expected_after_mixture,
+        );
+
+        let mut nan_nonc = oracle_gen();
+        let nan_nonc_values = nan_nonc
+            .noncentral_chisquare(f64::NAN, f64::NAN, 3)
+            .unwrap();
+        assert!(nan_nonc_values.iter().all(|value| value.is_nan()));
+        let nan_nonc_after = nan_nonc.random(5);
+        assert_f64_seq(
+            "noncentral_chisquare_nan_nonc_after",
+            &nan_nonc_after,
+            &expected_after_no_consume,
+        );
     }
 
     #[test]
