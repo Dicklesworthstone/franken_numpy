@@ -14183,13 +14183,36 @@ fn reciprocal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn conjugate(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.conjugate (element-wise complex conjugate).
-    // Real dtype returns the input unchanged; complex dtype negates
-    // the imaginary component. Aliased as np.conj in numpy.
+#[pyo3(signature = (x, out=None, **kwargs))]
+fn conjugate(
+    py: Python<'_>,
+    x: Py<PyAny>,
+    out: Option<Py<PyAny>>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Fast path: for real dtypes, conj/conjugate is a no-op.
+    // Complex dtypes require NumPy's implementation.
     let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("conjugate")?.call1((x.bind(py),))?.unbind())
+
+    // Fall back if out or other kwargs are provided
+    if out.is_some() || kwargs.is_some_and(|k| !k.is_empty()) {
+        return Ok(numpy
+            .getattr("conjugate")?
+            .call((x.bind(py),), kwargs)?
+            .unbind());
+    }
+
+    let array = numpy.call_method1("asarray", (x.bind(py),))?;
+    let dtype = array.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+
+    if kind.as_str() == "c" {
+        // Complex array - use NumPy's conjugate
+        Ok(numpy.getattr("conjugate")?.call1((array,))?.unbind())
+    } else {
+        // Real array - conjugate is identity, return the asarray result
+        Ok(array.unbind())
+    }
 }
 
 #[pyfunction]
@@ -24195,13 +24218,33 @@ fn concat(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (x, out=None, **kwargs))]
 fn conj(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    x: Py<PyAny>,
+    out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "conj", args, kwargs)
+    // Fast path: for real dtypes, conj is a no-op.
+    // Complex dtypes require NumPy's implementation.
+    let numpy = py.import("numpy")?;
+
+    // Fall back if out or other kwargs are provided
+    if out.is_some() || kwargs.is_some_and(|k| !k.is_empty()) {
+        return Ok(numpy.getattr("conj")?.call((x.bind(py),), kwargs)?.unbind());
+    }
+
+    let array = numpy.call_method1("asarray", (x.bind(py),))?;
+    let dtype = array.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+
+    if kind.as_str() == "c" {
+        // Complex array - use NumPy's conj
+        Ok(numpy.getattr("conj")?.call1((array,))?.unbind())
+    } else {
+        // Real array - conj is identity, return the asarray result
+        Ok(array.unbind())
+    }
 }
 
 // Arithmetic aliases / ufunc variants
