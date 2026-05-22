@@ -4602,7 +4602,7 @@ impl Generator {
         p: f64,
         size: usize,
     ) -> Result<Vec<u64>, RandomError> {
-        if n <= 0.0 || n.is_nan() || p.is_nan() || p <= 0.0 || p > 1.0 {
+        if !n.is_finite() || n <= 0.0 || p.is_nan() || p <= 0.0 || p > 1.0 {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -9295,6 +9295,15 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let samples = rng.negative_binomial(5.0, 0.5, 100).unwrap();
         assert_eq!(samples.len(), 100);
+    }
+
+    #[test]
+    fn negative_binomial_infinite_n_rejected_like_numpy() {
+        let mut rng = test_generator();
+        assert_eq!(
+            rng.negative_binomial(f64::INFINITY, 0.5, 1),
+            Err(RandomError::InvalidParameter)
+        );
     }
 
     #[test]

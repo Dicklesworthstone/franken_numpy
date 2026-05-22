@@ -9484,70 +9484,70 @@ fn solve_triangular(
 fn isposinf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "isposinf(x)")?;
     let result = ufunc_isposinf(&x).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
 fn isneginf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "isneginf(x)")?;
     let result = ufunc_isneginf(&x).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
 fn signbit(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "signbit(x)")?;
     let result = ufunc_signbit(&x).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
 fn isnan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "isnan(x)")?;
-    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Isnan))
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isnan))
 }
 
 #[pyfunction]
 fn isinf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "isinf(x)")?;
-    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Isinf))
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isinf))
 }
 
 #[pyfunction]
 fn isfinite(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "isfinite(x)")?;
-    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Isfinite))
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isfinite))
 }
 
 #[pyfunction]
 fn spacing(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "spacing(x)")?;
     let result = ufunc_spacing(&x).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
 fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "sign(x)")?;
-    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Sign))
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Sign))
 }
 
 #[pyfunction]
 fn floor(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "floor(x)")?;
-    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Floor))
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Floor))
 }
 
 #[pyfunction]
 fn ceil(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "ceil(x)")?;
-    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Ceil))
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Ceil))
 }
 
 #[pyfunction]
 fn trunc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "trunc(x)")?;
-    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Trunc))
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Trunc))
 }
 
 #[pyfunction]
@@ -9559,7 +9559,7 @@ fn rint(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         DType::I64 | DType::U64 => result.astype(DType::F64),
         _ => result,
     };
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -9577,7 +9577,7 @@ fn degrees(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         | DType::U64 => x.astype(DType::F64),
         _ => x,
     };
-    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Degrees))
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Degrees))
 }
 
 #[pyfunction]
@@ -9595,13 +9595,13 @@ fn radians(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         | DType::U64 => x.astype(DType::F64),
         _ => x,
     };
-    build_numpy_array_from_ufunc(py, &x.elementwise_unary(UnaryOp::Radians))
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Radians))
 }
 
 #[pyfunction]
 fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "sinc(x)")?;
-    build_numpy_array_from_ufunc(py, &x.sinc())
+    build_numpy_scalar_or_array(py, &x.sinc())
 }
 
 #[pyfunction]
@@ -9703,7 +9703,7 @@ fn nan_to_num(
         posinf.unwrap_or(default_posinf),
         neginf.unwrap_or(default_neginf),
     );
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
