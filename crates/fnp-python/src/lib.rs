@@ -14127,30 +14127,12 @@ fn real_if_close(py: Python<'_>, a: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> 
 #[pyfunction]
 #[pyo3(signature = (z, deg=false))]
 fn angle(py: Python<'_>, z: Py<PyAny>, deg: bool) -> PyResult<Py<PyAny>> {
-    // Fast path: for real dtypes, angle is 0 for non-negative and π for negative.
-    // Complex arrays fall back to NumPy.
+    // Pass original value to NumPy to preserve scalar return type.
     let numpy = py.import("numpy")?;
-    let array = numpy.call_method1("asarray", (z.bind(py),))?;
-    let dtype = array.getattr("dtype")?;
-    let kind = dtype.getattr("kind")?.extract::<String>()?;
-
-    if kind.as_str() == "c" {
-        // Complex array - use NumPy
-        let angle_fn = numpy.getattr("angle")?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("deg", deg)?;
-        Ok(angle_fn.call((array,), Some(&kwargs))?.unbind())
-    } else {
-        // Real array - angle is 0 for x >= 0, π for x < 0
-        // Use arctan2(0, x) which gives this result
-        let zeros = numpy.call_method1("zeros_like", (array.clone(),))?;
-        let result = numpy.getattr("arctan2")?.call1((zeros, array.clone()))?;
-        if deg {
-            Ok(numpy.getattr("degrees")?.call1((result,))?.unbind())
-        } else {
-            Ok(result.unbind())
-        }
-    }
+    let angle_fn = numpy.getattr("angle")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("deg", deg)?;
+    Ok(angle_fn.call((z.bind(py),), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]

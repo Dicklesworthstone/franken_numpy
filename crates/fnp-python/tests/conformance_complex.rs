@@ -252,3 +252,22 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     }
     Ok(())
 }
+
+#[test]
+fn angle_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.complex128(1.0 + 1.0j)
+fnp_result = fnp.angle(x)
+np_result = np.angle(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "angle scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
