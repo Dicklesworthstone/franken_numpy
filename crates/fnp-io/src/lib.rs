@@ -2483,6 +2483,12 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
             break;
         }
     }
+    for marker in ['h', 'l', 'L'] {
+        if let Some(rest) = body.strip_suffix(marker) {
+            body = rest;
+            break;
+        }
+    }
     let (width_text, precision) = if let Some((width_text, precision_text)) = body.split_once('.') {
         if precision_text.is_empty() || !precision_text.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
@@ -6095,6 +6101,46 @@ mm.flush()
             };
             assert!(savetxt(&values, 1, 1, &cfg).is_err());
         }
+    }
+
+    #[test]
+    fn savetxt_length_modifier_integer_formats_match_numpy() {
+        let values = vec![1.2, -3.4];
+        for fmt in ["%ld", "%li", "%lu", "%hd"] {
+            let cfg = SaveTxtConfig {
+                fmt,
+                ..SaveTxtConfig::default()
+            };
+            assert_eq!(savetxt(&values, 2, 1, &cfg).unwrap(), "1\n-3\n");
+        }
+    }
+
+    #[test]
+    fn savetxt_length_modifier_float_formats_match_numpy() {
+        let values = vec![1.2, -3.4];
+        let fixed = SaveTxtConfig {
+            fmt: "%5.2lf",
+            ..SaveTxtConfig::default()
+        };
+        let exp = SaveTxtConfig {
+            fmt: "%Le",
+            ..SaveTxtConfig::default()
+        };
+        assert_eq!(savetxt(&values, 2, 1, &fixed).unwrap(), " 1.20\n-3.40\n");
+        assert_eq!(
+            savetxt(&values, 2, 1, &exp).unwrap(),
+            "1.200000e+00\n-3.400000e+00\n"
+        );
+    }
+
+    #[test]
+    fn savetxt_rejects_doubled_length_modifier_like_numpy() {
+        let values = vec![1.2];
+        let cfg = SaveTxtConfig {
+            fmt: "%lld",
+            ..SaveTxtConfig::default()
+        };
+        assert!(savetxt(&values, 1, 1, &cfg).is_err());
     }
 
     #[test]
