@@ -9001,12 +9001,22 @@ fn pinv(
 
 #[pyfunction]
 fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (a.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+
+    // Complex arrays must fall back to numpy
+    if dtype_kind == "c" {
+        return Ok(numpy
+            .getattr("linalg")?
+            .getattr("eigvals")?
+            .call1((a.bind(py),))?
+            .unbind());
+    }
+
     let array = extract_numeric_array(py, a.bind(py), "eigvals(a)")?;
     let shape = array.shape();
-    if shape.len() == 2
-        && shape[0] == shape[1]
-        && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
-    {
+    if shape.len() == 2 && shape[0] == shape[1] {
         let result = array.eigvals().map_err(map_ufunc_error)?;
         return build_numpy_eigvals_vector_from_flat_interleaved(
             py,
@@ -9015,7 +9025,6 @@ fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
         );
     }
 
-    let numpy = py.import("numpy")?;
     Ok(numpy
         .getattr("linalg")?
         .getattr("eigvals")?

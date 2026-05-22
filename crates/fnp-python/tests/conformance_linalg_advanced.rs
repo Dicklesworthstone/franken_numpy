@@ -453,8 +453,27 @@ print(np.allclose(fnp_pow, A, rtol=1e-10))
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Complex matrix tests
-// Note: eigvals and pinv don't support complex128 yet - beads q0tsm, g9fct
+// Note: pinv doesn't support complex128 yet - bead g9fct
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn eigvals_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+fnp_vals = fnp.eigvals(a)
+np_vals = np.linalg.eigvals(a)
+# Eigenvalues may be in different order, so compare sorted
+fnp_sorted = np.sort_complex(fnp_vals)
+np_sorted = np.sort_complex(np_vals)
+print(np.allclose(fnp_sorted, np_sorted))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "eigvals complex should match numpy");
+    Ok(())
+}
 
 #[test]
 fn svd_complex() -> Result<(), String> {
