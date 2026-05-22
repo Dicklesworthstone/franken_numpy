@@ -423,3 +423,23 @@ print(match)
     );
     Ok(())
 }
+
+#[test]
+fn split_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+fnp_result = fnp.split(a, 2)
+np_result = np.split(a, 2)
+match = (
+    len(fnp_result) == len(np_result)
+    and all(np.array_equal(f, n) for f, n in zip(fnp_result, np_result))
+)
+print(match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "split complex should match numpy");
+    Ok(())
+}
