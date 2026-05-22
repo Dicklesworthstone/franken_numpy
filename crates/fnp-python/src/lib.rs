@@ -16740,7 +16740,7 @@ fn fix(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         return fallback();
     }
     let result = array.fix();
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -25087,7 +25087,7 @@ fn around(
             .collect();
         UFuncArray::new(array.shape().to_vec(), values, array.dtype()).map_err(map_ufunc_error)?
     };
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]

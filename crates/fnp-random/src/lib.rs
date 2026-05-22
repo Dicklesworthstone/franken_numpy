@@ -4838,7 +4838,7 @@ impl Generator {
     ///
     /// NumPy requires `kappa >= 0`.
     pub fn vonmises(&mut self, mu: f64, kappa: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if kappa < 0.0 {
+        if kappa < 0.0 || (kappa == 0.0 && kappa.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         if kappa.is_nan() {
@@ -9475,6 +9475,15 @@ for child in rng.spawn(n_children):
             samples
                 .iter()
                 .all(|&x| (-std::f64::consts::PI..=std::f64::consts::PI).contains(&x))
+        );
+    }
+
+    #[test]
+    fn vonmises_rejects_negative_zero_kappa_like_numpy() {
+        let mut rng = test_generator();
+        assert_eq!(
+            rng.vonmises(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
         );
     }
 
