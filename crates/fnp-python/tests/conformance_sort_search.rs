@@ -486,3 +486,23 @@ print(len(nz_indices) == count)
     );
     Ok(())
 }
+
+#[test]
+fn searchsorted_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 3, 4, 5])
+v = np.float64(2.5)
+fnp_result = fnp.searchsorted(a, v)
+np_result = np.searchsorted(a, v)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "searchsorted scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
