@@ -11046,15 +11046,37 @@ fn masked_not_equal(
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn vdot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.vdot so the conjugate-of-first-arg semantics
-    // (essential for complex inputs), input flattening, and scalar-typed
-    // return all match numpy exactly across real, complex, integer, and
-    // n-D inputs.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("vdot")?
-        .call1((a.bind(py), b.bind(py)))?
-        .unbind())
+    let vdot_fn = numpy.getattr("vdot")?;
+    let fallback = || -> PyResult<Py<PyAny>> { Ok(vdot_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
+
+    let a_arr = match extract_numeric_array(py, a.bind(py), "vdot(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    let b_arr = match extract_numeric_array(py, b.bind(py), "vdot(b)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Fall back for complex (needs conjugate semantics) or sidecars
+    if a_arr.has_integer_sidecar()
+        || b_arr.has_integer_sidecar()
+        || matches!(a_arr.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(b_arr.dtype(), DType::Complex64 | DType::Complex128)
+    {
+        return fallback();
+    }
+
+    let result = match a_arr.vdot(&b_arr) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+    let output = build_numpy_array_from_ufunc(py, &result)?;
+    if result.shape().is_empty() {
+        return Ok(output.bind(py).get_item(())?.unbind());
+    }
+    Ok(output)
 }
 
 #[pyfunction]
