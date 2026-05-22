@@ -24030,6 +24030,18 @@ fn unique(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // Fast path for simple single-arg calls
+    if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 1 {
+        let arr = match extract_numeric_array(py, &args.get_item(0)?, "unique(ar)") {
+            Ok(a) => a,
+            Err(_) => return core_numpy_passthrough(py, "unique", args, kwargs),
+        };
+        if arr.has_integer_sidecar() {
+            return core_numpy_passthrough(py, "unique", args, kwargs);
+        }
+        let result = arr.unique();
+        return build_numpy_array_from_ufunc(py, &result);
+    }
     core_numpy_passthrough(py, "unique", args, kwargs)
 }
 
