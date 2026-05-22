@@ -8396,7 +8396,7 @@ fn clip(
         return fallback();
     }
     let result = array.clip(min_val, max_val);
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
