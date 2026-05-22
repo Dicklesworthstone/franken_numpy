@@ -468,3 +468,27 @@ print(np.allclose(y, y_pred))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scalar return type tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn polyval_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+p = np.array([1, 2, 3], dtype=np.float64)
+x = np.float64(2.0)
+fnp_result = fnp.polyval(p, x)
+np_result = np.polyval(p, x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "polyval scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
