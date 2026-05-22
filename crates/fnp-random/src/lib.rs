@@ -4781,7 +4781,7 @@ impl Generator {
     ///
     /// NumPy requires `a > 0`.
     pub fn power(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if a <= 0.0 || a.is_nan() {
+        if a <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -9048,6 +9048,25 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let samples = rng.power(2.0, 1000).unwrap();
         assert!(samples.iter().all(|&v| (0.0..1.0).contains(&v)));
+    }
+
+    #[test]
+    fn power_shape_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.power(0.0, 1), Err(RandomError::InvalidParameter));
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.power(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.power(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite = test_generator();
+        assert_eq!(infinite.power(f64::INFINITY, 3).unwrap(), vec![1.0; 3]);
     }
 
     #[test]
