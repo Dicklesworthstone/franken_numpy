@@ -4621,6 +4621,9 @@ impl Generator {
         if dfnum <= 0.0 || dfden <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        if !dfnum.is_finite() || !dfden.is_finite() {
+            return Ok(vec![f64::NAN; size]);
+        }
         Ok((0..size)
             .map(|_| {
                 let x1 = self.sample_gamma(dfnum / 2.0) * 2.0 / dfnum;
@@ -9227,6 +9230,53 @@ for child in rng.spawn(n_children):
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
         // theoretical mean = dfden / (dfden - 2) = 10/8 = 1.25
         assert!((mean - 1.25).abs() < 0.3, "f mean={mean}");
+    }
+
+    #[test]
+    fn f_distribution_nonfinite_df_edge_cases_match_numpy() {
+        let mut zero_dfnum = test_generator();
+        assert_eq!(
+            zero_dfnum.f_distribution(0.0, 2.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut zero_dfden = test_generator();
+        assert_eq!(
+            zero_dfden.f_distribution(2.0, 0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut negative_zero_dfnum = test_generator();
+        assert_eq!(
+            negative_zero_dfnum.f_distribution(-0.0, 2.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut negative_zero_dfden = test_generator();
+        assert_eq!(
+            negative_zero_dfden.f_distribution(2.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan_dfnum = test_generator();
+        let nan_dfnum_values = nan_dfnum.f_distribution(f64::NAN, 2.0, 3).unwrap();
+        assert!(nan_dfnum_values.iter().all(|value| value.is_nan()));
+
+        let mut nan_dfden = test_generator();
+        let nan_dfden_values = nan_dfden.f_distribution(2.0, f64::NAN, 3).unwrap();
+        assert!(nan_dfden_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite_dfnum = test_generator();
+        let infinite_dfnum_values = infinite_dfnum
+            .f_distribution(f64::INFINITY, 2.0, 3)
+            .unwrap();
+        assert!(infinite_dfnum_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite_dfden = test_generator();
+        let infinite_dfden_values = infinite_dfden
+            .f_distribution(2.0, f64::INFINITY, 3)
+            .unwrap();
+        assert!(infinite_dfden_values.iter().all(|value| value.is_nan()));
     }
 
     #[test]
