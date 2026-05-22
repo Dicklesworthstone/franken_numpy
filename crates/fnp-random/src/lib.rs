@@ -4634,9 +4634,6 @@ impl Generator {
         if alpha.iter().any(|&a| a < 0.0) {
             return Err(RandomError::InvalidParameter);
         }
-        if alpha.iter().any(|&a| a.is_nan()) {
-            return Ok(vec![vec![f64::NAN; alpha.len()]; size]);
-        }
         Ok((0..size)
             .map(|_| {
                 let gamma_samples: Vec<f64> = alpha.iter().map(|&a| self.sample_gamma(a)).collect();
@@ -12354,6 +12351,73 @@ for child in rng.spawn(n_children):
                     (g_val - e_val).abs()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn oracle_dirichlet_nonfinite_alpha_advances_stream() {
+        let expected_after_one_nonfinite = [
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+            0.403_840_457_250_061_8,
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+        ];
+        let expected_after_two_nonfinite = [
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+            0.104_783_541_327_853_84,
+            0.895_599_581_743_493_9,
+            0.363_015_960_789_184_4,
+        ];
+
+        for (label, alpha, expected_after) in [
+            (
+                "dirichlet_nan_one",
+                [f64::NAN, 1.0],
+                &expected_after_one_nonfinite,
+            ),
+            (
+                "dirichlet_one_nan",
+                [1.0, f64::NAN],
+                &expected_after_one_nonfinite,
+            ),
+            (
+                "dirichlet_inf_one",
+                [f64::INFINITY, 1.0],
+                &expected_after_one_nonfinite,
+            ),
+            (
+                "dirichlet_one_inf",
+                [1.0, f64::INFINITY],
+                &expected_after_one_nonfinite,
+            ),
+            (
+                "dirichlet_nan_inf",
+                [f64::NAN, f64::INFINITY],
+                &expected_after_two_nonfinite,
+            ),
+        ] {
+            let mut g = oracle_gen();
+            let rows = g.dirichlet(&alpha, 3).unwrap();
+            for row in &rows {
+                match label {
+                    "dirichlet_inf_one" => {
+                        assert!(row[0].is_nan(), "{label}: first value should be NaN");
+                        assert_eq!(row[1], 0.0, "{label}: second value should be zero");
+                    }
+                    "dirichlet_one_inf" => {
+                        assert_eq!(row[0], 0.0, "{label}: first value should be zero");
+                        assert!(row[1].is_nan(), "{label}: second value should be NaN");
+                    }
+                    _ => assert!(
+                        row.iter().all(|value| value.is_nan()),
+                        "{label}: row should be all NaN, got {row:?}"
+                    ),
+                }
+            }
+            let after = g.random(5);
+            assert_f64_seq(label, &after, expected_after);
         }
     }
 
