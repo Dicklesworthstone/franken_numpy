@@ -4828,26 +4828,26 @@ impl Generator {
         if df <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
+        Ok((0..size)
+            .map(|_| self.sample_noncentral_chisquare(df, nonc))
+            .collect())
+    }
+
+    fn sample_noncentral_chisquare(&mut self, df: f64, nonc: f64) -> f64 {
         if nonc.is_nan() {
-            return Ok(vec![f64::NAN; size]);
+            return f64::NAN;
         }
         if nonc == 0.0 {
-            return self.chisquare(df, size);
+            return self.sample_gamma(df / 2.0) * 2.0;
         }
-        Ok((0..size)
-            .map(|_| {
-                if df > 1.0 {
-                    // X ~ chi²(df-1) + (Z + sqrt(nonc))²
-                    let chi2_part = self.sample_gamma((df - 1.0) / 2.0) * 2.0;
-                    let z = self.sample_standard_normal_single() + nonc.sqrt();
-                    chi2_part + z * z
-                } else {
-                    // df <= 1.0: use Poisson mixture
-                    let i = self.sample_poisson_single(nonc / 2.0);
-                    self.sample_gamma(df / 2.0 + i as f64) * 2.0
-                }
-            })
-            .collect())
+        if df > 1.0 {
+            let chi2_part = self.sample_gamma((df - 1.0) / 2.0) * 2.0;
+            let z = self.sample_standard_normal_single() + nonc.sqrt();
+            chi2_part + z * z
+        } else {
+            let i = self.sample_poisson_single(nonc / 2.0);
+            self.sample_gamma(df / 2.0 + i as f64) * 2.0
+        }
     }
 
     /// Non-central F-distribution (scipy.stats.ncf).
@@ -4864,24 +4864,9 @@ impl Generator {
         if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        if dfnum.is_nan() || dfden.is_nan() || nonc.is_nan() {
-            return Ok(vec![f64::NAN; size]);
-        }
-        if nonc == 0.0 {
-            return self.f_distribution(dfnum, dfden, size);
-        }
         Ok((0..size)
             .map(|_| {
-                let nc_chi2 = {
-                    if dfnum > 1.0 {
-                        let chi2_part = self.sample_gamma((dfnum - 1.0) / 2.0) * 2.0;
-                        let z = self.sample_standard_normal_single() + nonc.sqrt();
-                        chi2_part + z * z
-                    } else {
-                        let i = self.sample_poisson_single(nonc / 2.0);
-                        self.sample_gamma(dfnum / 2.0 + i as f64) * 2.0
-                    }
-                };
+                let nc_chi2 = self.sample_noncentral_chisquare(dfnum, nonc);
                 let chi2 = self.sample_gamma(dfden / 2.0) * 2.0;
                 (nc_chi2 / dfnum) / (chi2 / dfden)
             })
@@ -12394,6 +12379,61 @@ for child in rng.spawn(n_children):
             0.39845145064667553,
         ];
         assert_f64_seq("noncentral_f", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_noncentral_f_nan_parameter_stream_parity() {
+        let expected_after_dfnum_nan = [
+            0.878_004_336_796_319_5,
+            0.998_261_192_952_979_1,
+            0.669_159_567_435_787_9,
+            0.263_612_925_268_924_77,
+            0.693_094_675_047_929_1,
+        ];
+        let expected_after_dfden_nan = [
+            0.534_584_586_050_490_3,
+            0.878_004_336_796_319_5,
+            0.998_261_192_952_979_1,
+            0.669_159_567_435_787_9,
+            0.263_612_925_268_924_77,
+        ];
+        let expected_after_nonc_nan = [
+            0.888_337_197_310_043_6,
+            0.303_319_245_352_569_4,
+            0.440_032_955_585_861_1,
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+        ];
+
+        let mut dfnum_nan = oracle_gen();
+        let dfnum_nan_values = dfnum_nan.noncentral_f(f64::NAN, 5.0, 1.0, 3).unwrap();
+        assert!(dfnum_nan_values.iter().all(|value| value.is_nan()));
+        let dfnum_nan_after = dfnum_nan.random(5);
+        assert_f64_seq(
+            "noncentral_f_dfnum_nan_after",
+            &dfnum_nan_after,
+            &expected_after_dfnum_nan,
+        );
+
+        let mut dfden_nan = oracle_gen();
+        let dfden_nan_values = dfden_nan.noncentral_f(2.0, f64::NAN, 1.0, 3).unwrap();
+        assert!(dfden_nan_values.iter().all(|value| value.is_nan()));
+        let dfden_nan_after = dfden_nan.random(5);
+        assert_f64_seq(
+            "noncentral_f_dfden_nan_after",
+            &dfden_nan_after,
+            &expected_after_dfden_nan,
+        );
+
+        let mut nonc_nan = oracle_gen();
+        let nonc_nan_values = nonc_nan.noncentral_f(2.0, 5.0, f64::NAN, 3).unwrap();
+        assert!(nonc_nan_values.iter().all(|value| value.is_nan()));
+        let nonc_nan_after = nonc_nan.random(5);
+        assert_f64_seq(
+            "noncentral_f_nonc_nan_after",
+            &nonc_nan_after,
+            &expected_after_nonc_nan,
+        );
     }
 
     #[test]
