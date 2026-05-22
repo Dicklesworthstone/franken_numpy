@@ -2219,28 +2219,28 @@ enum SaveTxtRowPart {
     Conversion(SaveTxtFormat),
 }
 
-fn parse_savetxt_format(fmt: &str) -> ParsedSaveTxtFormat {
-    let Some(parts) = parse_savetxt_format_parts(fmt) else {
-        return ParsedSaveTxtFormat::Scalar(ParsedSaveTxtScalarFormat {
-            prefix: String::new(),
-            format: SaveTxtFormat::Default,
-            suffix: String::new(),
-        });
-    };
+fn parse_savetxt_format(fmt: &str) -> Result<ParsedSaveTxtFormat, IOError> {
+    if fmt.contains("%%") {
+        return Err(IOError::WriteContractViolation(
+            "fmt has wrong number of % formats",
+        ));
+    }
+
+    let parts = parse_savetxt_format_parts(fmt).ok_or(IOError::WriteContractViolation(
+        "unsupported format character",
+    ))?;
 
     let conversion_count = parts
         .iter()
         .filter(|part| matches!(part, SaveTxtRowPart::Conversion(_)))
         .count();
     if conversion_count == 0 {
-        return ParsedSaveTxtFormat::Scalar(ParsedSaveTxtScalarFormat {
-            prefix: String::new(),
-            format: SaveTxtFormat::Default,
-            suffix: String::new(),
-        });
+        return Err(IOError::WriteContractViolation(
+            "fmt has wrong number of % formats",
+        ));
     }
     if conversion_count > 1 {
-        return ParsedSaveTxtFormat::Row(parts);
+        return Ok(ParsedSaveTxtFormat::Row(parts));
     }
 
     let mut prefix = String::new();
@@ -2257,11 +2257,11 @@ fn parse_savetxt_format(fmt: &str) -> ParsedSaveTxtFormat {
             }
         }
     }
-    ParsedSaveTxtFormat::Scalar(ParsedSaveTxtScalarFormat {
+    Ok(ParsedSaveTxtFormat::Scalar(ParsedSaveTxtScalarFormat {
         prefix,
         format,
         suffix,
-    })
+    }))
 }
 
 fn parse_savetxt_format_parts(fmt: &str) -> Option<Vec<SaveTxtRowPart>> {
@@ -3005,7 +3005,7 @@ pub fn savetxt(
             "savetxt: values length != nrows * ncols",
         ));
     }
-    let fmt = parse_savetxt_format(config.fmt);
+    let fmt = parse_savetxt_format(config.fmt)?;
     // Pre-allocate approximately (15 chars per float + delimiter) * total
     let mut output = String::with_capacity(values.len() * 16);
     if !config.header.is_empty() {
@@ -6083,6 +6083,18 @@ mm.flush()
             ..SaveTxtConfig::default()
         };
         assert!(savetxt(&values, 1, 2, &cfg).is_err());
+    }
+
+    #[test]
+    fn savetxt_rejects_invalid_format_strings_like_numpy() {
+        let values = vec![1.0];
+        for fmt in ["abc", "%%", "%0.1f%%", "%q"] {
+            let cfg = SaveTxtConfig {
+                fmt,
+                ..SaveTxtConfig::default()
+            };
+            assert!(savetxt(&values, 1, 1, &cfg).is_err());
+        }
     }
 
     #[test]
