@@ -4708,9 +4708,6 @@ impl Generator {
         if dfnum <= 0.0 || dfden <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
-        if !dfnum.is_finite() || !dfden.is_finite() {
-            return Ok(vec![f64::NAN; size]);
-        }
         Ok((0..size)
             .map(|_| {
                 let x1 = self.sample_gamma(dfnum / 2.0) * 2.0 / dfnum;
@@ -11732,6 +11729,70 @@ for child in rng.spawn(n_children):
             0.34215986276681587,
         ];
         assert_f64_seq("f_distribution", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_f_nonfinite_parameters_advance_stream() {
+        let expected_after_nonfinite_numerator = [
+            0.104_783_541_327_853_84,
+            0.895_599_581_743_493_9,
+            0.363_015_960_789_184_4,
+            0.534_584_586_050_490_3,
+            0.878_004_336_796_319_5,
+        ];
+        let expected_after_nonfinite_denominator = [
+            0.363_015_960_789_184_4,
+            0.534_584_586_050_490_3,
+            0.878_004_336_796_319_5,
+            0.998_261_192_952_979_1,
+            0.669_159_567_435_787_9,
+        ];
+        let expected_after_two_nonfinite = [
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+            0.104_783_541_327_853_84,
+            0.895_599_581_743_493_9,
+            0.363_015_960_789_184_4,
+        ];
+
+        for (label, dfnum, dfden, expected_after) in [
+            (
+                "f_inf_one",
+                f64::INFINITY,
+                1.0,
+                &expected_after_nonfinite_numerator,
+            ),
+            (
+                "f_one_inf",
+                1.0,
+                f64::INFINITY,
+                &expected_after_nonfinite_denominator,
+            ),
+            (
+                "f_inf_inf",
+                f64::INFINITY,
+                f64::INFINITY,
+                &expected_after_two_nonfinite,
+            ),
+            (
+                "f_nan_one",
+                f64::NAN,
+                1.0,
+                &expected_after_nonfinite_numerator,
+            ),
+            (
+                "f_one_nan",
+                1.0,
+                f64::NAN,
+                &expected_after_nonfinite_denominator,
+            ),
+        ] {
+            let mut g = oracle_gen();
+            let values = g.f(dfnum, dfden, 3).unwrap();
+            assert!(values.iter().all(|value| value.is_nan()));
+            let after = g.random(5);
+            assert_f64_seq(label, &after, expected_after);
+        }
     }
 
     #[test]
