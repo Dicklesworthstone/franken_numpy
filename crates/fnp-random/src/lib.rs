@@ -4412,7 +4412,10 @@ impl Generator {
         if loc.len() != loc_count || scale.len() != scale_count {
             return Err(RandomError::InvalidParameter);
         }
-        if scale.iter().any(|&value| value < 0.0 || value.is_nan()) {
+        if scale
+            .iter()
+            .any(|&value| value < 0.0 || (value == 0.0 && value.is_sign_negative()))
+        {
             return Err(RandomError::InvalidParameter);
         }
 
@@ -4453,7 +4456,7 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn gumbel(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 || scale.is_nan() {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -4856,7 +4859,7 @@ impl Generator {
 
     /// Logistic distribution via inverse-CDF.
     pub fn logistic(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -8912,10 +8915,42 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn laplace_scale_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.laplace(2.0, 0.0, 3).unwrap(), vec![2.0; 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.laplace(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.laplace(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
     fn gumbel_basic() {
         let mut rng = test_generator();
         let samples = rng.gumbel(0.0, 1.0, 100).unwrap();
         assert_eq!(samples.len(), 100);
+    }
+
+    #[test]
+    fn gumbel_scale_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.gumbel(2.0, 0.0, 3).unwrap(), vec![2.0; 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.gumbel(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.gumbel(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
     }
 
     #[test]
@@ -9145,6 +9180,22 @@ for child in rng.spawn(n_children):
         let samples = rng.logistic(loc, 1.0, 5000).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
         assert!((mean - loc).abs() < 0.2, "logistic mean={mean}");
+    }
+
+    #[test]
+    fn logistic_scale_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.logistic(2.0, 0.0, 3).unwrap(), vec![2.0; 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.logistic(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.logistic(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
     }
 
     #[test]
