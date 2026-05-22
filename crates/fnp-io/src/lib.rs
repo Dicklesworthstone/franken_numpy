@@ -2137,6 +2137,7 @@ enum SaveTxtFormat {
     Int,
     Exp { precision: usize, uppercase: bool },
     Fixed(usize),
+    General { precision: usize, uppercase: bool },
 }
 
 fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
@@ -2151,6 +2152,14 @@ fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
             uppercase: true,
         },
         "%f" => SaveTxtFormat::Fixed(6),
+        "%g" => SaveTxtFormat::General {
+            precision: 6,
+            uppercase: false,
+        },
+        "%G" => SaveTxtFormat::General {
+            precision: 6,
+            uppercase: true,
+        },
         _ => {
             if let Some(prec) = parse_savetxt_precision(fmt, 'e') {
                 SaveTxtFormat::Exp {
@@ -2164,6 +2173,16 @@ fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
                 }
             } else if let Some(prec) = parse_savetxt_precision(fmt, 'f') {
                 SaveTxtFormat::Fixed(prec)
+            } else if let Some(prec) = parse_savetxt_precision(fmt, 'g') {
+                SaveTxtFormat::General {
+                    precision: prec,
+                    uppercase: false,
+                }
+            } else if let Some(prec) = parse_savetxt_precision(fmt, 'G') {
+                SaveTxtFormat::General {
+                    precision: prec,
+                    uppercase: true,
+                }
             } else {
                 SaveTxtFormat::Default
             }
@@ -2197,6 +2216,96 @@ fn write_savetxt_int(output: &mut String, v: f64) -> Result<(), IOError> {
     }
     write!(output, "{truncated:.0}")
         .map_err(|_| IOError::WriteContractViolation("formatting failed"))
+}
+
+fn trim_savetxt_general_fraction(text: &mut String) {
+    if !text.contains('.') {
+        return;
+    }
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+}
+
+fn push_savetxt_normalized_exponent(
+    output: &mut String,
+    exponent: i32,
+    uppercase: bool,
+) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    output.push(if uppercase { 'E' } else { 'e' });
+    if exponent < 0 {
+        write!(output, "-{:02}", exponent.abs())
+    } else {
+        write!(output, "+{exponent:02}")
+    }
+    .map_err(|_| IOError::WriteContractViolation("formatting failed"))
+}
+
+fn write_savetxt_general(
+    output: &mut String,
+    v: f64,
+    precision: usize,
+    uppercase: bool,
+) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    if v.is_nan() {
+        output.push_str(if uppercase { "NAN" } else { "nan" });
+        return Ok(());
+    }
+    if v.is_infinite() {
+        if v.is_sign_negative() {
+            output.push_str(if uppercase { "-INF" } else { "-inf" });
+        } else {
+            output.push_str(if uppercase { "INF" } else { "inf" });
+        }
+        return Ok(());
+    }
+    if v.to_bits() & 0x7fff_ffff_ffff_ffff == 0 {
+        if v.is_sign_negative() {
+            output.push_str("-0");
+        } else {
+            output.push('0');
+        }
+        return Ok(());
+    }
+
+    let precision = precision.max(1);
+    let scientific_digits = precision.saturating_sub(1);
+    let mut scientific = String::new();
+    write!(&mut scientific, "{v:.scientific_digits$e}")
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+    let marker = scientific
+        .rfind('e')
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+    let exponent = scientific
+        .get(marker + 1..)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?
+        .parse::<i32>()
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+
+    if exponent < -4 || exponent >= precision as i32 {
+        let mut mantissa = scientific
+            .get(..marker)
+            .ok_or(IOError::WriteContractViolation("formatting failed"))?
+            .to_string();
+        trim_savetxt_general_fraction(&mut mantissa);
+        output.push_str(&mantissa);
+        push_savetxt_normalized_exponent(output, exponent, uppercase)
+    } else {
+        let fixed_digits = (precision as i32 - 1 - exponent).max(0) as usize;
+        let mut fixed = String::new();
+        write!(&mut fixed, "{v:.fixed_digits$}")
+            .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+        trim_savetxt_general_fraction(&mut fixed);
+        output.push_str(&fixed);
+        Ok(())
+    }
 }
 
 fn write_savetxt_exp(
@@ -2288,6 +2397,12 @@ pub fn savetxt(
                 }
                 SaveTxtFormat::Int => {
                     write_savetxt_int(&mut output, v)?;
+                }
+                SaveTxtFormat::General {
+                    precision,
+                    uppercase,
+                } => {
+                    write_savetxt_general(&mut output, v, precision, uppercase)?;
                 }
                 SaveTxtFormat::Default => {
                     write!(output, "{v}")
@@ -5205,6 +5320,53 @@ mm.flush()
         };
         let output = savetxt(&values, 1, 3, &cfg).unwrap();
         assert_eq!(output, "NAN INF -INF\n");
+    }
+
+    #[test]
+    fn savetxt_general_format_matches_numpy_default_precision() {
+        let values = vec![
+            1.23456789,
+            123456789.0,
+            0.000123456789,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let cfg = SaveTxtConfig {
+            fmt: "%g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 6, &cfg).unwrap();
+        assert_eq!(output, "1.23457 1.23457e+08 0.000123457 nan inf -inf\n");
+    }
+
+    #[test]
+    fn savetxt_uppercase_general_format_matches_numpy_precision() {
+        let values = vec![
+            1.23456789,
+            123456789.0,
+            0.000123456789,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let cfg = SaveTxtConfig {
+            fmt: "%.3G",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 6, &cfg).unwrap();
+        assert_eq!(output, "1.23 1.23E+08 0.000123 NAN INF -INF\n");
+    }
+
+    #[test]
+    fn savetxt_general_format_preserves_negative_zero_like_numpy() {
+        let values = vec![-0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "-0\n");
     }
 
     #[test]
