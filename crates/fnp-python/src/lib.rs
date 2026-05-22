@@ -14263,24 +14263,9 @@ fn fmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn iscomplex(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Fast path: for real dtypes, iscomplex returns all-False.
-    // Complex dtypes fall back to NumPy to check imaginary parts.
+    // Delegate to NumPy to preserve scalar return type
     let numpy = py.import("numpy")?;
-    let array = numpy.call_method1("asarray", (x.bind(py),))?;
-    let dtype = array.getattr("dtype")?;
-    let kind = dtype.getattr("kind")?.extract::<String>()?;
-
-    if kind.as_str() == "c" {
-        // Complex array - use NumPy to check imaginary parts
-        Ok(numpy.getattr("iscomplex")?.call1((array,))?.unbind())
-    } else {
-        // Real array - all elements are not complex, return all-False
-        let shape = array.getattr("shape")?;
-        Ok(numpy
-            .call_method1("zeros", (shape,))?
-            .call_method1("astype", ("bool",))?
-            .unbind())
-    }
+    Ok(numpy.getattr("iscomplex")?.call1((x.bind(py),))?.unbind())
 }
 
 // Shared native fast-path for simple unary ufuncs that map 1:1 onto a
@@ -14907,24 +14892,9 @@ fn isscalar(py: Python<'_>, element: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn isreal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Fast path: for real dtypes, isreal returns all-True.
-    // Complex dtypes fall back to NumPy to check imaginary parts.
+    // Delegate to NumPy to preserve scalar return type
     let numpy = py.import("numpy")?;
-    let array = numpy.call_method1("asarray", (x.bind(py),))?;
-    let dtype = array.getattr("dtype")?;
-    let kind = dtype.getattr("kind")?.extract::<String>()?;
-
-    if kind.as_str() == "c" {
-        // Complex array - use NumPy to check imaginary parts
-        Ok(numpy.getattr("isreal")?.call1((array,))?.unbind())
-    } else {
-        // Real array - all elements are real, return all-True
-        let shape = array.getattr("shape")?;
-        Ok(numpy
-            .call_method1("ones", (shape,))?
-            .call_method1("astype", ("bool",))?
-            .unbind())
-    }
+    Ok(numpy.getattr("isreal")?.call1((x.bind(py),))?.unbind())
 }
 
 #[pyfunction]
