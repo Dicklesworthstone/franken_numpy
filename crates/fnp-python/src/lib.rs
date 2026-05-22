@@ -10325,14 +10325,39 @@ fn ravel(py: Python<'_>, a: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (a, newshape, order="C"))]
 fn reshape(py: Python<'_>, a: Py<PyAny>, newshape: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.reshape so inferred dimensions, order-sensitive
-    // layout, scalar behavior, object dtype handling, and error
-    // surfaces all match numpy exactly.
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("reshape")?
-        .call1((a.bind(py), newshape.bind(py), order))?
-        .unbind())
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr("reshape")?
+            .call1((a.bind(py), newshape.bind(py), order))?
+            .unbind())
+    };
+
+    let array = match extract_numeric_array(py, a.bind(py), "reshape(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    if array.has_integer_sidecar() {
+        return fallback();
+    }
+
+    // Parse newshape as Vec<isize>
+    let shape: Vec<isize> = match newshape.bind(py).extract::<Vec<isize>>() {
+        Ok(s) => s,
+        Err(_) => {
+            // Try as single integer
+            match newshape.bind(py).extract::<isize>() {
+                Ok(s) => vec![s],
+                Err(_) => return fallback(),
+            }
+        }
+    };
+
+    let result = match array.reshape_order(&shape, order) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
