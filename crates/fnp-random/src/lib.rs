@@ -4386,7 +4386,12 @@ impl Generator {
             return Err(RandomError::InvalidParameter);
         }
         if p == 1.0 {
-            return Ok(vec![1; size]);
+            return Ok((0..size)
+                .map(|_| {
+                    let _ = self.next_f64();
+                    1
+                })
+                .collect());
         }
         Ok((0..size)
             .map(|_| {
@@ -11467,6 +11472,15 @@ for child in rng.spawn(n_children):
         let vals = g.geometric(1.0, 10).expect("p=1 should succeed");
         let expected: Vec<u64> = vec![1; 10];
         assert_u64_seq("geometric_p_one", &vals, &expected);
+        let expected_after = [
+            0.378_851_142_176_928_95,
+            0.403_840_457_250_061_8,
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+            0.104_783_541_327_853_84,
+        ];
+        let after = g.random(5);
+        assert_f64_seq("geometric_p_one_after", &after, &expected_after);
     }
 
     #[test]
