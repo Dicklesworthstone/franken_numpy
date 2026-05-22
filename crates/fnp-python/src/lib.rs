@@ -16408,10 +16408,25 @@ fn true_divide(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.true_divide so x1/x2 element-wise always
-    // promotes to float (no integer truncation), matches numpy
-    // broadcasting and division-by-zero (yields ±inf for floats with
-    // appropriate sign) semantics.
+    // Fast path for simple two-arg calls
+    if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "true_divide(x1)") {
+            Ok(arr) => arr,
+            Err(_) => return core_numpy_passthrough(py, "true_divide", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "true_divide(x2)") {
+            Ok(arr) => arr,
+            Err(_) => return core_numpy_passthrough(py, "true_divide", args, kwargs),
+        };
+        if x1.has_integer_sidecar() || x2.has_integer_sidecar() {
+            return core_numpy_passthrough(py, "true_divide", args, kwargs);
+        }
+        let result = match x1.elementwise_binary(&x2, BinaryOp::Div) {
+            Ok(r) => r,
+            Err(_) => return core_numpy_passthrough(py, "true_divide", args, kwargs),
+        };
+        return build_numpy_array_from_ufunc(py, &result);
+    }
     core_numpy_passthrough(py, "true_divide", args, kwargs)
 }
 
