@@ -736,3 +736,51 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "arctan complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn arcsinh_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([0.5+0.5j, 2+1j, 1+2j], dtype=np.complex128)
+fnp_result = fnp.arcsinh(z)
+np_result = np.arcsinh(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "arcsinh complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn arccosh_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([2+1j, 3+0j, 1+2j], dtype=np.complex128)
+fnp_result = fnp.arccosh(z)
+np_result = np.arccosh(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "arccosh complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn arctanh_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([0.5+0.5j, 0.3+0.4j, 2+1j], dtype=np.complex128)
+fnp_result = fnp.arctanh(z)
+np_result = np.arctanh(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "arctanh complex should match numpy");
+    Ok(())
+}
