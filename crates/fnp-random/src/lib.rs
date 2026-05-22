@@ -4779,6 +4779,9 @@ impl Generator {
         if df.is_nan() || nonc.is_nan() {
             return Ok(vec![f64::NAN; size]);
         }
+        if nonc == 0.0 {
+            return self.chisquare(df, size);
+        }
         Ok((0..size)
             .map(|_| {
                 if df > 1.0 {
@@ -4811,6 +4814,9 @@ impl Generator {
         }
         if dfnum.is_nan() || dfden.is_nan() || nonc.is_nan() {
             return Ok(vec![f64::NAN; size]);
+        }
+        if nonc == 0.0 {
+            return self.f_distribution(dfnum, dfden, size);
         }
         Ok((0..size)
             .map(|_| {
@@ -9733,6 +9739,17 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn noncentral_chisquare_zero_nonc_matches_central_stream() {
+        let mut central = test_generator();
+        let expected = central.chisquare(5.0, 8).unwrap();
+
+        let mut noncentral = test_generator();
+        let actual = noncentral.noncentral_chisquare(5.0, 0.0, 8).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn noncentral_f_positive_values() {
         let mut rng = test_generator();
         let samples = rng.noncentral_f(5.0, 10.0, 1.0, 1000).unwrap();
@@ -9754,6 +9771,17 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let samples = rng.noncentral_f(0.5, 2.0, f64::NAN, 3).unwrap();
         assert!(samples.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
+    fn noncentral_f_zero_nonc_matches_central_stream() {
+        let mut central = test_generator();
+        let expected = central.f(5.0, 10.0, 8).unwrap();
+
+        let mut noncentral = test_generator();
+        let actual = noncentral.noncentral_f(5.0, 10.0, 0.0, 8).unwrap();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
