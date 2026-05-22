@@ -658,3 +658,120 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Complex dtype tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn exp_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, 0+1j, -1+0j, 1j*np.pi], dtype=np.complex128)
+fnp_result = fnp.exp(z)
+np_result = np.exp(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "exp complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn log_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, -1+0j, 0+1j, 2+3j], dtype=np.complex128)
+fnp_result = fnp.log(z)
+np_result = np.log(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "log complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn sqrt_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, -1+0j, 0+1j, 4+0j, -4+0j], dtype=np.complex128)
+fnp_result = fnp.sqrt(z)
+np_result = np.sqrt(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sqrt complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn square_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, 2+3j, -1-1j, 0+2j], dtype=np.complex128)
+fnp_result = fnp.square(z)
+np_result = np.square(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "square complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn power_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z1 = np.array([2+1j, 1+1j, 3+0j], dtype=np.complex128)
+z2 = np.array([2+0j, 1+1j, 0.5+0j], dtype=np.complex128)
+fnp_result = fnp.power(z1, z2)
+np_result = np.power(z1, z2)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "power complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn log10_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([10+0j, 1+1j, 100+0j, -10+0j], dtype=np.complex128)
+fnp_result = fnp.log10(z)
+np_result = np.log10(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "log10 complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn log2_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([2+0j, 4+0j, 1+1j, -2+0j], dtype=np.complex128)
+fnp_result = fnp.log2(z)
+np_result = np.log2(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "log2 complex should match numpy");
+    Ok(())
+}
