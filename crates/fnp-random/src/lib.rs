@@ -4729,7 +4729,7 @@ impl Generator {
         nonc: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if df <= 0.0 || nonc < 0.0 {
+        if df <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -4759,7 +4759,11 @@ impl Generator {
         nonc: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 {
+        if dfnum <= 0.0
+            || dfden <= 0.0
+            || nonc < 0.0
+            || (nonc == 0.0 && nonc.is_sign_negative())
+        {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -9346,11 +9350,29 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn noncentral_chisquare_rejects_negative_zero_nonc_like_numpy() {
+        let mut rng = test_generator();
+        assert_eq!(
+            rng.noncentral_chisquare(5.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+    }
+
+    #[test]
     fn noncentral_f_positive_values() {
         let mut rng = test_generator();
         let samples = rng.noncentral_f(5.0, 10.0, 1.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&v| v > 0.0));
+    }
+
+    #[test]
+    fn noncentral_f_rejects_negative_zero_nonc_like_numpy() {
+        let mut rng = test_generator();
+        assert_eq!(
+            rng.noncentral_f(5.0, 10.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
     }
 
     #[test]
