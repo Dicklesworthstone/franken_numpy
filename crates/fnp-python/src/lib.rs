@@ -11048,7 +11048,8 @@ fn masked_not_equal(
 fn vdot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let vdot_fn = numpy.getattr("vdot")?;
-    let fallback = || -> PyResult<Py<PyAny>> { Ok(vdot_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
+    let fallback =
+        || -> PyResult<Py<PyAny>> { Ok(vdot_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
 
     let a_arr = match extract_numeric_array(py, a.bind(py), "vdot(a)") {
         Ok(arr) => arr,
@@ -16768,8 +16769,25 @@ fn add(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.add. Element-wise addition with full numpy
-    // broadcasting and dtype-promotion rules.
+    // Fast path for simple two-arg calls
+    if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "add(x1)") {
+            Ok(arr) => arr,
+            Err(_) => return core_numpy_passthrough(py, "add", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "add(x2)") {
+            Ok(arr) => arr,
+            Err(_) => return core_numpy_passthrough(py, "add", args, kwargs),
+        };
+        if x1.has_integer_sidecar() || x2.has_integer_sidecar() {
+            return core_numpy_passthrough(py, "add", args, kwargs);
+        }
+        let result = match x1.elementwise_binary(&x2, BinaryOp::Add) {
+            Ok(r) => r,
+            Err(_) => return core_numpy_passthrough(py, "add", args, kwargs),
+        };
+        return build_numpy_array_from_ufunc(py, &result);
+    }
     core_numpy_passthrough(py, "add", args, kwargs)
 }
 
@@ -16783,8 +16801,25 @@ fn subtract(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.subtract. Element-wise x1-x2 with numpy's
-    // broadcasting and dtype-promotion rules.
+    // Fast path for simple two-arg calls
+    if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "subtract(x1)") {
+            Ok(arr) => arr,
+            Err(_) => return core_numpy_passthrough(py, "subtract", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "subtract(x2)") {
+            Ok(arr) => arr,
+            Err(_) => return core_numpy_passthrough(py, "subtract", args, kwargs),
+        };
+        if x1.has_integer_sidecar() || x2.has_integer_sidecar() {
+            return core_numpy_passthrough(py, "subtract", args, kwargs);
+        }
+        let result = match x1.elementwise_binary(&x2, BinaryOp::Sub) {
+            Ok(r) => r,
+            Err(_) => return core_numpy_passthrough(py, "subtract", args, kwargs),
+        };
+        return build_numpy_array_from_ufunc(py, &result);
+    }
     core_numpy_passthrough(py, "subtract", args, kwargs)
 }
 
@@ -16798,8 +16833,25 @@ fn multiply(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.multiply. Element-wise x1*x2 with numpy's
-    // broadcasting and dtype-promotion rules.
+    // Fast path for simple two-arg calls
+    if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
+        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "multiply(x1)") {
+            Ok(arr) => arr,
+            Err(_) => return core_numpy_passthrough(py, "multiply", args, kwargs),
+        };
+        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "multiply(x2)") {
+            Ok(arr) => arr,
+            Err(_) => return core_numpy_passthrough(py, "multiply", args, kwargs),
+        };
+        if x1.has_integer_sidecar() || x2.has_integer_sidecar() {
+            return core_numpy_passthrough(py, "multiply", args, kwargs);
+        }
+        let result = match x1.elementwise_binary(&x2, BinaryOp::Mul) {
+            Ok(r) => r,
+            Err(_) => return core_numpy_passthrough(py, "multiply", args, kwargs),
+        };
+        return build_numpy_array_from_ufunc(py, &result);
+    }
     core_numpy_passthrough(py, "multiply", args, kwargs)
 }
 
@@ -23856,7 +23908,14 @@ fn matmul(
         let kw = kwargs_for_fallback.as_ref().map(|k| k.bind(py));
         match &out_for_fallback {
             Some(o) => Ok(matmul_fn
-                .call((x1_for_fallback.bind(py), x2_for_fallback.bind(py), o.bind(py)), kw)?
+                .call(
+                    (
+                        x1_for_fallback.bind(py),
+                        x2_for_fallback.bind(py),
+                        o.bind(py),
+                    ),
+                    kw,
+                )?
                 .unbind()),
             None => Ok(matmul_fn
                 .call((x1_for_fallback.bind(py), x2_for_fallback.bind(py)), kw)?
