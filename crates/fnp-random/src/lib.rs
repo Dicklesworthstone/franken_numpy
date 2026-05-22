@@ -4330,6 +4330,31 @@ impl Generator {
                 })
                 .collect());
         }
+        if a <= 1.0 && b <= 1.0 {
+            return Ok((0..size)
+                .map(|_| {
+                    loop {
+                        let u = self.next_f64();
+                        let v = self.next_f64();
+                        let x = u.powf(1.0 / a);
+                        let y = v.powf(1.0 / b);
+                        let x_plus_y = x + y;
+                        if x_plus_y <= 1.0 && u + v > 0.0 {
+                            if x > 0.0 && y > 0.0 {
+                                return x / x_plus_y;
+                            }
+                            let log_x = u.ln() / a;
+                            let log_y = v.ln() / b;
+                            let delta = log_x - log_y;
+                            if delta > 0.0 {
+                                return (-(-delta).exp().ln_1p()).exp();
+                            }
+                            return (delta - delta.exp().ln_1p()).exp();
+                        }
+                    }
+                })
+                .collect());
+        }
         Ok((0..size)
             .map(|_| {
                 let x = self.sample_gamma(a);
@@ -11496,6 +11521,35 @@ for child in rng.spawn(n_children):
             0.10894170824615793,
         ];
         assert_f64_seq("beta", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_beta_johnk_small_shapes() {
+        let mut g = oracle_gen();
+        let vals = g.beta(0.5, 0.75, 10).unwrap();
+        let expected = [
+            0.158_906_203_786_056_74,
+            0.794_753_143_344_044_1,
+            0.459_937_337_503_706_25,
+            0.324_702_640_390_538_4,
+            0.978_683_595_230_560_7,
+            0.012_558_725_779_741_31,
+            0.232_973_517_119_089_92,
+            0.725_962_313_205_795_1,
+            0.064_895_666_879_578_36,
+            0.818_384_242_150_740_6,
+        ];
+        assert_f64_seq("beta_johnk", &vals, &expected);
+
+        let after = g.random(5);
+        let expected_after = [
+            0.424_873_506_439_447_66,
+            0.291_075_112_090_811_05,
+            0.124_041_679_968_191_04,
+            0.469_282_645_343_592_54,
+            0.725_100_797_231_033_2,
+        ];
+        assert_f64_seq("beta_johnk_after", &after, &expected_after);
     }
 
     #[test]
