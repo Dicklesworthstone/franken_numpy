@@ -402,3 +402,22 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+#[test]
+fn einsum_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(9, dtype=np.float64).reshape(3, 3)
+fnp_result = fnp.einsum('ii', a)
+np_result = np.einsum('ii', a)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "einsum scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
