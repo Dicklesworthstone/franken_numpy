@@ -551,3 +551,26 @@ print(fnp.gcd(a, a).tolist())
 
     Ok(())
 }
+
+#[test]
+fn gcd_lcm_scalar_return_type_matches_numpy() -> Result<(), String> {
+    for func in &["gcd", "lcm"] {
+        let script = format!(
+            "import numpy as np; x = np.int64(12); y = np.int64(8); r = np.{func}(x, y); print(type(r).__name__, r)"
+        );
+        let numpy_result = numpy_oracle(&script)?;
+
+        let rust_script = fnp_script(format!(
+            "x = np.int64(12); y = np.int64(8); r = fnp.{func}(x, y); print(type(r).__name__, r)"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+
+        assert_eq!(
+            numpy_result.trim(),
+            rust_result.trim(),
+            "{func} scalar return type mismatch\nnumpy: {numpy_result}\nfnp: {rust_result}"
+        );
+    }
+
+    Ok(())
+}

@@ -42,9 +42,9 @@ use fnp_ufunc::{
     bitwise_xor as ufunc_bitwise_xor, copysign as ufunc_copysign, divide as ufunc_divide,
     divmod_arrays as ufunc_divmod, equal as ufunc_equal, float_power as ufunc_float_power,
     fmax as ufunc_fmax, fmin as ufunc_fmin, fmod as ufunc_fmod, frexp as ufunc_frexp,
-    gcd_arrays as ufunc_gcd, greater as ufunc_greater, greater_equal as ufunc_greater_equal,
+    greater as ufunc_greater, greater_equal as ufunc_greater_equal,
     heaviside as ufunc_heaviside, hypot as ufunc_hypot, invert as ufunc_invert,
-    isneginf as ufunc_isneginf, isposinf as ufunc_isposinf, lcm_arrays as ufunc_lcm,
+    isneginf as ufunc_isneginf, isposinf as ufunc_isposinf,
     ldexp as ufunc_ldexp, left_shift as ufunc_left_shift, less as ufunc_less,
     less_equal as ufunc_less_equal, logaddexp as ufunc_logaddexp, logaddexp2 as ufunc_logaddexp2,
     logical_and as ufunc_logical_and, logical_not as ufunc_logical_not,
@@ -14433,14 +14433,8 @@ fn native_binary_gcd_or_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "gcd(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "gcd(x2)")?;
-        let result = ufunc_gcd(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough(py, "gcd", args, kwargs)
-    }
+    // Delegate to NumPy to preserve integer dtype and scalar return type.
+    core_numpy_passthrough(py, "gcd", args, kwargs)
 }
 
 fn native_binary_lcm_or_passthrough(
@@ -14448,14 +14442,8 @@ fn native_binary_lcm_or_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "lcm(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "lcm(x2)")?;
-        let result = ufunc_lcm(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough(py, "lcm", args, kwargs)
-    }
+    // Delegate to NumPy to preserve integer dtype and scalar return type.
+    core_numpy_passthrough(py, "lcm", args, kwargs)
 }
 
 fn native_binary_float_power_or_passthrough(
