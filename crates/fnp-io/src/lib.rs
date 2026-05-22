@@ -2190,7 +2190,13 @@ fn write_savetxt_int(output: &mut String, v: f64) -> Result<(), IOError> {
             "cannot convert float infinity to integer",
         ));
     }
-    write!(output, "{}", v as i64).map_err(|_| IOError::WriteContractViolation("formatting failed"))
+    let truncated = v.trunc();
+    if truncated.to_bits() & 0x7fff_ffff_ffff_ffff == 0 {
+        output.push('0');
+        return Ok(());
+    }
+    write!(output, "{truncated:.0}")
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))
 }
 
 fn write_savetxt_exp(
@@ -5233,6 +5239,31 @@ mm.flush()
         };
         let output = savetxt(&values, 1, 2, &cfg).unwrap();
         assert_eq!(output, "1 -1\n");
+    }
+
+    #[test]
+    fn savetxt_integer_format_handles_large_finite_values_like_numpy() {
+        let values = vec![1e20, -1e20, 9.223_372_036_854_776e18];
+        let cfg = SaveTxtConfig {
+            fmt: "%d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 3, &cfg).unwrap();
+        assert_eq!(
+            output,
+            "100000000000000000000 -100000000000000000000 9223372036854775808\n"
+        );
+    }
+
+    #[test]
+    fn savetxt_integer_format_negative_zero_matches_numpy() {
+        let values = vec![-0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "0\n");
     }
 
     #[test]
