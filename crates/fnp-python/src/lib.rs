@@ -9595,6 +9595,12 @@ fn spacing(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (x.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return Ok(numpy.getattr("sign")?.call1((arr,))?.unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "sign(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Sign))
 }

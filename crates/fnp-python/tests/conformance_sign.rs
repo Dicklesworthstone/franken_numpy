@@ -146,3 +146,19 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn sign_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, -2+2j, 0+0j, 3-4j], dtype=np.complex128)
+fnp_result = fnp.sign(z)
+np_result = np.sign(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sign complex should match numpy");
+    Ok(())
+}
