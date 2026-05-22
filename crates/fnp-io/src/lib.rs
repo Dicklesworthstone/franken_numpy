@@ -2152,6 +2152,7 @@ enum SaveTxtFormat {
     },
     Fixed {
         precision: usize,
+        uppercase: bool,
         width: Option<usize>,
         padding: SaveTxtPadding,
         alignment: SaveTxtAlignment,
@@ -2250,6 +2251,16 @@ fn savetxt_format_from_spec(spec: SaveTxtFormatSpec) -> SaveTxtFormat {
         },
         'f' => SaveTxtFormat::Fixed {
             precision: spec.precision.unwrap_or(6),
+            uppercase: false,
+            width: spec.width,
+            padding: spec.padding,
+            alignment: spec.alignment,
+            sign: spec.sign,
+            alternate: spec.alternate,
+        },
+        'F' => SaveTxtFormat::Fixed {
+            precision: spec.precision.unwrap_or(6),
+            uppercase: true,
             width: spec.width,
             padding: spec.padding,
             alignment: spec.alignment,
@@ -2292,7 +2303,10 @@ fn find_savetxt_format_spec(fmt: &str) -> Option<(usize, usize, SaveTxtFormatSpe
         let tail_start = start + 1;
         let tail = fmt.get(tail_start..)?;
         for (offset, specifier) in tail.char_indices() {
-            if !matches!(specifier, 'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'g' | 'G') {
+            if !matches!(
+                specifier,
+                'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G'
+            ) {
                 continue;
             }
             let end = tail_start + offset + specifier.len_utf8();
@@ -2319,7 +2333,10 @@ struct SaveTxtFormatSpec {
 fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
     let rest = fmt.strip_prefix('%')?;
     let specifier = rest.chars().last()?;
-    if !matches!(specifier, 'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'g' | 'G') {
+    if !matches!(
+        specifier,
+        'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G'
+    ) {
         return None;
     }
 
@@ -2499,6 +2516,36 @@ fn write_savetxt_int(output: &mut String, v: f64, precision: Option<usize>) -> R
     output
         .write_str(&digits)
         .map_err(|_| IOError::WriteContractViolation("formatting failed"))
+}
+
+fn write_savetxt_fixed(
+    output: &mut String,
+    v: f64,
+    precision: usize,
+    uppercase: bool,
+    alternate: bool,
+) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    if v.is_nan() {
+        output.push_str(if uppercase { "NAN" } else { "nan" });
+        return Ok(());
+    }
+    if v.is_infinite() {
+        if v.is_sign_negative() {
+            output.push_str(if uppercase { "-INF" } else { "-inf" });
+        } else {
+            output.push_str(if uppercase { "INF" } else { "inf" });
+        }
+        return Ok(());
+    }
+
+    write!(output, "{v:.precision$}")
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+    if alternate && precision == 0 {
+        output.push('.');
+    }
+    Ok(())
 }
 
 fn trim_savetxt_general_fraction(text: &mut String) {
@@ -2731,6 +2778,7 @@ pub fn savetxt(
                 }
                 SaveTxtFormat::Fixed {
                     precision,
+                    uppercase,
                     width,
                     padding,
                     alignment,
@@ -2743,15 +2791,7 @@ pub fn savetxt(
                         padding,
                         alignment,
                         sign,
-                        |cell| {
-                            write!(cell, "{v:.precision$}").map_err(|_| {
-                                IOError::WriteContractViolation("formatting failed")
-                            })?;
-                            if alternate && precision == 0 && v.is_finite() {
-                                cell.push('.');
-                            }
-                            Ok(())
-                        },
+                        |cell| write_savetxt_fixed(cell, v, precision, uppercase, alternate),
                     )?;
                 }
                 SaveTxtFormat::Int {
@@ -5725,6 +5765,39 @@ mm.flush()
         };
         let output = savetxt(&values, 1, 3, &cfg).unwrap();
         assert_eq!(output, "NAN INF -INF\n");
+    }
+
+    #[test]
+    fn savetxt_fixed_format_formats_nan_and_inf_like_numpy() {
+        let values = vec![1.2, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%.2f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(output, "1.20\nnan\ninf\n-inf\n");
+    }
+
+    #[test]
+    fn savetxt_uppercase_fixed_format_matches_numpy() {
+        let values = vec![1.2, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%.2F",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(output, "1.20\nNAN\nINF\n-INF\n");
+    }
+
+    #[test]
+    fn savetxt_uppercase_fixed_alternate_precision_zero_matches_numpy() {
+        let values = vec![1.2, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%#.0F",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(output, "1.\nNAN\nINF\n-INF\n");
     }
 
     #[test]
