@@ -552,3 +552,87 @@ print(np.allclose(result, expected))
     assert_eq!(result.trim(), "True", "outer complex should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// norm tests with different orders
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn norm_vector_l1() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, -2, 3, -4], dtype=np.float64)
+fnp_result = fnp.linalg.norm(a, ord=1)
+np_result = np.linalg.norm(a, ord=1)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "norm L1 should match numpy");
+    Ok(())
+}
+
+#[test]
+fn norm_vector_l2() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([3, 4], dtype=np.float64)
+fnp_result = fnp.linalg.norm(a, ord=2)
+np_result = np.linalg.norm(a, ord=2)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "norm L2 should match numpy");
+    Ok(())
+}
+
+#[test]
+fn norm_vector_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, -5, 3], dtype=np.float64)
+fnp_result = fnp.linalg.norm(a, ord=np.inf)
+np_result = np.linalg.norm(a, ord=np.inf)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "norm inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn norm_matrix_fro() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1, 2], [3, 4]], dtype=np.float64)
+fnp_result = fnp.linalg.norm(a, ord='fro')
+np_result = np.linalg.norm(a, ord='fro')
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "norm Frobenius should match numpy");
+    Ok(())
+}
+
+#[test]
+fn norm_matrix_nuc() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1, 2], [3, 4]], dtype=np.float64)
+fnp_result = fnp.linalg.norm(a, ord='nuc')
+np_result = np.linalg.norm(a, ord='nuc')
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "norm nuclear should match numpy");
+    Ok(())
+}
