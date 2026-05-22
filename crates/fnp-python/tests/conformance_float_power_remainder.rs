@@ -523,3 +523,23 @@ fn float_power_empty_array_match_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+#[test]
+fn float_power_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(2.0)
+y = np.float64(3.0)
+fnp_result = fnp.float_power(x, y)
+np_result = np.float_power(x, y)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "float_power scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
