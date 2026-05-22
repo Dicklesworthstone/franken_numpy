@@ -57757,12 +57757,13 @@ print(json.dumps(payload))
     #[test]
     fn reshape_order_f() {
         // 2x3 C-order: [[1,2,3],[4,5,6]] stored as [1,2,3,4,5,6]
-        // Reshape to 3x2 F-order should give [[1,4],[2,5],[3,6]] stored as [1,4,2,5,3,6]
+        // Reshape to 3x2 F-order: read source column-major [1,4,2,5,3,6],
+        // then fill output column-major → [[1,5],[4,3],[2,6]] stored [1,5,4,3,2,6]
         let a =
             UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let r = a.reshape_order(&[3, 2], "F").unwrap();
         assert_eq!(r.shape(), &[3, 2]);
-        assert_eq!(r.values(), &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+        assert_eq!(r.values(), &[1.0, 5.0, 4.0, 3.0, 2.0, 6.0]);
     }
 
     #[test]
