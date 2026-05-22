@@ -543,7 +543,15 @@ print(np.array_equal(reconstructed, a))
 
 #[test]
 fn arithmetic_scalar_return_type_matches_numpy() -> Result<(), String> {
-    let binary_funcs = ["add", "subtract", "multiply", "divide", "mod"];
+    let binary_funcs = [
+        "add",
+        "subtract",
+        "multiply",
+        "divide",
+        "floor_divide",
+        "true_divide",
+        "mod",
+    ];
     for func in binary_funcs {
         let script = fnp_script(format!(
             r#"
