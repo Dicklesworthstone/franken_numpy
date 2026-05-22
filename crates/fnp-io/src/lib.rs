@@ -2050,6 +2050,61 @@ pub fn loadtxt_usecols(
     })
 }
 
+/// Load data from text with NumPy-style signed column selection.
+/// Negative columns are resolved relative to each row's width, so `-1` selects the
+/// last column and mixed selections such as `[-1, 0]` preserve request order.
+pub fn loadtxt_usecols_signed(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    skiprows: usize,
+    max_rows: usize,
+    usecols: Option<&[isize]>,
+) -> Result<TextArrayData, IOError> {
+    let mut values = Vec::new();
+    let mut ncols: Option<usize> = None;
+    let mut nrows = 0usize;
+    for (line_idx, line) in text.lines().enumerate() {
+        if line_idx < skiprows {
+            continue;
+        }
+        let trimmed = strip_text_comment(line, comments).trim();
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
+        if nrows >= max_rows {
+            break;
+        }
+        let row_vals = if let Some(cols) = usecols {
+            parse_loadtxt_row_usecols_signed(trimmed, delimiter, cols)?
+        } else {
+            parse_loadtxt_row(trimmed, delimiter)?
+        };
+
+        match ncols {
+            None => ncols = Some(row_vals.len()),
+            Some(expected) if row_vals.len() != expected => {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "loadtxt: inconsistent number of columns",
+                ));
+            }
+            _ => {}
+        }
+        if values.len() + row_vals.len() > MAX_TEXT_ELEMENTS {
+            return Err(IOError::ReadPayloadIncomplete(
+                "loadtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+            ));
+        }
+        values.extend(row_vals);
+        nrows += 1;
+    }
+    Ok(TextArrayData {
+        values,
+        nrows,
+        ncols: ncols.unwrap_or(0),
+    })
+}
+
 fn parse_loadtxt_row(trimmed: &str, delimiter: char) -> Result<Vec<f64>, IOError> {
     let parsed: Result<Vec<f64>, _> = if delimiter == ' ' {
         trimmed
@@ -2123,6 +2178,66 @@ fn parse_loadtxt_row_usecols(
         return Err(IOError::ReadPayloadIncomplete(
             "loadtxt: usecols index out of bounds",
         ));
+    }
+
+    Ok(selected)
+}
+
+fn split_loadtxt_fields(trimmed: &str, delimiter: char) -> Vec<&str> {
+    if delimiter == ' ' {
+        trimmed.split_whitespace().collect()
+    } else {
+        trimmed.split(delimiter).collect()
+    }
+}
+
+fn resolve_signed_usecol(col: isize, row_width: usize) -> Result<usize, IOError> {
+    let idx = if col < 0 {
+        let offset = col
+            .checked_neg()
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or(IOError::ReadPayloadIncomplete(
+                "loadtxt: usecols index out of bounds",
+            ))?;
+        if offset == 0 || offset > row_width {
+            return Err(IOError::ReadPayloadIncomplete(
+                "loadtxt: usecols index out of bounds",
+            ));
+        }
+        row_width - offset
+    } else {
+        usize::try_from(col)
+            .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: usecols index out of bounds"))?
+    };
+
+    if idx >= row_width {
+        return Err(IOError::ReadPayloadIncomplete(
+            "loadtxt: usecols index out of bounds",
+        ));
+    }
+
+    Ok(idx)
+}
+
+fn parse_loadtxt_row_usecols_signed(
+    trimmed: &str,
+    delimiter: char,
+    cols: &[isize],
+) -> Result<Vec<f64>, IOError> {
+    if cols.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let fields = split_loadtxt_fields(trimmed, delimiter);
+    let mut selected = Vec::with_capacity(cols.len());
+
+    for &col in cols {
+        let idx = resolve_signed_usecol(col, fields.len())?;
+        let value = fields[idx]
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
+        selected.push(value);
     }
 
     Ok(selected)
@@ -5175,14 +5290,15 @@ mod tests {
         fromfile, fromfile_complex, fromfile_strings, fromfile_structured, fromfile_text,
         fromfile_text_with_budget, fromstring, genfromtxt, genfromtxt_full, load, load_auto,
         load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_unpack,
-        loadtxt_usecols, memmap, memmap_npy, open_memmap, parse_structured_descr, read_npy_bytes,
-        read_npz_bytes, save, save_complex, save_strings, save_structured, savetxt, savez,
-        savez_compressed, synthesize_npz_member_names, tobytes, tofile, tofile_complex,
-        tofile_strings, tofile_structured, tofile_text, tostring, validate_descriptor_roundtrip,
-        validate_header_schema, validate_io_policy_metadata, validate_magic_version,
-        validate_memmap_contract, validate_npz_archive_budget, validate_read_payload,
-        validate_write_contract, write_npy_bytes, write_npy_bytes_with_version, write_npy_preamble,
-        write_npz_bytes, write_npz_bytes_with_compression,
+        loadtxt_usecols, loadtxt_usecols_signed, memmap, memmap_npy, open_memmap,
+        parse_structured_descr, read_npy_bytes, read_npz_bytes, save, save_complex, save_strings,
+        save_structured, savetxt, savez, savez_compressed, synthesize_npz_member_names, tobytes,
+        tofile, tofile_complex, tofile_strings, tofile_structured, tofile_text, tostring,
+        validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
+        validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
+        validate_read_payload, validate_write_contract, write_npy_bytes,
+        write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
+        write_npz_bytes_with_compression,
     };
 
     fn packet009_artifacts() -> Vec<String> {
@@ -7250,6 +7366,50 @@ mm.flush()
         let text = "1,2,3\n4,5,6\n";
         let err = loadtxt_usecols(text, ',', '#', 0, usize::MAX, Some(&[5]))
             .expect_err("usecols out of bounds");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+    }
+
+    #[test]
+    fn loadtxt_signed_usecols_selects_negative_columns_like_numpy() {
+        let text = "1 2 3\n4 5 6\n";
+        let result = loadtxt_usecols_signed(text, ' ', '#', 0, usize::MAX, Some(&[-1])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 1);
+        assert_eq!(result.values, vec![3.0, 6.0]);
+    }
+
+    #[test]
+    fn loadtxt_signed_usecols_preserves_mixed_order_like_numpy() {
+        let text = "1 2 3\n4 5 6\n";
+        let result = loadtxt_usecols_signed(text, ' ', '#', 0, usize::MAX, Some(&[-1, 0])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![3.0, 1.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn loadtxt_signed_usecols_resolves_negative_indices_per_row_width() {
+        let text = "1 2\n3 4 5\n";
+        let result = loadtxt_usecols_signed(text, ' ', '#', 0, usize::MAX, Some(&[-1, 0])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![2.0, 1.0, 5.0, 3.0]);
+    }
+
+    #[test]
+    fn loadtxt_signed_usecols_ignores_unselected_nonnumeric_columns() {
+        let text = "1,skip,3\n4,nope,6\n";
+        let result = loadtxt_usecols_signed(text, ',', '#', 0, usize::MAX, Some(&[-1, 0])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![3.0, 1.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn loadtxt_signed_usecols_rejects_negative_out_of_bounds_like_numpy() {
+        let text = "1 2\n3 4 5\n";
+        let err = loadtxt_usecols_signed(text, ' ', '#', 0, usize::MAX, Some(&[-3]))
+            .expect_err("negative usecols out of bounds");
         assert_eq!(err.reason_code(), "io_read_payload_incomplete");
     }
 
