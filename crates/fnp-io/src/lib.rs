@@ -2164,6 +2164,11 @@ enum SaveTxtFormat {
         width: Option<usize>,
         alignment: SaveTxtAlignment,
     },
+    Repr {
+        precision: Option<usize>,
+        width: Option<usize>,
+        alignment: SaveTxtAlignment,
+    },
     General {
         precision: usize,
         uppercase: bool,
@@ -2352,6 +2357,11 @@ fn savetxt_format_from_spec(spec: SaveTxtFormatSpec) -> SaveTxtFormat {
             width: spec.width,
             alignment: spec.alignment,
         },
+        'a' | 'r' => SaveTxtFormat::Repr {
+            precision: spec.precision,
+            width: spec.width,
+            alignment: spec.alignment,
+        },
         'g' => SaveTxtFormat::General {
             precision: spec.precision.unwrap_or(6),
             uppercase: false,
@@ -2383,7 +2393,7 @@ fn parse_savetxt_format_spec_at(fmt: &str, start: usize) -> Option<(usize, SaveT
     for (offset, specifier) in tail.char_indices() {
         if !matches!(
             specifier,
-            'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 's'
+            'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 's' | 'a' | 'r'
         ) {
             continue;
         }
@@ -2413,7 +2423,7 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
     let specifier = rest.chars().last()?;
     if !matches!(
         specifier,
-        'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 's'
+        'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 's' | 'a' | 'r'
     ) {
         return None;
     }
@@ -2678,6 +2688,19 @@ fn write_savetxt_string(
     Ok(())
 }
 
+fn write_savetxt_repr(
+    output: &mut String,
+    v: f64,
+    precision: Option<usize>,
+) -> Result<(), IOError> {
+    let mut text = format!("np.float64({})", numpy_float_string(v)?);
+    if let Some(precision) = precision {
+        text.truncate(precision.min(text.len()));
+    }
+    output.push_str(&text);
+    Ok(())
+}
+
 fn trim_savetxt_general_fraction(text: &mut String) {
     if !text.contains('.') {
         return;
@@ -2906,6 +2929,18 @@ fn write_savetxt_value(output: &mut String, format: SaveTxtFormat, v: f64) -> Re
             alignment,
             SaveTxtSign::Default,
             |cell| write_savetxt_string(cell, v, precision),
+        ),
+        SaveTxtFormat::Repr {
+            precision,
+            width,
+            alignment,
+        } => write_savetxt_with_width(
+            output,
+            width,
+            SaveTxtPadding::Space,
+            alignment,
+            SaveTxtSign::Default,
+            |cell| write_savetxt_repr(cell, v, precision),
         ),
         SaveTxtFormat::General {
             precision,
@@ -5913,6 +5948,52 @@ mm.flush()
         assert_eq!(
             savetxt(&values, 2, 1, &precision).unwrap(),
             "1.2       \n-3.       \n"
+        );
+    }
+
+    #[test]
+    fn savetxt_repr_format_matches_numpy_float_scalar_repr() {
+        let values = vec![1.0, 1e20, f64::NAN, f64::INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%r",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(
+            output,
+            "np.float64(1.0)\nnp.float64(1e+20)\nnp.float64(nan)\nnp.float64(inf)\n"
+        );
+    }
+
+    #[test]
+    fn savetxt_ascii_format_matches_repr_for_numeric_scalars() {
+        let values = vec![1.0, -0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%a",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "np.float64(1.0)\nnp.float64(-0.0)\n");
+    }
+
+    #[test]
+    fn savetxt_repr_format_width_and_precision_match_numpy() {
+        let values = vec![1.0];
+        let width = SaveTxtConfig {
+            fmt: "%20r",
+            ..SaveTxtConfig::default()
+        };
+        let precision = SaveTxtConfig {
+            fmt: "%-20.8r",
+            ..SaveTxtConfig::default()
+        };
+        assert_eq!(
+            savetxt(&values, 1, 1, &width).unwrap(),
+            "     np.float64(1.0)\n"
+        );
+        assert_eq!(
+            savetxt(&values, 1, 1, &precision).unwrap(),
+            "np.float            \n"
         );
     }
 
