@@ -140,6 +140,41 @@ print(np.allclose(fnp_recon, a))
     Ok(())
 }
 
+#[test]
+fn cholesky_identity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.eye(5)
+fnp_l = fnp.linalg.cholesky(a)
+np_l = np.linalg.cholesky(a)
+# Cholesky of identity is identity
+print(np.allclose(fnp_l, np_l) and np.allclose(fnp_l, np.eye(5)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cholesky of identity should be identity");
+    Ok(())
+}
+
+#[test]
+fn cholesky_diagonal() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Diagonal positive definite matrix
+a = np.diag([4.0, 9.0, 16.0, 25.0])
+fnp_l = fnp.linalg.cholesky(a)
+np_l = np.linalg.cholesky(a)
+# Should be diagonal with sqrt of original diagonal
+print(np.allclose(fnp_l, np_l))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cholesky diagonal should match numpy");
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // eigh
 // ─────────────────────────────────────────────────────────────────────────────
@@ -181,6 +216,40 @@ print(np.allclose(fnp_vals, np_vals))
     );
     let result = numpy_oracle(&script)?;
     assert_eq!(result.trim(), "True", "eigvalsh basic should match numpy");
+    Ok(())
+}
+
+#[test]
+fn eigvalsh_identity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.eye(4)
+fnp_vals = fnp.linalg.eigvalsh(a)
+np_vals = np.linalg.eigvalsh(a)
+# Identity has all eigenvalues = 1
+print(np.allclose(fnp_vals, np.ones(4)) and np.allclose(np_vals, np.ones(4)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "eigvalsh identity should have eigenvalues 1");
+    Ok(())
+}
+
+#[test]
+fn eigvalsh_diagonal() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Diagonal matrix eigenvalues are the diagonal elements
+a = np.diag([1.0, 2.0, 3.0, 4.0])
+fnp_vals = fnp.linalg.eigvalsh(a)
+np_vals = np.linalg.eigvalsh(a)
+print(np.allclose(np.sort(fnp_vals), np.sort(np_vals)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "eigvalsh diagonal should match numpy");
     Ok(())
 }
 
