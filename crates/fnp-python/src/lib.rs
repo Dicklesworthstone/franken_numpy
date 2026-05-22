@@ -14219,29 +14219,12 @@ fn conjugate(
     out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Fast path: for real dtypes, conj/conjugate is a no-op.
-    // Complex dtypes require NumPy's implementation.
+    // Delegate to NumPy to preserve scalar return type for scalar inputs.
     let numpy = py.import("numpy")?;
-
-    // Fall back if out or other kwargs are provided
-    if out.is_some() || kwargs.is_some_and(|k| !k.is_empty()) {
-        return Ok(numpy
-            .getattr("conjugate")?
-            .call((x.bind(py),), kwargs)?
-            .unbind());
-    }
-
-    let array = numpy.call_method1("asarray", (x.bind(py),))?;
-    let dtype = array.getattr("dtype")?;
-    let kind = dtype.getattr("kind")?.extract::<String>()?;
-
-    if kind.as_str() == "c" {
-        // Complex array - use NumPy's conjugate
-        Ok(numpy.getattr("conjugate")?.call1((array,))?.unbind())
-    } else {
-        // Real array - conjugate is identity, return the asarray result
-        Ok(array.unbind())
-    }
+    Ok(numpy
+        .getattr("conjugate")?
+        .call((x.bind(py),), kwargs)?
+        .unbind())
 }
 
 #[pyfunction]
@@ -24266,26 +24249,9 @@ fn conj(
     out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Fast path: for real dtypes, conj is a no-op.
-    // Complex dtypes require NumPy's implementation.
+    // Delegate to NumPy to preserve scalar return type for scalar inputs.
     let numpy = py.import("numpy")?;
-
-    // Fall back if out or other kwargs are provided
-    if out.is_some() || kwargs.is_some_and(|k| !k.is_empty()) {
-        return Ok(numpy.getattr("conj")?.call((x.bind(py),), kwargs)?.unbind());
-    }
-
-    let array = numpy.call_method1("asarray", (x.bind(py),))?;
-    let dtype = array.getattr("dtype")?;
-    let kind = dtype.getattr("kind")?.extract::<String>()?;
-
-    if kind.as_str() == "c" {
-        // Complex array - use NumPy's conj
-        Ok(numpy.getattr("conj")?.call1((array,))?.unbind())
-    } else {
-        // Real array - conj is identity, return the asarray result
-        Ok(array.unbind())
-    }
+    Ok(numpy.getattr("conj")?.call((x.bind(py),), kwargs)?.unbind())
 }
 
 // Arithmetic aliases / ufunc variants
