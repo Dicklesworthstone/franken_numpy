@@ -2195,36 +2195,111 @@ enum SaveTxtSign {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ParsedSaveTxtFormat {
+enum ParsedSaveTxtFormat {
+    Scalar(ParsedSaveTxtScalarFormat),
+    Row(Vec<SaveTxtRowPart>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedSaveTxtScalarFormat {
     prefix: String,
     format: SaveTxtFormat,
     suffix: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SaveTxtRowPart {
+    Literal(String),
+    Conversion(SaveTxtFormat),
+}
+
 fn parse_savetxt_format(fmt: &str) -> ParsedSaveTxtFormat {
-    let Some((start, end, spec)) = find_savetxt_format_spec(fmt) else {
-        return ParsedSaveTxtFormat {
+    let Some(parts) = parse_savetxt_format_parts(fmt) else {
+        return ParsedSaveTxtFormat::Scalar(ParsedSaveTxtScalarFormat {
             prefix: String::new(),
             format: SaveTxtFormat::Default,
             suffix: String::new(),
-        };
+        });
     };
 
-    let prefix = &fmt[..start];
-    let suffix = &fmt[end..];
-    if prefix.contains('%') || suffix.contains('%') {
-        return ParsedSaveTxtFormat {
+    let conversion_count = parts
+        .iter()
+        .filter(|part| matches!(part, SaveTxtRowPart::Conversion(_)))
+        .count();
+    if conversion_count == 0 {
+        return ParsedSaveTxtFormat::Scalar(ParsedSaveTxtScalarFormat {
             prefix: String::new(),
             format: SaveTxtFormat::Default,
             suffix: String::new(),
-        };
+        });
+    }
+    if conversion_count > 1 {
+        return ParsedSaveTxtFormat::Row(parts);
     }
 
-    ParsedSaveTxtFormat {
-        prefix: prefix.to_string(),
-        format: savetxt_format_from_spec(spec),
-        suffix: suffix.to_string(),
+    let mut prefix = String::new();
+    let mut format = SaveTxtFormat::Default;
+    let mut suffix = String::new();
+    let mut seen_conversion = false;
+    for part in parts {
+        match part {
+            SaveTxtRowPart::Literal(text) if seen_conversion => suffix.push_str(&text),
+            SaveTxtRowPart::Literal(text) => prefix.push_str(&text),
+            SaveTxtRowPart::Conversion(parsed) => {
+                format = parsed;
+                seen_conversion = true;
+            }
+        }
     }
+    ParsedSaveTxtFormat::Scalar(ParsedSaveTxtScalarFormat {
+        prefix,
+        format,
+        suffix,
+    })
+}
+
+fn parse_savetxt_format_parts(fmt: &str) -> Option<Vec<SaveTxtRowPart>> {
+    let mut parts = Vec::new();
+    let mut literal_start = 0usize;
+    let mut cursor = 0usize;
+    while cursor < fmt.len() {
+        let tail = fmt.get(cursor..)?;
+        let Some(relative_start) = tail.find('%') else {
+            break;
+        };
+        let start = cursor + relative_start;
+        if fmt
+            .get(start + 1..)
+            .is_some_and(|tail| tail.starts_with('%'))
+        {
+            if literal_start < start {
+                parts.push(SaveTxtRowPart::Literal(
+                    fmt.get(literal_start..start)?.to_string(),
+                ));
+            }
+            parts.push(SaveTxtRowPart::Literal("%".to_string()));
+            cursor = start + 2;
+            literal_start = cursor;
+            continue;
+        }
+
+        let (end, spec) = parse_savetxt_format_spec_at(fmt, start)?;
+        if literal_start < start {
+            parts.push(SaveTxtRowPart::Literal(
+                fmt.get(literal_start..start)?.to_string(),
+            ));
+        }
+        parts.push(SaveTxtRowPart::Conversion(savetxt_format_from_spec(spec)));
+        cursor = end;
+        literal_start = end;
+    }
+
+    if literal_start < fmt.len() {
+        parts.push(SaveTxtRowPart::Literal(
+            fmt.get(literal_start..)?.to_string(),
+        ));
+    }
+    Some(parts)
 }
 
 fn savetxt_format_from_spec(spec: SaveTxtFormatSpec) -> SaveTxtFormat {
@@ -2299,32 +2374,25 @@ fn savetxt_format_from_spec(spec: SaveTxtFormatSpec) -> SaveTxtFormat {
     }
 }
 
-fn find_savetxt_format_spec(fmt: &str) -> Option<(usize, usize, SaveTxtFormatSpec)> {
-    for (start, ch) in fmt.char_indices() {
-        if !matches!(ch, '%') {
+fn parse_savetxt_format_spec_at(fmt: &str, start: usize) -> Option<(usize, SaveTxtFormatSpec)> {
+    if !fmt.get(start..)?.starts_with('%') {
+        return None;
+    }
+    let tail_start = start + 1;
+    let tail = fmt.get(tail_start..)?;
+    for (offset, specifier) in tail.char_indices() {
+        if !matches!(
+            specifier,
+            'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 's'
+        ) {
             continue;
         }
-        if fmt
-            .get(start + 1..)
-            .is_some_and(|tail| tail.starts_with('%'))
-        {
-            continue;
+        let end = tail_start + offset + specifier.len_utf8();
+        let candidate = fmt.get(start..end)?;
+        if let Some(spec) = parse_savetxt_format_spec(candidate) {
+            return Some((end, spec));
         }
-        let tail_start = start + 1;
-        let tail = fmt.get(tail_start..)?;
-        for (offset, specifier) in tail.char_indices() {
-            if !matches!(
-                specifier,
-                'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 's'
-            ) {
-                continue;
-            }
-            let end = tail_start + offset + specifier.len_utf8();
-            let candidate = fmt.get(start..end)?;
-            if let Some(spec) = parse_savetxt_format_spec(candidate) {
-                return Some((start, end, spec));
-            }
-        }
+        return None;
     }
     None
 }
@@ -2792,6 +2860,70 @@ fn push_savetxt_comment_block(output: &mut String, text: &str, comments: &str, n
     output.push_str(newline);
 }
 
+fn write_savetxt_value(output: &mut String, format: SaveTxtFormat, v: f64) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    match format {
+        SaveTxtFormat::Exp {
+            precision,
+            uppercase,
+            width,
+            padding,
+            alignment,
+            sign,
+            alternate,
+        } => write_savetxt_with_width(output, width, padding, alignment, sign, |cell| {
+            write_savetxt_exp(cell, v, precision, uppercase, alternate)
+        }),
+        SaveTxtFormat::Fixed {
+            precision,
+            uppercase,
+            width,
+            padding,
+            alignment,
+            sign,
+            alternate,
+        } => write_savetxt_with_width(output, width, padding, alignment, sign, |cell| {
+            write_savetxt_fixed(cell, v, precision, uppercase, alternate)
+        }),
+        SaveTxtFormat::Int {
+            precision,
+            width,
+            padding,
+            alignment,
+            sign,
+        } => write_savetxt_with_width(output, width, padding, alignment, sign, |cell| {
+            write_savetxt_int(cell, v, precision)
+        }),
+        SaveTxtFormat::String {
+            precision,
+            width,
+            alignment,
+        } => write_savetxt_with_width(
+            output,
+            width,
+            SaveTxtPadding::Space,
+            alignment,
+            SaveTxtSign::Default,
+            |cell| write_savetxt_string(cell, v, precision),
+        ),
+        SaveTxtFormat::General {
+            precision,
+            uppercase,
+            width,
+            padding,
+            alignment,
+            sign,
+            alternate,
+        } => write_savetxt_with_width(output, width, padding, alignment, sign, |cell| {
+            write_savetxt_general(cell, v, precision, uppercase, alternate)
+        }),
+        SaveTxtFormat::Default => {
+            write!(output, "{v}").map_err(|_| IOError::WriteContractViolation("formatting failed"))
+        }
+    }
+}
+
 /// Save data to a text string (np.savetxt equivalent).
 /// Writes row-major `values` with shape `(nrows, ncols)`.
 pub fn savetxt(
@@ -2811,107 +2943,46 @@ pub fn savetxt(
     if !config.header.is_empty() {
         push_savetxt_comment_block(&mut output, config.header, config.comments, config.newline);
     }
-    use std::fmt::Write;
-    for r in 0..nrows {
-        for c in 0..ncols {
-            if c > 0 {
-                output.push_str(config.delimiter);
+    match &fmt {
+        ParsedSaveTxtFormat::Scalar(fmt) => {
+            for r in 0..nrows {
+                for c in 0..ncols {
+                    if c > 0 {
+                        output.push_str(config.delimiter);
+                    }
+                    let v = values[r * ncols + c];
+                    output.push_str(&fmt.prefix);
+                    write_savetxt_value(&mut output, fmt.format, v)?;
+                    output.push_str(&fmt.suffix);
+                }
+                output.push_str(config.newline);
             }
-            let v = values[r * ncols + c];
-            output.push_str(&fmt.prefix);
-            match fmt.format {
-                SaveTxtFormat::Exp {
-                    precision,
-                    uppercase,
-                    width,
-                    padding,
-                    alignment,
-                    sign,
-                    alternate,
-                } => {
-                    write_savetxt_with_width(
-                        &mut output,
-                        width,
-                        padding,
-                        alignment,
-                        sign,
-                        |cell| write_savetxt_exp(cell, v, precision, uppercase, alternate),
-                    )?;
-                }
-                SaveTxtFormat::Fixed {
-                    precision,
-                    uppercase,
-                    width,
-                    padding,
-                    alignment,
-                    sign,
-                    alternate,
-                } => {
-                    write_savetxt_with_width(
-                        &mut output,
-                        width,
-                        padding,
-                        alignment,
-                        sign,
-                        |cell| write_savetxt_fixed(cell, v, precision, uppercase, alternate),
-                    )?;
-                }
-                SaveTxtFormat::Int {
-                    precision,
-                    width,
-                    padding,
-                    alignment,
-                    sign,
-                } => {
-                    write_savetxt_with_width(
-                        &mut output,
-                        width,
-                        padding,
-                        alignment,
-                        sign,
-                        |cell| write_savetxt_int(cell, v, precision),
-                    )?;
-                }
-                SaveTxtFormat::String {
-                    precision,
-                    width,
-                    alignment,
-                } => {
-                    write_savetxt_with_width(
-                        &mut output,
-                        width,
-                        SaveTxtPadding::Space,
-                        alignment,
-                        SaveTxtSign::Default,
-                        |cell| write_savetxt_string(cell, v, precision),
-                    )?;
-                }
-                SaveTxtFormat::General {
-                    precision,
-                    uppercase,
-                    width,
-                    padding,
-                    alignment,
-                    sign,
-                    alternate,
-                } => {
-                    write_savetxt_with_width(
-                        &mut output,
-                        width,
-                        padding,
-                        alignment,
-                        sign,
-                        |cell| write_savetxt_general(cell, v, precision, uppercase, alternate),
-                    )?;
-                }
-                SaveTxtFormat::Default => {
-                    write!(output, "{v}")
-                        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
-                }
-            };
-            output.push_str(&fmt.suffix);
         }
-        output.push_str(config.newline);
+        ParsedSaveTxtFormat::Row(parts) => {
+            let conversion_count = parts
+                .iter()
+                .filter(|part| matches!(part, SaveTxtRowPart::Conversion(_)))
+                .count();
+            if conversion_count != ncols {
+                return Err(IOError::WriteContractViolation(
+                    "fmt has wrong number of % formats",
+                ));
+            }
+            for r in 0..nrows {
+                let mut col = 0usize;
+                for part in parts {
+                    match part {
+                        SaveTxtRowPart::Literal(text) => output.push_str(text),
+                        SaveTxtRowPart::Conversion(format) => {
+                            let v = values[r * ncols + col];
+                            write_savetxt_value(&mut output, *format, v)?;
+                            col += 1;
+                        }
+                    }
+                }
+                output.push_str(config.newline);
+            }
+        }
     }
     if !config.footer.is_empty() {
         push_savetxt_comment_block(&mut output, config.footer, config.comments, config.newline);
@@ -5843,6 +5914,39 @@ mm.flush()
             savetxt(&values, 2, 1, &precision).unwrap(),
             "1.2       \n-3.       \n"
         );
+    }
+
+    #[test]
+    fn savetxt_multi_conversion_row_format_matches_numpy() {
+        let values = vec![1.25, 2.5, -3.75, 4.0];
+        let cfg = SaveTxtConfig {
+            fmt: "x=%0.1f y=%0.2e",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 2, &cfg).unwrap();
+        assert_eq!(output, "x=1.2 y=2.50e+00\nx=-3.8 y=4.00e+00\n");
+    }
+
+    #[test]
+    fn savetxt_multi_conversion_preserves_literals_and_ignores_delimiter() {
+        let values = vec![1.25, 2.5, -3.75, 4.0];
+        let cfg = SaveTxtConfig {
+            delimiter: "|",
+            fmt: "(%6.2f|%+06.1f)",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 2, &cfg).unwrap();
+        assert_eq!(output, "(  1.25|+002.5)\n( -3.75|+004.0)\n");
+    }
+
+    #[test]
+    fn savetxt_multi_conversion_rejects_wrong_column_count() {
+        let values = vec![1.25, 2.5];
+        let cfg = SaveTxtConfig {
+            fmt: "%0.1f %0.2f %0.3f",
+            ..SaveTxtConfig::default()
+        };
+        assert!(savetxt(&values, 1, 2, &cfg).is_err());
     }
 
     #[test]
