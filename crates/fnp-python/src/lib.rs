@@ -14389,7 +14389,7 @@ fn native_binary_arctan2_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "arctan2(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "arctan2(x2)")?;
         let result = ufunc_arctan2(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "arctan2", args, kwargs)
     }
