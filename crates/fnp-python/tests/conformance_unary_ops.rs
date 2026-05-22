@@ -134,3 +134,51 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn negative_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+2j, -3+4j, 5-6j], dtype=np.complex128)
+fnp_result = fnp.negative(z)
+np_result = np.negative(z)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "negative complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn positive_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+2j, -3+4j, 5-6j], dtype=np.complex128)
+fnp_result = fnp.positive(z)
+np_result = np.positive(z)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "positive complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn reciprocal_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, 2-1j, 3+0j], dtype=np.complex128)
+fnp_result = fnp.reciprocal(z)
+np_result = np.reciprocal(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "reciprocal complex should match numpy");
+    Ok(())
+}
