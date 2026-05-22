@@ -2137,23 +2137,27 @@ enum SaveTxtFormat {
     Int {
         width: Option<usize>,
         padding: SaveTxtPadding,
+        alignment: SaveTxtAlignment,
     },
     Exp {
         precision: usize,
         uppercase: bool,
         width: Option<usize>,
         padding: SaveTxtPadding,
+        alignment: SaveTxtAlignment,
     },
     Fixed {
         precision: usize,
         width: Option<usize>,
         padding: SaveTxtPadding,
+        alignment: SaveTxtAlignment,
     },
     General {
         precision: usize,
         uppercase: bool,
         width: Option<usize>,
         padding: SaveTxtPadding,
+        alignment: SaveTxtAlignment,
     },
 }
 
@@ -2161,6 +2165,12 @@ enum SaveTxtFormat {
 enum SaveTxtPadding {
     Space,
     Zero,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveTxtAlignment {
+    Right,
+    Left,
 }
 
 fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
@@ -2172,35 +2182,41 @@ fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
         'd' | 'i' if spec.precision.is_none() => SaveTxtFormat::Int {
             width: spec.width,
             padding: spec.padding,
+            alignment: spec.alignment,
         },
         'e' => SaveTxtFormat::Exp {
             precision: spec.precision.unwrap_or(6),
             uppercase: false,
             width: spec.width,
             padding: spec.padding,
+            alignment: spec.alignment,
         },
         'E' => SaveTxtFormat::Exp {
             precision: spec.precision.unwrap_or(6),
             uppercase: true,
             width: spec.width,
             padding: spec.padding,
+            alignment: spec.alignment,
         },
         'f' => SaveTxtFormat::Fixed {
             precision: spec.precision.unwrap_or(6),
             width: spec.width,
             padding: spec.padding,
+            alignment: spec.alignment,
         },
         'g' => SaveTxtFormat::General {
             precision: spec.precision.unwrap_or(6),
             uppercase: false,
             width: spec.width,
             padding: spec.padding,
+            alignment: spec.alignment,
         },
         'G' => SaveTxtFormat::General {
             precision: spec.precision.unwrap_or(6),
             uppercase: true,
             width: spec.width,
             padding: spec.padding,
+            alignment: spec.alignment,
         },
         _ => SaveTxtFormat::Default,
     }
@@ -2212,6 +2228,7 @@ struct SaveTxtFormatSpec {
     precision: Option<usize>,
     specifier: char,
     padding: SaveTxtPadding,
+    alignment: SaveTxtAlignment,
 }
 
 fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
@@ -2223,6 +2240,11 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
 
     let specifier_start = rest.len().checked_sub(specifier.len_utf8())?;
     let body = rest.get(..specifier_start)?;
+    let (alignment, body) = if let Some(body) = body.strip_prefix('-') {
+        (SaveTxtAlignment::Left, body)
+    } else {
+        (SaveTxtAlignment::Right, body)
+    };
     let (width_text, precision) = if let Some((width_text, precision_text)) = body.split_once('.') {
         if precision_text.is_empty() || !precision_text.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
@@ -2232,7 +2254,10 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
         (body, None)
     };
 
-    let (padding, width_text) = if width_text.len() > 1 && width_text.starts_with('0') {
+    let (padding, width_text) = if alignment == SaveTxtAlignment::Right
+        && width_text.len() > 1
+        && width_text.starts_with('0')
+    {
         (SaveTxtPadding::Zero, &width_text[1..])
     } else {
         (SaveTxtPadding::Space, width_text)
@@ -2252,6 +2277,7 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
         precision,
         specifier,
         padding,
+        alignment,
     })
 }
 
@@ -2271,18 +2297,23 @@ fn write_savetxt_with_width(
     output: &mut String,
     width: Option<usize>,
     padding: SaveTxtPadding,
+    alignment: SaveTxtAlignment,
     writer: impl FnOnce(&mut String) -> Result<(), IOError>,
 ) -> Result<(), IOError> {
     if let Some(width) = width {
         let mut cell = String::new();
         writer(&mut cell)?;
         let pad = width.saturating_sub(cell.len());
-        match padding {
-            SaveTxtPadding::Space => {
+        match (alignment, padding) {
+            (SaveTxtAlignment::Left, _) => {
+                output.push_str(&cell);
+                push_savetxt_left_padding(output, pad);
+            }
+            (SaveTxtAlignment::Right, SaveTxtPadding::Space) => {
                 push_savetxt_left_padding(output, pad);
                 output.push_str(&cell);
             }
-            SaveTxtPadding::Zero => {
+            (SaveTxtAlignment::Right, SaveTxtPadding::Zero) => {
                 if let Some(unsigned) = cell.strip_prefix('-') {
                     output.push('-');
                     push_savetxt_zero_padding(output, pad);
@@ -2505,8 +2536,9 @@ pub fn savetxt(
                     uppercase,
                     width,
                     padding,
+                    alignment,
                 } => {
-                    write_savetxt_with_width(&mut output, width, padding, |cell| {
+                    write_savetxt_with_width(&mut output, width, padding, alignment, |cell| {
                         write_savetxt_exp(cell, v, precision, uppercase)
                     })?;
                 }
@@ -2514,14 +2546,19 @@ pub fn savetxt(
                     precision,
                     width,
                     padding,
+                    alignment,
                 } => {
-                    write_savetxt_with_width(&mut output, width, padding, |cell| {
+                    write_savetxt_with_width(&mut output, width, padding, alignment, |cell| {
                         write!(cell, "{v:.precision$}")
                             .map_err(|_| IOError::WriteContractViolation("formatting failed"))
                     })?;
                 }
-                SaveTxtFormat::Int { width, padding } => {
-                    write_savetxt_with_width(&mut output, width, padding, |cell| {
+                SaveTxtFormat::Int {
+                    width,
+                    padding,
+                    alignment,
+                } => {
+                    write_savetxt_with_width(&mut output, width, padding, alignment, |cell| {
                         write_savetxt_int(cell, v)
                     })?;
                 }
@@ -2530,8 +2567,9 @@ pub fn savetxt(
                     uppercase,
                     width,
                     padding,
+                    alignment,
                 } => {
-                    write_savetxt_with_width(&mut output, width, padding, |cell| {
+                    write_savetxt_with_width(&mut output, width, padding, alignment, |cell| {
                         write_savetxt_general(cell, v, precision, uppercase)
                     })?;
                 }
@@ -5584,6 +5622,50 @@ mm.flush()
         };
         let output = savetxt(&values, 2, 1, &cfg).unwrap();
         assert_eq!(output, "0000000001\n-000000003\n");
+    }
+
+    #[test]
+    fn savetxt_fixed_format_left_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%-10.2f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "1.20      \n-3.40     \n");
+    }
+
+    #[test]
+    fn savetxt_exp_format_left_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%-10.2e",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "1.20e+00  \n-3.40e+00 \n");
+    }
+
+    #[test]
+    fn savetxt_general_format_left_width_matches_numpy() {
+        let values = vec![12345.0, -0.0012345];
+        let cfg = SaveTxtConfig {
+            fmt: "%-10.3g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "1.23e+04  \n-0.00123  \n");
+    }
+
+    #[test]
+    fn savetxt_integer_format_left_width_matches_numpy() {
+        let values = vec![1.9, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%-10d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "1         \n-3        \n");
     }
 
     #[test]
