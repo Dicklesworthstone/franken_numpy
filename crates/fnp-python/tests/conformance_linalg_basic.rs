@@ -636,3 +636,88 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "norm nuclear should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// det tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn det_2x2() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1, 2], [3, 4]], dtype=np.float64)
+fnp_result = fnp.linalg.det(a)
+np_result = np.linalg.det(a)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "det 2x2 should match numpy");
+    Ok(())
+}
+
+#[test]
+fn det_3x3() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 10]], dtype=np.float64)
+fnp_result = fnp.linalg.det(a)
+np_result = np.linalg.det(a)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "det 3x3 should match numpy");
+    Ok(())
+}
+
+#[test]
+fn det_identity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.eye(4)
+fnp_result = fnp.linalg.det(a)
+np_result = np.linalg.det(a)
+print(np.allclose(fnp_result, 1.0) and np.allclose(np_result, 1.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "det of identity should be 1");
+    Ok(())
+}
+
+#[test]
+fn det_singular() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Singular matrix (rows are linearly dependent)
+a = np.array([[1, 2], [2, 4]], dtype=np.float64)
+fnp_result = fnp.linalg.det(a)
+np_result = np.linalg.det(a)
+print(np.allclose(fnp_result, 0.0) and np.allclose(np_result, 0.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "det of singular matrix should be 0");
+    Ok(())
+}
+
+#[test]
+fn det_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+fnp_result = fnp.linalg.det(a)
+np_result = np.linalg.det(a)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "det complex should match numpy");
+    Ok(())
+}
