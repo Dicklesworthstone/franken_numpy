@@ -2463,6 +2463,7 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
     let mut sign = SaveTxtSign::Default;
     let mut alignment = SaveTxtAlignment::Right;
     let mut alternate = false;
+    let mut zero_padding = false;
     let mut body = body;
     loop {
         if let Some(rest) = body.strip_prefix('+') {
@@ -2478,6 +2479,9 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
             body = rest;
         } else if let Some(rest) = body.strip_prefix('#') {
             alternate = true;
+            body = rest;
+        } else if let Some(rest) = body.strip_prefix('0') {
+            zero_padding = true;
             body = rest;
         } else {
             break;
@@ -2498,13 +2502,10 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
         (body, None)
     };
 
-    let (padding, width_text) = if alignment == SaveTxtAlignment::Right
-        && width_text.len() > 1
-        && width_text.starts_with('0')
-    {
-        (SaveTxtPadding::Zero, &width_text[1..])
+    let padding = if alignment == SaveTxtAlignment::Right && zero_padding {
+        SaveTxtPadding::Zero
     } else {
-        (SaveTxtPadding::Space, width_text)
+        SaveTxtPadding::Space
     };
 
     let width = if width_text.is_empty() {
@@ -6478,6 +6479,24 @@ mm.flush()
         };
         let output = savetxt(&values, 2, 1, &cfg).unwrap();
         assert_eq!(output, "+000001.20\n-000003.40\n");
+    }
+
+    #[test]
+    fn savetxt_zero_flag_before_other_flags_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        for (fmt, expected) in [
+            ("%0+10.2f", "+000001.20\n-000003.40\n"),
+            ("%0 10.2f", " 000001.20\n-000003.40\n"),
+            ("%0#10.3g", "0000001.20\n-000003.40\n"),
+            ("%0-10.2f", "1.20      \n-3.40     \n"),
+        ] {
+            let cfg = SaveTxtConfig {
+                fmt,
+                ..SaveTxtConfig::default()
+            };
+            let output = savetxt(&values, 2, 1, &cfg).unwrap();
+            assert_eq!(output, expected);
+        }
     }
 
     #[test]
