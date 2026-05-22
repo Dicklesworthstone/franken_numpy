@@ -22464,6 +22464,15 @@ fn diagonal(
     axis1: isize,
     axis2: isize,
 ) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (a.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return Ok(numpy
+            .getattr("diagonal")?
+            .call1((arr, offset, axis1, axis2))?
+            .unbind());
+    }
     let a = extract_precise_numeric_array(py, a.bind(py), "diagonal(a)")?;
     let result = a.diagonal(offset, axis1, axis2).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)

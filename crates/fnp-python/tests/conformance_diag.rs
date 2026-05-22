@@ -152,3 +152,19 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "diag complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn diagonal_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+fnp_result = fnp.diagonal(a)
+np_result = np.diagonal(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diagonal complex should match numpy");
+    Ok(())
+}
