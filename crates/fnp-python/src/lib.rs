@@ -9673,6 +9673,7 @@ fn logaddexp2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny
 #[pyfunction]
 fn frexp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "frexp(x)")?;
+    let is_scalar = x.shape().is_empty();
     let (mantissas, exponents) = ufunc_frexp(&x).map_err(map_ufunc_error)?;
     let mantissa = build_numpy_array_from_ufunc(py, &mantissas)?;
     // NumPy exposes the exponent output as an integer array.
@@ -9687,9 +9688,18 @@ fn frexp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
                 .collect(),
         ),
     )?;
-    Ok(PyTuple::new(py, [mantissa.bind(py), exponent.bind(py)])?
-        .into_any()
-        .unbind())
+    // For scalar inputs, unwrap 0-d arrays to numpy scalars.
+    if is_scalar {
+        let mantissa_scalar = mantissa.bind(py).get_item(())?.unbind();
+        let exponent_scalar = exponent.bind(py).get_item(())?.unbind();
+        Ok(PyTuple::new(py, [mantissa_scalar.bind(py), exponent_scalar.bind(py)])?
+            .into_any()
+            .unbind())
+    } else {
+        Ok(PyTuple::new(py, [mantissa.bind(py), exponent.bind(py)])?
+            .into_any()
+            .unbind())
+    }
 }
 
 #[pyfunction]
@@ -9697,7 +9707,7 @@ fn modf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x = extract_numeric_array(py, x.bind(py), "modf(x)")?;
     let (fractional, integral) = ufunc_modf(&x).map_err(map_ufunc_error)?;
     let outputs = [fractional, integral];
-    build_numpy_tuple_from_ufuncs(py, &outputs)
+    build_numpy_scalar_or_array_tuple(py, &outputs)
 }
 
 #[pyfunction]
