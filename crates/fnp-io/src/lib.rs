@@ -2141,6 +2141,7 @@ enum SaveTxtFormat {
         alignment: SaveTxtAlignment,
         sign: SaveTxtSign,
     },
+    UnsupportedFloat,
     Exp {
         precision: usize,
         uppercase: bool,
@@ -2316,6 +2317,7 @@ fn savetxt_format_from_spec(spec: SaveTxtFormatSpec) -> SaveTxtFormat {
             alignment: spec.alignment,
             sign: spec.sign,
         },
+        'x' | 'X' | 'o' | 'c' => SaveTxtFormat::UnsupportedFloat,
         'e' => SaveTxtFormat::Exp {
             precision: spec.precision.unwrap_or(6),
             uppercase: false,
@@ -2393,7 +2395,21 @@ fn parse_savetxt_format_spec_at(fmt: &str, start: usize) -> Option<(usize, SaveT
     for (offset, specifier) in tail.char_indices() {
         if !matches!(
             specifier,
-            'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 's' | 'a' | 'r'
+            'd' | 'i'
+                | 'u'
+                | 'x'
+                | 'X'
+                | 'o'
+                | 'c'
+                | 'e'
+                | 'E'
+                | 'f'
+                | 'F'
+                | 'g'
+                | 'G'
+                | 's'
+                | 'a'
+                | 'r'
         ) {
             continue;
         }
@@ -2423,7 +2439,21 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
     let specifier = rest.chars().last()?;
     if !matches!(
         specifier,
-        'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 's' | 'a' | 'r'
+        'd' | 'i'
+            | 'u'
+            | 'x'
+            | 'X'
+            | 'o'
+            | 'c'
+            | 'e'
+            | 'E'
+            | 'f'
+            | 'F'
+            | 'g'
+            | 'G'
+            | 's'
+            | 'a'
+            | 'r'
     ) {
         return None;
     }
@@ -2918,6 +2948,9 @@ fn write_savetxt_value(output: &mut String, format: SaveTxtFormat, v: f64) -> Re
         } => write_savetxt_with_width(output, width, padding, alignment, sign, |cell| {
             write_savetxt_int(cell, v, precision)
         }),
+        SaveTxtFormat::UnsupportedFloat => Err(IOError::WriteContractViolation(
+            "mismatch between array dtype and format specifier",
+        )),
         SaveTxtFormat::String {
             precision,
             width,
@@ -6025,6 +6058,28 @@ mm.flush()
         let values = vec![1.25, 2.5];
         let cfg = SaveTxtConfig {
             fmt: "%0.1f %0.2f %0.3f",
+            ..SaveTxtConfig::default()
+        };
+        assert!(savetxt(&values, 1, 2, &cfg).is_err());
+    }
+
+    #[test]
+    fn savetxt_rejects_integer_like_formats_for_float_arrays_like_numpy() {
+        let values = vec![1.0, 15.0, -2.0];
+        for fmt in ["%x", "%X", "%o", "%c"] {
+            let cfg = SaveTxtConfig {
+                fmt,
+                ..SaveTxtConfig::default()
+            };
+            assert!(savetxt(&values, 3, 1, &cfg).is_err());
+        }
+    }
+
+    #[test]
+    fn savetxt_multi_conversion_rejects_integer_like_float_mismatch() {
+        let values = vec![1.0, 15.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%0.1f %x",
             ..SaveTxtConfig::default()
         };
         assert!(savetxt(&values, 1, 2, &cfg).is_err());
