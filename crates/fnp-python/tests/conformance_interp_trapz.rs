@@ -288,3 +288,24 @@ print(np.allclose(result, 20.0))
     );
     Ok(())
 }
+
+#[test]
+fn interp_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(1.5)
+xp = [1, 2, 3]
+fp = [10, 20, 30]
+fnp_result = fnp.interp(x, xp, fp)
+np_result = np.interp(x, xp, fp)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "interp scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
