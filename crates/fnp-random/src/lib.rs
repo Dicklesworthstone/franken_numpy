@@ -4292,6 +4292,12 @@ impl Generator {
         if a <= 0.0 || b <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        if a.is_nan() || b.is_nan() || a == f64::INFINITY {
+            return Ok(vec![f64::NAN; size]);
+        }
+        if b == f64::INFINITY {
+            return Ok(vec![0.0; size]);
+        }
         Ok((0..size)
             .map(|_| {
                 let x = self.sample_gamma(a);
@@ -8914,6 +8920,43 @@ for child in rng.spawn(n_children):
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
         // E[Beta(a,b)] = a/(a+b) = 2/7 ≈ 0.286
         assert!((mean - 2.0 / 7.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn beta_nonfinite_parameter_edge_cases_match_numpy() {
+        let mut invalid_a = test_generator();
+        assert_eq!(
+            invalid_a.beta(-0.0, 1.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut invalid_b = test_generator();
+        assert_eq!(
+            invalid_b.beta(1.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan_a = test_generator();
+        let nan_a_values = nan_a.beta(f64::NAN, 1.0, 3).unwrap();
+        assert!(nan_a_values.iter().all(|value| value.is_nan()));
+
+        let mut nan_b = test_generator();
+        let nan_b_values = nan_b.beta(1.0, f64::NAN, 3).unwrap();
+        assert!(nan_b_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite_a = test_generator();
+        let infinite_a_values = infinite_a.beta(f64::INFINITY, 1.0, 3).unwrap();
+        assert!(infinite_a_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite_b = test_generator();
+        assert_eq!(
+            infinite_b.beta(1.0, f64::INFINITY, 3).unwrap(),
+            vec![0.0; 3]
+        );
+
+        let mut both_infinite = test_generator();
+        let both_infinite_values = both_infinite.beta(f64::INFINITY, f64::INFINITY, 3).unwrap();
+        assert!(both_infinite_values.iter().all(|value| value.is_nan()));
     }
 
     #[test]
