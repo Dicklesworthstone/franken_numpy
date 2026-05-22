@@ -4400,9 +4400,6 @@ impl Generator {
         if left > mode || mode > right || left >= right {
             return Err(RandomError::InvalidParameter);
         }
-        if !left.is_finite() || !mode.is_finite() || !right.is_finite() {
-            return Err(RandomError::InvalidParameter);
-        }
         let base = right - left;
         let leftbase = mode - left;
         let ratio = leftbase / base;
@@ -9062,6 +9059,41 @@ for child in rng.spawn(n_children):
             "triangular_left_equals_right_after",
             &after,
             &expected_after,
+        );
+    }
+
+    #[test]
+    fn triangular_nonfinite_parameter_edge_cases_match_numpy() {
+        let mut nan_left = test_generator();
+        let nan_left_values = nan_left.triangular(f64::NAN, 0.5, 1.0, 3).unwrap();
+        assert!(nan_left_values.iter().all(|value| value.is_nan()));
+
+        let mut nan_mode = test_generator();
+        let nan_mode_values = nan_mode.triangular(0.0, f64::NAN, 1.0, 3).unwrap();
+        assert!(nan_mode_values.iter().all(|value| value.is_nan()));
+
+        let mut nan_right = test_generator();
+        let nan_right_values = nan_right.triangular(0.0, 0.5, f64::NAN, 3).unwrap();
+        assert!(nan_right_values.iter().all(|value| value.is_nan()));
+
+        let mut negative_infinite_left = test_generator();
+        assert_eq!(
+            negative_infinite_left
+                .triangular(f64::NEG_INFINITY, 0.0, 1.0, 3)
+                .unwrap(),
+            vec![f64::NEG_INFINITY; 3]
+        );
+
+        let mut infinite_right = test_generator();
+        let infinite_right_values = infinite_right
+            .triangular(0.0, 0.5, f64::INFINITY, 3)
+            .unwrap();
+        assert!(infinite_right_values.iter().all(|value| value.is_nan()));
+
+        let mut invalid_infinite_mode = test_generator();
+        assert_eq!(
+            invalid_infinite_mode.triangular(0.0, f64::INFINITY, 1.0, 1),
+            Err(RandomError::InvalidParameter)
         );
     }
 
