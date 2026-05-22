@@ -3532,8 +3532,17 @@ impl Generator {
         shape_param: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if shape_param <= 0.0 {
+        if shape_param < 0.0 || (shape_param == 0.0 && shape_param.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
+        }
+        if shape_param == 0.0 {
+            return Ok(vec![0.0; size]);
+        }
+        if shape_param.is_nan() {
+            return Ok(vec![f64::NAN; size]);
+        }
+        if shape_param.is_infinite() {
+            return Ok(vec![f64::INFINITY; size]);
         }
         Ok((0..size).map(|_| self.sample_gamma(shape_param)).collect())
     }
@@ -4133,11 +4142,25 @@ impl Generator {
         scale: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if shape_param <= 0.0 || shape_param.is_nan() {
+        if shape_param < 0.0 || (shape_param == 0.0 && shape_param.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        if scale <= 0.0 || scale.is_nan() {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
+        }
+        if shape_param.is_nan() || scale.is_nan() {
+            return Ok(vec![f64::NAN; size]);
+        }
+        if (shape_param == 0.0 && scale.is_infinite())
+            || (shape_param.is_infinite() && scale == 0.0)
+        {
+            return Ok(vec![f64::NAN; size]);
+        }
+        if shape_param == 0.0 || scale == 0.0 {
+            return Ok(vec![0.0; size]);
+        }
+        if shape_param.is_infinite() || scale.is_infinite() {
+            return Ok(vec![f64::INFINITY; size]);
         }
         Ok((0..size)
             .map(|_| self.sample_gamma(shape_param) * scale)
@@ -4341,6 +4364,9 @@ impl Generator {
     /// Chi-squared distribution with df degrees of freedom.
     pub fn chisquare(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         // Chi-squared is gamma(df/2, 2)
+        if df <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
         self.gamma(df / 2.0, 2.0, size)
     }
 
@@ -8818,6 +8844,65 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn gamma_parameter_edge_cases_match_numpy() {
+        let mut zero_shape = test_generator();
+        assert_eq!(zero_shape.gamma(0.0, 1.0, 3).unwrap(), vec![0.0; 3]);
+
+        let mut zero_scale = test_generator();
+        assert_eq!(zero_scale.gamma(1.0, 0.0, 3).unwrap(), vec![0.0; 3]);
+
+        let mut negative_zero_shape = test_generator();
+        assert_eq!(
+            negative_zero_shape.gamma(-0.0, 1.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut negative_zero_scale = test_generator();
+        assert_eq!(
+            negative_zero_scale.gamma(1.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan_shape = test_generator();
+        let nan_shape_values = nan_shape.gamma(f64::NAN, 1.0, 3).unwrap();
+        assert!(nan_shape_values.iter().all(|value| value.is_nan()));
+
+        let mut nan_scale = test_generator();
+        let nan_scale_values = nan_scale.gamma(1.0, f64::NAN, 3).unwrap();
+        assert!(nan_scale_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite_shape = test_generator();
+        assert_eq!(
+            infinite_shape.gamma(f64::INFINITY, 1.0, 3).unwrap(),
+            vec![f64::INFINITY; 3]
+        );
+
+        let mut infinite_scale = test_generator();
+        assert_eq!(
+            infinite_scale.gamma(1.0, f64::INFINITY, 3).unwrap(),
+            vec![f64::INFINITY; 3]
+        );
+
+        let mut zero_shape_infinite_scale = test_generator();
+        let zero_shape_infinite_scale_values =
+            zero_shape_infinite_scale.gamma(0.0, f64::INFINITY, 3).unwrap();
+        assert!(
+            zero_shape_infinite_scale_values
+                .iter()
+                .all(|value| value.is_nan())
+        );
+
+        let mut infinite_shape_zero_scale = test_generator();
+        let infinite_shape_zero_scale_values =
+            infinite_shape_zero_scale.gamma(f64::INFINITY, 0.0, 3).unwrap();
+        assert!(
+            infinite_shape_zero_scale_values
+                .iter()
+                .all(|value| value.is_nan())
+        );
+    }
+
+    #[test]
     fn beta_basic() {
         let mut rng = test_generator();
         let samples = rng.beta(2.0, 5.0, 1000).unwrap();
@@ -8876,6 +8961,28 @@ for child in rng.spawn(n_children):
         assert!(samples.iter().all(|&v| v > 0.0));
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
         assert!((mean - 3.0).abs() < 0.5); // E[chi2(df)] = df
+    }
+
+    #[test]
+    fn chisquare_parameter_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.chisquare(0.0, 1), Err(RandomError::InvalidParameter));
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.chisquare(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.chisquare(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite = test_generator();
+        assert_eq!(
+            infinite.chisquare(f64::INFINITY, 3).unwrap(),
+            vec![f64::INFINITY; 3]
+        );
     }
 
     #[test]
@@ -9460,6 +9567,28 @@ for child in rng.spawn(n_children):
         assert!(
             (mean - shape_param).abs() < 0.3,
             "standard_gamma mean={mean}, expected ~{shape_param}"
+        );
+    }
+
+    #[test]
+    fn standard_gamma_shape_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.standard_gamma(0.0, 3).unwrap(), vec![0.0; 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.standard_gamma(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.standard_gamma(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite = test_generator();
+        assert_eq!(
+            infinite.standard_gamma(f64::INFINITY, 3).unwrap(),
+            vec![f64::INFINITY; 3]
         );
     }
 
