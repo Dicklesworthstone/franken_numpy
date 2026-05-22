@@ -2,13 +2,30 @@
 //!
 //! Tests sin, cos, tan, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
-        .args(["-c", script])
-        .output()
+    let mut child = Command::new("python3")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| format!("python3 stdin pipe should be available\nScript: {script}"))?
+        .write_all(script.as_bytes())
+        .map_err(|error| {
+            format!("failed to write Python oracle script: {error}\nScript: {script}")
+        })?;
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for Python oracle: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
@@ -550,12 +567,11 @@ print(np.allclose(deg, roundtrip))
 #[test]
 fn trig_scalar_return_type_matches_numpy() -> Result<(), String> {
     let funcs = [
-        "sin", "cos", "tan", "arcsin", "arccos", "arctan",
-        "sinh", "cosh", "tanh", "arcsinh", "arccosh", "arctanh",
-        "deg2rad", "rad2deg",
+        "sin", "cos", "tan", "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh", "arcsinh",
+        "arccosh", "arctanh", "deg2rad", "rad2deg",
     ];
     for func in funcs {
-        let input = if func == "arccosh" { "2.0" } else if func.starts_with("arc") && !func.contains("h") { "0.5" } else { "0.5" };
+        let input = if func == "arccosh" { "2.0" } else { "0.5" };
         let script = fnp_script(format!(
             r#"
 x = np.float64({input})
