@@ -14818,15 +14818,30 @@ fn imag(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn floor_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.floor_divide (element-wise floor of x1/x2).
-    // Preserves numpy's integer/integer-> integer, float/float -> float
-    // dtype rules and numpy's division-by-zero behavior (inf/nan with
-    // RuntimeWarning on float, integer divide-by-zero warning).
     let numpy = py.import("numpy")?;
-    Ok(numpy
-        .getattr("floor_divide")?
-        .call1((x1.bind(py), x2.bind(py)))?
-        .unbind())
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr("floor_divide")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind())
+    };
+
+    let a = match extract_numeric_array(py, x1.bind(py), "floor_divide(x1)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    let b = match extract_numeric_array(py, x2.bind(py), "floor_divide(x2)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    if a.has_integer_sidecar() || b.has_integer_sidecar() {
+        return fallback();
+    }
+    let result = match a.elementwise_binary(&b, BinaryOp::FloorDivide) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
