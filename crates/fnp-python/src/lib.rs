@@ -14464,6 +14464,14 @@ fn native_binary_maximum_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let numpy = py.import("numpy")?;
+        let arr1 = numpy.call_method1("asarray", (&args.get_item(0)?,))?;
+        let arr2 = numpy.call_method1("asarray", (&args.get_item(1)?,))?;
+        let dtype1_kind = arr1.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+        let dtype2_kind = arr2.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+        if dtype1_kind == "c" || dtype2_kind == "c" {
+            return core_numpy_passthrough(py, "maximum", args, kwargs);
+        }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "maximum(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "maximum(x2)")?;
         let result = ufunc_maximum(&x1, &x2).map_err(map_ufunc_error)?;
@@ -14479,6 +14487,14 @@ fn native_binary_minimum_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let numpy = py.import("numpy")?;
+        let arr1 = numpy.call_method1("asarray", (&args.get_item(0)?,))?;
+        let arr2 = numpy.call_method1("asarray", (&args.get_item(1)?,))?;
+        let dtype1_kind = arr1.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+        let dtype2_kind = arr2.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+        if dtype1_kind == "c" || dtype2_kind == "c" {
+            return core_numpy_passthrough(py, "minimum", args, kwargs);
+        }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "minimum(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "minimum(x2)")?;
         let result = ufunc_minimum(&x1, &x2).map_err(map_ufunc_error)?;
