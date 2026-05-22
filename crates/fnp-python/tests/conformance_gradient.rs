@@ -1,0 +1,118 @@
+//! Conformance tests for numpy.gradient against NumPy oracle.
+//!
+//! Tests gradient (gradient of an N-dimensional array).
+
+use std::process::Command;
+
+fn numpy_oracle(script: &str) -> Result<String, String> {
+    let output = Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn fnp_script(body: String) -> String {
+    let library_name = format!(
+        "{}fnp_python{}",
+        std::env::consts::DLL_PREFIX,
+        std::env::consts::DLL_SUFFIX
+    );
+    let module_path = std::env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(&library_name)))
+        .unwrap_or_else(|| library_name.into());
+    let module_literal = format!("{module_path:?}");
+    format!(
+        "import importlib.util\n\
+         import numpy as np\n\
+         spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
+         fnp = importlib.util.module_from_spec(spec)\n\
+         spec.loader.exec_module(fnp)\n\
+         {body}"
+    )
+}
+
+#[test]
+fn gradient_1d_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+f = np.array([1, 2, 4, 7, 11])
+result = fnp.gradient(f)
+expected = np.gradient(f)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "gradient 1D basic should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn gradient_with_spacing() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+f = np.array([1, 2, 4, 7, 11])
+result = fnp.gradient(f, 2.0)
+expected = np.gradient(f, 2.0)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "gradient with spacing should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn gradient_2d() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+f = np.array([[1, 2, 6], [3, 4, 5], [7, 8, 9]])
+result_y, result_x = fnp.gradient(f)
+expected_y, expected_x = np.gradient(f)
+print(np.allclose(result_y, expected_y) and np.allclose(result_x, expected_x))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "gradient 2D should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn gradient_single_axis() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+f = np.array([[1, 2, 6], [3, 4, 5], [7, 8, 9]])
+result = fnp.gradient(f, axis=0)
+expected = np.gradient(f, axis=0)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "gradient single axis should match numpy"
+    );
+    Ok(())
+}
