@@ -2111,6 +2111,7 @@ pub fn loadtxt_unpack(
 #[derive(Debug, Clone)]
 pub struct SaveTxtConfig<'a> {
     pub delimiter: &'a str,
+    pub newline: &'a str,
     pub fmt: &'a str,
     pub header: &'a str,
     pub footer: &'a str,
@@ -2121,6 +2122,7 @@ impl Default for SaveTxtConfig<'_> {
     fn default() -> Self {
         Self {
             delimiter: " ",
+            newline: "\n",
             fmt: "%.18e",
             header: "",
             footer: "",
@@ -2221,7 +2223,7 @@ pub fn savetxt(
     if !config.header.is_empty() {
         output.push_str(config.comments);
         output.push_str(config.header);
-        output.push('\n');
+        output.push_str(config.newline);
     }
     use std::fmt::Write;
     for r in 0..nrows {
@@ -2248,12 +2250,12 @@ pub fn savetxt(
                 }
             };
         }
-        output.push('\n');
+        output.push_str(config.newline);
     }
     if !config.footer.is_empty() {
         output.push_str(config.comments);
         output.push_str(config.footer);
-        output.push('\n');
+        output.push_str(config.newline);
     }
     Ok(output)
 }
@@ -5161,6 +5163,33 @@ mm.flush()
         };
         let output = savetxt(&values, 1, 1, &cfg).unwrap();
         assert_eq!(output, "#h\n1.000000000000000000e+00\n#f\n");
+    }
+
+    #[test]
+    fn savetxt_custom_newline_matches_numpy() {
+        let values = vec![1.0, 2.0, 3.0, 4.0];
+        let cfg = SaveTxtConfig {
+            newline: "|",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 2, &cfg).unwrap();
+        assert_eq!(
+            output,
+            "1.000000000000000000e+00 2.000000000000000000e+00|3.000000000000000000e+00 4.000000000000000000e+00|"
+        );
+    }
+
+    #[test]
+    fn savetxt_custom_newline_applies_to_header_and_footer() {
+        let values = vec![1.0];
+        let cfg = SaveTxtConfig {
+            header: "h",
+            footer: "f",
+            newline: "\r\n",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "# h\r\n1.000000000000000000e+00\r\n# f\r\n");
     }
 
     #[test]
