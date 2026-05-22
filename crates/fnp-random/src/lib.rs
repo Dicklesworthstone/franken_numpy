@@ -4776,6 +4776,9 @@ impl Generator {
         if df <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
+        if df.is_nan() || nonc.is_nan() {
+            return Ok(vec![f64::NAN; size]);
+        }
         Ok((0..size)
             .map(|_| {
                 if df > 1.0 {
@@ -4805,6 +4808,9 @@ impl Generator {
     ) -> Result<Vec<f64>, RandomError> {
         if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
+        }
+        if dfnum.is_nan() || dfden.is_nan() || nonc.is_nan() {
+            return Ok(vec![f64::NAN; size]);
         }
         Ok((0..size)
             .map(|_| {
@@ -9720,6 +9726,13 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn noncentral_chisquare_nan_nonc_matches_numpy() {
+        let mut rng = test_generator();
+        let samples = rng.noncentral_chisquare(0.5, f64::NAN, 3).unwrap();
+        assert!(samples.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
     fn noncentral_f_positive_values() {
         let mut rng = test_generator();
         let samples = rng.noncentral_f(5.0, 10.0, 1.0, 1000).unwrap();
@@ -9734,6 +9747,13 @@ for child in rng.spawn(n_children):
             rng.noncentral_f(5.0, 10.0, -0.0, 1),
             Err(RandomError::InvalidParameter)
         );
+    }
+
+    #[test]
+    fn noncentral_f_nan_nonc_matches_numpy() {
+        let mut rng = test_generator();
+        let samples = rng.noncentral_f(0.5, 2.0, f64::NAN, 3).unwrap();
+        assert!(samples.iter().all(|value| value.is_nan()));
     }
 
     #[test]
