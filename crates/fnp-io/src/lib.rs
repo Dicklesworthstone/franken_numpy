@@ -2159,6 +2159,11 @@ enum SaveTxtFormat {
         sign: SaveTxtSign,
         alternate: bool,
     },
+    String {
+        precision: Option<usize>,
+        width: Option<usize>,
+        alignment: SaveTxtAlignment,
+    },
     General {
         precision: usize,
         uppercase: bool,
@@ -2267,6 +2272,11 @@ fn savetxt_format_from_spec(spec: SaveTxtFormatSpec) -> SaveTxtFormat {
             sign: spec.sign,
             alternate: spec.alternate,
         },
+        's' => SaveTxtFormat::String {
+            precision: spec.precision,
+            width: spec.width,
+            alignment: spec.alignment,
+        },
         'g' => SaveTxtFormat::General {
             precision: spec.precision.unwrap_or(6),
             uppercase: false,
@@ -2305,7 +2315,7 @@ fn find_savetxt_format_spec(fmt: &str) -> Option<(usize, usize, SaveTxtFormatSpe
         for (offset, specifier) in tail.char_indices() {
             if !matches!(
                 specifier,
-                'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G'
+                'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 's'
             ) {
                 continue;
             }
@@ -2335,7 +2345,7 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
     let specifier = rest.chars().last()?;
     if !matches!(
         specifier,
-        'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G'
+        'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'F' | 'g' | 'G' | 's'
     ) {
         return None;
     }
@@ -2545,6 +2555,58 @@ fn write_savetxt_fixed(
     if alternate && precision == 0 {
         output.push('.');
     }
+    Ok(())
+}
+
+fn numpy_float_string(v: f64) -> Result<String, IOError> {
+    use std::fmt::Write as _;
+
+    if v.is_nan() {
+        return Ok("nan".to_string());
+    }
+    if v.is_infinite() {
+        return Ok(if v.is_sign_negative() {
+            "-inf".to_string()
+        } else {
+            "inf".to_string()
+        });
+    }
+
+    let raw = format!("{v:?}");
+    let Some(marker) = raw.find('e').or_else(|| raw.find('E')) else {
+        return Ok(raw);
+    };
+    let mantissa = raw
+        .get(..marker)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+    let exponent = raw
+        .get(marker + 1..)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?
+        .parse::<i32>()
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+
+    let mut normalized = String::new();
+    normalized.push_str(mantissa);
+    normalized.push('e');
+    if exponent < 0 {
+        write!(&mut normalized, "-{:02}", exponent.abs())
+    } else {
+        write!(&mut normalized, "+{exponent:02}")
+    }
+    .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+    Ok(normalized)
+}
+
+fn write_savetxt_string(
+    output: &mut String,
+    v: f64,
+    precision: Option<usize>,
+) -> Result<(), IOError> {
+    let mut text = numpy_float_string(v)?;
+    if let Some(precision) = precision {
+        text.truncate(precision.min(text.len()));
+    }
+    output.push_str(&text);
     Ok(())
 }
 
@@ -2808,6 +2870,20 @@ pub fn savetxt(
                         alignment,
                         sign,
                         |cell| write_savetxt_int(cell, v, precision),
+                    )?;
+                }
+                SaveTxtFormat::String {
+                    precision,
+                    width,
+                    alignment,
+                } => {
+                    write_savetxt_with_width(
+                        &mut output,
+                        width,
+                        SaveTxtPadding::Space,
+                        alignment,
+                        SaveTxtSign::Default,
+                        |cell| write_savetxt_string(cell, v, precision),
                     )?;
                 }
                 SaveTxtFormat::General {
@@ -5724,6 +5800,49 @@ mm.flush()
         };
         let output = savetxt(&values, 2, 1, &cfg).unwrap();
         assert_eq!(output, "[+001.2]\n[-003.4]\n");
+    }
+
+    #[test]
+    fn savetxt_string_format_matches_numpy_float_strings() {
+        let values = vec![1.0, -0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%s",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 5, 1, &cfg).unwrap();
+        assert_eq!(output, "1.0\n-0.0\nnan\ninf\n-inf\n");
+    }
+
+    #[test]
+    fn savetxt_string_format_normalizes_scientific_exponents_like_numpy() {
+        let values = vec![1e20, 1e-7];
+        let cfg = SaveTxtConfig {
+            fmt: "%s",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "1e+20\n1e-07\n");
+    }
+
+    #[test]
+    fn savetxt_string_format_width_and_precision_match_numpy() {
+        let values = vec![1.2, -3.4];
+        let width = SaveTxtConfig {
+            fmt: "%10s",
+            ..SaveTxtConfig::default()
+        };
+        let precision = SaveTxtConfig {
+            fmt: "%-10.3s",
+            ..SaveTxtConfig::default()
+        };
+        assert_eq!(
+            savetxt(&values, 2, 1, &width).unwrap(),
+            "       1.2\n      -3.4\n"
+        );
+        assert_eq!(
+            savetxt(&values, 2, 1, &precision).unwrap(),
+            "1.2       \n-3.       \n"
+        );
     }
 
     #[test]
