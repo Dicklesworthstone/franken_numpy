@@ -2121,10 +2121,10 @@ impl Default for SaveTxtConfig<'_> {
     fn default() -> Self {
         Self {
             delimiter: " ",
-            fmt: "%g",
+            fmt: "%.18e",
             header: "",
             footer: "",
-            comments: "#",
+            comments: "# ",
         }
     }
 }
@@ -2160,6 +2160,48 @@ fn parse_savetxt_precision(fmt: &str, spec: char) -> Option<usize> {
     digits.parse::<usize>().ok()
 }
 
+fn write_savetxt_exp(output: &mut String, v: f64, prec: usize) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    if v.is_nan() {
+        output.push_str("nan");
+        return Ok(());
+    }
+    if v.is_infinite() {
+        if v.is_sign_negative() {
+            output.push_str("-inf");
+        } else {
+            output.push_str("inf");
+        }
+        return Ok(());
+    }
+
+    let start = output.len();
+    write!(output, "{v:.prec$e}")
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+    let tail = output
+        .get(start..)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+    let exponent_marker = tail
+        .rfind('e')
+        .map(|idx| start + idx)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+    let exponent_text = output
+        .get(exponent_marker + 1..)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+    let exponent = exponent_text
+        .parse::<i32>()
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+
+    output.truncate(exponent_marker + 1);
+    if exponent < 0 {
+        write!(output, "-{:02}", exponent.abs())
+    } else {
+        write!(output, "+{exponent:02}")
+    }
+    .map_err(|_| IOError::WriteContractViolation("formatting failed"))
+}
+
 /// Save data to a text string (np.savetxt equivalent).
 /// Writes row-major `values` with shape `(nrows, ncols)`.
 pub fn savetxt(
@@ -2178,7 +2220,6 @@ pub fn savetxt(
     let mut output = String::with_capacity(values.len() * 16);
     if !config.header.is_empty() {
         output.push_str(config.comments);
-        output.push(' ');
         output.push_str(config.header);
         output.push('\n');
     }
@@ -2191,8 +2232,7 @@ pub fn savetxt(
             let v = values[r * ncols + c];
             match fmt {
                 SaveTxtFormat::Exp(prec) => {
-                    write!(output, "{v:.prec$e}")
-                        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+                    write_savetxt_exp(&mut output, v, prec)?;
                 }
                 SaveTxtFormat::Fixed(prec) => {
                     write!(output, "{v:.prec$}")
@@ -2212,7 +2252,6 @@ pub fn savetxt(
     }
     if !config.footer.is_empty() {
         output.push_str(config.comments);
-        output.push(' ');
         output.push_str(config.footer);
         output.push('\n');
     }
@@ -5075,8 +5114,8 @@ mm.flush()
     fn savetxt_basic() {
         let values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let output = savetxt(&values, 2, 3, &SaveTxtConfig::default()).unwrap();
-        assert!(output.contains('1'));
-        assert!(output.contains('6'));
+        assert!(output.starts_with("1.000000000000000000e+00"));
+        assert!(output.contains("6.000000000000000000e+00"));
         assert_eq!(output.lines().count(), 2);
     }
 
@@ -5089,10 +5128,11 @@ mm.flush()
         };
         let output = savetxt(&values, 1, 1, &cfg).unwrap();
         let line = output.trim();
+        assert_eq!(line, "1.500000000000000000e+00");
         let mut parts = line.split('e');
         let mantissa = parts.next().expect("mantissa");
         let exponent = parts.next().expect("exponent");
-        assert!(!exponent.is_empty());
+        assert_eq!(exponent, "+00");
         assert!(parts.next().is_none());
         let frac = mantissa.split('.').nth(1).unwrap_or("");
         assert_eq!(frac.len(), 18);
@@ -5108,6 +5148,26 @@ mm.flush()
         };
         let output = savetxt(&values, 1, 2, &cfg).unwrap();
         assert!(output.starts_with("# x,y\n"));
+    }
+
+    #[test]
+    fn savetxt_custom_comments_are_verbatim_like_numpy() {
+        let values = vec![1.0];
+        let cfg = SaveTxtConfig {
+            header: "h",
+            footer: "f",
+            comments: "#",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "#h\n1.000000000000000000e+00\n#f\n");
+    }
+
+    #[test]
+    fn savetxt_formats_nan_and_inf_like_numpy() {
+        let values = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let output = savetxt(&values, 1, 3, &SaveTxtConfig::default()).unwrap();
+        assert_eq!(output, "nan inf -inf\n");
     }
 
     #[test]
