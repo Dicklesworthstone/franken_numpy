@@ -2514,7 +2514,7 @@ impl RandomState {
     }
 
     pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok(self
@@ -2530,7 +2530,7 @@ impl RandomState {
         sigma: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if sigma < 0.0 {
+        if sigma < 0.0 || (sigma == 0.0 && sigma.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -2553,7 +2553,7 @@ impl RandomState {
     }
 
     pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok(self
@@ -2564,7 +2564,7 @@ impl RandomState {
     }
 
     pub fn standard_gamma(&mut self, shape: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if shape < 0.0 {
+        if shape < 0.0 || (shape == 0.0 && shape.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -2573,7 +2573,11 @@ impl RandomState {
     }
 
     pub fn gamma(&mut self, shape: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if shape < 0.0 || scale < 0.0 {
+        if shape < 0.0
+            || (shape == 0.0 && shape.is_sign_negative())
+            || scale < 0.0
+            || (scale == 0.0 && scale.is_sign_negative())
+        {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -6452,6 +6456,35 @@ for child in rng.spawn(n_children):
         );
         assert!(zero_shape.standard_gamma(-1.0, 1).is_err());
         assert!(zero_shape.gamma(1.0, -1.0, 1).is_err());
+    }
+
+    #[test]
+    fn random_state_legacy_negative_zero_parameters_match_numpy() {
+        let mut state = RandomState::new(SeedMaterial::U64(42)).expect("state");
+        assert_eq!(
+            state.normal(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        assert_eq!(
+            state.lognormal(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        assert_eq!(
+            state.exponential(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        assert_eq!(
+            state.standard_gamma(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        assert_eq!(
+            state.gamma(-0.0, 1.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        assert_eq!(
+            state.gamma(1.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
     }
 
     #[test]
