@@ -388,3 +388,35 @@ print(np.array_equal(result, expected) and result.shape == expected.shape)
     );
     Ok(())
 }
+
+#[test]
+fn tile_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j], dtype=np.complex128)
+fnp_result = fnp.tile(a, 2)
+np_result = np.tile(a, 2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "tile complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn repeat_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j], dtype=np.complex128)
+fnp_result = fnp.repeat(a, 2)
+np_result = np.repeat(a, 2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "repeat complex should match numpy");
+    Ok(())
+}
