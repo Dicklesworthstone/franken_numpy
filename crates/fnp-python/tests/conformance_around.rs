@@ -238,3 +238,22 @@ print(np.array_equal(result, expected))
     assert_eq!(result.trim(), "True", "around should use banker's rounding");
     Ok(())
 }
+
+#[test]
+fn around_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(5.5)
+fnp_result = fnp.around(x)
+np_result = np.around(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "around scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
