@@ -14536,7 +14536,7 @@ fn native_binary_equal_or_passthrough(
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "equal", args, kwargs),
         };
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "equal", args, kwargs)
     }
@@ -14560,7 +14560,7 @@ fn native_binary_not_equal_or_passthrough(
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "not_equal", args, kwargs),
         };
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "not_equal", args, kwargs)
     }
@@ -14584,7 +14584,7 @@ fn native_binary_greater_or_passthrough(
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "greater", args, kwargs),
         };
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "greater", args, kwargs)
     }
@@ -14608,7 +14608,7 @@ fn native_binary_greater_equal_or_passthrough(
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "greater_equal", args, kwargs),
         };
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "greater_equal", args, kwargs)
     }
@@ -14632,7 +14632,7 @@ fn native_binary_less_or_passthrough(
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "less", args, kwargs),
         };
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "less", args, kwargs)
     }
@@ -14656,7 +14656,7 @@ fn native_binary_less_equal_or_passthrough(
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "less_equal", args, kwargs),
         };
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "less_equal", args, kwargs)
     }
@@ -14671,7 +14671,7 @@ fn native_binary_logical_and_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "logical_and(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "logical_and(x2)")?;
         let result = ufunc_logical_and(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "logical_and", args, kwargs)
     }
@@ -14686,7 +14686,7 @@ fn native_binary_logical_or_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "logical_or(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "logical_or(x2)")?;
         let result = ufunc_logical_or(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "logical_or", args, kwargs)
     }
@@ -14701,7 +14701,7 @@ fn native_binary_logical_xor_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "logical_xor(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "logical_xor(x2)")?;
         let result = ufunc_logical_xor(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "logical_xor", args, kwargs)
     }
@@ -14715,7 +14715,7 @@ fn native_unary_logical_not_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x = extract_numeric_array(py, &args.get_item(0)?, "logical_not(x)")?;
         let result = ufunc_logical_not(&x).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "logical_not", args, kwargs)
     }
