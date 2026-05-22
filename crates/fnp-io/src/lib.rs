@@ -2147,6 +2147,7 @@ enum SaveTxtFormat {
         padding: SaveTxtPadding,
         alignment: SaveTxtAlignment,
         sign: SaveTxtSign,
+        alternate: bool,
     },
     Fixed {
         precision: usize,
@@ -2154,6 +2155,7 @@ enum SaveTxtFormat {
         padding: SaveTxtPadding,
         alignment: SaveTxtAlignment,
         sign: SaveTxtSign,
+        alternate: bool,
     },
     General {
         precision: usize,
@@ -2162,6 +2164,7 @@ enum SaveTxtFormat {
         padding: SaveTxtPadding,
         alignment: SaveTxtAlignment,
         sign: SaveTxtSign,
+        alternate: bool,
     },
 }
 
@@ -2203,6 +2206,7 @@ fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
             padding: spec.padding,
             alignment: spec.alignment,
             sign: spec.sign,
+            alternate: spec.alternate,
         },
         'E' => SaveTxtFormat::Exp {
             precision: spec.precision.unwrap_or(6),
@@ -2211,6 +2215,7 @@ fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
             padding: spec.padding,
             alignment: spec.alignment,
             sign: spec.sign,
+            alternate: spec.alternate,
         },
         'f' => SaveTxtFormat::Fixed {
             precision: spec.precision.unwrap_or(6),
@@ -2218,6 +2223,7 @@ fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
             padding: spec.padding,
             alignment: spec.alignment,
             sign: spec.sign,
+            alternate: spec.alternate,
         },
         'g' => SaveTxtFormat::General {
             precision: spec.precision.unwrap_or(6),
@@ -2226,6 +2232,7 @@ fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
             padding: spec.padding,
             alignment: spec.alignment,
             sign: spec.sign,
+            alternate: spec.alternate,
         },
         'G' => SaveTxtFormat::General {
             precision: spec.precision.unwrap_or(6),
@@ -2234,6 +2241,7 @@ fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
             padding: spec.padding,
             alignment: spec.alignment,
             sign: spec.sign,
+            alternate: spec.alternate,
         },
         _ => SaveTxtFormat::Default,
     }
@@ -2247,6 +2255,7 @@ struct SaveTxtFormatSpec {
     padding: SaveTxtPadding,
     alignment: SaveTxtAlignment,
     sign: SaveTxtSign,
+    alternate: bool,
 }
 
 fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
@@ -2258,18 +2267,29 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
 
     let specifier_start = rest.len().checked_sub(specifier.len_utf8())?;
     let body = rest.get(..specifier_start)?;
-    let (sign, body) = if let Some(body) = body.strip_prefix('+') {
-        (SaveTxtSign::Plus, body)
-    } else if let Some(body) = body.strip_prefix(' ') {
-        (SaveTxtSign::Space, body)
-    } else {
-        (SaveTxtSign::Default, body)
-    };
-    let (alignment, body) = if let Some(body) = body.strip_prefix('-') {
-        (SaveTxtAlignment::Left, body)
-    } else {
-        (SaveTxtAlignment::Right, body)
-    };
+    let mut sign = SaveTxtSign::Default;
+    let mut alignment = SaveTxtAlignment::Right;
+    let mut alternate = false;
+    let mut body = body;
+    loop {
+        if let Some(rest) = body.strip_prefix('+') {
+            sign = SaveTxtSign::Plus;
+            body = rest;
+        } else if let Some(rest) = body.strip_prefix(' ') {
+            if sign == SaveTxtSign::Default {
+                sign = SaveTxtSign::Space;
+            }
+            body = rest;
+        } else if let Some(rest) = body.strip_prefix('-') {
+            alignment = SaveTxtAlignment::Left;
+            body = rest;
+        } else if let Some(rest) = body.strip_prefix('#') {
+            alternate = true;
+            body = rest;
+        } else {
+            break;
+        }
+    }
     let (width_text, precision) = if let Some((width_text, precision_text)) = body.split_once('.') {
         if precision_text.is_empty() || !precision_text.bytes().all(|byte| byte.is_ascii_digit()) {
             return None;
@@ -2304,6 +2324,7 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
         padding,
         alignment,
         sign,
+        alternate,
     })
 }
 
@@ -2418,6 +2439,12 @@ fn trim_savetxt_general_fraction(text: &mut String) {
     }
 }
 
+fn ensure_savetxt_decimal_point(text: &mut String) {
+    if !text.contains('.') {
+        text.push('.');
+    }
+}
+
 fn push_savetxt_normalized_exponent(
     output: &mut String,
     exponent: i32,
@@ -2439,9 +2466,11 @@ fn write_savetxt_general(
     v: f64,
     precision: usize,
     uppercase: bool,
+    alternate: bool,
 ) -> Result<(), IOError> {
     use std::fmt::Write as _;
 
+    let precision = precision.max(1);
     if v.is_nan() {
         output.push_str(if uppercase { "NAN" } else { "nan" });
         return Ok(());
@@ -2460,10 +2489,15 @@ fn write_savetxt_general(
         } else {
             output.push('0');
         }
+        if alternate {
+            output.push('.');
+            for _ in 1..precision {
+                output.push('0');
+            }
+        }
         return Ok(());
     }
 
-    let precision = precision.max(1);
     let scientific_digits = precision.saturating_sub(1);
     let mut scientific = String::new();
     write!(&mut scientific, "{v:.scientific_digits$e}")
@@ -2482,7 +2516,11 @@ fn write_savetxt_general(
             .get(..marker)
             .ok_or(IOError::WriteContractViolation("formatting failed"))?
             .to_string();
-        trim_savetxt_general_fraction(&mut mantissa);
+        if alternate {
+            ensure_savetxt_decimal_point(&mut mantissa);
+        } else {
+            trim_savetxt_general_fraction(&mut mantissa);
+        }
         output.push_str(&mantissa);
         push_savetxt_normalized_exponent(output, exponent, uppercase)
     } else {
@@ -2490,7 +2528,11 @@ fn write_savetxt_general(
         let mut fixed = String::new();
         write!(&mut fixed, "{v:.fixed_digits$}")
             .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
-        trim_savetxt_general_fraction(&mut fixed);
+        if alternate {
+            ensure_savetxt_decimal_point(&mut fixed);
+        } else {
+            trim_savetxt_general_fraction(&mut fixed);
+        }
         output.push_str(&fixed);
         Ok(())
     }
@@ -2501,6 +2543,7 @@ fn write_savetxt_exp(
     v: f64,
     prec: usize,
     uppercase: bool,
+    alternate: bool,
 ) -> Result<(), IOError> {
     use std::fmt::Write as _;
 
@@ -2535,6 +2578,14 @@ fn write_savetxt_exp(
         .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
 
     output.truncate(exponent_marker);
+    if alternate {
+        let mantissa = output
+            .get(start..)
+            .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+        if !mantissa.contains('.') {
+            output.push('.');
+        }
+    }
     output.push(if uppercase { 'E' } else { 'e' });
     if exponent < 0 {
         write!(output, "-{:02}", exponent.abs())
@@ -2592,6 +2643,7 @@ pub fn savetxt(
                     padding,
                     alignment,
                     sign,
+                    alternate,
                 } => {
                     write_savetxt_with_width(
                         &mut output,
@@ -2599,7 +2651,7 @@ pub fn savetxt(
                         padding,
                         alignment,
                         sign,
-                        |cell| write_savetxt_exp(cell, v, precision, uppercase),
+                        |cell| write_savetxt_exp(cell, v, precision, uppercase, alternate),
                     )?;
                 }
                 SaveTxtFormat::Fixed {
@@ -2608,6 +2660,7 @@ pub fn savetxt(
                     padding,
                     alignment,
                     sign,
+                    alternate,
                 } => {
                     write_savetxt_with_width(
                         &mut output,
@@ -2616,8 +2669,13 @@ pub fn savetxt(
                         alignment,
                         sign,
                         |cell| {
-                            write!(cell, "{v:.precision$}")
-                                .map_err(|_| IOError::WriteContractViolation("formatting failed"))
+                            write!(cell, "{v:.precision$}").map_err(|_| {
+                                IOError::WriteContractViolation("formatting failed")
+                            })?;
+                            if alternate && precision == 0 && v.is_finite() {
+                                cell.push('.');
+                            }
+                            Ok(())
                         },
                     )?;
                 }
@@ -2643,6 +2701,7 @@ pub fn savetxt(
                     padding,
                     alignment,
                     sign,
+                    alternate,
                 } => {
                     write_savetxt_with_width(
                         &mut output,
@@ -2650,7 +2709,7 @@ pub fn savetxt(
                         padding,
                         alignment,
                         sign,
-                        |cell| write_savetxt_general(cell, v, precision, uppercase),
+                        |cell| write_savetxt_general(cell, v, precision, uppercase, alternate),
                     )?;
                 }
                 SaveTxtFormat::Default => {
@@ -5614,6 +5673,57 @@ mm.flush()
         };
         let output = savetxt(&values, 1, 1, &cfg).unwrap();
         assert_eq!(output, "-0\n");
+    }
+
+    #[test]
+    fn savetxt_general_alternate_format_preserves_trailing_zeros_like_numpy() {
+        let values = vec![1.2, 12345.0, 0.0012, 0.0, -0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%#.3g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 5, 1, &cfg).unwrap();
+        assert_eq!(output, "1.20\n1.23e+04\n0.00120\n0.00\n-0.00\n");
+    }
+
+    #[test]
+    fn savetxt_general_alternate_format_width_matches_numpy() {
+        let values = vec![1.2, 12345.0, 0.0012, 0.0, -0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%#10.3g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 5, 1, &cfg).unwrap();
+        assert_eq!(
+            output,
+            "      1.20\n  1.23e+04\n   0.00120\n      0.00\n     -0.00\n"
+        );
+    }
+
+    #[test]
+    fn savetxt_general_alternate_precision_one_keeps_decimal_point_like_numpy() {
+        let values = vec![1.2, 12345.0, 0.0012, 0.0, -0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%#.1g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 5, 1, &cfg).unwrap();
+        assert_eq!(output, "1.\n1.e+04\n0.001\n0.\n-0.\n");
+    }
+
+    #[test]
+    fn savetxt_fixed_and_exp_alternate_precision_zero_keep_decimal_point_like_numpy() {
+        let values = vec![1.2, -3.4];
+        let fixed = SaveTxtConfig {
+            fmt: "%#.0f",
+            ..SaveTxtConfig::default()
+        };
+        let exp = SaveTxtConfig {
+            fmt: "%#.0e",
+            ..SaveTxtConfig::default()
+        };
+        assert_eq!(savetxt(&values, 2, 1, &fixed).unwrap(), "1.\n-3.\n");
+        assert_eq!(savetxt(&values, 2, 1, &exp).unwrap(), "1.e+00\n-3.e+00\n");
     }
 
     #[test]
