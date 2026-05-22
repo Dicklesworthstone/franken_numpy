@@ -495,3 +495,28 @@ print(np.allclose(cosh_sq - sinh_sq, 1.0))
     assert_eq!(result.trim(), "True", "cosh^2 - sinh^2 should equal 1");
     Ok(())
 }
+
+#[test]
+fn trig_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let funcs = [
+        "sin", "cos", "tan", "arcsin", "arccos", "arctan",
+        "sinh", "cosh", "tanh", "arcsinh", "arccosh", "arctanh",
+    ];
+    for func in funcs {
+        let input = if func == "arccosh" { "2.0" } else if func.starts_with("arc") && !func.contains("h") { "0.5" } else { "0.5" };
+        let script = fnp_script(format!(
+            r#"
+x = np.float64({input})
+fnp_result = fnp.{func}(x)
+np_result = np.{func}(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        ));
+        let result = numpy_oracle(&script)?;
+        assert!(
+            result.trim().starts_with("True"),
+            "{func} scalar return type should match numpy: {result}"
+        );
+    }
+    Ok(())
+}

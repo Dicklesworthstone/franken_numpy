@@ -614,3 +614,27 @@ print(np.allclose(sqrt_result, power_result))
     assert_eq!(result.trim(), "True", "sqrt should equal power(x, 0.5)");
     Ok(())
 }
+
+#[test]
+fn exp_log_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let funcs = [
+        "exp", "exp2", "expm1", "log", "log2", "log10", "log1p",
+        "sqrt", "square", "positive", "negative", "absolute",
+    ];
+    for func in funcs {
+        let script = fnp_script(format!(
+            r#"
+x = np.float64(2.0)
+fnp_result = fnp.{func}(x)
+np_result = np.{func}(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        ));
+        let result = numpy_oracle(&script)?;
+        assert!(
+            result.trim().starts_with("True"),
+            "{func} scalar return type should match numpy: {result}"
+        );
+    }
+    Ok(())
+}
