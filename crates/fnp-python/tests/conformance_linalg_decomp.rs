@@ -97,6 +97,24 @@ print(np.allclose(fnp_recon, np_recon))
     Ok(())
 }
 
+#[test]
+fn qr_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j], [5+2j, 6]], dtype=np.complex128)
+fnp_q, fnp_r = fnp.linalg.qr(a)
+np_q, np_r = np.linalg.qr(a)
+# Check reconstruction
+fnp_recon = fnp_q @ fnp_r
+print(np.allclose(fnp_recon, a))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "qr complex reconstruction should match");
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // cholesky
 // ─────────────────────────────────────────────────────────────────────────────
@@ -172,6 +190,23 @@ print(np.allclose(fnp_l, np_l))
     );
     let result = numpy_oracle(&script)?;
     assert_eq!(result.trim(), "True", "cholesky diagonal should match numpy");
+    Ok(())
+}
+
+#[test]
+fn cholesky_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Hermitian positive definite matrix
+a = np.array([[4, 1+1j], [1-1j, 3]], dtype=np.complex128)
+fnp_l = fnp.linalg.cholesky(a)
+np_l = np.linalg.cholesky(a)
+print(np.allclose(fnp_l, np_l))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cholesky complex should match numpy");
     Ok(())
 }
 
