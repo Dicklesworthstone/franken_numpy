@@ -402,3 +402,22 @@ fn sum_empty_array_matches_numpy() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[test]
+fn sum_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+x = np.float64(5.0)
+fnp_result = fnp.sum(x)
+np_result = np.sum(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "sum scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
