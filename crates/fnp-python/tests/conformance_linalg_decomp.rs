@@ -575,3 +575,74 @@ print(np.allclose(fnp_s, np_s))
     assert_eq!(result.trim(), "True", "svdvals complex should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Batched (stacked) matrix tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn inv_batched() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Stack of 3 invertible 2x2 matrices
+a = np.array([
+    [[1, 2], [3, 4]],
+    [[5, 6], [7, 9]],
+    [[2, 1], [1, 3]]
+], dtype=np.float64)
+fnp_inv = fnp.linalg.inv(a)
+np_inv = np.linalg.inv(a)
+print(np.allclose(fnp_inv, np_inv))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "inv batched should match numpy");
+    Ok(())
+}
+
+#[test]
+fn solve_batched() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Stack of 2 systems
+a = np.array([
+    [[3, 1], [1, 2]],
+    [[4, 2], [1, 3]]
+], dtype=np.float64)
+b = np.array([
+    [9, 8],
+    [10, 7]
+], dtype=np.float64)
+fnp_x = fnp.linalg.solve(a, b)
+np_x = np.linalg.solve(a, b)
+print(np.allclose(fnp_x, np_x))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "solve batched should match numpy");
+    Ok(())
+}
+
+#[test]
+fn qr_batched() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([
+    [[1, 2], [3, 4]],
+    [[5, 6], [7, 8]]
+], dtype=np.float64)
+fnp_q, fnp_r = fnp.linalg.qr(a)
+np_q, np_r = np.linalg.qr(a)
+# Check reconstruction
+fnp_recon = np.einsum('...ij,...jk->...ik', fnp_q, fnp_r)
+np_recon = np.einsum('...ij,...jk->...ik', np_q, np_r)
+print(np.allclose(fnp_recon, np_recon))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "qr batched reconstruction should match numpy");
+    Ok(())
+}
