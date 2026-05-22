@@ -421,3 +421,20 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn einsum_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+b = np.array([[1, 2+1j], [3-1j, 4]], dtype=np.complex128)
+fnp_result = fnp.einsum('ij,jk->ik', a, b)
+np_result = np.einsum('ij,jk->ik', a, b)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "einsum complex should match numpy");
+    Ok(())
+}
