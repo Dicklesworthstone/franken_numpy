@@ -3470,7 +3470,7 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 || scale.is_nan() {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok(self
@@ -3498,7 +3498,7 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 || scale.is_nan() {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -4327,7 +4327,7 @@ impl Generator {
         sigma: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if sigma < 0.0 || sigma.is_nan() {
+        if sigma < 0.0 || (sigma == 0.0 && sigma.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -8560,11 +8560,40 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn normal_scale_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.normal(2.0, 0.0, 3).unwrap(), vec![2.0; 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.normal(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.normal(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
     fn exponential_positive() {
         let mut rng = test_generator();
         let vals = rng.exponential(1.0, 100).unwrap();
         assert_eq!(vals.len(), 100);
         assert!(vals.iter().all(|&v| v > 0.0));
+    }
+
+    #[test]
+    fn exponential_scale_edge_cases_match_numpy() {
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.exponential(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.exponential(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
     }
 
     #[test]
@@ -8822,6 +8851,22 @@ for child in rng.spawn(n_children):
         let samples = rng.lognormal(0.0, 1.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&v| v > 0.0));
+    }
+
+    #[test]
+    fn lognormal_sigma_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.lognormal(0.5, 0.0, 3).unwrap(), vec![0.5_f64.exp(); 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.lognormal(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.lognormal(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
     }
 
     #[test]
