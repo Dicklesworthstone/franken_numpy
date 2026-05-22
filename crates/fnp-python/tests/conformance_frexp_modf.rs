@@ -337,3 +337,42 @@ print(f.shape, i.shape)
 
     Ok(())
 }
+
+#[test]
+fn frexp_modf_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let frexp_script = fnp_script(
+        r#"
+x = np.float64(3.5)
+fnp_m, fnp_e = fnp.frexp(x)
+np_m, np_e = np.frexp(x)
+types_match = (type(fnp_m).__name__ == type(np_m).__name__ and
+               type(fnp_e).__name__ == type(np_e).__name__)
+print(types_match, fnp_m, fnp_e, np_m, np_e)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&frexp_script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "frexp scalar return type should match numpy: {result}"
+    );
+
+    let modf_script = fnp_script(
+        r#"
+x = np.float64(3.5)
+fnp_f, fnp_i = fnp.modf(x)
+np_f, np_i = np.modf(x)
+types_match = (type(fnp_f).__name__ == type(np_f).__name__ and
+               type(fnp_i).__name__ == type(np_i).__name__)
+print(types_match, fnp_f, fnp_i, np_f, np_i)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&modf_script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "modf scalar return type should match numpy: {result}"
+    );
+
+    Ok(())
+}

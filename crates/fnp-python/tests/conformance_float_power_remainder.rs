@@ -543,3 +543,24 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn remainder_fmod_scalar_return_type_matches_numpy() -> Result<(), String> {
+    for func in &["remainder", "fmod"] {
+        let script = fnp_script(format!(
+            r#"
+x = np.float64(7.0)
+y = np.float64(3.0)
+fnp_result = fnp.{func}(x, y)
+np_result = np.{func}(x, y)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        ));
+        let result = numpy_oracle(&script)?;
+        assert!(
+            result.trim().starts_with("True"),
+            "{func} scalar return type should match numpy: {result}"
+        );
+    }
+    Ok(())
+}
