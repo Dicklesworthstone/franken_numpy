@@ -2136,21 +2136,31 @@ enum SaveTxtFormat {
     Default,
     Int {
         width: Option<usize>,
+        padding: SaveTxtPadding,
     },
     Exp {
         precision: usize,
         uppercase: bool,
         width: Option<usize>,
+        padding: SaveTxtPadding,
     },
     Fixed {
         precision: usize,
         width: Option<usize>,
+        padding: SaveTxtPadding,
     },
     General {
         precision: usize,
         uppercase: bool,
         width: Option<usize>,
+        padding: SaveTxtPadding,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveTxtPadding {
+    Space,
+    Zero,
 }
 
 fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
@@ -2159,30 +2169,38 @@ fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
     };
 
     match spec.specifier {
-        'd' | 'i' if spec.precision.is_none() => SaveTxtFormat::Int { width: spec.width },
+        'd' | 'i' if spec.precision.is_none() => SaveTxtFormat::Int {
+            width: spec.width,
+            padding: spec.padding,
+        },
         'e' => SaveTxtFormat::Exp {
             precision: spec.precision.unwrap_or(6),
             uppercase: false,
             width: spec.width,
+            padding: spec.padding,
         },
         'E' => SaveTxtFormat::Exp {
             precision: spec.precision.unwrap_or(6),
             uppercase: true,
             width: spec.width,
+            padding: spec.padding,
         },
         'f' => SaveTxtFormat::Fixed {
             precision: spec.precision.unwrap_or(6),
             width: spec.width,
+            padding: spec.padding,
         },
         'g' => SaveTxtFormat::General {
             precision: spec.precision.unwrap_or(6),
             uppercase: false,
             width: spec.width,
+            padding: spec.padding,
         },
         'G' => SaveTxtFormat::General {
             precision: spec.precision.unwrap_or(6),
             uppercase: true,
             width: spec.width,
+            padding: spec.padding,
         },
         _ => SaveTxtFormat::Default,
     }
@@ -2193,6 +2211,7 @@ struct SaveTxtFormatSpec {
     width: Option<usize>,
     precision: Option<usize>,
     specifier: char,
+    padding: SaveTxtPadding,
 }
 
 fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
@@ -2213,13 +2232,16 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
         (body, None)
     };
 
+    let (padding, width_text) = if width_text.len() > 1 && width_text.starts_with('0') {
+        (SaveTxtPadding::Zero, &width_text[1..])
+    } else {
+        (SaveTxtPadding::Space, width_text)
+    };
+
     let width = if width_text.is_empty() {
         None
     } else {
         if !width_text.bytes().all(|byte| byte.is_ascii_digit()) {
-            return None;
-        }
-        if width_text.len() > 1 && width_text.starts_with('0') {
             return None;
         }
         Some(width_text.parse::<usize>().ok()?)
@@ -2229,6 +2251,7 @@ fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
         width,
         precision,
         specifier,
+        padding,
     })
 }
 
@@ -2238,16 +2261,38 @@ fn push_savetxt_left_padding(output: &mut String, count: usize) {
     }
 }
 
+fn push_savetxt_zero_padding(output: &mut String, count: usize) {
+    for _ in 0..count {
+        output.push('0');
+    }
+}
+
 fn write_savetxt_with_width(
     output: &mut String,
     width: Option<usize>,
+    padding: SaveTxtPadding,
     writer: impl FnOnce(&mut String) -> Result<(), IOError>,
 ) -> Result<(), IOError> {
     if let Some(width) = width {
         let mut cell = String::new();
         writer(&mut cell)?;
-        push_savetxt_left_padding(output, width.saturating_sub(cell.len()));
-        output.push_str(&cell);
+        let pad = width.saturating_sub(cell.len());
+        match padding {
+            SaveTxtPadding::Space => {
+                push_savetxt_left_padding(output, pad);
+                output.push_str(&cell);
+            }
+            SaveTxtPadding::Zero => {
+                if let Some(unsigned) = cell.strip_prefix('-') {
+                    output.push('-');
+                    push_savetxt_zero_padding(output, pad);
+                    output.push_str(unsigned);
+                } else {
+                    push_savetxt_zero_padding(output, pad);
+                    output.push_str(&cell);
+                }
+            }
+        }
         Ok(())
     } else {
         writer(output)
@@ -2459,19 +2504,24 @@ pub fn savetxt(
                     precision,
                     uppercase,
                     width,
+                    padding,
                 } => {
-                    write_savetxt_with_width(&mut output, width, |cell| {
+                    write_savetxt_with_width(&mut output, width, padding, |cell| {
                         write_savetxt_exp(cell, v, precision, uppercase)
                     })?;
                 }
-                SaveTxtFormat::Fixed { precision, width } => {
-                    write_savetxt_with_width(&mut output, width, |cell| {
+                SaveTxtFormat::Fixed {
+                    precision,
+                    width,
+                    padding,
+                } => {
+                    write_savetxt_with_width(&mut output, width, padding, |cell| {
                         write!(cell, "{v:.precision$}")
                             .map_err(|_| IOError::WriteContractViolation("formatting failed"))
                     })?;
                 }
-                SaveTxtFormat::Int { width } => {
-                    write_savetxt_with_width(&mut output, width, |cell| {
+                SaveTxtFormat::Int { width, padding } => {
+                    write_savetxt_with_width(&mut output, width, padding, |cell| {
                         write_savetxt_int(cell, v)
                     })?;
                 }
@@ -2479,8 +2529,9 @@ pub fn savetxt(
                     precision,
                     uppercase,
                     width,
+                    padding,
                 } => {
-                    write_savetxt_with_width(&mut output, width, |cell| {
+                    write_savetxt_with_width(&mut output, width, padding, |cell| {
                         write_savetxt_general(cell, v, precision, uppercase)
                     })?;
                 }
@@ -5489,6 +5540,50 @@ mm.flush()
         };
         let output = savetxt(&values, 2, 1, &cfg).unwrap();
         assert_eq!(output, "         1\n        -3\n");
+    }
+
+    #[test]
+    fn savetxt_fixed_format_zero_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%010.2f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "0000001.20\n-000003.40\n");
+    }
+
+    #[test]
+    fn savetxt_exp_format_zero_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%010.2e",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "001.20e+00\n-03.40e+00\n");
+    }
+
+    #[test]
+    fn savetxt_general_format_zero_width_matches_numpy() {
+        let values = vec![12345.0, -0.0012345];
+        let cfg = SaveTxtConfig {
+            fmt: "%010.3g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "001.23e+04\n-000.00123\n");
+    }
+
+    #[test]
+    fn savetxt_integer_format_zero_width_matches_numpy() {
+        let values = vec![1.9, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%010d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "0000000001\n-000000003\n");
     }
 
     #[test]
