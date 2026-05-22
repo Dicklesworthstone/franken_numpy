@@ -421,3 +421,35 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn sum_complex() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+z = np.array([1+2j, 3+4j, 5+6j], dtype=np.complex128)
+fnp_result = fnp.sum(z)
+np_result = np.sum(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sum complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn sum_complex_axis() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+z = np.array([[1+1j, 2+2j], [3+3j, 4+4j]], dtype=np.complex128)
+fnp_result = fnp.sum(z, axis=0)
+np_result = np.sum(z, axis=0)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sum complex axis=0 should match numpy");
+    Ok(())
+}
