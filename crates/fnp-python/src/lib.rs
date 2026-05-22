@@ -24723,23 +24723,98 @@ fn unique_values(
 
 // Convolution / correlation / isclose (3).
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn convolve(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "convolve", args, kwargs)
+#[pyo3(signature = (a, v, mode="full"))]
+fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let convolve_fn = numpy.getattr("convolve")?;
+    let a_for_fallback = a.clone_ref(py);
+    let v_for_fallback = v.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("mode", mode)?;
+        Ok(convolve_fn
+            .call(
+                (a_for_fallback.bind(py), v_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
+
+    // Fast path: 1D f64 arrays with standard modes
+    let a_arr = match extract_numeric_array(py, a.bind(py), "convolve(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    let v_arr = match extract_numeric_array(py, v.bind(py), "convolve(v)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Only fast-path 1D arrays without integer sidecars
+    if a_arr.shape().len() != 1
+        || v_arr.shape().len() != 1
+        || a_arr.has_integer_sidecar()
+        || v_arr.has_integer_sidecar()
+    {
+        return fallback();
+    }
+
+    let result = match a_arr.convolve_mode(&v_arr, mode) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn correlate(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "correlate", args, kwargs)
+#[pyo3(signature = (a, v, mode="valid"))]
+fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let correlate_fn = numpy.getattr("correlate")?;
+    let a_for_fallback = a.clone_ref(py);
+    let v_for_fallback = v.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("mode", mode)?;
+        Ok(correlate_fn
+            .call(
+                (a_for_fallback.bind(py), v_for_fallback.bind(py)),
+                Some(&kwargs),
+            )?
+            .unbind())
+    };
+
+    // Fast path: 1D f64 arrays with standard modes
+    let a_arr = match extract_numeric_array(py, a.bind(py), "correlate(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    let v_arr = match extract_numeric_array(py, v.bind(py), "correlate(v)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Only fast-path 1D arrays without integer sidecars
+    if a_arr.shape().len() != 1
+        || v_arr.shape().len() != 1
+        || a_arr.has_integer_sidecar()
+        || v_arr.has_integer_sidecar()
+    {
+        return fallback();
+    }
+
+    // Fall back to NumPy for mode="same" when kernel is longer than input,
+    // since the "same" mode centering has complex edge-case semantics that
+    // differ from convolve(a, v[::-1], mode="same").
+    if mode == "same" && v_arr.shape()[0] > a_arr.shape()[0] {
+        return fallback();
+    }
+
+    let result = match a_arr.correlate_mode(&v_arr, mode) {
+        Ok(result) => result,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
