@@ -2593,6 +2593,17 @@ impl RandomState {
         if a <= 0.0 || b <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
+        if a < BETA_TINY_THRESHOLD && b < BETA_TINY_THRESHOLD {
+            return Ok((0..size)
+                .map(|_| {
+                    if (a + b) * self.next_f64() < a {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect());
+        }
         Ok((0..size)
             .map(|_| {
                 let ga = self.legacy_standard_gamma(a);
@@ -6738,6 +6749,32 @@ for child in rng.spawn(n_children):
         assert!(nan_b.beta(1.0, f64::NAN, 1).expect("nan_b")[0].is_nan());
         let after: Vec<u64> = (0..3).map(|_| nan_b.random_interval(9)).collect();
         assert_eq!(after, vec![7, 4, 3]);
+    }
+
+    #[test]
+    fn random_state_legacy_beta_tiny_shapes_use_numpy_bernoulli_branch() {
+        let a = 1e-120;
+        let b = 2e-120;
+        let mut expected_rng = RandomState::new(SeedMaterial::U64(42)).expect("expected");
+        let expected: Vec<f64> = (0..8)
+            .map(|_| {
+                if (a + b) * expected_rng.next_f64() < a {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let expected_after: Vec<u64> =
+            (0..5).map(|_| expected_rng.random_interval(9)).collect();
+
+        let mut rng = RandomState::new(SeedMaterial::U64(42)).expect("actual");
+        let actual = rng.beta(a, b, 8).expect("tiny beta");
+        let actual_after: Vec<u64> = (0..5).map(|_| rng.random_interval(9)).collect();
+
+        assert_eq!(actual, expected);
+        assert!(actual.iter().all(|&value| value == 0.0 || value == 1.0));
+        assert_eq!(actual_after, expected_after);
     }
 
     #[test]
