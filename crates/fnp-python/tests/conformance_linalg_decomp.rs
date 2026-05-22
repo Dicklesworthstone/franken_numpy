@@ -199,6 +199,41 @@ print(vals_close and vecs_close)
     Ok(())
 }
 
+#[test]
+fn eigh_identity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.eye(3)
+fnp_vals, fnp_vecs = fnp.linalg.eigh(a)
+np_vals, np_vecs = np.linalg.eigh(a)
+# Identity eigenvalues are all 1
+vals_close = np.allclose(fnp_vals, np.ones(3))
+print(vals_close)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "eigh identity eigenvalues should be 1");
+    Ok(())
+}
+
+#[test]
+fn eigh_diagonal() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.diag([1.0, 3.0, 2.0])
+fnp_vals, _ = fnp.linalg.eigh(a)
+np_vals, _ = np.linalg.eigh(a)
+# Eigenvalues of diagonal are the diagonal elements (sorted)
+print(np.allclose(np.sort(fnp_vals), np.sort(np_vals)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "eigh diagonal should match numpy");
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // eigvalsh
 // ─────────────────────────────────────────────────────────────────────────────
