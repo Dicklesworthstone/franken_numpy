@@ -1,6 +1,6 @@
-//! Conformance tests for numpy.trace against NumPy oracle.
+//! Conformance tests for numpy.cross against NumPy oracle.
 //!
-//! Tests trace (sum along diagonal).
+//! Tests cross (cross product of two vectors).
 
 use std::process::Command;
 
@@ -38,12 +38,34 @@ fn fnp_script(body: String) -> String {
 }
 
 #[test]
-fn trace_square_matrix() -> Result<(), String> {
+fn cross_3d_vectors() -> Result<(), String> {
     let script = fnp_script(
         r#"
-a = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
-result = fnp.trace(a)
-expected = np.trace(a)
+a = np.array([1, 2, 3])
+b = np.array([4, 5, 6])
+result = fnp.cross(a, b)
+expected = np.cross(a, b)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cross 3D vectors should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn cross_2d_vectors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2])
+b = np.array([3, 4])
+result = fnp.cross(a, b)
+expected = np.cross(a, b)
 print(result == expected)
 "#
         .into(),
@@ -52,19 +74,20 @@ print(result == expected)
     assert_eq!(
         result.trim(),
         "True",
-        "trace square matrix should match numpy"
+        "cross 2D vectors should match numpy (returns scalar)"
     );
     Ok(())
 }
 
 #[test]
-fn trace_rectangular_matrix() -> Result<(), String> {
+fn cross_batch_3d() -> Result<(), String> {
     let script = fnp_script(
         r#"
-a = np.array([[1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12]])
-result = fnp.trace(a)
-expected = np.trace(a)
-print(result == expected)
+a = np.array([[1, 2, 3], [4, 5, 6]])
+b = np.array([[7, 8, 9], [10, 11, 12]])
+result = fnp.cross(a, b)
+expected = np.cross(a, b)
+print(np.array_equal(result, expected))
 "#
         .into(),
     );
@@ -72,19 +95,20 @@ print(result == expected)
     assert_eq!(
         result.trim(),
         "True",
-        "trace rectangular matrix should match numpy"
+        "cross batch 3D should match numpy"
     );
     Ok(())
 }
 
 #[test]
-fn trace_with_offset() -> Result<(), String> {
+fn cross_float() -> Result<(), String> {
     let script = fnp_script(
         r#"
-a = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
-result = fnp.trace(a, offset=1)
-expected = np.trace(a, offset=1)
-print(result == expected)
+a = np.array([1.0, 2.0, 3.0])
+b = np.array([4.0, 5.0, 6.0])
+result = fnp.cross(a, b)
+expected = np.cross(a, b)
+print(np.allclose(result, expected))
 "#
         .into(),
     );
@@ -92,46 +116,7 @@ print(result == expected)
     assert_eq!(
         result.trim(),
         "True",
-        "trace with offset should match numpy"
-    );
-    Ok(())
-}
-
-#[test]
-fn trace_negative_offset() -> Result<(), String> {
-    let script = fnp_script(
-        r#"
-a = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
-result = fnp.trace(a, offset=-1)
-expected = np.trace(a, offset=-1)
-print(result == expected)
-"#
-        .into(),
-    );
-    let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "trace with negative offset should match numpy"
-    );
-    Ok(())
-}
-
-#[test]
-fn trace_scalar_return_type_matches_numpy() -> Result<(), String> {
-    let script = fnp_script(
-        r#"
-a = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
-fnp_result = fnp.trace(a)
-np_result = np.trace(a)
-print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
-"#
-        .into(),
-    );
-    let result = numpy_oracle(&script)?;
-    assert!(
-        result.trim().starts_with("True"),
-        "trace scalar return type should match numpy: {result}"
+        "cross float should match numpy"
     );
     Ok(())
 }
