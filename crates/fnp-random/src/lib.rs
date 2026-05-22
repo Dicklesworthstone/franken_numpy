@@ -4550,8 +4550,11 @@ impl Generator {
     /// Dirichlet distribution (np.random.dirichlet).
     /// Returns `size` samples, each a vector of length `alpha.len()`.
     pub fn dirichlet(&mut self, alpha: &[f64], size: usize) -> Result<Vec<Vec<f64>>, RandomError> {
-        if alpha.iter().any(|&a| a.is_nan() || a < 0.0) {
+        if alpha.iter().any(|&a| a < 0.0) {
             return Err(RandomError::InvalidParameter);
+        }
+        if alpha.iter().any(|&a| a.is_nan()) {
+            return Ok(vec![vec![f64::NAN; alpha.len()]; size]);
         }
         Ok((0..size)
             .map(|_| {
@@ -9273,6 +9276,17 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let samples = rng.dirichlet(&[0.0, 0.0], 4).unwrap();
         assert_eq!(samples, vec![vec![0.0, 0.0]; 4]);
+    }
+
+    #[test]
+    fn dirichlet_nan_alpha_returns_nan_rows_like_numpy() {
+        let mut rng = test_generator();
+        let samples = rng.dirichlet(&[f64::NAN, 1.0], 3).unwrap();
+        assert_eq!(samples.len(), 3);
+        for sample in samples {
+            assert_eq!(sample.len(), 2);
+            assert!(sample.iter().all(|value| value.is_nan()));
+        }
     }
 
     #[test]
