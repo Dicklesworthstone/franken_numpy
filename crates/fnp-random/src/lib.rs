@@ -2604,6 +2604,31 @@ impl RandomState {
                 })
                 .collect());
         }
+        if a <= 1.0 && b <= 1.0 {
+            return Ok((0..size)
+                .map(|_| {
+                    loop {
+                        let u = self.next_f64();
+                        let v = self.next_f64();
+                        let x = u.powf(1.0 / a);
+                        let y = v.powf(1.0 / b);
+                        let x_plus_y = x + y;
+                        if x_plus_y <= 1.0 && u + v > 0.0 {
+                            if x > 0.0 && y > 0.0 {
+                                return x / x_plus_y;
+                            }
+                            let log_x = u.ln() / a;
+                            let log_y = v.ln() / b;
+                            let delta = log_x - log_y;
+                            if delta > 0.0 {
+                                return (-(-delta).exp().ln_1p()).exp();
+                            }
+                            return (delta - delta.exp().ln_1p()).exp();
+                        }
+                    }
+                })
+                .collect());
+        }
         Ok((0..size)
             .map(|_| {
                 let ga = self.legacy_standard_gamma(a);
@@ -6790,8 +6815,7 @@ for child in rng.spawn(n_children):
                 }
             })
             .collect();
-        let expected_after: Vec<u64> =
-            (0..5).map(|_| expected_rng.random_interval(9)).collect();
+        let expected_after: Vec<u64> = (0..5).map(|_| expected_rng.random_interval(9)).collect();
 
         let mut rng = RandomState::new(SeedMaterial::U64(42)).expect("actual");
         let actual = rng.beta(a, b, 8).expect("tiny beta");
@@ -6800,6 +6824,35 @@ for child in rng.spawn(n_children):
         assert_eq!(actual, expected);
         assert!(actual.iter().all(|&value| value == 0.0 || value == 1.0));
         assert_eq!(actual_after, expected_after);
+    }
+
+    #[test]
+    fn random_state_legacy_beta_johnk_small_shapes_match_numpy_oracle() {
+        let mut rng = RandomState::new(SeedMaterial::U64(12345)).expect("rng");
+        let values = rng.beta(0.5, 0.75, 10).expect("beta johnk");
+        let expected = [
+            0.219_143_446_991_956_87,
+            0.391_455_611_433_897_8,
+            0.001_392_874_726_238_171_3,
+            0.135_249_976_513_749_2,
+            0.493_972_440_786_974_55,
+            0.227_339_571_562_641_28,
+            0.868_309_558_791_001_6,
+            0.000_969_146_594_151_747_9,
+            0.991_280_379_770_157_1,
+            0.362_709_863_835_021_74,
+        ];
+        assert_f64_seq("random_state_beta_johnk", &values, &expected);
+
+        let after: Vec<f64> = (0..5).map(|_| rng.next_f64()).collect();
+        let expected_after = [
+            0.596_366_010_419_380_5,
+            0.051_957_545_102_533_59,
+            0.895_089_528_053_921_2,
+            0.728_266_180_327_117_3,
+            0.818_350_011_389_914_5,
+        ];
+        assert_f64_seq("random_state_beta_johnk_after", &after, &expected_after);
     }
 
     #[test]
