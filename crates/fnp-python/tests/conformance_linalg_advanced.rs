@@ -453,8 +453,23 @@ print(np.allclose(fnp_pow, A, rtol=1e-10))
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Complex matrix tests
-// Note: pinv doesn't support complex128 yet - bead g9fct
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn pinv_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j], [5+2j, 6]], dtype=np.complex128)
+fnp_pinv = fnp.pinv(a)
+np_pinv = np.linalg.pinv(a)
+print(np.allclose(fnp_pinv, np_pinv))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "pinv complex should match numpy");
+    Ok(())
+}
 
 #[test]
 fn eigvals_complex() -> Result<(), String> {

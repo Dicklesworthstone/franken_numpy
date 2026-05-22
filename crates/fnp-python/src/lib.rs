@@ -8959,15 +8959,28 @@ fn pinv(
     hermitian: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (a.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+
+    // Complex arrays must fall back to numpy
+    if dtype_kind == "c" {
+        let pinv_fn = numpy.getattr("linalg")?.getattr("pinv")?;
+        let rcond_parsed = OptionalFloatKwarg::parse(py, rcond, "rcond")?;
+        let rtol = parse_pinv_rtol_kwarg(py, kwargs)?;
+        let kw = PyDict::new(py);
+        rcond_parsed.set_on_kwargs(&kw, "rcond")?;
+        kw.set_item("hermitian", hermitian)?;
+        rtol.set_on_kwargs(&kw, "rtol")?;
+        return Ok(pinv_fn.call((a.bind(py),), Some(&kw))?.unbind());
+    }
+
     let rcond = OptionalFloatKwarg::parse(py, rcond, "rcond")?;
     let rtol = parse_pinv_rtol_kwarg(py, kwargs)?;
     let array = extract_numeric_array(py, a.bind(py), "pinv(a)")?;
     let shape = array.shape();
 
-    if shape.len() == 2
-        && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
-        && (!hermitian || shape[0] == shape[1])
-    {
+    if shape.len() == 2 && (!hermitian || shape[0] == shape[1]) {
         let values = if hermitian {
             pinv_hermitian_nxn_with_tolerance_aliases(
                 array.values(),
@@ -8990,13 +9003,12 @@ fn pinv(
         return build_numpy_array_from_ufunc(py, &result);
     }
 
-    let numpy = py.import("numpy")?;
     let pinv_fn = numpy.getattr("linalg")?.getattr("pinv")?;
-    let kwargs = PyDict::new(py);
-    rcond.set_on_kwargs(&kwargs, "rcond")?;
-    kwargs.set_item("hermitian", hermitian)?;
-    rtol.set_on_kwargs(&kwargs, "rtol")?;
-    Ok(pinv_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    let kw = PyDict::new(py);
+    rcond.set_on_kwargs(&kw, "rcond")?;
+    kw.set_item("hermitian", hermitian)?;
+    rtol.set_on_kwargs(&kw, "rtol")?;
+    Ok(pinv_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
 #[pyfunction]
