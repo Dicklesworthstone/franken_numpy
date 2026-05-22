@@ -9609,7 +9609,7 @@ fn copysign(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>>
     let x1 = extract_numeric_array(py, x1.bind(py), "copysign(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "copysign(x2)")?;
     let result = ufunc_copysign(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -9617,7 +9617,7 @@ fn nextafter(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
     let x1 = extract_numeric_array(py, x1.bind(py), "nextafter(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "nextafter(x2)")?;
     let result = ufunc_nextafter(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -9625,7 +9625,7 @@ fn hypot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x1 = extract_numeric_array(py, x1.bind(py), "hypot(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "hypot(x2)")?;
     let result = ufunc_hypot(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -9638,7 +9638,7 @@ fn ldexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
         ));
     }
     let result = ufunc_ldexp(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -9646,7 +9646,7 @@ fn logaddexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
     let x1 = extract_numeric_array(py, x1.bind(py), "logaddexp(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "logaddexp(x2)")?;
     let result = ufunc_logaddexp(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -9654,7 +9654,7 @@ fn logaddexp2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny
     let x1 = extract_numeric_array(py, x1.bind(py), "logaddexp2(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "logaddexp2(x2)")?;
     let result = ufunc_logaddexp2(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -14176,7 +14176,7 @@ fn heaviside(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
     let x1 = extract_numeric_array(py, x1.bind(py), "heaviside(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "heaviside(x2)")?;
     let result = ufunc_heaviside(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
