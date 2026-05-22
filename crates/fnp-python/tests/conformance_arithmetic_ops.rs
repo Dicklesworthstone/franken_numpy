@@ -420,6 +420,23 @@ fn conformance_arithmetic_ops_matrix() {
             },
             no_kwargs,
         );
+        // Scalar input should return numpy scalar, not 0-d array
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "arith-true_divide-scalar",
+            "true_divide",
+            RequirementLevel::Must,
+            CompareMode::Close,
+            t,
+            |py| {
+                let a = py.import("numpy")?.getattr("float64")?.call1((5.0_f64,))?;
+                let b = py.import("numpy")?.getattr("float64")?.call1((2.0_f64,))?;
+                PyTuple::new(py, [a, b])
+            },
+            no_kwargs,
+        );
 
         // ─── floor_divide / mod / remainder ─────────────────────────────
         run_case(
@@ -459,6 +476,23 @@ fn conformance_arithmetic_ops_matrix() {
                         np_array_int(py, vec![2, 3, -4])?,
                     ],
                 )
+            },
+            no_kwargs,
+        );
+        // Scalar input should return numpy scalar, not 0-d array
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "arith-floor_divide-scalar",
+            "floor_divide",
+            RequirementLevel::Must,
+            CompareMode::Strict,
+            t,
+            |py| {
+                let a = py.import("numpy")?.getattr("float64")?.call1((5.0_f64,))?;
+                let b = py.import("numpy")?.getattr("float64")?.call1((2.0_f64,))?;
+                PyTuple::new(py, [a, b])
             },
             no_kwargs,
         );
