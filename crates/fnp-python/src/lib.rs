@@ -14987,41 +14987,28 @@ fn negative(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 fn real(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Fast path: for real dtypes, real returns the input unchanged.
     // Complex inputs use NumPy for proper write-view semantics.
+    // Pass original value to NumPy to preserve scalar return type.
     let numpy = py.import("numpy")?;
     let array = numpy.call_method1("asarray", (val.bind(py),))?;
     let dtype = array.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
 
     if kind.as_str() == "c" {
-        // Complex array - use NumPy's real for view semantics
-        Ok(numpy.getattr("real")?.call1((array,))?.unbind())
+        // Complex input - use NumPy's real with original value to preserve scalar type
+        Ok(numpy.getattr("real")?.call1((val.bind(py),))?.unbind())
     } else {
-        // Real array - return the array as-is
-        Ok(array.unbind())
+        // Real input - return via NumPy to handle scalar vs array correctly
+        Ok(numpy.getattr("real")?.call1((val.bind(py),))?.unbind())
     }
 }
 
 #[pyfunction]
 #[pyo3(signature = (val,))]
 fn imag(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Fast path: for real dtypes, imag returns a zeros array with same shape/dtype.
-    // Complex inputs use NumPy to preserve write-view semantics.
+    // Pass original value to NumPy to preserve scalar return type.
+    // NumPy handles both complex and real inputs correctly.
     let numpy = py.import("numpy")?;
-    let array = numpy.call_method1("asarray", (val.bind(py),))?;
-    let dtype = array.getattr("dtype")?;
-    let kind = dtype.getattr("kind")?.extract::<String>()?;
-
-    if kind.as_str() == "c" {
-        // Complex array - use NumPy's imag for view semantics
-        Ok(numpy.getattr("imag")?.call1((array,))?.unbind())
-    } else {
-        // Real array - imaginary part is zeros with same shape and dtype
-        let shape = array.getattr("shape")?;
-        Ok(numpy
-            .call_method1("zeros", (shape,))?
-            .call_method1("astype", (dtype,))?
-            .unbind())
-    }
+    Ok(numpy.getattr("imag")?.call1((val.bind(py),))?.unbind())
 }
 
 #[pyfunction]

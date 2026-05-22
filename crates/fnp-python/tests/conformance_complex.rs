@@ -232,3 +232,23 @@ print(np.allclose(conj_result, conjugate_result))
     assert_eq!(result.trim(), "True", "conj should equal conjugate");
     Ok(())
 }
+
+#[test]
+fn complex_scalar_return_type_matches_numpy() -> Result<(), String> {
+    for func in &["real", "imag", "conj", "conjugate"] {
+        let script = fnp_script(format!(
+            r#"
+x = np.complex128(2.0 + 3.0j)
+fnp_result = fnp.{func}(x)
+np_result = np.{func}(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        ));
+        let result = numpy_oracle(&script)?;
+        assert!(
+            result.trim().starts_with("True"),
+            "{func} scalar return type should match numpy: {result}"
+        );
+    }
+    Ok(())
+}
