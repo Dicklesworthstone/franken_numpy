@@ -503,3 +503,75 @@ print(np.allclose(a @ fnp_x, b))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Complex matrix tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn inv_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+fnp_inv = fnp.linalg.inv(a)
+np_inv = np.linalg.inv(a)
+print(np.allclose(fnp_inv, np_inv))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "inv complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn solve_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+b = np.array([5+2j, 6-1j], dtype=np.complex128)
+fnp_x = fnp.linalg.solve(a, b)
+np_x = np.linalg.solve(a, b)
+print(np.allclose(fnp_x, np_x))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "solve complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn eigh_hermitian() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Hermitian matrix
+a = np.array([[2, 1+1j], [1-1j, 3]], dtype=np.complex128)
+fnp_vals, fnp_vecs = fnp.linalg.eigh(a)
+np_vals, np_vecs = np.linalg.eigh(a)
+# Eigenvalues of Hermitian matrix are real
+vals_close = np.allclose(fnp_vals, np_vals)
+print(vals_close)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "eigh hermitian should match numpy");
+    Ok(())
+}
+
+#[test]
+fn svdvals_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j], [5+2j, 6]], dtype=np.complex128)
+fnp_s = fnp.linalg.svdvals(a)
+np_s = np.linalg.svdvals(a)
+print(np.allclose(fnp_s, np_s))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "svdvals complex should match numpy");
+    Ok(())
+}
