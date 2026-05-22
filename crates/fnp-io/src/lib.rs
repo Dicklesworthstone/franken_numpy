@@ -2188,11 +2188,40 @@ enum SaveTxtSign {
     Space,
 }
 
-fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
-    let Some(spec) = parse_savetxt_format_spec(fmt) else {
-        return SaveTxtFormat::Default;
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedSaveTxtFormat {
+    prefix: String,
+    format: SaveTxtFormat,
+    suffix: String,
+}
+
+fn parse_savetxt_format(fmt: &str) -> ParsedSaveTxtFormat {
+    let Some((start, end, spec)) = find_savetxt_format_spec(fmt) else {
+        return ParsedSaveTxtFormat {
+            prefix: String::new(),
+            format: SaveTxtFormat::Default,
+            suffix: String::new(),
+        };
     };
 
+    let prefix = &fmt[..start];
+    let suffix = &fmt[end..];
+    if prefix.contains('%') || suffix.contains('%') {
+        return ParsedSaveTxtFormat {
+            prefix: String::new(),
+            format: SaveTxtFormat::Default,
+            suffix: String::new(),
+        };
+    }
+
+    ParsedSaveTxtFormat {
+        prefix: prefix.to_string(),
+        format: savetxt_format_from_spec(spec),
+        suffix: suffix.to_string(),
+    }
+}
+
+fn savetxt_format_from_spec(spec: SaveTxtFormatSpec) -> SaveTxtFormat {
     match spec.specifier {
         'd' | 'i' | 'u' => SaveTxtFormat::Int {
             precision: spec.precision,
@@ -2247,6 +2276,33 @@ fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
         },
         _ => SaveTxtFormat::Default,
     }
+}
+
+fn find_savetxt_format_spec(fmt: &str) -> Option<(usize, usize, SaveTxtFormatSpec)> {
+    for (start, ch) in fmt.char_indices() {
+        if !matches!(ch, '%') {
+            continue;
+        }
+        if fmt
+            .get(start + 1..)
+            .is_some_and(|tail| tail.starts_with('%'))
+        {
+            continue;
+        }
+        let tail_start = start + 1;
+        let tail = fmt.get(tail_start..)?;
+        for (offset, specifier) in tail.char_indices() {
+            if !matches!(specifier, 'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'g' | 'G') {
+                continue;
+            }
+            let end = tail_start + offset + specifier.len_utf8();
+            let candidate = fmt.get(start..end)?;
+            if let Some(spec) = parse_savetxt_format_spec(candidate) {
+                return Some((start, end, spec));
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2653,7 +2709,8 @@ pub fn savetxt(
                 output.push_str(config.delimiter);
             }
             let v = values[r * ncols + c];
-            match fmt {
+            output.push_str(&fmt.prefix);
+            match fmt.format {
                 SaveTxtFormat::Exp {
                     precision,
                     uppercase,
@@ -2736,6 +2793,7 @@ pub fn savetxt(
                         .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
                 }
             };
+            output.push_str(&fmt.suffix);
         }
         output.push_str(config.newline);
     }
@@ -5604,6 +5662,28 @@ mm.flush()
         assert!(output.starts_with("1.000000000000000000e+00"));
         assert!(output.contains("6.000000000000000000e+00"));
         assert_eq!(output.lines().count(), 2);
+    }
+
+    #[test]
+    fn savetxt_literal_prefix_format_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "value=%0.1f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "value=1.2\nvalue=-3.4\n");
+    }
+
+    #[test]
+    fn savetxt_literal_affix_format_preserves_width_and_sign_like_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "[%+06.1f]",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "[+001.2]\n[-003.4]\n");
     }
 
     #[test]
