@@ -8415,18 +8415,62 @@ fn append(
     values: Py<PyAny>,
     axis: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Delegate to NumPy so flattened default behavior, axis-aware
-    // appends, scalar coercions, object arrays, and mismatch errors
-    // all stay exact.
     let numpy = py.import("numpy")?;
     let append_fn = numpy.getattr("append")?;
-    let kwargs = PyDict::new(py);
-    if let Some(axis) = axis {
-        kwargs.set_item("axis", axis.bind(py))?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(ref a) = axis {
+            kwargs.set_item("axis", a.bind(py))?;
+        }
+        Ok(append_fn
+            .call((arr.bind(py), values.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    // Fast path: axis=None case (flatten and concatenate)
+    let axis_val: Option<isize> = match &axis {
+        None => None,
+        Some(a) => {
+            let bound = a.bind(py);
+            if bound.is_none() {
+                None
+            } else {
+                match bound.extract::<isize>() {
+                    Ok(v) => Some(v),
+                    Err(_) => return fallback(),
+                }
+            }
+        }
+    };
+
+    let a = match extract_numeric_array(py, arr.bind(py), "append(arr)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    let v = match extract_numeric_array(py, values.bind(py), "append(values)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    if a.has_integer_sidecar() || v.has_integer_sidecar() {
+        return fallback();
     }
-    Ok(append_fn
-        .call((arr.bind(py), values.bind(py)), Some(&kwargs))?
-        .unbind())
+
+    let result = match axis_val {
+        None => {
+            // Flatten both and concatenate
+            let a_flat = a.flatten();
+            let v_flat = v.flatten();
+            match UFuncArray::concatenate(&[&a_flat, &v_flat], 0) {
+                Ok(r) => r,
+                Err(_) => return fallback(),
+            }
+        }
+        Some(ax) => match UFuncArray::concatenate(&[&a, &v], ax) {
+            Ok(r) => r,
+            Err(_) => return fallback(),
+        },
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
