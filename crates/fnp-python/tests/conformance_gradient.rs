@@ -116,3 +116,19 @@ print(np.allclose(result, expected))
     );
     Ok(())
 }
+
+#[test]
+fn gradient_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, 3+4j, 6+9j], dtype=np.complex128)
+fnp_result = fnp.gradient(z)
+np_result = np.gradient(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "gradient complex should match numpy");
+    Ok(())
+}
