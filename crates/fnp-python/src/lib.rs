@@ -14404,7 +14404,7 @@ fn native_binary_fmax_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "fmax(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "fmax(x2)")?;
         let result = ufunc_fmax(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "fmax", args, kwargs)
     }
@@ -14419,7 +14419,7 @@ fn native_binary_fmin_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "fmin(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "fmin(x2)")?;
         let result = ufunc_fmin(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "fmin", args, kwargs)
     }
@@ -14434,7 +14434,7 @@ fn native_binary_maximum_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "maximum(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "maximum(x2)")?;
         let result = ufunc_maximum(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "maximum", args, kwargs)
     }
@@ -14449,7 +14449,7 @@ fn native_binary_minimum_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "minimum(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "minimum(x2)")?;
         let result = ufunc_minimum(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "minimum", args, kwargs)
     }
@@ -14464,7 +14464,7 @@ fn native_binary_gcd_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "gcd(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "gcd(x2)")?;
         let result = ufunc_gcd(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "gcd", args, kwargs)
     }
@@ -14479,7 +14479,7 @@ fn native_binary_lcm_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "lcm(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "lcm(x2)")?;
         let result = ufunc_lcm(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "lcm", args, kwargs)
     }
@@ -14494,7 +14494,7 @@ fn native_binary_float_power_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "float_power(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "float_power(x2)")?;
         let result = ufunc_float_power(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "float_power", args, kwargs)
     }
@@ -14512,7 +14512,7 @@ fn native_binary_remainder_or_passthrough(
             return core_numpy_passthrough(py, "remainder", args, kwargs);
         }
         let result = ufunc_remainder(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "remainder", args, kwargs)
     }
