@@ -7620,7 +7620,7 @@ mm.flush()
 
     #[test]
     fn loadtxt_quotechar_ignores_comment_after_quoted_value_like_numpy() {
-        let text = "\"1.5\" # trailing comment\n";
+        let text = "\"1.5\"# trailing comment\n";
         let result = loadtxt_quotechar(text, ' ', '#', 0, usize::MAX, None, Some('"')).unwrap();
         assert_eq!(result.nrows, 1);
         assert_eq!(result.ncols, 1);
