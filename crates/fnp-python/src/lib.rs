@@ -8963,8 +8963,10 @@ fn pinv(
     let arr = numpy.call_method1("asarray", (a.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
 
-    // Complex arrays must fall back to numpy
-    if dtype_kind == "c" {
+    // Complex arrays or empty matrices must fall back to numpy
+    let arr_shape = arr.getattr("shape")?.extract::<Vec<usize>>()?;
+    let is_empty = arr_shape.iter().any(|&d| d == 0);
+    if dtype_kind == "c" || is_empty {
         let pinv_fn = numpy.getattr("linalg")?.getattr("pinv")?;
         let rcond_parsed = OptionalFloatKwarg::parse(py, rcond, "rcond")?;
         let rtol = parse_pinv_rtol_kwarg(py, kwargs)?;

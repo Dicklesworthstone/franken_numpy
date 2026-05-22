@@ -560,3 +560,37 @@ print(np.allclose(fnp_logdet, np_logdet))
     assert_eq!(result.trim(), "True", "slogdet complex logdet should match numpy");
     Ok(())
 }
+
+#[test]
+fn svd_empty_rows() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([]).reshape(0, 3)
+fnp_u, fnp_s, fnp_vh = fnp.svd(a)
+np_u, np_s, np_vh = np.linalg.svd(a)
+# Shapes should match
+shape_ok = fnp_u.shape == np_u.shape and fnp_s.shape == np_s.shape and fnp_vh.shape == np_vh.shape
+print(shape_ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "svd empty rows shapes should match numpy");
+    Ok(())
+}
+
+#[test]
+fn pinv_empty() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([]).reshape(0, 3)
+fnp_result = fnp.pinv(a)
+np_result = np.linalg.pinv(a)
+print(fnp_result.shape == np_result.shape and np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "pinv empty should match numpy");
+    Ok(())
+}
