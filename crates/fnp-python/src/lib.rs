@@ -14879,11 +14879,24 @@ fn isscalar(py: Python<'_>, element: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn isreal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.isreal. Returns a bool array True at element
-    // positions where the imaginary part is zero. Real-input arrays
-    // return all-True; complex-with-nonzero-imag positions are False.
+    // Fast path: for real dtypes, isreal returns all-True.
+    // Complex dtypes fall back to NumPy to check imaginary parts.
     let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("isreal")?.call1((x.bind(py),))?.unbind())
+    let array = numpy.call_method1("asarray", (x.bind(py),))?;
+    let dtype = array.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+
+    if kind.as_str() == "c" {
+        // Complex array - use NumPy to check imaginary parts
+        Ok(numpy.getattr("isreal")?.call1((array,))?.unbind())
+    } else {
+        // Real array - all elements are real, return all-True
+        let shape = array.getattr("shape")?;
+        Ok(numpy
+            .call_method1("ones", (shape,))?
+            .call_method1("astype", ("bool",))?
+            .unbind())
+    }
 }
 
 #[pyfunction]
