@@ -466,3 +466,43 @@ print(np.array_equal(result, expected) and result.dtype == expected.dtype)
     );
     Ok(())
 }
+
+#[test]
+fn logaddexp_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.float64(1.0)
+x2 = np.float64(2.0)
+fnp_result = fnp.logaddexp(x1, x2)
+np_result = np.logaddexp(x1, x2)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "logaddexp scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn logaddexp2_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.float64(1.0)
+x2 = np.float64(2.0)
+fnp_result = fnp.logaddexp2(x1, x2)
+np_result = np.logaddexp2(x1, x2)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "logaddexp2 scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
