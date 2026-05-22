@@ -6532,6 +6532,19 @@ fn build_numpy_tuple_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyRes
         .unbind())
 }
 
+fn build_numpy_scalar_or_array_tuple(
+    py: Python<'_>,
+    arrays: &[UFuncArray],
+) -> PyResult<Py<PyAny>> {
+    let arrays = arrays
+        .iter()
+        .map(|array| build_numpy_scalar_or_array(py, array))
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(PyTuple::new(py, arrays.iter().map(|array| array.bind(py)))?
+        .into_any()
+        .unbind())
+}
+
 fn build_numpy_list_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyResult<Py<PyAny>> {
     let arrays = arrays
         .iter()
@@ -24776,7 +24789,7 @@ fn divmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x2 = extract_numeric_array(py, x2.bind(py), "divmod(x2)")?;
     let (quotient, remainder) = ufunc_divmod(&x1, &x2).map_err(map_ufunc_error)?;
     let outputs = [quotient, remainder];
-    build_numpy_tuple_from_ufuncs(py, &outputs)
+    build_numpy_scalar_or_array_tuple(py, &outputs)
 }
 
 // `mod` is a reserved word in Rust — use py_mod with name override.
