@@ -337,3 +337,44 @@ print(np.array_equal(result_left, expected_left) and np.array_equal(result_right
     assert_eq!(result.trim(), "True", "shift with zero should match numpy");
     Ok(())
 }
+
+#[test]
+fn bitwise_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let binary_funcs = [
+        "bitwise_and", "bitwise_or", "bitwise_xor",
+        "left_shift", "right_shift",
+    ];
+    for func in binary_funcs {
+        let script = fnp_script(format!(
+            r#"
+x = np.int64(12)
+y = np.int64(5)
+fnp_result = fnp.{func}(x, y)
+np_result = np.{func}(x, y)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        ));
+        let result = numpy_oracle(&script)?;
+        assert!(
+            result.trim().starts_with("True"),
+            "{func} scalar return type should match numpy: {result}"
+        );
+    }
+
+    let script = fnp_script(
+        r#"
+x = np.int64(12)
+fnp_result = fnp.invert(x)
+np_result = np.invert(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "invert scalar return type should match numpy: {result}"
+    );
+
+    Ok(())
+}
