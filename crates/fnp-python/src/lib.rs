@@ -9492,8 +9492,23 @@ fn tensorsolve(
 #[pyfunction]
 #[pyo3(signature = (a, ind=2))]
 fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
-    let a = extract_numeric_array(py, a.bind(py), "tensorinv(a)")?;
-    let result = a.tensorinv(ind).map_err(map_ufunc_error)?;
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (a.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+
+    // Complex arrays must fall back to numpy
+    if dtype_kind == "c" {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("ind", ind)?;
+        return Ok(numpy
+            .getattr("linalg")?
+            .getattr("tensorinv")?
+            .call((a.bind(py),), Some(&kwargs))?
+            .unbind());
+    }
+
+    let array = extract_numeric_array(py, a.bind(py), "tensorinv(a)")?;
+    let result = array.tensorinv(ind).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -9506,10 +9521,28 @@ fn solve_triangular(
     lower: bool,
     unit_diagonal: bool,
 ) -> PyResult<Py<PyAny>> {
-    let a = extract_numeric_array(py, a.bind(py), "solve_triangular(a)")?;
-    let b = extract_numeric_array(py, b.bind(py), "solve_triangular(b)")?;
-    let result = a
-        .solve_triangular(&b, lower, unit_diagonal)
+    let numpy = py.import("numpy")?;
+    let arr_a = numpy.call_method1("asarray", (a.bind(py),))?;
+    let arr_b = numpy.call_method1("asarray", (b.bind(py),))?;
+    let kind_a = arr_a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    let kind_b = arr_b.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+
+    // Complex arrays must fall back to scipy
+    if kind_a == "c" || kind_b == "c" {
+        let scipy_linalg = py.import("scipy.linalg")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("lower", lower)?;
+        kwargs.set_item("unit_diagonal", unit_diagonal)?;
+        return Ok(scipy_linalg
+            .getattr("solve_triangular")?
+            .call((a.bind(py), b.bind(py)), Some(&kwargs))?
+            .unbind());
+    }
+
+    let a_arr = extract_numeric_array(py, a.bind(py), "solve_triangular(a)")?;
+    let b_arr = extract_numeric_array(py, b.bind(py), "solve_triangular(b)")?;
+    let result = a_arr
+        .solve_triangular(&b_arr, lower, unit_diagonal)
         .map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }

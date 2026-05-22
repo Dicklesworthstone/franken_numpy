@@ -472,6 +472,44 @@ print(np.allclose(fnp_pinv, np_pinv))
 }
 
 #[test]
+fn tensorinv_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Create a tensor that can be inverted: shape (2,3,6) with ind=2 means 2*3=6
+a = np.arange(36, dtype=np.complex128).reshape(2, 3, 6) + 1j
+# Make it more invertible by adding scaled identity-like structure
+for i in range(6):
+    a.flat[i * 7] += 10
+fnp_result = fnp.tensorinv(a, ind=2)
+np_result = np.linalg.tensorinv(a, ind=2)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "tensorinv complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn solve_triangular_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import scipy.linalg
+a = np.array([[2+1j, 0, 0], [1, 3-1j, 0], [2, 1, 4+1j]], dtype=np.complex128)
+b = np.array([1+1j, 2-1j, 3], dtype=np.complex128)
+fnp_result = fnp.solve_triangular(a, b, lower=True)
+sp_result = scipy.linalg.solve_triangular(a, b, lower=True)
+print(np.allclose(fnp_result, sp_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "solve_triangular complex should match scipy");
+    Ok(())
+}
+
+#[test]
 fn eigvals_complex() -> Result<(), String> {
     let script = fnp_script(
         r#"
