@@ -14730,7 +14730,7 @@ fn native_binary_bitwise_and_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "bitwise_and(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "bitwise_and(x2)")?;
         let result = ufunc_bitwise_and(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "bitwise_and", args, kwargs)
     }
@@ -14745,7 +14745,7 @@ fn native_binary_bitwise_or_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "bitwise_or(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "bitwise_or(x2)")?;
         let result = ufunc_bitwise_or(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "bitwise_or", args, kwargs)
     }
@@ -14760,7 +14760,7 @@ fn native_binary_bitwise_xor_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "bitwise_xor(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "bitwise_xor(x2)")?;
         let result = ufunc_bitwise_xor(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "bitwise_xor", args, kwargs)
     }
@@ -14775,7 +14775,7 @@ fn native_binary_left_shift_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "left_shift(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "left_shift(x2)")?;
         let result = ufunc_left_shift(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "left_shift", args, kwargs)
     }
@@ -14790,7 +14790,7 @@ fn native_binary_right_shift_or_passthrough(
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "right_shift(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "right_shift(x2)")?;
         let result = ufunc_right_shift(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "right_shift", args, kwargs)
     }
@@ -14804,7 +14804,7 @@ fn native_unary_invert_or_passthrough(
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
         let x = extract_numeric_array(py, &args.get_item(0)?, "invert(x)")?;
         let result = ufunc_invert(&x).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "invert", args, kwargs)
     }
@@ -24506,7 +24506,7 @@ fn bitwise_count(
             }
         };
         match ufunc_bitwise_count(&arr) {
-            Ok(result) => build_numpy_array_from_ufunc(py, &result),
+            Ok(result) => build_numpy_scalar_or_array(py, &result),
             Err(_) => Ok(numpy.getattr("bitwise_count")?.call1((array,))?.unbind()),
         }
     } else {
