@@ -450,3 +450,41 @@ print(np.allclose(fnp_pow, A, rtol=1e-10))
     assert_eq!(result.trim(), "True", "matrix_power(A, 1) should equal A");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Complex matrix tests
+// Note: eigvals and pinv don't support complex128 yet - beads q0tsm, g9fct
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn svd_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j], [5+2j, 6]], dtype=np.complex128)
+fnp_u, fnp_s, fnp_vh = fnp.svd(a)
+np_u, np_s, np_vh = np.linalg.svd(a)
+# Singular values should match
+print(np.allclose(fnp_s, np_s))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "svd complex singular values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn slogdet_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+fnp_sign, fnp_logdet = fnp.slogdet(a)
+np_sign, np_logdet = np.linalg.slogdet(a)
+print(np.allclose(fnp_logdet, np_logdet))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "slogdet complex logdet should match numpy");
+    Ok(())
+}
