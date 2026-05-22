@@ -2135,18 +2135,33 @@ impl Default for SaveTxtConfig<'_> {
 enum SaveTxtFormat {
     Default,
     Int,
-    Exp(usize),
+    Exp { precision: usize, uppercase: bool },
     Fixed(usize),
 }
 
 fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
     match fmt {
         "%d" | "%i" => SaveTxtFormat::Int,
-        "%e" => SaveTxtFormat::Exp(6),
+        "%e" => SaveTxtFormat::Exp {
+            precision: 6,
+            uppercase: false,
+        },
+        "%E" => SaveTxtFormat::Exp {
+            precision: 6,
+            uppercase: true,
+        },
         "%f" => SaveTxtFormat::Fixed(6),
         _ => {
             if let Some(prec) = parse_savetxt_precision(fmt, 'e') {
-                SaveTxtFormat::Exp(prec)
+                SaveTxtFormat::Exp {
+                    precision: prec,
+                    uppercase: false,
+                }
+            } else if let Some(prec) = parse_savetxt_precision(fmt, 'E') {
+                SaveTxtFormat::Exp {
+                    precision: prec,
+                    uppercase: true,
+                }
             } else if let Some(prec) = parse_savetxt_precision(fmt, 'f') {
                 SaveTxtFormat::Fixed(prec)
             } else {
@@ -2162,18 +2177,23 @@ fn parse_savetxt_precision(fmt: &str, spec: char) -> Option<usize> {
     digits.parse::<usize>().ok()
 }
 
-fn write_savetxt_exp(output: &mut String, v: f64, prec: usize) -> Result<(), IOError> {
+fn write_savetxt_exp(
+    output: &mut String,
+    v: f64,
+    prec: usize,
+    uppercase: bool,
+) -> Result<(), IOError> {
     use std::fmt::Write as _;
 
     if v.is_nan() {
-        output.push_str("nan");
+        output.push_str(if uppercase { "NAN" } else { "nan" });
         return Ok(());
     }
     if v.is_infinite() {
         if v.is_sign_negative() {
-            output.push_str("-inf");
+            output.push_str(if uppercase { "-INF" } else { "-inf" });
         } else {
-            output.push_str("inf");
+            output.push_str(if uppercase { "INF" } else { "inf" });
         }
         return Ok(());
     }
@@ -2195,7 +2215,8 @@ fn write_savetxt_exp(output: &mut String, v: f64, prec: usize) -> Result<(), IOE
         .parse::<i32>()
         .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
 
-    output.truncate(exponent_marker + 1);
+    output.truncate(exponent_marker);
+    output.push(if uppercase { 'E' } else { 'e' });
     if exponent < 0 {
         write!(output, "-{:02}", exponent.abs())
     } else {
@@ -2233,8 +2254,11 @@ pub fn savetxt(
             }
             let v = values[r * ncols + c];
             match fmt {
-                SaveTxtFormat::Exp(prec) => {
-                    write_savetxt_exp(&mut output, v, prec)?;
+                SaveTxtFormat::Exp {
+                    precision,
+                    uppercase,
+                } => {
+                    write_savetxt_exp(&mut output, v, precision, uppercase)?;
                 }
                 SaveTxtFormat::Fixed(prec) => {
                     write!(output, "{v:.prec$}")
@@ -5138,6 +5162,28 @@ mm.flush()
         assert!(parts.next().is_none());
         let frac = mantissa.split('.').nth(1).unwrap_or("");
         assert_eq!(frac.len(), 18);
+    }
+
+    #[test]
+    fn savetxt_uppercase_exp_format_matches_numpy() {
+        let values = vec![1.23456, 1000.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%.2E",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 2, &cfg).unwrap();
+        assert_eq!(output, "1.23E+00 1.00E+03\n");
+    }
+
+    #[test]
+    fn savetxt_uppercase_exp_formats_nan_and_inf_like_numpy() {
+        let values = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%E",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 3, &cfg).unwrap();
+        assert_eq!(output, "NAN INF -INF\n");
     }
 
     #[test]
