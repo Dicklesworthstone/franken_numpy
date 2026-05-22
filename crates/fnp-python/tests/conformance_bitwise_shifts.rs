@@ -210,3 +210,43 @@ print(np.all(counts == 1))
     assert_eq!(result.trim(), "True", "powers of 2 should have count 1");
     Ok(())
 }
+
+#[test]
+fn bitwise_shifts_scalar_return_type_matches_numpy() -> Result<(), String> {
+    for func in &["bitwise_left_shift", "bitwise_right_shift"] {
+        let script = format!(
+            "import numpy as np; x = np.int64(8); y = np.int64(2); r = np.{func}(x, y); print(type(r).__name__, r)"
+        );
+        let numpy_result = numpy_oracle(&script)?;
+
+        let rust_script = fnp_script(format!(
+            "x = np.int64(8); y = np.int64(2); r = fnp.{func}(x, y); print(type(r).__name__, r)"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+
+        assert_eq!(
+            numpy_result.trim(),
+            rust_result.trim(),
+            "{func} scalar return type mismatch\nnumpy: {numpy_result}\nfnp: {rust_result}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn bitwise_count_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = "import numpy as np; x = np.int64(15); r = np.bitwise_count(x); print(type(r).__name__, r)";
+    let numpy_result = numpy_oracle(script)?;
+
+    let rust_script = fnp_script("x = np.int64(15); r = fnp.bitwise_count(x); print(type(r).__name__, r)".into());
+    let rust_result = numpy_oracle(&rust_script)?;
+
+    assert_eq!(
+        numpy_result.trim(),
+        rust_result.trim(),
+        "bitwise_count scalar return type mismatch\nnumpy: {numpy_result}\nfnp: {rust_result}"
+    );
+
+    Ok(())
+}
