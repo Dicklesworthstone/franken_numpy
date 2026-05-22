@@ -276,6 +276,9 @@ pub const BIT_GENERATOR_STATE_SCHEMA_VERSION: u32 = 1;
 /// Maximum trials for direct binomial sampling (before switching to approximation).
 /// Set to i64::MAX to match the u64-to-i64 boundary in NumPy's implementation.
 const MAX_BINOMIAL_DIRECT_TRIALS: u64 = i64::MAX as u64;
+/// Maximum Poisson lambda accepted by NumPy's Generator before int64 overflow risk.
+/// NumPy computes this as `float(np.iinfo(int64).max) - 10 * sqrt(float(np.iinfo(int64).max))`.
+const POISSON_LAM_MAX: f64 = 9.223_372_006_484_771e18;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RandomRuntimeMode {
@@ -3584,7 +3587,7 @@ impl Generator {
     /// Uses NumPy's exact algorithms: multiplicative method for lam < 10,
     /// PTRS (Hörmann 1993) for lam >= 10.
     pub fn poisson(&mut self, lam: f64, size: usize) -> Result<Vec<u64>, RandomError> {
-        if !lam.is_finite() || lam < 0.0 {
+        if !(0.0..=POISSON_LAM_MAX).contains(&lam) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size).map(|_| self.sample_poisson_single(lam)).collect())
@@ -4798,11 +4801,7 @@ impl Generator {
         nonc: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if dfnum <= 0.0
-            || dfden <= 0.0
-            || nonc < 0.0
-            || (nonc == 0.0 && nonc.is_sign_negative())
-        {
+        if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -5551,10 +5550,11 @@ mod tests {
         BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
         BitGeneratorState, DEFAULT_RNG_SEED, DeterministicRng, Generator, GeneratorPicklePayload,
         MAX_RNG_JUMP_OPERATIONS, MAX_SEED_SEQUENCE_CHILDREN, MAX_SEED_SEQUENCE_WORDS, Mt19937,
-        Mt19937Rng, Pcg64, Pcg64DxsmRng, Pcg64Rng, Philox, RANDOM_PACKET_REASON_CODES,
-        RNG_CORE_REASON_CODES, RandomError, RandomLogRecord, RandomPolicyError, RandomRuntimeMode,
-        RandomState, SeedMaterial, SeedSequence, SeedSequenceError, SeedSequenceSnapshot, Sfc64,
-        default_rng, generator_from_seed_sequence, validate_rng_policy_metadata,
+        Mt19937Rng, POISSON_LAM_MAX, Pcg64, Pcg64DxsmRng, Pcg64Rng, Philox,
+        RANDOM_PACKET_REASON_CODES, RNG_CORE_REASON_CODES, RandomError, RandomLogRecord,
+        RandomPolicyError, RandomRuntimeMode, RandomState, SeedMaterial, SeedSequence,
+        SeedSequenceError, SeedSequenceSnapshot, Sfc64, default_rng, generator_from_seed_sequence,
+        validate_rng_policy_metadata,
     };
 
     fn packet007_artifacts() -> Vec<String> {
@@ -8502,14 +8502,14 @@ for child in rng.spawn(n_children):
         let mut scalar_rng = test_generator();
         let scalar = scalar_rng.random_shaped(None).unwrap();
         assert!(scalar.is_scalar());
-        assert_eq!(scalar.shape(), &[]);
+        assert!(scalar.shape().is_empty());
         assert_eq!(scalar.len(), 1);
         assert!(scalar.scalar_value().is_some());
 
         let mut zero_dim_rng = test_generator();
         let zero_dim = zero_dim_rng.random_shaped(Some(&[])).unwrap();
         assert!(!zero_dim.is_scalar());
-        assert_eq!(zero_dim.shape(), &[]);
+        assert!(zero_dim.shape().is_empty());
         assert_eq!(zero_dim.len(), 1);
         assert_eq!(scalar.values(), zero_dim.values());
     }
@@ -8726,6 +8726,18 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn poisson_rejects_lambda_above_numpy_ceiling() {
+        let mut allowed = test_generator();
+        assert!(allowed.poisson(POISSON_LAM_MAX, 0).unwrap().is_empty());
+
+        let mut too_large = test_generator();
+        assert_eq!(
+            too_large.poisson(i64::MAX as f64, 0),
+            Err(RandomError::InvalidParameter)
+        );
+    }
+
+    #[test]
     fn binomial_bounded() {
         let mut rng = test_generator();
         let vals = rng.binomial(10, 0.5, 100).unwrap();
@@ -8926,8 +8938,9 @@ for child in rng.spawn(n_children):
         );
 
         let mut zero_shape_infinite_scale = test_generator();
-        let zero_shape_infinite_scale_values =
-            zero_shape_infinite_scale.gamma(0.0, f64::INFINITY, 3).unwrap();
+        let zero_shape_infinite_scale_values = zero_shape_infinite_scale
+            .gamma(0.0, f64::INFINITY, 3)
+            .unwrap();
         assert!(
             zero_shape_infinite_scale_values
                 .iter()
@@ -8935,8 +8948,9 @@ for child in rng.spawn(n_children):
         );
 
         let mut infinite_shape_zero_scale = test_generator();
-        let infinite_shape_zero_scale_values =
-            infinite_shape_zero_scale.gamma(f64::INFINITY, 0.0, 3).unwrap();
+        let infinite_shape_zero_scale_values = infinite_shape_zero_scale
+            .gamma(f64::INFINITY, 0.0, 3)
+            .unwrap();
         assert!(
             infinite_shape_zero_scale_values
                 .iter()
@@ -9631,7 +9645,10 @@ for child in rng.spawn(n_children):
 
         for invalid in [-0.5, 1.0, f64::INFINITY] {
             let mut rng = test_generator();
-            assert_eq!(rng.logseries(invalid, 1), Err(RandomError::InvalidParameter));
+            assert_eq!(
+                rng.logseries(invalid, 1),
+                Err(RandomError::InvalidParameter)
+            );
         }
     }
 
