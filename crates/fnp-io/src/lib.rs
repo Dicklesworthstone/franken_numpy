@@ -157,30 +157,52 @@ impl IOSupportedDType {
     pub fn decode(descr: &str) -> Result<Self, IOError> {
         match descr {
             "|b1" => Ok(Self::Bool),
+            "=b1" => Ok(Self::Bool),
             "|i1" => Ok(Self::I8),
+            "=i1" => Ok(Self::I8),
             "<i2" => Ok(Self::I16),
             ">i2" => Ok(Self::I16Be),
+            "=i2" => Ok(Self::native_endian(Self::I16, Self::I16Be)),
             "<i4" => Ok(Self::I32),
             ">i4" => Ok(Self::I32Be),
+            "=i4" => Ok(Self::native_endian(Self::I32, Self::I32Be)),
             "<i8" => Ok(Self::I64),
             ">i8" => Ok(Self::I64Be),
+            "=i8" => Ok(Self::native_endian(Self::I64, Self::I64Be)),
             "|u1" => Ok(Self::U8),
+            "=u1" => Ok(Self::U8),
             "<u2" => Ok(Self::U16),
             ">u2" => Ok(Self::U16Be),
+            "=u2" => Ok(Self::native_endian(Self::U16, Self::U16Be)),
             "<u4" => Ok(Self::U32),
             ">u4" => Ok(Self::U32Be),
+            "=u4" => Ok(Self::native_endian(Self::U32, Self::U32Be)),
             "<u8" => Ok(Self::U64),
             ">u8" => Ok(Self::U64Be),
+            "=u8" => Ok(Self::native_endian(Self::U64, Self::U64Be)),
             "<f4" => Ok(Self::F32),
             ">f4" => Ok(Self::F32Be),
+            "=f4" => Ok(Self::native_endian(Self::F32, Self::F32Be)),
             "<f8" => Ok(Self::F64),
             ">f8" => Ok(Self::F64Be),
+            "=f8" => Ok(Self::native_endian(Self::F64, Self::F64Be)),
             "<c8" => Ok(Self::Complex64),
             ">c8" => Ok(Self::Complex64Be),
+            "=c8" => Ok(Self::native_endian(Self::Complex64, Self::Complex64Be)),
             "<c16" => Ok(Self::Complex128),
             ">c16" => Ok(Self::Complex128Be),
+            "=c16" => Ok(Self::native_endian(Self::Complex128, Self::Complex128Be)),
             "|O" => Ok(Self::Object),
+            "=O" => Ok(Self::Object),
             _ => Self::decode_variable_width(descr),
+        }
+    }
+
+    fn native_endian(little: Self, big: Self) -> Self {
+        if cfg!(target_endian = "little") {
+            little
+        } else {
+            big
         }
     }
 
@@ -201,8 +223,13 @@ impl IOSupportedDType {
         }
         match (endian, kind) {
             (b'|', b'S') => Ok(Self::Bytes(width)),
+            (b'=', b'S') => Ok(Self::Bytes(width)),
             (b'<', b'U') => Ok(Self::Unicode(width)),
             (b'>', b'U') => Ok(Self::UnicodeBe(width)),
+            (b'=', b'U') => Ok(Self::native_endian(
+                Self::Unicode(width),
+                Self::UnicodeBe(width),
+            )),
             _ => Err(IOError::DTypeDescriptorInvalid),
         }
     }
@@ -5379,6 +5406,81 @@ mm.flush()
 
         let err = IOSupportedDType::decode(">i3").expect_err("unsupported descriptor");
         assert_eq!(err.reason_code(), "io_dtype_descriptor_invalid");
+    }
+
+    #[test]
+    fn native_endian_descriptors_decode_like_numpy() {
+        let cases = [
+            ("=b1", IOSupportedDType::Bool),
+            ("=i1", IOSupportedDType::I8),
+            (
+                "=i2",
+                IOSupportedDType::native_endian(IOSupportedDType::I16, IOSupportedDType::I16Be),
+            ),
+            (
+                "=i4",
+                IOSupportedDType::native_endian(IOSupportedDType::I32, IOSupportedDType::I32Be),
+            ),
+            (
+                "=i8",
+                IOSupportedDType::native_endian(IOSupportedDType::I64, IOSupportedDType::I64Be),
+            ),
+            ("=u1", IOSupportedDType::U8),
+            (
+                "=u2",
+                IOSupportedDType::native_endian(IOSupportedDType::U16, IOSupportedDType::U16Be),
+            ),
+            (
+                "=u4",
+                IOSupportedDType::native_endian(IOSupportedDType::U32, IOSupportedDType::U32Be),
+            ),
+            (
+                "=u8",
+                IOSupportedDType::native_endian(IOSupportedDType::U64, IOSupportedDType::U64Be),
+            ),
+            (
+                "=f4",
+                IOSupportedDType::native_endian(IOSupportedDType::F32, IOSupportedDType::F32Be),
+            ),
+            (
+                "=f8",
+                IOSupportedDType::native_endian(IOSupportedDType::F64, IOSupportedDType::F64Be),
+            ),
+            (
+                "=c8",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Complex64,
+                    IOSupportedDType::Complex64Be,
+                ),
+            ),
+            (
+                "=c16",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Complex128,
+                    IOSupportedDType::Complex128Be,
+                ),
+            ),
+            ("=S3", IOSupportedDType::Bytes(3)),
+            (
+                "=U3",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Unicode(3),
+                    IOSupportedDType::UnicodeBe(3),
+                ),
+            ),
+            ("=O", IOSupportedDType::Object),
+        ];
+
+        for (descr, expected) in cases {
+            assert_eq!(IOSupportedDType::decode(descr).unwrap(), expected);
+        }
+
+        let header = validate_header_schema(&[2], false, "=f8", 128)
+            .expect("native-endian header descriptor");
+        assert_eq!(
+            header.descr,
+            IOSupportedDType::native_endian(IOSupportedDType::F64, IOSupportedDType::F64Be)
+        );
     }
 
     #[test]
