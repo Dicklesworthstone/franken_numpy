@@ -416,3 +416,22 @@ fn std_nan_handling_matches_numpy() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[test]
+fn std_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_std_script(
+        r#"
+x = np.float64(5.0)
+fnp_result = fnp.std(x)
+np_result = np.std(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "std scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}

@@ -416,3 +416,22 @@ fn var_nan_handling_matches_numpy() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[test]
+fn var_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_var_script(
+        r#"
+x = np.float64(5.0)
+fnp_result = fnp.var(x)
+np_result = np.var(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "var scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
