@@ -4221,6 +4221,11 @@ impl Generator {
         if shape_param == 0.0 {
             return 0.0;
         }
+        if !shape_param.is_finite() {
+            let _ = self.sample_standard_normal_single();
+            let _ = self.next_f64();
+            return shape_param;
+        }
         if shape_param < 1.0 {
             // NumPy's exact algorithm for shape < 1 from distributions.c:
             // Uses uniform + exponential rejection.
@@ -4337,12 +4342,6 @@ impl Generator {
     pub fn beta(&mut self, a: f64, b: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if a <= 0.0 || b <= 0.0 {
             return Err(RandomError::InvalidParameter);
-        }
-        if a.is_nan() || b.is_nan() || a == f64::INFINITY {
-            return Ok(vec![f64::NAN; size]);
-        }
-        if b == f64::INFINITY {
-            return Ok(vec![0.0; size]);
         }
         if a < BETA_TINY_THRESHOLD && b < BETA_TINY_THRESHOLD {
             return Ok((0..size)
@@ -11603,6 +11602,57 @@ for child in rng.spawn(n_children):
             0.725_100_797_231_033_2,
         ];
         assert_f64_seq("beta_johnk_after", &after, &expected_after);
+    }
+
+    #[test]
+    fn oracle_beta_nonfinite_parameters_advance_stream() {
+        let expected_after_one_nonfinite = [
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+            0.403_840_457_250_061_8,
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+        ];
+        let expected_after_two_nonfinite = [
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+            0.104_783_541_327_853_84,
+            0.895_599_581_743_493_9,
+            0.363_015_960_789_184_4,
+        ];
+
+        for (label, a, b, expected_after) in [
+            (
+                "beta_inf_one",
+                f64::INFINITY,
+                1.0,
+                &expected_after_one_nonfinite,
+            ),
+            (
+                "beta_one_inf",
+                1.0,
+                f64::INFINITY,
+                &expected_after_one_nonfinite,
+            ),
+            ("beta_nan_one", f64::NAN, 1.0, &expected_after_one_nonfinite),
+            ("beta_one_nan", 1.0, f64::NAN, &expected_after_one_nonfinite),
+            (
+                "beta_inf_inf",
+                f64::INFINITY,
+                f64::INFINITY,
+                &expected_after_two_nonfinite,
+            ),
+        ] {
+            let mut g = oracle_gen();
+            let values = g.beta(a, b, 3).unwrap();
+            if label == "beta_one_inf" {
+                assert_eq!(values, vec![0.0; 3]);
+            } else {
+                assert!(values.iter().all(|value| value.is_nan()));
+            }
+            let after = g.random(5);
+            assert_f64_seq(label, &after, expected_after);
+        }
     }
 
     #[test]
