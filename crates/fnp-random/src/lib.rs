@@ -27,6 +27,7 @@ mod ziggurat;
 const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 const MIX_CONST1: u64 = 0xBF58_476D_1CE4_E5B9;
 const MIX_CONST2: u64 = 0x94D0_49BB_1331_11EB;
+const BETA_TINY_THRESHOLD: f64 = 3e-103;
 
 fn wrap_angle_to_pi(angle: f64) -> f64 {
     (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
@@ -4306,6 +4307,17 @@ impl Generator {
         }
         if b == f64::INFINITY {
             return Ok(vec![0.0; size]);
+        }
+        if a < BETA_TINY_THRESHOLD && b < BETA_TINY_THRESHOLD {
+            return Ok((0..size)
+                .map(|_| {
+                    if (a + b) * self.next_f64() < a {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect());
         }
         Ok((0..size)
             .map(|_| {
@@ -9018,6 +9030,31 @@ for child in rng.spawn(n_children):
         let mut both_infinite = test_generator();
         let both_infinite_values = both_infinite.beta(f64::INFINITY, f64::INFINITY, 3).unwrap();
         assert!(both_infinite_values.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
+    fn beta_tiny_shapes_use_numpy_bernoulli_branch() {
+        let a = 1e-120;
+        let b = 2e-120;
+        let mut expected_rng = test_generator();
+        let expected: Vec<f64> = (0..8)
+            .map(|_| {
+                if (a + b) * expected_rng.next_f64() < a {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let expected_after: Vec<u64> = (0..5).map(|_| expected_rng.random_interval(9)).collect();
+
+        let mut rng = test_generator();
+        let actual = rng.beta(a, b, 8).unwrap();
+        let actual_after: Vec<u64> = (0..5).map(|_| rng.random_interval(9)).collect();
+
+        assert_eq!(actual, expected);
+        assert!(actual.iter().all(|&value| value == 0.0 || value == 1.0));
+        assert_eq!(actual_after, expected_after);
     }
 
     #[test]
