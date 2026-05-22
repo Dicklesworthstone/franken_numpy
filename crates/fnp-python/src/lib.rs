@@ -14082,15 +14082,23 @@ fn ascontiguousarray(
 #[pyfunction]
 #[pyo3(signature = (a, tol=100.0))]
 fn real_if_close(py: Python<'_>, a: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.real_if_close. If input is complex with all
-    // imaginary parts within tol*epsilon of zero, returns the real
-    // part; otherwise returns the input unchanged. Plain real input
-    // passes through.
+    // Fast path: for real dtypes, real_if_close returns input unchanged.
+    // Complex dtypes fall back to NumPy to check imaginary parts.
     let numpy = py.import("numpy")?;
-    let rif_fn = numpy.getattr("real_if_close")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("tol", tol)?;
-    Ok(rif_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
+    let array = numpy.call_method1("asarray", (a.bind(py),))?;
+    let dtype = array.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+
+    if kind.as_str() == "c" {
+        // Complex array - use NumPy to check if close to real
+        let rif_fn = numpy.getattr("real_if_close")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("tol", tol)?;
+        Ok(rif_fn.call((array,), Some(&kwargs))?.unbind())
+    } else {
+        // Real array - already real, return as-is
+        Ok(array.unbind())
+    }
 }
 
 #[pyfunction]
