@@ -120,3 +120,20 @@ print(np.allclose(result, expected))
     );
     Ok(())
 }
+
+#[test]
+fn kron_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2]], dtype=np.complex128)
+b = np.array([[1], [2+1j]], dtype=np.complex128)
+fnp_result = fnp.kron(a, b)
+np_result = np.kron(a, b)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "kron complex should match numpy");
+    Ok(())
+}
