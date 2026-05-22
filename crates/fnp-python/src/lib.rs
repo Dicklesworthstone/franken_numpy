@@ -37,7 +37,8 @@ use fnp_random::{
 use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
     FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
-    arctan2 as ufunc_arctan2, bitwise_and as ufunc_bitwise_and, bitwise_or as ufunc_bitwise_or,
+    arctan2 as ufunc_arctan2, bitwise_and as ufunc_bitwise_and,
+    bitwise_count as ufunc_bitwise_count, bitwise_or as ufunc_bitwise_or,
     bitwise_xor as ufunc_bitwise_xor, copysign as ufunc_copysign, divide as ufunc_divide,
     divmod_arrays as ufunc_divmod, equal as ufunc_equal, float_power as ufunc_float_power,
     fmax as ufunc_fmax, fmin as ufunc_fmin, fmod as ufunc_fmod, frexp as ufunc_frexp,
@@ -24397,13 +24398,43 @@ fn bitwise_and(
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (x, **kwargs))]
 fn bitwise_count(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    x: Py<PyAny>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "bitwise_count", args, kwargs)
+    // Fast path: use native implementation for integer types
+    let numpy = py.import("numpy")?;
+
+    // Fall back if kwargs are provided
+    if kwargs.is_some_and(|k| !k.is_empty()) {
+        return Ok(numpy
+            .getattr("bitwise_count")?
+            .call((x.bind(py),), kwargs)?
+            .unbind());
+    }
+
+    let array = numpy.call_method1("asarray", (x.bind(py),))?;
+    let dtype = array.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+
+    // bitwise_count only works on integer and bool types
+    if kind.as_str() == "i" || kind.as_str() == "u" || kind.as_str() == "b" {
+        let arr = match extract_numeric_array(py, &array, "bitwise_count(x)") {
+            Ok(a) => a,
+            Err(_) => {
+                return Ok(numpy.getattr("bitwise_count")?.call1((array,))?.unbind());
+            }
+        };
+        match ufunc_bitwise_count(&arr) {
+            Ok(result) => build_numpy_array_from_ufunc(py, &result),
+            Err(_) => Ok(numpy.getattr("bitwise_count")?.call1((array,))?.unbind()),
+        }
+    } else {
+        // Float or other types - fallback to NumPy (will raise an error)
+        Ok(numpy.getattr("bitwise_count")?.call1((array,))?.unbind())
+    }
 }
 
 #[pyfunction]
