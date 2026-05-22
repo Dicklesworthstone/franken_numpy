@@ -378,3 +378,81 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge case tests: singular/ill-conditioned matrices
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn cond_singular_matrix() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Singular matrix - condition number should be inf
+a = np.array([[1, 2], [2, 4]], dtype=np.float64)
+fnp_c = fnp.linalg.cond(a)
+np_c = np.linalg.cond(a)
+print(np.isinf(fnp_c) == np.isinf(np_c))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cond of singular matrix should be inf");
+    Ok(())
+}
+
+#[test]
+fn svdvals_rank_deficient() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Rank-deficient matrix - should have a zero singular value
+a = np.array([[1, 2, 3], [2, 4, 6], [3, 6, 9]], dtype=np.float64)
+fnp_s = fnp.linalg.svdvals(a)
+np_s = np.linalg.svdvals(a)
+# Both should have same number of zero (or near-zero) singular values
+fnp_near_zero = np.sum(fnp_s < 1e-10)
+np_near_zero = np.sum(np_s < 1e-10)
+print(fnp_near_zero == np_near_zero)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "svdvals should identify rank deficiency");
+    Ok(())
+}
+
+#[test]
+fn lstsq_overdetermined() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Overdetermined system (more equations than unknowns)
+a = np.array([[1], [2], [3]], dtype=np.float64)
+b = np.array([1, 2, 4], dtype=np.float64)
+fnp_x, _, _, _ = fnp.linalg.lstsq(a, b, rcond=None)
+np_x, _, _, _ = np.linalg.lstsq(a, b, rcond=None)
+print(np.allclose(fnp_x, np_x))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "lstsq overdetermined should match numpy");
+    Ok(())
+}
+
+#[test]
+fn lstsq_underdetermined() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Underdetermined system (more unknowns than equations)
+a = np.array([[1, 2, 3]], dtype=np.float64)
+b = np.array([6], dtype=np.float64)
+fnp_x, _, _, _ = fnp.linalg.lstsq(a, b, rcond=None)
+np_x, _, _, _ = np.linalg.lstsq(a, b, rcond=None)
+# Both should find a solution that satisfies the equation
+print(np.allclose(a @ fnp_x, b))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "lstsq underdetermined should satisfy equation");
+    Ok(())
+}
