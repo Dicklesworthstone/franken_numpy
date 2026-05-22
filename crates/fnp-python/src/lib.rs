@@ -7454,7 +7454,7 @@ fn digitize(py: Python<'_>, x: Py<PyAny>, bins: Py<PyAny>, right: bool) -> PyRes
     let x = extract_numeric_array(py, x.bind(py), "digitize(x)")?;
     let bins = extract_numeric_array(py, bins.bind(py), "digitize(bins)")?;
     let result = x.digitize_right(&bins, right).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -7492,7 +7492,7 @@ fn interp(
     let xp = extract_numeric_array(py, xp.bind(py), "interp(xp)")?;
     let fp = extract_numeric_array(py, fp.bind(py), "interp(fp)")?;
     let result = UFuncArray::interp_lr(&x, &xp, &fp, left, right).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 fn trapezoid_impl(
