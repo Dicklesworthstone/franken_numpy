@@ -120,3 +120,20 @@ print(np.allclose(result, expected))
     );
     Ok(())
 }
+
+#[test]
+fn cross_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2+2j, 3+3j], dtype=np.complex128)
+b = np.array([4+1j, 5+2j, 6+3j], dtype=np.complex128)
+fnp_result = fnp.cross(a, b)
+np_result = np.cross(a, b)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cross complex should match numpy");
+    Ok(())
+}
