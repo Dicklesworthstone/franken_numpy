@@ -23816,23 +23816,104 @@ fn argmin(
 
 // Linalg shortcuts
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
+#[pyo3(signature = (x1, x2, out=None, **kwargs))]
 fn matmul(
     py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
+    x1: Py<PyAny>,
+    x2: Py<PyAny>,
+    out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "matmul", args, kwargs)
+    let numpy = py.import("numpy")?;
+    let matmul_fn = numpy.getattr("matmul")?;
+    let x1_for_fallback = x1.clone_ref(py);
+    let x2_for_fallback = x2.clone_ref(py);
+    let out_for_fallback = out.as_ref().map(|o| o.clone_ref(py));
+    let kwargs_for_fallback = kwargs.map(|k| k.clone().unbind());
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kw = kwargs_for_fallback.as_ref().map(|k| k.bind(py));
+        match &out_for_fallback {
+            Some(o) => Ok(matmul_fn
+                .call((x1_for_fallback.bind(py), x2_for_fallback.bind(py), o.bind(py)), kw)?
+                .unbind()),
+            None => Ok(matmul_fn
+                .call((x1_for_fallback.bind(py), x2_for_fallback.bind(py)), kw)?
+                .unbind()),
+        }
+    };
+
+    // out parameter or extra kwargs require NumPy
+    if out.is_some() || kwargs.is_some_and(|k| !k.is_empty()) {
+        return fallback();
+    }
+
+    let a_arr = match extract_numeric_array(py, x1.bind(py), "matmul(x1)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    let b_arr = match extract_numeric_array(py, x2.bind(py), "matmul(x2)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Fall back if sidecars present (complex integer types)
+    if a_arr.has_integer_sidecar() || b_arr.has_integer_sidecar() {
+        return fallback();
+    }
+
+    let result = match a_arr.matmul(&b_arr) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
-#[pyo3(signature = (*args, **kwargs))]
-fn dot(
-    py: Python<'_>,
-    args: &Bound<'_, PyTuple>,
-    kwargs: Option<&Bound<'_, PyDict>>,
-) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "dot", args, kwargs)
+#[pyo3(signature = (a, b, out=None))]
+fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let dot_fn = numpy.getattr("dot")?;
+    let a_for_fallback = a.clone_ref(py);
+    let b_for_fallback = b.clone_ref(py);
+    let out_for_fallback = out.as_ref().map(|o| o.clone_ref(py));
+    let fallback = || -> PyResult<Py<PyAny>> {
+        match out_for_fallback {
+            Some(o) => Ok(dot_fn
+                .call(
+                    (a_for_fallback.bind(py), b_for_fallback.bind(py), o.bind(py)),
+                    None,
+                )?
+                .unbind()),
+            None => Ok(dot_fn
+                .call((a_for_fallback.bind(py), b_for_fallback.bind(py)), None)?
+                .unbind()),
+        }
+    };
+
+    // out parameter requires NumPy for in-place writes
+    if out.is_some() {
+        return fallback();
+    }
+
+    let a_arr = match extract_numeric_array(py, a.bind(py), "dot(a)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    let b_arr = match extract_numeric_array(py, b.bind(py), "dot(b)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+
+    // Fall back if sidecars present (complex integer types)
+    if a_arr.has_integer_sidecar() || b_arr.has_integer_sidecar() {
+        return fallback();
+    }
+
+    let result = match a_arr.dot(&b_arr) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
