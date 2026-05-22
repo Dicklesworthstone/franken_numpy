@@ -4017,10 +4017,12 @@ impl Generator {
         if !replace && size > n {
             return Err(RandomError::InvalidUpperBound);
         }
+        // NumPy accepts probability sums within sqrt(float64 epsilon).
+        let sum_tolerance = f64::EPSILON.sqrt();
         // Validate probabilities are non-negative and sum to ~1.0
         let sum: f64 = p.iter().sum();
         if !sum.is_finite()
-            || (sum - 1.0).abs() > 1e-8
+            || (sum - 1.0).abs() > sum_tolerance
             || p.iter().any(|&v| !v.is_finite() || v < 0.0)
         {
             return Err(RandomError::InvalidUpperBound);
@@ -9907,6 +9909,23 @@ for child in rng.spawn(n_children):
         assert!(rng.choice_weighted(&a, 1, true, &p3).is_err());
         let p4 = [0.5, f64::INFINITY, 0.5];
         assert!(rng.choice_weighted(&a, 1, true, &p4).is_err());
+    }
+
+    #[test]
+    fn choice_weighted_uses_numpy_probability_sum_tolerance() {
+        let mut rng = test_generator();
+        let a = [1.0, 2.0];
+        let just_inside_numpy_tolerance = [0.5, 0.5 + 1.4e-8];
+        assert!(
+            rng.choice_weighted(&a, 2, true, &just_inside_numpy_tolerance)
+                .is_ok()
+        );
+
+        let just_outside_numpy_tolerance = [0.5, 0.5 + 1.5e-8];
+        assert!(
+            rng.choice_weighted(&a, 2, true, &just_outside_numpy_tolerance)
+                .is_err()
+        );
     }
 
     #[test]
