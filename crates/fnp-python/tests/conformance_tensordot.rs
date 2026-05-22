@@ -140,3 +140,20 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn tensordot_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2]], dtype=np.complex128)
+b = np.array([[1], [2+1j]], dtype=np.complex128)
+fnp_result = fnp.tensordot(a, b, axes=1)
+np_result = np.tensordot(a, b, axes=1)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "tensordot complex should match numpy");
+    Ok(())
+}
