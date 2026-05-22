@@ -17002,7 +17002,7 @@ fn add(
             Ok(r) => r,
             Err(_) => return core_numpy_passthrough(py, "add", args, kwargs),
         };
-        return build_numpy_array_from_ufunc(py, &result);
+        return build_numpy_scalar_or_array(py, &result);
     }
     core_numpy_passthrough(py, "add", args, kwargs)
 }
@@ -17034,7 +17034,7 @@ fn subtract(
             Ok(r) => r,
             Err(_) => return core_numpy_passthrough(py, "subtract", args, kwargs),
         };
-        return build_numpy_array_from_ufunc(py, &result);
+        return build_numpy_scalar_or_array(py, &result);
     }
     core_numpy_passthrough(py, "subtract", args, kwargs)
 }
@@ -17066,7 +17066,7 @@ fn multiply(
             Ok(r) => r,
             Err(_) => return core_numpy_passthrough(py, "multiply", args, kwargs),
         };
-        return build_numpy_array_from_ufunc(py, &result);
+        return build_numpy_scalar_or_array(py, &result);
     }
     core_numpy_passthrough(py, "multiply", args, kwargs)
 }
