@@ -14828,7 +14828,7 @@ fn native_binary_power_or_passthrough(
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "power", args, kwargs),
         };
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "power", args, kwargs)
     }
@@ -14855,7 +14855,7 @@ fn native_binary_divide_or_passthrough(
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "divide", args, kwargs),
         };
-        build_numpy_array_from_ufunc(py, &result)
+        build_numpy_scalar_or_array(py, &result)
     } else {
         core_numpy_passthrough(py, "divide", args, kwargs)
     }
