@@ -2356,6 +2356,20 @@ fn write_savetxt_exp(
     .map_err(|_| IOError::WriteContractViolation("formatting failed"))
 }
 
+fn push_savetxt_comment_block(output: &mut String, text: &str, comments: &str, newline: &str) {
+    output.push_str(comments);
+    let mut lines = text.split('\n');
+    if let Some(first) = lines.next() {
+        output.push_str(first);
+    }
+    for line in lines {
+        output.push('\n');
+        output.push_str(comments);
+        output.push_str(line);
+    }
+    output.push_str(newline);
+}
+
 /// Save data to a text string (np.savetxt equivalent).
 /// Writes row-major `values` with shape `(nrows, ncols)`.
 pub fn savetxt(
@@ -2373,9 +2387,7 @@ pub fn savetxt(
     // Pre-allocate approximately (15 chars per float + delimiter) * total
     let mut output = String::with_capacity(values.len() * 16);
     if !config.header.is_empty() {
-        output.push_str(config.comments);
-        output.push_str(config.header);
-        output.push_str(config.newline);
+        push_savetxt_comment_block(&mut output, config.header, config.comments, config.newline);
     }
     use std::fmt::Write;
     for r in 0..nrows {
@@ -2413,9 +2425,7 @@ pub fn savetxt(
         output.push_str(config.newline);
     }
     if !config.footer.is_empty() {
-        output.push_str(config.comments);
-        output.push_str(config.footer);
-        output.push_str(config.newline);
+        push_savetxt_comment_block(&mut output, config.footer, config.comments, config.newline);
     }
     Ok(output)
 }
@@ -5451,6 +5461,32 @@ mm.flush()
         };
         let output = savetxt(&values, 1, 1, &cfg).unwrap();
         assert_eq!(output, "#h\n1.000000000000000000e+00\n#f\n");
+    }
+
+    #[test]
+    fn savetxt_multiline_header_and_footer_prefix_each_line_like_numpy() {
+        let values = vec![1.0];
+        let cfg = SaveTxtConfig {
+            header: "h1\nh2",
+            footer: "f1\nf2",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "# h1\n# h2\n1.000000000000000000e+00\n# f1\n# f2\n");
+    }
+
+    #[test]
+    fn savetxt_multiline_header_and_footer_use_custom_comments_like_numpy() {
+        let values = vec![1.0];
+        let cfg = SaveTxtConfig {
+            header: "h1\nh2",
+            footer: "f1\nf2",
+            comments: "##",
+            newline: "|",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "##h1\n##h2|1.000000000000000000e+00|##f1\n##f2|");
     }
 
     #[test]
