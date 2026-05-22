@@ -5080,7 +5080,10 @@ impl Generator {
 
     /// Logarithmic (log-series) distribution (matching NumPy's algorithm).
     pub fn logseries(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
-        if p <= 0.0 || p >= 1.0 {
+        if p == 0.0 {
+            return Ok(vec![1; size]);
+        }
+        if !(0.0..1.0).contains(&p) {
             return Err(RandomError::InvalidParameter);
         }
         let r = (-p).ln_1p(); // log1p(-p) = ln(1 - p)
@@ -9222,6 +9225,26 @@ for child in rng.spawn(n_children):
             count_one > 1000,
             "logseries(p=0.5) should produce many 1s, got {count_one}"
         );
+    }
+
+    #[test]
+    fn logseries_probability_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.logseries(0.0, 4).unwrap(), vec![1; 4]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(negative_zero.logseries(-0.0, 4).unwrap(), vec![1; 4]);
+
+        let mut nan = test_generator();
+        assert_eq!(
+            nan.logseries(f64::NAN, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        for invalid in [-0.5, 1.0, f64::INFINITY] {
+            let mut rng = test_generator();
+            assert_eq!(rng.logseries(invalid, 1), Err(RandomError::InvalidParameter));
+        }
     }
 
     #[test]
