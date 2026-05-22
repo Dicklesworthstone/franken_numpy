@@ -496,11 +496,63 @@ print(np.allclose(cosh_sq - sinh_sq, 1.0))
     Ok(())
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// deg2rad / rad2deg
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn deg2rad_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0, 30, 45, 60, 90, 180, 360])
+result = fnp.deg2rad(x)
+expected = np.deg2rad(x)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "deg2rad basic should match numpy");
+    Ok(())
+}
+
+#[test]
+fn rad2deg_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0, np.pi/6, np.pi/4, np.pi/3, np.pi/2, np.pi, 2*np.pi])
+result = fnp.rad2deg(x)
+expected = np.rad2deg(x)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rad2deg basic should match numpy");
+    Ok(())
+}
+
+#[test]
+fn deg2rad_rad2deg_inverse() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+deg = np.array([0, 45, 90, 135, 180, 270, 360])
+roundtrip = fnp.rad2deg(fnp.deg2rad(deg))
+print(np.allclose(deg, roundtrip))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rad2deg(deg2rad(x)) should equal x");
+    Ok(())
+}
+
 #[test]
 fn trig_scalar_return_type_matches_numpy() -> Result<(), String> {
     let funcs = [
         "sin", "cos", "tan", "arcsin", "arccos", "arctan",
         "sinh", "cosh", "tanh", "arcsinh", "arccosh", "arctanh",
+        "deg2rad", "rad2deg",
     ];
     for func in funcs {
         let input = if func == "arccosh" { "2.0" } else if func.starts_with("arc") && !func.contains("h") { "0.5" } else { "0.5" };
