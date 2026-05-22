@@ -24090,7 +24090,39 @@ fn concat(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "concat", args, kwargs)
+    let numpy = py.import("numpy")?;
+    let concat_fn = numpy.getattr("concat")?;
+    let fallback = || -> PyResult<Py<PyAny>> { Ok(concat_fn.call(args, kwargs)?.unbind()) };
+
+    // Fall back for empty args, extra positional args, or any kwargs
+    if args.is_empty() || args.len() > 2 || kwargs.is_some_and(|k| !k.is_empty()) {
+        return fallback();
+    }
+
+    // Parse arrays sequence and optional axis
+    let arrays_seq = args.get_item(0)?;
+    let axis: isize = if args.len() == 2 {
+        args.get_item(1)?.extract().unwrap_or(0)
+    } else {
+        0
+    };
+
+    let arrays = match extract_numeric_array_sequence(py, &arrays_seq, "concat") {
+        Ok(a) => a,
+        Err(_) => return fallback(),
+    };
+
+    // Fall back if any array has sidecars
+    if arrays.iter().any(|a| a.has_integer_sidecar()) {
+        return fallback();
+    }
+
+    let refs: Vec<&UFuncArray> = arrays.iter().collect();
+    let result = match UFuncArray::concatenate(&refs, axis) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
