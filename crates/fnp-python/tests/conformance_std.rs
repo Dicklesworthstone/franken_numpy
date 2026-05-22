@@ -435,3 +435,19 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn std_complex() -> Result<(), String> {
+    let script = fnp_std_script(
+        r#"
+z = np.array([1+2j, 3+4j, 5+6j], dtype=np.complex128)
+fnp_result = fnp.std(z)
+np_result = np.std(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "std complex should match numpy");
+    Ok(())
+}

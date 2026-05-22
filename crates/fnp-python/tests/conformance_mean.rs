@@ -368,3 +368,19 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn mean_complex() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+z = np.array([1+2j, 3+4j, 5+6j], dtype=np.complex128)
+fnp_result = fnp.mean(z)
+np_result = np.mean(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "mean complex should match numpy");
+    Ok(())
+}
