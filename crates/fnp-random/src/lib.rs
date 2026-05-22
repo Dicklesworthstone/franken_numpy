@@ -4836,7 +4836,7 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn rayleigh(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 || scale.is_nan() {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -9081,6 +9081,31 @@ for child in rng.spawn(n_children):
         assert!(
             (mean - expected).abs() < 0.2,
             "rayleigh mean={mean}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn rayleigh_scale_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.rayleigh(0.0, 4).unwrap(), vec![0.0; 4]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.rayleigh(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.rayleigh(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite = test_generator();
+        assert!(
+            infinite
+                .rayleigh(f64::INFINITY, 3)
+                .unwrap()
+                .iter()
+                .all(|value| value.is_infinite() && value.is_sign_positive())
         );
     }
 
