@@ -16,6 +16,7 @@ description = "NumPy-parity RNG: PCG64DXSM, distributions, oracle-verified deter
 # variants don't depend on ndarray, but the shaped variants need the SCE
 # contracts to build correctly-strided output arrays.
 fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }
+getrandom.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true

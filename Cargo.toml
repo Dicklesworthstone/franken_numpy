@@ -39,6 +39,8 @@ serde_json = "1.0.149"
 serde = { version = "1.0.228", features = ["derive"] }
 # Workspace benchmark harness for performance baselines and regression gates.
 criterion = { version = "0.6", features = ["html_reports"] }
+# OS entropy source for NumPy-compatible unseeded RNG constructors.
+getrandom = "0.3.4"
 # CPython bridge used by the NumPy oracle wrappers and Python-facing parity tests.
 pyo3 = { version = "0.28.3", features = ["auto-initialize"] }
 # Optional structured async runtime for long-running conformance/artifact jobs.

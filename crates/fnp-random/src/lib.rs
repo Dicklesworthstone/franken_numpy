@@ -1994,41 +1994,38 @@ pub struct BitGenerator {
 impl BitGenerator {
     pub fn new(kind: BitGeneratorKind, seed: SeedMaterial) -> Result<Self, BitGeneratorError> {
         let rng = match seed {
-            SeedMaterial::None => match kind {
-                BitGeneratorKind::Pcg64 => {
-                    RngBackend::Pcg64(Pcg64Rng::from_u64_seed(DEFAULT_RNG_SEED).map_err(|_| {
-                        BitGeneratorError::InitFailed("PCG64 initialization failed")
-                    })?)
+            SeedMaterial::None => {
+                let seed_sequence = seed_sequence_from_os_entropy().map_err(|_| {
+                    BitGeneratorError::InitFailed("OS entropy unavailable for unseeded generator")
+                })?;
+                match kind {
+                    BitGeneratorKind::Pcg64 => {
+                        RngBackend::Pcg64(Pcg64Rng::from_seed_sequence(&seed_sequence).map_err(
+                            |_| BitGeneratorError::InitFailed("PCG64 initialization failed"),
+                        )?)
+                    }
+                    BitGeneratorKind::Pcg64Dxsm => RngBackend::Pcg64Dxsm(
+                        Pcg64DxsmRng::from_seed_sequence(&seed_sequence).map_err(|_| {
+                            BitGeneratorError::InitFailed("PCG64DXSM initialization failed")
+                        })?,
+                    ),
+                    BitGeneratorKind::Mt19937 => RngBackend::Mt19937(
+                        Mt19937Rng::from_seed_sequence(&seed_sequence).map_err(|_| {
+                            BitGeneratorError::InitFailed("MT19937 initialization failed")
+                        })?,
+                    ),
+                    BitGeneratorKind::Philox => {
+                        RngBackend::Philox(PhiloxRng::from_seed_sequence(&seed_sequence).map_err(
+                            |_| BitGeneratorError::InitFailed("Philox initialization failed"),
+                        )?)
+                    }
+                    BitGeneratorKind::Sfc64 => {
+                        RngBackend::Sfc64(Sfc64Rng::from_seed_sequence(&seed_sequence).map_err(
+                            |_| BitGeneratorError::InitFailed("SFC64 initialization failed"),
+                        )?)
+                    }
                 }
-                BitGeneratorKind::Pcg64Dxsm => {
-                    RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_u64_seed(DEFAULT_RNG_SEED).map_err(
-                        |_| BitGeneratorError::InitFailed("PCG64DXSM initialization failed"),
-                    )?)
-                }
-                BitGeneratorKind::Mt19937 => {
-                    RngBackend::Mt19937(Mt19937Rng::from_u32_seed(DEFAULT_RNG_SEED as u32))
-                }
-                BitGeneratorKind::Philox => {
-                    let ss = SeedSequence::new(&[
-                        DEFAULT_RNG_SEED as u32,
-                        (DEFAULT_RNG_SEED >> 32) as u32,
-                    ])
-                    .map_err(|_| BitGeneratorError::InitFailed("Philox initialization failed"))?;
-                    RngBackend::Philox(PhiloxRng::from_seed_sequence(&ss).map_err(|_| {
-                        BitGeneratorError::InitFailed("Philox initialization failed")
-                    })?)
-                }
-                BitGeneratorKind::Sfc64 => {
-                    let ss = SeedSequence::new(&[
-                        DEFAULT_RNG_SEED as u32,
-                        (DEFAULT_RNG_SEED >> 32) as u32,
-                    ])
-                    .map_err(|_| BitGeneratorError::InitFailed("SFC64 initialization failed"))?;
-                    RngBackend::Sfc64(Sfc64Rng::from_seed_sequence(&ss).map_err(|_| {
-                        BitGeneratorError::InitFailed("SFC64 initialization failed")
-                    })?)
-                }
-            },
+            }
             SeedMaterial::U64(s) => match kind {
                 BitGeneratorKind::Pcg64 => {
                     RngBackend::Pcg64(Pcg64Rng::from_u64_seed(s).map_err(|_| {
@@ -5347,11 +5344,38 @@ fn seed_material_to_u64(words: &[u32]) -> u64 {
     mixed
 }
 
+fn seed_sequence_from_os_entropy() -> Result<SeedSequence, SeedSequenceError> {
+    let words = os_entropy_u32_words(DEFAULT_SEED_SEQUENCE_POOL_SIZE)?;
+    SeedSequence::new(&words)
+}
+
+fn os_entropy_u32_words(words: usize) -> Result<Vec<u32>, SeedSequenceError> {
+    let byte_len = words
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or(SeedSequenceError::GenerateStateContractViolation)?;
+    let mut bytes = vec![0_u8; byte_len];
+    getrandom::fill(&mut bytes).map_err(|_| SeedSequenceError::GenerateStateContractViolation)?;
+
+    Ok(bytes
+        .chunks_exact(std::mem::size_of::<u32>())
+        .map(|chunk| {
+            let mut word = [0_u8; std::mem::size_of::<u32>()];
+            word.copy_from_slice(chunk);
+            u32::from_ne_bytes(word)
+        })
+        .collect())
+}
+
 fn deterministic_rng_from_seed_material(
     seed: SeedMaterial,
 ) -> Result<DeterministicRng, RngConstructorError> {
     match seed {
-        SeedMaterial::None => Ok(DeterministicRng::new(DEFAULT_RNG_SEED)),
+        SeedMaterial::None => {
+            let seed_sequence = seed_sequence_from_os_entropy()
+                .map_err(|_| RngConstructorError::SeedMetadataInvalid)?;
+            rng_from_seed_sequence(&seed_sequence)
+                .map_err(|_| RngConstructorError::SeedMetadataInvalid)
+        }
         SeedMaterial::U64(value) => Ok(DeterministicRng::new(value)),
         SeedMaterial::U32Words(words) => {
             if words.is_empty() {
@@ -6165,11 +6189,26 @@ for child in rng.spawn(n_children):
 
     #[test]
     fn default_rng_constructor_normalizes_seed_material() {
-        let mut from_none = default_rng(SeedMaterial::None).expect("default constructor");
+        let first_unseeded = default_rng(SeedMaterial::None)
+            .expect("first unseeded default constructor")
+            .state();
+        let second_unseeded = default_rng(SeedMaterial::None)
+            .expect("second unseeded default constructor")
+            .state();
+        assert_ne!(
+            first_unseeded, second_unseeded,
+            "unseeded default_rng must source fresh OS entropy"
+        );
+
         let mut from_default_seed =
             default_rng(SeedMaterial::U64(DEFAULT_RNG_SEED)).expect("explicit default seed");
+        let mut from_default_seed_again =
+            default_rng(SeedMaterial::U64(DEFAULT_RNG_SEED)).expect("explicit default seed");
         for _ in 0..64 {
-            assert_eq!(from_none.next_u64(), from_default_seed.next_u64());
+            assert_eq!(
+                from_default_seed.next_u64(),
+                from_default_seed_again.next_u64()
+            );
         }
 
         let words = vec![0x1234_5678, 0x90AB_CDEF, 0x4444_9999];

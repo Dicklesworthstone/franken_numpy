@@ -4,7 +4,7 @@
   <img src="franken_numpy_illustration.webp" alt="FrankenNumPy — memory-safe clean-room NumPy reimplementation in Rust" width="400">
 
   **A memory-safe, clean-room reimplementation of NumPy in Rust.**<br>
-  100% of `numpy.__all__` (499/499) is reachable as `fnp_python.<name>`, structurally locked by a conformance test that fails CI on regression. Zero hand-written `unsafe` blocks across all 10 implementation crates (9 declare `#![forbid(unsafe_code)]`; `fnp-python` is opt-out only because PyO3 macros may expand to unsafe). 6,392 tests. Bit-exact PCG64DXSM RNG parity for explicit seeds (the no-seed default deliberately diverges — see `docs/DIVERGENCES.md`).
+  100% of `numpy.__all__` (499/499) is reachable as `fnp_python.<name>`, structurally locked by a conformance test that fails CI on regression. Zero hand-written `unsafe` blocks across all 10 implementation crates (9 declare `#![forbid(unsafe_code)]`; `fnp-python` is opt-out only because PyO3 macros may expand to unsafe). 6,392 tests. Bit-exact PCG64DXSM RNG parity for explicit seeds; no-seed constructors source OS entropy like NumPy.
 
   ![Rust](https://img.shields.io/badge/Rust-nightly%202026--02--20-orange)
   ![Edition](https://img.shields.io/badge/edition-2024-blue)
@@ -538,7 +538,7 @@ Eigenvalue sort order is ascending to match NumPy. Singularity checks use exact 
 
 ### Random Number Generation (`fnp-random`)
 
-The RNG crate achieves **bit-exact parity with NumPy** by porting every algorithm from NumPy's C source code. **`fnp-random` has zero external `crates.io` dependencies**; it depends only on `fnp-ndarray` within the workspace.
+The RNG crate achieves **bit-exact parity with NumPy** by porting every algorithm from NumPy's C source code. `fnp-random` keeps a deliberately small dependency graph: `fnp-ndarray` within the workspace plus `getrandom` for NumPy-compatible no-seed OS entropy.
 
 **5 production bit generators**, enumerated under `pub enum BitGeneratorKind`:
 
@@ -584,9 +584,9 @@ let restored = Generator::from_pickle_payload(payload)?;
 
 `GeneratorPicklePayload` captures the bit-generator state (seed, counter, algorithm tag, schema version) and optionally the `SeedSequence` snapshot for spawn-lineage tracking. The `RandomState` wrapper provides legacy `numpy.random.RandomState` API parity.
 
-**Seed material** accepts `None` (deterministic default), `U64(seed)`, `U32Words(vec)`, `SeedSequence`, or direct `State { seed, counter }` for exact restoration. `default_rng(12345)`, `default_rng([1, 2, 3])`, and `default_rng(SeedSequence(42))` all work bit-exactly.
+**Seed material** accepts `None` (fresh OS entropy), `U64(seed)`, `U32Words(vec)`, `SeedSequence`, or direct `State { seed, counter }` for exact restoration. `default_rng(12345)`, `default_rng([1, 2, 3])`, and `default_rng(SeedSequence(42))` all work bit-exactly.
 
-> ⚠️ **`SeedMaterial::None` uses a fixed deterministic seed** (`DEFAULT_RNG_SEED = 0xC0DE_CAFE_F00D_BAAD`) rather than OS entropy. NumPy's `default_rng()` sources fresh OS entropy on each call. This is tracked as the single active row in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) (bead `franken_numpy-ucc2o`) pending a decision on whether to add `getrandom` as `fnp-random`'s first external dependency. **Explicit seeds always match NumPy bit-for-bit.**
+`SeedMaterial::None` and no-seed `default_rng()` source fresh OS entropy via `getrandom`, matching NumPy's non-reproducible default constructor behavior. Use explicit seeds when you need bit-for-bit reproducibility.
 
 ### I/O Format Handling (`fnp-io`)
 
@@ -884,7 +884,7 @@ Determinism is a graded property; the README is explicit about which kind applie
 | Shape / stride / broadcast computation | **Bit-deterministic, platform-independent.** | Every `broadcast_shape`, `fix_unknown_dimension`, and `contiguous_strides` is a pure `const fn`-style computation. Same inputs always produce the same outputs, on every platform. |
 | Dtype promotion | **Bit-deterministic, exhaustively enumerated.** | All 324 pairs explicit; no platform-dependent fallback path; no compiler-version-dependent inference. |
 | RNG output (explicit seed) | **Bit-exact vs NumPy upstream**, platform-independent. | `Generator::from_pcg64_dxsm(seed)` and the eight ported distribution algorithms produce sequences identical to `numpy.random.Generator(PCG64DXSM(seed))`. |
-| RNG output (no seed) | **Deterministic** but **diverges from NumPy upstream.** | `SeedMaterial::None` uses fixed default seed `0xC0DE_CAFE_F00D_BAAD`; NumPy uses OS entropy. Tracked in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) row `franken_numpy-ucc2o`. |
+| RNG output (no seed) | **Fresh entropy, matching NumPy upstream.** | `SeedMaterial::None` and no-seed `default_rng()` source OS entropy through `getrandom`; use an explicit seed for reproducible streams. |
 | Ufunc / reduction values | **Behaviorally equivalent vs NumPy** to within the per-fixture relative tolerance recorded in each differential case. | Many ops coincide bit-for-bit with NumPy; when they don't, the differential gate compares against the explicit `rel_tol` field in the fixture. |
 | Linalg outputs | **Behaviorally equivalent vs NumPy** up to tolerance; **bit-deterministic on a single platform**. | QR/SVD/Cholesky/eig values match NumPy within tolerance; on a given platform with a given Rust toolchain, repeating the call always yields the same bits. |
 | FFT outputs | **Behaviorally equivalent vs NumPy** up to tolerance; **deterministic** ordering of butterfly operations. | The Cooley–Tukey and Bluestein paths are deterministic; output values match NumPy within the per-fixture relative tolerance configured for the FFT differential cases (`fft_differential_cases.json`). |
@@ -1121,7 +1121,7 @@ A concrete checklist for "make my numerical pipeline bit-reproducible from a fre
 
 1. **Pin the toolchain.** Add `rust-toolchain.toml` with a specific nightly. We use `nightly-2026-02-20`.
 2. **Pin every dependency.** Use exact `=x.y.z` constraints in `Cargo.toml`, not caret/tilde. Commit `Cargo.lock`.
-3. **Use an explicit RNG seed.** `Generator::from_pcg64_dxsm(seed)` for new code; never rely on `SeedMaterial::None`.
+3. **Use an explicit RNG seed for reproducibility.** `Generator::from_pcg64_dxsm(seed)` for new code; `SeedMaterial::None` intentionally sources OS entropy like NumPy.
 4. **Spawn child streams for parallelism, not OS entropy.** `let mut parent = SeedSequence::new(&[seed])?; let children = parent.spawn(n_workers)?;` gives each worker a child stream. The full lineage is captured in the spawn counter, so child indices reproduce.
 5. **Capture the full generator state.** Before any non-deterministic side-effect, call `generator.to_pickle_payload()` to obtain a typed snapshot struct; `from_pickle_payload` reconstructs the *exact* state in-process. For cross-process persistence you currently need to layer your own transport over the payload's public fields.
 6. **Use `errstate` rather than global `seterr` for short-lived overrides.** Global `seterr` is process-wide; `errstate` is RAII-scoped and restores prior state on drop.
@@ -1497,7 +1497,7 @@ A practical checklist for Python users moving an existing NumPy-based codebase t
 | 1 | `import fnp_python as np` (replace `import numpy as np`) | `fnp_python` re-exports the full `numpy.__all__`, so the import rename usually suffices. |
 | 2 | Run your existing test suite. | Most tests will pass unchanged because the surface is 1:1. |
 | 3 | Inspect failures for `is`-comparisons against numpy types (e.g. `type(x) is numpy.ndarray`). | The arrays returned from re-exported numpy functions ARE numpy ndarrays; those returned from Rust-engine fast paths might be the same. If `is`-comparisons break, switch to `isinstance(x, np.ndarray)`. |
-| 4 | Pin a specific seed everywhere that uses `np.random.default_rng()`. | `SeedMaterial::None` is currently deterministic in `fnp-random` (divergence ledger row `franken_numpy-ucc2o`); explicit seeds avoid surprise. |
+| 4 | Pin a specific seed everywhere that uses `np.random.default_rng()` when reproducibility matters. | `SeedMaterial::None` now matches NumPy by sourcing OS entropy; explicit seeds give stable streams. |
 | 5 | Replace single-RNG parallel patterns with `SeedSequence.spawn(n)`. | If you've been calling `np.random.default_rng()` once per worker without seed spawning, you've been relying on OS entropy for stream independence; switch to explicit spawn so the behavior is reproducible AND parallel-safe. |
 | 6 | Audit your `.npy` / `.npz` consumers if you handle untrusted files. | The `fnp-io` parsers have hard bounds (`MAX_HEADER_BYTES = 65,536`, `MAX_ARCHIVE_MEMBERS = 4,096`, `MAX_ARCHIVE_UNCOMPRESSED_BYTES = 2 GiB`). If your existing pipeline relies on loading files larger than these bounds, document the gap before flipping over. |
 | 7 | If you use `np.empty()` with the expectation of uninitialized memory for speed, you now get zero-filled memory. | Safe Rust forbids uninitialized memory; the perf delta is small in practice but measurable for very large pre-allocations. |
@@ -1516,7 +1516,7 @@ Things that look broken but aren't, plus things that look fine but bite you late
 | Pattern | What happens | What to do |
 |---|---|---|
 | `Generator::from_pcg64_dxsm(seed).standard_normal(5)`, calling it twice and expecting the same result | Second call gives the **next** 5 samples, not the first 5 again. The generator is stateful. | Build the generator inside the test/function; or `to_pickle_payload()` + `from_pickle_payload()` to rewind. |
-| `default_rng()` without a seed and expecting fresh randomness across runs | The result is **deterministic**; fixed default seed `0xC0DE_CAFE_F00D_BAAD` (divergence ledger row `franken_numpy-ucc2o`) | Pass an explicit seed; or accept the determinism as a feature. |
+| `default_rng()` without a seed and expecting reproducible output | The result is intentionally **non-deterministic**, matching NumPy's OS-entropy default | Pass an explicit seed for a reproducible stream. |
 | `np.empty((1_000_000,))` expecting uninitialized memory for benchmark realism | Result is **zero-filled** (safe Rust forbids uninit memory) | Benchmark realistically by writing into the buffer before timing reads. |
 | `reduce_mean(None, false)` on a float array, then asserting shape `[1]` | Result shape is `[]` (0-D scalar), not `[1]`. `keepdims=true` gives `[1, ...]` of all-ones. | Use `keepdims=true` if you want a shape-preserving reduction. |
 | Sorting an array containing NaN and expecting NaN in the middle | NaN sorts to **end** (NumPy convention). | Use `nansort_index` style explicit ordering if you need to filter out NaN first. |
@@ -1923,11 +1923,12 @@ The `asupersync` RaptorQ primitives (`fnp-conformance` uses them for the sidecar
 
 Behavioral differences vs upstream NumPy that we accept either intentionally or as tracked parity debt live in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md). The ledger is machine-readable: a diagnostic case can only be marked `intentional_divergence` when it references a row here.
 
-**Current state (2026-05-16): 1 active row.**
+**Current state (2026-05-22): 0 active rows.**
 
 | ID | Disposition | Surface | Behavior |
 |---|---|---|---|
-| `franken_numpy-ucc2o` | `parity_debt` | `fnp-random` `SeedMaterial::None` / no-seed `default_rng()` | Uses a fixed deterministic seed (`0xC0DE_CAFE_F00D_BAAD`); NumPy sources OS entropy. Explicit seeds always match NumPy bit-for-bit. |
+
+Resolved note: `franken_numpy-iqo31` closed the prior `SeedMaterial::None` parity debt by sourcing no-seed constructors from OS entropy via `getrandom`.
 
 The ledger gate is enforced by:
 
@@ -2049,11 +2050,10 @@ What doesn't work today.
 - **No `pip install frankennumpy` packaging story yet.** The Python surface is reached today by building the `fnp-python` PyO3 extension and putting the renamed cdylib on `PYTHONPATH`. The pyproject.toml + wheel + PyPI publishing flow is future work. *Surface coverage itself is no longer a limitation*: the `fnp_python` module reaches **100% of `numpy.__all__`** (499/499 names), structurally locked.
 - **No BLAS/LAPACK backend.** Linear algebra uses pure-Rust implementations (Householder QR, Golub–Kahan SVD, implicit shifted QR for eigenvalues). Competitive with BLAS for small matrices; slower for large ones. Optional BLAS linkage is a Phase 3 work-stream (ADR-001).
 - **Complex elementwise arithmetic uses interleaved storage.** Complex64/Complex128 dtypes store real/imaginary parts as interleaved floats. Elementwise `multiply` and `divide` apply true complex arithmetic `(a+bi)(c+di) = (ac−bd)+(ad+bc)i`, but the interleaved representation adds overhead vs native complex types.
-- **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Switching would pull `fnp-linalg` into `fnp-random`'s dependency graph (currently `fnp-random` has zero external crates.io dependencies; only intra-workspace `fnp-ndarray`).
+- **`multivariate_normal` uses Cholesky.** NumPy defaults to SVD. Switching would pull `fnp-linalg` into `fnp-random`'s dependency graph (currently `fnp-random` keeps only intra-workspace `fnp-ndarray` plus `getrandom` for OS entropy).
 - **`multivariate_hypergeometric` uses sequential draws.** NumPy uses the `random_mvhg_marginals` algorithm.
 - **Single-threaded.** All array operations are single-threaded. The `asupersync` integration is optional and used only for conformance pipeline orchestration, not parallel array computation. Multi-threading is a Phase 3 work-stream.
 - **f64 internal representation for `UFuncArray`.** Numeric values are stored as `Vec<f64>` internally for arithmetic. For i64/u64 values > 2^53, `IntegerSidecar` preserves exact integer values through storage round-trips; arithmetic on such values still uses f64 approximation. Native i64/u64 paths are a Phase 3 work-stream.
-- **`SeedMaterial::None` is deterministic.** A no-seed `default_rng()` uses a fixed default seed; NumPy uses OS entropy. Explicit-seed forms match NumPy bit-for-bit. See the Divergence Ledger.
 - **Large-scale ufunc-elementwise / ufunc-broadcast hotspots.** Without SIMD or BLAS, these workloads sit in the 10–30× range vs NumPy at large array sizes. Small/medium and contiguous workloads are at or near parity.
 - **`std`-only — no `no_std` support.** All 10 crates link to the Rust standard library; there are zero `#![no_std]` declarations and no `panic_handler` attributes in the workspace (verified via grep). The codebase uses `std::sync::{Arc, Mutex, RwLock, OnceLock}`, `std::time::SystemTime`, `std::fs`, `std::process::Command`, etc. throughout. Embedded / `no_std` targets are out of scope for this project.
 
@@ -2338,13 +2338,13 @@ Memory safety is a core value. 9 of the 10 implementation crates declare `#![for
 Profile-driven. I/O, random, linalg, reductions, and sorting are at or near parity with NumPy. FFT is mixed (power-of-two fast, non-power-of-two slower). Large-scale elementwise/broadcast ufuncs are the main hotspot, with 10–30× ratios; the Phase 3 SIMD/BLAS work-streams target these. Small/medium array workloads are competitive across the board.
 
 **Can I use just the RNG crate?**
-Yes. `fnp-random` pulls **zero external crates.io dependencies** (only depends on `fnp-ndarray` within the workspace) and produces bit-exact NumPy-compatible random sequences from a given seed.
+Yes. `fnp-random` keeps dependencies minimal (`fnp-ndarray` plus `getrandom` for no-seed OS entropy) and produces bit-exact NumPy-compatible random sequences from a given explicit seed.
 
 **What's the difference between `fnp_python` and just calling numpy?**
 `fnp_python` is the parity oracle surface. Hot operations execute on the Rust engine for native speed; everything else falls back to numpy verbatim so behavior is identical (including version-gated and deprecation paths). You get one drop-in module, with Rust under the hood where it matters.
 
 **Is anything intentionally divergent from NumPy?**
-[`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) is the machine-readable ledger. As of 2026-05-16 there is exactly one active row, and it is parity debt (`fnp-random` no-seed default), not an intentional design divergence. The ledger gate is enforced in CI.
+[`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) is the machine-readable ledger. As of 2026-05-22 there are zero active rows; the prior `fnp-random` no-seed default parity debt is resolved. The ledger gate is enforced in CI.
 
 **Are there any stubs, TODOs, or mock code in production?**
 No. The [`audit_numpy_mocks.md`](audit_numpy_mocks.md) automated audit shows zero `TODO` / `FIXME` / `HACK` / `STUB` / `unimplemented!()` / `todo!()` across the 10 production crates, and zero production `.unwrap()` outside `fnp-conformance` fixture-harness code.

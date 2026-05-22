@@ -9,12 +9,16 @@ Current policy: no fnp-python diagnostic mismatch is accepted as an intentional
 NumPy divergence. The table below lists active tracked parity debt discovered
 while building the diagnostic parity wave.
 
-**Active rows: 1** (as of 2026-05-16). The two resolution notes below the table
+**Active rows: 0** (as of 2026-05-22). The resolution notes below the table
 record beads that previously held entries; they remain for provenance.
 
 | ID | Disposition | Surface | Affected behavior | NumPy scope | Strict behavior | Hardened behavior | Follow-up | Evidence |
 |---|---|---|---|---|---|---|---|---|
-| `franken_numpy-ucc2o` | parity_debt | `fnp-random` `SeedMaterial::None` / no-seed `default_rng()` | Sourcing entropy for an unseeded RNG | NumPy's `default_rng()` sources from OS entropy (getrandom / CryptGenRandom) → fresh sequence per process | Uses fixed `DEFAULT_RNG_SEED = 0xC0DE_CAFE_F00D_BAAD` (deterministic) | Same as strict | Decide whether to add `getrandom` as an external crates.io dep (fnp-random currently has none — only intra-workspace fnp-ndarray) or keep deterministic-default and document loudly | `crates/fnp-random/src/lib.rs:256` (verified 2026-05-16, byte-for-byte match incl. underscore placement), `:1997, :5354`; README RNG State Serialization section updated 2026-05-16 to flag the divergence |
+
+Resolved no-seed RNG note: `franken_numpy-iqo31` changed `SeedMaterial::None`
+and no-seed `default_rng()` from the fixed `DEFAULT_RNG_SEED` stream to a fresh
+`SeedSequence` initialized from OS entropy. Explicit seed material remains
+deterministic and bit-for-bit reproducible.
 
 Resolved warning-debt note: `franken_numpy-2f6l4` restored diagnostic coverage
 for divide/remainder/mod/fmod zero-divisor warnings, empty mean/var warnings,

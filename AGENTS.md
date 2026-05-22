@@ -52,7 +52,7 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 - Workspace runs 6,392 tests across 10 crates (see [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the per-crate breakdown). Underlying Rust surface: 1,575 `pub fn` declarations across `crates/*/src/**/*.rs`.
 - Bead tracker stands at ~1,417 closed beads as of 2026-05-19; live count via `br list --status=closed --limit 10000 --json | jq length`.
 - No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (8 #[test] functions fail CI on stub markers); per-site analysis in [`audit_numpy_mocks.md`](audit_numpy_mocks.md).
-- Active tracked divergences: 1 row in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md) (fnp-random `SeedMaterial::None` uses a fixed default seed instead of OS entropy — bead `franken_numpy-ucc2o`).
+- Active tracked divergences: 0 rows in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
 
 ## Toolchain: Rust & Cargo
 
@@ -73,6 +73,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 | `serde_yaml_ng` | YAML parsing for security control maps and contracts |
 | `sha2` | Content hashing for artifact integrity |
 | `base64` | Encoding for artifact payloads |
+| `getrandom` | OS entropy for NumPy-compatible unseeded RNG constructors |
 
 ### Release Profile
 
