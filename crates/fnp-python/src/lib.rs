@@ -14958,11 +14958,24 @@ fn real(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (val,))]
 fn imag(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.imag (imaginary part of a complex array; for
-    // real-dtype inputs numpy returns a zero-valued array with the real
-    // dtype). Preserves numpy's write-view semantics for complex inputs.
+    // Fast path: for real dtypes, imag returns a zeros array with same shape/dtype.
+    // Complex inputs use NumPy to preserve write-view semantics.
     let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("imag")?.call1((val.bind(py),))?.unbind())
+    let array = numpy.call_method1("asarray", (val.bind(py),))?;
+    let dtype = array.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+
+    if kind.as_str() == "c" {
+        // Complex array - use NumPy's imag for view semantics
+        Ok(numpy.getattr("imag")?.call1((array,))?.unbind())
+    } else {
+        // Real array - imaginary part is zeros with same shape and dtype
+        let shape = array.getattr("shape")?;
+        Ok(numpy
+            .call_method1("zeros", (shape,))?
+            .call_method1("astype", (dtype,))?
+            .unbind())
+    }
 }
 
 #[pyfunction]
