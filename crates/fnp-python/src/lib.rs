@@ -15054,7 +15054,7 @@ fn floor_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyA
         Ok(r) => r,
         Err(_) => return fallback(),
     };
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -16657,7 +16657,7 @@ fn true_divide(
             Ok(r) => r,
             Err(_) => return core_numpy_passthrough(py, "true_divide", args, kwargs),
         };
-        return build_numpy_array_from_ufunc(py, &result);
+        return build_numpy_scalar_or_array(py, &result);
     }
     core_numpy_passthrough(py, "true_divide", args, kwargs)
 }
