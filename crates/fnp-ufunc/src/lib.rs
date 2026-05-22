@@ -9353,14 +9353,17 @@ impl UFuncArray {
             )));
         }
         // F-order reshape: read source in Fortran (column-major) order,
-        // store the flat sequence as the new C-order values.
+        // write to output in Fortran (column-major) order.
+        // Since we store in C-order, we compute the C-order indices for both.
         let n = self.values.len();
         let old_shape = &self.shape;
         let old_ndim = old_shape.len();
         let old_c_strides = c_strides_elems(old_shape);
-        let mut values = Vec::with_capacity(n);
+        let new_ndim = resolved.len();
+        let new_c_strides = c_strides_elems(&resolved);
+        let mut values = vec![0.0; n];
         for f_flat in 0..n {
-            // Convert F-order flat index to old multi-index, then to C-order source index
+            // Convert F-order flat index to SOURCE multi-index, then to C-order source index
             let mut rem = f_flat;
             let mut src_c = 0usize;
             for d in 0..old_ndim {
@@ -9371,7 +9374,20 @@ impl UFuncArray {
                     src_c += coord * old_c_strides[d];
                 }
             }
-            values.push(if src_c < n { self.values[src_c] } else { 0.0 });
+            // Convert F-order flat index to OUTPUT multi-index, then to C-order output index
+            rem = f_flat;
+            let mut out_c = 0usize;
+            for d in 0..new_ndim {
+                let dim = resolved[d];
+                if dim > 0 {
+                    let coord = rem % dim;
+                    rem /= dim;
+                    out_c += coord * new_c_strides[d];
+                }
+            }
+            if src_c < n && out_c < n {
+                values[out_c] = self.values[src_c];
+            }
         }
         Ok(Self {
             shape: resolved,
