@@ -8491,27 +8491,50 @@ fn concatenate(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Delegate to NumPy so sequence handling, axis=None flattening,
-    // explicit out buffers, dtype/casting interactions, and shape
-    // mismatch errors all match exactly.
     let numpy = py.import("numpy")?;
     let concatenate_fn = numpy.getattr("concatenate")?;
-    if args.is_empty() || args.len() > 2 {
-        return Ok(concatenate_fn.call(args, kwargs)?.unbind());
-    }
-
-    let call_kwargs = PyDict::new(py);
-    if let Some(kwargs) = kwargs {
-        for (key, value) in kwargs.iter() {
-            call_kwargs.set_item(key, value)?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let call_kwargs = PyDict::new(py);
+        if let Some(kw) = kwargs {
+            for (key, value) in kw.iter() {
+                call_kwargs.set_item(key, value)?;
+            }
         }
+        if !call_kwargs.contains("axis")? && args.len() == 1 {
+            call_kwargs.set_item("axis", 0_i64)?;
+        }
+        Ok(concatenate_fn.call(args, Some(&call_kwargs))?.unbind())
+    };
+
+    // Fall back for empty args, extra positional args, or any kwargs
+    if args.is_empty() || args.len() > 2 || kwargs.is_some_and(|k| !k.is_empty()) {
+        return fallback();
     }
 
-    if !call_kwargs.contains("axis")? && args.len() == 1 {
-        call_kwargs.set_item("axis", 0_i64)?;
+    // Parse arrays sequence and optional axis
+    let arrays_seq = args.get_item(0)?;
+    let axis: isize = if args.len() == 2 {
+        args.get_item(1)?.extract().unwrap_or(0)
+    } else {
+        0
+    };
+
+    let arrays = match extract_numeric_array_sequence(py, &arrays_seq, "concatenate") {
+        Ok(a) => a,
+        Err(_) => return fallback(),
+    };
+
+    // Fall back if any array has sidecars
+    if arrays.iter().any(|a| a.has_integer_sidecar()) {
+        return fallback();
     }
 
-    Ok(concatenate_fn.call(args, Some(&call_kwargs))?.unbind())
+    let refs: Vec<&UFuncArray> = arrays.iter().collect();
+    let result = match UFuncArray::concatenate(&refs, axis) {
+        Ok(r) => r,
+        Err(_) => return fallback(),
+    };
+    build_numpy_array_from_ufunc(py, &result)
 }
 
 #[pyfunction]
