@@ -442,3 +442,41 @@ print(np.array_equal(cross_ab, -cross_ba))
     );
     Ok(())
 }
+
+#[test]
+fn linalg_det_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1.0, 2.0], [3.0, 4.0]], dtype=np.float64)
+fnp_result = fnp.linalg.det(a)
+np_result = np.linalg.det(a)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "linalg.det scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn linalg_norm_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+fnp_result = fnp.linalg.norm(a)
+np_result = np.linalg.norm(a)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "linalg.norm scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
