@@ -280,3 +280,35 @@ print(np.array_equal(ravel_result, reshape_result))
     assert_eq!(result.trim(), "True", "ravel should equal reshape(-1)");
     Ok(())
 }
+
+#[test]
+fn reshape_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+fnp_result = fnp.reshape(a, (2, 2))
+np_result = np.reshape(a, (2, 2))
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "reshape complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ravel_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2-1j], [3+2j, 4-2j]], dtype=np.complex128)
+fnp_result = fnp.ravel(a)
+np_result = np.ravel(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ravel complex should match numpy");
+    Ok(())
+}
