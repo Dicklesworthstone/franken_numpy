@@ -194,3 +194,37 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn equal_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z1 = np.array([1+1j, 2+2j, 3+3j], dtype=np.complex128)
+z2 = np.array([1+1j, 2+3j, 3+3j], dtype=np.complex128)
+fnp_result = fnp.equal(z1, z2)
+np_result = np.equal(z1, z2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "equal complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn not_equal_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z1 = np.array([1+1j, 2+2j, 3+3j], dtype=np.complex128)
+z2 = np.array([1+1j, 2+3j, 3+3j], dtype=np.complex128)
+fnp_result = fnp.not_equal(z1, z2)
+np_result = np.not_equal(z1, z2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "not_equal complex should match numpy");
+    Ok(())
+}
