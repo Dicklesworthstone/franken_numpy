@@ -4188,19 +4188,11 @@ impl Generator {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        if shape_param.is_nan() || scale.is_nan() {
-            return Ok(vec![f64::NAN; size]);
-        }
-        if (shape_param == 0.0 && scale.is_infinite())
-            || (shape_param.is_infinite() && scale == 0.0)
-        {
-            return Ok(vec![f64::NAN; size]);
-        }
-        if shape_param == 0.0 || scale == 0.0 {
+        if shape_param == 0.0 {
+            if scale.is_nan() || scale.is_infinite() {
+                return Ok(vec![f64::NAN; size]);
+            }
             return Ok(vec![0.0; size]);
-        }
-        if shape_param.is_infinite() || scale.is_infinite() {
-            return Ok(vec![f64::INFINITY; size]);
         }
         Ok((0..size)
             .map(|_| self.sample_gamma(shape_param) * scale)
@@ -11546,6 +11538,104 @@ for child in rng.spawn(n_children):
             4.908686593272669,
         ];
         assert_f64_seq("gamma", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_gamma_special_scale_nonzero_shape_advances_stream() {
+        let expected_after = [
+            0.888_337_197_310_043_6,
+            0.303_319_245_352_569_4,
+            0.440_032_955_585_861_1,
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+        ];
+
+        let mut zero_scale = oracle_gen();
+        assert_eq!(zero_scale.gamma(2.0, 0.0, 3).unwrap(), vec![0.0; 3]);
+        let zero_scale_after = zero_scale.random(5);
+        assert_f64_seq("gamma_zero_scale_after", &zero_scale_after, &expected_after);
+
+        let mut nan_scale = oracle_gen();
+        let nan_scale_values = nan_scale.gamma(2.0, f64::NAN, 3).unwrap();
+        assert!(nan_scale_values.iter().all(|value| value.is_nan()));
+        let nan_scale_after = nan_scale.random(5);
+        assert_f64_seq("gamma_nan_scale_after", &nan_scale_after, &expected_after);
+
+        let mut infinite_scale = oracle_gen();
+        let infinite_scale_values = infinite_scale.gamma(2.0, f64::INFINITY, 3).unwrap();
+        assert!(
+            infinite_scale_values
+                .iter()
+                .all(|value| *value == f64::INFINITY)
+        );
+        let infinite_scale_after = infinite_scale.random(5);
+        assert_f64_seq(
+            "gamma_infinite_scale_after",
+            &infinite_scale_after,
+            &expected_after,
+        );
+
+        let mut nan_shape_zero_scale = oracle_gen();
+        let nan_shape_values = nan_shape_zero_scale.gamma(f64::NAN, 0.0, 3).unwrap();
+        assert!(nan_shape_values.iter().all(|value| value.is_nan()));
+        let nan_shape_after = nan_shape_zero_scale.random(5);
+        assert_f64_seq(
+            "gamma_nan_shape_zero_scale_after",
+            &nan_shape_after,
+            &expected_after,
+        );
+
+        let mut infinite_shape_zero_scale = oracle_gen();
+        let infinite_shape_values = infinite_shape_zero_scale
+            .gamma(f64::INFINITY, 0.0, 3)
+            .unwrap();
+        assert!(infinite_shape_values.iter().all(|value| value.is_nan()));
+        let infinite_shape_after = infinite_shape_zero_scale.random(5);
+        assert_f64_seq(
+            "gamma_infinite_shape_zero_scale_after",
+            &infinite_shape_after,
+            &expected_after,
+        );
+    }
+
+    #[test]
+    fn oracle_gamma_zero_shape_does_not_advance_stream() {
+        let expected_after = [
+            0.932_081_690_319_876_3,
+            0.337_505_601_117_676_8,
+            0.216_981_970_195_010_64,
+            0.352_706_249_766_546_2,
+            0.550_105_102_114_212_7,
+        ];
+
+        let mut finite_scale = oracle_gen();
+        assert_eq!(finite_scale.gamma(0.0, 2.0, 3).unwrap(), vec![0.0; 3]);
+        let finite_scale_after = finite_scale.random(5);
+        assert_f64_seq(
+            "gamma_zero_shape_finite_scale_after",
+            &finite_scale_after,
+            &expected_after,
+        );
+
+        let mut nan_scale = oracle_gen();
+        let nan_scale_values = nan_scale.gamma(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_scale_values.iter().all(|value| value.is_nan()));
+        let nan_scale_after = nan_scale.random(5);
+        assert_f64_seq(
+            "gamma_zero_shape_nan_scale_after",
+            &nan_scale_after,
+            &expected_after,
+        );
+
+        let mut infinite_scale = oracle_gen();
+        let infinite_scale_values = infinite_scale.gamma(0.0, f64::INFINITY, 3).unwrap();
+        assert!(infinite_scale_values.iter().all(|value| value.is_nan()));
+        let infinite_scale_after = infinite_scale.random(5);
+        assert_f64_seq(
+            "gamma_zero_shape_infinite_scale_after",
+            &infinite_scale_after,
+            &expected_after,
+        );
     }
 
     #[test]
