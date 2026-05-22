@@ -2266,10 +2266,9 @@ pub fn genfromtxt(
                 values.extend(row_vals);
             }
             Some(expected) if current_ncols != expected => {
-                // Pad or truncate to match
-                let mut padded = row_vals;
-                padded.resize(expected, filling_values);
-                values.extend(padded);
+                return Err(IOError::ReadPayloadIncomplete(
+                    "genfromtxt: inconsistent number of columns",
+                ));
             }
             Some(_) => {
                 values.extend(row_vals);
@@ -2334,18 +2333,30 @@ pub fn genfromtxt_full(
                 .collect()
         };
 
-        // Apply usecols filter
-        let row_vals = if let Some(cols) = config.usecols {
-            cols.iter()
-                .map(|&c| {
-                    if c < row_vals.len() {
-                        row_vals[c]
-                    } else {
-                        config.filling_values
-                    }
-                })
-                .collect()
+        let raw_ncols = row_vals.len();
+
+        // Apply usecols filter. NumPy permits row-width drift when the
+        // selected columns are still present, but fails if a selected column is
+        // missing from an offending row.
+        let row_vals: Vec<f64> = if let Some(cols) = config.usecols {
+            let mut selected = Vec::with_capacity(cols.len());
+            for &c in cols {
+                if c >= raw_ncols {
+                    return Err(IOError::ReadPayloadIncomplete(
+                        "genfromtxt: usecols index out of bounds",
+                    ));
+                }
+                selected.push(row_vals[c]);
+            }
+            selected
         } else {
+            if let Some(expected) = ncols
+                && raw_ncols != expected
+            {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "genfromtxt: inconsistent number of columns",
+                ));
+            }
             row_vals
         };
 
@@ -2362,11 +2373,6 @@ pub fn genfromtxt_full(
             None => {
                 ncols = Some(current_ncols);
                 values.extend(row_vals);
-            }
-            Some(expected) if current_ncols != expected => {
-                let mut padded = row_vals;
-                padded.resize(expected, config.filling_values);
-                values.extend(padded);
             }
             Some(_) => {
                 values.extend(row_vals);
@@ -5121,6 +5127,17 @@ mm.flush()
     }
 
     #[test]
+    fn genfromtxt_rejects_inconsistent_columns_like_numpy() {
+        let text = "1 2 3\n4 5\n";
+        let err = genfromtxt(text, ' ', '#', 0, f64::NAN).unwrap_err();
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+        assert_eq!(
+            err.to_string(),
+            "genfromtxt: inconsistent number of columns"
+        );
+    }
+
+    #[test]
     fn genfromtxt_skip_header() {
         let text = "col1,col2\n1,2\n3,4\n";
         let result = genfromtxt(text, ',', '#', 1, 0.0).unwrap();
@@ -5183,6 +5200,39 @@ mm.flush()
         assert_eq!(result.nrows, 3);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![1.0, 3.0, 4.0, 6.0, 7.0, 9.0]);
+    }
+
+    #[test]
+    fn genfromtxt_full_usecols_allows_unselected_width_drift() {
+        let text = "1,2\n3\n";
+        let usecols = [0usize];
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            filling_values: 0.0,
+            usecols: Some(&usecols),
+            ..GenFromTxtConfig::default()
+        };
+        let result = genfromtxt_full(text, &config).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 1);
+        assert_eq!(result.values, vec![1.0, 3.0]);
+    }
+
+    #[test]
+    fn genfromtxt_full_rejects_missing_selected_usecol() {
+        let text = "1,2\n3\n";
+        let usecols = [1usize];
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            filling_values: 0.0,
+            usecols: Some(&usecols),
+            ..GenFromTxtConfig::default()
+        };
+        let err = genfromtxt_full(text, &config).unwrap_err();
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+        assert_eq!(err.to_string(), "genfromtxt: usecols index out of bounds");
     }
 
     #[test]
