@@ -2135,6 +2135,7 @@ impl Default for SaveTxtConfig<'_> {
 enum SaveTxtFormat {
     Default,
     Int {
+        precision: Option<usize>,
         width: Option<usize>,
         padding: SaveTxtPadding,
         alignment: SaveTxtAlignment,
@@ -2193,7 +2194,8 @@ fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
     };
 
     match spec.specifier {
-        'd' | 'i' if spec.precision.is_none() => SaveTxtFormat::Int {
+        'd' | 'i' | 'u' => SaveTxtFormat::Int {
+            precision: spec.precision,
             width: spec.width,
             padding: spec.padding,
             alignment: spec.alignment,
@@ -2261,7 +2263,7 @@ struct SaveTxtFormatSpec {
 fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
     let rest = fmt.strip_prefix('%')?;
     let specifier = rest.chars().last()?;
-    if !matches!(specifier, 'd' | 'i' | 'e' | 'E' | 'f' | 'g' | 'G') {
+    if !matches!(specifier, 'd' | 'i' | 'u' | 'e' | 'E' | 'f' | 'g' | 'G') {
         return None;
     }
 
@@ -2405,7 +2407,7 @@ fn write_savetxt_with_width(
     }
 }
 
-fn write_savetxt_int(output: &mut String, v: f64) -> Result<(), IOError> {
+fn write_savetxt_int(output: &mut String, v: f64, precision: Option<usize>) -> Result<(), IOError> {
     use std::fmt::Write as _;
 
     if v.is_nan() {
@@ -2419,11 +2421,27 @@ fn write_savetxt_int(output: &mut String, v: f64) -> Result<(), IOError> {
         ));
     }
     let truncated = v.trunc();
-    if truncated.to_bits() & 0x7fff_ffff_ffff_ffff == 0 {
-        output.push('0');
-        return Ok(());
+    let is_zero = truncated.to_bits() & 0x7fff_ffff_ffff_ffff == 0;
+    let negative = truncated.is_sign_negative() && !is_zero;
+    let magnitude = if is_zero {
+        0.0
+    } else if negative {
+        -truncated
+    } else {
+        truncated
+    };
+    let mut digits = String::new();
+    write!(&mut digits, "{magnitude:.0}")
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+
+    if negative {
+        output.push('-');
     }
-    write!(output, "{truncated:.0}")
+    if let Some(precision) = precision {
+        push_savetxt_zero_padding(output, precision.saturating_sub(digits.len()));
+    }
+    output
+        .write_str(&digits)
         .map_err(|_| IOError::WriteContractViolation("formatting failed"))
 }
 
@@ -2680,6 +2698,7 @@ pub fn savetxt(
                     )?;
                 }
                 SaveTxtFormat::Int {
+                    precision,
                     width,
                     padding,
                     alignment,
@@ -2691,7 +2710,7 @@ pub fn savetxt(
                         padding,
                         alignment,
                         sign,
-                        |cell| write_savetxt_int(cell, v),
+                        |cell| write_savetxt_int(cell, v, precision),
                     )?;
                 }
                 SaveTxtFormat::General {
@@ -5922,6 +5941,39 @@ mm.flush()
         };
         let output = savetxt(&values, 2, 1, &cfg).unwrap();
         assert_eq!(output, "        +1\n        -3\n");
+    }
+
+    #[test]
+    fn savetxt_unsigned_integer_format_matches_numpy() {
+        let values = vec![1.9, -3.4, 0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%u",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 3, 1, &cfg).unwrap();
+        assert_eq!(output, "1\n-3\n0\n");
+    }
+
+    #[test]
+    fn savetxt_integer_precision_format_matches_numpy() {
+        let values = vec![0.0, -0.0, 1.9, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%.2d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(output, "00\n00\n01\n-03\n");
+    }
+
+    #[test]
+    fn savetxt_integer_precision_combines_with_width_and_zero_fill_like_numpy() {
+        let values = vec![0.0, -0.0, 1.9, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%05.2u",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(output, "00000\n00000\n00001\n-0003\n");
     }
 
     #[test]
