@@ -14275,7 +14275,7 @@ fn fmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .unbind());
     }
     let result = ufunc_fmod(&x1_array, &x2_array).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
