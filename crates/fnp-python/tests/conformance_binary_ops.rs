@@ -192,3 +192,71 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn add_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z1 = np.array([1+2j, 3+4j], dtype=np.complex128)
+z2 = np.array([5+6j, 7+8j], dtype=np.complex128)
+fnp_result = fnp.add(z1, z2)
+np_result = np.add(z1, z2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "add complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn subtract_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z1 = np.array([5+6j, 7+8j], dtype=np.complex128)
+z2 = np.array([1+2j, 3+4j], dtype=np.complex128)
+fnp_result = fnp.subtract(z1, z2)
+np_result = np.subtract(z1, z2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "subtract complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn multiply_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z1 = np.array([1+2j, 3+4j], dtype=np.complex128)
+z2 = np.array([5+6j, 7+8j], dtype=np.complex128)
+fnp_result = fnp.multiply(z1, z2)
+np_result = np.multiply(z1, z2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "multiply complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn divide_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z1 = np.array([5+10j, 15+20j], dtype=np.complex128)
+z2 = np.array([1+2j, 3+4j], dtype=np.complex128)
+fnp_result = fnp.divide(z1, z2)
+np_result = np.divide(z1, z2)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "divide complex should match numpy");
+    Ok(())
+}
