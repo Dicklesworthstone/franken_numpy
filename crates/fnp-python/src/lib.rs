@@ -22430,6 +22430,12 @@ fn irfft2(
 #[pyfunction]
 #[pyo3(signature = (v, k=0))]
 fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (v.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return Ok(numpy.getattr("diag")?.call1((arr, k))?.unbind());
+    }
     let v = extract_precise_numeric_array(py, v.bind(py), "diag(v)")?;
     let result = v.diag(k).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
@@ -22438,6 +22444,12 @@ fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (v, k=0))]
 fn diagflat(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (v.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return Ok(numpy.getattr("diagflat")?.call1((arr, k))?.unbind());
+    }
     let v = extract_precise_numeric_array(py, v.bind(py), "diagflat(v)")?;
     let result = v.diagflat(k);
     build_numpy_array_from_ufunc(py, &result)

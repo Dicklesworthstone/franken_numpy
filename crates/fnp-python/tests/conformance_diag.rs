@@ -136,3 +136,19 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+#[test]
+fn diag_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+fnp_result = fnp.diag(a)
+np_result = np.diag(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diag complex should match numpy");
+    Ok(())
+}
