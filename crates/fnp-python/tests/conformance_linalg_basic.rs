@@ -480,3 +480,75 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Complex number tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn dot_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2+2j, 3+3j], dtype=np.complex128)
+b = np.array([4-1j, 5-2j, 6-3j], dtype=np.complex128)
+result = fnp.dot(a, b)
+expected = np.dot(a, b)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "dot complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn matmul_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+b = np.array([[5+2j, 6], [7, 8-2j]], dtype=np.complex128)
+result = fnp.matmul(a, b)
+expected = np.matmul(a, b)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "matmul complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn inner_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2+2j], dtype=np.complex128)
+b = np.array([3-1j, 4-2j], dtype=np.complex128)
+result = fnp.inner(a, b)
+expected = np.inner(a, b)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "inner complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn outer_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j], dtype=np.complex128)
+b = np.array([3+2j, 4-2j, 5], dtype=np.complex128)
+result = fnp.outer(a, b)
+expected = np.outer(a, b)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "outer complex should match numpy");
+    Ok(())
+}
