@@ -1935,7 +1935,7 @@ impl Default for GenFromTxtConfig<'_> {
 /// Each line is a row; columns are separated by `delimiter`.
 /// Lines starting with `comments` char are skipped.
 /// `skiprows` lines are skipped from the start.
-/// `max_rows` limits the number of rows read (0 = no limit).
+/// `max_rows` limits the number of rows read; use `usize::MAX` for no limit.
 pub fn loadtxt(
     text: &str,
     delimiter: char,
@@ -1967,7 +1967,7 @@ pub fn loadtxt_usecols(
         if trimmed.is_empty() || trimmed.starts_with(comments) {
             continue;
         }
-        if max_rows > 0 && nrows >= max_rows {
+        if nrows >= max_rows {
             break;
         }
         let row_vals = if let Some(cols) = usecols {
@@ -4997,7 +4997,7 @@ mm.flush()
     #[test]
     fn loadtxt_basic() {
         let text = "1.0 2.0 3.0\n4.0 5.0 6.0\n";
-        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        let result = loadtxt(text, ' ', '#', 0, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 3);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -5006,7 +5006,7 @@ mm.flush()
     #[test]
     fn loadtxt_space_delimiter_accepts_mixed_whitespace() {
         let text = "1 2\t3\n4\t5 6\n";
-        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        let result = loadtxt(text, ' ', '#', 0, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 3);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -5015,7 +5015,7 @@ mm.flush()
     #[test]
     fn loadtxt_csv() {
         let text = "1,2,3\n4,5,6";
-        let result = loadtxt(text, ',', '#', 0, 0).unwrap();
+        let result = loadtxt(text, ',', '#', 0, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 3);
     }
@@ -5023,7 +5023,7 @@ mm.flush()
     #[test]
     fn loadtxt_comments_and_skiprows() {
         let text = "# header\n# another comment\n1 2\n3 4\n";
-        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        let result = loadtxt(text, ' ', '#', 0, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
     }
@@ -5031,7 +5031,7 @@ mm.flush()
     #[test]
     fn loadtxt_strips_inline_comments() {
         let text = "1 2 # first row\n3 4#second row\n";
-        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        let result = loadtxt(text, ' ', '#', 0, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
@@ -5040,7 +5040,7 @@ mm.flush()
     #[test]
     fn loadtxt_skiprows() {
         let text = "header line\n1 2\n3 4\n";
-        let result = loadtxt(text, ' ', '#', 1, 0).unwrap();
+        let result = loadtxt(text, ' ', '#', 1, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
     }
 
@@ -5049,6 +5049,15 @@ mm.flush()
         let text = "1 2\n3 4\n5 6\n";
         let result = loadtxt(text, ' ', '#', 0, 2).unwrap();
         assert_eq!(result.nrows, 2);
+    }
+
+    #[test]
+    fn loadtxt_max_rows_zero_matches_numpy_empty_result() {
+        let text = "1 2\n3 4\n5 6\n";
+        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        assert_eq!(result.nrows, 0);
+        assert_eq!(result.ncols, 0);
+        assert!(result.values.is_empty());
     }
 
     #[test]
@@ -5094,7 +5103,7 @@ mm.flush()
     fn savetxt_roundtrip() {
         let original = vec![1.5, 2.5, 3.5, 4.5];
         let text = savetxt(&original, 2, 2, &SaveTxtConfig::default()).unwrap();
-        let loaded = loadtxt(&text, ' ', '#', 0, 0).unwrap();
+        let loaded = loadtxt(&text, ' ', '#', 0, usize::MAX).unwrap();
         assert_eq!(loaded.nrows, 2);
         assert_eq!(loaded.ncols, 2);
         assert_eq!(loaded.values, original);
@@ -5341,7 +5350,7 @@ mm.flush()
     #[test]
     fn loadtxt_usecols_selects_columns() {
         let text = "1,2,3,4\n5,6,7,8\n";
-        let result = loadtxt_usecols(text, ',', '#', 0, 0, Some(&[0, 2])).unwrap();
+        let result = loadtxt_usecols(text, ',', '#', 0, usize::MAX, Some(&[0, 2])).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![1.0, 3.0, 5.0, 7.0]);
@@ -5350,7 +5359,7 @@ mm.flush()
     #[test]
     fn loadtxt_usecols_single_column() {
         let text = "10 20 30\n40 50 60\n";
-        let result = loadtxt_usecols(text, ' ', '#', 0, 0, Some(&[1])).unwrap();
+        let result = loadtxt_usecols(text, ' ', '#', 0, usize::MAX, Some(&[1])).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 1);
         assert_eq!(result.values, vec![20.0, 50.0]);
@@ -5359,7 +5368,7 @@ mm.flush()
     #[test]
     fn loadtxt_usecols_ignores_unselected_non_numeric_columns() {
         let text = "1,foo,3\n4,bar,6\n";
-        let result = loadtxt_usecols(text, ',', '#', 0, 0, Some(&[0, 2])).unwrap();
+        let result = loadtxt_usecols(text, ',', '#', 0, usize::MAX, Some(&[0, 2])).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![1.0, 3.0, 4.0, 6.0]);
@@ -5368,15 +5377,15 @@ mm.flush()
     #[test]
     fn loadtxt_usecols_out_of_bounds() {
         let text = "1,2,3\n4,5,6\n";
-        let err =
-            loadtxt_usecols(text, ',', '#', 0, 0, Some(&[5])).expect_err("usecols out of bounds");
+        let err = loadtxt_usecols(text, ',', '#', 0, usize::MAX, Some(&[5]))
+            .expect_err("usecols out of bounds");
         assert_eq!(err.reason_code(), "io_read_payload_incomplete");
     }
 
     #[test]
     fn loadtxt_usecols_none_loads_all() {
         let text = "1,2,3\n4,5,6\n";
-        let result = loadtxt_usecols(text, ',', '#', 0, 0, None).unwrap();
+        let result = loadtxt_usecols(text, ',', '#', 0, usize::MAX, None).unwrap();
         assert_eq!(result.ncols, 3);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
@@ -5385,7 +5394,7 @@ mm.flush()
     fn loadtxt_unpack_basic() {
         // [[1,2,3],[4,5,6]] with unpack=true → [[1,4],[2,5],[3,6]]
         let text = "1,2,3\n4,5,6\n";
-        let result = loadtxt_unpack(text, ',', '#', 0, 0, None, true).unwrap();
+        let result = loadtxt_unpack(text, ',', '#', 0, usize::MAX, None, true).unwrap();
         // After transpose: nrows=3 (was ncols), ncols=2 (was nrows)
         assert_eq!(result.nrows, 3);
         assert_eq!(result.ncols, 2);
@@ -5395,8 +5404,8 @@ mm.flush()
     #[test]
     fn loadtxt_unpack_false_matches_default() {
         let text = "1,2,3\n4,5,6\n";
-        let default = loadtxt_usecols(text, ',', '#', 0, 0, None).unwrap();
-        let no_unpack = loadtxt_unpack(text, ',', '#', 0, 0, None, false).unwrap();
+        let default = loadtxt_usecols(text, ',', '#', 0, usize::MAX, None).unwrap();
+        let no_unpack = loadtxt_unpack(text, ',', '#', 0, usize::MAX, None, false).unwrap();
         assert_eq!(default.values, no_unpack.values);
     }
 
