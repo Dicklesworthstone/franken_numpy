@@ -158,42 +158,60 @@ impl IOSupportedDType {
         match descr {
             "|b1" => Ok(Self::Bool),
             "=b1" => Ok(Self::Bool),
+            "<b1" => Ok(Self::Bool),
+            ">b1" => Ok(Self::Bool),
             "|i1" => Ok(Self::I8),
             "=i1" => Ok(Self::I8),
+            "<i1" => Ok(Self::I8),
+            ">i1" => Ok(Self::I8),
             "<i2" => Ok(Self::I16),
             ">i2" => Ok(Self::I16Be),
             "=i2" => Ok(Self::native_endian(Self::I16, Self::I16Be)),
+            "|i2" => Ok(Self::native_endian(Self::I16, Self::I16Be)),
             "<i4" => Ok(Self::I32),
             ">i4" => Ok(Self::I32Be),
             "=i4" => Ok(Self::native_endian(Self::I32, Self::I32Be)),
+            "|i4" => Ok(Self::native_endian(Self::I32, Self::I32Be)),
             "<i8" => Ok(Self::I64),
             ">i8" => Ok(Self::I64Be),
             "=i8" => Ok(Self::native_endian(Self::I64, Self::I64Be)),
+            "|i8" => Ok(Self::native_endian(Self::I64, Self::I64Be)),
             "|u1" => Ok(Self::U8),
             "=u1" => Ok(Self::U8),
+            "<u1" => Ok(Self::U8),
+            ">u1" => Ok(Self::U8),
             "<u2" => Ok(Self::U16),
             ">u2" => Ok(Self::U16Be),
             "=u2" => Ok(Self::native_endian(Self::U16, Self::U16Be)),
+            "|u2" => Ok(Self::native_endian(Self::U16, Self::U16Be)),
             "<u4" => Ok(Self::U32),
             ">u4" => Ok(Self::U32Be),
             "=u4" => Ok(Self::native_endian(Self::U32, Self::U32Be)),
+            "|u4" => Ok(Self::native_endian(Self::U32, Self::U32Be)),
             "<u8" => Ok(Self::U64),
             ">u8" => Ok(Self::U64Be),
             "=u8" => Ok(Self::native_endian(Self::U64, Self::U64Be)),
+            "|u8" => Ok(Self::native_endian(Self::U64, Self::U64Be)),
             "<f4" => Ok(Self::F32),
             ">f4" => Ok(Self::F32Be),
             "=f4" => Ok(Self::native_endian(Self::F32, Self::F32Be)),
+            "|f4" => Ok(Self::native_endian(Self::F32, Self::F32Be)),
             "<f8" => Ok(Self::F64),
             ">f8" => Ok(Self::F64Be),
             "=f8" => Ok(Self::native_endian(Self::F64, Self::F64Be)),
+            "|f8" => Ok(Self::native_endian(Self::F64, Self::F64Be)),
             "<c8" => Ok(Self::Complex64),
             ">c8" => Ok(Self::Complex64Be),
             "=c8" => Ok(Self::native_endian(Self::Complex64, Self::Complex64Be)),
+            "|c8" => Ok(Self::native_endian(Self::Complex64, Self::Complex64Be)),
             "<c16" => Ok(Self::Complex128),
             ">c16" => Ok(Self::Complex128Be),
             "=c16" => Ok(Self::native_endian(Self::Complex128, Self::Complex128Be)),
+            "|c16" => Ok(Self::native_endian(Self::Complex128, Self::Complex128Be)),
             "|O" => Ok(Self::Object),
             "=O" => Ok(Self::Object),
+            "<O" => Ok(Self::Object),
+            ">O" => Ok(Self::Object),
             _ => Self::decode_variable_width(descr),
         }
     }
@@ -224,9 +242,14 @@ impl IOSupportedDType {
         match (endian, kind) {
             (b'|', b'S') => Ok(Self::Bytes(width)),
             (b'=', b'S') => Ok(Self::Bytes(width)),
+            (b'<', b'S') | (b'>', b'S') => Ok(Self::Bytes(width)),
             (b'<', b'U') => Ok(Self::Unicode(width)),
             (b'>', b'U') => Ok(Self::UnicodeBe(width)),
             (b'=', b'U') => Ok(Self::native_endian(
+                Self::Unicode(width),
+                Self::UnicodeBe(width),
+            )),
+            (b'|', b'U') => Ok(Self::native_endian(
                 Self::Unicode(width),
                 Self::UnicodeBe(width),
             )),
@@ -5484,6 +5507,79 @@ mm.flush()
     }
 
     #[test]
+    fn byte_order_alias_descriptors_decode_like_numpy() {
+        let cases = [
+            ("<b1", IOSupportedDType::Bool),
+            (">b1", IOSupportedDType::Bool),
+            ("<i1", IOSupportedDType::I8),
+            (">i1", IOSupportedDType::I8),
+            (
+                "|i2",
+                IOSupportedDType::native_endian(IOSupportedDType::I16, IOSupportedDType::I16Be),
+            ),
+            (
+                "|i4",
+                IOSupportedDType::native_endian(IOSupportedDType::I32, IOSupportedDType::I32Be),
+            ),
+            (
+                "|i8",
+                IOSupportedDType::native_endian(IOSupportedDType::I64, IOSupportedDType::I64Be),
+            ),
+            ("<u1", IOSupportedDType::U8),
+            (">u1", IOSupportedDType::U8),
+            (
+                "|u2",
+                IOSupportedDType::native_endian(IOSupportedDType::U16, IOSupportedDType::U16Be),
+            ),
+            (
+                "|u4",
+                IOSupportedDType::native_endian(IOSupportedDType::U32, IOSupportedDType::U32Be),
+            ),
+            (
+                "|u8",
+                IOSupportedDType::native_endian(IOSupportedDType::U64, IOSupportedDType::U64Be),
+            ),
+            (
+                "|f4",
+                IOSupportedDType::native_endian(IOSupportedDType::F32, IOSupportedDType::F32Be),
+            ),
+            (
+                "|f8",
+                IOSupportedDType::native_endian(IOSupportedDType::F64, IOSupportedDType::F64Be),
+            ),
+            (
+                "|c8",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Complex64,
+                    IOSupportedDType::Complex64Be,
+                ),
+            ),
+            (
+                "|c16",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Complex128,
+                    IOSupportedDType::Complex128Be,
+                ),
+            ),
+            ("<S3", IOSupportedDType::Bytes(3)),
+            (">S3", IOSupportedDType::Bytes(3)),
+            (
+                "|U3",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Unicode(3),
+                    IOSupportedDType::UnicodeBe(3),
+                ),
+            ),
+            ("<O", IOSupportedDType::Object),
+            (">O", IOSupportedDType::Object),
+        ];
+
+        for (descr, expected) in cases {
+            assert_eq!(IOSupportedDType::decode(descr).unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn write_contract_property_grid_is_deterministic() {
         for seed in 1usize..=128usize {
             let rows = (seed % 17) + 1;
@@ -8620,6 +8716,51 @@ mm.flush()
         assert_eq!(npy.header.descr, IOSupportedDType::Unicode(3));
         let strings = fromfile_strings(&npy.payload, npy.header.descr, None).unwrap();
         assert_eq!(strings, vec!["abc", "xy"]);
+    }
+
+    #[test]
+    fn npy_headers_with_byte_order_alias_dtypes_parse() {
+        let cases = [
+            ("<b1", IOSupportedDType::Bool),
+            (">i1", IOSupportedDType::I8),
+            (
+                "|i4",
+                IOSupportedDType::native_endian(IOSupportedDType::I32, IOSupportedDType::I32Be),
+            ),
+            (
+                "|u8",
+                IOSupportedDType::native_endian(IOSupportedDType::U64, IOSupportedDType::U64Be),
+            ),
+            (
+                "|f8",
+                IOSupportedDType::native_endian(IOSupportedDType::F64, IOSupportedDType::F64Be),
+            ),
+            (
+                "|c16",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Complex128,
+                    IOSupportedDType::Complex128Be,
+                ),
+            ),
+            (">S3", IOSupportedDType::Bytes(3)),
+            (
+                "|U3",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Unicode(3),
+                    IOSupportedDType::UnicodeBe(3),
+                ),
+            ),
+        ];
+
+        for (descr, expected) in cases {
+            let header = format!(
+                "{{'descr': '{descr}', 'fortran_order': False, 'shape': (0,), }}          "
+            );
+            let payload = make_manual_npy_payload(&header, &[]);
+            let npy = read_npy_bytes(&payload, false).unwrap();
+            assert_eq!(npy.header.descr, expected, "descriptor {descr}");
+            assert!(npy.payload.is_empty());
+        }
     }
 
     // ── Structured / Record Dtype NPY tests ──
