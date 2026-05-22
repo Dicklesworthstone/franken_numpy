@@ -267,3 +267,23 @@ fn fp_classify_empty_arrays_match_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+#[test]
+fn fp_classify_scalar_return_type_matches_numpy() -> Result<(), String> {
+    for func in &["isnan", "isinf", "isfinite", "signbit"] {
+        let script = fnp_script(format!(
+            r#"
+x = np.float64(1.5)
+fnp_result = fnp.{func}(x)
+np_result = np.{func}(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        ));
+        let result = numpy_oracle(&script)?;
+        assert!(
+            result.trim().starts_with("True"),
+            "{func} scalar return type should match numpy: {result}"
+        );
+    }
+    Ok(())
+}
