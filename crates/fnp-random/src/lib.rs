@@ -5177,7 +5177,12 @@ impl Generator {
     /// Logarithmic (log-series) distribution (matching NumPy's algorithm).
     pub fn logseries(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
         if p == 0.0 {
-            return Ok(vec![1; size]);
+            return Ok((0..size)
+                .map(|_| {
+                    let _ = self.next_f64();
+                    1
+                })
+                .collect());
         }
         if !(0.0..1.0).contains(&p) {
             return Err(RandomError::InvalidParameter);
@@ -11766,6 +11771,37 @@ for child in rng.spawn(n_children):
         let vals = g.logseries(0.6, 10).unwrap();
         let expected: Vec<u64> = vec![1, 1, 2, 1, 1, 2, 1, 2, 2, 1];
         assert_u64_seq("logseries", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_logseries_zero_probability_advances_stream() {
+        let expected_after = [
+            0.883_167_405_273_299_6,
+            0.888_337_197_310_043_6,
+            0.303_319_245_352_569_4,
+            0.440_032_955_585_861_1,
+            0.329_258_442_888_161_75,
+        ];
+
+        let mut zero = oracle_gen();
+        let zero_values = zero.logseries(0.0, 5).unwrap();
+        assert_u64_seq("logseries_zero_values", &zero_values, &[1, 1, 1, 1, 1]);
+        let zero_after = zero.random(5);
+        assert_f64_seq("logseries_zero_after", &zero_after, &expected_after);
+
+        let mut negative_zero = oracle_gen();
+        let negative_zero_values = negative_zero.logseries(-0.0, 5).unwrap();
+        assert_u64_seq(
+            "logseries_negative_zero_values",
+            &negative_zero_values,
+            &[1, 1, 1, 1, 1],
+        );
+        let negative_zero_after = negative_zero.random(5);
+        assert_f64_seq(
+            "logseries_negative_zero_after",
+            &negative_zero_after,
+            &expected_after,
+        );
     }
 
     #[test]
