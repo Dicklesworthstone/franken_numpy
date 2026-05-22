@@ -14947,12 +14947,20 @@ fn negative(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (val,))]
 fn real(py: Python<'_>, val: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.real (return real part of a complex array; view
-    // into the same buffer when the input is complex, and simply the
-    // input array when the dtype is real). Preserves numpy's write-view
-    // semantics for complex inputs so downstream mutations agree.
+    // Fast path: for real dtypes, real returns the input unchanged.
+    // Complex inputs use NumPy for proper write-view semantics.
     let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("real")?.call1((val.bind(py),))?.unbind())
+    let array = numpy.call_method1("asarray", (val.bind(py),))?;
+    let dtype = array.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+
+    if kind.as_str() == "c" {
+        // Complex array - use NumPy's real for view semantics
+        Ok(numpy.getattr("real")?.call1((array,))?.unbind())
+    } else {
+        // Real array - return the array as-is
+        Ok(array.unbind())
+    }
 }
 
 #[pyfunction]
