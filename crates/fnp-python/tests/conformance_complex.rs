@@ -311,3 +311,39 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     }
     Ok(())
 }
+
+#[test]
+fn real_if_close_scalar_return_type_matches_numpy() -> Result<(), String> {
+    // Test with complex scalar (imaginary part is small)
+    let script = fnp_script(
+        r#"
+x = np.complex128(2.5 + 1e-15j)
+fnp_result = fnp.real_if_close(x)
+np_result = np.real_if_close(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "real_if_close complex scalar return type should match numpy: {result}"
+    );
+
+    // Test with real scalar
+    let script = fnp_script(
+        r#"
+x = np.float64(2.5)
+fnp_result = fnp.real_if_close(x)
+np_result = np.real_if_close(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "real_if_close real scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}

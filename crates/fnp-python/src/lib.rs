@@ -14105,23 +14105,14 @@ fn ascontiguousarray(
 #[pyfunction]
 #[pyo3(signature = (a, tol=100.0))]
 fn real_if_close(py: Python<'_>, a: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> {
-    // Fast path: for real dtypes, real_if_close returns input unchanged.
-    // Complex dtypes fall back to NumPy to check imaginary parts.
+    // Delegate to NumPy to preserve scalar return type for scalar inputs.
     let numpy = py.import("numpy")?;
-    let array = numpy.call_method1("asarray", (a.bind(py),))?;
-    let dtype = array.getattr("dtype")?;
-    let kind = dtype.getattr("kind")?.extract::<String>()?;
-
-    if kind.as_str() == "c" {
-        // Complex array - use NumPy to check if close to real
-        let rif_fn = numpy.getattr("real_if_close")?;
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("tol", tol)?;
-        Ok(rif_fn.call((array,), Some(&kwargs))?.unbind())
-    } else {
-        // Real array - already real, return as-is
-        Ok(array.unbind())
-    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("tol", tol)?;
+    Ok(numpy
+        .getattr("real_if_close")?
+        .call((a.bind(py),), Some(&kwargs))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -14221,9 +14212,18 @@ fn conjugate(
 ) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy to preserve scalar return type for scalar inputs.
     let numpy = py.import("numpy")?;
+    let call_kwargs = PyDict::new(py);
+    if let Some(out_val) = out {
+        call_kwargs.set_item("out", out_val.bind(py))?;
+    }
+    if let Some(kw) = kwargs {
+        for (key, value) in kw.iter() {
+            call_kwargs.set_item(key, value)?;
+        }
+    }
     Ok(numpy
         .getattr("conjugate")?
-        .call((x.bind(py),), kwargs)?
+        .call((x.bind(py),), Some(&call_kwargs))?
         .unbind())
 }
 
@@ -24251,7 +24251,19 @@ fn conj(
 ) -> PyResult<Py<PyAny>> {
     // Delegate to NumPy to preserve scalar return type for scalar inputs.
     let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("conj")?.call((x.bind(py),), kwargs)?.unbind())
+    let call_kwargs = PyDict::new(py);
+    if let Some(out_val) = out {
+        call_kwargs.set_item("out", out_val.bind(py))?;
+    }
+    if let Some(kw) = kwargs {
+        for (key, value) in kw.iter() {
+            call_kwargs.set_item(key, value)?;
+        }
+    }
+    Ok(numpy
+        .getattr("conj")?
+        .call((x.bind(py),), Some(&call_kwargs))?
+        .unbind())
 }
 
 // Arithmetic aliases / ufunc variants
