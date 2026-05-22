@@ -127,3 +127,19 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn clip_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, 5+5j, 2+2j], dtype=np.complex128)
+fnp_result = fnp.clip(z, 0+0j, 3+3j)
+np_result = np.clip(z, 0+0j, 3+3j)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip complex should match numpy");
+    Ok(())
+}
