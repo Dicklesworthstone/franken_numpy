@@ -115,3 +115,20 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn fmax_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z1 = np.array([1+1j, 5+5j, 2+2j], dtype=np.complex128)
+z2 = np.array([3+3j, 2+2j, 4+4j], dtype=np.complex128)
+fnp_result = fnp.fmax(z1, z2)
+np_result = np.fmax(z1, z2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fmax complex should match numpy");
+    Ok(())
+}
