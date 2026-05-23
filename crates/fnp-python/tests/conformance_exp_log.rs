@@ -775,3 +775,103 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "log2 complex should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Special value tests (nan/inf/negative)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn exp_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.exp(x)
+np_result = np.exp(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "exp special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn log_negative_returns_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1.0, -10.0, -100.0])
+fnp_result = fnp.log(x)
+np_result = np.log(x)
+print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "log of negative should return nan");
+    Ok(())
+}
+
+#[test]
+fn log_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, 0.0, np.nan])
+fnp_result = fnp.log(x)
+np_result = np.log(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "log special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn power_zero_exponent() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, 1.0, 5.0, -3.0, np.inf, np.nan])
+fnp_result = fnp.power(x, 0)
+np_result = np.power(x, 0)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "x^0 should equal 1 for all x");
+    Ok(())
+}
+
+#[test]
+fn power_negative_base_fractional_exp() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1.0, -2.0, -4.0])
+fnp_result = fnp.power(x, 0.5)
+np_result = np.power(x, 0.5)
+print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "negative base with fractional exp should return nan");
+    Ok(())
+}
+
+#[test]
+fn exp_overflow() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1000.0, 710.0])
+fnp_result = fnp.exp(x)
+np_result = np.exp(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "exp overflow should match numpy");
+    Ok(())
+}
