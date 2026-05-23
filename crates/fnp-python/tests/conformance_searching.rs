@@ -112,6 +112,19 @@ fn np_array_2d_s<'py>(
     py.import("numpy")?.getattr("array")?.call1((rows,))
 }
 
+fn np_array_1d_complex<'py>(
+    py: Python<'py>,
+    values: &[(f64, f64)],
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let np = py.import("numpy")?;
+    let complex_list: Vec<_> = values
+        .iter()
+        .map(|(r, i)| pyo3::types::PyComplex::from_doubles(py, *r, *i))
+        .collect();
+    let arr = np.getattr("array")?.call1((complex_list,))?;
+    arr.call_method1("astype", (np.getattr("complex128")?,))
+}
+
 fn assert_count_nonzero_scalar_surface(
     label: &str,
     ours: &pyo3::Bound<'_, pyo3::types::PyAny>,
@@ -1095,6 +1108,108 @@ fn conformance_searching_matrix() {
             CompareMode::Strict,
             t,
             |py| PyTuple::new(py, [np_array_1d_i(py, vec![0, 0, 0, 0])?]),
+            no_kwargs,
+        );
+
+        // ─── complex dtype tests (SHOULD) ──────────────────────────────
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-nonzero-complex",
+            "nonzero",
+            RequirementLevel::Should,
+            CompareMode::Surface,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_1d_complex(
+                        py,
+                        &[(1.0, 1.0), (0.0, 0.0), (3.0, 2.0), (0.0, 0.0), (5.0, -1.0)],
+                    )?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-flatnonzero-complex",
+            "flatnonzero",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_1d_complex(
+                        py,
+                        &[(1.0, 1.0), (0.0, 0.0), (3.0, 2.0), (0.0, 0.0), (5.0, -1.0)],
+                    )?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-count_nonzero-complex",
+            "count_nonzero",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_1d_complex(
+                        py,
+                        &[(1.0, 1.0), (0.0, 0.0), (3.0, 2.0), (0.0, 0.0), (5.0, -1.0)],
+                    )?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-argwhere-complex",
+            "argwhere",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_1d_complex(
+                        py,
+                        &[(1.0, 1.0), (0.0, 0.0), (3.0, 2.0), (0.0, 0.0), (5.0, -1.0)],
+                    )?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "searching-where-1arg-complex",
+            "where",
+            RequirementLevel::Should,
+            CompareMode::Surface,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_1d_complex(
+                        py,
+                        &[(1.0, 1.0), (0.0, 0.0), (3.0, 2.0), (0.0, 0.0)],
+                    )?],
+                )
+            },
             no_kwargs,
         );
 
