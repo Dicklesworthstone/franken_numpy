@@ -358,3 +358,37 @@ print(fnp_result == np_result == True)
     assert_eq!(output, "True", "array_equiv empty arrays mismatch");
     Ok(())
 }
+
+#[test]
+fn array_equal_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j], dtype=np.complex128)
+b = np.array([1+1j, 2-1j, 3+2j], dtype=np.complex128)
+fnp_result = fnp.array_equal(a, b)
+np_result = np.array_equal(a, b)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    assert_eq!(output, "True", "array_equal complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn array_equiv_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j], dtype=np.complex128)
+b = np.array([1+1j, 2-1j], dtype=np.complex128)
+fnp_result = fnp.array_equiv(a, b)
+np_result = np.array_equiv(a, b)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let output = numpy_oracle(&script)?;
+    assert_eq!(output, "True", "array_equiv complex should match numpy");
+    Ok(())
+}

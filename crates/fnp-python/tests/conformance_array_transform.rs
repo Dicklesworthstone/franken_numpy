@@ -356,3 +356,51 @@ print(np.array_equal(fliplr_result, flip_axis1_result))
     assert_eq!(result.trim(), "True", "fliplr should equal flip(axis=1)");
     Ok(())
 }
+
+#[test]
+fn flip_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j], dtype=np.complex128)
+fnp_result = fnp.flip(a)
+np_result = np.flip(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "flip complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn roll_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+fnp_result = fnp.roll(a, 2)
+np_result = np.roll(a, 2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "roll complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn rot90_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2-1j], [3+2j, 4-2j]], dtype=np.complex128)
+fnp_result = fnp.rot90(a)
+np_result = np.rot90(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rot90 complex should match numpy");
+    Ok(())
+}

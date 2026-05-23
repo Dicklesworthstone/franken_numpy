@@ -12864,6 +12864,14 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
             .unbind())
     };
 
+    // Check for complex dtype and fallback to numpy
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (m.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return fallback();
+    }
+
     let m = extract_numeric_array(py, m.bind(py), "flip(m)")?;
     let axes = extract_axis_spec(py, axis, "flip")?;
     // Out-of-bounds axis: numpy raises AxisError (subclass of ValueError).
@@ -12892,6 +12900,13 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Check for complex dtype and fallback to numpy
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (m.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return Ok(numpy.getattr("flipud")?.call1((arr,))?.unbind());
+    }
     let m = extract_numeric_array(py, m.bind(py), "flipud(m)")?;
     let result = m.flipud().map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
@@ -12900,6 +12915,13 @@ fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Check for complex dtype and fallback to numpy
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (m.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return Ok(numpy.getattr("fliplr")?.call1((arr,))?.unbind());
+    }
     let m = extract_numeric_array(py, m.bind(py), "fliplr(m)")?;
     let result = m.fliplr().map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
