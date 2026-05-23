@@ -257,3 +257,19 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn around_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.5+1.5j, 2.4-2.4j], dtype=np.complex128)
+fnp_result = fnp.around(a)
+np_result = np.around(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "around complex should match numpy");
+    Ok(())
+}

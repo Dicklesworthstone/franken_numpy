@@ -254,3 +254,20 @@ print(shape_match)
     );
     Ok(())
 }
+
+#[test]
+fn meshgrid_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1+1j, 2+2j], dtype=np.complex128)
+y = np.array([3+3j, 4+4j], dtype=np.complex128)
+fnp_X, fnp_Y = fnp.meshgrid(x, y)
+np_X, np_Y = np.meshgrid(x, y)
+print(np.array_equal(fnp_X, np_X) and np.array_equal(fnp_Y, np_Y))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "meshgrid complex should match numpy");
+    Ok(())
+}
