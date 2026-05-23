@@ -244,3 +244,123 @@ print(np.array_equal(out, np_out) and fnp_result is out)
     assert_eq!(result.trim(), "True", "clip out parameter should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge case tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn clip_empty_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([], dtype=np.float64)
+fnp_result = fnp.clip(a, 2.0, 4.0)
+np_result = np.clip(a, 2.0, 4.0)
+print(np.array_equal(fnp_result, np_result) and fnp_result.shape == np_result.shape)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip empty array should match numpy");
+    Ok(())
+}
+
+#[test]
+fn clip_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([5.0])
+fnp_result = fnp.clip(a, 2.0, 4.0)
+np_result = np.clip(a, 2.0, 4.0)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip single element should match numpy");
+    Ok(())
+}
+
+#[test]
+fn clip_equal_bounds() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+fnp_result = fnp.clip(a, 3.0, 3.0)
+np_result = np.clip(a, 3.0, 3.0)
+print(np.array_equal(fnp_result, np_result) and np.all(fnp_result == 3.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip equal bounds should match numpy");
+    Ok(())
+}
+
+#[test]
+fn clip_integer_dtypes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a_int32 = np.array([1, 5, 10, 15, 20], dtype=np.int32)
+a_int64 = np.array([1, 5, 10, 15, 20], dtype=np.int64)
+tests_pass = True
+for a in [a_int32, a_int64]:
+    fnp_result = fnp.clip(a, 5, 15)
+    np_result = np.clip(a, 5, 15)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip integer dtypes should match numpy");
+    Ok(())
+}
+
+#[test]
+fn clip_all_within_bounds() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([3.0, 4.0, 5.0, 6.0, 7.0])
+fnp_result = fnp.clip(a, 1.0, 10.0)
+np_result = np.clip(a, 1.0, 10.0)
+print(np.array_equal(fnp_result, np_result) and np.array_equal(fnp_result, a))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip all within bounds should match numpy");
+    Ok(())
+}
+
+#[test]
+fn clip_all_below_min() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+fnp_result = fnp.clip(a, 10.0, 20.0)
+np_result = np.clip(a, 10.0, 20.0)
+print(np.array_equal(fnp_result, np_result) and np.all(fnp_result == 10.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip all below min should match numpy");
+    Ok(())
+}
+
+#[test]
+fn clip_all_above_max() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([10.0, 20.0, 30.0, 40.0, 50.0])
+fnp_result = fnp.clip(a, 1.0, 5.0)
+np_result = np.clip(a, 1.0, 5.0)
+print(np.array_equal(fnp_result, np_result) and np.all(fnp_result == 5.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip all above max should match numpy");
+    Ok(())
+}
