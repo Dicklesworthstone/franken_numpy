@@ -217,3 +217,34 @@ print(np.array_equal(fnp_abs, fnp_absolute))
     assert_eq!(result.trim(), "True", "abs should be alias for absolute");
     Ok(())
 }
+
+#[test]
+fn abs_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# abs signed-zero: abs(-0.0) = 0.0 (positive, not negative zero)
+tests = [0.0, -0.0]
+all_pass = True
+for x in tests:
+    fnp_result = fnp.abs(np.float64(x))
+    np_result = np.abs(np.float64(x))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: abs({x}) signbit fnp={fnp_sign} np={np_sign}")
+        all_pass = False
+    if fnp_result != np_result:
+        print(f"FAIL: abs({x}) value mismatch")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "abs signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
