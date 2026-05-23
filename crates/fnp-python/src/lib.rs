@@ -7900,6 +7900,15 @@ fn expand_dims(py: Python<'_>, a: Py<PyAny>, axis: Py<PyAny>) -> PyResult<Py<PyA
             .call1((a_for_fallback.bind(py), axis_for_fallback.bind(py)))?
             .unbind())
     };
+
+    // Check for complex dtype and fallback to numpy
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (a.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return fallback();
+    }
+
     let a = extract_numeric_array(py, a.bind(py), "expand_dims(a)")?;
     let axes = extract_expand_dims_axes(py, axis, a.shape().len())?;
     // Out-of-bounds axis: numpy raises AxisError (subclass of ValueError).

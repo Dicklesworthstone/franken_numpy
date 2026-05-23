@@ -445,3 +445,39 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "transpose complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn squeeze_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[[1+1j, 2-1j]]], dtype=np.complex128)
+fnp_result = fnp.squeeze(a)
+np_result = np.squeeze(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "squeeze complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn expand_dims_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j], dtype=np.complex128)
+fnp_result = fnp.expand_dims(a, axis=0)
+np_result = np.expand_dims(a, axis=0)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "expand_dims complex should match numpy"
+    );
+    Ok(())
+}
