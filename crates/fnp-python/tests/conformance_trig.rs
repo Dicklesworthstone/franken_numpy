@@ -902,3 +902,42 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
     assert_eq!(result.trim(), "True", "arctanh boundary should match numpy");
     Ok(())
 }
+
+#[test]
+fn trig_odd_functions_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Odd trig functions preserve sign of zero: f(-0) = -0
+# sin, tan, arcsin, arctan, sinh, tanh, arcsinh, arctanh
+odd_funcs = [
+    ('sin', fnp.sin, np.sin),
+    ('tan', fnp.tan, np.tan),
+    ('arcsin', fnp.arcsin, np.arcsin),
+    ('arctan', fnp.arctan, np.arctan),
+    ('sinh', fnp.sinh, np.sinh),
+    ('tanh', fnp.tanh, np.tanh),
+    ('arcsinh', fnp.arcsinh, np.arcsinh),
+    ('arctanh', fnp.arctanh, np.arctanh),
+]
+all_pass = True
+for name, fnp_f, np_f in odd_funcs:
+    for x in [0.0, -0.0]:
+        fnp_result = fnp_f(np.float64(x))
+        np_result = np_f(np.float64(x))
+        fnp_sign = np.signbit(fnp_result)
+        np_sign = np.signbit(np_result)
+        if fnp_sign != np_sign:
+            print(f"FAIL: {name}({x}) signbit fnp={fnp_sign} np={np_sign}")
+            all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "trig odd functions signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
