@@ -150,3 +150,70 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn fabs_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.fabs(x)
+np_result = np.fabs(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fabs special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn absolute_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.absolute(x)
+np_result = np.absolute(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "absolute special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn absolute_integer_dtypes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+tests_pass = True
+for dtype in [np.int8, np.int16, np.int32, np.int64]:
+    x = np.array([-128, -1, 0, 1, 127], dtype=dtype)
+    fnp_result = fnp.absolute(x)
+    np_result = np.absolute(x)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "absolute integer dtypes should match numpy");
+    Ok(())
+}
+
+#[test]
+fn abs_alias_matches_absolute() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-5, -1, 0, 1, 5])
+fnp_abs = fnp.abs(x)
+fnp_absolute = fnp.absolute(x)
+print(np.array_equal(fnp_abs, fnp_absolute))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "abs should be alias for absolute");
+    Ok(())
+}
