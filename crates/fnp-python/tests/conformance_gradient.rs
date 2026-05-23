@@ -132,3 +132,35 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "gradient complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn gradient_edge_order_1() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+f = np.array([1, 2, 4, 7, 11])
+fnp_result = fnp.gradient(f, edge_order=1)
+np_result = np.gradient(f, edge_order=1)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "gradient edge_order=1 should match numpy");
+    Ok(())
+}
+
+#[test]
+fn gradient_edge_order_2() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+f = np.array([1, 2, 4, 7, 11])
+fnp_result = fnp.gradient(f, edge_order=2)
+np_result = np.gradient(f, edge_order=2)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "gradient edge_order=2 should match numpy");
+    Ok(())
+}
