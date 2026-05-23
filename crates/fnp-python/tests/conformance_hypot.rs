@@ -183,3 +183,43 @@ print(np.allclose(result, expected))
     assert_eq!(result.trim(), "True", "hypot large values should match numpy");
     Ok(())
 }
+
+#[test]
+fn hypot_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# hypot signed-zero parity
+# hypot(0, 0) = 0.0 (always positive, per IEEE 754)
+# hypot(-0, -0) = 0.0 (always positive)
+tests = [
+    (0.0, 0.0),
+    (-0.0, 0.0),
+    (0.0, -0.0),
+    (-0.0, -0.0),
+]
+all_pass = True
+for x1, x2 in tests:
+    fnp_result = fnp.hypot(np.float64(x1), np.float64(x2))
+    np_result = np.hypot(np.float64(x1), np.float64(x2))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: hypot({x1}, {x2})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+    if fnp_result != np_result:
+        print(f"FAIL: hypot({x1}, {x2}) value mismatch: fnp={fnp_result} np={np_result}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "hypot signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
