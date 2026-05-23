@@ -210,6 +210,58 @@ fn cumsum_cumprod_native_fnp_python_paths_match_numpy() {
             }
         }
 
+        // ─── NaN propagation tests (SHOULD) ─────────────────────────────────
+        let nan_cases: &[&[f64]] = &[
+            &[1.0, f64::NAN, 3.0, 4.0],
+            &[f64::NAN, 1.0, 2.0, 3.0],
+            &[1.0, 2.0, 3.0, f64::NAN],
+            &[f64::NAN, f64::NAN, f64::NAN],
+        ];
+
+        for (idx, values) in nan_cases.iter().enumerate() {
+            for function in ["cumsum", "cumprod"] {
+                let values = (*values).to_vec();
+                run_case(
+                    py,
+                    &module,
+                    &numpy,
+                    &format!("{function}-nan-propagation-{idx}"),
+                    function,
+                    RequirementLevel::Should,
+                    CompareMode::Close,
+                    t,
+                    move |py| PyTuple::new(py, [np_array_1d_f(py, &values)?]),
+                    no_kwargs,
+                );
+            }
+        }
+
+        // ─── Inf handling tests (SHOULD) ───────────────────────────────────
+        let inf_cases: &[&[f64]] = &[
+            &[1.0, f64::INFINITY, 3.0],
+            &[f64::NEG_INFINITY, 1.0, 2.0],
+            &[1.0, 2.0, f64::INFINITY, f64::NEG_INFINITY],
+            &[f64::INFINITY, f64::INFINITY],
+        ];
+
+        for (idx, values) in inf_cases.iter().enumerate() {
+            for function in ["cumsum", "cumprod"] {
+                let values = (*values).to_vec();
+                run_case(
+                    py,
+                    &module,
+                    &numpy,
+                    &format!("{function}-inf-handling-{idx}"),
+                    function,
+                    RequirementLevel::Should,
+                    CompareMode::Close,
+                    t,
+                    move |py| PyTuple::new(py, [np_array_1d_f(py, &values)?]),
+                    no_kwargs,
+                );
+            }
+        }
+
         eprintln!("{}", TOTALS.summarize("cumsum-cumprod-native"));
         Ok(())
     });
