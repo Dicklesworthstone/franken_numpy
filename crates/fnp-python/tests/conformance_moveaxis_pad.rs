@@ -291,3 +291,35 @@ print(result.dtype == a.dtype)
     assert_eq!(result.trim(), "True", "pad should preserve dtype");
     Ok(())
 }
+
+#[test]
+fn moveaxis_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.zeros((2, 3, 4), dtype=np.complex128)
+fnp_result = fnp.moveaxis(a, 0, -1)
+np_result = np.moveaxis(a, 0, -1)
+print(fnp_result.shape == np_result.shape)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "moveaxis complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn pad_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j], dtype=np.complex128)
+fnp_result = fnp.pad(a, 1, mode='constant')
+np_result = np.pad(a, 1, mode='constant')
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "pad complex should match numpy");
+    Ok(())
+}
