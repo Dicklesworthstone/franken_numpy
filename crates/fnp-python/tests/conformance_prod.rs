@@ -414,3 +414,32 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "prod complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn prod_inf_handling_matches_numpy() -> Result<(), String> {
+    let inf_cases = [
+        "[1.0, np.inf, 3.0]",
+        "[np.inf, 2.0, 3.0]",
+        "[0.0, np.inf]",
+        "[np.inf, np.inf]",
+        "[-np.inf, np.inf]",
+    ];
+
+    for arr_str in &inf_cases {
+        let np_script =
+            format!("import numpy as np; print(repr(np.prod(np.array({arr_str}))))");
+        let np_output = numpy_oracle(&np_script)?;
+
+        let fnp_script = fnp_prod_script(format!(
+            "print(repr(fnp.prod(np.array({arr_str}))))"
+        ));
+        let fnp_output = numpy_oracle(&fnp_script)?;
+
+        assert_eq!(
+            fnp_output.trim(),
+            np_output.trim(),
+            "prod inf mismatch for {arr_str}"
+        );
+    }
+    Ok(())
+}
