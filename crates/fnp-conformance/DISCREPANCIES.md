@@ -129,7 +129,7 @@
   - Same behavior for fmin/fmax
 - **Resolution:** WILL-FIX
 - **Reason:** This blocks parallel operation safety proofs in fnp-ufunc. The `ParallelOperationEligibility::UnsafeUntilProof` annotation on min/max-family operations requires deterministic signed-zero tie selection matching NumPy for partition replay stability.
-- **Tests affected:** `{minimum,maximum,fmin,fmax}_signed_zero_tie_selection_parity` (#[ignore])
+- **Tests affected:** `{minimum,maximum,fmin,fmax}_signed_zero_tie_selection_parity`, `{min,max}_signed_zero_tie_selection_parity` (#[ignore])
 - **Review date:** 2026-05-23
 - **Investigation:** The underlying Rust `f64::min`/`f64::max` may use different tie-breaking than NumPy's C implementation. Fix requires explicit sign-aware comparison when values are equal.
 
