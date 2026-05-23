@@ -184,3 +184,46 @@ print(fnp_result == np_result)
     assert_eq!(result.trim(), "True", "inner single element should match numpy");
     Ok(())
 }
+
+#[test]
+#[ignore = "PARITY GAP: fnp accumulator returns -0.0, NumPy returns 0.0. See DISC-011."]
+fn inner_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Inner product signed-zero parity
+# inner(a, b) = sum(a[i] * b[i]) - involves multiply and accumulate
+tests = [
+    ([0.0, 0.0], [1.0, 1.0]),         # 0 in dot product
+    ([-0.0, -0.0], [1.0, 1.0]),       # -0 in dot product
+    ([1.0, -0.0], [0.0, 1.0]),        # mixed zeros
+    ([-0.0, 0.0], [-0.0, 0.0]),       # all zeros
+    ([1.0, 1.0], [-0.0, -0.0]),       # -0 multiplied by positive
+]
+all_pass = True
+for a_vals, b_vals in tests:
+    a = np.array(a_vals)
+    b = np.array(b_vals)
+    fnp_result = fnp.inner(a, b)
+    np_result = np.inner(a, b)
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: inner({a_vals}, {b_vals})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+    if not np.allclose(fnp_result, np_result):
+        print(f"FAIL: inner({a_vals}, {b_vals}) values mismatch")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "inner signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}

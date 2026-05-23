@@ -206,3 +206,43 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "kron 3D arrays should match numpy");
     Ok(())
 }
+
+#[test]
+fn kron_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Kronecker product signed-zero parity (multiplication-based)
+# kron(a, b)[i*len(b)+j] = a[i] * b[j]
+tests = [
+    ([1.0, -0.0], [1.0, 2.0]),      # -0 * positive = -0
+    ([0.0, 1.0], [-0.0, 2.0]),      # positive * -0 = -0
+    ([-0.0, -0.0], [1.0, -1.0]),    # -0 * negative = 0, -0 * positive = -0
+    ([0.0, 0.0], [-0.0, -0.0]),     # 0 * -0 = -0
+]
+all_pass = True
+for a_vals, b_vals in tests:
+    a = np.array(a_vals)
+    b = np.array(b_vals)
+    fnp_result = fnp.kron(a, b)
+    np_result = np.kron(a, b)
+    fnp_signs = np.signbit(fnp_result).tolist()
+    np_signs = np.signbit(np_result).tolist()
+    if fnp_signs != np_signs:
+        print(f"FAIL: kron({a_vals}, {b_vals})")
+        print(f"  fnp signbit={fnp_signs} np signbit={np_signs}")
+        all_pass = False
+    if not np.allclose(fnp_result, np_result):
+        print(f"FAIL: kron({a_vals}, {b_vals}) values mismatch")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "kron signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}

@@ -255,3 +255,43 @@ print(np.allclose(fnp_result, k) and np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "cross unit vectors should follow right-hand rule");
     Ok(())
 }
+
+#[test]
+fn cross_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Cross product signed-zero parity
+# Cross product involves multiplication and subtraction
+tests = [
+    ([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]),      # Standard case
+    ([-0.0, -0.0, 1.0], [1.0, 0.0, 0.0]),    # Negative zeros in first
+    ([0.0, 0.0, 1.0], [-0.0, 0.0, 0.0]),     # Negative zero in second
+    ([0.0, -0.0, 0.0], [0.0, 0.0, 1.0]),     # Mixed zeros, cross with z-axis
+]
+all_pass = True
+for a_vals, b_vals in tests:
+    a = np.array(a_vals)
+    b = np.array(b_vals)
+    fnp_result = fnp.cross(a, b)
+    np_result = np.cross(a, b)
+    fnp_signs = np.signbit(fnp_result).tolist()
+    np_signs = np.signbit(np_result).tolist()
+    if fnp_signs != np_signs:
+        print(f"FAIL: cross({a_vals}, {b_vals})")
+        print(f"  fnp signbit={fnp_signs} np signbit={np_signs}")
+        all_pass = False
+    if not np.allclose(fnp_result, np_result):
+        print(f"FAIL: cross({a_vals}, {b_vals}) values mismatch")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cross signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
