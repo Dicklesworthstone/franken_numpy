@@ -351,3 +351,62 @@ fn all_complex_dtype_matches_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+#[test]
+fn all_special_values_match_numpy() -> Result<(), String> {
+    let script = fnp_all_script(
+        r#"
+tests = []
+# NaN is truthy (nonzero)
+a = np.array([np.nan, 1.0, 2.0])
+tests.append(fnp.all(a) == np.all(a))
+
+# inf is truthy
+a = np.array([np.inf, 1.0])
+tests.append(fnp.all(a) == np.all(a))
+
+# -inf is truthy
+a = np.array([-np.inf, 1.0])
+tests.append(fnp.all(a) == np.all(a))
+
+# Mixed special values (all truthy)
+a = np.array([np.nan, np.inf, -np.inf, 1.0])
+tests.append(fnp.all(a) == np.all(a))
+
+# Special value with zero (falsy)
+a = np.array([np.nan, 0.0, 1.0])
+tests.append(fnp.all(a) == np.all(a))
+
+# Only nan
+a = np.array([np.nan])
+tests.append(fnp.all(a) == np.all(a))
+
+# Only inf
+a = np.array([np.inf])
+tests.append(fnp.all(a) == np.all(a))
+
+print(all(tests))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "all special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn all_negative_zero_matches_numpy() -> Result<(), String> {
+    let script = fnp_all_script(
+        r#"
+# -0.0 is falsy (zero)
+a = np.array([-0.0])
+fnp_result = fnp.all(a)
+np_result = np.all(a)
+print(fnp_result == np_result and fnp_result == False)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "all negative zero should match numpy");
+    Ok(())
+}
