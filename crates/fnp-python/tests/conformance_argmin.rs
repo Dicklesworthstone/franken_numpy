@@ -328,3 +328,19 @@ print(fnp_result == np_result)
     assert_eq!(result.trim(), "True", "argmin complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn argmin_with_nan() -> Result<(), String> {
+    let script = fnp_argmin_script(
+        r#"
+a = np.array([1.0, np.nan, 3.0])
+fnp_result = fnp.argmin(a)
+np_result = np.argmin(a)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argmin nan handling should match numpy");
+    Ok(())
+}
