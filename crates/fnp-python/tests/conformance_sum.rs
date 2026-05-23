@@ -563,3 +563,19 @@ print(fnp_result == np_result == 9)  # 1 + 3 + 5
     assert_eq!(result.trim(), "True", "sum with where parameter should match numpy");
     Ok(())
 }
+
+#[test]
+fn sum_with_initial_parameter() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([1, 2, 3, 4, 5])
+fnp_result = fnp.sum(a, initial=10)
+np_result = np.sum(a, initial=10)
+print(fnp_result == np_result == 25)  # 10 + 1+2+3+4+5
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sum with initial parameter should match numpy");
+    Ok(())
+}
