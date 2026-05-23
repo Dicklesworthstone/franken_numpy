@@ -498,3 +498,32 @@ np.sum(a, axis=5)
         "sum with out-of-bounds axis should raise same error as numpy"
     );
 }
+
+#[test]
+fn sum_inf_handling_matches_numpy() -> Result<(), String> {
+    let inf_cases = [
+        "[1.0, np.inf, 3.0]",
+        "[np.inf, 2.0, 3.0]",
+        "[-np.inf, np.inf]",
+        "[np.inf, np.inf]",
+        "[-np.inf, -np.inf]",
+    ];
+
+    for arr_str in &inf_cases {
+        let np_script =
+            format!("import numpy as np; print(repr(np.sum(np.array({arr_str}))))");
+        let np_output = numpy_oracle(&np_script)?;
+
+        let fnp_script = fnp_sum_script(format!(
+            "print(repr(fnp.sum(np.array({arr_str}))))"
+        ));
+        let fnp_output = numpy_oracle(&fnp_script)?;
+
+        assert_eq!(
+            fnp_output.trim(),
+            np_output.trim(),
+            "sum inf mismatch for {arr_str}"
+        );
+    }
+    Ok(())
+}
