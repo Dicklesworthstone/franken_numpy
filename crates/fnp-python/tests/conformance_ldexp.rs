@@ -115,3 +115,71 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn ldexp_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+exp = np.array([1, 1, 1, 1, 1])
+result = fnp.ldexp(x, exp)
+expected = np.ldexp(x, exp)
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ldexp special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ldexp_overflow() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1.0, 1.0])
+exp = np.array([1024, 2000])
+result = fnp.ldexp(x, exp)
+expected = np.ldexp(x, exp)
+print(np.allclose(result, expected) or np.all(np.isinf(result) == np.isinf(expected)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ldexp overflow should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ldexp_underflow() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1.0, 1.0])
+exp = np.array([-1024, -2000])
+result = fnp.ldexp(x, exp)
+expected = np.ldexp(x, exp)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ldexp underflow should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ldexp_zero_exponent() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1.0, 2.0, -3.0, 0.5])
+exp = np.array([0, 0, 0, 0])
+result = fnp.ldexp(x, exp)
+expected = np.ldexp(x, exp)
+print(np.allclose(result, expected) and np.allclose(result, x))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ldexp zero exponent should match numpy");
+    Ok(())
+}
