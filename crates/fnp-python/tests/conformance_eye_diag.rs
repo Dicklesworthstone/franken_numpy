@@ -360,3 +360,82 @@ print(np.array_equal(v, extracted))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Complex dtype tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn diag_extract_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2-1j, 3+2j], [4-2j, 5+1j, 6-1j], [7+2j, 8-2j, 9+1j]], dtype=np.complex128)
+result = fnp.diag(a)
+expected = np.diag(a)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag extract complex should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn diag_construct_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+v = np.array([1+1j, 2-1j, 3+2j], dtype=np.complex128)
+result = fnp.diag(v)
+expected = np.diag(v)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag construct complex should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn diagflat_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+v = np.array([1+1j, 2-1j, 3+2j], dtype=np.complex128)
+result = fnp.diagflat(v)
+expected = np.diagflat(v)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diagflat complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn eye_complex_dtype() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+result = fnp.eye(4, dtype=np.complex128)
+expected = np.eye(4, dtype=np.complex128)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "eye complex dtype should match numpy"
+    );
+    Ok(())
+}
