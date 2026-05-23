@@ -344,3 +344,31 @@ print(fnp_result == np_result)
     assert_eq!(result.trim(), "True", "argmin nan handling should match numpy");
     Ok(())
 }
+
+#[test]
+fn argmin_empty_array_raises_valueerror() -> Result<(), String> {
+    let script = fnp_argmin_script(
+        r#"
+empty = np.array([])
+fnp_raised = False
+np_raised = False
+try:
+    fnp.argmin(empty)
+except ValueError:
+    fnp_raised = True
+except Exception:
+    pass
+try:
+    np.argmin(empty)
+except ValueError:
+    np_raised = True
+except Exception:
+    pass
+print(fnp_raised == np_raised == True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argmin of empty array should raise ValueError");
+    Ok(())
+}

@@ -361,3 +361,31 @@ print(fnp_result == np_result)
     assert_eq!(result.trim(), "True", "argmax all-nan should match numpy");
     Ok(())
 }
+
+#[test]
+fn argmax_empty_array_raises_valueerror() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+empty = np.array([])
+fnp_raised = False
+np_raised = False
+try:
+    fnp.argmax(empty)
+except ValueError:
+    fnp_raised = True
+except Exception:
+    pass
+try:
+    np.argmax(empty)
+except ValueError:
+    np_raised = True
+except Exception:
+    pass
+print(fnp_raised == np_raised == True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argmax of empty array should raise ValueError");
+    Ok(())
+}
