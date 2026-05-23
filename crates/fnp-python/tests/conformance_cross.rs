@@ -184,3 +184,74 @@ np.cross(a, b)
         "cross with 4D vectors should raise same error as numpy"
     );
 }
+
+#[test]
+fn cross_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([np.inf, 1.0, np.nan])
+b = np.array([1.0, 2.0, 3.0])
+fnp_result = fnp.cross(a, b)
+np_result = np.cross(a, b)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cross special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn cross_zero_vectors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([0.0, 0.0, 0.0])
+b = np.array([1.0, 2.0, 3.0])
+fnp_result = fnp.cross(a, b)
+np_result = np.cross(a, b)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cross zero vector should match numpy");
+    Ok(())
+}
+
+#[test]
+fn cross_parallel_vectors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Cross product of parallel vectors is zero
+a = np.array([1.0, 2.0, 3.0])
+b = np.array([2.0, 4.0, 6.0])
+fnp_result = fnp.cross(a, b)
+np_result = np.cross(a, b)
+print(np.allclose(fnp_result, np_result) and np.allclose(fnp_result, 0.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cross parallel vectors should be zero");
+    Ok(())
+}
+
+#[test]
+fn cross_unit_vectors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# i x j = k
+i = np.array([1.0, 0.0, 0.0])
+j = np.array([0.0, 1.0, 0.0])
+k = np.array([0.0, 0.0, 1.0])
+fnp_result = fnp.cross(i, j)
+np_result = np.cross(i, j)
+print(np.allclose(fnp_result, k) and np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cross unit vectors should follow right-hand rule");
+    Ok(())
+}

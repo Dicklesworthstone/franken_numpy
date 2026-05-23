@@ -204,3 +204,54 @@ np.tensordot(a, b, axes=1)
         "tensordot axes mismatch should raise same error as numpy"
     );
 }
+
+#[test]
+fn tensordot_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[np.inf, 1.0], [np.nan, 2.0]])
+b = np.array([[1.0], [1.0]])
+fnp_result = fnp.tensordot(a, b, axes=1)
+np_result = np.tensordot(a, b, axes=1)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "tensordot special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn tensordot_empty_result() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1, 2, 3]])
+b = np.array([[4], [5], [6]])
+fnp_result = fnp.tensordot(a, b, axes=0)
+np_result = np.tensordot(a, b, axes=0)
+print(fnp_result.shape == np_result.shape and np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "tensordot axes=0 shape should match numpy");
+    Ok(())
+}
+
+#[test]
+fn tensordot_negative_axes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(24).reshape(2, 3, 4)
+b = np.arange(12).reshape(3, 4)
+fnp_result = fnp.tensordot(a, b, axes=([-1, -2], [-1, -2]))
+np_result = np.tensordot(a, b, axes=([-1, -2], [-1, -2]))
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "tensordot negative axes should match numpy");
+    Ok(())
+}
