@@ -995,3 +995,108 @@ print(fnp_result.dtype == np_result.dtype, fnp_result.dtype, np_result.dtype)
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// out parameter tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn add_out_parameter_identity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0])
+b = np.array([4.0, 5.0, 6.0])
+out = np.zeros(3)
+fnp_result = fnp.add(a, b, out=out)
+np_out = np.zeros(3)
+np_result = np.add(a, b, out=np_out)
+print(fnp_result is out, np_result is np_out)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True True", "add out parameter should return same object");
+    Ok(())
+}
+
+#[test]
+fn add_out_parameter_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0])
+b = np.array([4.0, 5.0, 6.0])
+fnp_out = np.zeros(3)
+np_out = np.zeros(3)
+fnp.add(a, b, out=fnp_out)
+np.add(a, b, out=np_out)
+print(np.array_equal(fnp_out, np_out))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "add out parameter values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn multiply_out_parameter() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0])
+b = np.array([4.0, 5.0, 6.0])
+fnp_out = np.zeros(3)
+np_out = np.zeros(3)
+fnp.multiply(a, b, out=fnp_out)
+np.multiply(a, b, out=np_out)
+print(np.array_equal(fnp_out, np_out))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "multiply out parameter should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Broadcasting edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn add_broadcast_0d_1d() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array(5)  # 0-d scalar array
+b = np.array([1, 2, 3])
+fnp_result = fnp.add(a, b)
+np_result = np.add(a, b)
+print(fnp_result.shape == np_result.shape, np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True True"),
+        "add broadcast 0-d + 1-d should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn add_broadcast_empty_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([]).reshape(0, 3)  # (0, 3)
+b = np.array([1, 2, 3])  # (3,)
+fnp_result = fnp.add(a, b)
+np_result = np.add(a, b)
+print(fnp_result.shape == np_result.shape, np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True True"),
+        "add broadcast with empty array should match numpy: {result}"
+    );
+    Ok(())
+}
