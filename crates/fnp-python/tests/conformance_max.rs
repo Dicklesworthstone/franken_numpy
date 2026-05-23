@@ -368,7 +368,6 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
 }
 
 #[test]
-#[ignore = "PARITY GAP: Reduction signed-zero tie selection may differ. See DISC-010."]
 fn max_signed_zero_tie_selection_parity() -> Result<(), String> {
     // Tests signed-zero reduction behavior for parallel safety proofs
     let script = fnp_max_script(
