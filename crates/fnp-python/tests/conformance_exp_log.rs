@@ -875,3 +875,59 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
     assert_eq!(result.trim(), "True", "exp overflow should match numpy");
     Ok(())
 }
+
+#[test]
+fn expm1_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# expm1 signed-zero: expm1(±0) = ±0
+tests = [0.0, -0.0]
+all_pass = True
+for x in tests:
+    fnp_result = fnp.expm1(np.float64(x))
+    np_result = np.expm1(np.float64(x))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: expm1({x}) signbit fnp={fnp_sign} np={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "expm1 signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn log1p_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# log1p signed-zero: log1p(±0) = ±0
+tests = [0.0, -0.0]
+all_pass = True
+for x in tests:
+    fnp_result = fnp.log1p(np.float64(x))
+    np_result = np.log1p(np.float64(x))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: log1p({x}) signbit fnp={fnp_sign} np={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "log1p signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
