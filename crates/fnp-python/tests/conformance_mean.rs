@@ -429,3 +429,21 @@ np.mean(a, axis=5)
         "mean with out-of-bounds axis should raise same error as numpy"
     );
 }
+
+#[test]
+fn mean_with_out_parameter() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+a = np.array([[1.0, 2.0], [3.0, 4.0]])
+out = np.empty((2,), dtype=np.float64)
+fnp_result = fnp.mean(a, axis=0, out=out)
+np_out = np.empty((2,), dtype=np.float64)
+np_result = np.mean(a, axis=0, out=np_out)
+print(np.allclose(fnp_result, np_result) and np.allclose(out, np_out))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "mean with out parameter should match numpy");
+    Ok(())
+}

@@ -443,3 +443,21 @@ fn prod_inf_handling_matches_numpy() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[test]
+fn prod_with_out_parameter() -> Result<(), String> {
+    let script = fnp_prod_script(
+        r#"
+a = np.array([[1, 2], [3, 4]])
+out = np.empty((2,), dtype=np.int64)
+fnp_result = fnp.prod(a, axis=0, out=out)
+np_out = np.empty((2,), dtype=np.int64)
+np_result = np.prod(a, axis=0, out=np_out)
+print(np.array_equal(fnp_result, np_result) and np.array_equal(out, np_out))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "prod with out parameter should match numpy");
+    Ok(())
+}
