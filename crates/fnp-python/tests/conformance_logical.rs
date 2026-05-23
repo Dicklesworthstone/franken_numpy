@@ -171,3 +171,110 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn logical_operations_on_integers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([0, 1, 2, 0])
+x2 = np.array([0, 0, 1, 3])
+tests_pass = True
+for func_name in ['logical_and', 'logical_or', 'logical_xor']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x1, x2)
+    np_result = np_func(x1, x2)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logical operations on integers should match numpy");
+    Ok(())
+}
+
+#[test]
+fn logical_operations_on_floats() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([0.0, 1.0, 0.5, 0.0])
+x2 = np.array([0.0, 0.0, 0.5, 1.5])
+tests_pass = True
+for func_name in ['logical_and', 'logical_or', 'logical_xor']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x1, x2)
+    np_result = np_func(x1, x2)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logical operations on floats should match numpy");
+    Ok(())
+}
+
+#[test]
+fn logical_not_on_integers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0, 1, 2, -1, 0])
+fnp_result = fnp.logical_not(x)
+np_result = np.logical_not(x)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logical_not on integers should match numpy");
+    Ok(())
+}
+
+#[test]
+fn logical_broadcasting() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([[True, False], [True, False]])
+x2 = np.array([True, False])
+tests_pass = True
+for func_name in ['logical_and', 'logical_or', 'logical_xor']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x1, x2)
+    np_result = np_func(x1, x2)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logical broadcasting should match numpy");
+    Ok(())
+}
+
+#[test]
+fn logical_nan_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([np.nan, 1.0, 0.0, np.nan])
+x2 = np.array([1.0, np.nan, np.nan, np.nan])
+tests_pass = True
+for func_name in ['logical_and', 'logical_or', 'logical_xor']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x1, x2)
+    np_result = np_func(x1, x2)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+fnp_not = fnp.logical_not(x1)
+np_not = np.logical_not(x1)
+tests_pass = tests_pass and np.array_equal(fnp_not, np_not)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logical nan handling should match numpy");
+    Ok(())
+}
