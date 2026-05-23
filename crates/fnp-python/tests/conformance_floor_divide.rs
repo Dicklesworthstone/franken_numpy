@@ -175,3 +175,40 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "floor_divide broadcasting should match numpy");
     Ok(())
 }
+
+#[test]
+fn floor_divide_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+# floor_divide signed-zero: 0 // x preserves sign rules
+# 0 // positive = 0, 0 // negative = -0
+# -0 // positive = -0, -0 // negative = 0
+tests = [
+    (0.0, 1.0), (0.0, -1.0),
+    (-0.0, 1.0), (-0.0, -1.0),
+]
+all_pass = True
+for x1, x2 in tests:
+    fnp_result = fnp.floor_divide(np.float64(x1), np.float64(x2))
+    np_result = np.floor_divide(np.float64(x1), np.float64(x2))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: floor_divide({x1}, {x2})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor_divide signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
