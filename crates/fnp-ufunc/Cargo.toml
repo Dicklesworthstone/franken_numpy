@@ -32,3 +32,7 @@ criterion.workspace = true
 [[bench]]
 name = "elementwise"
 harness = false
+
+[[bench]]
+name = "transcendental"
+harness = false
