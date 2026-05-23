@@ -228,3 +228,86 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "not_equal complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn comparison_with_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([1.0, np.nan, np.nan, 2.0])
+x2 = np.array([1.0, np.nan, 2.0, np.nan])
+tests_pass = True
+for func_name in ['equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x1, x2)
+    np_result = np_func(x1, x2)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "comparison with nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn comparison_with_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([1.0, np.inf, -np.inf, np.inf])
+x2 = np.array([np.inf, np.inf, -np.inf, -np.inf])
+tests_pass = True
+for func_name in ['equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x1, x2)
+    np_result = np_func(x1, x2)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "comparison with inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn equal_negative_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([0.0, -0.0, 0.0])
+x2 = np.array([-0.0, 0.0, 0.0])
+fnp_result = fnp.equal(x1, x2)
+np_result = np.equal(x1, x2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "equal with negative zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn comparison_broadcasting() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([[1, 2, 3], [4, 5, 6]])
+x2 = np.array([2, 2, 2])
+tests_pass = True
+for func_name in ['equal', 'not_equal', 'less', 'less_equal', 'greater', 'greater_equal']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x1, x2)
+    np_result = np_func(x1, x2)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "comparison broadcasting should match numpy");
+    Ok(())
+}
