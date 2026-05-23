@@ -274,3 +274,39 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "diff with append should match numpy");
     Ok(())
 }
+
+#[test]
+fn diff_signed_zero_parity() -> Result<(), String> {
+    // Test signed-zero behavior for diff (a[i+1] - a[i])
+    // diff computes subtraction, so signed-zero rules apply
+    let script = fnp_script(
+        r#"
+# Signed-zero diff semantics (subtraction rules)
+# 0.0 - 0.0 = 0.0, -0.0 - (-0.0) = 0.0, 0.0 - (-0.0) = 0.0, -0.0 - 0.0 = -0.0
+tests = [
+    ([0.0, 0.0, 0.0], [False, False]),      # diff: [0, 0]
+    ([-0.0, -0.0, -0.0], [False, False]),   # diff: [0, 0]
+    ([0.0, -0.0], [True]),                  # diff: [-0] (0-(-0) = 0? or -0-0?)
+]
+all_pass = True
+for values, expected_signbits in tests:
+    arr = np.array(values)
+    fnp_result = fnp.diff(arr)
+    np_result = np.diff(arr)
+    fnp_signs = np.signbit(fnp_result).tolist()
+    np_signs = np.signbit(np_result).tolist()
+    if fnp_signs != np_signs:
+        print(f"FAIL: diff({values}) fnp signbit={fnp_signs} np signbit={np_signs}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diff signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
