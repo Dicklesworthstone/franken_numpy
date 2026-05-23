@@ -407,3 +407,41 @@ fn diff_single_element_matches_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+#[test]
+fn gradient_signed_zero_parity() -> Result<(), String> {
+    // Test signed-zero behavior for gradient (central difference)
+    let script = fnp_script(
+        r#"
+# Signed-zero gradient semantics
+# gradient computes differences divided by spacing
+tests = [
+    ([0.0, 0.0, 0.0], False),       # gradient: [0, 0, 0] (forward/backward/central)
+    ([-0.0, -0.0, -0.0], False),    # gradient: [0, 0, 0]
+    ([1.0, -0.0, 1.0], False),      # gradient with -0 in middle
+]
+all_pass = True
+for values, check_signs in tests:
+    arr = np.array(values)
+    fnp_result = fnp.gradient(arr)
+    np_result = np.gradient(arr)
+    if not np.allclose(fnp_result, np_result):
+        print(f"FAIL: gradient({values}) value mismatch")
+        all_pass = False
+    fnp_signs = np.signbit(fnp_result).tolist()
+    np_signs = np.signbit(np_result).tolist()
+    if fnp_signs != np_signs:
+        print(f"FAIL: gradient({values}) fnp signbit={fnp_signs} np signbit={np_signs}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "gradient signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
