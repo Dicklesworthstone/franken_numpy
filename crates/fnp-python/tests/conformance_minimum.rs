@@ -188,3 +188,70 @@ print(np.array_equal(np.isnan(fnp_result), np.isnan(np_result)))
     assert_eq!(result.trim(), "True", "minimum all nan should match numpy");
     Ok(())
 }
+
+#[test]
+#[ignore = "PARITY GAP: fnp returns x1 when equal, NumPy returns x2. See DISC-010."]
+fn minimum_signed_zero_tie_selection_parity() -> Result<(), String> {
+    // Critical for parallel operation safety: when comparing +0.0 and -0.0,
+    // the selected minimum and its sign bit must match NumPy exactly.
+    // This is a stronger test than value equality (0.0 == -0.0).
+    //
+    // FINDING: fnp.minimum returns x1 when values are equal (sign of first arg)
+    //          np.minimum returns x2 when values are equal (sign of second arg)
+    //          e.g., minimum(-0.0, 0.0): fnp → -0.0, np → 0.0
+    let script = fnp_script(
+        r#"
+# Test all combinations of signed zero comparisons
+x1 = np.array([0.0, -0.0, 0.0, -0.0])
+x2 = np.array([0.0, 0.0, -0.0, -0.0])
+fnp_result = fnp.minimum(x1, x2)
+np_result = np.minimum(x1, x2)
+
+# Check both value and sign bit match
+values_match = np.array_equal(fnp_result, np_result)
+signs_match = np.array_equal(np.signbit(fnp_result), np.signbit(np_result))
+print(f"fnp signbit: {np.signbit(fnp_result)}")
+print(f"np signbit:  {np.signbit(np_result)}")
+print(f"values={values_match} signs={signs_match}")
+print(values_match and signs_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().ends_with("True"),
+        "minimum signed-zero tie selection must match numpy sign bits exactly: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn minimum_nan_propagation_parity() -> Result<(), String> {
+    // Critical for parallel operation safety: NaN propagation must be deterministic.
+    let script = fnp_script(
+        r#"
+import numpy as np
+# Test NaN in both positions
+x1 = np.array([np.nan, 1.0, np.nan, -np.inf])
+x2 = np.array([1.0, np.nan, np.nan, np.nan])
+fnp_result = fnp.minimum(x1, x2)
+np_result = np.minimum(x1, x2)
+
+# Both NaN positions and non-NaN values must match
+nan_mask_match = np.array_equal(np.isnan(fnp_result), np.isnan(np_result))
+non_nan_match = np.allclose(
+    fnp_result[~np.isnan(fnp_result)],
+    np_result[~np.isnan(np_result)]
+) if not np.all(np.isnan(fnp_result)) else True
+print(nan_mask_match and non_nan_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "minimum NaN propagation must match numpy exactly"
+    );
+    Ok(())
+}
