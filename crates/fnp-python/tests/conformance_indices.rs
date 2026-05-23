@@ -347,3 +347,25 @@ print(total == n * n)
     );
     Ok(())
 }
+
+#[test]
+fn fill_diagonal_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+arr1 = np.zeros((3, 3), dtype=np.complex128)
+arr2 = np.zeros((3, 3), dtype=np.complex128)
+vals = [1+1j, 2+2j, 3+3j]
+fnp.fill_diagonal(arr1, vals)
+np.fill_diagonal(arr2, vals)
+print(np.array_equal(arr1, arr2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fill_diagonal complex should match numpy"
+    );
+    Ok(())
+}

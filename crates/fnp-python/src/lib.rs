@@ -22555,6 +22555,16 @@ fn fill_diagonal(py: Python<'_>, a: Py<PyAny>, val: Py<PyAny>, wrap: bool) -> Py
     let a = a.bind(py);
     require_numpy_ndarray(py, a, "fill_diagonal")?;
 
+    // Check for complex dtype and fallback to numpy
+    let dtype_kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("wrap", wrap)?;
+        numpy.getattr("fill_diagonal")?.call((a, val.bind(py)), Some(&kwargs))?;
+        return Ok(py.None());
+    }
+
     let mut array = extract_precise_numeric_array(py, a, "fill_diagonal(a)")?;
     let values = extract_precise_numeric_array(py, val.bind(py), "fill_diagonal(val)")?;
 
