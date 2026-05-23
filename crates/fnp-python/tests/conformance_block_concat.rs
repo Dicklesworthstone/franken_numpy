@@ -269,3 +269,58 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Complex dtype tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn block_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+A = np.array([[1+1j, 2-1j], [3+2j, 4-2j]], dtype=np.complex128)
+B = np.array([[5+1j, 6-1j], [7+2j, 8-2j]], dtype=np.complex128)
+result = fnp.block([[A, B]])
+expected = np.block([[A, B]])
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "block complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn concat_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j], dtype=np.complex128)
+b = np.array([4-2j, 5+1j, 6-1j], dtype=np.complex128)
+result = fnp.concat([a, b])
+expected = np.concat([a, b])
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "concat complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn kron_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2-1j]], dtype=np.complex128)
+b = np.array([[1, 2], [3, 4]])
+result = fnp.kron(a, b)
+expected = np.kron(a, b)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "kron complex should match numpy");
+    Ok(())
+}
