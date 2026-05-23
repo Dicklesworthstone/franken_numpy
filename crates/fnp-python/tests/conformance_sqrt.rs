@@ -198,3 +198,72 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
     assert_eq!(result.trim(), "True", "sqrt special values should match numpy");
     Ok(())
 }
+
+#[test]
+fn sqrt_negative_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([0.0, -0.0])
+fnp_result = fnp.sqrt(a)
+np_result = np.sqrt(a)
+# Check both value and sign bit
+value_match = np.allclose(fnp_result, np_result)
+sign_match = np.array_equal(np.signbit(fnp_result), np.signbit(np_result))
+print(value_match and sign_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sqrt negative zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn cbrt_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.cbrt(a)
+np_result = np.cbrt(a)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cbrt special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn square_overflow() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+fmax = np.finfo(np.float64).max
+a = np.array([fmax ** 0.5 * 1.1, -(fmax ** 0.5 * 1.1)])
+fnp_result = fnp.square(a)
+np_result = np.square(a)
+# Both should overflow to inf
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "square overflow should match numpy");
+    Ok(())
+}
+
+#[test]
+fn square_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.square(a)
+np_result = np.square(a)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "square special values should match numpy");
+    Ok(())
+}

@@ -119,3 +119,84 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn nextafter_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([np.inf, -np.inf, np.nan, 0.0])
+x2 = np.array([0.0, 0.0, 0.0, np.inf])
+result = fnp.nextafter(x1, x2)
+expected = np.nextafter(x1, x2)
+# Check nan positions and other values
+match = True
+for r, e in zip(result.flat, expected.flat):
+    if np.isnan(e):
+        if not np.isnan(r):
+            match = False
+    elif r != e:
+        match = False
+print(match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nextafter special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nextafter_subnormal() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+tiny = np.finfo(np.float64).tiny
+x1 = np.array([tiny / 2, tiny / 4, 0.0])
+x2 = np.array([0.0, 0.0, tiny / 2])
+result = fnp.nextafter(x1, x2)
+expected = np.nextafter(x1, x2)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nextafter subnormal should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nextafter_negative_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([0.0, -0.0, 1.0])
+x2 = np.array([-0.0, 0.0, -np.inf])
+result = fnp.nextafter(x1, x2)
+expected = np.nextafter(x1, x2)
+# Check both values and sign bits
+value_match = np.array_equal(result, expected)
+sign_match = np.array_equal(np.signbit(result), np.signbit(expected))
+print(value_match and sign_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nextafter negative zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nextafter_max_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+fmax = np.finfo(np.float64).max
+x1 = np.array([fmax, -fmax])
+x2 = np.array([np.inf, -np.inf])
+result = fnp.nextafter(x1, x2)
+expected = np.nextafter(x1, x2)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nextafter max values should match numpy");
+    Ok(())
+}

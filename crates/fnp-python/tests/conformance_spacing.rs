@@ -119,3 +119,70 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn spacing_subnormal() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+tiny = np.finfo(np.float64).tiny
+x = np.array([tiny / 2, tiny / 4, tiny / 8])
+result = fnp.spacing(x)
+expected = np.spacing(x)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "spacing subnormal should match numpy");
+    Ok(())
+}
+
+#[test]
+fn spacing_negative_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, -0.0])
+result = fnp.spacing(x)
+expected = np.spacing(x)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "spacing negative zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn spacing_large_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Test large but not maximum values
+x = np.array([1e100, -1e100, 1e200])
+result = fnp.spacing(x)
+expected = np.spacing(x)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "spacing large values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn spacing_negative_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-np.inf])
+result = fnp.spacing(x)
+expected = np.spacing(x)
+# spacing of -inf should be nan
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "spacing negative inf should match numpy");
+    Ok(())
+}

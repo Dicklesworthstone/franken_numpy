@@ -156,3 +156,95 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn remainder_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([np.inf, -np.inf, np.nan, 1.0, 0.0])
+x2 = np.array([2.0, 2.0, 2.0, np.nan, 2.0])
+result = fnp.remainder(x1, x2)
+expected = np.remainder(x1, x2)
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "remainder special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn fmod_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([np.inf, -np.inf, np.nan, 1.0, 0.0])
+x2 = np.array([2.0, 2.0, 2.0, np.nan, 2.0])
+result = fnp.fmod(x1, x2)
+expected = np.fmod(x1, x2)
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fmod special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn remainder_divide_by_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    x1 = np.array([1.0, 2.0, 0.0])
+    x2 = np.array([0.0, 0.0, 0.0])
+    result = fnp.remainder(x1, x2)
+    expected = np.remainder(x1, x2)
+    # Both should produce NaN for division by zero
+    print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "remainder divide by zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn fmod_divide_by_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    x1 = np.array([1.0, 2.0, 0.0])
+    x2 = np.array([0.0, 0.0, 0.0])
+    result = fnp.fmod(x1, x2)
+    expected = np.fmod(x1, x2)
+    print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fmod divide by zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn remainder_broadcasting() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([[7, 8], [9, 10]])
+x2 = np.array([3, 4])
+result = fnp.remainder(x1, x2)
+expected = np.remainder(x1, x2)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "remainder broadcasting should match numpy");
+    Ok(())
+}

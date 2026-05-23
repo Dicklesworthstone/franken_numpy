@@ -160,3 +160,89 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn logaddexp_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([np.nan, 1.0, np.nan])
+x2 = np.array([1.0, np.nan, np.nan])
+result = fnp.logaddexp(x1, x2)
+expected = np.logaddexp(x1, x2)
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logaddexp nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn logaddexp_neg_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([-np.inf, -np.inf, 0.0])
+x2 = np.array([-np.inf, 0.0, -np.inf])
+result = fnp.logaddexp(x1, x2)
+expected = np.logaddexp(x1, x2)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logaddexp neg inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn logaddexp2_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([np.inf, -np.inf, np.nan, 0.0])
+x2 = np.array([0.0, 0.0, 0.0, np.inf])
+result = fnp.logaddexp2(x1, x2)
+expected = np.logaddexp2(x1, x2)
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logaddexp2 special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn logaddexp_broadcasting() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([[1.0, 2.0], [3.0, 4.0]])
+x2 = np.array([0.0, 1.0])
+result = fnp.logaddexp(x1, x2)
+expected = np.logaddexp(x1, x2)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logaddexp broadcasting should match numpy");
+    Ok(())
+}
+
+#[test]
+fn logaddexp_large_difference() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# When one value dominates, result should be close to max
+x1 = np.array([1000.0, -1000.0])
+x2 = np.array([1.0, 1.0])
+result = fnp.logaddexp(x1, x2)
+expected = np.logaddexp(x1, x2)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "logaddexp large difference should match numpy");
+    Ok(())
+}

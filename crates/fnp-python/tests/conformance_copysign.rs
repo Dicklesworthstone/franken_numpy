@@ -115,3 +115,68 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn copysign_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([np.inf, -np.inf, np.nan, 1.0])
+x2 = np.array([-1.0, 1.0, -1.0, np.nan])
+result = fnp.copysign(x1, x2)
+expected = np.copysign(x1, x2)
+# Check inf sign and nan positions
+match = True
+for r, e in zip(result.flat, expected.flat):
+    if np.isnan(e):
+        if not np.isnan(r):
+            match = False
+    elif np.isinf(e):
+        if r != e:
+            match = False
+    elif r != e:
+        match = False
+print(match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "copysign special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn copysign_negative_zero_source() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([-0.0, 0.0, 1.0, -1.0])
+x2 = np.array([1.0, -1.0, -0.0, 0.0])
+result = fnp.copysign(x1, x2)
+expected = np.copysign(x1, x2)
+# Verify sign bits match
+sign_match = np.array_equal(np.signbit(result), np.signbit(expected))
+value_match = np.allclose(result, expected)
+print(sign_match and value_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "copysign negative zero source should match numpy");
+    Ok(())
+}
+
+#[test]
+fn copysign_inf_target() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([1.0, -1.0, 0.0, -0.0])
+x2 = np.array([np.inf, -np.inf, np.inf, -np.inf])
+result = fnp.copysign(x1, x2)
+expected = np.copysign(x1, x2)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "copysign with inf target should match numpy");
+    Ok(())
+}
