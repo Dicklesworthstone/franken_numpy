@@ -10807,6 +10807,12 @@ fn put(py: Python<'_>, a: Py<PyAny>, ind: Py<PyAny>, v: Py<PyAny>) -> PyResult<P
     let a = a.bind(py);
     require_numpy_ndarray(py, a, "put")?;
 
+    // Check for complex dtype and fallback to numpy
+    let dtype_kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return fallback();
+    }
+
     let mut array = extract_numeric_array(py, a, "put(a)")?;
     let (_, indices) = extract_take_indices(py, ind.bind(py), "put(ind)")?;
     let values = extract_numeric_array(py, v.bind(py), "put(v)")?;

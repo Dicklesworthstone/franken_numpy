@@ -482,3 +482,22 @@ print(np.array_equal(arr1, arr2))
     assert_eq!(result.trim(), "True", "putmask complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn put_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+arr1 = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+arr2 = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+indices = [0, 2]
+vals = np.array([9+9j, 8+8j], dtype=np.complex128)
+fnp.put(arr1, indices, vals)
+np.put(arr2, indices, vals)
+print(np.array_equal(arr1, arr2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "put complex should match numpy");
+    Ok(())
+}
