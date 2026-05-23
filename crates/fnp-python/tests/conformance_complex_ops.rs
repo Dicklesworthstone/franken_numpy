@@ -173,3 +173,86 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn real_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([np.inf + 0j, -np.inf + 1j, np.nan + 2j])
+result = fnp.real(z)
+expected = np.real(z)
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "real special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn imag_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1 + np.inf*1j, 2 + -np.inf*1j])
+result = fnp.imag(z)
+expected = np.imag(z)
+# inf * 1j produces nan in imag part due to multiplication
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "imag special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn conj_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([np.inf + 0j, -np.inf + 0j, 0 + np.nan*1j])
+result = fnp.conj(z)
+expected = np.conj(z)
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "conj special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn conjugate_alias() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+2j, 3+4j])
+fnp_conj = fnp.conj(z)
+fnp_conjugate = fnp.conjugate(z)
+print(np.array_equal(fnp_conj, fnp_conjugate))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "conjugate should be alias for conj");
+    Ok(())
+}
+
+#[test]
+fn real_imag_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([0+0j, -0+0j, 0-0j, -0-0j])
+fnp_real = fnp.real(z)
+fnp_imag = fnp.imag(z)
+np_real = np.real(z)
+np_imag = np.imag(z)
+print(np.allclose(fnp_real, np_real) and np.allclose(fnp_imag, np_imag))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "real/imag zero should match numpy");
+    Ok(())
+}
