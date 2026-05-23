@@ -183,3 +183,39 @@ print(np.allclose(result, expected) and np.allclose(result, x))
     assert_eq!(result.trim(), "True", "ldexp zero exponent should match numpy");
     Ok(())
 }
+
+#[test]
+fn ldexp_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# ldexp signed-zero parity: ldexp(±0, n) = ±0
+tests = [
+    (0.0, 0), (0.0, 5), (0.0, -5),
+    (-0.0, 0), (-0.0, 5), (-0.0, -5),
+]
+all_pass = True
+for x, exp in tests:
+    fnp_result = fnp.ldexp(np.float64(x), np.int32(exp))
+    np_result = np.ldexp(np.float64(x), np.int32(exp))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: ldexp({x}, {exp})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+    if fnp_result != np_result:
+        print(f"FAIL: ldexp({x}, {exp}) value mismatch")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ldexp signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
