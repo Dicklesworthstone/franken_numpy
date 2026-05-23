@@ -132,3 +132,55 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "fmax complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn fmax_with_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([1.0, np.inf, -np.inf, np.inf])
+x2 = np.array([np.inf, 1.0, np.inf, -np.inf])
+result = fnp.fmax(x1, x2)
+expected = np.fmax(x1, x2)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fmax with inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn fmax_broadcasting() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([[1.0, 2.0], [3.0, 4.0]])
+x2 = np.array([2.5, 2.5])
+result = fnp.fmax(x1, x2)
+expected = np.fmax(x1, x2)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fmax broadcasting should match numpy");
+    Ok(())
+}
+
+#[test]
+fn fmax_negative_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([0.0, -0.0, 0.0])
+x2 = np.array([-0.0, 0.0, -0.0])
+result = fnp.fmax(x1, x2)
+expected = np.fmax(x1, x2)
+# fmax(0, -0) and fmax(-0, 0) behavior - check they match
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fmax negative zero should match numpy");
+    Ok(())
+}

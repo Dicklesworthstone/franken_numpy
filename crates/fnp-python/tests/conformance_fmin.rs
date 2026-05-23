@@ -132,3 +132,55 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "fmin complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn fmin_with_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([1.0, np.inf, -np.inf, np.inf])
+x2 = np.array([np.inf, 1.0, np.inf, -np.inf])
+result = fnp.fmin(x1, x2)
+expected = np.fmin(x1, x2)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fmin with inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn fmin_broadcasting() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([[1.0, 2.0], [3.0, 4.0]])
+x2 = np.array([2.5, 2.5])
+result = fnp.fmin(x1, x2)
+expected = np.fmin(x1, x2)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fmin broadcasting should match numpy");
+    Ok(())
+}
+
+#[test]
+fn fmin_negative_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([0.0, -0.0, 0.0])
+x2 = np.array([-0.0, 0.0, -0.0])
+result = fnp.fmin(x1, x2)
+expected = np.fmin(x1, x2)
+# fmin(0, -0) and fmin(-0, 0) behavior - check they match
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fmin negative zero should match numpy");
+    Ok(())
+}
