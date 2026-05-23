@@ -7685,6 +7685,15 @@ fn take(
             )?
             .unbind())
     };
+
+    // Check for complex dtype and fallback to numpy
+    let numpy = py.import("numpy")?;
+    let arr = numpy.call_method1("asarray", (a.bind(py),))?;
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return fallback();
+    }
+
     if mode != "raise" {
         return fallback();
     }

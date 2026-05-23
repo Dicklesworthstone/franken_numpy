@@ -594,3 +594,21 @@ print(match)
     assert_eq!(result.trim(), "True", "where with NaN should match numpy");
     Ok(())
 }
+
+#[test]
+fn where_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array([True, False, True])
+x = np.array([1+1j, 2+2j, 3+3j], dtype=np.complex128)
+y = np.array([4+4j, 5+5j, 6+6j], dtype=np.complex128)
+fnp_result = fnp.where(condition, x, y)
+np_result = np.where(condition, x, y)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "where complex should match numpy");
+    Ok(())
+}

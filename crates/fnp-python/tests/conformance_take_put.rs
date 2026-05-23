@@ -226,3 +226,20 @@ print(np.all(sorted_a[:, :-1] <= sorted_a[:, 1:]))
     );
     Ok(())
 }
+
+#[test]
+fn take_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+indices = [0, 2, 3]
+fnp_result = fnp.take(a, indices)
+np_result = np.take(a, indices)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "take complex should match numpy");
+    Ok(())
+}
