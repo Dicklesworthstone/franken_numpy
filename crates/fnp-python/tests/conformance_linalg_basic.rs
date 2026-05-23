@@ -963,3 +963,199 @@ print(all_pass)
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NaN propagation tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn norm_nan_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1.0, np.nan, 3.0])
+fnp_result = fnp.linalg.norm(x)
+np_result = np.linalg.norm(x)
+print(np.isnan(fnp_result) and np.isnan(np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "norm should propagate NaN");
+    Ok(())
+}
+
+#[test]
+fn det_nan_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1.0, np.nan], [3.0, 4.0]])
+fnp_result = fnp.linalg.det(a)
+np_result = np.linalg.det(a)
+print(np.isnan(fnp_result) and np.isnan(np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "det should propagate NaN");
+    Ok(())
+}
+
+#[test]
+fn inv_nan_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1.0, np.nan], [3.0, 4.0]])
+fnp_result = fnp.linalg.inv(a)
+np_result = np.linalg.inv(a)
+print(np.all(np.isnan(fnp_result) == np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "inv should propagate NaN similarly");
+    Ok(())
+}
+
+#[test]
+fn solve_nan_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1.0, 2.0], [3.0, 4.0]])
+b = np.array([1.0, np.nan])
+fnp_result = fnp.linalg.solve(a, b)
+np_result = np.linalg.solve(a, b)
+print(np.all(np.isnan(fnp_result) == np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "solve should propagate NaN similarly");
+    Ok(())
+}
+
+#[test]
+fn svd_nan_raises_error() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# NumPy SVD raises LinAlgError for NaN input ("SVD did not converge")
+a = np.array([[1.0, np.nan], [3.0, 4.0]])
+fnp_raised = False
+np_raised = False
+try:
+    fnp.linalg.svd(a)
+except Exception:
+    fnp_raised = True
+try:
+    np.linalg.svd(a)
+except Exception:
+    np_raised = True
+print(fnp_raised == np_raised)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "svd should raise error for NaN input similarly to numpy");
+    Ok(())
+}
+
+#[test]
+fn eig_nan_raises_error() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# NumPy eig raises LinAlgError for NaN input ("Array must not contain infs or NaNs")
+a = np.array([[1.0, np.nan], [3.0, 4.0]])
+fnp_raised = False
+np_raised = False
+try:
+    fnp.linalg.eig(a)
+except Exception:
+    fnp_raised = True
+try:
+    np.linalg.eig(a)
+except Exception:
+    np_raised = True
+print(fnp_raised == np_raised)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "eig should raise error for NaN input similarly to numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inf handling tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn norm_inf_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1.0, np.inf, 3.0])
+fnp_result = fnp.linalg.norm(x)
+np_result = np.linalg.norm(x)
+print(np.isinf(fnp_result) and np.isinf(np_result) and fnp_result > 0 and np_result > 0)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "norm should return +inf for input with inf");
+    Ok(())
+}
+
+#[test]
+fn norm_neginf_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1.0, -np.inf, 3.0])
+fnp_result = fnp.linalg.norm(x)
+np_result = np.linalg.norm(x)
+print(np.isinf(fnp_result) and np.isinf(np_result) and fnp_result > 0 and np_result > 0)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "norm should return +inf for input with -inf");
+    Ok(())
+}
+
+#[test]
+fn det_inf_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[np.inf, 1.0], [1.0, 1.0]])
+fnp_result = fnp.linalg.det(a)
+np_result = np.linalg.det(a)
+print(np.isinf(fnp_result) == np.isinf(np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "det should propagate inf similarly to numpy");
+    Ok(())
+}
+
+#[test]
+fn eig_inf_raises_error() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# NumPy eig raises LinAlgError for Inf input
+a = np.array([[np.inf, 1.0], [1.0, 1.0]])
+fnp_raised = False
+np_raised = False
+try:
+    fnp.linalg.eig(a)
+except Exception:
+    fnp_raised = True
+try:
+    np.linalg.eig(a)
+except Exception:
+    np_raised = True
+print(fnp_raised == np_raised)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "eig should raise error for Inf input similarly to numpy");
+    Ok(())
+}
