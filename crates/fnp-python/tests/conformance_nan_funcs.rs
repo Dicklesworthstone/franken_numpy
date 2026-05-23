@@ -449,3 +449,132 @@ print(np.allclose(percentile, median))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// All-NaN array edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn nansum_all_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    a = np.array([np.nan, np.nan, np.nan])
+    result = fnp.nansum(a)
+    expected = np.nansum(a)
+    print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nansum all-nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nanmean_all_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    a = np.array([np.nan, np.nan, np.nan])
+    result = fnp.nanmean(a)
+    expected = np.nanmean(a)
+    print(np.isnan(result) and np.isnan(expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nanmean all-nan should return nan");
+    Ok(())
+}
+
+#[test]
+fn nanprod_all_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    a = np.array([np.nan, np.nan, np.nan])
+    result = fnp.nanprod(a)
+    expected = np.nanprod(a)
+    print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nanprod all-nan should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inf handling in nan-ignoring functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn nansum_with_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, np.nan, np.inf, 4])
+result = fnp.nansum(a)
+expected = np.nansum(a)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nansum with inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nanmean_with_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, np.nan, np.inf, 4])
+result = fnp.nanmean(a)
+expected = np.nanmean(a)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nanmean with inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nanmax_with_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, np.nan, np.inf, 4])
+result = fnp.nanmax(a)
+expected = np.nanmax(a)
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nanmax with inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nanmin_with_neg_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, np.nan, -np.inf, 4])
+result = fnp.nanmin(a)
+expected = np.nanmin(a)
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nanmin with -inf should match numpy");
+    Ok(())
+}
