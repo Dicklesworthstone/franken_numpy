@@ -331,3 +331,314 @@ np.multiply(a, b)
         "multiply with incompatible broadcast shapes should raise same error as numpy"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge case tests: NaN, Inf, signed zero
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn add_nan_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([1.0, np.nan, 3.0, np.nan])
+x2 = np.array([4.0, 5.0, np.nan, np.nan])
+fnp_result = fnp.add(x1, x2)
+np_result = np.add(x1, x2)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "add nan propagation should match numpy");
+    Ok(())
+}
+
+#[test]
+fn subtract_nan_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([1.0, np.nan, 3.0, np.nan])
+x2 = np.array([4.0, 5.0, np.nan, np.nan])
+fnp_result = fnp.subtract(x1, x2)
+np_result = np.subtract(x1, x2)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "subtract nan propagation should match numpy");
+    Ok(())
+}
+
+#[test]
+fn multiply_nan_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([1.0, np.nan, 3.0, np.nan])
+x2 = np.array([4.0, 5.0, np.nan, np.nan])
+fnp_result = fnp.multiply(x1, x2)
+np_result = np.multiply(x1, x2)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "multiply nan propagation should match numpy");
+    Ok(())
+}
+
+#[test]
+fn divide_nan_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+x1 = np.array([1.0, np.nan, 3.0, np.nan])
+x2 = np.array([4.0, 5.0, np.nan, np.nan])
+fnp_result = fnp.divide(x1, x2)
+np_result = np.divide(x1, x2)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "divide nan propagation should match numpy");
+    Ok(())
+}
+
+#[test]
+fn add_inf_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([1.0, np.inf, -np.inf, np.inf])
+x2 = np.array([np.inf, np.inf, np.inf, -np.inf])
+fnp_result = fnp.add(x1, x2)
+np_result = np.add(x1, x2)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "add inf handling should match numpy");
+    Ok(())
+}
+
+#[test]
+fn subtract_inf_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([np.inf, np.inf, -np.inf, 1.0])
+x2 = np.array([1.0, np.inf, -np.inf, np.inf])
+fnp_result = fnp.subtract(x1, x2)
+np_result = np.subtract(x1, x2)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "subtract inf handling should match numpy");
+    Ok(())
+}
+
+#[test]
+fn multiply_inf_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+x1 = np.array([np.inf, np.inf, -np.inf, 0.0])
+x2 = np.array([2.0, -2.0, -np.inf, np.inf])
+fnp_result = fnp.multiply(x1, x2)
+np_result = np.multiply(x1, x2)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "multiply inf handling should match numpy");
+    Ok(())
+}
+
+#[test]
+fn divide_inf_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+x1 = np.array([1.0, np.inf, -np.inf, np.inf])
+x2 = np.array([0.0, 2.0, -np.inf, np.inf])
+fnp_result = fnp.divide(x1, x2)
+np_result = np.divide(x1, x2)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "divide inf handling should match numpy");
+    Ok(())
+}
+
+#[test]
+fn divide_by_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+x1 = np.array([1.0, -1.0, 0.0])
+x2 = np.array([0.0, 0.0, 0.0])
+fnp_result = fnp.divide(x1, x2)
+np_result = np.divide(x1, x2)
+print(np.allclose(fnp_result, np_result, equal_nan=True) or
+      all((np.isinf(f) == np.isinf(n) and np.isnan(f) == np.isnan(n))
+          for f, n in zip(fnp_result.flat, np_result.flat)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "divide by zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn add_signed_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# IEEE 754: 0.0 + (-0.0) = 0.0, (-0.0) + 0.0 = 0.0, (-0.0) + (-0.0) = -0.0
+tests = [
+    (0.0, 0.0),
+    (0.0, -0.0),
+    (-0.0, 0.0),
+    (-0.0, -0.0),
+]
+all_pass = True
+for x1, x2 in tests:
+    fnp_result = fnp.add(np.float64(x1), np.float64(x2))
+    np_result = np.add(np.float64(x1), np.float64(x2))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: add({x1}, {x2})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "add signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn subtract_signed_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# IEEE 754: 0.0 - 0.0 = 0.0, 0.0 - (-0.0) = 0.0, (-0.0) - 0.0 = -0.0, (-0.0) - (-0.0) = 0.0
+tests = [
+    (0.0, 0.0),
+    (0.0, -0.0),
+    (-0.0, 0.0),
+    (-0.0, -0.0),
+]
+all_pass = True
+for x1, x2 in tests:
+    fnp_result = fnp.subtract(np.float64(x1), np.float64(x2))
+    np_result = np.subtract(np.float64(x1), np.float64(x2))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: subtract({x1}, {x2})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "subtract signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn multiply_signed_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# IEEE 754: sign(product) = sign(x1) XOR sign(x2)
+tests = [
+    (0.0, 0.0),    # +0 * +0 = +0
+    (0.0, -0.0),   # +0 * -0 = -0
+    (-0.0, 0.0),   # -0 * +0 = -0
+    (-0.0, -0.0),  # -0 * -0 = +0
+    (1.0, -0.0),   # +1 * -0 = -0
+    (-1.0, 0.0),   # -1 * +0 = -0
+]
+all_pass = True
+for x1, x2 in tests:
+    fnp_result = fnp.multiply(np.float64(x1), np.float64(x2))
+    np_result = np.multiply(np.float64(x1), np.float64(x2))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: multiply({x1}, {x2})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "multiply signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn divide_signed_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+# IEEE 754: 0 / x preserves sign rules
+tests = [
+    (0.0, 1.0),    # +0 / +1 = +0
+    (0.0, -1.0),   # +0 / -1 = -0
+    (-0.0, 1.0),   # -0 / +1 = -0
+    (-0.0, -1.0),  # -0 / -1 = +0
+]
+all_pass = True
+for x1, x2 in tests:
+    fnp_result = fnp.divide(np.float64(x1), np.float64(x2))
+    np_result = np.divide(np.float64(x1), np.float64(x2))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: divide({x1}, {x2})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divide signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
