@@ -119,3 +119,59 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn floor_divide_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([np.inf, -np.inf, 1.0, np.nan])
+x2 = np.array([2.0, 2.0, np.inf, 1.0])
+fnp_result = fnp.floor_divide(x1, x2)
+np_result = np.floor_divide(x1, x2)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "floor_divide special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn floor_divide_by_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+x1 = np.array([1.0, -1.0, 0.0])
+x2 = np.array([0.0, 0.0, 0.0])
+fnp_result = fnp.floor_divide(x1, x2)
+np_result = np.floor_divide(x1, x2)
+# Check inf/nan results match
+print(np.allclose(fnp_result, np_result, equal_nan=True) or
+      all((np.isinf(f) == np.isinf(n) and np.isnan(f) == np.isnan(n))
+          for f, n in zip(fnp_result.flat, np_result.flat)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "floor_divide by zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn floor_divide_broadcasting() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([[10.0, 20.0], [30.0, 40.0]])
+x2 = np.array([3.0, 4.0])
+fnp_result = fnp.floor_divide(x1, x2)
+np_result = np.floor_divide(x1, x2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "floor_divide broadcasting should match numpy");
+    Ok(())
+}
