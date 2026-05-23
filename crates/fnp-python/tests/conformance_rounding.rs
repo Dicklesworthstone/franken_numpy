@@ -180,3 +180,99 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn floor_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.floor(x)
+np_result = np.floor(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "floor special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ceil_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.ceil(x)
+np_result = np.ceil(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ceil special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn trunc_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.trunc(x)
+np_result = np.trunc(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "trunc special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn rint_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.rint(x)
+np_result = np.rint(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rint special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn rint_bankers_rounding() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.5, 1.5, 2.5, 3.5, 4.5, -0.5, -1.5, -2.5])
+fnp_result = fnp.rint(x)
+np_result = np.rint(x)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rint bankers rounding should match numpy");
+    Ok(())
+}
+
+#[test]
+fn floor_large_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1e15 + 0.5, -1e15 - 0.5, 1e16 + 0.1, -1e16 - 0.1])
+fnp_result = fnp.floor(x)
+np_result = np.floor(x)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "floor large values should match numpy");
+    Ok(())
+}
