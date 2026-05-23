@@ -447,3 +447,74 @@ print(np.allclose(fnp_result, np_result) and np.allclose(out, np_out))
     assert_eq!(result.trim(), "True", "mean with out parameter should match numpy");
     Ok(())
 }
+
+#[test]
+fn mean_signed_zero_parity() -> Result<(), String> {
+    // Test signed-zero behavior for mean reduction
+    // Mean of signed zeros: IEEE 754 sum rules apply, then divide
+    let script = fnp_mean_script(
+        r#"
+# Signed-zero mean semantics
+tests = [
+    ([0.0, 0.0], False),      # mean([0.0, 0.0]) = 0.0 (positive)
+    ([-0.0, -0.0], True),     # mean([-0.0, -0.0]) = -0.0 (negative)
+    ([0.0, -0.0], False),     # mean([0.0, -0.0]) = 0.0 (IEEE 754 sum rule)
+]
+all_pass = True
+for values, expected_signbit in tests:
+    arr = np.array(values)
+    fnp_result = fnp.mean(arr)
+    np_result = np.mean(arr)
+    if np.signbit(fnp_result) != np.signbit(np_result):
+        print(f"FAIL: mean({values}) fnp signbit={np.signbit(fnp_result)} np signbit={np.signbit(np_result)}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "mean signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn mean_inf_handling_matches_numpy() -> Result<(), String> {
+    // Test inf behavior for mean
+    let script = fnp_mean_script(
+        r#"
+inf_cases = [
+    "[1.0, np.inf, 3.0]",
+    "[np.inf, np.inf]",
+    "[-np.inf, np.inf]",  # Should produce NaN
+    "[-np.inf, -np.inf]",
+]
+all_pass = True
+for arr_str in inf_cases:
+    arr = eval("np.array(" + arr_str + ")")
+    fnp_result = fnp.mean(arr)
+    np_result = np.mean(arr)
+    if np.isnan(fnp_result) and np.isnan(np_result):
+        pass  # Both NaN is OK
+    elif np.isinf(fnp_result) and np.isinf(np_result):
+        if np.sign(fnp_result) != np.sign(np_result):
+            print(f"FAIL: mean({arr_str}) inf sign mismatch")
+            all_pass = False
+    elif not np.isclose(fnp_result, np_result):
+        print(f"FAIL: mean({arr_str}) mismatch")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "mean inf handling should match numpy: {result}"
+    );
+    Ok(())
+}
