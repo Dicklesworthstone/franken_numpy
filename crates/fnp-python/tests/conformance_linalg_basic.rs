@@ -895,3 +895,71 @@ print(fnp_result[0] == np_result[0] == "LinAlgError")
     );
     Ok(())
 }
+
+#[test]
+fn norm_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# norm of signed-zero vector: norm([±0, ±0]) = +0 (always positive magnitude)
+tests = [
+    np.array([0.0, 0.0]),
+    np.array([-0.0, -0.0]),
+    np.array([0.0, -0.0]),
+]
+all_pass = True
+for a in tests:
+    fnp_result = fnp.linalg.norm(a)
+    np_result = np.linalg.norm(a)
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: norm({a.tolist()}) signbit fnp={fnp_sign} np={np_sign}")
+        all_pass = False
+    if fnp_result != np_result:
+        print(f"FAIL: norm({a.tolist()}) value mismatch")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn det_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# det of matrix with signed zeros
+# det([[0, 0], [0, 1]]) = 0, det([[-0, 0], [0, 1]]) = -0
+tests = [
+    np.array([[0.0, 0.0], [0.0, 1.0]]),
+    np.array([[-0.0, 0.0], [0.0, 1.0]]),
+    np.array([[0.0, -0.0], [0.0, 1.0]]),
+]
+all_pass = True
+for a in tests:
+    fnp_result = fnp.linalg.det(a)
+    np_result = np.linalg.det(a)
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: det of matrix with zeros signbit fnp={fnp_sign} np={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "det signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
