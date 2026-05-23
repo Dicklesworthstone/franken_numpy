@@ -165,3 +165,36 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn sqrt_negative_returns_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([-1.0, -4.0, -9.0])
+fnp_result = fnp.sqrt(a)
+np_result = np.sqrt(a)
+# Both should return NaN for negative inputs
+print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sqrt of negative should return NaN");
+    Ok(())
+}
+
+#[test]
+fn sqrt_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([0.0, np.inf, np.nan])
+fnp_result = fnp.sqrt(a)
+np_result = np.sqrt(a)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sqrt special values should match numpy");
+    Ok(())
+}
