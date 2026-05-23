@@ -43,6 +43,36 @@ fn np_array_2d_f<'py>(
         .call1((values.to_vec(),))
 }
 
+fn np_array_1d_complex<'py>(
+    py: Python<'py>,
+    values: &[(f64, f64)],
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let np = py.import("numpy")?;
+    let complex_list: Vec<_> = values
+        .iter()
+        .map(|(r, i)| pyo3::types::PyComplex::from_doubles(py, *r, *i))
+        .collect();
+    let arr = np.getattr("array")?.call1((complex_list,))?;
+    arr.call_method1("astype", (np.getattr("complex128")?,))
+}
+
+fn np_array_2d_complex<'py>(
+    py: Python<'py>,
+    values: &[Vec<(f64, f64)>],
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let np = py.import("numpy")?;
+    let nested: Vec<Vec<_>> = values
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|(r, i)| pyo3::types::PyComplex::from_doubles(py, *r, *i))
+                .collect()
+        })
+        .collect();
+    let arr = np.getattr("array")?.call1((nested,))?;
+    arr.call_method1("astype", (np.getattr("complex128")?,))
+}
+
 #[test]
 fn cumsum_cumprod_native_fnp_python_paths_match_numpy() {
     static TOTALS: Totals = Totals::new();
@@ -114,6 +144,67 @@ fn cumsum_cumprod_native_fnp_python_paths_match_numpy() {
                     CompareMode::Close,
                     t,
                     move |py| PyTuple::new(py, [np_array_2d_f(py, &values)?]),
+                    move |py| axis_kwargs(py, Some(axis)),
+                );
+            }
+        }
+
+        // ─── complex dtype tests (SHOULD) ──────────────────────────────────
+        let complex_flat_cases: &[&[(f64, f64)]] = &[
+            &[(1.0, 1.0), (2.0, -1.0), (3.0, 2.0)],
+            &[(0.5, 0.5), (1.5, -1.5), (2.5, 2.5)],
+            &[(-1.0, 1.0), (0.0, 0.0), (1.0, -1.0)],
+        ];
+
+        for (idx, values) in complex_flat_cases.iter().enumerate() {
+            for function in ["cumsum", "cumprod"] {
+                let values = (*values).to_vec();
+                run_case(
+                    py,
+                    &module,
+                    &numpy,
+                    &format!("{function}-complex-flat-{idx}"),
+                    function,
+                    RequirementLevel::Should,
+                    CompareMode::Close,
+                    t,
+                    move |py| PyTuple::new(py, [np_array_1d_complex(py, &values)?]),
+                    no_kwargs,
+                );
+            }
+        }
+
+        let complex_axis_cases: &[(Vec<Vec<(f64, f64)>>, i64)] = &[
+            (
+                vec![
+                    vec![(1.0, 1.0), (2.0, -1.0)],
+                    vec![(3.0, 2.0), (4.0, -2.0)],
+                ],
+                0,
+            ),
+            (
+                vec![
+                    vec![(1.0, 1.0), (2.0, -1.0)],
+                    vec![(3.0, 2.0), (4.0, -2.0)],
+                ],
+                1,
+            ),
+        ];
+
+        for (idx, (values, axis)) in complex_axis_cases.iter().enumerate() {
+            for function in ["cumsum", "cumprod"] {
+                let values = values.clone();
+                let axis = *axis;
+                run_case(
+                    py,
+                    &module,
+                    &numpy,
+                    &format!("{function}-complex-axis-{idx}"),
+                    function,
+                    RequirementLevel::Should,
+                    CompareMode::Close,
+                    t,
+                    move |py| PyTuple::new(py, [np_array_2d_complex(py, &values)?]),
                     move |py| axis_kwargs(py, Some(axis)),
                 );
             }
