@@ -267,3 +267,63 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
     assert_eq!(result.trim(), "True", "square special values should match numpy");
     Ok(())
 }
+
+#[test]
+fn square_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# square signed-zero: (-0.0)^2 = +0.0 per IEEE 754 (negative * negative = positive)
+tests = [0.0, -0.0]
+all_pass = True
+for x in tests:
+    fnp_result = fnp.square(np.float64(x))
+    np_result = np.square(np.float64(x))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: square({x})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "square signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn cbrt_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# cbrt signed-zero: cbrt(-0.0) = -0.0 (odd function preserves sign)
+tests = [0.0, -0.0]
+all_pass = True
+for x in tests:
+    fnp_result = fnp.cbrt(np.float64(x))
+    np_result = np.cbrt(np.float64(x))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: cbrt({x})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cbrt signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
