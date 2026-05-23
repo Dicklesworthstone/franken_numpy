@@ -719,9 +719,29 @@ impl BinaryOp {
                 if rhs == 0.0 { f64::NAN } else { lhs % rhs }
             }
             Self::Copysign => lhs.copysign(rhs),
-            // fmax/fmin ignore NaN (return the non-NaN value)
-            Self::Fmax => lhs.max(rhs),
-            Self::Fmin => lhs.min(rhs),
+            // fmax/fmin: ignore NaN, return rhs when equal (NumPy SIMD behavior for signed zeros)
+            Self::Fmax => {
+                if lhs.is_nan() {
+                    rhs
+                } else if rhs.is_nan() {
+                    lhs
+                } else if lhs > rhs {
+                    lhs
+                } else {
+                    rhs
+                }
+            }
+            Self::Fmin => {
+                if lhs.is_nan() {
+                    rhs
+                } else if rhs.is_nan() {
+                    lhs
+                } else if lhs < rhs {
+                    lhs
+                } else {
+                    rhs
+                }
+            }
             Self::Heaviside => {
                 if lhs.is_nan() {
                     f64::NAN
@@ -32513,8 +32533,11 @@ pub fn fmax(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> 
                 b
             } else if b.is_nan() {
                 a
+            } else if a > b {
+                a
             } else {
-                a.max(b)
+                // Return second argument when equal (NumPy SIMD behavior for signed zeros)
+                b
             }
         })
         .collect();
@@ -32543,8 +32566,11 @@ pub fn fmin(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> 
                 b
             } else if b.is_nan() {
                 a
+            } else if a < b {
+                a
             } else {
-                a.min(b)
+                // Return second argument when equal (NumPy SIMD behavior for signed zeros)
+                b
             }
         })
         .collect();
@@ -32571,8 +32597,11 @@ pub fn maximum(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncErro
         .map(|(&a, &b)| {
             if a.is_nan() || b.is_nan() {
                 f64::NAN
+            } else if a > b {
+                a
             } else {
-                a.max(b)
+                // Return second argument when equal (NumPy SIMD behavior for signed zeros)
+                b
             }
         })
         .collect();
@@ -32599,8 +32628,11 @@ pub fn minimum(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncErro
         .map(|(&a, &b)| {
             if a.is_nan() || b.is_nan() {
                 f64::NAN
+            } else if a < b {
+                a
             } else {
-                a.min(b)
+                // Return second argument when equal (NumPy SIMD behavior for signed zeros)
+                b
             }
         })
         .collect();

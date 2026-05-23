@@ -186,7 +186,6 @@ print(np.array_equal(result, expected))
 }
 
 #[test]
-#[ignore = "PARITY GAP: fnp returns x1 when equal, NumPy returns x2. See DISC-010."]
 fn fmax_signed_zero_tie_selection_parity() -> Result<(), String> {
     // Critical for parallel operation safety: when comparing +0.0 and -0.0,
     // the selected fmax and its sign bit must match NumPy exactly.

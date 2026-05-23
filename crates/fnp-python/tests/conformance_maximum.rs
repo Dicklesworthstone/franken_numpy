@@ -190,7 +190,6 @@ print(np.array_equal(np.isnan(fnp_result), np.isnan(np_result)))
 }
 
 #[test]
-#[ignore = "PARITY GAP: fnp returns x1 when equal, NumPy returns x2. See DISC-010."]
 fn maximum_signed_zero_tie_selection_parity() -> Result<(), String> {
     // Critical for parallel operation safety: when comparing +0.0 and -0.0,
     // the selected maximum and its sign bit must match NumPy exactly.
