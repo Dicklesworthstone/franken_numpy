@@ -356,3 +356,207 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge case tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn histogram_empty() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([], dtype=np.float64)
+hist, edges = fnp.histogram(a, bins=5)
+np_hist, np_edges = np.histogram(a, bins=5)
+print(np.array_equal(hist, np_hist) and np.allclose(edges, np_edges))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "histogram empty should match numpy");
+    Ok(())
+}
+
+#[test]
+fn histogram_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([5.0])
+hist, edges = fnp.histogram(a, bins=3)
+np_hist, np_edges = np.histogram(a, bins=3)
+print(np.array_equal(hist, np_hist) and np.allclose(edges, np_edges))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "histogram single element should match numpy");
+    Ok(())
+}
+
+#[test]
+fn histogram_all_same_value() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([3.0, 3.0, 3.0, 3.0, 3.0])
+hist, edges = fnp.histogram(a)
+np_hist, np_edges = np.histogram(a)
+print(np.array_equal(hist, np_hist) and np.allclose(edges, np_edges))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "histogram all same value should match numpy");
+    Ok(())
+}
+
+#[test]
+fn histogram_edge_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+bins = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+hist, edges = fnp.histogram(a, bins=bins)
+np_hist, np_edges = np.histogram(a, bins=bins)
+print(np.array_equal(hist, np_hist) and np.allclose(edges, np_edges))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "histogram edge values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn bincount_zeros_only() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([0, 0, 0, 0, 0])
+result = fnp.bincount(a)
+expected = np.bincount(a)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bincount zeros only should match numpy");
+    Ok(())
+}
+
+#[test]
+fn bincount_single_large_value() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([100])
+result = fnp.bincount(a)
+expected = np.bincount(a)
+print(np.array_equal(result, expected) and len(result) == 101)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bincount single large value should match numpy");
+    Ok(())
+}
+
+#[test]
+fn bincount_sparse_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([0, 50, 100])
+result = fnp.bincount(a)
+expected = np.bincount(a)
+print(np.array_equal(result, expected) and result[0] == 1 and result[50] == 1 and result[100] == 1)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bincount sparse values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn bincount_with_zero_weights() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([0, 1, 2, 3])
+w = np.array([1.0, 0.0, 0.0, 1.0])
+result = fnp.bincount(a, weights=w)
+expected = np.bincount(a, weights=w)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bincount with zero weights should match numpy");
+    Ok(())
+}
+
+#[test]
+fn digitize_empty() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([], dtype=np.float64)
+bins = np.array([1, 2, 3, 4])
+result = fnp.digitize(x, bins)
+expected = np.digitize(x, bins)
+print(np.array_equal(result, expected) and result.shape == expected.shape)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "digitize empty should match numpy");
+    Ok(())
+}
+
+#[test]
+fn digitize_single_bin() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, 0.5, 1.0, 1.5, 2.0])
+bins = np.array([1.0])
+result = fnp.digitize(x, bins)
+expected = np.digitize(x, bins)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "digitize single bin should match numpy");
+    Ok(())
+}
+
+#[test]
+fn digitize_exact_matches() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1.0, 2.0, 3.0, 4.0])
+bins = np.array([1.0, 2.0, 3.0, 4.0])
+result_left = fnp.digitize(x, bins, right=False)
+result_right = fnp.digitize(x, bins, right=True)
+expected_left = np.digitize(x, bins, right=False)
+expected_right = np.digitize(x, bins, right=True)
+print(np.array_equal(result_left, expected_left) and np.array_equal(result_right, expected_right))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "digitize exact matches should match numpy");
+    Ok(())
+}
+
+#[test]
+fn digitize_inf_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-np.inf, 0.0, np.inf])
+bins = np.array([1.0, 2.0, 3.0])
+result = fnp.digitize(x, bins)
+expected = np.digitize(x, bins)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "digitize inf values should match numpy");
+    Ok(())
+}
