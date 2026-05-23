@@ -323,3 +323,70 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "pad complex should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .expect("python3 should be available");
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("AxisError") || stderr.contains("axis") {
+            "AxisError".to_string()
+        } else if stderr.contains("ValueError") {
+            "ValueError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn moveaxis_invalid_source_raises_axiserror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(24).reshape(2, 3, 4)
+fnp.moveaxis(a, 5, 0)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(24).reshape(2, 3, 4)
+np.moveaxis(a, 5, 0)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "moveaxis with invalid source axis should raise same error as numpy"
+    );
+}
+
+#[test]
+fn pad_negative_width_raises_valueerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(5)
+fnp.pad(a, -1)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(5)
+np.pad(a, -1)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "pad with negative width should raise same error as numpy"
+    );
+}
