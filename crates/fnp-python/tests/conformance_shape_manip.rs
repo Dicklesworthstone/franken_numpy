@@ -413,3 +413,35 @@ print(match)
     );
     Ok(())
 }
+
+#[test]
+fn swapaxes_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2-1j], [3+2j, 4-2j]], dtype=np.complex128)
+fnp_result = fnp.swapaxes(a, 0, 1)
+np_result = np.swapaxes(a, 0, 1)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "swapaxes complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn transpose_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2-1j], [3+2j, 4-2j]], dtype=np.complex128)
+fnp_result = fnp.transpose(a)
+np_result = np.transpose(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "transpose complex should match numpy");
+    Ok(())
+}
