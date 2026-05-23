@@ -214,3 +214,115 @@ print(tests_pass)
     assert_eq!(result.trim(), "True", "sign integer dtypes should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge case tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn sign_empty_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([], dtype=np.float64)
+fnp_result = fnp.sign(x)
+np_result = np.sign(x)
+print(np.array_equal(fnp_result, np_result) and fnp_result.shape == np_result.shape)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sign empty array should match numpy");
+    Ok(())
+}
+
+#[test]
+fn signbit_empty_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([], dtype=np.float64)
+fnp_result = fnp.signbit(x)
+np_result = np.signbit(x)
+print(np.array_equal(fnp_result, np_result) and fnp_result.shape == np_result.shape)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "signbit empty array should match numpy");
+    Ok(())
+}
+
+#[test]
+fn sign_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+tests_pass = True
+for val in [-5.0, -0.0, 0.0, 5.0]:
+    x = np.array([val])
+    fnp_result = fnp.sign(x)
+    np_result = np.sign(x)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sign single element should match numpy");
+    Ok(())
+}
+
+#[test]
+fn sign_unsigned_integers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+tests_pass = True
+for dtype in [np.uint8, np.uint16, np.uint32, np.uint64]:
+    x = np.array([0, 1, 127, 255], dtype=dtype)
+    fnp_result = fnp.sign(x)
+    np_result = np.sign(x)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sign unsigned integers should match numpy");
+    Ok(())
+}
+
+#[test]
+fn sign_subnormal_numbers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import sys
+tiny = sys.float_info.min
+subnormal = tiny / 2.0
+x = np.array([subnormal, -subnormal, tiny, -tiny, 0.0])
+fnp_result = fnp.sign(x)
+np_result = np.sign(x)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sign subnormal numbers should match numpy");
+    Ok(())
+}
+
+#[test]
+fn signbit_subnormal_numbers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import sys
+tiny = sys.float_info.min
+subnormal = tiny / 2.0
+x = np.array([subnormal, -subnormal, tiny, -tiny])
+fnp_result = fnp.signbit(x)
+np_result = np.signbit(x)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "signbit subnormal numbers should match numpy");
+    Ok(())
+}
