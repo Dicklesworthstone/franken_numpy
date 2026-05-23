@@ -321,3 +321,145 @@ print(np.allclose(avg, mean))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge case tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn cov_with_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1.0, np.nan, 3.0, 4.0, 5.0])
+fnp_result = fnp.cov(x)
+np_result = np.cov(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cov with nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn corrcoef_with_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1.0, np.nan, 3.0, 4.0, 5.0])
+y = np.array([5.0, 6.0, np.nan, 8.0, 9.0])
+fnp_result = fnp.corrcoef(x, y)
+np_result = np.corrcoef(x, y)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "corrcoef with nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn cov_constant_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([5.0, 5.0, 5.0, 5.0, 5.0])
+fnp_result = fnp.cov(x)
+np_result = np.cov(x)
+# Constant array has zero variance, cov returns 0
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cov constant array should match numpy");
+    Ok(())
+}
+
+#[test]
+fn corrcoef_constant_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+x = np.array([5.0, 5.0, 5.0, 5.0, 5.0])
+y = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+fnp_result = fnp.corrcoef(x, y)
+np_result = np.corrcoef(x, y)
+# Constant array has zero std, corrcoef produces nan
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "corrcoef constant array should match numpy");
+    Ok(())
+}
+
+#[test]
+fn average_with_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, np.nan, 3.0, 4.0, 5.0])
+fnp_result = fnp.average(a)
+np_result = np.average(a)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "average with nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn average_with_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, np.inf, 3.0, 4.0, 5.0])
+fnp_result = fnp.average(a)
+np_result = np.average(a)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "average with inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn average_zero_weights() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0])
+w = np.array([1.0, 0.0, 1.0])
+fnp_result = fnp.average(a, weights=w)
+np_result = np.average(a, weights=w)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "average with zero weights should match numpy");
+    Ok(())
+}
+
+#[test]
+fn cov_single_observation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+x = np.array([5.0])
+fnp_result = fnp.cov(x)
+np_result = np.cov(x)
+# Single observation: ddof=1 leads to division by zero -> nan
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cov single observation should match numpy");
+    Ok(())
+}
