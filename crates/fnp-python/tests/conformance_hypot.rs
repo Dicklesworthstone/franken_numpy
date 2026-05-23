@@ -115,3 +115,71 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn hypot_with_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([np.nan, 1.0, np.nan])
+x2 = np.array([1.0, np.nan, np.nan])
+result = fnp.hypot(x1, x2)
+expected = np.hypot(x1, x2)
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "hypot with nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn hypot_with_zeros() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([0.0, 0.0, 3.0, -0.0])
+x2 = np.array([0.0, 4.0, 0.0, -0.0])
+result = fnp.hypot(x1, x2)
+expected = np.hypot(x1, x2)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "hypot with zeros should match numpy");
+    Ok(())
+}
+
+#[test]
+fn hypot_negative_inputs() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([-3.0, -5.0, 3.0])
+x2 = np.array([4.0, -12.0, -4.0])
+result = fnp.hypot(x1, x2)
+expected = np.hypot(x1, x2)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "hypot negative inputs should match numpy");
+    Ok(())
+}
+
+#[test]
+fn hypot_large_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([1e154, 1e200, 1e-154])
+x2 = np.array([1e154, 1e200, 1e-154])
+result = fnp.hypot(x1, x2)
+expected = np.hypot(x1, x2)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "hypot large values should match numpy");
+    Ok(())
+}
