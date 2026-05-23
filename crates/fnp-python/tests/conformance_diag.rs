@@ -168,3 +168,67 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "diagonal complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn diag_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[np.inf, np.nan], [-np.inf, 0.0]])
+fnp_result = fnp.diag(a)
+np_result = np.diag(a)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diag special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn diag_empty_vector() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+v = np.array([], dtype=np.float64)
+fnp_result = fnp.diag(v)
+np_result = np.diag(v)
+print(fnp_result.shape == np_result.shape == (0, 0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diag empty vector should match numpy");
+    Ok(())
+}
+
+#[test]
+fn diag_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+v = np.array([5.0])
+fnp_result = fnp.diag(v)
+np_result = np.diag(v)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diag single element should match numpy");
+    Ok(())
+}
+
+#[test]
+fn diagonal_3d() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])
+fnp_result = fnp.diagonal(a)
+np_result = np.diagonal(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diagonal 3d should match numpy");
+    Ok(())
+}

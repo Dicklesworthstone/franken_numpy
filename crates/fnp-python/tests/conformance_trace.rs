@@ -151,3 +151,69 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "trace complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn trace_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[np.inf, 1.0], [2.0, np.nan]])
+fnp_result = fnp.trace(a)
+np_result = np.trace(a)
+# inf + nan = nan
+print(np.isnan(fnp_result) and np.isnan(np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "trace special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn trace_1x1() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[5.0]])
+fnp_result = fnp.trace(a)
+np_result = np.trace(a)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "trace 1x1 should match numpy");
+    Ok(())
+}
+
+#[test]
+fn trace_large_offset() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Offset larger than matrix size - should return 0
+a = np.array([[1, 2], [3, 4]])
+fnp_result = fnp.trace(a, offset=5)
+np_result = np.trace(a, offset=5)
+print(fnp_result == np_result == 0)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "trace large offset should match numpy");
+    Ok(())
+}
+
+#[test]
+fn trace_3d_batched() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[[1, 2], [3, 4]], [[5, 6], [7, 8]]])
+fnp_result = fnp.trace(a)
+np_result = np.trace(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "trace 3d batched should match numpy");
+    Ok(())
+}
