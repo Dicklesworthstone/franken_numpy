@@ -9947,8 +9947,26 @@ fn select(
 #[pyfunction]
 #[pyo3(signature = (a, choices, mode="raise"))]
 fn choose(py: Python<'_>, a: Py<PyAny>, choices: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
+    // Check if any choices array is complex dtype and fallback to numpy
+    let numpy = py.import("numpy")?;
+    let choices_bound = choices.bind(py);
+    if let Ok(choices_list) = choices_bound.downcast::<pyo3::types::PyList>() {
+        for item in choices_list.iter() {
+            let arr = numpy.call_method1("asarray", (item,))?;
+            let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+            if dtype_kind == "c" {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("mode", mode)?;
+                return Ok(numpy
+                    .getattr("choose")?
+                    .call((a.bind(py), choices_bound), Some(&kwargs))?
+                    .unbind());
+            }
+        }
+    }
+
     let a = extract_integer_array(py, a.bind(py), "choose(a)")?;
-    let choices = extract_numeric_array_sequence(py, choices.bind(py), "choose(choices)")?;
+    let choices = extract_numeric_array_sequence(py, choices_bound, "choose(choices)")?;
     let result = a
         .choose_with_mode(&choices, mode)
         .map_err(map_ufunc_error)?;

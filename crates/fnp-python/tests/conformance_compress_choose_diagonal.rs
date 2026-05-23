@@ -416,3 +416,38 @@ print(np.array_equal(compress_result, extract_result))
     );
     Ok(())
 }
+
+#[test]
+fn compress_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+condition = [True, False, True, False]
+fnp_result = fnp.compress(condition, a)
+np_result = np.compress(condition, a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "compress complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn choose_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+choices = [np.array([1+1j, 2+2j], dtype=np.complex128),
+           np.array([3+3j, 4+4j], dtype=np.complex128)]
+a = [0, 1]
+fnp_result = fnp.choose(a, choices)
+np_result = np.choose(a, choices)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "choose complex should match numpy");
+    Ok(())
+}
