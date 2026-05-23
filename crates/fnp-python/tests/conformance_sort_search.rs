@@ -506,3 +506,35 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn sort_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([3+1j, 1-1j, 2+2j], dtype=np.complex128)
+fnp_result = fnp.sort(a)
+np_result = np.sort(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sort complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn argsort_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([3+1j, 1-1j, 2+2j], dtype=np.complex128)
+fnp_result = fnp.argsort(a)
+np_result = np.argsort(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argsort complex should match numpy");
+    Ok(())
+}
