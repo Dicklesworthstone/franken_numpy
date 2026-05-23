@@ -143,3 +143,36 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "clip complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn clip_nan_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, np.nan, 3.0, 5.0])
+fnp_result = fnp.clip(a, 2.0, 4.0)
+np_result = np.clip(a, 2.0, 4.0)
+# NaN should propagate through clip
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip nan handling should match numpy");
+    Ok(())
+}
+
+#[test]
+fn clip_inf_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([np.inf, -np.inf, 0.0])
+fnp_result = fnp.clip(a, -1.0, 1.0)
+np_result = np.clip(a, -1.0, 1.0)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip inf handling should match numpy");
+    Ok(())
+}
