@@ -137,3 +137,72 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "kron complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn kron_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[np.inf, 1.0], [np.nan, 2.0]])
+b = np.array([[1.0, 2.0]])
+fnp_result = fnp.kron(a, b)
+np_result = np.kron(a, b)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "kron special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn kron_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[3.0]])
+b = np.array([[5.0]])
+fnp_result = fnp.kron(a, b)
+np_result = np.kron(a, b)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "kron single element should match numpy");
+    Ok(())
+}
+
+#[test]
+fn kron_identity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.eye(2)
+b = np.eye(3)
+fnp_result = fnp.kron(a, b)
+np_result = np.kron(a, b)
+# Kronecker product of identity matrices gives larger identity-like structure
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "kron identity matrices should match numpy");
+    Ok(())
+}
+
+#[test]
+fn kron_3d_arrays() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(8).reshape(2, 2, 2)
+b = np.arange(4).reshape(2, 2)
+fnp_result = fnp.kron(a, b)
+np_result = np.kron(a, b)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "kron 3D arrays should match numpy");
+    Ok(())
+}

@@ -115,3 +115,72 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn inner_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([np.inf, -np.inf, np.nan, 1.0])
+b = np.array([1.0, 1.0, 1.0, np.nan])
+fnp_result = fnp.inner(a, b)
+np_result = np.inner(a, b)
+# inf + -inf + nan + nan = nan
+print(np.isnan(fnp_result) and np.isnan(np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "inner special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn inner_empty_arrays() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([], dtype=np.float64)
+b = np.array([], dtype=np.float64)
+fnp_result = fnp.inner(a, b)
+np_result = np.inner(a, b)
+print(fnp_result == np_result == 0.0)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "inner empty arrays should match numpy");
+    Ok(())
+}
+
+#[test]
+fn inner_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2+2j, 3+3j], dtype=np.complex128)
+b = np.array([4+1j, 5+2j, 6+3j], dtype=np.complex128)
+fnp_result = fnp.inner(a, b)
+np_result = np.inner(a, b)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "inner complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn inner_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([5.0])
+b = np.array([3.0])
+fnp_result = fnp.inner(a, b)
+np_result = np.inner(a, b)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "inner single element should match numpy");
+    Ok(())
+}
