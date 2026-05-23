@@ -451,3 +451,46 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "var complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn var_inf_handling_matches_numpy() -> Result<(), String> {
+    let test_cases = vec![
+        "[1.0, np.inf, 3.0]",
+        "[-np.inf, 2.0, 3.0]",
+        "[1.0, np.inf, -np.inf]",
+        "[np.inf, np.inf, np.inf]",
+    ];
+
+    for arr_str in &test_cases {
+        let script = format!("import numpy as np; print(np.var(np.array({arr_str})))");
+        let numpy_result = numpy_oracle(&script)?;
+
+        let rust_script = fnp_var_script(format!("print(fnp.var(np.array({arr_str})))"));
+        let rust_result = numpy_oracle(&rust_script)?;
+
+        assert_eq!(
+            numpy_result.trim(),
+            rust_result.trim(),
+            "var inf mismatch for {arr_str}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn var_out_parameter_matches_numpy() -> Result<(), String> {
+    let script = fnp_var_script(
+        r#"
+a = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+fnp_out = np.empty((3,))
+np_out = np.empty((3,))
+fnp.var(a, axis=0, out=fnp_out)
+np.var(a, axis=0, out=np_out)
+print(np.allclose(fnp_out, np_out))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "var out parameter should match numpy");
+    Ok(())
+}
