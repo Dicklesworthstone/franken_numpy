@@ -243,3 +243,26 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "take complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn put_along_axis_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+arr1 = np.array([[1+1j, 2-1j], [3+2j, 4-2j]], dtype=np.complex128)
+arr2 = np.array([[1+1j, 2-1j], [3+2j, 4-2j]], dtype=np.complex128)
+indices = np.array([[0], [1]])
+values = np.array([[9+9j], [8+8j]], dtype=np.complex128)
+fnp.put_along_axis(arr1, indices, values, axis=1)
+np.put_along_axis(arr2, indices, values, axis=1)
+print(np.array_equal(arr1, arr2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "put_along_axis complex should match numpy"
+    );
+    Ok(())
+}

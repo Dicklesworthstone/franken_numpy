@@ -22737,6 +22737,13 @@ fn put_along_axis(
     };
     let arr = arr.bind(py);
     let _ = arr.getattr("ndim")?;
+
+    // Check for complex dtype and fallback to numpy
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return invoke_fallback();
+    }
+
     let original_shape = arr.getattr("shape")?.extract::<Vec<usize>>()?;
     let mut array = extract_numeric_array(py, arr, "put_along_axis(arr)")?;
 
