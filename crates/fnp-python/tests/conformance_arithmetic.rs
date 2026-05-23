@@ -829,3 +829,169 @@ print(all(tests))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// dtype promotion tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn add_dtype_promotion_int_float() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 3], dtype=np.int32)
+b = np.array([1.5, 2.5, 3.5], dtype=np.float32)
+fnp_result = fnp.add(a, b)
+np_result = np.add(a, b)
+print(fnp_result.dtype == np_result.dtype, fnp_result.dtype, np_result.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "add dtype promotion int32+float32 should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn add_dtype_promotion_int_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 3], dtype=np.int8)
+b = np.array([1, 2, 3], dtype=np.int64)
+fnp_result = fnp.add(a, b)
+np_result = np.add(a, b)
+print(fnp_result.dtype == np_result.dtype, fnp_result.dtype, np_result.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "add dtype promotion int8+int64 should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn add_dtype_promotion_float_sizes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0], dtype=np.float32)
+b = np.array([1.0], dtype=np.float64)
+fnp_result = fnp.add(a, b)
+np_result = np.add(a, b)
+print(fnp_result.dtype == np_result.dtype, fnp_result.dtype, np_result.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "add dtype promotion float32+float64 should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn add_dtype_promotion_float_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0], dtype=np.float64)
+b = np.array([1+0j], dtype=np.complex128)
+fnp_result = fnp.add(a, b)
+np_result = np.add(a, b)
+print(fnp_result.dtype == np_result.dtype, fnp_result.dtype, np_result.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "add dtype promotion float64+complex128 should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+#[ignore = "DISC-012: fnp promotes uint8+int8 to float64, numpy promotes to int16"]
+fn add_dtype_promotion_unsigned_signed() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1], dtype=np.uint8)
+b = np.array([1], dtype=np.int8)
+fnp_result = fnp.add(a, b)
+np_result = np.add(a, b)
+print(fnp_result.dtype == np_result.dtype, fnp_result.dtype, np_result.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "add dtype promotion uint8+int8 should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn add_dtype_promotion_bool_int() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([True, False])
+b = np.array([1, 2])
+fnp_result = fnp.add(a, b)
+np_result = np.add(a, b)
+print(fnp_result.dtype == np_result.dtype, fnp_result.dtype, np_result.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "add dtype promotion bool+int should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn multiply_dtype_promotion_int_float() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 3], dtype=np.int32)
+b = np.array([1.5, 2.5, 3.5], dtype=np.float32)
+fnp_result = fnp.multiply(a, b)
+np_result = np.multiply(a, b)
+print(fnp_result.dtype == np_result.dtype, fnp_result.dtype, np_result.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "multiply dtype promotion int32*float32 should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn divide_dtype_promotion_int_int() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# integer division promotes to float64
+a = np.array([10, 20, 30], dtype=np.int32)
+b = np.array([3, 4, 5], dtype=np.int32)
+fnp_result = fnp.divide(a, b)
+np_result = np.divide(a, b)
+print(fnp_result.dtype == np_result.dtype, fnp_result.dtype, np_result.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "divide dtype promotion int32/int32 should match numpy: {result}"
+    );
+    Ok(())
+}

@@ -150,6 +150,20 @@
 
 ---
 
+## DISC-012: unsigned+signed integer dtype promotion
+
+- **Reference:** NumPy promotes uint8 + int8 to int16 (smallest signed type that can hold both ranges)
+- **Our impl:** Promotes uint8 + int8 to float64
+- **Impact:** dtype differs in mixed unsigned/signed integer arithmetic:
+  - `np.add(uint8, int8)`: fnp → float64, np → int16
+- **Resolution:** WILL-FIX
+- **Reason:** fnp-dtype's promotion rules are overly conservative, promoting to float64 instead of finding the minimal compatible integer type. NumPy uses the "result type" casting rule that finds the smallest integer type that can safely hold both operands.
+- **Tests affected:** `add_dtype_promotion_unsigned_signed` (#[ignore])
+- **Review date:** 2026-05-23
+- **Investigation:** Fix belongs in fnp-dtype crate's type promotion logic. The current implementation falls back to float64 for safety but should calculate the minimal integer type.
+
+---
+
 ## Adding New Divergences
 
 When documenting a new divergence:
