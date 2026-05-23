@@ -644,3 +644,63 @@ print(scalar_match and axis_match)
     );
     Ok(())
 }
+
+#[test]
+fn sum_negative_axis() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([[1, 2, 3], [4, 5, 6]])
+fnp_result_m1 = fnp.sum(a, axis=-1)
+np_result_m1 = np.sum(a, axis=-1)
+fnp_result_m2 = fnp.sum(a, axis=-2)
+np_result_m2 = np.sum(a, axis=-2)
+print(np.array_equal(fnp_result_m1, np_result_m1) and np.array_equal(fnp_result_m2, np_result_m2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sum with negative axis should match numpy");
+    Ok(())
+}
+
+#[test]
+fn sum_tuple_axis() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.arange(24).reshape(2, 3, 4)
+fnp_result_02 = fnp.sum(a, axis=(0, 2))
+np_result_02 = np.sum(a, axis=(0, 2))
+fnp_result_12 = fnp.sum(a, axis=(1, 2))
+np_result_12 = np.sum(a, axis=(1, 2))
+print(
+    fnp_result_02.shape == np_result_02.shape,
+    fnp_result_12.shape == np_result_12.shape,
+    np.array_equal(fnp_result_02, np_result_02),
+    np.array_equal(fnp_result_12, np_result_12)
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True True True True"),
+        "sum with tuple axis should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_axis_none_flatten() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([[1, 2, 3], [4, 5, 6]])
+fnp_result = fnp.sum(a, axis=None)
+np_result = np.sum(a, axis=None)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sum with axis=None should flatten and match numpy");
+    Ok(())
+}
