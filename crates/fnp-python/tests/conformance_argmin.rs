@@ -312,3 +312,19 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn argmin_complex() -> Result<(), String> {
+    let script = fnp_argmin_script(
+        r#"
+a = np.array([3+1j, 1-1j, 2+2j], dtype=np.complex128)
+fnp_result = fnp.argmin(a)
+np_result = np.argmin(a)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argmin complex should match numpy");
+    Ok(())
+}

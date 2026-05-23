@@ -312,3 +312,19 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn argmax_complex() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+a = np.array([1+1j, 3-1j, 2+2j], dtype=np.complex128)
+fnp_result = fnp.argmax(a)
+np_result = np.argmax(a)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argmax complex should match numpy");
+    Ok(())
+}
