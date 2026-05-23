@@ -348,3 +348,20 @@ print(type(result).__name__ in ('bool', 'numpy.bool_', 'bool_'))
     assert_eq!(result.trim(), "True", "allclose should return bool type");
     Ok(())
 }
+
+#[test]
+fn allclose_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j], dtype=np.complex128)
+b = np.array([1+1j, 2-1j, 3+2j], dtype=np.complex128)
+fnp_result = fnp.allclose(a, b)
+np_result = np.allclose(a, b)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "allclose complex should match numpy");
+    Ok(())
+}

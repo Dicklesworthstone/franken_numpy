@@ -322,3 +322,19 @@ print(result.shape == a.shape and result.dtype == a.dtype)
     );
     Ok(())
 }
+
+#[test]
+fn asarray_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = [1+1j, 2-1j, 3+2j]
+fnp_result = fnp.asarray(a, dtype=np.complex128)
+np_result = np.asarray(a, dtype=np.complex128)
+print(np.array_equal(fnp_result, np_result) and fnp_result.dtype == np_result.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "asarray complex should match numpy");
+    Ok(())
+}
