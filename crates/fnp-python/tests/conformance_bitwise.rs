@@ -378,3 +378,78 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
 
     Ok(())
 }
+
+#[test]
+fn bitwise_negative_numbers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1, -2, -128, -256], dtype=np.int64)
+y = np.array([1, 2, 127, 255], dtype=np.int64)
+result_and = fnp.bitwise_and(x, y)
+result_or = fnp.bitwise_or(x, y)
+result_xor = fnp.bitwise_xor(x, y)
+expected_and = np.bitwise_and(x, y)
+expected_or = np.bitwise_or(x, y)
+expected_xor = np.bitwise_xor(x, y)
+print(np.array_equal(result_and, expected_and) and np.array_equal(result_or, expected_or) and np.array_equal(result_xor, expected_xor))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bitwise negative numbers should match numpy");
+    Ok(())
+}
+
+#[test]
+fn shift_negative_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1, -2, -128, -256], dtype=np.int64)
+result_right = fnp.right_shift(x, 1)
+expected_right = np.right_shift(x, 1)
+print(np.array_equal(result_right, expected_right))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "right shift negative values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn bitwise_uint8_dtype() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([255, 128, 64, 32, 16], dtype=np.uint8)
+y = np.array([1, 2, 4, 8, 16], dtype=np.uint8)
+result_and = fnp.bitwise_and(x, y)
+result_or = fnp.bitwise_or(x, y)
+expected_and = np.bitwise_and(x, y)
+expected_or = np.bitwise_or(x, y)
+print(np.array_equal(result_and, expected_and) and np.array_equal(result_or, expected_or))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bitwise uint8 dtype should match numpy");
+    Ok(())
+}
+
+#[test]
+fn invert_different_dtypes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+tests_pass = True
+for dtype in [np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64]:
+    x = np.array([0, 1, -1 if np.issubdtype(dtype, np.signedinteger) else 255, 127], dtype=dtype)
+    result = fnp.invert(x)
+    expected = np.invert(x)
+    tests_pass = tests_pass and np.array_equal(result, expected)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "invert different dtypes should match numpy");
+    Ok(())
+}
