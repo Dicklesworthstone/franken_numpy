@@ -477,3 +477,167 @@ fn conformance_svd_2x3() {
     }
     assert_vec_close("svd_2x3 U*S*Vt", &reconstructed, &a, 1e-10, 1e-12);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge cases: Identity matrices
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn conformance_det_identity_2x2() {
+    let identity = [[1.0, 0.0], [0.0, 1.0]];
+    let det = det_2x2(identity).expect("det identity 2x2");
+    assert_scalar_close("det identity 2x2", det, 1.0, 1e-14, 1e-14);
+}
+
+#[test]
+fn conformance_det_identity_3x3() {
+    let identity: Vec<f64> = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let det = det_nxn(&identity, 3).expect("det identity 3x3");
+    assert_scalar_close("det identity 3x3", det, 1.0, 1e-14, 1e-14);
+}
+
+#[test]
+fn conformance_inv_identity_2x2() {
+    let identity = [[1.0, 0.0], [0.0, 1.0]];
+    let inv = inv_2x2(identity).expect("inv identity 2x2");
+    let inv_flat: Vec<f64> = inv.iter().flat_map(|row| row.iter().copied()).collect();
+    let expected = vec![1.0, 0.0, 0.0, 1.0];
+    assert_vec_close("inv identity 2x2", &inv_flat, &expected, 1e-14, 1e-14);
+}
+
+#[test]
+fn conformance_inv_identity_3x3() {
+    let identity: Vec<f64> = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let inv = inv_nxn(&identity, 3).expect("inv identity 3x3");
+    assert_vec_close("inv identity 3x3", &inv, &identity, 1e-14, 1e-14);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge cases: Negative determinant
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn conformance_det_negative_2x2() {
+    // This matrix has det = 1*4 - 2*3 = -2
+    let a = [[1.0, 2.0], [3.0, 4.0]];
+    let det = det_2x2(a).expect("det negative 2x2");
+    assert_scalar_close("det negative 2x2", det, -2.0, 1e-14, 1e-14);
+}
+
+#[test]
+fn conformance_slogdet_negative_2x2() {
+    // Matrix with negative determinant
+    let a = [[1.0, 2.0], [3.0, 4.0]];
+    let (sign, logdet) = slogdet_2x2(a).expect("slogdet negative 2x2");
+    // det = -2, so sign = -1, logdet = ln(2) ≈ 0.693
+    assert_scalar_close("slogdet negative 2x2 sign", sign, -1.0, 1e-14, 1e-14);
+    assert_scalar_close("slogdet negative 2x2 logdet", logdet, 2.0_f64.ln(), 1e-10, 1e-12);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge cases: Singular matrices (det = 0)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn conformance_det_singular_2x2() {
+    // Linearly dependent rows: second row = 2 * first row
+    let a = [[1.0, 2.0], [2.0, 4.0]];
+    let det = det_2x2(a).expect("det singular 2x2");
+    assert_scalar_close("det singular 2x2", det, 0.0, 1e-14, 1e-14);
+}
+
+#[test]
+fn conformance_det_singular_3x3() {
+    // Linearly dependent rows: third row = first + second
+    let a: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 5.0, 7.0, 9.0];
+    let det = det_nxn(&a, 3).expect("det singular 3x3");
+    assert!(det.abs() < 1e-10, "det singular 3x3 should be ~0, got {det}");
+}
+
+#[test]
+fn conformance_inv_singular_2x2_returns_error() {
+    let a = [[1.0, 2.0], [2.0, 4.0]];
+    let result = inv_2x2(a);
+    assert!(
+        result.is_err(),
+        "inv of singular matrix should return error"
+    );
+}
+
+#[test]
+fn conformance_solve_singular_2x2_returns_error() {
+    let a = [[1.0, 2.0], [2.0, 4.0]];
+    let b = [1.0, 2.0];
+    let result = solve_2x2(a, b);
+    assert!(
+        result.is_err(),
+        "solve with singular matrix should return error"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge cases: Diagonal matrices
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn conformance_det_diagonal_2x2() {
+    let a = [[3.0, 0.0], [0.0, 5.0]];
+    let det = det_2x2(a).expect("det diagonal 2x2");
+    assert_scalar_close("det diagonal 2x2", det, 15.0, 1e-14, 1e-14);
+}
+
+#[test]
+fn conformance_inv_diagonal_2x2() {
+    let a = [[2.0, 0.0], [0.0, 4.0]];
+    let inv = inv_2x2(a).expect("inv diagonal 2x2");
+    let inv_flat: Vec<f64> = inv.iter().flat_map(|row| row.iter().copied()).collect();
+    let expected = vec![0.5, 0.0, 0.0, 0.25];
+    assert_vec_close("inv diagonal 2x2", &inv_flat, &expected, 1e-14, 1e-14);
+}
+
+#[test]
+fn conformance_cholesky_identity_3x3() {
+    let identity: Vec<f64> = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let l = cholesky_nxn(&identity, 3).expect("cholesky identity 3x3");
+    // Cholesky of identity should be identity
+    assert_vec_close("cholesky identity 3x3", &l, &identity, 1e-14, 1e-14);
+}
+
+#[test]
+fn conformance_cholesky_diagonal_3x3() {
+    // Diagonal SPD matrix: diag(4, 9, 16)
+    let diag: Vec<f64> = vec![4.0, 0.0, 0.0, 0.0, 9.0, 0.0, 0.0, 0.0, 16.0];
+    let l = cholesky_nxn(&diag, 3).expect("cholesky diagonal 3x3");
+    // Cholesky of diagonal should be sqrt of diagonal
+    let expected: Vec<f64> = vec![2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 4.0];
+    assert_vec_close("cholesky diagonal 3x3", &l, &expected, 1e-14, 1e-14);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge cases: Very small and large values
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn conformance_det_small_values_2x2() {
+    let a = [[1e-100, 0.0], [0.0, 1e-100]];
+    let det = det_2x2(a).expect("det small values 2x2");
+    assert_scalar_close("det small values 2x2", det, 1e-200, 1e-10, 1e-210);
+}
+
+#[test]
+fn conformance_det_large_values_2x2() {
+    let a = [[1e50, 0.0], [0.0, 1e50]];
+    let det = det_2x2(a).expect("det large values 2x2");
+    assert_scalar_close("det large values 2x2", det, 1e100, 1e-10, 1e90);
+}
+
+#[test]
+fn conformance_slogdet_large_values_2x2() {
+    // For very large determinants, slogdet avoids overflow
+    let a = [[1e150, 0.0], [0.0, 1e150]];
+    let (sign, logdet) = slogdet_2x2(a).expect("slogdet large values 2x2");
+    // det = 1e300, sign = 1, logdet = ln(1e300) = 300 * ln(10) ≈ 690.78
+    assert_scalar_close("slogdet large values sign", sign, 1.0, 1e-14, 1e-14);
+    let expected_logdet = 300.0 * 10.0_f64.ln();
+    assert_scalar_close("slogdet large values logdet", logdet, expected_logdet, 1e-10, 1e-8);
+}
