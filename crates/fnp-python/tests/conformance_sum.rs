@@ -579,3 +579,68 @@ print(fnp_result == np_result == 25)  # 10 + 1+2+3+4+5
     assert_eq!(result.trim(), "True", "sum with initial parameter should match numpy");
     Ok(())
 }
+
+#[test]
+fn sum_signed_zero_parity() -> Result<(), String> {
+    // Test signed-zero behavior for parallel operation safety proofs.
+    // IEEE 754: 0.0 + 0.0 = 0.0, -0.0 + -0.0 = -0.0, 0.0 + -0.0 = 0.0
+    let script = fnp_sum_script(
+        r#"
+# Signed-zero sum semantics
+tests = [
+    ([0.0, 0.0], False),      # 0.0 + 0.0 = 0.0 (positive)
+    ([-0.0, -0.0], True),     # -0.0 + -0.0 = -0.0 (negative)
+    ([0.0, -0.0], False),     # 0.0 + -0.0 = 0.0 (positive - IEEE 754 rule)
+    ([-0.0, 0.0], False),     # -0.0 + 0.0 = 0.0 (positive)
+    ([-0.0, -0.0, -0.0], True), # Multiple -0.0 sum
+]
+all_pass = True
+for values, expected_signbit in tests:
+    arr = np.array(values)
+    fnp_result = fnp.sum(arr)
+    np_result = np.sum(arr)
+    if np.signbit(fnp_result) != np.signbit(np_result):
+        print(f"FAIL: sum({values}) fnp signbit={np.signbit(fnp_result)} np signbit={np.signbit(np_result)}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_accumulation_stability() -> Result<(), String> {
+    // Test that sum accumulation order matches NumPy
+    let script = fnp_sum_script(
+        r#"
+# Large values that could suffer from accumulation order issues
+a = np.array([1e16, 1.0, -1e16])
+fnp_result = fnp.sum(a)
+np_result = np.sum(a)
+
+# Also test with axis reduction
+b = np.array([[1e16, 1.0], [-1e16, 2.0]])
+fnp_axis = fnp.sum(b, axis=0)
+np_axis = np.sum(b, axis=0)
+
+axis_match = np.allclose(fnp_axis, np_axis)
+scalar_match = np.isclose(fnp_result, np_result) or (fnp_result == np_result)
+print(scalar_match and axis_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum accumulation stability should match numpy: {result}"
+    );
+    Ok(())
+}
