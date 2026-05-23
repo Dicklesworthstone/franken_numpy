@@ -176,3 +176,71 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "clip inf handling should match numpy");
     Ok(())
 }
+
+#[test]
+fn clip_negative_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([-0.0, 0.0, -1.0, 1.0])
+fnp_result = fnp.clip(a, -0.5, 0.5)
+np_result = np.clip(a, -0.5, 0.5)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip negative zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn clip_inf_bounds() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+fnp_result = fnp.clip(a, -np.inf, np.inf)
+np_result = np.clip(a, -np.inf, np.inf)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip inf bounds should match numpy");
+    Ok(())
+}
+
+#[test]
+fn clip_broadcasting() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1, 2, 3], [4, 5, 6]])
+a_min = np.array([2, 2, 2])
+a_max = np.array([5, 5, 5])
+fnp_result = fnp.clip(a, a_min, a_max)
+np_result = np.clip(a, a_min, a_max)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip broadcasting should match numpy");
+    Ok(())
+}
+
+#[test]
+fn clip_out_parameter() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+out = np.empty_like(a)
+fnp_result = fnp.clip(a, 2.0, 4.0, out=out)
+np_out = np.empty_like(a)
+np_result = np.clip(a, 2.0, 4.0, out=np_out)
+print(np.array_equal(out, np_out) and fnp_result is out)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "clip out parameter should match numpy");
+    Ok(())
+}

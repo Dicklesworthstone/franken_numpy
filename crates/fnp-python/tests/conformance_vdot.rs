@@ -115,3 +115,55 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn vdot_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([np.inf, -np.inf, np.nan, 1.0])
+b = np.array([1.0, 1.0, 1.0, np.nan])
+result = fnp.vdot(a, b)
+expected = np.vdot(a, b)
+# Both should be nan due to nan propagation
+print(np.isnan(result) and np.isnan(expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "vdot special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn vdot_empty_arrays() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([], dtype=np.float64)
+b = np.array([], dtype=np.float64)
+result = fnp.vdot(a, b)
+expected = np.vdot(a, b)
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "vdot empty arrays should match numpy");
+    Ok(())
+}
+
+#[test]
+fn vdot_integer_dtypes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 3], dtype=np.int32)
+b = np.array([4, 5, 6], dtype=np.int32)
+result = fnp.vdot(a, b)
+expected = np.vdot(a, b)
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "vdot integer dtypes should match numpy");
+    Ok(())
+}

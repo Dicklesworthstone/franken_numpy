@@ -138,3 +138,55 @@ print(result.shape == expected.shape)
     );
     Ok(())
 }
+
+#[test]
+fn outer_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([np.inf, -np.inf, np.nan, 0.0])
+b = np.array([1.0, 0.0, np.nan])
+result = fnp.outer(a, b)
+expected = np.outer(a, b)
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "outer special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn outer_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+2j, 3+4j])
+b = np.array([5+6j, 7+8j])
+result = fnp.outer(a, b)
+expected = np.outer(a, b)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "outer complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn outer_mixed_dtypes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 3], dtype=np.int32)
+b = np.array([1.5, 2.5], dtype=np.float64)
+result = fnp.outer(a, b)
+expected = np.outer(a, b)
+# Result should be promoted to float64
+print(np.allclose(result, expected) and result.dtype == expected.dtype)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "outer mixed dtypes should match numpy");
+    Ok(())
+}

@@ -115,3 +115,78 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn angle_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Use np.complex128 to construct inf without nan
+z = np.array([np.inf + 0j, -np.inf + 0j], dtype=np.complex128)
+result = fnp.angle(z)
+expected = np.angle(z)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "angle special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn angle_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([0+0j, 0-0j, -0+0j, -0-0j])
+result = fnp.angle(z)
+expected = np.angle(z)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "angle zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn angle_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([np.nan + 0j, 0 + np.nan*1j, np.nan + np.nan*1j])
+result = fnp.angle(z)
+expected = np.angle(z)
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "angle nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn angle_quadrants() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Test all four quadrants and axes
+z = np.array([
+    1+0j,    # 0 rad
+    0+1j,    # pi/2
+    -1+0j,   # pi
+    0-1j,    # -pi/2
+    1+1j,    # pi/4
+    -1+1j,   # 3*pi/4
+    -1-1j,   # -3*pi/4
+    1-1j,    # -pi/4
+])
+result = fnp.angle(z)
+expected = np.angle(z)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "angle quadrants should match numpy");
+    Ok(())
+}
