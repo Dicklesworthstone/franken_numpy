@@ -158,3 +158,50 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "dot complex should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .expect("python3 should be available");
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("ValueError") {
+            "ValueError".to_string()
+        } else if stderr.contains("not aligned") || stderr.contains("shape") {
+            "ValueError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn dot_2d_dimension_mismatch_raises_valueerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(6).reshape(2, 3)
+b = fnp.arange(10).reshape(5, 2)
+fnp.dot(a, b)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(6).reshape(2, 3)
+b = np.arange(10).reshape(5, 2)
+np.dot(a, b)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "dot 2D dimension mismatch should raise same error as numpy"
+    );
+}

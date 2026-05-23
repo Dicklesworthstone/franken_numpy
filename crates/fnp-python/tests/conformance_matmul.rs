@@ -141,3 +141,74 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .expect("python3 should be available");
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("ValueError") {
+            "ValueError".to_string()
+        } else if stderr.contains("matmul:") || stderr.contains("not aligned") {
+            "ValueError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn matmul_dimension_mismatch_raises_valueerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(6).reshape(2, 3)
+b = fnp.arange(10).reshape(5, 2)
+fnp.matmul(a, b)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(6).reshape(2, 3)
+b = np.arange(10).reshape(5, 2)
+np.matmul(a, b)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "matmul dimension mismatch should raise same error as numpy"
+    );
+}
+
+#[test]
+fn matmul_1d_mismatch_raises_valueerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(3)
+b = fnp.arange(5)
+fnp.matmul(a, b)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(3)
+b = np.arange(5)
+np.matmul(a, b)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "matmul 1D vector mismatch should raise same error as numpy"
+    );
+}
