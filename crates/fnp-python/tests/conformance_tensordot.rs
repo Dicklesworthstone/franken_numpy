@@ -255,3 +255,35 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "tensordot negative axes should match numpy");
     Ok(())
 }
+
+#[test]
+#[ignore = "PARITY GAP: fnp accumulator returns -0.0, NumPy returns 0.0. See DISC-011."]
+fn tensordot_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Tensordot signed-zero parity (generalized dot product)
+# tensordot contracts specified axes via multiplication and summation
+a = np.array([[1.0, -0.0], [-0.0, 1.0]])
+b = np.array([[1.0, 0.0], [0.0, 1.0]])
+fnp_result = fnp.tensordot(a, b, axes=1)
+np_result = np.tensordot(a, b, axes=1)
+fnp_signs = np.signbit(fnp_result)
+np_signs = np.signbit(np_result)
+if np.array_equal(fnp_signs, np_signs):
+    print("True")
+else:
+    print(f"FAIL: tensordot signbit mismatch")
+    print(f"  fnp signbit={fnp_signs.tolist()}")
+    print(f"  np signbit={np_signs.tolist()}")
+    print("False")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensordot signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}

@@ -281,3 +281,44 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "matmul broadcast batch should match numpy");
     Ok(())
 }
+
+#[test]
+#[ignore = "PARITY GAP: fnp accumulator returns -0.0, NumPy returns 0.0. See DISC-011."]
+fn matmul_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Matmul signed-zero parity (accumulation in matrix multiplication)
+# Each output element is a dot product
+tests = [
+    # 1D @ 1D (dot product)
+    (np.array([1.0, -0.0]), np.array([-0.0, 1.0])),
+    (np.array([-0.0, -0.0]), np.array([1.0, 1.0])),
+    # 2D @ 2D with signed zeros
+    (np.array([[1.0, -0.0], [-0.0, 1.0]]), np.array([[1.0, 0.0], [0.0, 1.0]])),
+]
+all_pass = True
+for a, b in tests:
+    fnp_result = fnp.matmul(a, b)
+    np_result = np.matmul(a, b)
+    fnp_signs = np.signbit(fnp_result)
+    np_signs = np.signbit(np_result)
+    if not np.array_equal(fnp_signs, np_signs):
+        print(f"FAIL: matmul signbit mismatch")
+        print(f"  fnp signbit={fnp_signs.tolist()}")
+        print(f"  np signbit={np_signs.tolist()}")
+        all_pass = False
+    if not np.allclose(fnp_result, np_result):
+        print(f"FAIL: matmul values mismatch")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "matmul signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}

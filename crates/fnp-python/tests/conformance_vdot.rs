@@ -167,3 +167,41 @@ print(result == expected)
     assert_eq!(result.trim(), "True", "vdot integer dtypes should match numpy");
     Ok(())
 }
+
+#[test]
+#[ignore = "PARITY GAP: fnp accumulator returns -0.0, NumPy returns 0.0. See DISC-011."]
+fn vdot_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# vdot signed-zero parity (accumulation-based, flattens input)
+tests = [
+    ([0.0, 0.0], [1.0, 1.0]),
+    ([-0.0, -0.0], [1.0, 1.0]),
+    ([1.0, 1.0], [-0.0, -0.0]),
+    ([-0.0, 0.0], [0.0, -0.0]),
+]
+all_pass = True
+for a_vals, b_vals in tests:
+    a = np.array(a_vals)
+    b = np.array(b_vals)
+    fnp_result = fnp.vdot(a, b)
+    np_result = np.vdot(a, b)
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: vdot({a_vals}, {b_vals})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "vdot signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}

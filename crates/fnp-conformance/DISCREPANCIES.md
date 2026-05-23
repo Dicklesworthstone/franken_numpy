@@ -144,9 +144,9 @@
   - `inner([1.0, 1.0], [-0.0, -0.0])`: fnp → -0.0, np → 0.0
 - **Resolution:** WILL-FIX
 - **Reason:** This affects dot product operations and is related to accumulator initialization. NumPy initializes the accumulator to +0.0, and IEEE 754 specifies 0.0 + (-0.0) = 0.0. FnP's accumulation differs, likely due to accumulator initialization or reduction ordering.
-- **Tests affected:** `inner_signed_zero_parity` (#[ignore])
+- **Tests affected:** `inner_signed_zero_parity`, `dot_signed_zero_parity`, `vdot_signed_zero_parity`, `matmul_signed_zero_parity`, `tensordot_signed_zero_parity` (#[ignore])
 - **Review date:** 2026-05-23
-- **Investigation:** Related to sum/cumsum signed-zero handling. May also affect matmul, vdot, tensordot.
+- **Investigation:** Related to sum/cumsum signed-zero handling. Affects all accumulation-based operations: inner, dot, vdot, matmul, tensordot, and likely multi_dot.
 
 ---
 
