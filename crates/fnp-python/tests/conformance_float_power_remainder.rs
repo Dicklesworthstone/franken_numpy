@@ -631,3 +631,92 @@ print(all_pass)
     );
     Ok(())
 }
+
+#[test]
+fn float_power_ieee_special_cases_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# IEEE 754 power special cases
+# Note: NumPy follows C99 conventions
+import warnings
+warnings.filterwarnings('ignore')
+
+cases = [
+    # 0**0 = 1 by convention
+    (0.0, 0.0),
+    (-0.0, 0.0),
+    # x**0 = 1 for all x including inf/nan
+    (np.inf, 0.0),
+    (-np.inf, 0.0),
+    (np.nan, 0.0),
+    # 1**y = 1 for all y including inf/nan
+    (1.0, np.inf),
+    (1.0, -np.inf),
+    (1.0, np.nan),
+    # 0**positive = 0
+    (0.0, 2.0),
+    (-0.0, 2.0),
+    # 0**negative = inf
+    (0.0, -1.0),
+    (-0.0, -1.0),
+    # inf**positive = inf
+    (np.inf, 2.0),
+    # inf**negative = 0
+    (np.inf, -1.0),
+    # (-inf)**int = +/-inf based on parity
+    (-np.inf, 2.0),  # even -> inf
+    (-np.inf, 3.0),  # odd -> -inf
+]
+
+all_pass = True
+for x, y in cases:
+    fnp_result = fnp.float_power(np.float64(x), np.float64(y))
+    np_result = np.float_power(np.float64(x), np.float64(y))
+    # Compare with allclose for nan handling
+    if np.isnan(fnp_result) and np.isnan(np_result):
+        pass  # both nan is ok
+    elif np.isinf(fnp_result) and np.isinf(np_result):
+        if np.signbit(fnp_result) != np.signbit(np_result):
+            print(f"FAIL: float_power({x}, {y}) sign mismatch: fnp={fnp_result} np={np_result}")
+            all_pass = False
+    elif not np.allclose(fnp_result, np_result, equal_nan=True):
+        print(f"FAIL: float_power({x}, {y}): fnp={fnp_result} np={np_result}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "float_power IEEE special cases should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn float_power_negative_fractional_returns_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# negative base with non-integer exponent yields nan in real domain
+import warnings
+warnings.filterwarnings('ignore')
+
+x = np.array([-2.0, -3.0, -4.0])
+y = np.array([0.5, 1.5, 2.5])  # fractional exponents
+fnp_result = fnp.float_power(x, y)
+np_result = np.float_power(x, y)
+# Both should return nan for negative base with fractional exponent
+print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "float_power negative fractional should return nan"
+    );
+    Ok(())
+}
