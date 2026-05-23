@@ -461,3 +461,20 @@ print(np.array_equal(fnp_result, np_result) and np.array_equal(out, np_out))
     assert_eq!(result.trim(), "True", "prod with out parameter should match numpy");
     Ok(())
 }
+
+#[test]
+fn prod_with_where_parameter() -> Result<(), String> {
+    let script = fnp_prod_script(
+        r#"
+a = np.array([1, 2, 3, 4, 5])
+mask = np.array([True, False, True, False, True])
+fnp_result = fnp.prod(a, where=mask)
+np_result = np.prod(a, where=mask)
+print(fnp_result == np_result == 15)  # 1 * 3 * 5
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "prod with where parameter should match numpy");
+    Ok(())
+}
