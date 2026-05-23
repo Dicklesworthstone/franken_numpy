@@ -311,3 +311,134 @@ print(all_pass)
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge case tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn rounding_empty_arrays() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([], dtype=np.float64)
+tests_pass = True
+for func_name in ['floor', 'ceil', 'trunc', 'rint']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x)
+    np_result = np_func(x)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+    tests_pass = tests_pass and (fnp_result.shape == np_result.shape)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rounding empty arrays should match numpy");
+    Ok(())
+}
+
+#[test]
+fn rounding_near_integer_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+eps = np.finfo(np.float64).eps
+x = np.array([1 - eps, 1 + eps, 2 - eps, 2 + eps, -1 - eps, -1 + eps])
+tests_pass = True
+for func_name in ['floor', 'ceil', 'trunc', 'rint']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x)
+    np_result = np_func(x)
+    tests_pass = tests_pass and np.allclose(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rounding near integer values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn rounding_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([2.7])
+tests_pass = True
+for func_name in ['floor', 'ceil', 'trunc', 'rint']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x)
+    np_result = np_func(x)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rounding single element should match numpy");
+    Ok(())
+}
+
+#[test]
+fn rounding_exact_integers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0])
+tests_pass = True
+for func_name in ['floor', 'ceil', 'trunc', 'rint']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x)
+    np_result = np_func(x)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+    tests_pass = tests_pass and np.array_equal(fnp_result, x)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rounding exact integers should match numpy");
+    Ok(())
+}
+
+#[test]
+fn rounding_subnormal_numbers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import sys
+tiny = sys.float_info.min
+subnormal = tiny / 2.0
+x = np.array([subnormal, -subnormal, tiny, -tiny])
+tests_pass = True
+for func_name in ['floor', 'ceil', 'trunc', 'rint']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x)
+    np_result = np_func(x)
+    tests_pass = tests_pass and np.allclose(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rounding subnormal numbers should match numpy");
+    Ok(())
+}
+
+#[test]
+fn fix_alias() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1.7, -0.5, 0.5, 1.7])
+result = fnp.fix(x)
+expected = np.fix(x)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fix should match numpy");
+    Ok(())
+}
