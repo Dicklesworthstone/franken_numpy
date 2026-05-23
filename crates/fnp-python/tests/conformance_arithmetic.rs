@@ -570,3 +570,70 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     }
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integer overflow behavior
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn add_int64_overflow_wraps() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([np.iinfo(np.int64).max], dtype=np.int64)
+b = np.array([1], dtype=np.int64)
+result = fnp.add(a, b)
+expected = np.add(a, b)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "int64 overflow should wrap like numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn multiply_int64_overflow_wraps() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([np.iinfo(np.int64).max], dtype=np.int64)
+b = np.array([2], dtype=np.int64)
+result = fnp.multiply(a, b)
+expected = np.multiply(a, b)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "int64 multiply overflow should wrap like numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn subtract_int64_underflow_wraps() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([np.iinfo(np.int64).min], dtype=np.int64)
+b = np.array([1], dtype=np.int64)
+result = fnp.subtract(a, b)
+expected = np.subtract(a, b)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "int64 underflow should wrap like numpy"
+    );
+    Ok(())
+}
