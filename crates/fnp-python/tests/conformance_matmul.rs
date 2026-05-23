@@ -212,3 +212,72 @@ np.matmul(a, b)
         "matmul 1D vector mismatch should raise same error as numpy"
     );
 }
+
+#[test]
+fn matmul_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[np.inf, 1.0], [np.nan, 2.0]])
+b = np.array([[1.0, 2.0], [3.0, 4.0]])
+fnp_result = fnp.matmul(a, b)
+np_result = np.matmul(a, b)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "matmul special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn matmul_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2+2j], [3+3j, 4+4j]], dtype=np.complex128)
+b = np.array([[5+5j, 6+6j], [7+7j, 8+8j]], dtype=np.complex128)
+fnp_result = fnp.matmul(a, b)
+np_result = np.matmul(a, b)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "matmul complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn matmul_identity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
+identity = np.eye(3)
+fnp_result = fnp.matmul(a, identity)
+np_result = np.matmul(a, identity)
+# Matmul with identity should return original (or close to it)
+print(np.allclose(fnp_result, a) and np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "matmul identity should match numpy");
+    Ok(())
+}
+
+#[test]
+fn matmul_broadcast_batch() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(12).reshape(3, 2, 2)
+b = np.arange(4).reshape(2, 2)  # broadcast this
+fnp_result = fnp.matmul(a, b)
+np_result = np.matmul(a, b)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "matmul broadcast batch should match numpy");
+    Ok(())
+}
