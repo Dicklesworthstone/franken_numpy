@@ -205,3 +205,72 @@ np.dot(a, b)
         "dot 2D dimension mismatch should raise same error as numpy"
     );
 }
+
+#[test]
+fn dot_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([np.inf, -np.inf, np.nan, 1.0])
+b = np.array([1.0, 1.0, 1.0, np.nan])
+fnp_result = fnp.dot(a, b)
+np_result = np.dot(a, b)
+# inf + -inf + nan + nan = nan
+print(np.isnan(fnp_result) and np.isnan(np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "dot special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn dot_empty_vectors() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([], dtype=np.float64)
+b = np.array([], dtype=np.float64)
+fnp_result = fnp.dot(a, b)
+np_result = np.dot(a, b)
+print(fnp_result == np_result == 0.0)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "dot empty vectors should match numpy");
+    Ok(())
+}
+
+#[test]
+fn dot_3d_nd() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(24).reshape(2, 3, 4)
+b = np.arange(4)
+fnp_result = fnp.dot(a, b)
+np_result = np.dot(a, b)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "dot 3D array should match numpy");
+    Ok(())
+}
+
+#[test]
+fn dot_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([5.0])
+b = np.array([3.0])
+fnp_result = fnp.dot(a, b)
+np_result = np.dot(a, b)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "dot single element should match numpy");
+    Ok(())
+}
