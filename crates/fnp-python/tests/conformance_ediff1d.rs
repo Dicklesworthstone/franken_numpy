@@ -282,3 +282,36 @@ print(np.allclose(result, expected))
     assert_eq!(result.trim(), "True", "ediff1d complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn ediff1d_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, np.inf, 3.0, np.nan, 5.0])
+fnp_result = fnp.ediff1d(a)
+np_result = np.ediff1d(a)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ediff1d special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ediff1d_constant_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([5.0, 5.0, 5.0, 5.0])
+fnp_result = fnp.ediff1d(a)
+np_result = np.ediff1d(a)
+# Diff of constant should be zero
+print(np.allclose(fnp_result, np_result) and np.allclose(fnp_result, 0.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ediff1d constant array should match numpy");
+    Ok(())
+}
