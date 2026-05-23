@@ -453,3 +453,48 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "sum complex axis=0 should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .expect("python3 should be available");
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("AxisError") || stderr.contains("axis") {
+            "AxisError".to_string()
+        } else if stderr.contains("ValueError") {
+            "ValueError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn sum_axis_out_of_bounds_raises_axiserror() {
+    let fnp_err = classify_error(&fnp_sum_script(
+        r#"
+a = fnp.arange(12).reshape(3, 4)
+fnp.sum(a, axis=5)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(12).reshape(3, 4)
+np.sum(a, axis=5)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "sum with out-of-bounds axis should raise same error as numpy"
+    );
+}
