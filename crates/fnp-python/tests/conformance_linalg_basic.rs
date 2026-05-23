@@ -721,3 +721,129 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "det complex should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests - verify fnp raises same errors as numpy
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn inv_singular_raises_linalgerror() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def classify(call):
+    try:
+        call()
+        return ("ok", "")
+    except np.linalg.LinAlgError as e:
+        return ("LinAlgError", str(e).lower())
+    except Exception as e:
+        return (type(e).__name__, str(e).lower())
+
+a = np.array([[1, 2], [2, 4]], dtype=np.float64)
+fnp_result = classify(lambda: fnp.linalg.inv(a))
+np_result = classify(lambda: np.linalg.inv(a))
+# Both should raise LinAlgError with "singular" in the message
+print(fnp_result[0] == np_result[0] == "LinAlgError" and "singular" in fnp_result[1])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "inv of singular matrix should raise LinAlgError"
+    );
+    Ok(())
+}
+
+#[test]
+fn det_nonsquare_raises_linalgerror() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def classify(call):
+    try:
+        call()
+        return ("ok", "")
+    except np.linalg.LinAlgError as e:
+        return ("LinAlgError", str(e).lower())
+    except Exception as e:
+        return (type(e).__name__, str(e).lower())
+
+a = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float64)
+fnp_result = classify(lambda: fnp.linalg.det(a))
+np_result = classify(lambda: np.linalg.det(a))
+# Both should raise LinAlgError with "square" in message
+print(fnp_result[0] == np_result[0] == "LinAlgError")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "det of non-square matrix should raise LinAlgError"
+    );
+    Ok(())
+}
+
+#[test]
+fn solve_singular_raises_linalgerror() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def classify(call):
+    try:
+        call()
+        return ("ok", "")
+    except np.linalg.LinAlgError as e:
+        return ("LinAlgError", str(e).lower())
+    except Exception as e:
+        return (type(e).__name__, str(e).lower())
+
+a = np.array([[1, 2], [2, 4]], dtype=np.float64)
+b = np.array([1, 2], dtype=np.float64)
+fnp_result = classify(lambda: fnp.linalg.solve(a, b))
+np_result = classify(lambda: np.linalg.solve(a, b))
+# Both should raise LinAlgError with "singular" in message
+print(fnp_result[0] == np_result[0] == "LinAlgError" and "singular" in fnp_result[1])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "solve with singular matrix should raise LinAlgError"
+    );
+    Ok(())
+}
+
+#[test]
+fn cholesky_non_posdef_raises_linalgerror() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def classify(call):
+    try:
+        call()
+        return ("ok", "")
+    except np.linalg.LinAlgError as e:
+        return ("LinAlgError", str(e).lower())
+    except Exception as e:
+        return (type(e).__name__, str(e).lower())
+
+# Not positive definite (negative eigenvalue)
+a = np.array([[1, 2], [2, 1]], dtype=np.float64)
+fnp_result = classify(lambda: fnp.linalg.cholesky(a))
+np_result = classify(lambda: np.linalg.cholesky(a))
+# Both should raise LinAlgError
+print(fnp_result[0] == np_result[0] == "LinAlgError")
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cholesky of non-positive-definite matrix should raise LinAlgError"
+    );
+    Ok(())
+}
