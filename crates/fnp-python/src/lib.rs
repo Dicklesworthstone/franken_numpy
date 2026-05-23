@@ -10850,6 +10850,14 @@ fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> Py
     let arr = arr.bind(py);
     require_numpy_ndarray(py, arr, "place")?;
 
+    // Check for complex dtype and fallback to numpy
+    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        let numpy = py.import("numpy")?;
+        numpy.getattr("place")?.call1((arr, mask.bind(py), vals.bind(py)))?;
+        return Ok(py.None());
+    }
+
     let mut array = extract_numeric_array(py, arr, "place(arr)")?;
     let mask = extract_numeric_array(py, mask.bind(py), "place(mask)")?;
     let values = extract_numeric_array(py, vals.bind(py), "place(vals)")?;
@@ -10869,6 +10877,14 @@ fn putmask(
 ) -> PyResult<Py<PyAny>> {
     let a = a.bind(py);
     require_numpy_ndarray(py, a, "putmask")?;
+
+    // Check for complex dtype and fallback to numpy
+    let dtype_kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        let numpy = py.import("numpy")?;
+        numpy.getattr("putmask")?.call1((a, mask.bind(py), values.bind(py)))?;
+        return Ok(py.None());
+    }
 
     let mut array = extract_numeric_array(py, a, "putmask(a)")?;
     let mask = extract_numeric_array(py, mask.bind(py), "putmask(mask)")?;
