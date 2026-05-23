@@ -394,3 +394,31 @@ print(values_match and signs_match)
     );
     Ok(())
 }
+
+#[test]
+fn max_empty_array_raises_valueerror() -> Result<(), String> {
+    let script = fnp_max_script(
+        r#"
+empty = np.array([])
+fnp_raised = False
+np_raised = False
+try:
+    fnp.max(empty)
+except ValueError:
+    fnp_raised = True
+except Exception:
+    pass
+try:
+    np.max(empty)
+except ValueError:
+    np_raised = True
+except Exception:
+    pass
+print(fnp_raised == np_raised == True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "max of empty array should raise ValueError");
+    Ok(())
+}
