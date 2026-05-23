@@ -184,3 +184,37 @@ print(np.array_equal(result, expected))
     assert_eq!(result.trim(), "True", "fmin negative zero should match numpy");
     Ok(())
 }
+
+#[test]
+#[ignore = "PARITY GAP: fnp returns x1 when equal, NumPy returns x2. See DISC-010."]
+fn fmin_signed_zero_tie_selection_parity() -> Result<(), String> {
+    // Critical for parallel operation safety: when comparing +0.0 and -0.0,
+    // the selected fmin and its sign bit must match NumPy exactly.
+    //
+    // FINDING: fnp.fmin returns x1 when values are equal (sign of first arg)
+    //          np.fmin returns x2 when values are equal (sign of second arg)
+    let script = fnp_script(
+        r#"
+# Test all combinations of signed zero comparisons
+x1 = np.array([0.0, -0.0, 0.0, -0.0])
+x2 = np.array([0.0, 0.0, -0.0, -0.0])
+fnp_result = fnp.fmin(x1, x2)
+np_result = np.fmin(x1, x2)
+
+# Check both value and sign bit match
+values_match = np.array_equal(fnp_result, np_result)
+signs_match = np.array_equal(np.signbit(fnp_result), np.signbit(np_result))
+print(f"fnp signbit: {np.signbit(fnp_result)}")
+print(f"np signbit:  {np.signbit(np_result)}")
+print(f"values={values_match} signs={signs_match}")
+print(values_match and signs_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().ends_with("True"),
+        "fmin signed-zero tie selection must match numpy sign bits exactly: {result}"
+    );
+    Ok(())
+}
