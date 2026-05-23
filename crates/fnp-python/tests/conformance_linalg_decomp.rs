@@ -785,3 +785,82 @@ print(np.allclose(fnp_recon, np_recon))
     assert_eq!(result.trim(), "True", "qr batched reconstruction should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("python3")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("python3 should be available");
+    child
+        .stdin
+        .as_mut()
+        .unwrap()
+        .write_all(script.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("LinAlgError") {
+            "LinAlgError".to_string()
+        } else if stderr.contains("ValueError") {
+            "ValueError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn eig_non_square_raises_linalgerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(6).reshape(2, 3).astype(float)
+fnp.linalg.eig(a)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(6).reshape(2, 3).astype(float)
+np.linalg.eig(a)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "eig on non-square matrix should raise same error as numpy"
+    );
+}
+
+#[test]
+fn qr_empty_raises_valueerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.array([]).reshape(0, 3)
+fnp.linalg.qr(a)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.array([]).reshape(0, 3)
+np.linalg.qr(a)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "qr on empty array should raise same error as numpy"
+    );
+}
