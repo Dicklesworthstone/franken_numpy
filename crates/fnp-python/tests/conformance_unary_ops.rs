@@ -182,3 +182,75 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "reciprocal complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn positive_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.positive(x)
+np_result = np.positive(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "positive special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn negative_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.negative(x)
+np_result = np.negative(x)
+# Check values and sign bits for zeros
+value_match = np.allclose(fnp_result, np_result, equal_nan=True)
+sign_match = np.array_equal(np.signbit(fnp_result), np.signbit(np_result))
+print(value_match and sign_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "negative special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn negative_zero_sign() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, -0.0])
+fnp_result = fnp.negative(x)
+np_result = np.negative(x)
+# negative(0.0) should be -0.0, negative(-0.0) should be 0.0
+sign_match = np.array_equal(np.signbit(fnp_result), np.signbit(np_result))
+print(sign_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "negative zero sign should match numpy");
+    Ok(())
+}
+
+#[test]
+fn positive_preserves_sign() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, -0.0, 1.0, -1.0])
+fnp_result = fnp.positive(x)
+np_result = np.positive(x)
+# positive should preserve sign
+sign_match = np.array_equal(np.signbit(fnp_result), np.signbit(np_result))
+value_match = np.array_equal(fnp_result, np_result)
+print(sign_match and value_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "positive should preserve sign");
+    Ok(())
+}
