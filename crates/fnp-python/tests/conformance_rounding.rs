@@ -276,3 +276,38 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "floor large values should match numpy");
     Ok(())
 }
+
+#[test]
+fn rounding_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Rounding functions preserve sign of zero: f(-0.0) = -0.0
+# IEEE 754: floor(-0.0) = -0.0, ceil(-0.0) = -0.0, trunc(-0.0) = -0.0, rint(-0.0) = -0.0
+funcs = [
+    ('floor', fnp.floor, np.floor),
+    ('ceil', fnp.ceil, np.ceil),
+    ('trunc', fnp.trunc, np.trunc),
+    ('rint', fnp.rint, np.rint),
+]
+all_pass = True
+for name, fnp_f, np_f in funcs:
+    for x in [0.0, -0.0]:
+        fnp_result = fnp_f(np.float64(x))
+        np_result = np_f(np.float64(x))
+        fnp_sign = np.signbit(fnp_result)
+        np_sign = np.signbit(np_result)
+        if fnp_sign != np_sign:
+            print(f"FAIL: {name}({x}) signbit fnp={fnp_sign} np={np_sign}")
+            all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
