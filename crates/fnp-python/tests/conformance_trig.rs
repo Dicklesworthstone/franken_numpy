@@ -784,3 +784,121 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "arctanh complex should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Special value tests (nan/inf)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn sin_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.sin(x)
+np_result = np.sin(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sin special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn cos_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.cos(x)
+np_result = np.cos(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cos special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn tan_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.tan(x)
+np_result = np.tan(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "tan special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn arcsin_out_of_domain() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([2.0, -2.0, 1.5, -1.5])
+fnp_result = fnp.arcsin(x)
+np_result = np.arcsin(x)
+print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "arcsin out of domain should return nan");
+    Ok(())
+}
+
+#[test]
+fn arccos_out_of_domain() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([2.0, -2.0, 1.5, -1.5])
+fnp_result = fnp.arccos(x)
+np_result = np.arccos(x)
+print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "arccos out of domain should return nan");
+    Ok(())
+}
+
+#[test]
+fn sinh_cosh_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf])
+fnp_sinh = fnp.sinh(x)
+np_sinh = np.sinh(x)
+fnp_cosh = fnp.cosh(x)
+np_cosh = np.cosh(x)
+print(np.allclose(fnp_sinh, np_sinh) and np.allclose(fnp_cosh, np_cosh))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sinh/cosh inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn arctanh_boundary() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1.0, -1.0, 2.0, -2.0])
+fnp_result = fnp.arctanh(x)
+np_result = np.arctanh(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "arctanh boundary should match numpy");
+    Ok(())
+}
