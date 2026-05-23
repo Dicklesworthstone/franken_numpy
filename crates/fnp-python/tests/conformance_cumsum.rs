@@ -262,6 +262,32 @@ fn cumsum_cumprod_native_fnp_python_paths_match_numpy() {
             }
         }
 
+        // ─── Signed-zero tests (SHOULD) ────────────────────────────────────
+        let signed_zero_cases: &[&[f64]] = &[
+            &[0.0, 0.0, 0.0],           // cumsum: [0, 0, 0], cumprod: [0, 0, 0]
+            &[-0.0, -0.0, -0.0],        // cumsum: [-0, -0, -0], cumprod: [-0, 0, -0]
+            &[0.0, -0.0, 0.0],          // cumsum: [0, 0, 0], cumprod: [0, -0, -0]
+            &[1.0, -0.0, 1.0],          // cumprod signed-zero in middle
+        ];
+
+        for (idx, values) in signed_zero_cases.iter().enumerate() {
+            for function in ["cumsum", "cumprod"] {
+                let values = (*values).to_vec();
+                run_case(
+                    py,
+                    &module,
+                    &numpy,
+                    &format!("{function}-signed-zero-{idx}"),
+                    function,
+                    RequirementLevel::Should,
+                    CompareMode::Close,
+                    t,
+                    move |py| PyTuple::new(py, [np_array_1d_f(py, &values)?]),
+                    no_kwargs,
+                );
+            }
+        }
+
         eprintln!("{}", TOTALS.summarize("cumsum-cumprod-native"));
         Ok(())
     });
