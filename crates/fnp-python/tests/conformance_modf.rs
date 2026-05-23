@@ -113,3 +113,72 @@ print(frac_type_match and int_type_match, fnp_frac, fnp_int, np_frac, np_int)
     );
     Ok(())
 }
+
+#[test]
+fn modf_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_frac, fnp_int = fnp.modf(x)
+np_frac, np_int = np.modf(x)
+frac_match = np.allclose(fnp_frac, np_frac, equal_nan=True)
+int_match = np.allclose(fnp_int, np_int, equal_nan=True)
+print(frac_match and int_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "modf special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn modf_signed_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, -0.0])
+fnp_frac, fnp_int = fnp.modf(x)
+np_frac, np_int = np.modf(x)
+# Check both values and sign bits
+value_match = np.allclose(fnp_frac, np_frac) and np.allclose(fnp_int, np_int)
+sign_match = np.array_equal(np.signbit(fnp_frac), np.signbit(np_frac)) and np.array_equal(np.signbit(fnp_int), np.signbit(np_int))
+print(value_match and sign_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "modf signed zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn modf_small_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.1, 0.01, 0.001, -0.1, -0.01])
+fnp_frac, fnp_int = fnp.modf(x)
+np_frac, np_int = np.modf(x)
+print(np.allclose(fnp_frac, np_frac) and np.allclose(fnp_int, np_int))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "modf small values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn modf_large_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1e15, 1e16, -1e15, 1e15 + 0.5])
+fnp_frac, fnp_int = fnp.modf(x)
+np_frac, np_int = np.modf(x)
+print(np.allclose(fnp_frac, np_frac) and np.allclose(fnp_int, np_int))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "modf large values should match numpy");
+    Ok(())
+}
