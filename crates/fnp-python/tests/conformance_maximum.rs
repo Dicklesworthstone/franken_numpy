@@ -134,3 +134,57 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "maximum complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn maximum_with_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([1.0, np.inf, -np.inf, np.inf])
+x2 = np.array([np.inf, 1.0, np.inf, -np.inf])
+result = fnp.maximum(x1, x2)
+expected = np.maximum(x1, x2)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "maximum with inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn maximum_negative_zero_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([0.0, -0.0, 0.0])
+x2 = np.array([-0.0, 0.0, -0.0])
+fnp_result = fnp.maximum(x1, x2)
+np_result = np.maximum(x1, x2)
+# Check value equality (0.0 == -0.0), but sign bit behavior may differ
+value_match = np.array_equal(fnp_result, np_result)
+print(value_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "maximum negative zero values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn maximum_all_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.array([np.nan, np.nan])
+x2 = np.array([np.nan, 1.0])
+fnp_result = fnp.maximum(x1, x2)
+np_result = np.maximum(x1, x2)
+# NaN propagates, so maximum(nan, anything) = nan
+print(np.array_equal(np.isnan(fnp_result), np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "maximum all nan should match numpy");
+    Ok(())
+}
