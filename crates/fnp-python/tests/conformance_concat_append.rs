@@ -458,3 +458,77 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Complex dtype tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn concatenate_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j], dtype=np.complex128)
+b = np.array([3+2j, 4-2j], dtype=np.complex128)
+fnp_result = fnp.concatenate([a, b])
+np_result = np.concatenate([a, b])
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "concatenate complex should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn append_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j], dtype=np.complex128)
+b = np.array([3+2j, 4-2j], dtype=np.complex128)
+fnp_result = fnp.append(a, b)
+np_result = np.append(a, b)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "append complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn insert_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j], dtype=np.complex128)
+fnp_result = fnp.insert(a, 1, 9+9j)
+np_result = np.insert(a, 1, 9+9j)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "insert complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn delete_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+fnp_result = fnp.delete(a, 1)
+np_result = np.delete(a, 1)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "delete complex should match numpy");
+    Ok(())
+}
