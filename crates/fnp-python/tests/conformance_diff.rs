@@ -193,3 +193,84 @@ np.diff(a, axis=5)
         "diff with out-of-bounds axis should raise same error as numpy"
     );
 }
+
+#[test]
+fn diff_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, np.inf, 3.0, np.nan, 5.0])
+fnp_result = fnp.diff(a)
+np_result = np.diff(a)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diff special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn diff_constant_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([5.0, 5.0, 5.0, 5.0])
+fnp_result = fnp.diff(a)
+np_result = np.diff(a)
+# Diff of constant should be zero
+print(np.allclose(fnp_result, np_result) and np.allclose(fnp_result, 0.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diff constant array should match numpy");
+    Ok(())
+}
+
+#[test]
+fn diff_two_elements() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 5.0])
+fnp_result = fnp.diff(a)
+np_result = np.diff(a)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diff two elements should match numpy");
+    Ok(())
+}
+
+#[test]
+fn diff_with_prepend() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 4, 7])
+fnp_result = fnp.diff(a, prepend=0)
+np_result = np.diff(a, prepend=0)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diff with prepend should match numpy");
+    Ok(())
+}
+
+#[test]
+fn diff_with_append() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 4, 7])
+fnp_result = fnp.diff(a, append=20)
+np_result = np.diff(a, append=20)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diff with append should match numpy");
+    Ok(())
+}
