@@ -248,3 +248,74 @@ print(all_pass)
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Complex number edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn absolute_complex_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([np.inf + 1j, 1 + np.inf*1j, np.inf + np.inf*1j])
+fnp_result = fnp.absolute(z)
+np_result = np.absolute(z)
+print(np.all(np.isinf(fnp_result) == np.isinf(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "absolute of complex inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn absolute_complex_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([np.nan + 1j, 1 + np.nan*1j, np.nan + np.nan*1j])
+fnp_result = fnp.absolute(z)
+np_result = np.absolute(z)
+print(np.all(np.isnan(fnp_result) == np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "absolute of complex nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn real_imag_conj_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+2j, 3+4j, -1-2j])
+tests = []
+tests.append(np.array_equal(fnp.real(a), np.real(a)))
+tests.append(np.array_equal(fnp.imag(a), np.imag(a)))
+tests.append(np.array_equal(fnp.conj(a), np.conj(a)))
+print(all(tests))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "real/imag/conj should match numpy");
+    Ok(())
+}
+
+#[test]
+fn real_imag_on_real_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0])
+tests = []
+tests.append(np.array_equal(fnp.real(a), np.real(a)))
+tests.append(np.array_equal(fnp.imag(a), np.imag(a)))
+print(all(tests))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "real/imag on real array should match numpy");
+    Ok(())
+}
