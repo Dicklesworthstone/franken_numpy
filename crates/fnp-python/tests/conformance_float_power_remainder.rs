@@ -564,3 +564,70 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     }
     Ok(())
 }
+
+#[test]
+fn remainder_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# remainder signed-zero: 0 % x = 0 with sign of dividend
+# IEEE 754: remainder sign follows dividend (x1)
+tests = [
+    (0.0, 1.0), (0.0, -1.0),
+    (-0.0, 1.0), (-0.0, -1.0),
+]
+all_pass = True
+for x1, x2 in tests:
+    fnp_result = fnp.remainder(np.float64(x1), np.float64(x2))
+    np_result = np.remainder(np.float64(x1), np.float64(x2))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: remainder({x1}, {x2})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "remainder signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn fmod_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# fmod signed-zero: fmod(0, x) = 0 with sign of dividend
+tests = [
+    (0.0, 1.0), (0.0, -1.0),
+    (-0.0, 1.0), (-0.0, -1.0),
+]
+all_pass = True
+for x1, x2 in tests:
+    fnp_result = fnp.fmod(np.float64(x1), np.float64(x2))
+    np_result = np.fmod(np.float64(x1), np.float64(x2))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: fmod({x1}, {x2})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fmod signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
