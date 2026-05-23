@@ -22830,6 +22830,15 @@ fn take_along_axis(
             )?
             .unbind())
     };
+
+    // Check for complex dtype and fallback to numpy
+    let numpy = py.import("numpy")?;
+    let arr_bound = numpy.call_method1("asarray", (arr.bind(py),))?;
+    let dtype_kind = arr_bound.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if dtype_kind == "c" {
+        return fallback();
+    }
+
     let arr = extract_numeric_array(py, arr.bind(py), "take_along_axis(arr)")?;
     let indices = extract_integer_array(py, indices.bind(py), "take_along_axis(indices)")?;
 

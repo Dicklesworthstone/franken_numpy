@@ -266,3 +266,24 @@ print(np.array_equal(arr1, arr2))
     );
     Ok(())
 }
+
+#[test]
+fn take_along_axis_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+arr = np.array([[1+1j, 2-1j, 3+2j], [4-2j, 5+1j, 6-1j]], dtype=np.complex128)
+indices = np.array([[0, 2], [1, 0]])
+fnp_result = fnp.take_along_axis(arr, indices, axis=1)
+np_result = np.take_along_axis(arr, indices, axis=1)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take_along_axis complex should match numpy"
+    );
+    Ok(())
+}
