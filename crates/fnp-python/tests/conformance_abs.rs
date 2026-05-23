@@ -319,3 +319,91 @@ print(all(tests))
     assert_eq!(result.trim(), "True", "real/imag on real array should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// More edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn fabs_empty_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([], dtype=np.float64)
+fnp_result = fnp.fabs(x)
+np_result = np.fabs(x)
+print(np.array_equal(fnp_result, np_result) and fnp_result.shape == np_result.shape)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fabs empty array should match numpy");
+    Ok(())
+}
+
+#[test]
+fn absolute_empty_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([], dtype=np.float64)
+fnp_result = fnp.absolute(x)
+np_result = np.absolute(x)
+print(np.array_equal(fnp_result, np_result) and fnp_result.shape == np_result.shape)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "absolute empty array should match numpy");
+    Ok(())
+}
+
+#[test]
+fn fabs_subnormal_numbers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import sys
+tiny = sys.float_info.min
+subnormal = tiny / 2.0
+x = np.array([subnormal, -subnormal, tiny, -tiny])
+fnp_result = fnp.fabs(x)
+np_result = np.fabs(x)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fabs subnormal numbers should match numpy");
+    Ok(())
+}
+
+#[test]
+fn absolute_large_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import sys
+x = np.array([sys.float_info.max, -sys.float_info.max, sys.float_info.max / 2, -sys.float_info.max / 2])
+fnp_result = fnp.absolute(x)
+np_result = np.absolute(x)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "absolute large values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn absolute_complex_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([0+0j, 0-0j, -0+0j, -0-0j], dtype=np.complex128)
+fnp_result = fnp.absolute(z)
+np_result = np.absolute(z)
+print(np.array_equal(fnp_result, np_result) and np.all(fnp_result == 0.0))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "absolute of complex zero should match numpy");
+    Ok(())
+}
