@@ -445,3 +445,90 @@ print(all_pass)
     );
     Ok(())
 }
+
+#[test]
+fn diff_nan_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, np.nan, 3.0, 4.0])
+fnp_result = fnp.diff(a)
+np_result = np.diff(a)
+# NaN should propagate through differences
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diff nan propagation should match numpy");
+    Ok(())
+}
+
+#[test]
+fn diff_inf_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, np.inf, 2.0, -np.inf])
+fnp_result = fnp.diff(a)
+np_result = np.diff(a)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diff inf handling should match numpy");
+    Ok(())
+}
+
+#[test]
+fn gradient_nan_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, np.nan, 3.0, 4.0, 5.0])
+fnp_result = fnp.gradient(a)
+np_result = np.gradient(a)
+# NaN should propagate through gradient calculation
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "gradient nan propagation should match numpy");
+    Ok(())
+}
+
+#[test]
+fn diff_higher_order_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 4, 9, 16, 25, 36])  # squares
+# First difference: [3, 5, 7, 9, 11]
+# Second difference: [2, 2, 2, 2]
+fnp_d1 = fnp.diff(a, n=1)
+fnp_d2 = fnp.diff(a, n=2)
+np_d1 = np.diff(a, n=1)
+np_d2 = np.diff(a, n=2)
+print(np.array_equal(fnp_d1, np_d1) and np.array_equal(fnp_d2, np_d2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "diff higher order should match numpy");
+    Ok(())
+}
+
+#[test]
+fn gradient_non_uniform_spacing() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, 1.0, 3.0, 6.0])  # non-uniform spacing
+y = np.array([0.0, 1.0, 4.0, 9.0])  # y = (x/3)**2 approximately
+fnp_result = fnp.gradient(y, x)
+np_result = np.gradient(y, x)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "gradient non-uniform spacing should match numpy");
+    Ok(())
+}
