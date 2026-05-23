@@ -478,3 +478,72 @@ print(fnp_result == np_result == 15)  # 1 * 3 * 5
     assert_eq!(result.trim(), "True", "prod with where parameter should match numpy");
     Ok(())
 }
+
+#[test]
+fn prod_signed_zero_parity() -> Result<(), String> {
+    // Test signed-zero behavior for parallel operation safety proofs.
+    // Product of signed zeros follows XOR sign rule.
+    let script = fnp_prod_script(
+        r#"
+# Signed-zero product semantics
+# 0.0 * 0.0 = 0.0, -0.0 * 0.0 = -0.0, 0.0 * -0.0 = -0.0, -0.0 * -0.0 = 0.0
+tests = [
+    ([0.0, 1.0], False),      # 0.0 * 1.0 = 0.0 (positive)
+    ([-0.0, 1.0], True),      # -0.0 * 1.0 = -0.0 (negative)
+    ([0.0, -0.0], True),      # 0.0 * -0.0 = -0.0 (negative)
+    ([-0.0, -0.0], False),    # -0.0 * -0.0 = 0.0 (positive)
+    ([1.0, -0.0, 1.0], True), # Product with -0.0 in middle
+]
+all_pass = True
+for values, expected_signbit in tests:
+    arr = np.array(values)
+    fnp_result = fnp.prod(arr)
+    np_result = np.prod(arr)
+    if np.signbit(fnp_result) != np.signbit(np_result):
+        print(f"FAIL: prod({values}) fnp signbit={np.signbit(fnp_result)} np signbit={np.signbit(np_result)}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "prod signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn prod_overflow_underflow_parity() -> Result<(), String> {
+    // Test overflow/underflow edge cases
+    let script = fnp_prod_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+
+# Overflow case
+big = np.array([1e200, 1e200, 1e200])
+fnp_big = fnp.prod(big)
+np_big = np.prod(big)
+
+# Underflow case
+small = np.array([1e-200, 1e-200, 1e-200])
+fnp_small = fnp.prod(small)
+np_small = np.prod(small)
+
+big_match = (np.isinf(fnp_big) == np.isinf(np_big))
+small_match = ((fnp_small == 0.0) == (np_small == 0.0))
+print(big_match and small_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "prod overflow/underflow should match numpy: {result}"
+    );
+    Ok(())
+}
