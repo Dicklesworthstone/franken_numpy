@@ -518,3 +518,21 @@ print(all_pass)
     );
     Ok(())
 }
+
+#[test]
+fn mean_empty_array_returns_nan() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+empty = np.array([])
+fnp_result = fnp.mean(empty)
+np_result = np.mean(empty)
+print(np.isnan(fnp_result) and np.isnan(np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "mean of empty array should return nan");
+    Ok(())
+}

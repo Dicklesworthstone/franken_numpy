@@ -494,3 +494,37 @@ print(np.allclose(fnp_out, np_out))
     assert_eq!(result.trim(), "True", "std out parameter should match numpy");
     Ok(())
 }
+
+#[test]
+fn std_empty_array_returns_nan() -> Result<(), String> {
+    let script = fnp_std_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+empty = np.array([])
+fnp_result = fnp.std(empty)
+np_result = np.std(empty)
+print(np.isnan(fnp_result) and np.isnan(np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "std of empty array should return nan");
+    Ok(())
+}
+
+#[test]
+fn std_single_element_is_zero() -> Result<(), String> {
+    let script = fnp_std_script(
+        r#"
+single = np.array([5.0])
+fnp_result = fnp.std(single)
+np_result = np.std(single)
+print(fnp_result == np_result == 0.0)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "std of single element should be 0");
+    Ok(())
+}
