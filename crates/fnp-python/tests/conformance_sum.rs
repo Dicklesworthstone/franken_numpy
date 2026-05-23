@@ -704,3 +704,64 @@ print(fnp_result == np_result)
     assert_eq!(result.trim(), "True", "sum with axis=None should flatten and match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// dtype parameter tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn sum_dtype_parameter_int_to_float() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([1, 2, 3], dtype=np.int32)
+fnp_result = fnp.sum(a, dtype=np.float64)
+np_result = np.sum(a, dtype=np.float64)
+print(fnp_result.dtype == np_result.dtype, fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True True"),
+        "sum with dtype=float64 should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_dtype_parameter_int_to_int64() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([1, 2, 3], dtype=np.int32)
+fnp_result = fnp.sum(a, dtype=np.int64)
+np_result = np.sum(a, dtype=np.int64)
+print(fnp_result.dtype == np_result.dtype, fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True True"),
+        "sum with dtype=int64 should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_dtype_parameter_with_axis() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([[1, 2], [3, 4]], dtype=np.int32)
+fnp_result = fnp.sum(a, axis=0, dtype=np.float64)
+np_result = np.sum(a, axis=0, dtype=np.float64)
+print(fnp_result.dtype == np_result.dtype, np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True True"),
+        "sum with axis and dtype should match numpy: {result}"
+    );
+    Ok(())
+}
