@@ -641,3 +641,47 @@ fn conformance_slogdet_large_values_2x2() {
     let expected_logdet = 300.0 * 10.0_f64.ln();
     assert_scalar_close("slogdet large values logdet", logdet, expected_logdet, 1e-10, 1e-8);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge cases: Nearly singular and ill-conditioned matrices
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn conformance_det_nearly_singular_2x2() {
+    let epsilon = 1e-10;
+    let a = [[1.0, 1.0], [1.0, 1.0 + epsilon]];
+    let det = det_2x2(a).expect("det nearly singular 2x2");
+    assert_scalar_close("det nearly singular 2x2", det, epsilon, 0.5, 1e-14);
+}
+
+#[test]
+fn conformance_det_nearly_singular_3x3() {
+    let epsilon = 1e-12;
+    let a: Vec<f64> = vec![
+        1.0, 2.0, 3.0,
+        4.0, 5.0, 6.0,
+        7.0, 8.0, 9.0 + epsilon,
+    ];
+    let det = det_nxn(&a, 3).expect("det nearly singular 3x3");
+    assert!(det.abs() < 1e-10, "det nearly singular 3x3 should be near zero");
+}
+
+#[test]
+fn conformance_inv_hilbert_3x3() {
+    let hilbert: Vec<f64> = vec![
+        1.0, 1.0/2.0, 1.0/3.0,
+        1.0/2.0, 1.0/3.0, 1.0/4.0,
+        1.0/3.0, 1.0/4.0, 1.0/5.0,
+    ];
+    let inv = inv_nxn(&hilbert, 3).expect("inv hilbert 3x3");
+    let mut product = vec![0.0; 9];
+    for i in 0..3 {
+        for j in 0..3 {
+            for k in 0..3 {
+                product[i * 3 + j] += hilbert[i * 3 + k] * inv[k * 3 + j];
+            }
+        }
+    }
+    let identity: Vec<f64> = vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    assert_vec_close("inv hilbert 3x3", &product, &identity, 1e-6, 1e-6);
+}
