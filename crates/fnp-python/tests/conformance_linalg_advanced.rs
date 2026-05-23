@@ -594,3 +594,70 @@ print(fnp_result.shape == np_result.shape and np.allclose(fnp_result, np_result)
     assert_eq!(result.trim(), "True", "pinv empty should match numpy");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .expect("python3 should be available");
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("LinAlgError") {
+            "LinAlgError".to_string()
+        } else if stderr.contains("ValueError") {
+            "ValueError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn matrix_power_non_square_raises_linalgerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(6).reshape(2, 3).astype(float)
+fnp.linalg.matrix_power(a, 2)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(6).reshape(2, 3).astype(float)
+np.linalg.matrix_power(a, 2)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "matrix_power on non-square should raise same error as numpy"
+    );
+}
+
+#[test]
+fn eigvals_non_square_raises_linalgerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(6).reshape(2, 3).astype(float)
+fnp.linalg.eigvals(a)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(6).reshape(2, 3).astype(float)
+np.linalg.eigvals(a)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "eigvals on non-square should raise same error as numpy"
+    );
+}
