@@ -315,3 +315,39 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     );
     Ok(())
 }
+
+#[test]
+fn all_complex_dtype_matches_numpy() -> Result<(), String> {
+    let test_cases = vec![
+        // All nonzero complex
+        "[1+1j, 2-1j, 3+2j]",
+        "[0.5+0.5j, 1.5-1.5j]",
+        // Contains zero complex
+        "[1+1j, 0+0j, 3+2j]",
+        "[0+0j, 0+0j]",
+        // Single element
+        "[1+1j]",
+        "[0+0j]",
+    ];
+
+    for arr_str in &test_cases {
+        let script = format!(
+            "import numpy as np; print(np.all(np.array({arr_str}, dtype=np.complex128)))"
+        );
+        let numpy_result = numpy_oracle(&script)?;
+        let numpy_val = parse_bool(&numpy_result);
+
+        let rust_script = fnp_all_script(format!(
+            "print(fnp.all(np.array({arr_str}, dtype=np.complex128)))"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+        let rust_val = parse_bool(&rust_result);
+
+        assert_eq!(
+            numpy_val, rust_val,
+            "all complex mismatch for {arr_str}\nnumpy: {numpy_val}\nrust: {rust_val}"
+        );
+    }
+
+    Ok(())
+}
