@@ -637,6 +637,38 @@ print(np.allclose(fnp_result, np_result))
     Ok(())
 }
 
+#[test]
+fn norm_zero_vector() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.zeros(5)
+fnp_result = fnp.linalg.norm(a)
+np_result = np.linalg.norm(a)
+print(fnp_result == np_result == 0.0)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "norm of zero vector should be 0");
+    Ok(())
+}
+
+#[test]
+fn norm_empty_vector() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([])
+fnp_result = fnp.linalg.norm(a)
+np_result = np.linalg.norm(a)
+print(fnp_result == np_result == 0.0)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "norm of empty vector should be 0");
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // det tests
 // ─────────────────────────────────────────────────────────────────────────────
