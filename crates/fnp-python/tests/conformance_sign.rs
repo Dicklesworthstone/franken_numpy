@@ -162,3 +162,55 @@ print(np.allclose(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "sign complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn sign_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.sign(x)
+np_result = np.sign(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sign special values should match numpy");
+    Ok(())
+}
+
+#[test]
+fn signbit_negative_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, -0.0])
+fnp_result = fnp.signbit(x)
+np_result = np.signbit(x)
+# signbit(-0.0) should be True, signbit(0.0) should be False
+print(np.array_equal(fnp_result, np_result) and fnp_result[0] == False and fnp_result[1] == True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "signbit negative zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn sign_integer_dtypes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+tests_pass = True
+for dtype in [np.int8, np.int16, np.int32, np.int64]:
+    x = np.array([-128, -1, 0, 1, 127], dtype=dtype)
+    fnp_result = fnp.sign(x)
+    np_result = np.sign(x)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sign integer dtypes should match numpy");
+    Ok(())
+}
