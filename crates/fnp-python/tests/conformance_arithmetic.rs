@@ -915,7 +915,6 @@ print(fnp_result.dtype == np_result.dtype, fnp_result.dtype, np_result.dtype)
 }
 
 #[test]
-#[ignore = "DISC-012: fnp promotes uint8+int8 to float64, numpy promotes to int16"]
 fn add_dtype_promotion_unsigned_signed() -> Result<(), String> {
     let script = fnp_script(
         r#"

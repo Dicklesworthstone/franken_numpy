@@ -14974,12 +14974,13 @@ fn native_binary_divide_or_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // Use precise dtype extraction for correct promotion
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "divide(x1)") {
+        let x1 = match extract_precise_numeric_array(py, &args.get_item(0)?, "divide(x1)") {
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "divide", args, kwargs),
         };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "divide(x2)") {
+        let x2 = match extract_precise_numeric_array(py, &args.get_item(1)?, "divide(x2)") {
             Ok(value) => value,
             Err(_) => return core_numpy_passthrough(py, "divide", args, kwargs),
         };
@@ -17088,13 +17089,13 @@ fn add(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Fast path for simple two-arg calls
+    // Fast path for simple two-arg calls - use precise dtype extraction for correct promotion
     if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "add(x1)") {
+        let x1 = match extract_precise_numeric_array(py, &args.get_item(0)?, "add(x1)") {
             Ok(arr) => arr,
             Err(_) => return core_numpy_passthrough(py, "add", args, kwargs),
         };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "add(x2)") {
+        let x2 = match extract_precise_numeric_array(py, &args.get_item(1)?, "add(x2)") {
             Ok(arr) => arr,
             Err(_) => return core_numpy_passthrough(py, "add", args, kwargs),
         };
@@ -17120,13 +17121,13 @@ fn subtract(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Fast path for simple two-arg calls
+    // Fast path for simple two-arg calls - use precise dtype extraction for correct promotion
     if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "subtract(x1)") {
+        let x1 = match extract_precise_numeric_array(py, &args.get_item(0)?, "subtract(x1)") {
             Ok(arr) => arr,
             Err(_) => return core_numpy_passthrough(py, "subtract", args, kwargs),
         };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "subtract(x2)") {
+        let x2 = match extract_precise_numeric_array(py, &args.get_item(1)?, "subtract(x2)") {
             Ok(arr) => arr,
             Err(_) => return core_numpy_passthrough(py, "subtract", args, kwargs),
         };
@@ -17152,13 +17153,13 @@ fn multiply(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Fast path for simple two-arg calls
+    // Fast path for simple two-arg calls - use precise dtype extraction for correct promotion
     if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "multiply(x1)") {
+        let x1 = match extract_precise_numeric_array(py, &args.get_item(0)?, "multiply(x1)") {
             Ok(arr) => arr,
             Err(_) => return core_numpy_passthrough(py, "multiply", args, kwargs),
         };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "multiply(x2)") {
+        let x2 = match extract_precise_numeric_array(py, &args.get_item(1)?, "multiply(x2)") {
             Ok(arr) => arr,
             Err(_) => return core_numpy_passthrough(py, "multiply", args, kwargs),
         };
