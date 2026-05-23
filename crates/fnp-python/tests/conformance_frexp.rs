@@ -115,3 +115,71 @@ print(mant_type_match and exp_type_match, fnp_mant, fnp_exp, np_mant, np_exp)
     );
     Ok(())
 }
+
+#[test]
+fn frexp_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.nan])
+fnp_mant, fnp_exp = fnp.frexp(x)
+np_mant, np_exp = np.frexp(x)
+print(np.isnan(fnp_mant[0]) and np.isnan(np_mant[0]) and fnp_exp[0] == np_exp[0])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "frexp nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn frexp_signed_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, -0.0])
+fnp_mant, fnp_exp = fnp.frexp(x)
+np_mant, np_exp = np.frexp(x)
+# Check values and sign bits match
+value_match = np.allclose(fnp_mant, np_mant) and np.array_equal(fnp_exp, np_exp)
+sign_match = np.array_equal(np.signbit(fnp_mant), np.signbit(np_mant))
+print(value_match and sign_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "frexp signed zero should match numpy");
+    Ok(())
+}
+
+#[test]
+fn frexp_subnormal() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.finfo(np.float64).tiny / 2, np.finfo(np.float64).tiny / 4])
+fnp_mant, fnp_exp = fnp.frexp(x)
+np_mant, np_exp = np.frexp(x)
+print(np.allclose(fnp_mant, np_mant) and np.array_equal(fnp_exp, np_exp))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "frexp subnormal should match numpy");
+    Ok(())
+}
+
+#[test]
+fn frexp_powers_of_two() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([2**i for i in range(-5, 10)])
+fnp_mant, fnp_exp = fnp.frexp(x)
+np_mant, np_exp = np.frexp(x)
+# For powers of 2, mantissa should be 0.5 and exp is n+1
+print(np.allclose(fnp_mant, np_mant) and np.array_equal(fnp_exp, np_exp))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "frexp powers of two should match numpy");
+    Ok(())
+}
