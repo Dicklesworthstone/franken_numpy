@@ -765,3 +765,49 @@ print(fnp_result.dtype == np_result.dtype, np.array_equal(fnp_result, np_result)
     );
     Ok(())
 }
+
+#[test]
+fn sum_large_values_overflow_matches_numpy() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+# Test overflow to inf behavior
+large = np.finfo(np.float64).max / 2
+a = np.array([large, large, large], dtype=np.float64)
+fnp_result = fnp.sum(a)
+np_result = np.sum(a)
+both_inf = np.isinf(fnp_result) and np.isinf(np_result)
+same_sign = fnp_result > 0 and np_result > 0
+print(both_inf and same_sign)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum large value overflow should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_subnormal_values_matches_numpy() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+tiny = np.finfo(np.float64).tiny
+subnormal = tiny / 2.0
+a = np.array([subnormal, subnormal, subnormal], dtype=np.float64)
+fnp_result = fnp.sum(a)
+np_result = np.sum(a)
+print(np.allclose(fnp_result, np_result, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum subnormal values should match numpy"
+    );
+    Ok(())
+}
