@@ -941,3 +941,127 @@ print(all_pass)
     );
     Ok(())
 }
+
+#[test]
+fn arcsin_complex_branch_cuts() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# arcsin branch cut: (-inf, -1) and (1, inf) on real axis
+z = np.array([
+    1.0 + 0j,
+    -1.0 + 0j,
+    1.0 + 1e-10j,
+    1.0 - 1e-10j,
+    -1.0 + 1e-10j,
+    -1.0 - 1e-10j,
+    2.0 + 0j,
+    -2.0 + 0j,
+], dtype=np.complex128)
+fnp_result = fnp.arcsin(z)
+np_result = np.arcsin(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arcsin complex branch cuts should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn arccos_complex_branch_cuts() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# arccos branch cut: same as arcsin
+z = np.array([
+    1.0 + 0j,
+    -1.0 + 0j,
+    1.0 + 1e-10j,
+    1.0 - 1e-10j,
+    2.0 + 0j,
+    -2.0 + 0j,
+], dtype=np.complex128)
+fnp_result = fnp.arccos(z)
+np_result = np.arccos(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arccos complex branch cuts should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn arctanh_complex_branch_cuts() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# arctanh branch cut: (-inf, -1] and [1, inf) on real axis
+z = np.array([
+    0.99 + 0j,
+    -0.99 + 0j,
+    1.0 + 1e-10j,
+    1.0 - 1e-10j,
+    -1.0 + 1e-10j,
+    -1.0 - 1e-10j,
+    2.0 + 0j,
+    -2.0 + 0j,
+], dtype=np.complex128)
+fnp_result = fnp.arctanh(z)
+np_result = np.arctanh(z)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arctanh complex branch cuts should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn complex_trig_inf_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Complex infinity and NaN handling
+z = np.array([
+    np.inf + 0j,
+    -np.inf + 0j,
+    0 + np.inf*1j,
+    np.nan + 0j,
+    0 + np.nan*1j,
+    np.inf + np.inf*1j,
+], dtype=np.complex128)
+tests = []
+for fnp_f, np_f in [(fnp.sin, np.sin), (fnp.cos, np.cos), (fnp.exp, np.exp)]:
+    fnp_result = fnp_f(z)
+    np_result = np_f(z)
+    fnp_nan = np.isnan(fnp_result)
+    np_nan = np.isnan(np_result)
+    fnp_inf = np.isinf(fnp_result)
+    np_inf = np.isinf(np_result)
+    tests.append(np.array_equal(fnp_nan, np_nan))
+    tests.append(np.array_equal(fnp_inf, np_inf))
+print(all(tests))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "complex trig inf/nan should match numpy"
+    );
+    Ok(())
+}
