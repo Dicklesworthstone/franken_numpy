@@ -119,6 +119,21 @@
 
 ---
 
+## DISC-010: minimum/maximum signed-zero tie selection
+
+- **Reference:** NumPy's `minimum(x1, x2)` / `maximum(x1, x2)` return x2 when values are equal
+- **Our impl:** Returns x1 when values are equal
+- **Impact:** Sign bit differs when comparing +0.0 vs -0.0:
+  - `minimum(-0.0, 0.0)`: fnp → -0.0, np → 0.0
+  - `maximum(-0.0, 0.0)`: fnp → -0.0, np → 0.0
+- **Resolution:** WILL-FIX
+- **Reason:** This blocks parallel operation safety proofs in fnp-ufunc. The `ParallelOperationEligibility::UnsafeUntilProof` annotation on min/max-family operations requires deterministic signed-zero tie selection matching NumPy for partition replay stability.
+- **Tests affected:** `minimum_signed_zero_tie_selection_parity`, `maximum_signed_zero_tie_selection_parity` (#[ignore])
+- **Review date:** 2026-05-23
+- **Investigation:** The underlying Rust `f64::min`/`f64::max` may use different tie-breaking than NumPy's C implementation. Fix requires explicit sign-aware comparison when values are equal.
+
+---
+
 ## Adding New Divergences
 
 When documenting a new divergence:
