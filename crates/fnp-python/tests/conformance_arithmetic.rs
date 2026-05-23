@@ -637,3 +637,195 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Signed-zero parity tests (critical for parallel operation safety)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn subtract_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# IEEE 754 signed-zero subtract semantics
+# 0.0 - 0.0 = 0.0, -0.0 - (-0.0) = 0.0, 0.0 - (-0.0) = 0.0, -0.0 - 0.0 = -0.0
+tests = []
+cases = [
+    (0.0, 0.0),
+    (-0.0, -0.0),
+    (0.0, -0.0),
+    (-0.0, 0.0),
+    (1.0, 1.0),    # 1.0 - 1.0 = 0.0 (positive zero)
+    (-1.0, -1.0),  # -1.0 - (-1.0) = 0.0
+]
+for a, b in cases:
+    fnp_result = fnp.subtract(np.float64(a), np.float64(b))
+    np_result = np.subtract(np.float64(a), np.float64(b))
+    # Check both value and sign bit
+    value_match = fnp_result == np_result or (np.isnan(fnp_result) and np.isnan(np_result))
+    sign_match = np.signbit(fnp_result) == np.signbit(np_result)
+    tests.append(value_match and sign_match)
+print(all(tests))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "subtract signed zero parity should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn add_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# IEEE 754 signed-zero add semantics
+# 0.0 + 0.0 = 0.0, -0.0 + (-0.0) = -0.0, 0.0 + (-0.0) = 0.0, -0.0 + 0.0 = 0.0
+tests = []
+cases = [
+    (0.0, 0.0),
+    (-0.0, -0.0),
+    (0.0, -0.0),
+    (-0.0, 0.0),
+]
+for a, b in cases:
+    fnp_result = fnp.add(np.float64(a), np.float64(b))
+    np_result = np.add(np.float64(a), np.float64(b))
+    # Check both value and sign bit
+    value_match = fnp_result == np_result
+    sign_match = np.signbit(fnp_result) == np.signbit(np_result)
+    tests.append(value_match and sign_match)
+print(all(tests))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "add signed zero parity should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn multiply_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# IEEE 754 signed-zero multiply semantics
+# Sign of result is XOR of operand signs
+tests = []
+cases = [
+    (0.0, 1.0),    # 0.0 * 1.0 = 0.0
+    (-0.0, 1.0),   # -0.0 * 1.0 = -0.0
+    (0.0, -1.0),   # 0.0 * -1.0 = -0.0
+    (-0.0, -1.0),  # -0.0 * -1.0 = 0.0
+    (0.0, 0.0),
+    (-0.0, -0.0),
+    (0.0, -0.0),
+    (-0.0, 0.0),
+]
+for a, b in cases:
+    fnp_result = fnp.multiply(np.float64(a), np.float64(b))
+    np_result = np.multiply(np.float64(a), np.float64(b))
+    value_match = fnp_result == np_result
+    sign_match = np.signbit(fnp_result) == np.signbit(np_result)
+    tests.append(value_match and sign_match)
+print(all(tests))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "multiply signed zero parity should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn divide_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+# IEEE 754 signed-zero divide semantics
+tests = []
+cases = [
+    (0.0, 1.0),    # 0.0 / 1.0 = 0.0
+    (-0.0, 1.0),   # -0.0 / 1.0 = -0.0
+    (0.0, -1.0),   # 0.0 / -1.0 = -0.0
+    (-0.0, -1.0),  # -0.0 / -1.0 = 0.0
+    (1.0, np.inf),  # 1.0 / inf = 0.0
+    (-1.0, np.inf), # -1.0 / inf = -0.0
+    (1.0, -np.inf), # 1.0 / -inf = -0.0
+    (-1.0, -np.inf), # -1.0 / -inf = 0.0
+]
+for a, b in cases:
+    fnp_result = fnp.divide(np.float64(a), np.float64(b))
+    np_result = np.divide(np.float64(a), np.float64(b))
+    value_match = fnp_result == np_result or (np.isnan(fnp_result) and np.isnan(np_result))
+    sign_match = np.signbit(fnp_result) == np.signbit(np_result)
+    tests.append(value_match and sign_match)
+print(all(tests))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divide signed zero parity should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn arithmetic_special_values_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+tests = []
+# inf arithmetic
+cases = [
+    ('add', np.inf, 1.0, np.inf),
+    ('add', -np.inf, 1.0, -np.inf),
+    ('add', np.inf, -np.inf, np.nan),
+    ('subtract', np.inf, 1.0, np.inf),
+    ('subtract', np.inf, np.inf, np.nan),
+    ('multiply', np.inf, 2.0, np.inf),
+    ('multiply', np.inf, -2.0, -np.inf),
+    ('multiply', np.inf, 0.0, np.nan),
+    ('divide', np.inf, 2.0, np.inf),
+    ('divide', 1.0, 0.0, np.inf),
+    ('divide', -1.0, 0.0, -np.inf),
+    ('divide', 0.0, 0.0, np.nan),
+]
+for op, a, b, expected in cases:
+    fnp_func = getattr(fnp, op)
+    np_func = getattr(np, op)
+    fnp_result = fnp_func(np.float64(a), np.float64(b))
+    np_result = np_func(np.float64(a), np.float64(b))
+    if np.isnan(expected):
+        match = np.isnan(fnp_result) and np.isnan(np_result)
+    elif np.isinf(expected):
+        match = np.isinf(fnp_result) and np.isinf(np_result) and np.sign(fnp_result) == np.sign(np_result)
+    else:
+        match = fnp_result == np_result
+    tests.append(match)
+print(all(tests))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arithmetic special values inf should match numpy"
+    );
+    Ok(())
+}
