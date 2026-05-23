@@ -739,6 +739,22 @@ print(np.allclose(fnp_result, 0.0) and np.allclose(np_result, 0.0))
 }
 
 #[test]
+fn det_1x1() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[5.0]], dtype=np.float64)
+fnp_result = fnp.linalg.det(a)
+np_result = np.linalg.det(a)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "det of 1x1 should match numpy");
+    Ok(())
+}
+
+#[test]
 fn det_complex() -> Result<(), String> {
     let script = fnp_script(
         r#"
