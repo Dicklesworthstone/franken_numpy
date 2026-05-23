@@ -328,3 +328,36 @@ print(fnp_result == np_result)
     assert_eq!(result.trim(), "True", "argmax complex should match numpy");
     Ok(())
 }
+
+#[test]
+fn argmax_with_nan() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+# NaN handling - numpy returns index of NaN as "max"
+a = np.array([1.0, np.nan, 3.0])
+fnp_result = fnp.argmax(a)
+np_result = np.argmax(a)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argmax nan handling should match numpy");
+    Ok(())
+}
+
+#[test]
+fn argmax_all_nan() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+a = np.array([np.nan, np.nan, np.nan])
+fnp_result = fnp.argmax(a)
+np_result = np.argmax(a)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argmax all-nan should match numpy");
+    Ok(())
+}
