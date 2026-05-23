@@ -470,3 +470,43 @@ print(len(set(shapes)) == 1)
     );
     Ok(())
 }
+
+#[test]
+fn broadcast_to_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j], dtype=np.complex128)
+fnp_result = fnp.broadcast_to(a, (3, 2))
+np_result = np.broadcast_to(a, (3, 2))
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "broadcast_to complex should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn atleast_1d_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array(1+1j, dtype=np.complex128)
+fnp_result = fnp.atleast_1d(a)
+np_result = np.atleast_1d(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "atleast_1d complex should match numpy"
+    );
+    Ok(())
+}
