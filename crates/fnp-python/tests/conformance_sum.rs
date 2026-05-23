@@ -546,3 +546,20 @@ print(np.array_equal(fnp_result, np_result) and np.array_equal(out, np_out))
     assert_eq!(result.trim(), "True", "sum with out parameter should match numpy");
     Ok(())
 }
+
+#[test]
+fn sum_with_where_parameter() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([1, 2, 3, 4, 5])
+mask = np.array([True, False, True, False, True])
+fnp_result = fnp.sum(a, where=mask)
+np_result = np.sum(a, where=mask)
+print(fnp_result == np_result == 9)  # 1 + 3 + 5
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sum with where parameter should match numpy");
+    Ok(())
+}
