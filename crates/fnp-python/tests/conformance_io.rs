@@ -428,3 +428,63 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+#[test]
+fn genfromtxt_negative_usecols_last_column() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+data = "1,2,3,4\n5,6,7,8"
+result = fnp.genfromtxt(StringIO(data), delimiter=',', usecols=-1)
+expected = np.genfromtxt(StringIO(data), delimiter=',', usecols=-1)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "genfromtxt with usecols=-1 should select last column"
+    );
+    Ok(())
+}
+
+#[test]
+fn genfromtxt_negative_usecols_mixed_order() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+data = "1,2,3,4\n5,6,7,8"
+result = fnp.genfromtxt(StringIO(data), delimiter=',', usecols=(-1, 0))
+expected = np.genfromtxt(StringIO(data), delimiter=',', usecols=(-1, 0))
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "genfromtxt with usecols=(-1, 0) should select last then first"
+    );
+    Ok(())
+}
+
+#[test]
+fn genfromtxt_negative_usecols_third_from_last() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+data = "1,2,3,4\n5,6,7,8"
+result = fnp.genfromtxt(StringIO(data), delimiter=',', usecols=-3)
+expected = np.genfromtxt(StringIO(data), delimiter=',', usecols=-3)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "genfromtxt with usecols=-3 should select third from last"
+    );
+    Ok(())
+}
