@@ -623,10 +623,13 @@ pub fn solve_nxn(a: &[f64], b: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError
 /// Determinant of an NxN matrix (flat row-major).  Returns 0.0 for singular
 /// matrices instead of erroring.
 pub fn det_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
-    if Some(a.len()) != n.checked_mul(n) || n == 0 {
+    if Some(a.len()) != n.checked_mul(n) {
         return Err(LinAlgError::ShapeContractViolation(
-            "det_nxn: input must be n*n with n > 0",
+            "det_nxn: input length must equal n*n",
         ));
+    }
+    if n == 0 {
+        return Ok(1.0);
     }
 
     match lu_decompose_for_det(a, n) {
@@ -644,10 +647,13 @@ pub fn det_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
 
 /// Sign and log-absolute-determinant for an NxN matrix.
 pub fn slogdet_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
-    if Some(a.len()) != n.checked_mul(n) || n == 0 {
+    if Some(a.len()) != n.checked_mul(n) {
         return Err(LinAlgError::ShapeContractViolation(
-            "slogdet_nxn: input must be n*n with n > 0",
+            "slogdet_nxn: input length must equal n*n",
         ));
+    }
+    if n == 0 {
+        return Ok((1.0, 0.0));
     }
 
     match lu_decompose_for_det(a, n) {
@@ -6663,6 +6669,19 @@ mod tests {
         let a_sing = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0];
         let d_sing = det_nxn(&a_sing, 3).expect("singular det");
         assert!(approx_equal(d_sing, 0.0, 1e-10));
+    }
+
+    #[test]
+    fn det_empty_matrix_returns_one() {
+        let d0 = det_nxn(&[], 0).expect("empty det");
+        assert_eq!(d0, 1.0);
+    }
+
+    #[test]
+    fn slogdet_empty_matrix_returns_sign_one_logdet_zero() {
+        let (sign, logdet) = slogdet_nxn(&[], 0).expect("empty slogdet");
+        assert_eq!(sign, 1.0);
+        assert_eq!(logdet, 0.0);
     }
 
     #[test]
