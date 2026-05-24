@@ -206,6 +206,34 @@ impl PyUFunc {
         np_ufunc.getattr("types").map(|v| v.unbind())
     }
 
+    #[getter]
+    fn signature(&self, py: Python<'_>) -> Py<PyAny> {
+        py.None()
+    }
+
+    #[pyo3(signature = (dtypes, *, signature=None, casting=None))]
+    fn resolve_dtypes(
+        &self,
+        py: Python<'_>,
+        dtypes: Py<PyAny>,
+        signature: Option<Py<PyAny>>,
+        casting: Option<&str>,
+    ) -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let kwargs = PyDict::new(py);
+        if let Some(sig) = signature.as_ref() {
+            kwargs.set_item("signature", sig.bind(py))?;
+        }
+        if let Some(c) = casting {
+            kwargs.set_item("casting", c)?;
+        }
+        Ok(np_ufunc
+            .getattr("resolve_dtypes")?
+            .call((dtypes.bind(py),), Some(&kwargs))?
+            .unbind())
+    }
+
     fn __repr__(&self) -> String {
         format!("<ufunc '{}'>", self.kind.name())
     }
