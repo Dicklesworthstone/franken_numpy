@@ -84,6 +84,266 @@ pub struct PyFromPyFunc {
     nout: usize,
 }
 
+#[derive(Clone, Copy)]
+enum UFuncKind {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    FloorDivide,
+    Remainder,
+    Power,
+    Maximum,
+    Minimum,
+    BitwiseAnd,
+    BitwiseOr,
+    BitwiseXor,
+    LogicalAnd,
+    LogicalOr,
+    LogicalXor,
+}
+
+impl UFuncKind {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Subtract => "subtract",
+            Self::Multiply => "multiply",
+            Self::Divide => "divide",
+            Self::FloorDivide => "floor_divide",
+            Self::Remainder => "remainder",
+            Self::Power => "power",
+            Self::Maximum => "maximum",
+            Self::Minimum => "minimum",
+            Self::BitwiseAnd => "bitwise_and",
+            Self::BitwiseOr => "bitwise_or",
+            Self::BitwiseXor => "bitwise_xor",
+            Self::LogicalAnd => "logical_and",
+            Self::LogicalOr => "logical_or",
+            Self::LogicalXor => "logical_xor",
+        }
+    }
+
+    fn binary_op(self) -> BinaryOp {
+        match self {
+            Self::Add => BinaryOp::Add,
+            Self::Subtract => BinaryOp::Sub,
+            Self::Multiply => BinaryOp::Mul,
+            Self::Divide => BinaryOp::Div,
+            Self::FloorDivide => BinaryOp::FloorDivide,
+            Self::Remainder => BinaryOp::Remainder,
+            Self::Power => BinaryOp::Power,
+            Self::Maximum => BinaryOp::Maximum,
+            Self::Minimum => BinaryOp::Minimum,
+            Self::BitwiseAnd => BinaryOp::BitwiseAnd,
+            Self::BitwiseOr => BinaryOp::BitwiseOr,
+            Self::BitwiseXor => BinaryOp::BitwiseXor,
+            Self::LogicalAnd => BinaryOp::LogicalAnd,
+            Self::LogicalOr => BinaryOp::LogicalOr,
+            Self::LogicalXor => BinaryOp::LogicalXor,
+        }
+    }
+
+    fn identity(self) -> Option<f64> {
+        match self {
+            Self::Add => Some(0.0),
+            Self::Multiply => Some(1.0),
+            Self::Maximum => None,
+            Self::Minimum => None,
+            Self::BitwiseAnd => None,
+            Self::BitwiseOr => Some(0.0),
+            Self::BitwiseXor => Some(0.0),
+            Self::LogicalAnd => Some(1.0),
+            Self::LogicalOr => Some(0.0),
+            Self::LogicalXor => Some(0.0),
+            _ => None,
+        }
+    }
+}
+
+#[pyclass(name = "ufunc", skip_from_py_object)]
+#[derive(Clone)]
+pub struct PyUFunc {
+    kind: UFuncKind,
+}
+
+#[pymethods]
+impl PyUFunc {
+    #[getter]
+    fn nin(&self) -> usize {
+        2
+    }
+
+    #[getter]
+    fn nout(&self) -> usize {
+        1
+    }
+
+    #[getter]
+    fn nargs(&self) -> usize {
+        3
+    }
+
+    #[getter]
+    fn identity(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        Ok(match self.kind.identity() {
+            Some(v) if v == 0.0 => 0i64.into_pyobject(py)?.into_any().unbind(),
+            Some(v) if v == 1.0 => 1i64.into_pyobject(py)?.into_any().unbind(),
+            Some(v) => v.into_pyobject(py)?.into_any().unbind(),
+            None => py.None(),
+        })
+    }
+
+    #[getter]
+    fn ntypes(&self) -> usize {
+        22
+    }
+
+    #[getter]
+    fn types(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let np_ufunc = numpy.getattr(self.kind.name())?;
+        np_ufunc.getattr("types").map(|v| v.unbind())
+    }
+
+    fn __repr__(&self) -> String {
+        format!("<ufunc '{}'>", self.kind.name())
+    }
+
+    #[pyo3(signature = (*args, **kwargs))]
+    fn __call__(
+        &self,
+        py: Python<'_>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let np_ufunc = numpy.getattr(self.kind.name())?;
+        Ok(np_ufunc.call(args, kwargs)?.unbind())
+    }
+
+    #[pyo3(signature = (array, axis=None, dtype=None, out=None, keepdims=false, initial=None, where_arg=None))]
+    fn reduce(
+        &self,
+        py: Python<'_>,
+        array: Py<PyAny>,
+        axis: Option<Py<PyAny>>,
+        dtype: Option<Py<PyAny>>,
+        out: Option<Py<PyAny>>,
+        keepdims: bool,
+        initial: Option<Py<PyAny>>,
+        where_arg: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let kwargs = PyDict::new(py);
+        if let Some(a) = axis.as_ref() {
+            kwargs.set_item("axis", a.bind(py))?;
+        }
+        if let Some(d) = dtype.as_ref() {
+            kwargs.set_item("dtype", d.bind(py))?;
+        }
+        if let Some(o) = out.as_ref() {
+            kwargs.set_item("out", o.bind(py))?;
+        }
+        kwargs.set_item("keepdims", keepdims)?;
+        if let Some(i) = initial.as_ref() {
+            kwargs.set_item("initial", i.bind(py))?;
+        }
+        if let Some(w) = where_arg.as_ref() {
+            kwargs.set_item("where", w.bind(py))?;
+        }
+        Ok(np_ufunc
+            .getattr("reduce")?
+            .call((array.bind(py),), Some(&kwargs))?
+            .unbind())
+    }
+
+    #[pyo3(signature = (array, axis=0, dtype=None, out=None))]
+    fn accumulate(
+        &self,
+        py: Python<'_>,
+        array: Py<PyAny>,
+        axis: i64,
+        dtype: Option<Py<PyAny>>,
+        out: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", axis)?;
+        if let Some(d) = dtype.as_ref() {
+            kwargs.set_item("dtype", d.bind(py))?;
+        }
+        if let Some(o) = out.as_ref() {
+            kwargs.set_item("out", o.bind(py))?;
+        }
+        Ok(np_ufunc
+            .getattr("accumulate")?
+            .call((array.bind(py),), Some(&kwargs))?
+            .unbind())
+    }
+
+    #[pyo3(signature = (a, b, **kwargs))]
+    fn outer(
+        &self,
+        py: Python<'_>,
+        a: Py<PyAny>,
+        b: Py<PyAny>,
+        kwargs: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let np_ufunc = numpy.getattr(self.kind.name())?;
+        Ok(np_ufunc
+            .getattr("outer")?
+            .call((a.bind(py), b.bind(py)), kwargs)?
+            .unbind())
+    }
+
+    #[pyo3(signature = (array, indices, axis=0, dtype=None, out=None))]
+    fn reduceat(
+        &self,
+        py: Python<'_>,
+        array: Py<PyAny>,
+        indices: Py<PyAny>,
+        axis: i64,
+        dtype: Option<Py<PyAny>>,
+        out: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", axis)?;
+        if let Some(d) = dtype.as_ref() {
+            kwargs.set_item("dtype", d.bind(py))?;
+        }
+        if let Some(o) = out.as_ref() {
+            kwargs.set_item("out", o.bind(py))?;
+        }
+        Ok(np_ufunc
+            .getattr("reduceat")?
+            .call((array.bind(py), indices.bind(py)), Some(&kwargs))?
+            .unbind())
+    }
+
+    #[pyo3(signature = (a, indices, b=None))]
+    fn at(
+        &self,
+        py: Python<'_>,
+        a: Py<PyAny>,
+        indices: Py<PyAny>,
+        b: Option<Py<PyAny>>,
+    ) -> PyResult<Py<PyAny>> {
+        let numpy = py.import("numpy")?;
+        let np_ufunc = numpy.getattr(self.kind.name())?;
+        let args = match b {
+            Some(b_val) => PyTuple::new(py, [a.bind(py), indices.bind(py), b_val.bind(py)])?,
+            None => PyTuple::new(py, [a.bind(py), indices.bind(py)])?,
+        };
+        Ok(np_ufunc.getattr("at")?.call1(args)?.unbind())
+    }
+}
+
 enum VectorizeArgSlot {
     Fixed(Py<PyAny>),
     PendingArray(Py<PyAny>),
@@ -26257,7 +26517,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(negative, m)?)?;
     m.add_function(wrap_pyfunction!(real, m)?)?;
     m.add_function(wrap_pyfunction!(imag, m)?)?;
-    m.add_function(wrap_pyfunction!(floor_divide, m)?)?;
+    m.add("floor_divide", Py::new(py, PyUFunc { kind: UFuncKind::FloorDivide })?)?;
     m.add_function(wrap_pyfunction!(invert, m)?)?;
     m.add_function(wrap_pyfunction!(unwrap, m)?)?;
     m.add_function(wrap_pyfunction!(polyder, m)?)?;
@@ -26376,9 +26636,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(linalg_matrix_norm, m)?)?;
     m.add_function(wrap_pyfunction!(py_abs, m)?)?;
     m.add_function(wrap_pyfunction!(absolute, m)?)?;
-    m.add_function(wrap_pyfunction!(add, m)?)?;
-    m.add_function(wrap_pyfunction!(subtract, m)?)?;
-    m.add_function(wrap_pyfunction!(multiply, m)?)?;
+    m.add("add", Py::new(py, PyUFunc { kind: UFuncKind::Add })?)?;
+    m.add("subtract", Py::new(py, PyUFunc { kind: UFuncKind::Subtract })?)?;
+    m.add("multiply", Py::new(py, PyUFunc { kind: UFuncKind::Multiply })?)?;
     m.add_function(wrap_pyfunction!(sin, m)?)?;
     m.add_function(wrap_pyfunction!(cos, m)?)?;
     m.add_function(wrap_pyfunction!(log, m)?)?;
@@ -26567,8 +26827,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(unique, m)?)?;
     m.add_function(wrap_pyfunction!(concat, m)?)?;
     m.add_function(wrap_pyfunction!(conj, m)?)?;
-    m.add_function(wrap_pyfunction!(divide, m)?)?;
-    m.add_function(wrap_pyfunction!(power, m)?)?;
+    m.add("divide", Py::new(py, PyUFunc { kind: UFuncKind::Divide })?)?;
+    m.add("power", Py::new(py, PyUFunc { kind: UFuncKind::Power })?)?;
     m.add_function(wrap_pyfunction!(log2, m)?)?;
     m.add_function(wrap_pyfunction!(log10, m)?)?;
     m.add_function(wrap_pyfunction!(exp2, m)?)?;
@@ -26582,14 +26842,14 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(atan2, m)?)?;
     m.add_function(wrap_pyfunction!(atanh, m)?)?;
     m.add_function(wrap_pyfunction!(tan, m)?)?;
-    m.add_function(wrap_pyfunction!(bitwise_and, m)?)?;
+    m.add("bitwise_and", Py::new(py, PyUFunc { kind: UFuncKind::BitwiseAnd })?)?;
     m.add_function(wrap_pyfunction!(bitwise_count, m)?)?;
     m.add_function(wrap_pyfunction!(bitwise_invert, m)?)?;
     m.add_function(wrap_pyfunction!(bitwise_left_shift, m)?)?;
     m.add_function(wrap_pyfunction!(bitwise_not, m)?)?;
-    m.add_function(wrap_pyfunction!(bitwise_or, m)?)?;
+    m.add("bitwise_or", Py::new(py, PyUFunc { kind: UFuncKind::BitwiseOr })?)?;
     m.add_function(wrap_pyfunction!(bitwise_right_shift, m)?)?;
-    m.add_function(wrap_pyfunction!(bitwise_xor, m)?)?;
+    m.add("bitwise_xor", Py::new(py, PyUFunc { kind: UFuncKind::BitwiseXor })?)?;
     m.add_function(wrap_pyfunction!(left_shift, m)?)?;
     m.add_function(wrap_pyfunction!(right_shift, m)?)?;
     m.add_function(wrap_pyfunction!(gcd, m)?)?;
@@ -26600,18 +26860,18 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(greater_equal, m)?)?;
     m.add_function(wrap_pyfunction!(less, m)?)?;
     m.add_function(wrap_pyfunction!(less_equal, m)?)?;
-    m.add_function(wrap_pyfunction!(logical_and, m)?)?;
+    m.add("logical_and", Py::new(py, PyUFunc { kind: UFuncKind::LogicalAnd })?)?;
     m.add_function(wrap_pyfunction!(logical_not, m)?)?;
-    m.add_function(wrap_pyfunction!(logical_or, m)?)?;
-    m.add_function(wrap_pyfunction!(logical_xor, m)?)?;
+    m.add("logical_or", Py::new(py, PyUFunc { kind: UFuncKind::LogicalOr })?)?;
+    m.add("logical_xor", Py::new(py, PyUFunc { kind: UFuncKind::LogicalXor })?)?;
     m.add_function(wrap_pyfunction!(fmax, m)?)?;
     m.add_function(wrap_pyfunction!(fmin, m)?)?;
-    m.add_function(wrap_pyfunction!(maximum, m)?)?;
-    m.add_function(wrap_pyfunction!(minimum, m)?)?;
+    m.add("maximum", Py::new(py, PyUFunc { kind: UFuncKind::Maximum })?)?;
+    m.add("minimum", Py::new(py, PyUFunc { kind: UFuncKind::Minimum })?)?;
     m.add_function(wrap_pyfunction!(float_power, m)?)?;
     m.add_function(wrap_pyfunction!(divmod, m)?)?;
     m.add_function(wrap_pyfunction!(py_mod, m)?)?;
-    m.add_function(wrap_pyfunction!(remainder, m)?)?;
+    m.add("remainder", Py::new(py, PyUFunc { kind: UFuncKind::Remainder })?)?;
     m.add_function(wrap_pyfunction!(isnat, m)?)?;
     m.add_function(wrap_pyfunction!(ptp, m)?)?;
     m.add_function(wrap_pyfunction!(vecmat, m)?)?;
@@ -69489,6 +69749,86 @@ mod tests {
                 "ufunc special-value divergences from numpy ({} total):\n  {}",
                 divergences.len(),
                 divergences.join("\n  ")
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ufunc_methods_reduce_accumulate_outer_at_match_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test_ufunc_methods")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array_equal = numpy.getattr("array_equal")?;
+
+            let fnp_add = module.getattr("add")?;
+            let np_add = numpy.getattr("add")?;
+
+            let a1d = numpy.call_method1("array", (vec![1, 2, 3, 4],))?;
+            let a2d = numpy.call_method1("array", (vec![vec![1, 2], vec![3, 4]],))?;
+
+            assert!(
+                fnp_add.getattr("nin")?.extract::<usize>()? == 2,
+                "ufunc nin should be 2"
+            );
+            assert!(
+                fnp_add.getattr("nout")?.extract::<usize>()? == 1,
+                "ufunc nout should be 1"
+            );
+
+            let fnp_reduce = fnp_add.call_method1("reduce", (&a1d,))?;
+            let np_reduce = np_add.call_method1("reduce", (&a1d,))?;
+            assert!(
+                array_equal.call1((&fnp_reduce, &np_reduce))?.extract::<bool>()?,
+                "reduce mismatch"
+            );
+
+            let kwargs_axis0 = PyDict::new(py);
+            kwargs_axis0.set_item("axis", 0)?;
+            let fnp_reduce_axis = fnp_add.call_method("reduce", (&a2d,), Some(&kwargs_axis0))?;
+            let np_reduce_axis = np_add.call_method("reduce", (&a2d,), Some(&kwargs_axis0))?;
+            assert!(
+                array_equal.call1((&fnp_reduce_axis, &np_reduce_axis))?.extract::<bool>()?,
+                "reduce axis mismatch"
+            );
+
+            let fnp_accum = fnp_add.call_method1("accumulate", (&a1d,))?;
+            let np_accum = np_add.call_method1("accumulate", (&a1d,))?;
+            assert!(
+                array_equal.call1((&fnp_accum, &np_accum))?.extract::<bool>()?,
+                "accumulate mismatch"
+            );
+
+            let arr1 = numpy.call_method1("array", (vec![1, 2],))?;
+            let arr2 = numpy.call_method1("array", (vec![3, 4],))?;
+            let fnp_outer = fnp_add.call_method1("outer", (&arr1, &arr2))?;
+            let np_outer = np_add.call_method1("outer", (&arr1, &arr2))?;
+            assert!(
+                array_equal.call1((&fnp_outer, &np_outer))?.extract::<bool>()?,
+                "outer mismatch"
+            );
+
+            let arr_at = numpy.call_method1("array", (vec![1, 2, 3, 4],))?;
+            fnp_add.call_method1("at", (&arr_at, vec![0, 2], 10))?;
+            let arr_np = numpy.call_method1("array", (vec![1, 2, 3, 4],))?;
+            np_add.call_method1("at", (&arr_np, vec![0, 2], 10))?;
+            assert!(
+                array_equal.call1((&arr_at, &arr_np))?.extract::<bool>()?,
+                "at mismatch"
+            );
+
+            let fnp_multiply = module.getattr("multiply")?;
+            let np_multiply = numpy.getattr("multiply")?;
+            let fnp_mul_reduce = fnp_multiply.call_method1("reduce", (&a1d,))?;
+            let np_mul_reduce = np_multiply.call_method1("reduce", (&a1d,))?;
+            assert!(
+                array_equal.call1((&fnp_mul_reduce, &np_mul_reduce))?.extract::<bool>()?,
+                "multiply reduce mismatch"
             );
 
             Ok(())
