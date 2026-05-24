@@ -723,9 +723,7 @@ impl BinaryOp {
             Self::Fmax => {
                 if lhs.is_nan() {
                     rhs
-                } else if rhs.is_nan() {
-                    lhs
-                } else if lhs > rhs {
+                } else if rhs.is_nan() || lhs > rhs {
                     lhs
                 } else {
                     rhs
@@ -734,9 +732,7 @@ impl BinaryOp {
             Self::Fmin => {
                 if lhs.is_nan() {
                     rhs
-                } else if rhs.is_nan() {
-                    lhs
-                } else if lhs < rhs {
+                } else if rhs.is_nan() || lhs < rhs {
                     lhs
                 } else {
                     rhs
@@ -32531,9 +32527,7 @@ pub fn fmax(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> 
         .map(|(&a, &b)| {
             if a.is_nan() {
                 b
-            } else if b.is_nan() {
-                a
-            } else if a > b {
+            } else if b.is_nan() || a > b {
                 a
             } else {
                 // Return second argument when equal (NumPy SIMD behavior for signed zeros)
@@ -32564,9 +32558,7 @@ pub fn fmin(x1: &UFuncArray, x2: &UFuncArray) -> Result<UFuncArray, UFuncError> 
         .map(|(&a, &b)| {
             if a.is_nan() {
                 b
-            } else if b.is_nan() {
-                a
-            } else if a < b {
+            } else if b.is_nan() || a < b {
                 a
             } else {
                 // Return second argument when equal (NumPy SIMD behavior for signed zeros)
