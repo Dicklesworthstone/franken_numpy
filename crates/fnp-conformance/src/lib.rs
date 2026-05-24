@@ -19737,7 +19737,9 @@ fn generate_rng_samples(
         "f_distribution" => {
             map_fallible_random_values(generator.f_distribution(case.param_a, case.param_b, draws))
         }
-        "standard_t" => Ok(generator.standard_t(case.param_a, draws)),
+        "standard_t" => {
+            map_fallible_random_values(generator.standard_t(case.param_a, draws))
+        }
         "noncentral_chisquare" => map_fallible_random_values(generator.noncentral_chisquare(
             case.param_a,
             case.param_b,
@@ -19770,7 +19772,9 @@ fn generate_rng_samples(
         "zipf" => generator
             .zipf(case.param_a, draws)
             .map_err(|e| RngSuiteError::new("parameter_violation", e.to_string())),
-        "wald" => Ok(generator.wald(case.param_a, case.param_b, draws)),
+        "wald" => {
+            map_fallible_random_values(generator.wald(case.param_a, case.param_b, draws))
+        }
         "logseries" => generator
             .logseries(case.param_a, draws)
             .map(|vals| vals.into_iter().map(|v| v as f64).collect())
@@ -22611,7 +22615,7 @@ mod tests {
         );
         check_seq!(
             "standard_t(5)",
-            |g: &mut Generator| g.standard_t(5.0, 5),
+            |g: &mut Generator| g.standard_t(5.0, 5).unwrap(),
             [
                 5.00833320479618593e-1,
                 8.31263707118225392e-1,
@@ -22677,7 +22681,7 @@ mod tests {
         );
         check_seq!(
             "wald(3,2)",
-            |g: &mut Generator| g.wald(3.0, 2.0, 5),
+            |g: &mut Generator| g.wald(3.0, 2.0, 5).unwrap(),
             [
                 1.38174906568860378e0,
                 5.94694599526367829e-1,

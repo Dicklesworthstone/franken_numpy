@@ -531,7 +531,13 @@ fn conformance_slogdet_negative_2x2() {
     let (sign, logdet) = slogdet_2x2(a).expect("slogdet negative 2x2");
     // det = -2, so sign = -1, logdet = ln(2) ≈ 0.693
     assert_scalar_close("slogdet negative 2x2 sign", sign, -1.0, 1e-14, 1e-14);
-    assert_scalar_close("slogdet negative 2x2 logdet", logdet, 2.0_f64.ln(), 1e-10, 1e-12);
+    assert_scalar_close(
+        "slogdet negative 2x2 logdet",
+        logdet,
+        2.0_f64.ln(),
+        1e-10,
+        1e-12,
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -551,7 +557,10 @@ fn conformance_det_singular_3x3() {
     // Linearly dependent rows: third row = first + second
     let a: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 5.0, 7.0, 9.0];
     let det = det_nxn(&a, 3).expect("det singular 3x3");
-    assert!(det.abs() < 1e-10, "det singular 3x3 should be ~0, got {det}");
+    assert!(
+        det.abs() < 1e-10,
+        "det singular 3x3 should be ~0, got {det}"
+    );
 }
 
 #[test]
@@ -639,7 +648,13 @@ fn conformance_slogdet_large_values_2x2() {
     // det = 1e300, sign = 1, logdet = ln(1e300) = 300 * ln(10) ≈ 690.78
     assert_scalar_close("slogdet large values sign", sign, 1.0, 1e-14, 1e-14);
     let expected_logdet = 300.0 * 10.0_f64.ln();
-    assert_scalar_close("slogdet large values logdet", logdet, expected_logdet, 1e-10, 1e-8);
+    assert_scalar_close(
+        "slogdet large values logdet",
+        logdet,
+        expected_logdet,
+        1e-10,
+        1e-8,
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -657,21 +672,26 @@ fn conformance_det_nearly_singular_2x2() {
 #[test]
 fn conformance_det_nearly_singular_3x3() {
     let epsilon = 1e-12;
-    let a: Vec<f64> = vec![
-        1.0, 2.0, 3.0,
-        4.0, 5.0, 6.0,
-        7.0, 8.0, 9.0 + epsilon,
-    ];
+    let a: Vec<f64> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0 + epsilon];
     let det = det_nxn(&a, 3).expect("det nearly singular 3x3");
-    assert!(det.abs() < 1e-10, "det nearly singular 3x3 should be near zero");
+    assert!(
+        det.abs() < 1e-10,
+        "det nearly singular 3x3 should be near zero"
+    );
 }
 
 #[test]
 fn conformance_inv_hilbert_3x3() {
     let hilbert: Vec<f64> = vec![
-        1.0, 1.0/2.0, 1.0/3.0,
-        1.0/2.0, 1.0/3.0, 1.0/4.0,
-        1.0/3.0, 1.0/4.0, 1.0/5.0,
+        1.0,
+        1.0 / 2.0,
+        1.0 / 3.0,
+        1.0 / 2.0,
+        1.0 / 3.0,
+        1.0 / 4.0,
+        1.0 / 3.0,
+        1.0 / 4.0,
+        1.0 / 5.0,
     ];
     let inv = inv_nxn(&hilbert, 3).expect("inv hilbert 3x3");
     let mut product = vec![0.0; 9];
