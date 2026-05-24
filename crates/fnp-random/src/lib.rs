@@ -4809,14 +4809,18 @@ impl Generator {
     }
 
     /// Student's t-distribution with `df` degrees of freedom.
-    pub fn standard_t(&mut self, df: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    /// Returns `Err(InvalidParameter)` if `df <= 0` (including -0.0).
+    pub fn standard_t(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if df <= 0.0 || df.is_sign_negative() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let z = self.sample_standard_normal_single();
                 let chi2 = self.sample_gamma(df / 2.0) * 2.0;
                 z / (chi2 / df).sqrt()
             })
-            .collect()
+            .collect())
     }
 
     /// Non-central chi-squared distribution (scipy.stats.ncx2).
@@ -5162,8 +5166,12 @@ impl Generator {
     }
 
     /// Wald (inverse Gaussian) distribution (matching NumPy's algorithm).
-    pub fn wald(&mut self, mean: f64, scale: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    /// Returns `Err(InvalidParameter)` if `mean <= 0` or `scale <= 0` (including -0.0).
+    pub fn wald(&mut self, mean: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if mean <= 0.0 || mean.is_sign_negative() || scale <= 0.0 || scale.is_sign_negative() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let y = self.sample_ziggurat_normal();
                 let y = mean * y * y;
@@ -5176,7 +5184,7 @@ impl Generator {
                     mean * mean / x
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Logarithmic (log-series) distribution (matching NumPy's algorithm).
@@ -9567,9 +9575,17 @@ for child in rng.spawn(n_children):
     #[test]
     fn standard_t_symmetric_around_zero() {
         let mut rng = test_generator();
-        let samples = rng.standard_t(10.0, 5000);
+        let samples = rng.standard_t(10.0, 5000).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
         assert!(mean.abs() < 0.15, "t mean={mean}");
+    }
+
+    #[test]
+    fn standard_t_rejects_nonpositive_df() {
+        let mut rng = test_generator();
+        assert!(rng.standard_t(0.0, 1).is_err(), "df=0 should fail");
+        assert!(rng.standard_t(-1.0, 1).is_err(), "df<0 should fail");
+        assert!(rng.standard_t(-0.0, 1).is_err(), "df=-0.0 should fail");
     }
 
     #[test]
@@ -9755,12 +9771,23 @@ for child in rng.spawn(n_children):
     fn wald_positive_and_expected_mean() {
         let mut rng = test_generator();
         let mu = 2.0;
-        let samples = rng.wald(mu, 5.0, 5000);
+        let samples = rng.wald(mu, 5.0, 5000).unwrap();
         for &s in &samples {
             assert!(s > 0.0, "wald values must be positive");
         }
         let mean = samples.iter().sum::<f64>() / 5000.0;
         assert!((mean - mu).abs() < 0.3, "wald mean={mean}, expected ~{mu}");
+    }
+
+    #[test]
+    fn wald_rejects_invalid_mean_and_scale() {
+        let mut rng = test_generator();
+        assert!(rng.wald(0.0, 1.0, 1).is_err(), "mean=0 should fail");
+        assert!(rng.wald(-1.0, 1.0, 1).is_err(), "mean<0 should fail");
+        assert!(rng.wald(-0.0, 1.0, 1).is_err(), "mean=-0.0 should fail");
+        assert!(rng.wald(1.0, 0.0, 1).is_err(), "scale=0 should fail");
+        assert!(rng.wald(1.0, -1.0, 1).is_err(), "scale<0 should fail");
+        assert!(rng.wald(1.0, -0.0, 1).is_err(), "scale=-0.0 should fail");
     }
 
     #[test]
@@ -11763,7 +11790,7 @@ for child in rng.spawn(n_children):
     #[test]
     fn oracle_wald() {
         let mut g = oracle_gen();
-        let vals = g.wald(3.0, 2.0, 10);
+        let vals = g.wald(3.0, 2.0, 10).unwrap();
         let expected = [
             1.3817490656886038,
             0.5946945995263678,
@@ -11937,7 +11964,7 @@ for child in rng.spawn(n_children):
     #[test]
     fn oracle_standard_t() {
         let mut g = oracle_gen();
-        let vals = g.standard_t(5.0, 10);
+        let vals = g.standard_t(5.0, 10).unwrap();
         let expected = [
             0.5008333204796186,
             0.8312637071182254,

@@ -769,12 +769,12 @@ impl PyRandomGenerator {
         df: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        if df <= 0.0 {
-            return Err(PyValueError::new_err("df <= 0"));
-        }
         let size = random_size_from_py(py, size, "Generator.standard_t(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.standard_t(df, len);
+        let values = self
+            .inner
+            .standard_t(df, len)
+            .map_err(|_| PyValueError::new_err("df <= 0"))?;
         build_random_f64_parts(py, shape, values, scalar)
     }
 
@@ -850,15 +850,15 @@ impl PyRandomGenerator {
         scale: f64,
         size: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        if mean <= 0.0 {
-            return Err(PyValueError::new_err("mean <= 0"));
-        }
-        if scale <= 0.0 {
-            return Err(PyValueError::new_err("scale <= 0"));
-        }
         let size = random_size_from_py(py, size, "Generator.wald(size)")?;
         let (shape, len, scalar) = random_len_and_shape(size)?;
-        let values = self.inner.wald(mean, scale, len);
+        let values = self.inner.wald(mean, scale, len).map_err(|_| {
+            if mean <= 0.0 || mean.is_sign_negative() {
+                PyValueError::new_err("mean <= 0")
+            } else {
+                PyValueError::new_err("scale <= 0")
+            }
+        })?;
         build_random_f64_parts(py, shape, values, scalar)
     }
 
