@@ -86,7 +86,7 @@
   },
   {
     "id": "dtype002_adv_unknown_lhs_string",
-    "lhs": "str_",
+    "lhs": "stringtype",
     "rhs": "bool",
     "expected_error_contains": "unknown lhs dtype",
     "expected_reason_code": "dtype_normalization_failed",
