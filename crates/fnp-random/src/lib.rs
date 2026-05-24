@@ -365,6 +365,16 @@ impl std::error::Error for RngConstructorError {}
 pub enum RandomError {
     InvalidUpperBound,
     InvalidParameter,
+    ScaleNegative,
+    ShapeNegative,
+    AlphaNonPositive,
+    BetaNonPositive,
+    DfNonPositive,
+    POutOfRange,
+    NNonPositive,
+    HighMinusLowNegative,
+    MeanNonPositive,
+    LamNonPositive,
 }
 
 impl RandomError {
@@ -372,7 +382,17 @@ impl RandomError {
     pub const fn reason_code(self) -> &'static str {
         match self {
             Self::InvalidUpperBound => "random_upper_bound_rejected",
-            Self::InvalidParameter => "random_invalid_parameter",
+            Self::InvalidParameter
+            | Self::ScaleNegative
+            | Self::ShapeNegative
+            | Self::AlphaNonPositive
+            | Self::BetaNonPositive
+            | Self::DfNonPositive
+            | Self::POutOfRange
+            | Self::NNonPositive
+            | Self::HighMinusLowNegative
+            | Self::MeanNonPositive
+            | Self::LamNonPositive => "random_invalid_parameter",
         }
     }
 }
@@ -385,6 +405,16 @@ impl std::fmt::Display for RandomError {
                 f,
                 "parameter is out of valid bounds (e.g. negative variance or invalid probability)"
             ),
+            Self::ScaleNegative => write!(f, "scale < 0"),
+            Self::ShapeNegative => write!(f, "shape < 0"),
+            Self::AlphaNonPositive => write!(f, "a <= 0"),
+            Self::BetaNonPositive => write!(f, "b <= 0"),
+            Self::DfNonPositive => write!(f, "df <= 0"),
+            Self::POutOfRange => write!(f, "p < 0, p > 1 or p is NaN"),
+            Self::NNonPositive => write!(f, "n <= 0"),
+            Self::HighMinusLowNegative => write!(f, "high - low < 0"),
+            Self::MeanNonPositive => write!(f, "mean <= 0"),
+            Self::LamNonPositive => write!(f, "lam < 0"),
         }
     }
 }
@@ -2519,7 +2549,7 @@ impl RandomState {
 
     pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
         Ok(self
             .standard_normal(size)
@@ -2558,7 +2588,7 @@ impl RandomState {
 
     pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
         Ok(self
             .standard_exponential(size)
@@ -2569,7 +2599,7 @@ impl RandomState {
 
     pub fn standard_gamma(&mut self, shape: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if shape < 0.0 || (shape == 0.0 && shape.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ShapeNegative);
         }
         Ok((0..size)
             .map(|_| self.legacy_standard_gamma(shape))
@@ -2577,12 +2607,11 @@ impl RandomState {
     }
 
     pub fn gamma(&mut self, shape: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if shape < 0.0
-            || (shape == 0.0 && shape.is_sign_negative())
-            || scale < 0.0
-            || (scale == 0.0 && scale.is_sign_negative())
-        {
-            return Err(RandomError::InvalidParameter);
+        if shape < 0.0 || (shape == 0.0 && shape.is_sign_negative()) {
+            return Err(RandomError::ShapeNegative);
+        }
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::ScaleNegative);
         }
         Ok((0..size)
             .map(|_| scale * self.legacy_standard_gamma(shape))
@@ -2590,8 +2619,11 @@ impl RandomState {
     }
 
     pub fn beta(&mut self, a: f64, b: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if a <= 0.0 || b <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+        if a <= 0.0 {
+            return Err(RandomError::AlphaNonPositive);
+        }
+        if b <= 0.0 {
+            return Err(RandomError::BetaNonPositive);
         }
         if a < BETA_TINY_THRESHOLD && b < BETA_TINY_THRESHOLD {
             return Ok((0..size)
@@ -3391,7 +3423,7 @@ impl Generator {
             return Err(RandomError::InvalidParameter);
         }
         if high < low {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::HighMinusLowNegative);
         }
         let range = high - low;
         Ok((0..size).map(|_| low + self.next_f64() * range).collect())
@@ -3515,7 +3547,7 @@ impl Generator {
     /// NumPy requires `scale >= 0`.
     pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
         Ok(self
             .standard_normal(size)
@@ -3543,7 +3575,7 @@ impl Generator {
     /// NumPy requires `scale >= 0`.
     pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::ScaleNegative);
         }
         Ok((0..size)
             .map(|_| scale * self.sample_ziggurat_exponential())
@@ -4326,8 +4358,11 @@ impl Generator {
 
     /// Beta distribution via gamma sampling.
     pub fn beta(&mut self, a: f64, b: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if a <= 0.0 || b <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+        if a <= 0.0 {
+            return Err(RandomError::AlphaNonPositive);
+        }
+        if b <= 0.0 {
+            return Err(RandomError::BetaNonPositive);
         }
         if a < BETA_TINY_THRESHOLD && b < BETA_TINY_THRESHOLD {
             return Ok((0..size)
@@ -6532,7 +6567,7 @@ for child in rng.spawn(n_children):
         let mut state = RandomState::new(SeedMaterial::U64(42)).expect("state");
         assert_eq!(
             state.normal(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
         assert_eq!(
             state.lognormal(0.0, -0.0, 1),
@@ -6540,19 +6575,19 @@ for child in rng.spawn(n_children):
         );
         assert_eq!(
             state.exponential(-0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
         assert_eq!(
             state.standard_gamma(-0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ShapeNegative)
         );
         assert_eq!(
             state.gamma(-0.0, 1.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ShapeNegative)
         );
         assert_eq!(
             state.gamma(1.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
     }
 
@@ -6767,7 +6802,7 @@ for child in rng.spawn(n_children):
         let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
         assert_eq!(
             invalid.beta(0.0, 1.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::AlphaNonPositive)
         );
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
         assert_eq!(after, vec![6, 3, 7]);
@@ -8758,7 +8793,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.normal(0.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan = test_generator();
@@ -8779,7 +8814,7 @@ for child in rng.spawn(n_children):
         let mut negative_zero = test_generator();
         assert_eq!(
             negative_zero.exponential(-0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::ScaleNegative)
         );
 
         let mut nan = test_generator();
@@ -9097,13 +9132,13 @@ for child in rng.spawn(n_children):
         let mut invalid_a = test_generator();
         assert_eq!(
             invalid_a.beta(-0.0, 1.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::AlphaNonPositive)
         );
 
         let mut invalid_b = test_generator();
         assert_eq!(
             invalid_b.beta(1.0, -0.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::BetaNonPositive)
         );
 
         let mut nan_a = test_generator();
