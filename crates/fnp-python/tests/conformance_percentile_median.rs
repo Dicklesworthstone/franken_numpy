@@ -369,7 +369,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "median single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "median single element should match numpy"
+    );
     Ok(())
 }
 
@@ -386,7 +390,11 @@ print(np.isnan(result) == np.isnan(expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "percentile nan handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "percentile nan handling should match numpy"
+    );
     Ok(())
 }
 
@@ -403,7 +411,11 @@ print(np.isnan(result) == np.isnan(expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "median nan handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "median nan handling should match numpy"
+    );
     Ok(())
 }
 
@@ -437,7 +449,11 @@ print(np.isnan(result) == np.isnan(expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ptp nan propagation should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ptp nan propagation should match numpy"
+    );
     Ok(())
 }
 

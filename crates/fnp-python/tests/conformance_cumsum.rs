@@ -176,17 +176,11 @@ fn cumsum_cumprod_native_fnp_python_paths_match_numpy() {
 
         let complex_axis_cases: &[(Vec<Vec<(f64, f64)>>, i64)] = &[
             (
-                vec![
-                    vec![(1.0, 1.0), (2.0, -1.0)],
-                    vec![(3.0, 2.0), (4.0, -2.0)],
-                ],
+                vec![vec![(1.0, 1.0), (2.0, -1.0)], vec![(3.0, 2.0), (4.0, -2.0)]],
                 0,
             ),
             (
-                vec![
-                    vec![(1.0, 1.0), (2.0, -1.0)],
-                    vec![(3.0, 2.0), (4.0, -2.0)],
-                ],
+                vec![vec![(1.0, 1.0), (2.0, -1.0)], vec![(3.0, 2.0), (4.0, -2.0)]],
                 1,
             ),
         ];
@@ -264,10 +258,10 @@ fn cumsum_cumprod_native_fnp_python_paths_match_numpy() {
 
         // ─── Signed-zero tests (SHOULD) ────────────────────────────────────
         let signed_zero_cases: &[&[f64]] = &[
-            &[0.0, 0.0, 0.0],           // cumsum: [0, 0, 0], cumprod: [0, 0, 0]
-            &[-0.0, -0.0, -0.0],        // cumsum: [-0, -0, -0], cumprod: [-0, 0, -0]
-            &[0.0, -0.0, 0.0],          // cumsum: [0, 0, 0], cumprod: [0, -0, -0]
-            &[1.0, -0.0, 1.0],          // cumprod signed-zero in middle
+            &[0.0, 0.0, 0.0],    // cumsum: [0, 0, 0], cumprod: [0, 0, 0]
+            &[-0.0, -0.0, -0.0], // cumsum: [-0, -0, -0], cumprod: [-0, 0, -0]
+            &[0.0, -0.0, 0.0],   // cumsum: [0, 0, 0], cumprod: [0, -0, -0]
+            &[1.0, -0.0, 1.0],   // cumprod signed-zero in middle
         ];
 
         for (idx, values) in signed_zero_cases.iter().enumerate() {

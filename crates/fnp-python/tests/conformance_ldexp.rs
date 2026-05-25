@@ -129,7 +129,11 @@ print(np.allclose(result, expected, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ldexp special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ldexp special values should match numpy"
+    );
     Ok(())
 }
 
@@ -180,7 +184,11 @@ print(np.allclose(result, expected) and np.allclose(result, x))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ldexp zero exponent should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ldexp zero exponent should match numpy"
+    );
     Ok(())
 }
 

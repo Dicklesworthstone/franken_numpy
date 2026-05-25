@@ -133,7 +133,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "floor_divide special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor_divide special values should match numpy"
+    );
     Ok(())
 }
 
@@ -155,7 +159,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True) or
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "floor_divide by zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor_divide by zero should match numpy"
+    );
     Ok(())
 }
 
@@ -172,7 +180,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "floor_divide broadcasting should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor_divide broadcasting should match numpy"
+    );
     Ok(())
 }
 

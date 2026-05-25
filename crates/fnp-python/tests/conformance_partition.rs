@@ -433,7 +433,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "partition complex should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "partition complex should match numpy"
+    );
     Ok(())
 }
 

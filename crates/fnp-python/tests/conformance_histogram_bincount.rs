@@ -389,7 +389,11 @@ print(np.array_equal(hist, np_hist) and np.allclose(edges, np_edges))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram single element should match numpy"
+    );
     Ok(())
 }
 
@@ -405,7 +409,11 @@ print(np.array_equal(hist, np_hist) and np.allclose(edges, np_edges))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram all same value should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram all same value should match numpy"
+    );
     Ok(())
 }
 
@@ -422,7 +430,11 @@ print(np.array_equal(hist, np_hist) and np.allclose(edges, np_edges))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "histogram edge values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "histogram edge values should match numpy"
+    );
     Ok(())
 }
 
@@ -438,7 +450,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bincount zeros only should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bincount zeros only should match numpy"
+    );
     Ok(())
 }
 
@@ -454,7 +470,11 @@ print(np.array_equal(result, expected) and len(result) == 101)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bincount single large value should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bincount single large value should match numpy"
+    );
     Ok(())
 }
 
@@ -470,7 +490,11 @@ print(np.array_equal(result, expected) and result[0] == 1 and result[50] == 1 an
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bincount sparse values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bincount sparse values should match numpy"
+    );
     Ok(())
 }
 
@@ -487,7 +511,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bincount with zero weights should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bincount with zero weights should match numpy"
+    );
     Ok(())
 }
 
@@ -521,7 +549,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "digitize single bin should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "digitize single bin should match numpy"
+    );
     Ok(())
 }
 
@@ -540,7 +572,11 @@ print(np.array_equal(result_left, expected_left) and np.array_equal(result_right
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "digitize exact matches should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "digitize exact matches should match numpy"
+    );
     Ok(())
 }
 
@@ -557,6 +593,10 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "digitize inf values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "digitize inf values should match numpy"
+    );
     Ok(())
 }

@@ -333,9 +333,8 @@ fn any_complex_dtype_matches_numpy() -> Result<(), String> {
     ];
 
     for arr_str in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.any(np.array({arr_str}, dtype=np.complex128)))"
-        );
+        let script =
+            format!("import numpy as np; print(np.any(np.array({arr_str}, dtype=np.complex128)))");
         let numpy_result = numpy_oracle(&script)?;
         let numpy_val = parse_bool(&numpy_result);
 
@@ -392,7 +391,11 @@ print(all(tests))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "any special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "any special values should match numpy"
+    );
     Ok(())
 }
 
@@ -409,6 +412,10 @@ print(fnp_result == np_result and fnp_result == False)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "any negative zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "any negative zero should match numpy"
+    );
     Ok(())
 }

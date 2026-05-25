@@ -236,10 +236,12 @@ fn bitwise_shifts_scalar_return_type_matches_numpy() -> Result<(), String> {
 
 #[test]
 fn bitwise_count_scalar_return_type_matches_numpy() -> Result<(), String> {
-    let script = "import numpy as np; x = np.int64(15); r = np.bitwise_count(x); print(type(r).__name__, r)";
+    let script =
+        "import numpy as np; x = np.int64(15); r = np.bitwise_count(x); print(type(r).__name__, r)";
     let numpy_result = numpy_oracle(script)?;
 
-    let rust_script = fnp_script("x = np.int64(15); r = fnp.bitwise_count(x); print(type(r).__name__, r)".into());
+    let rust_script =
+        fnp_script("x = np.int64(15); r = fnp.bitwise_count(x); print(type(r).__name__, r)".into());
     let rust_result = numpy_oracle(&rust_script)?;
 
     assert_eq!(

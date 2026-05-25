@@ -67,11 +67,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "subtract basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "subtract basic should match numpy");
     Ok(())
 }
 
@@ -88,11 +84,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "multiply basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "multiply basic should match numpy");
     Ok(())
 }
 
@@ -349,7 +341,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "add nan propagation should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "add nan propagation should match numpy"
+    );
     Ok(())
 }
 
@@ -366,7 +362,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "subtract nan propagation should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "subtract nan propagation should match numpy"
+    );
     Ok(())
 }
 
@@ -383,7 +383,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "multiply nan propagation should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "multiply nan propagation should match numpy"
+    );
     Ok(())
 }
 
@@ -402,7 +406,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "divide nan propagation should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divide nan propagation should match numpy"
+    );
     Ok(())
 }
 
@@ -436,7 +444,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "subtract inf handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "subtract inf handling should match numpy"
+    );
     Ok(())
 }
 
@@ -455,7 +467,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "multiply inf handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "multiply inf handling should match numpy"
+    );
     Ok(())
 }
 
@@ -474,7 +490,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "divide inf handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "divide inf handling should match numpy"
+    );
     Ok(())
 }
 

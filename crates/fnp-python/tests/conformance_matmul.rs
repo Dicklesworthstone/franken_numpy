@@ -113,11 +113,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "matmul batch should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "matmul batch should match numpy");
     Ok(())
 }
 
@@ -134,11 +130,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "matmul should match @ operator"
-    );
+    assert_eq!(result.trim(), "True", "matmul should match @ operator");
     Ok(())
 }
 
@@ -226,7 +218,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "matmul special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "matmul special values should match numpy"
+    );
     Ok(())
 }
 
@@ -278,7 +274,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "matmul broadcast batch should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "matmul broadcast batch should match numpy"
+    );
     Ok(())
 }
 

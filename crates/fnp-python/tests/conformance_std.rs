@@ -491,7 +491,11 @@ print(np.allclose(fnp_out, np_out))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "std out parameter should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "std out parameter should match numpy"
+    );
     Ok(())
 }
 
@@ -509,7 +513,11 @@ print(np.isnan(fnp_result) and np.isnan(np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "std of empty array should return nan");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "std of empty array should return nan"
+    );
     Ok(())
 }
 

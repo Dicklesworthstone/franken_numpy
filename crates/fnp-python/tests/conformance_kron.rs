@@ -50,11 +50,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "kron 2D matrices should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "kron 2D matrices should match numpy");
     Ok(())
 }
 
@@ -71,11 +67,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "kron 1D vectors should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "kron 1D vectors should match numpy");
     Ok(())
 }
 
@@ -113,11 +105,7 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "kron float should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "kron float should match numpy");
     Ok(())
 }
 
@@ -151,7 +139,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "kron special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "kron special values should match numpy"
+    );
     Ok(())
 }
 
@@ -168,7 +160,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "kron single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "kron single element should match numpy"
+    );
     Ok(())
 }
 
@@ -186,7 +182,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "kron identity matrices should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "kron identity matrices should match numpy"
+    );
     Ok(())
 }
 

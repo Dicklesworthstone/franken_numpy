@@ -111,7 +111,11 @@ print(np.allclose(fnp_recon, a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "qr complex reconstruction should match");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "qr complex reconstruction should match"
+    );
     Ok(())
 }
 
@@ -171,7 +175,11 @@ print(np.allclose(fnp_l, np_l) and np.allclose(fnp_l, np.eye(5)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cholesky of identity should be identity");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cholesky of identity should be identity"
+    );
     Ok(())
 }
 
@@ -189,7 +197,11 @@ print(np.allclose(fnp_l, np_l))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cholesky diagonal should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cholesky diagonal should match numpy"
+    );
     Ok(())
 }
 
@@ -248,7 +260,11 @@ print(vals_close)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "eigh identity eigenvalues should be 1");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "eigh identity eigenvalues should be 1"
+    );
     Ok(())
 }
 
@@ -302,7 +318,11 @@ print(np.allclose(fnp_vals, np.ones(4)) and np.allclose(np_vals, np.ones(4)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "eigvalsh identity should have eigenvalues 1");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "eigvalsh identity should have eigenvalues 1"
+    );
     Ok(())
 }
 
@@ -319,7 +339,11 @@ print(np.allclose(np.sort(fnp_vals), np.sort(np_vals)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "eigvalsh diagonal should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "eigvalsh diagonal should match numpy"
+    );
     Ok(())
 }
 
@@ -782,7 +806,11 @@ print(np.allclose(fnp_recon, np_recon))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "qr batched reconstruction should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "qr batched reconstruction should match numpy"
+    );
     Ok(())
 }
 

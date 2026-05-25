@@ -65,11 +65,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "fabs signed zero should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "fabs signed zero should match numpy");
     Ok(())
 }
 
@@ -85,11 +81,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "absolute basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "absolute basic should match numpy");
     Ok(())
 }
 
@@ -105,11 +97,7 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "absolute complex should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "absolute complex should match numpy");
     Ok(())
 }
 
@@ -163,7 +151,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "fabs special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fabs special values should match numpy"
+    );
     Ok(())
 }
 
@@ -179,7 +171,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "absolute special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "absolute special values should match numpy"
+    );
     Ok(())
 }
 
@@ -198,7 +194,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "absolute integer dtypes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "absolute integer dtypes should match numpy"
+    );
     Ok(())
 }
 
@@ -265,7 +265,11 @@ print(np.all(np.isinf(fnp_result) == np.isinf(np_result)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "absolute of complex inf should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "absolute of complex inf should match numpy"
+    );
     Ok(())
 }
 
@@ -281,7 +285,11 @@ print(np.all(np.isnan(fnp_result) == np.isnan(np_result)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "absolute of complex nan should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "absolute of complex nan should match numpy"
+    );
     Ok(())
 }
 
@@ -316,7 +324,11 @@ print(all(tests))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "real/imag on real array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "real/imag on real array should match numpy"
+    );
     Ok(())
 }
 
@@ -352,7 +364,11 @@ print(np.array_equal(fnp_result, np_result) and fnp_result.shape == np_result.sh
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "absolute empty array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "absolute empty array should match numpy"
+    );
     Ok(())
 }
 
@@ -371,7 +387,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "fabs subnormal numbers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fabs subnormal numbers should match numpy"
+    );
     Ok(())
 }
 
@@ -388,7 +408,11 @@ print(np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "absolute large values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "absolute large values should match numpy"
+    );
     Ok(())
 }
 
@@ -404,6 +428,10 @@ print(np.array_equal(fnp_result, np_result) and np.all(fnp_result == 0.0))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "absolute of complex zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "absolute of complex zero should match numpy"
+    );
     Ok(())
 }

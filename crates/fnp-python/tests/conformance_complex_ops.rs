@@ -186,7 +186,11 @@ print(np.allclose(result, expected, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "real special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "real special values should match numpy"
+    );
     Ok(())
 }
 
@@ -203,7 +207,11 @@ print(np.allclose(result, expected, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "imag special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "imag special values should match numpy"
+    );
     Ok(())
 }
 
@@ -219,7 +227,11 @@ print(np.allclose(result, expected, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "conj special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "conj special values should match numpy"
+    );
     Ok(())
 }
 

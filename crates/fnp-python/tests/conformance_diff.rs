@@ -65,11 +65,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "diff with n=2 should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "diff with n=2 should match numpy");
     Ok(())
 }
 
@@ -85,11 +81,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "diff 2D axis=0 should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "diff 2D axis=0 should match numpy");
     Ok(())
 }
 
@@ -105,11 +97,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "diff 2D axis=1 should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "diff 2D axis=1 should match numpy");
     Ok(())
 }
 
@@ -125,11 +113,7 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "diff float should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "diff float should match numpy");
     Ok(())
 }
 
@@ -206,7 +190,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diff special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diff special values should match numpy"
+    );
     Ok(())
 }
 
@@ -223,7 +211,11 @@ print(np.allclose(fnp_result, np_result) and np.allclose(fnp_result, 0.0))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diff constant array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diff constant array should match numpy"
+    );
     Ok(())
 }
 
@@ -239,7 +231,11 @@ print(np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diff two elements should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diff two elements should match numpy"
+    );
     Ok(())
 }
 
@@ -255,7 +251,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diff with prepend should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diff with prepend should match numpy"
+    );
     Ok(())
 }
 

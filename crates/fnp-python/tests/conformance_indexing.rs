@@ -423,7 +423,10 @@ fn conformance_indexing_matrix() {
                 PyTuple::new(
                     py,
                     [
-                        np_array_1d_complex(py, &[(1.0, 1.0), (2.0, -1.0), (3.0, 2.0), (4.0, -2.0)])?,
+                        np_array_1d_complex(
+                            py,
+                            &[(1.0, 1.0), (2.0, -1.0), (3.0, 2.0), (4.0, -2.0)],
+                        )?,
                         np_array_1d_i(py, vec![0, 2])?,
                     ],
                 )
@@ -444,7 +447,10 @@ fn conformance_indexing_matrix() {
                     py,
                     [
                         np_array_1d_b(py, vec![true, false, true, false])?,
-                        np_array_1d_complex(py, &[(1.0, 1.0), (2.0, -1.0), (3.0, 2.0), (4.0, -2.0)])?,
+                        np_array_1d_complex(
+                            py,
+                            &[(1.0, 1.0), (2.0, -1.0), (3.0, 2.0), (4.0, -2.0)],
+                        )?,
                     ],
                 )
             },
@@ -464,7 +470,10 @@ fn conformance_indexing_matrix() {
                     py,
                     [
                         np_array_1d_b(py, vec![true, false, true, false])?,
-                        np_array_1d_complex(py, &[(1.0, 1.0), (2.0, -1.0), (3.0, 2.0), (4.0, -2.0)])?,
+                        np_array_1d_complex(
+                            py,
+                            &[(1.0, 1.0), (2.0, -1.0), (3.0, 2.0), (4.0, -2.0)],
+                        )?,
                     ],
                 )
             },

@@ -1029,7 +1029,11 @@ print(np.all(np.isnan(fnp_result) == np.isnan(np_result)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "solve should propagate NaN similarly");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "solve should propagate NaN similarly"
+    );
     Ok(())
 }
 
@@ -1054,7 +1058,11 @@ print(fnp_raised == np_raised)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "svd should raise error for NaN input similarly to numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "svd should raise error for NaN input similarly to numpy"
+    );
     Ok(())
 }
 
@@ -1079,7 +1087,11 @@ print(fnp_raised == np_raised)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "eig should raise error for NaN input similarly to numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "eig should raise error for NaN input similarly to numpy"
+    );
     Ok(())
 }
 
@@ -1099,7 +1111,11 @@ print(np.isinf(fnp_result) and np.isinf(np_result) and fnp_result > 0 and np_res
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "norm should return +inf for input with inf");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm should return +inf for input with inf"
+    );
     Ok(())
 }
 
@@ -1115,7 +1131,11 @@ print(np.isinf(fnp_result) and np.isinf(np_result) and fnp_result > 0 and np_res
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "norm should return +inf for input with -inf");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm should return +inf for input with -inf"
+    );
     Ok(())
 }
 
@@ -1131,7 +1151,11 @@ print(np.isinf(fnp_result) == np.isinf(np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "det should propagate inf similarly to numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "det should propagate inf similarly to numpy"
+    );
     Ok(())
 }
 
@@ -1156,6 +1180,10 @@ print(fnp_raised == np_raised)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "eig should raise error for Inf input similarly to numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "eig should raise error for Inf input similarly to numpy"
+    );
     Ok(())
 }

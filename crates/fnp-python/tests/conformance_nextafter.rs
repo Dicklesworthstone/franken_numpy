@@ -50,11 +50,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "nextafter basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "nextafter basic should match numpy");
     Ok(())
 }
 
@@ -141,7 +137,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "nextafter special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nextafter special values should match numpy"
+    );
     Ok(())
 }
 
@@ -159,7 +159,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "nextafter subnormal should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nextafter subnormal should match numpy"
+    );
     Ok(())
 }
 
@@ -179,7 +183,11 @@ print(value_match and sign_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "nextafter negative zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nextafter negative zero should match numpy"
+    );
     Ok(())
 }
 
@@ -197,6 +205,10 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "nextafter max values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nextafter max values should match numpy"
+    );
     Ok(())
 }

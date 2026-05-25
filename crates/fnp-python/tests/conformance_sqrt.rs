@@ -65,11 +65,7 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "sqrt complex should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "sqrt complex should match numpy");
     Ok(())
 }
 
@@ -85,11 +81,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "square basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "square basic should match numpy");
     Ok(())
 }
 
@@ -195,7 +187,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sqrt special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sqrt special values should match numpy"
+    );
     Ok(())
 }
 
@@ -214,7 +210,11 @@ print(value_match and sign_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sqrt negative zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sqrt negative zero should match numpy"
+    );
     Ok(())
 }
 
@@ -230,7 +230,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cbrt special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cbrt special values should match numpy"
+    );
     Ok(())
 }
 
@@ -264,7 +268,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "square special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "square special values should match numpy"
+    );
     Ok(())
 }
 

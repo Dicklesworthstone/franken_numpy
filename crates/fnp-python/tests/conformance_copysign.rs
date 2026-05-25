@@ -140,7 +140,11 @@ print(match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "copysign special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "copysign special values should match numpy"
+    );
     Ok(())
 }
 
@@ -160,7 +164,11 @@ print(sign_match and value_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "copysign negative zero source should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "copysign negative zero source should match numpy"
+    );
     Ok(())
 }
 
@@ -177,6 +185,10 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "copysign with inf target should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "copysign with inf target should match numpy"
+    );
     Ok(())
 }

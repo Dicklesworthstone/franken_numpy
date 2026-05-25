@@ -81,11 +81,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "signbit basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "signbit basic should match numpy");
     Ok(())
 }
 
@@ -175,7 +171,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sign special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sign special values should match numpy"
+    );
     Ok(())
 }
 
@@ -192,7 +192,11 @@ print(np.array_equal(fnp_result, np_result) and fnp_result[0] == False and fnp_r
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "signbit negative zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "signbit negative zero should match numpy"
+    );
     Ok(())
 }
 
@@ -211,7 +215,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sign integer dtypes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sign integer dtypes should match numpy"
+    );
     Ok(())
 }
 
@@ -247,7 +255,11 @@ print(np.array_equal(fnp_result, np_result) and fnp_result.shape == np_result.sh
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "signbit empty array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "signbit empty array should match numpy"
+    );
     Ok(())
 }
 
@@ -266,7 +278,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sign single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sign single element should match numpy"
+    );
     Ok(())
 }
 
@@ -285,7 +301,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sign unsigned integers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sign unsigned integers should match numpy"
+    );
     Ok(())
 }
 
@@ -304,7 +324,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sign subnormal numbers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sign subnormal numbers should match numpy"
+    );
     Ok(())
 }
 
@@ -323,6 +347,10 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "signbit subnormal numbers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "signbit subnormal numbers should match numpy"
+    );
     Ok(())
 }

@@ -133,7 +133,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "spacing subnormal should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "spacing subnormal should match numpy"
+    );
     Ok(())
 }
 
@@ -149,7 +153,11 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "spacing negative zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "spacing negative zero should match numpy"
+    );
     Ok(())
 }
 
@@ -166,7 +174,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "spacing large values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "spacing large values should match numpy"
+    );
     Ok(())
 }
 
@@ -183,6 +195,10 @@ print(np.allclose(result, expected, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "spacing negative inf should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "spacing negative inf should match numpy"
+    );
     Ok(())
 }

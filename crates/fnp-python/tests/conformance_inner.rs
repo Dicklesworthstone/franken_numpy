@@ -130,7 +130,11 @@ print(np.isnan(fnp_result) and np.isnan(np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "inner special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "inner special values should match numpy"
+    );
     Ok(())
 }
 
@@ -147,7 +151,11 @@ print(fnp_result == np_result == 0.0)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "inner empty arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "inner empty arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -181,7 +189,11 @@ print(fnp_result == np_result)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "inner single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "inner single element should match numpy"
+    );
     Ok(())
 }
 

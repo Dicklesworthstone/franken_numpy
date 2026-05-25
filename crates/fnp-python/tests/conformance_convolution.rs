@@ -225,7 +225,10 @@ fn convolution_fnp_python_module_paths_match_numpy() {
                 CompareMode::Close,
                 t,
                 move |py| {
-                    PyTuple::new(py, [np_array_1d_complex(py, &a)?, np_array_1d_complex(py, &v)?])
+                    PyTuple::new(
+                        py,
+                        [np_array_1d_complex(py, &a)?, np_array_1d_complex(py, &v)?],
+                    )
                 },
                 move |py| mode_kwargs(py, &mode),
             );

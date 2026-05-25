@@ -152,7 +152,11 @@ print(np.allclose(result, expected, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "outer special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "outer special values should match numpy"
+    );
     Ok(())
 }
 
@@ -187,7 +191,11 @@ print(np.allclose(result, expected) and result.dtype == expected.dtype)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "outer mixed dtypes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "outer mixed dtypes should match numpy"
+    );
     Ok(())
 }
 

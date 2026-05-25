@@ -129,7 +129,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "angle special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "angle special values should match numpy"
+    );
     Ok(())
 }
 

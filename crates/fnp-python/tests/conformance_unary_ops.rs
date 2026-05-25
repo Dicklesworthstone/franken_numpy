@@ -49,11 +49,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "positive basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "positive basic should match numpy");
     Ok(())
 }
 
@@ -69,11 +65,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "negative basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "negative basic should match numpy");
     Ok(())
 }
 
@@ -89,11 +81,7 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "reciprocal basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "reciprocal basic should match numpy");
     Ok(())
 }
 
@@ -179,7 +167,11 @@ print(np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "reciprocal complex should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reciprocal complex should match numpy"
+    );
     Ok(())
 }
 
@@ -195,7 +187,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "positive special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "positive special values should match numpy"
+    );
     Ok(())
 }
 
@@ -214,7 +210,11 @@ print(value_match and sign_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "negative special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "negative special values should match numpy"
+    );
     Ok(())
 }
 
@@ -232,7 +232,11 @@ print(sign_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "negative zero sign should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "negative zero sign should match numpy"
+    );
     Ok(())
 }
 

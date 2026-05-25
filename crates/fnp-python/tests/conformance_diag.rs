@@ -181,7 +181,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diag special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag special values should match numpy"
+    );
     Ok(())
 }
 
@@ -197,7 +201,11 @@ print(fnp_result.shape == np_result.shape == (0, 0))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diag empty vector should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag empty vector should match numpy"
+    );
     Ok(())
 }
 
@@ -213,7 +221,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diag single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diag single element should match numpy"
+    );
     Ok(())
 }
 

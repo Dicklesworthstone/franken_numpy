@@ -585,8 +585,15 @@ print(np.array_equal(result, expected))
 #[test]
 fn comparison_logical_scalar_return_type_matches_numpy() -> Result<(), String> {
     let binary_funcs = [
-        "equal", "not_equal", "greater", "greater_equal", "less", "less_equal",
-        "logical_and", "logical_or", "logical_xor",
+        "equal",
+        "not_equal",
+        "greater",
+        "greater_equal",
+        "less",
+        "less_equal",
+        "logical_and",
+        "logical_or",
+        "logical_xor",
     ];
     for func in binary_funcs {
         let script = fnp_script(format!(

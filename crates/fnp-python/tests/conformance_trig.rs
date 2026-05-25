@@ -801,7 +801,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sin special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sin special values should match numpy"
+    );
     Ok(())
 }
 
@@ -817,7 +821,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cos special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cos special values should match numpy"
+    );
     Ok(())
 }
 
@@ -833,7 +841,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tan special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tan special values should match numpy"
+    );
     Ok(())
 }
 
@@ -849,7 +861,11 @@ print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "arcsin out of domain should return nan");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arcsin out of domain should return nan"
+    );
     Ok(())
 }
 
@@ -865,7 +881,11 @@ print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "arccos out of domain should return nan");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "arccos out of domain should return nan"
+    );
     Ok(())
 }
 

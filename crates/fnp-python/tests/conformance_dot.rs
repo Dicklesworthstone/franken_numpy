@@ -50,11 +50,7 @@ print(np.isclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "dot 1D vectors should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "dot 1D vectors should match numpy");
     Ok(())
 }
 
@@ -71,11 +67,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "dot 2D matrices should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "dot 2D matrices should match numpy");
     Ok(())
 }
 
@@ -92,11 +84,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "dot with scalar should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "dot with scalar should match numpy");
     Ok(())
 }
 
@@ -220,7 +208,11 @@ print(np.isnan(fnp_result) and np.isnan(np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "dot special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "dot special values should match numpy"
+    );
     Ok(())
 }
 
@@ -237,7 +229,11 @@ print(fnp_result == np_result == 0.0)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "dot empty vectors should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "dot empty vectors should match numpy"
+    );
     Ok(())
 }
 
@@ -271,7 +267,11 @@ print(fnp_result == np_result)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "dot single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "dot single element should match numpy"
+    );
     Ok(())
 }
 

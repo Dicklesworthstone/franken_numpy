@@ -295,7 +295,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ediff1d special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ediff1d special values should match numpy"
+    );
     Ok(())
 }
 
@@ -312,6 +316,10 @@ print(np.allclose(fnp_result, np_result) and np.allclose(fnp_result, 0.0))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ediff1d constant array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ediff1d constant array should match numpy"
+    );
     Ok(())
 }

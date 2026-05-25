@@ -154,7 +154,11 @@ print(np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tensordot complex should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensordot complex should match numpy"
+    );
     Ok(())
 }
 
@@ -218,7 +222,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tensordot special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensordot special values should match numpy"
+    );
     Ok(())
 }
 
@@ -235,7 +243,11 @@ print(fnp_result.shape == np_result.shape and np.array_equal(fnp_result, np_resu
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tensordot axes=0 shape should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensordot axes=0 shape should match numpy"
+    );
     Ok(())
 }
 
@@ -252,7 +264,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tensordot negative axes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensordot negative axes should match numpy"
+    );
     Ok(())
 }
 

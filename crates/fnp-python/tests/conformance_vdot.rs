@@ -130,7 +130,11 @@ print(np.isnan(result) and np.isnan(expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "vdot special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "vdot special values should match numpy"
+    );
     Ok(())
 }
 
@@ -147,7 +151,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "vdot empty arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "vdot empty arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -164,7 +172,11 @@ print(result == expected)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "vdot integer dtypes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "vdot integer dtypes should match numpy"
+    );
     Ok(())
 }
 

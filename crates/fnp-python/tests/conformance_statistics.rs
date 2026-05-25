@@ -355,7 +355,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "corrcoef with nan should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "corrcoef with nan should match numpy"
+    );
     Ok(())
 }
 
@@ -372,7 +376,11 @@ print(np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cov constant array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cov constant array should match numpy"
+    );
     Ok(())
 }
 
@@ -392,7 +400,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "corrcoef constant array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "corrcoef constant array should match numpy"
+    );
     Ok(())
 }
 
@@ -441,7 +453,11 @@ print(np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "average with zero weights should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "average with zero weights should match numpy"
+    );
     Ok(())
 }
 
@@ -460,6 +476,10 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cov single observation should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cov single observation should match numpy"
+    );
     Ok(())
 }

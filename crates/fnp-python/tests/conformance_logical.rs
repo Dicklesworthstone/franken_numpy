@@ -190,7 +190,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical operations on integers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical operations on integers should match numpy"
+    );
     Ok(())
 }
 
@@ -212,7 +216,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical operations on floats should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical operations on floats should match numpy"
+    );
     Ok(())
 }
 
@@ -228,7 +236,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical_not on integers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical_not on integers should match numpy"
+    );
     Ok(())
 }
 
@@ -250,7 +262,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical broadcasting should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical broadcasting should match numpy"
+    );
     Ok(())
 }
 
@@ -275,7 +291,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical nan handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical nan handling should match numpy"
+    );
     Ok(())
 }
 
@@ -304,7 +324,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical inf handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical inf handling should match numpy"
+    );
     Ok(())
 }
 
@@ -332,7 +356,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical signed zero handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical signed zero handling should match numpy"
+    );
     Ok(())
 }
 
@@ -359,7 +387,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical empty array should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical empty array should match numpy"
+    );
     Ok(())
 }
 
@@ -384,7 +416,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical single element should match numpy"
+    );
     Ok(())
 }
 
@@ -410,7 +446,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical mixed dtypes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical mixed dtypes should match numpy"
+    );
     Ok(())
 }
 
@@ -438,6 +478,10 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logical all true/false should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logical all true/false should match numpy"
+    );
     Ok(())
 }

@@ -450,7 +450,11 @@ print(np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sum complex axis=0 should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum complex axis=0 should match numpy"
+    );
     Ok(())
 }
 
@@ -510,13 +514,10 @@ fn sum_inf_handling_matches_numpy() -> Result<(), String> {
     ];
 
     for arr_str in &inf_cases {
-        let np_script =
-            format!("import numpy as np; print(repr(np.sum(np.array({arr_str}))))");
+        let np_script = format!("import numpy as np; print(repr(np.sum(np.array({arr_str}))))");
         let np_output = numpy_oracle(&np_script)?;
 
-        let fnp_script = fnp_sum_script(format!(
-            "print(repr(fnp.sum(np.array({arr_str}))))"
-        ));
+        let fnp_script = fnp_sum_script(format!("print(repr(fnp.sum(np.array({arr_str}))))"));
         let fnp_output = numpy_oracle(&fnp_script)?;
 
         assert_eq!(
@@ -543,7 +544,11 @@ print(np.array_equal(fnp_result, np_result) and np.array_equal(out, np_out))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sum with out parameter should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum with out parameter should match numpy"
+    );
     Ok(())
 }
 
@@ -560,7 +565,11 @@ print(fnp_result == np_result == 9)  # 1 + 3 + 5
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sum with where parameter should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum with where parameter should match numpy"
+    );
     Ok(())
 }
 
@@ -576,7 +585,11 @@ print(fnp_result == np_result == 25)  # 10 + 1+2+3+4+5
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sum with initial parameter should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum with initial parameter should match numpy"
+    );
     Ok(())
 }
 
@@ -659,7 +672,11 @@ print(np.array_equal(fnp_result_m1, np_result_m1) and np.array_equal(fnp_result_
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sum with negative axis should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum with negative axis should match numpy"
+    );
     Ok(())
 }
 
@@ -701,7 +718,11 @@ print(fnp_result == np_result)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "sum with axis=None should flatten and match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum with axis=None should flatten and match numpy"
+    );
     Ok(())
 }
 

@@ -50,11 +50,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "cross 3D vectors should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "cross 3D vectors should match numpy");
     Ok(())
 }
 
@@ -92,11 +88,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "cross batch 3D should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "cross batch 3D should match numpy");
     Ok(())
 }
 
@@ -113,11 +105,7 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "cross float should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "cross float should match numpy");
     Ok(())
 }
 
@@ -198,7 +186,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cross special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cross special values should match numpy"
+    );
     Ok(())
 }
 
@@ -215,7 +207,11 @@ print(np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cross zero vector should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cross zero vector should match numpy"
+    );
     Ok(())
 }
 
@@ -233,7 +229,11 @@ print(np.allclose(fnp_result, np_result) and np.allclose(fnp_result, 0.0))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cross parallel vectors should be zero");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cross parallel vectors should be zero"
+    );
     Ok(())
 }
 
@@ -252,7 +252,11 @@ print(np.allclose(fnp_result, k) and np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "cross unit vectors should follow right-hand rule");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cross unit vectors should follow right-hand rule"
+    );
     Ok(())
 }
 

@@ -342,7 +342,11 @@ print(fnp_result == np_result)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "argmax nan handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argmax nan handling should match numpy"
+    );
     Ok(())
 }
 
@@ -386,6 +390,10 @@ print(fnp_raised == np_raised == True)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "argmax of empty array should raise ValueError");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argmax of empty array should raise ValueError"
+    );
     Ok(())
 }

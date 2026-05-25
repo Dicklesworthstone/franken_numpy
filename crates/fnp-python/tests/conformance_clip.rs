@@ -157,7 +157,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip nan handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip nan handling should match numpy"
+    );
     Ok(())
 }
 
@@ -173,7 +177,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip inf handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip inf handling should match numpy"
+    );
     Ok(())
 }
 
@@ -189,7 +197,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip negative zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip negative zero should match numpy"
+    );
     Ok(())
 }
 
@@ -223,7 +235,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip broadcasting should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip broadcasting should match numpy"
+    );
     Ok(())
 }
 
@@ -241,7 +257,11 @@ print(np.array_equal(out, np_out) and fnp_result is out)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip out parameter should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip out parameter should match numpy"
+    );
     Ok(())
 }
 
@@ -277,7 +297,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip single element should match numpy"
+    );
     Ok(())
 }
 
@@ -293,7 +317,11 @@ print(np.array_equal(fnp_result, np_result) and np.all(fnp_result == 3.0))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip equal bounds should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip equal bounds should match numpy"
+    );
     Ok(())
 }
 
@@ -313,7 +341,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip integer dtypes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip integer dtypes should match numpy"
+    );
     Ok(())
 }
 
@@ -329,7 +361,11 @@ print(np.array_equal(fnp_result, np_result) and np.array_equal(fnp_result, a))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip all within bounds should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip all within bounds should match numpy"
+    );
     Ok(())
 }
 
@@ -345,7 +381,11 @@ print(np.array_equal(fnp_result, np_result) and np.all(fnp_result == 10.0))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip all below min should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip all below min should match numpy"
+    );
     Ok(())
 }
 
@@ -361,6 +401,10 @@ print(np.array_equal(fnp_result, np_result) and np.all(fnp_result == 5.0))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "clip all above max should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "clip all above max should match numpy"
+    );
     Ok(())
 }

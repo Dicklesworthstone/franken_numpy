@@ -163,7 +163,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "hypot negative inputs should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "hypot negative inputs should match numpy"
+    );
     Ok(())
 }
 
@@ -180,7 +184,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "hypot large values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "hypot large values should match numpy"
+    );
     Ok(())
 }
 

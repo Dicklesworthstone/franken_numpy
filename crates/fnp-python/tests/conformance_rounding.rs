@@ -81,11 +81,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "trunc basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "trunc basic should match numpy");
     Ok(())
 }
 
@@ -193,7 +189,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "floor special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor special values should match numpy"
+    );
     Ok(())
 }
 
@@ -209,7 +209,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "ceil special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ceil special values should match numpy"
+    );
     Ok(())
 }
 
@@ -225,7 +229,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "trunc special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "trunc special values should match numpy"
+    );
     Ok(())
 }
 
@@ -241,7 +249,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "rint special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rint special values should match numpy"
+    );
     Ok(())
 }
 
@@ -257,7 +269,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "rint bankers rounding should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rint bankers rounding should match numpy"
+    );
     Ok(())
 }
 
@@ -273,7 +289,11 @@ print(np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "floor large values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor large values should match numpy"
+    );
     Ok(())
 }
 
@@ -334,7 +354,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "rounding empty arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding empty arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -356,7 +380,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "rounding near integer values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding near integer values should match numpy"
+    );
     Ok(())
 }
 
@@ -377,7 +405,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "rounding single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding single element should match numpy"
+    );
     Ok(())
 }
 
@@ -399,7 +431,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "rounding exact integers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding exact integers should match numpy"
+    );
     Ok(())
 }
 
@@ -423,7 +459,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "rounding subnormal numbers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding subnormal numbers should match numpy"
+    );
     Ok(())
 }
 

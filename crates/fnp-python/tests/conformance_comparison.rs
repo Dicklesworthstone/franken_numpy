@@ -67,11 +67,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "not_equal basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "not_equal basic should match numpy");
     Ok(())
 }
 
@@ -105,11 +101,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "less_equal basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "less_equal basic should match numpy");
     Ok(())
 }
 
@@ -126,11 +118,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "greater basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "greater basic should match numpy");
     Ok(())
 }
 
@@ -225,7 +213,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "not_equal complex should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "not_equal complex should match numpy"
+    );
     Ok(())
 }
 
@@ -247,7 +239,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison with nan should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison with nan should match numpy"
+    );
     Ok(())
 }
 
@@ -269,7 +265,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison with inf should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison with inf should match numpy"
+    );
     Ok(())
 }
 
@@ -286,7 +286,11 @@ print(np.array_equal(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "equal with negative zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "equal with negative zero should match numpy"
+    );
     Ok(())
 }
 
@@ -308,7 +312,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison broadcasting should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison broadcasting should match numpy"
+    );
     Ok(())
 }
 
@@ -335,7 +343,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison empty arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison empty arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -357,7 +369,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison single element should match numpy"
+    );
     Ok(())
 }
 
@@ -379,7 +395,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison signed zeros should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison signed zeros should match numpy"
+    );
     Ok(())
 }
 
@@ -401,7 +421,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison mixed dtypes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison mixed dtypes should match numpy"
+    );
     Ok(())
 }
 
@@ -423,7 +447,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison boolean arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison boolean arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -445,7 +473,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison nan vs inf should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison nan vs inf should match numpy"
+    );
     Ok(())
 }
 
@@ -470,6 +502,10 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "comparison subnormal numbers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "comparison subnormal numbers should match numpy"
+    );
     Ok(())
 }

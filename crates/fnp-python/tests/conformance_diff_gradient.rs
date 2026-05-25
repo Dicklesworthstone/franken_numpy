@@ -459,7 +459,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diff nan propagation should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diff nan propagation should match numpy"
+    );
     Ok(())
 }
 
@@ -475,7 +479,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diff inf handling should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diff inf handling should match numpy"
+    );
     Ok(())
 }
 
@@ -492,7 +500,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "gradient nan propagation should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "gradient nan propagation should match numpy"
+    );
     Ok(())
 }
 
@@ -512,7 +524,11 @@ print(np.array_equal(fnp_d1, np_d1) and np.array_equal(fnp_d2, np_d2))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "diff higher order should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diff higher order should match numpy"
+    );
     Ok(())
 }
 
@@ -529,6 +545,10 @@ print(np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "gradient non-uniform spacing should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "gradient non-uniform spacing should match numpy"
+    );
     Ok(())
 }

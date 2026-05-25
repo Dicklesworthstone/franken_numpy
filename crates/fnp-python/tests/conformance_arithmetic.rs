@@ -1014,7 +1014,11 @@ print(fnp_result is out, np_result is np_out)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True True", "add out parameter should return same object");
+    assert_eq!(
+        result.trim(),
+        "True True",
+        "add out parameter should return same object"
+    );
     Ok(())
 }
 
@@ -1033,7 +1037,11 @@ print(np.array_equal(fnp_out, np_out))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "add out parameter values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "add out parameter values should match numpy"
+    );
     Ok(())
 }
 
@@ -1052,7 +1060,11 @@ print(np.array_equal(fnp_out, np_out))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "multiply out parameter should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "multiply out parameter should match numpy"
+    );
     Ok(())
 }
 

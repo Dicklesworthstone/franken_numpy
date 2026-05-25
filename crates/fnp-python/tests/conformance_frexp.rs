@@ -147,7 +147,11 @@ print(value_match and sign_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "frexp signed zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "frexp signed zero should match numpy"
+    );
     Ok(())
 }
 
@@ -180,6 +184,10 @@ print(np.allclose(fnp_mant, np_mant) and np.array_equal(fnp_exp, np_exp))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "frexp powers of two should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "frexp powers of two should match numpy"
+    );
     Ok(())
 }

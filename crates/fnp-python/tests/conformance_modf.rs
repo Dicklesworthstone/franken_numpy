@@ -128,7 +128,11 @@ print(frac_match and int_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "modf special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "modf special values should match numpy"
+    );
     Ok(())
 }
 
@@ -163,7 +167,11 @@ print(np.allclose(fnp_frac, np_frac) and np.allclose(fnp_int, np_int))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "modf small values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "modf small values should match numpy"
+    );
     Ok(())
 }
 
@@ -179,6 +187,10 @@ print(np.allclose(fnp_frac, np_frac) and np.allclose(fnp_int, np_int))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "modf large values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "modf large values should match numpy"
+    );
     Ok(())
 }

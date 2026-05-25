@@ -487,7 +487,11 @@ print(np.allclose(fnp_result, np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "tensorinv complex should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensorinv complex should match numpy"
+    );
     Ok(())
 }
 
@@ -505,7 +509,11 @@ print(np.allclose(fnp_result, sp_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "solve_triangular complex should match scipy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "solve_triangular complex should match scipy"
+    );
     Ok(())
 }
 
@@ -541,7 +549,11 @@ print(np.allclose(fnp_s, np_s))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "svd complex singular values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "svd complex singular values should match numpy"
+    );
     Ok(())
 }
 
@@ -557,7 +569,11 @@ print(np.allclose(fnp_logdet, np_logdet))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "slogdet complex logdet should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "slogdet complex logdet should match numpy"
+    );
     Ok(())
 }
 
@@ -575,7 +591,11 @@ print(shape_ok)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "svd empty rows shapes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "svd empty rows shapes should match numpy"
+    );
     Ok(())
 }
 

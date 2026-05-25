@@ -50,11 +50,7 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "remainder basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "remainder basic should match numpy");
     Ok(())
 }
 
@@ -109,11 +105,7 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "fmod negative should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "fmod negative should match numpy");
     Ok(())
 }
 
@@ -170,7 +162,11 @@ print(np.allclose(result, expected, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "remainder special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "remainder special values should match numpy"
+    );
     Ok(())
 }
 
@@ -187,7 +183,11 @@ print(np.allclose(result, expected, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "fmod special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fmod special values should match numpy"
+    );
     Ok(())
 }
 
@@ -208,7 +208,11 @@ with warnings.catch_warnings():
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "remainder divide by zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "remainder divide by zero should match numpy"
+    );
     Ok(())
 }
 
@@ -228,7 +232,11 @@ with warnings.catch_warnings():
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "fmod divide by zero should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fmod divide by zero should match numpy"
+    );
     Ok(())
 }
 
@@ -245,6 +253,10 @@ print(np.array_equal(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "remainder broadcasting should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "remainder broadcasting should match numpy"
+    );
     Ok(())
 }

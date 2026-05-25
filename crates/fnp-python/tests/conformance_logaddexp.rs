@@ -50,11 +50,7 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "logaddexp basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "logaddexp basic should match numpy");
     Ok(())
 }
 
@@ -113,11 +109,7 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(
-        result.trim(),
-        "True",
-        "logaddexp2 basic should match numpy"
-    );
+    assert_eq!(result.trim(), "True", "logaddexp2 basic should match numpy");
     Ok(())
 }
 
@@ -191,7 +183,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp neg inf should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp neg inf should match numpy"
+    );
     Ok(())
 }
 
@@ -208,7 +204,11 @@ print(np.allclose(result, expected, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp2 special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp2 special values should match numpy"
+    );
     Ok(())
 }
 
@@ -225,7 +225,11 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp broadcasting should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp broadcasting should match numpy"
+    );
     Ok(())
 }
 
@@ -243,6 +247,10 @@ print(np.allclose(result, expected))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "logaddexp large difference should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "logaddexp large difference should match numpy"
+    );
     Ok(())
 }

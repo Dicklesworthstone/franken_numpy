@@ -618,8 +618,8 @@ print(np.allclose(sqrt_result, power_result))
 #[test]
 fn exp_log_scalar_return_type_matches_numpy() -> Result<(), String> {
     let funcs = [
-        "exp", "exp2", "expm1", "log", "log2", "log10", "log1p",
-        "sqrt", "square", "positive", "negative", "absolute",
+        "exp", "exp2", "expm1", "log", "log2", "log10", "log1p", "sqrt", "square", "positive",
+        "negative", "absolute",
     ];
     for func in funcs {
         let script = fnp_script(format!(
@@ -792,7 +792,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "exp special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "exp special values should match numpy"
+    );
     Ok(())
 }
 
@@ -824,7 +828,11 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "log special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "log special values should match numpy"
+    );
     Ok(())
 }
 
@@ -856,7 +864,11 @@ print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "negative base with fractional exp should return nan");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "negative base with fractional exp should return nan"
+    );
     Ok(())
 }
 

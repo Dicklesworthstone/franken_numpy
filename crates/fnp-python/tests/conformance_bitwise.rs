@@ -341,8 +341,11 @@ print(np.array_equal(result_left, expected_left) and np.array_equal(result_right
 #[test]
 fn bitwise_scalar_return_type_matches_numpy() -> Result<(), String> {
     let binary_funcs = [
-        "bitwise_and", "bitwise_or", "bitwise_xor",
-        "left_shift", "right_shift",
+        "bitwise_and",
+        "bitwise_or",
+        "bitwise_xor",
+        "left_shift",
+        "right_shift",
     ];
     for func in binary_funcs {
         let script = fnp_script(format!(
@@ -396,7 +399,11 @@ print(np.array_equal(result_and, expected_and) and np.array_equal(result_or, exp
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise negative numbers should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise negative numbers should match numpy"
+    );
     Ok(())
 }
 
@@ -412,7 +419,11 @@ print(np.array_equal(result_right, expected_right))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "right shift negative values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "right shift negative values should match numpy"
+    );
     Ok(())
 }
 
@@ -431,7 +442,11 @@ print(np.array_equal(result_and, expected_and) and np.array_equal(result_or, exp
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise uint8 dtype should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise uint8 dtype should match numpy"
+    );
     Ok(())
 }
 
@@ -450,7 +465,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "invert different dtypes should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "invert different dtypes should match numpy"
+    );
     Ok(())
 }
 
@@ -476,7 +495,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise empty arrays should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise empty arrays should match numpy"
+    );
     Ok(())
 }
 
@@ -498,7 +521,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise single element should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise single element should match numpy"
+    );
     Ok(())
 }
 
@@ -523,7 +550,11 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "bitwise all zeros should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise all zeros should match numpy"
+    );
     Ok(())
 }
 
@@ -573,6 +604,10 @@ print(tests_pass)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "shift large amounts should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "shift large amounts should match numpy"
+    );
     Ok(())
 }

@@ -167,7 +167,11 @@ print(value_match)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "minimum negative zero values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "minimum negative zero values should match numpy"
+    );
     Ok(())
 }
 

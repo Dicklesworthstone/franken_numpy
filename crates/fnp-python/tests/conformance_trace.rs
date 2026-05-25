@@ -165,7 +165,11 @@ print(np.isnan(fnp_result) and np.isnan(np_result))
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "trace special values should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "trace special values should match numpy"
+    );
     Ok(())
 }
 
@@ -198,7 +202,11 @@ print(fnp_result == np_result == 0)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "trace large offset should match numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "trace large offset should match numpy"
+    );
     Ok(())
 }
 

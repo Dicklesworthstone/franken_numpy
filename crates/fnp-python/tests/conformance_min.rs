@@ -418,6 +418,10 @@ print(fnp_raised == np_raised == True)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "min of empty array should raise ValueError");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "min of empty array should raise ValueError"
+    );
     Ok(())
 }
