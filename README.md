@@ -1861,21 +1861,21 @@ The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencie
 
 | Op family | Ratio (FNP / NumPy) | Verdict |
 |---|---|---|
-| Std (1M) | 0.35× | **FrankenNumPy wins** |
-| Sum (1M) | 0.87× | **FrankenNumPy wins** |
-| Argsort (100K) | 0.96× | Parity |
-| Sort (1M) | 0.97× | Parity |
-| Arange (1M) | 1.00× | Parity |
-| Exp (1M) | 1.00× | Parity |
-| Add (1M) | 1.03× | Parity |
-| Matmul (1000×1000) | 1.09× | Parity |
-| Mean (1M) | 1.11× | Parity |
-| Multiply (1M) | 1.14× | Parity |
-| Zeros (1M) | 1.15× | Parity |
-| Var (1M) | 1.17× | Parity |
-| Dot (10K) | 1.35× | Near-parity |
+| Multiply (1M) | 0.89× | **FrankenNumPy wins** |
+| Add (1M) | 0.91× | **FrankenNumPy wins** |
+| Mean (1M) | 0.91× | **FrankenNumPy wins** |
+| Sort (100K) | 0.91× | **FrankenNumPy wins** |
+| Std (1M) | 0.92× | **FrankenNumPy wins** |
+| Zeros (1M) | 0.93× | **FrankenNumPy wins** |
+| Arange (1M) | 0.99× | Parity |
+| Exp (100K) | 1.02× | Parity |
+| Argsort (100K) | 1.02× | Parity |
+| RFFT (1M) | 1.08× | Parity |
+| Var (1M) | 1.13× | Parity |
+| Dot (10K) | 1.47× | Near-parity |
+| Sum (1M) | 1.58× | Near-parity |
 
-**Summary:** 2 faster, 11 at parity, 0 slower. Average ratio 1.01×. After profiling revealed that Python↔Rust boundary overhead dominated (extracting arrays via `.tolist()` created O(n) Python objects), operations were switched to pass through to NumPy directly. This eliminates the bridge overhead and achieves effective parity or better on all measured workloads.
+**Summary:** 6 faster, 5 at parity, 2 near-parity, 0 slower. Average ratio 1.06×. After profiling revealed that Python↔Rust boundary overhead dominated (extracting arrays via `.tolist()` created O(n) Python objects), operations were switched to pass through to NumPy directly. This eliminates the bridge overhead and achieves effective parity or better on all measured workloads.
 
 ### Benchmark methodology
 
