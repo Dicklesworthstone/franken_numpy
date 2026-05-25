@@ -35,6 +35,8 @@ categories = ["science", "mathematics", "data-structures"]
 [workspace.dependencies]
 # Shared JSON encoding for conformance fixtures, reports, and evidence ledgers.
 serde_json = "1.0.149"
+# Property-based testing for metamorphic test suites.
+proptest = "1.5"
 # Derive-backed serialization for cross-crate contract and artifact data models.
 serde = { version = "1.0.228", features = ["derive"] }
 # Workspace benchmark harness for performance baselines and regression gates.
