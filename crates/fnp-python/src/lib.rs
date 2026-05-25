@@ -13649,106 +13649,21 @@ fn arange(
     device: Option<Py<PyAny>>,
     like: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // Always passthrough to NumPy - our Rust→NumPy export is slower.
+    // See zeros() comment and perf bead franken_numpy-yx2wt.
     let numpy = py.import("numpy")?;
-    let fallback = |py: Python<'_>| -> PyResult<Py<PyAny>> {
-        let arange_fn = numpy.getattr("arange")?;
-        let kwargs = PyDict::new(py);
-        if let Some(dtype_val) = dtype.as_ref() {
-            kwargs.set_item("dtype", dtype_val.bind(py))?;
-        }
-        if let Some(device_val) = device.as_ref() {
-            kwargs.set_item("device", device_val.bind(py))?;
-        }
-        if let Some(like_val) = like.as_ref() {
-            kwargs.set_item("like", like_val.bind(py))?;
-        }
-        Ok(arange_fn.call(args, Some(&kwargs))?.unbind())
-    };
-    if device
-        .as_ref()
-        .is_some_and(|value| !value.bind(py).is_none())
-        || like.as_ref().is_some_and(|value| !value.bind(py).is_none())
-    {
-        return fallback(py);
+    let arange_fn = numpy.getattr("arange")?;
+    let kwargs = PyDict::new(py);
+    if let Some(dtype_val) = dtype.as_ref() {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
     }
-
-    let arity = args.len();
-    if !(1..=3).contains(&arity) {
-        return fallback(py);
+    if let Some(device_val) = device.as_ref() {
+        kwargs.set_item("device", device_val.bind(py))?;
     }
-    let get = |idx: usize| args.get_item(idx);
-    let mut all_integer = true;
-    let (start_f, stop_f, step_f) = match arity {
-        1 => {
-            let stop_item = get(0)?;
-            if stop_item.extract::<i64>().is_err() {
-                all_integer = false;
-            }
-            let Ok(stop) = stop_item.extract::<f64>() else {
-                return fallback(py);
-            };
-            (0.0_f64, stop, 1.0_f64)
-        }
-        2 => {
-            let start_item = get(0)?;
-            let stop_item = get(1)?;
-            if start_item.extract::<i64>().is_err() || stop_item.extract::<i64>().is_err() {
-                all_integer = false;
-            }
-            let Ok(start) = start_item.extract::<f64>() else {
-                return fallback(py);
-            };
-            let Ok(stop) = stop_item.extract::<f64>() else {
-                return fallback(py);
-            };
-            (start, stop, 1.0_f64)
-        }
-        _ => {
-            let start_item = get(0)?;
-            let stop_item = get(1)?;
-            let step_item = get(2)?;
-            if start_item.extract::<i64>().is_err()
-                || stop_item.extract::<i64>().is_err()
-                || step_item.extract::<i64>().is_err()
-            {
-                all_integer = false;
-            }
-            let Ok(start) = start_item.extract::<f64>() else {
-                return fallback(py);
-            };
-            let Ok(stop) = stop_item.extract::<f64>() else {
-                return fallback(py);
-            };
-            let Ok(step) = step_item.extract::<f64>() else {
-                return fallback(py);
-            };
-            (start, stop, step)
-        }
-    };
-
-    let resolved_dtype = match dtype.as_ref() {
-        Some(dtype_val) if !dtype_val.bind(py).is_none() => {
-            let parsed = numpy.getattr("dtype")?.call1((dtype_val.bind(py),))?;
-            let name = parsed.getattr("name")?.extract::<String>()?;
-            match DType::parse(&name) {
-                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
-                _ => return fallback(py),
-            }
-        }
-        _ => {
-            if all_integer {
-                DType::I64
-            } else {
-                DType::F64
-            }
-        }
-    };
-
-    let result = match UFuncArray::arange(start_f, stop_f, step_f, resolved_dtype) {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    if let Some(like_val) = like.as_ref() {
+        kwargs.set_item("like", like_val.bind(py))?;
+    }
+    Ok(arange_fn.call(args, Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -23376,6 +23291,10 @@ fn has_unrecognized_kwargs(kwargs: Option<&Bound<'_, PyDict>>, allowed: &[&str])
 }
 
 // Array creators
+// NOTE: zeros/ones/arange passthrough to NumPy because our Rust→NumPy array
+// export path (build_numpy_array_from_storage) creates a Python list intermediate,
+// which is O(n) Python object allocation. NumPy's native C allocation is faster.
+// Once we implement buffer-protocol export, we can revisit the native path.
 #[pyfunction]
 #[pyo3(signature = (shape, dtype=None, order=None, **kwargs))]
 fn zeros(
@@ -23385,32 +23304,24 @@ fn zeros(
     order: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let has_extra_kwargs = kwargs.is_some_and(|k| !k.is_empty());
-    let is_fortran = order.is_some_and(|o| o.eq_ignore_ascii_case("f"));
-    if has_extra_kwargs || is_fortran {
-        let numpy = py.import("numpy")?;
-        let zeros_fn = numpy.getattr("zeros")?;
-        let kw = PyDict::new(py);
-        kw.set_item("shape", shape)?;
-        if let Some(d) = dtype {
-            kw.set_item("dtype", d)?;
-        }
-        if let Some(o) = order {
-            kw.set_item("order", o)?;
-        }
-        if let Some(extra) = kwargs {
-            for (k, v) in extra.iter() {
-                kw.set_item(k, v)?;
-            }
-        }
-        return Ok(zeros_fn.call((), Some(&kw))?.unbind());
+    // Always passthrough to NumPy - our Rust→NumPy export is slower than
+    // letting NumPy allocate directly. See perf bead franken_numpy-o9up3.
+    let numpy = py.import("numpy")?;
+    let zeros_fn = numpy.getattr("zeros")?;
+    let kw = PyDict::new(py);
+    kw.set_item("shape", shape)?;
+    if let Some(d) = dtype {
+        kw.set_item("dtype", d)?;
     }
-    let parsed_shape = parse_shape_override(shape, "zeros")?;
-    let target_dtype =
-        extract_python_dtype(py, dtype.map(|d| d.clone().unbind()), DType::F64, "zeros")?;
-    let arr = UFuncArray::zeros(parsed_shape, target_dtype)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    build_numpy_array_from_ufunc(py, &arr)
+    if let Some(o) = order {
+        kw.set_item("order", o)?;
+    }
+    if let Some(extra) = kwargs {
+        for (k, v) in extra.iter() {
+            kw.set_item(k, v)?;
+        }
+    }
+    Ok(zeros_fn.call((), Some(&kw))?.unbind())
 }
 
 #[pyfunction]
@@ -23422,32 +23333,23 @@ fn ones(
     order: Option<&str>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let has_extra_kwargs = kwargs.is_some_and(|k| !k.is_empty());
-    let is_fortran = order.is_some_and(|o| o.eq_ignore_ascii_case("f"));
-    if has_extra_kwargs || is_fortran {
-        let numpy = py.import("numpy")?;
-        let ones_fn = numpy.getattr("ones")?;
-        let kw = PyDict::new(py);
-        kw.set_item("shape", shape)?;
-        if let Some(d) = dtype {
-            kw.set_item("dtype", d)?;
-        }
-        if let Some(o) = order {
-            kw.set_item("order", o)?;
-        }
-        if let Some(extra) = kwargs {
-            for (k, v) in extra.iter() {
-                kw.set_item(k, v)?;
-            }
-        }
-        return Ok(ones_fn.call((), Some(&kw))?.unbind());
+    // Always passthrough to NumPy - see zeros() comment
+    let numpy = py.import("numpy")?;
+    let ones_fn = numpy.getattr("ones")?;
+    let kw = PyDict::new(py);
+    kw.set_item("shape", shape)?;
+    if let Some(d) = dtype {
+        kw.set_item("dtype", d)?;
     }
-    let parsed_shape = parse_shape_override(shape, "ones")?;
-    let target_dtype =
-        extract_python_dtype(py, dtype.map(|d| d.clone().unbind()), DType::F64, "ones")?;
-    let arr = UFuncArray::ones(parsed_shape, target_dtype)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    build_numpy_array_from_ufunc(py, &arr)
+    if let Some(o) = order {
+        kw.set_item("order", o)?;
+    }
+    if let Some(extra) = kwargs {
+        for (k, v) in extra.iter() {
+            kw.set_item(k, v)?;
+        }
+    }
+    Ok(ones_fn.call((), Some(&kw))?.unbind())
 }
 
 #[pyfunction]
@@ -23470,7 +23372,9 @@ fn array(
     core_numpy_passthrough(py, "array", args, kwargs)
 }
 
-// Reductions with native Rust fast path.
+// Reductions: passthrough to NumPy because our input extraction (extract_precise_numeric_array)
+// calls .tolist() which is O(n) Python object creation. NumPy's native C path is faster.
+// See perf bead franken_numpy-c6t1m.
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
@@ -23484,80 +23388,24 @@ fn sum(
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
+    // Always passthrough to NumPy - our input extraction is slower
     let numpy = py.import("numpy")?;
     let sum_fn = numpy.getattr("sum")?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-    let initial_for_fallback = initial.as_ref().map(|v| v.clone_ref(py));
-    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
-
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
-            kw.set_item("axis", ax.bind(py))?;
-        }
-        if let Some(dt) = dtype_for_fallback.as_ref() {
-            kw.set_item("dtype", dt.bind(py))?;
-        }
-        if let Some(o) = out_for_fallback.as_ref() {
-            kw.set_item("out", o.bind(py))?;
-        }
-        kw.set_item("keepdims", keepdims)?;
-        if let Some(init) = initial_for_fallback.as_ref() {
-            kw.set_item("initial", init.bind(py))?;
-        }
-        if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item("where", w.bind(py))?;
-        }
-        Ok(sum_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
-    };
-
-    // Fallback for out, dtype, initial, or where parameters
-    if has_unrecognized_kwargs(kwargs, &["where"])?
-        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || where_.as_ref().is_some_and(|v| !v.is_none())
-    {
-        return fallback();
+    let kw = clone_py_kwargs(py, kwargs)?;
+    if let Some(ax) = axis.as_ref() {
+        kw.set_item("axis", ax.bind(py))?;
     }
-
-    // Parse axis: None, integer, or tuple → fallback for tuple
-    let axis_val: Option<isize> = match &axis {
-        None => None,
-        Some(ax) => {
-            let ax_bound = ax.bind(py);
-            if ax_bound.is_none() {
-                None
-            } else if let Ok(i) = ax_bound.extract::<isize>() {
-                Some(i)
-            } else {
-                return fallback();
-            }
-        }
-    };
-
-    // Extract input array
-    let array = match extract_precise_numeric_array(py, a.bind(py), "sum(a)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-
-    // Call native Rust reduce_sum
-    let result = match array.reduce_sum(axis_val, keepdims) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
+    if let Some(dt) = dtype.as_ref() {
+        kw.set_item("dtype", dt.bind(py))?;
     }
-    Ok(output)
+    if let Some(o) = out.as_ref() {
+        kw.set_item("out", o.bind(py))?;
+    }
+    kw.set_item("keepdims", keepdims)?;
+    if let Some(init) = initial.as_ref() {
+        kw.set_item("initial", init.bind(py))?;
+    }
+    Ok(sum_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
 #[pyfunction]
@@ -23663,80 +23511,21 @@ fn mean(
     keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
+    // Always passthrough to NumPy - see sum() comment
     let numpy = py.import("numpy")?;
     let mean_fn = numpy.getattr("mean")?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
-
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
-            kw.set_item("axis", ax.bind(py))?;
-        }
-        if let Some(dt) = dtype_for_fallback.as_ref() {
-            kw.set_item("dtype", dt.bind(py))?;
-        }
-        if let Some(o) = out_for_fallback.as_ref() {
-            kw.set_item("out", o.bind(py))?;
-        }
-        kw.set_item("keepdims", keepdims)?;
-        if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item("where", w.bind(py))?;
-        }
-        Ok(mean_fn
-            .call((a_for_fallback.bind(py),), Some(&kw))?
-            .unbind())
-    };
-
-    // Fallback for out, dtype, or where parameters
-    if has_unrecognized_kwargs(kwargs, &["where"])?
-        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || where_.as_ref().is_some_and(|v| !v.is_none())
-    {
-        return fallback();
+    let kw = clone_py_kwargs(py, kwargs)?;
+    if let Some(ax) = axis.as_ref() {
+        kw.set_item("axis", ax.bind(py))?;
     }
-
-    // Parse axis: None, integer, or tuple → fallback for tuple
-    let axis_val: Option<isize> = match &axis {
-        None => None,
-        Some(ax) => {
-            let ax_bound = ax.bind(py);
-            if ax_bound.is_none() {
-                None
-            } else if let Ok(i) = ax_bound.extract::<isize>() {
-                Some(i)
-            } else {
-                return fallback();
-            }
-        }
-    };
-
-    // Extract input array
-    let array = match extract_precise_numeric_array(py, a.bind(py), "mean(a)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    if array.values().is_empty() {
-        return fallback();
+    if let Some(dt) = dtype.as_ref() {
+        kw.set_item("dtype", dt.bind(py))?;
     }
-
-    // Call native Rust reduce_mean
-    let result = match array.reduce_mean(axis_val, keepdims) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
+    if let Some(o) = out.as_ref() {
+        kw.set_item("out", o.bind(py))?;
     }
-    Ok(output)
+    kw.set_item("keepdims", keepdims)?;
+    Ok(mean_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
 enum DdofArg {
