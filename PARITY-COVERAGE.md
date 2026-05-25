@@ -82,6 +82,7 @@ This is by design (DISC-009 acceptance) — the passthrough ensures correctness 
 1. **`pip install` distribution** — No PyPI wheel yet; local build only
 2. **100% bit-for-bit oracle verification** — Conformance tests verify behavior, not exact floating-point bit patterns for all inputs
 3. **NumPy private/undocumented APIs** — Only public API surface
+4. **`np.random.mtrand` submodule** — Legacy compatibility layer; `RandomState` is exposed directly on `fnp.random`
 
 ## Gaps Found
 
