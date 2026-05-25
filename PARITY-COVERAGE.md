@@ -14,9 +14,19 @@ Rigorous upstream coverage audit completed 2026-05-25.
 
 ## Conformance Test Coverage
 
-- **Total conformance tests**: 2,350 test functions across 168 test files
+- **Total workspace tests**: 7,355 test functions
+- **Conformance tests**: 2,350 test functions across 168 test files
 - **Test result**: 0 failures
 - **fnp-python tests**: All pass (2,127 in fnp-python crate)
+
+## Bead Tracker Status
+
+- **Total beads**: 1,577
+- **Closed**: 1,577 (100%)
+- **Open**: 0
+- **In Progress**: 0
+- **Blocked**: 0
+- **Avg lead time**: 4.2 hours
 
 ## Edge Case Verification
 
