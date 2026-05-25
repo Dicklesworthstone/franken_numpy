@@ -328,9 +328,8 @@ impl PyUFunc {
         if let Some(o) = out.as_ref() {
             kwargs.set_item("out", o.bind(py))?;
         }
-        match r#where {
-            Some(w) => kwargs.set_item("where", w.bind(py))?,
-            None => kwargs.set_item("where", true)?,
+        if let Some(w) = r#where {
+            kwargs.set_item("where", w.bind(py))?;
         }
         kwargs.set_item("casting", casting)?;
         kwargs.set_item("order", order)?;
