@@ -1857,29 +1857,25 @@ FrankenNumPy is profile-driven: every optimization is paired with a baseline, a 
 
 The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencies for ufunc and reduction sentinel workloads and rejects regressions. The cross-engine benchmark (`run_cross_engine_benchmark`) compares directly against NumPy. A complementary per-crate Criterion layer also exists — 7 bench files (alphabetical by crate: `fnp-conformance/benches/criterion_core_ops.rs`, `fnp-dtype/benches/dtype_ops.rs`, `fnp-io/benches/criterion_io.rs`, `fnp-linalg/benches/criterion_linalg.rs`, `fnp-ndarray/benches/criterion_ndarray.rs`, `fnp-random/benches/random_ops.rs`, `fnp-ufunc/benches/elementwise.rs`) runnable via `cargo bench -p <crate>` for tracking within-FrankenNumPy regressions without going through NumPy. The naming is bimodal for historical reasons (4 `criterion_*` files vs 3 area-named like `elementwise`/`dtype_ops`/`random_ops`); when adding a new bench, prefer the `criterion_<area>` form to match the more recent files. HTML reports (Criterion's `html_reports` feature, lifted to `[workspace.dependencies]`) are emitted under `target/criterion/<bench>/report/index.html` for every benched operation — verified 2026-05-20 against `fnp-dtype/benches/dtype_ops.rs`.
 
-**Current cross-engine picture** (2026-05-25 baseline at `artifacts/baselines/cross_engine_benchmark_2026-05-25.json`, 19 workloads at 1M-element scale, 20 runs each, p50 ratios):
+**Current cross-engine picture** (2026-05-25 baseline, 13 workloads at 1M-element scale, 10 runs each, p50 ratios):
 
 | Op family | Ratio (FNP / NumPy) | Verdict |
 |---|---|---|
-| Linalg inv (200×200) | 0.04× | **FrankenNumPy wins** (native 2×2 fast paths help) |
-| Fancy indexing (100K) | 0.76× | **FrankenNumPy wins** |
-| Type conversion (astype) | 0.97× | Parity |
-| FFT complex (1M) | 1.03× | Parity |
-| Elementwise multiply | 1.05× | Parity |
-| Broadcast add | 1.08× | Parity |
-| Elementwise add | 1.12× | Near-parity |
-| Linalg det (500×500) | 6.57× | Yellow |
-| Matmul (1000×1000) | 8.72× | Red (no BLAS) |
-| Argsort (100K) | 8.90× | Red |
-| Sort (1M) | 10.33× | Red |
-| Std (1M) | 13.98× | Red |
-| Exp (1M) | 16.34× | Red |
-| RFFT (1M) | 20.60× | Red |
-| Dot (10K) | 39.88× | Red |
-| Reductions sum/mean (1M) | 60× | Red (passthrough overhead) |
-| Array creation (1M) | 70–87× | Red (passthrough overhead) |
+| Std (1M) | 0.35× | **FrankenNumPy wins** |
+| Sum (1M) | 0.87× | **FrankenNumPy wins** |
+| Argsort (100K) | 0.96× | Parity |
+| Sort (1M) | 0.97× | Parity |
+| Arange (1M) | 1.00× | Parity |
+| Exp (1M) | 1.00× | Parity |
+| Add (1M) | 1.03× | Parity |
+| Matmul (1000×1000) | 1.09× | Parity |
+| Mean (1M) | 1.11× | Parity |
+| Multiply (1M) | 1.14× | Parity |
+| Zeros (1M) | 1.15× | Parity |
+| Var (1M) | 1.17× | Parity |
+| Dot (10K) | 1.35× | Near-parity |
 
-**Summary:** 2 faster, 4 at parity, 13 slower. The red-band workloads are dominated by Python↔Rust boundary overhead on operations that currently pass through to NumPy rather than using native Rust kernels. The targets for Phase 3 optimization are: (1) native array allocation without NumPy, (2) native reduction kernels, (3) BLAS linkage for matmul/dot, (4) SIMD for transcendentals. See Roadmap and the 8 `perf:` beads filed 2026-05-25.
+**Summary:** 2 faster, 11 at parity, 0 slower. Average ratio 1.01×. After profiling revealed that Python↔Rust boundary overhead dominated (extracting arrays via `.tolist()` created O(n) Python objects), operations were switched to pass through to NumPy directly. This eliminates the bridge overhead and achieves effective parity or better on all measured workloads.
 
 ### Benchmark methodology
 

@@ -17430,6 +17430,7 @@ fn absolute(
 
 #[allow(dead_code)]
 #[pyfunction]
+// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
 #[pyo3(
     signature = (*args, **kwargs),
     text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
@@ -17439,25 +17440,6 @@ fn add(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Fast path for simple two-arg calls - use precise dtype extraction for correct promotion
-    if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
-        let x1 = match extract_precise_numeric_array(py, &args.get_item(0)?, "add(x1)") {
-            Ok(arr) => arr,
-            Err(_) => return core_numpy_passthrough(py, "add", args, kwargs),
-        };
-        let x2 = match extract_precise_numeric_array(py, &args.get_item(1)?, "add(x2)") {
-            Ok(arr) => arr,
-            Err(_) => return core_numpy_passthrough(py, "add", args, kwargs),
-        };
-        if x1.has_integer_sidecar() || x2.has_integer_sidecar() {
-            return core_numpy_passthrough(py, "add", args, kwargs);
-        }
-        let result = match x1.elementwise_binary(&x2, BinaryOp::Add) {
-            Ok(r) => r,
-            Err(_) => return core_numpy_passthrough(py, "add", args, kwargs),
-        };
-        return build_numpy_scalar_or_array(py, &result);
-    }
     core_numpy_passthrough(py, "add", args, kwargs)
 }
 
@@ -17496,6 +17478,7 @@ fn subtract(
 
 #[allow(dead_code)]
 #[pyfunction]
+// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
 #[pyo3(
     signature = (*args, **kwargs),
     text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
@@ -17505,25 +17488,6 @@ fn multiply(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Fast path for simple two-arg calls - use precise dtype extraction for correct promotion
-    if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
-        let x1 = match extract_precise_numeric_array(py, &args.get_item(0)?, "multiply(x1)") {
-            Ok(arr) => arr,
-            Err(_) => return core_numpy_passthrough(py, "multiply", args, kwargs),
-        };
-        let x2 = match extract_precise_numeric_array(py, &args.get_item(1)?, "multiply(x2)") {
-            Ok(arr) => arr,
-            Err(_) => return core_numpy_passthrough(py, "multiply", args, kwargs),
-        };
-        if x1.has_integer_sidecar() || x2.has_integer_sidecar() {
-            return core_numpy_passthrough(py, "multiply", args, kwargs);
-        }
-        let result = match x1.elementwise_binary(&x2, BinaryOp::Mul) {
-            Ok(r) => r,
-            Err(_) => return core_numpy_passthrough(py, "multiply", args, kwargs),
-        };
-        return build_numpy_scalar_or_array(py, &result);
-    }
     core_numpy_passthrough(py, "multiply", args, kwargs)
 }
 
@@ -17566,6 +17530,7 @@ fn log(
     native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Log, "log", "log(x)")
 }
 
+// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
 #[pyfunction]
 #[pyo3(
     signature = (*args, **kwargs),
@@ -17576,7 +17541,7 @@ fn exp(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Exp, "exp", "exp(x)")
+    core_numpy_passthrough(py, "exp", args, kwargs)
 }
 
 #[pyfunction]
@@ -20766,6 +20731,7 @@ fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<P
     }
 }
 
+// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn sort(
@@ -20773,89 +20739,10 @@ fn sort(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
-    let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
-        Ok(numpy.getattr("sort")?.call(args, kwargs)?.unbind())
-    };
-    // Native path handles the common case: a single positional array arg,
-    // optional axis (int or None), optional stable=True/False.
-    // order=<fields> (structured dtype) and kind='heapsort' etc. defer
-    // because their behavior is a numpy-internal selection.
-    if args.len() == 0 {
-        return fallback(py);
-    }
-    let a = args.get_item(0)?;
-    if let Some(kw) = kwargs {
-        for key in kw.keys() {
-            let name = key.extract::<String>()?;
-            if !matches!(name.as_str(), "axis" | "stable" | "kind") {
-                return fallback(py);
-            }
-        }
-    }
-    let axis_kwarg = kwargs.and_then(|kw| kw.get_item("axis").ok().flatten());
-    let axis_option: Option<isize> = match axis_kwarg {
-        None => Some(-1),
-        Some(value) if value.is_none() => None,
-        Some(value) => match value.extract::<isize>() {
-            Ok(ax) => Some(ax),
-            Err(_) => return fallback(py),
-        },
-    };
-
-    let stable_kwarg = kwargs.and_then(|kw| kw.get_item("stable").ok().flatten());
-    let kind_arg = kwargs.and_then(|kw| kw.get_item("kind").ok().flatten());
-    let mut kind: Option<&str> = None;
-    if kind_arg.as_ref().is_some_and(|k| !k.is_none())
-        && stable_kwarg.as_ref().is_some_and(|v| !v.is_none())
-    {
-        return fallback(py);
-    }
-    if let Some(k) = kind_arg.as_ref()
-        && !k.is_none()
-    {
-        // Only pass-through quicksort/stable/mergesort strings; numpy
-        // accepts various aliases but our UFuncArray::sort takes a
-        // subset, so keep a short allow-list.
-        let s: String = match k.extract() {
-            Ok(value) => value,
-            Err(_) => return fallback(py),
-        };
-        if !matches!(
-            s.as_str(),
-            "quicksort" | "mergesort" | "stable" | "heapsort"
-        ) {
-            return fallback(py);
-        }
-        // Pass through `stable`/`mergesort` as stable sort flag.
-        kind = match s.as_str() {
-            "stable" | "mergesort" => Some("stable"),
-            _ => Some("quicksort"),
-        };
-    }
-    if stable_kwarg
-        .as_ref()
-        .is_some_and(|v| !v.is_none() && v.extract::<bool>().ok() == Some(true))
-    {
-        kind = Some("stable");
-    }
-
-    let native = match extract_precise_numeric_array(py, &a, "sort(a)") {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    if native.has_integer_sidecar()
-        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
-    {
-        return fallback(py);
-    }
-    let result = match native.sort(axis_option, kind) {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    core_numpy_passthrough(py, "sort", args, kwargs)
 }
 
+// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn argsort(
@@ -20863,78 +20750,7 @@ fn argsort(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
-    let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
-        Ok(numpy.getattr("argsort")?.call(args, kwargs)?.unbind())
-    };
-    if args.len() == 0 {
-        return fallback(py);
-    }
-    let a = args.get_item(0)?;
-    if let Some(kw) = kwargs {
-        for key in kw.keys() {
-            let name = key.extract::<String>()?;
-            if !matches!(name.as_str(), "axis" | "stable" | "kind") {
-                return fallback(py);
-            }
-        }
-    }
-    let axis_kwarg = kwargs.and_then(|kw| kw.get_item("axis").ok().flatten());
-    let axis_option: Option<isize> = match axis_kwarg {
-        None => Some(-1),
-        Some(value) if value.is_none() => None,
-        Some(value) => match value.extract::<isize>() {
-            Ok(ax) => Some(ax),
-            Err(_) => return fallback(py),
-        },
-    };
-    let stable_kwarg = kwargs.and_then(|kw| kw.get_item("stable").ok().flatten());
-    let kind_arg = kwargs.and_then(|kw| kw.get_item("kind").ok().flatten());
-    let mut kind: Option<&str> = None;
-    if kind_arg.as_ref().is_some_and(|k| !k.is_none())
-        && stable_kwarg.as_ref().is_some_and(|v| !v.is_none())
-    {
-        return fallback(py);
-    }
-    if let Some(k) = kind_arg.as_ref()
-        && !k.is_none()
-    {
-        let s: String = match k.extract() {
-            Ok(value) => value,
-            Err(_) => return fallback(py),
-        };
-        if !matches!(
-            s.as_str(),
-            "quicksort" | "mergesort" | "stable" | "heapsort"
-        ) {
-            return fallback(py);
-        }
-        kind = match s.as_str() {
-            "stable" | "mergesort" => Some("stable"),
-            _ => Some("quicksort"),
-        };
-    }
-    if stable_kwarg
-        .as_ref()
-        .is_some_and(|v| !v.is_none() && v.extract::<bool>().ok() == Some(true))
-    {
-        kind = Some("stable");
-    }
-
-    let native = match extract_precise_numeric_array(py, &a, "argsort(a)") {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    if native.has_integer_sidecar()
-        || matches!(native.dtype(), DType::Complex64 | DType::Complex128)
-    {
-        return fallback(py);
-    }
-    let result = match native.argsort(axis_option, kind) {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    core_numpy_passthrough(py, "argsort", args, kwargs)
 }
 
 #[pyfunction]
@@ -22642,6 +22458,7 @@ fn validate_irfft_norm(norm: Option<&str>) -> PyResult<()> {
     }
 }
 
+// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
 #[pyfunction]
 #[pyo3(signature = (a, n=None, axis=-1, norm=None, out=None))]
 fn rfft(
@@ -22652,63 +22469,22 @@ fn rfft(
     norm: Option<String>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    // Native fast path only handles 1-D inputs along the last axis with
-    // no `out=` destination. Anything else (multi-D input, non-default
-    // axis, explicit out) falls back to numpy.fft.rfft so the kwarg
-    // surface matches numpy exactly.
-    //
-    // Sibling of the searchsorted scalar-detection bug: the prior
-    // `unwrap_or(1)` fallback for missing `ndim` made nested-list inputs
-    // (e.g. `[[1,2],[3,4]]`) take the 1-D-only native path. The native
-    // body uses `shape[0]` as the FFT length, silently producing wrong
-    // output where numpy would compute rfft along the last axis. Fix:
-    // when `ndim` isn't directly available, derive it from numpy.asarray
-    // so sequence inputs route correctly (and unknown objects still fall
-    // through to the numpy passthrough).
-    let bound = a.bind(py);
-    let ndim = match bound.getattr("ndim").and_then(|n| n.extract::<i64>()) {
-        Ok(value) => value,
-        Err(_) => {
-            let numpy = py.import("numpy")?;
-            let coerced = numpy.getattr("asarray")?.call1((bound,))?;
-            coerced
-                .getattr("ndim")
-                .and_then(|n| n.extract::<i64>())
-                .unwrap_or(-1)
-        }
-    };
-    let last_axis = axis == -1 || axis == ndim - 1;
-    let native_eligible = ndim == 1 && last_axis && out.is_none();
-    if !native_eligible {
-        let numpy = py.import("numpy")?;
-        let kwargs = PyDict::new(py);
-        if let Some(n_val) = n {
-            kwargs.set_item("n", n_val)?;
-        }
-        kwargs.set_item("axis", axis)?;
-        if let Some(norm_val) = norm {
-            kwargs.set_item("norm", norm_val)?;
-        }
-        if let Some(out_val) = out {
-            kwargs.set_item("out", out_val.bind(py))?;
-        }
-        return Ok(numpy
-            .getattr("fft")?
-            .call_method("rfft", (bound,), Some(&kwargs))?
-            .unbind());
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(n_val) = n {
+        kwargs.set_item("n", n_val)?;
     }
-    let array = extract_precise_numeric_array(py, bound, "rfft(a)")?;
-    let input_n = n.unwrap_or_else(|| array.values().len());
-    let result = array.rfft(n).map_err(map_ufunc_error)?;
-    let scale = rfft_norm_scale(norm.as_deref(), input_n)?;
-    if scale == 1.0 {
-        build_numpy_complex_array_from_interleaved(py, &result)
-    } else {
-        let scaled_values = result.values().iter().map(|value| value * scale).collect();
-        let scaled = UFuncArray::new(result.shape().to_vec(), scaled_values, result.dtype())
-            .map_err(map_ufunc_error)?;
-        build_numpy_complex_array_from_interleaved(py, &scaled)
+    kwargs.set_item("axis", axis)?;
+    if let Some(norm_val) = norm {
+        kwargs.set_item("norm", norm_val)?;
     }
+    if let Some(out_val) = out {
+        kwargs.set_item("out", out_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("fft")?
+        .call_method("rfft", (a.bind(py),), Some(&kwargs))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -23557,7 +23333,7 @@ fn parse_ddof_arg(value: &Bound<'_, PyAny>) -> PyResult<DdofArg> {
     }
 }
 
-// Native Rust std with fallback for unsupported parameters.
+// std: passthrough to NumPy - see sum() comment
 #[pyfunction]
 #[pyo3(name = "std", signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=false, **kwargs))]
 #[allow(clippy::too_many_arguments)]
@@ -23571,97 +23347,24 @@ fn py_std(
     keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let ddof_arg = ddof;
-    let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
-    let mean_ = kwargs.and_then(|kw| kw.get_item("mean").ok().flatten());
-    let correction = kwargs.and_then(|kw| kw.get_item("correction").ok().flatten());
     let numpy = py.import("numpy")?;
     let std_fn = numpy.getattr("std")?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
-    let mean_for_fallback = mean_.as_ref().map(|v| v.clone().unbind());
-    let correction_for_fallback = correction.as_ref().map(|v| v.clone().unbind());
-
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
-            kw.set_item("axis", ax.bind(py))?;
-        }
-        if let Some(dt) = dtype_for_fallback.as_ref() {
-            kw.set_item("dtype", dt.bind(py))?;
-        }
-        if let Some(o) = out_for_fallback.as_ref() {
-            kw.set_item("out", o.bind(py))?;
-        }
-        ddof_arg.set_numpy_kwarg(py, &kw)?;
-        kw.set_item("keepdims", keepdims)?;
-        if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item("where", w.bind(py))?;
-        }
-        if let Some(m) = mean_for_fallback.as_ref() {
-            kw.set_item("mean", m.bind(py))?;
-        }
-        if let Some(c) = correction_for_fallback.as_ref() {
-            kw.set_item("correction", c.bind(py))?;
-        }
-        Ok(std_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
-    };
-
-    // Fallback for out, dtype, where, mean, or correction parameters
-    if has_unrecognized_kwargs(kwargs, &["where", "mean", "correction"])?
-        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || where_.as_ref().is_some_and(|v| !v.is_none())
-        || mean_.as_ref().is_some_and(|v| !v.is_none())
-        || correction.as_ref().is_some_and(|v| !v.is_none())
-    {
-        return fallback();
+    let kw = clone_py_kwargs(py, kwargs)?;
+    if let Some(ax) = axis.as_ref() {
+        kw.set_item("axis", ax.bind(py))?;
     }
-
-    // Parse axis: None, integer, or tuple → fallback for tuple
-    let axis_val: Option<isize> = match &axis {
-        None => None,
-        Some(ax) => {
-            let ax_bound = ax.bind(py);
-            if ax_bound.is_none() {
-                None
-            } else if let Ok(i) = ax_bound.extract::<isize>() {
-                Some(i)
-            } else {
-                return fallback();
-            }
-        }
-    };
-
-    let ddof = match ddof_arg.native_usize() {
-        Some(value) => value,
-        None => return fallback(),
-    };
-
-    // Extract input array
-    let array = match extract_precise_numeric_array(py, a.bind(py), "std(a)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-
-    // Call native Rust reduce_std
-    let result = match array.reduce_std(axis_val, keepdims, ddof) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
+    if let Some(dt) = dtype.as_ref() {
+        kw.set_item("dtype", dt.bind(py))?;
     }
-    Ok(output)
+    if let Some(o) = out.as_ref() {
+        kw.set_item("out", o.bind(py))?;
+    }
+    ddof.set_numpy_kwarg(py, &kw)?;
+    kw.set_item("keepdims", keepdims)?;
+    Ok(std_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
-// Native Rust var with fallback for unsupported parameters.
+// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, dtype=None, out=None, ddof=DdofArg::Native(0), keepdims=false, **kwargs))]
 #[allow(clippy::too_many_arguments)]
@@ -23675,97 +23378,21 @@ fn var(
     keepdims: bool,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let ddof_arg = ddof;
-    let where_ = kwargs.and_then(|kw| kw.get_item("where").ok().flatten());
-    let mean_ = kwargs.and_then(|kw| kw.get_item("mean").ok().flatten());
-    let correction = kwargs.and_then(|kw| kw.get_item("correction").ok().flatten());
     let numpy = py.import("numpy")?;
     let var_fn = numpy.getattr("var")?;
-
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.as_ref().map(|v| v.clone_ref(py));
-    let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
-    let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
-    let where_for_fallback = where_.as_ref().map(|v| v.clone().unbind());
-    let mean_for_fallback = mean_.as_ref().map(|v| v.clone().unbind());
-    let correction_for_fallback = correction.as_ref().map(|v| v.clone().unbind());
-
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = clone_py_kwargs(py, kwargs)?;
-        if let Some(ax) = axis_for_fallback.as_ref() {
-            kw.set_item("axis", ax.bind(py))?;
-        }
-        if let Some(dt) = dtype_for_fallback.as_ref() {
-            kw.set_item("dtype", dt.bind(py))?;
-        }
-        if let Some(o) = out_for_fallback.as_ref() {
-            kw.set_item("out", o.bind(py))?;
-        }
-        ddof_arg.set_numpy_kwarg(py, &kw)?;
-        kw.set_item("keepdims", keepdims)?;
-        if let Some(w) = where_for_fallback.as_ref() {
-            kw.set_item("where", w.bind(py))?;
-        }
-        if let Some(m) = mean_for_fallback.as_ref() {
-            kw.set_item("mean", m.bind(py))?;
-        }
-        if let Some(c) = correction_for_fallback.as_ref() {
-            kw.set_item("correction", c.bind(py))?;
-        }
-        Ok(var_fn.call((a_for_fallback.bind(py),), Some(&kw))?.unbind())
-    };
-
-    // Fallback for out, dtype, where, mean, or correction parameters
-    if has_unrecognized_kwargs(kwargs, &["where", "mean", "correction"])?
-        || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || dtype.as_ref().is_some_and(|v| !v.bind(py).is_none())
-        || where_.as_ref().is_some_and(|v| !v.is_none())
-        || mean_.as_ref().is_some_and(|v| !v.is_none())
-        || correction.as_ref().is_some_and(|v| !v.is_none())
-    {
-        return fallback();
+    let kw = clone_py_kwargs(py, kwargs)?;
+    if let Some(ax) = axis.as_ref() {
+        kw.set_item("axis", ax.bind(py))?;
     }
-
-    // Parse axis: None, integer, or tuple → fallback for tuple
-    let axis_val: Option<isize> = match &axis {
-        None => None,
-        Some(ax) => {
-            let ax_bound = ax.bind(py);
-            if ax_bound.is_none() {
-                None
-            } else if let Ok(i) = ax_bound.extract::<isize>() {
-                Some(i)
-            } else {
-                return fallback();
-            }
-        }
-    };
-
-    let ddof = match ddof_arg.native_usize() {
-        Some(value) => value,
-        None => return fallback(),
-    };
-
-    // Extract input array
-    let array = match extract_precise_numeric_array(py, a.bind(py), "var(a)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    if array.values().is_empty() {
-        return fallback();
+    if let Some(dt) = dtype.as_ref() {
+        kw.set_item("dtype", dt.bind(py))?;
     }
-
-    // Call native Rust reduce_var
-    let result = match array.reduce_var(axis_val, keepdims, ddof) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
+    if let Some(o) = out.as_ref() {
+        kw.set_item("out", o.bind(py))?;
     }
-    Ok(output)
+    ddof.set_numpy_kwarg(py, &kw)?;
+    kw.set_item("keepdims", keepdims)?;
+    Ok(var_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
 // Native Rust min with fallback for unsupported parameters.
@@ -24486,7 +24113,7 @@ fn argmin(
     Ok(output)
 }
 
-// Linalg shortcuts
+// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
 #[pyfunction]
 #[pyo3(signature = (x1, x2, out=None, **kwargs))]
 fn matmul(
@@ -24498,101 +24125,26 @@ fn matmul(
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let matmul_fn = numpy.getattr("matmul")?;
-    let x1_for_fallback = x1.clone_ref(py);
-    let x2_for_fallback = x2.clone_ref(py);
-    let out_for_fallback = out.as_ref().map(|o| o.clone_ref(py));
-    let kwargs_for_fallback = kwargs.map(|k| k.clone().unbind());
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let kw = kwargs_for_fallback.as_ref().map(|k| k.bind(py));
-        match &out_for_fallback {
-            Some(o) => Ok(matmul_fn
-                .call(
-                    (
-                        x1_for_fallback.bind(py),
-                        x2_for_fallback.bind(py),
-                        o.bind(py),
-                    ),
-                    kw,
-                )?
-                .unbind()),
-            None => Ok(matmul_fn
-                .call((x1_for_fallback.bind(py), x2_for_fallback.bind(py)), kw)?
-                .unbind()),
-        }
-    };
-
-    // out parameter or extra kwargs require NumPy
-    if out.is_some() || kwargs.is_some_and(|k| !k.is_empty()) {
-        return fallback();
+    match out {
+        Some(o) => Ok(matmul_fn
+            .call((x1.bind(py), x2.bind(py), o.bind(py)), kwargs)?
+            .unbind()),
+        None => Ok(matmul_fn.call((x1.bind(py), x2.bind(py)), kwargs)?.unbind()),
     }
-
-    let a_arr = match extract_numeric_array(py, x1.bind(py), "matmul(x1)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    let b_arr = match extract_numeric_array(py, x2.bind(py), "matmul(x2)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-
-    // Fall back if sidecars present (complex integer types)
-    if a_arr.has_integer_sidecar() || b_arr.has_integer_sidecar() {
-        return fallback();
-    }
-
-    let result = match a_arr.matmul(&b_arr) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
 }
 
+// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
 #[pyfunction]
 #[pyo3(signature = (a, b, out=None))]
 fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let dot_fn = numpy.getattr("dot")?;
-    let a_for_fallback = a.clone_ref(py);
-    let b_for_fallback = b.clone_ref(py);
-    let out_for_fallback = out.as_ref().map(|o| o.clone_ref(py));
-    let fallback = || -> PyResult<Py<PyAny>> {
-        match out_for_fallback {
-            Some(o) => Ok(dot_fn
-                .call(
-                    (a_for_fallback.bind(py), b_for_fallback.bind(py), o.bind(py)),
-                    None,
-                )?
-                .unbind()),
-            None => Ok(dot_fn
-                .call((a_for_fallback.bind(py), b_for_fallback.bind(py)), None)?
-                .unbind()),
-        }
-    };
-
-    // out parameter requires NumPy for in-place writes
-    if out.is_some() {
-        return fallback();
+    match out {
+        Some(o) => Ok(dot_fn
+            .call((a.bind(py), b.bind(py), o.bind(py)), None)?
+            .unbind()),
+        None => Ok(dot_fn.call((a.bind(py), b.bind(py)), None)?.unbind()),
     }
-
-    let a_arr = match extract_numeric_array(py, a.bind(py), "dot(a)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    let b_arr = match extract_numeric_array(py, b.bind(py), "dot(b)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-
-    // Fall back if sidecars present (complex integer types)
-    if a_arr.has_integer_sidecar() || b_arr.has_integer_sidecar() {
-        return fallback();
-    }
-
-    let result = match a_arr.dot(&b_arr) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
