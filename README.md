@@ -1857,22 +1857,29 @@ FrankenNumPy is profile-driven: every optimization is paired with a baseline, a 
 
 The G7 budget gate (`run_performance_budget_gate`) measures p50/p95/p99 latencies for ufunc and reduction sentinel workloads and rejects regressions. The cross-engine benchmark (`run_cross_engine_benchmark`) compares directly against NumPy. A complementary per-crate Criterion layer also exists — 7 bench files (alphabetical by crate: `fnp-conformance/benches/criterion_core_ops.rs`, `fnp-dtype/benches/dtype_ops.rs`, `fnp-io/benches/criterion_io.rs`, `fnp-linalg/benches/criterion_linalg.rs`, `fnp-ndarray/benches/criterion_ndarray.rs`, `fnp-random/benches/random_ops.rs`, `fnp-ufunc/benches/elementwise.rs`) runnable via `cargo bench -p <crate>` for tracking within-FrankenNumPy regressions without going through NumPy. The naming is bimodal for historical reasons (4 `criterion_*` files vs 3 area-named like `elementwise`/`dtype_ops`/`random_ops`); when adding a new bench, prefer the `criterion_<area>` form to match the more recent files. HTML reports (Criterion's `html_reports` feature, lifted to `[workspace.dependencies]`) are emitted under `target/criterion/<bench>/report/index.html` for every benched operation — verified 2026-05-20 against `fnp-dtype/benches/dtype_ops.rs`.
 
-**Current cross-engine picture** (2026-04-10 baseline at `artifacts/baselines/cross_engine_benchmark_v1.json`, 37 workloads — verified 2026-05-17 to be the most recent baseline on disk; later parity / metadata / fuzz work has not regenerated it, so ratios below reflect pre-May code paths):
+**Current cross-engine picture** (2026-05-25 baseline at `artifacts/baselines/cross_engine_benchmark_2026-05-25.json`, 19 workloads at 1M-element scale, 20 runs each, p50 ratios):
 
-| Op family | Median ratio (FNP / NumPy) | Verdict |
+| Op family | Ratio (FNP / NumPy) | Verdict |
 |---|---|---|
-| I/O | 0.14× | **FrankenNumPy wins** |
-| Random | 1.00× | Parity |
-| Linalg | 1.02× | Parity |
-| Reductions | 1.18× | Near-parity |
-| Sorting | 1.90× | Acceptable |
-| Statistics | 2.79× | Yellow |
-| Matmul | 3.40× | Yellow |
-| FFT | 10.56× | Mixed: the 2 FFT workloads are `fft_power2_medium` at 0.50× (FNP wins) and `fft_non_power2_medium` at 20.63× (Bluestein chirp-Z slow path) — median of the two is 10.56× |
-| Ufunc broadcast | 13.53× | Red, large-scale |
-| Ufunc elementwise | 30.76× | Red, large-scale |
+| Linalg inv (200×200) | 0.04× | **FrankenNumPy wins** (native 2×2 fast paths help) |
+| Fancy indexing (100K) | 0.76× | **FrankenNumPy wins** |
+| Type conversion (astype) | 0.97× | Parity |
+| FFT complex (1M) | 1.03× | Parity |
+| Elementwise multiply | 1.05× | Parity |
+| Broadcast add | 1.08× | Parity |
+| Elementwise add | 1.12× | Near-parity |
+| Linalg det (500×500) | 6.57× | Yellow |
+| Matmul (1000×1000) | 8.72× | Red (no BLAS) |
+| Argsort (100K) | 8.90× | Red |
+| Sort (1M) | 10.33× | Red |
+| Std (1M) | 13.98× | Red |
+| Exp (1M) | 16.34× | Red |
+| RFFT (1M) | 20.60× | Red |
+| Dot (10K) | 39.88× | Red |
+| Reductions sum/mean (1M) | 60× | Red (passthrough overhead) |
+| Array creation (1M) | 70–87× | Red (passthrough overhead) |
 
-The red-band workloads are the targets of the future Phase 3 work (SIMD, BLAS linkage, parallel execution). See Roadmap. For small/medium arrays and for I/O / random / linalg / reductions the picture is already at or near parity.
+**Summary:** 2 faster, 4 at parity, 13 slower. The red-band workloads are dominated by Python↔Rust boundary overhead on operations that currently pass through to NumPy rather than using native Rust kernels. The targets for Phase 3 optimization are: (1) native array allocation without NumPy, (2) native reduction kernels, (3) BLAS linkage for matmul/dot, (4) SIMD for transcendentals. See Roadmap and the 8 `perf:` beads filed 2026-05-25.
 
 ### Benchmark methodology
 
