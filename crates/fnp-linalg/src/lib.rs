@@ -3032,9 +3032,19 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
                 return Ok(f64::NAN);
             }
             let norm_a = matrix_norm_nxn(a, n, n, ord)?;
-            let a_inv = inv_nxn(a, n)?;
-            let norm_inv = matrix_norm_nxn(&a_inv, n, n, ord)?;
-            Ok(norm_a * norm_inv)
+            // NumPy computes cond(A, p) = norm(A, p) * norm(inv(A), p) under
+            // `errstate(all="ignore")`: a singular A makes inv(A) blow up, so
+            // the condition number is +inf rather than an error. NumPy also
+            // maps a nan result produced from a finite input to +inf.
+            match inv_nxn(a, n) {
+                Ok(a_inv) => {
+                    let norm_inv = matrix_norm_nxn(&a_inv, n, n, ord)?;
+                    let r = norm_a * norm_inv;
+                    Ok(if r.is_nan() { f64::INFINITY } else { r })
+                }
+                Err(LinAlgError::SolverSingularity) => Ok(f64::INFINITY),
+                Err(other) => Err(other),
+            }
         }
         _ => Err(LinAlgError::ShapeContractViolation(
             "cond: p must be one of None, '1', '-1', '2', '-2', 'inf', '-inf', 'fro'",
@@ -7950,6 +7960,23 @@ mod tests {
         cond_p_nxn(&a, 2, None).expect_err("default cond should remain spectral");
         cond_p_nxn(&a, 2, Some("2")).expect_err("2-norm cond should remain spectral");
         cond_p_nxn(&a, 2, Some("-2")).expect_err("-2 cond should remain spectral");
+    }
+
+    #[test]
+    fn cond_p_singular_non_spectral_orders_are_infinite() {
+        // NumPy evaluates cond(A, p) = norm(A, p) * norm(inv(A), p) under
+        // errstate(all="ignore"); for a singular (but finite) matrix the
+        // result is +inf, not a raised error. Verified against NumPy 2.4.3:
+        // np.linalg.cond([[1,2],[2,4]], p) == inf for p in {1,-1,inf,-inf,fro}.
+        let singular = [1.0, 2.0, 2.0, 4.0];
+        for ord in ["fro", "1", "-1", "inf", "-inf"] {
+            let c = cond_p_nxn(&singular, 2, Some(ord))
+                .unwrap_or_else(|_| panic!("singular cond order {ord} should not error"));
+            assert!(
+                c.is_infinite() && c > 0.0,
+                "order {ord} on a singular matrix should be +inf, got {c}",
+            );
+        }
     }
 
     #[test]
