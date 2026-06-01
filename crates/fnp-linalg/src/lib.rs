@@ -3833,12 +3833,17 @@ pub fn pinv_2x2_with_tolerance_aliases(
 pub fn vector_norm(values: &[f64], ord: Option<VectorNormOrder>) -> Result<f64, LinAlgError> {
     let order = ord.unwrap_or(VectorNormOrder::Two);
     if values.is_empty() {
-        if matches!(order, VectorNormOrder::NegInf) {
-            return Err(LinAlgError::NormDetRankPolicyViolation(
+        // NumPy reduces over an empty vector as follows:
+        //   * ord=-inf  -> min(|x|) over empty has no identity, so it raises.
+        //   * negative finite ord -> sum(|x|^ord)=0, then 0^(1/ord) = +inf (1/ord < 0).
+        //   * every non-negative order (0, 1, 2, +inf, positive p) -> 0.0.
+        return match order {
+            VectorNormOrder::NegInf => Err(LinAlgError::NormDetRankPolicyViolation(
                 "negative infinity vector norm is undefined for empty inputs",
-            ));
-        }
-        return Ok(0.0);
+            )),
+            VectorNormOrder::P(p) if p < 0.0 => Ok(f64::INFINITY),
+            _ => Ok(0.0),
+        };
     }
 
     let result = match order {
@@ -5870,6 +5875,26 @@ mod tests {
         ));
         let err = vector_norm(&[], Some(VectorNormOrder::NegInf)).expect_err("empty -inf");
         assert_eq!(err.reason_code(), "linalg_norm_det_rank_policy_violation");
+
+        // Empty input with a negative finite order matches NumPy: 0^(1/ord) = +inf.
+        // np.linalg.norm([], -1) == np.linalg.norm([], -2) == np.linalg.norm([], -0.5) == inf
+        assert_eq!(
+            vector_norm(&[], Some(VectorNormOrder::P(-1.0))).expect("empty p=-1"),
+            f64::INFINITY
+        );
+        assert_eq!(
+            vector_norm(&[], Some(VectorNormOrder::P(-2.0))).expect("empty p=-2"),
+            f64::INFINITY
+        );
+        assert_eq!(
+            vector_norm(&[], Some(VectorNormOrder::P(-0.5))).expect("empty p=-0.5"),
+            f64::INFINITY
+        );
+        // Positive finite order over empty stays 0.0, like NumPy.
+        assert_eq!(
+            vector_norm(&[], Some(VectorNormOrder::P(3.0))).expect("empty p=3"),
+            0.0
+        );
     }
 
     #[test]
