@@ -3256,9 +3256,52 @@ impl UFuncArrayView {
         Ok((min_off, max_off))
     }
 
-    /// Detect internal overlap: any two distinct logical indices mapping to the
-    /// same buffer position.
+    /// Detect internal overlap: exact for bounded views, conservative for huge views.
     fn detect_overlap(shape: &[usize], strides: &[isize]) -> Result<bool, UFuncError> {
+        const MAX_EXACT_OFFSETS: usize = 200_000;
+
+        let total = element_count(shape).map_err(UFuncError::Shape)?;
+        if total <= 1 {
+            return Ok(false);
+        }
+
+        if total <= MAX_EXACT_OFFSETS {
+            let mut seen = HashSet::with_capacity(total);
+            let ndim = shape.len();
+            let mut coords = vec![0usize; ndim];
+            let mut current_offset = 0isize;
+
+            for _ in 0..total {
+                if !seen.insert(current_offset) {
+                    return Ok(true);
+                }
+
+                for i in (0..ndim).rev() {
+                    coords[i] += 1;
+                    if coords[i] < shape[i] {
+                        current_offset =
+                            current_offset.checked_add(strides[i]).ok_or_else(|| {
+                                UFuncError::Msg("as_strided: offset overflow".to_string())
+                            })?;
+                        break;
+                    }
+
+                    coords[i] = 0;
+                    let dim_minus_1 = isize::try_from(shape[i] - 1).map_err(|_| {
+                        UFuncError::Msg("as_strided: dimension overflow".to_string())
+                    })?;
+                    let reset_span = dim_minus_1.checked_mul(strides[i]).ok_or_else(|| {
+                        UFuncError::Msg("as_strided: offset overflow".to_string())
+                    })?;
+                    current_offset = current_offset.checked_sub(reset_span).ok_or_else(|| {
+                        UFuncError::Msg("as_strided: offset overflow".to_string())
+                    })?;
+                }
+            }
+
+            return Ok(false);
+        }
+
         let mut axes = Vec::new();
         for (&dim, &stride) in shape.iter().zip(strides) {
             if dim <= 1 {
@@ -3283,9 +3326,12 @@ impl UFuncArrayView {
             if stride < required_stride {
                 return Ok(true);
             }
-            let dim = isize::try_from(dim)
+            let dim_minus_1 = isize::try_from(dim - 1)
                 .map_err(|_| UFuncError::Msg("as_strided: dimension overflow".to_string()))?;
-            required_stride = stride.checked_mul(dim).ok_or_else(|| {
+            let span = stride.checked_mul(dim_minus_1).ok_or_else(|| {
+                UFuncError::Msg("as_strided: required stride overflow".to_string())
+            })?;
+            required_stride = required_stride.checked_add(span).ok_or_else(|| {
                 UFuncError::Msg("as_strided: required stride overflow".to_string())
             })?;
         }
@@ -56548,6 +56594,46 @@ print(json.dumps(payload))
         );
         // Zero stride → overlap → read-only.
         assert!(!view.is_writable());
+    }
+
+    #[test]
+    fn test_as_strided_view_sparse_non_overlapping_stays_writable() {
+        let a = UFuncArray::new(
+            vec![11],
+            vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0],
+            DType::F64,
+        )
+        .unwrap();
+        let view = a.as_strided_view(vec![3, 3], vec![2, 3]).unwrap();
+        let mat = UFuncArray::from_shared_view(&view).unwrap();
+
+        assert_eq!(
+            mat.values(),
+            &[0.0, 3.0, 6.0, 2.0, 5.0, 8.0, 4.0, 7.0, 10.0]
+        );
+        assert!(view.is_writable());
+        assert!(!view.parallel_safety_contract().may_have_internal_overlap);
+    }
+
+    #[test]
+    fn test_as_strided_view_sparse_overlapping_is_read_only() {
+        let a = UFuncArray::new(
+            vec![13],
+            vec![
+                0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0,
+            ],
+            DType::F64,
+        )
+        .unwrap();
+        let view = a.as_strided_view(vec![3, 3], vec![2, 4]).unwrap();
+        let mat = UFuncArray::from_shared_view(&view).unwrap();
+
+        assert_eq!(
+            mat.values(),
+            &[0.0, 4.0, 8.0, 2.0, 6.0, 10.0, 4.0, 8.0, 12.0]
+        );
+        assert!(!view.is_writable());
+        assert!(view.parallel_safety_contract().may_have_internal_overlap);
     }
 
     #[test]
