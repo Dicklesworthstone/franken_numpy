@@ -1,0 +1,13 @@
+# perf level-split: errstate cost on elementwise add (1024x1024)
+op,errstate,median_ms
+add_broadcast_1024x1024_by_1024,default_warn,14.2928
+add_broadcast_1024x1024_by_1024,all_ignore,14.0305
+add_equal_1024x1024,default_warn,14.5057
+add_equal_1024x1024,all_ignore,15.0259
+reduce_sum_axis1_1024x1024,default_warn,0.6995
+construct_from_vec_1m,n/a,18.9045
+raw_handwritten_add_1m,n/a,0.5259
+alloc_zero_8mb,n/a,0.0921
+
+broadcast default/all-ignore ratio = 1.02x
+equal-shape default/all-ignore ratio = 0.97x

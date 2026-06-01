@@ -48,9 +48,21 @@ pyo3 = { version = "0.28.3", features = ["auto-initialize"] }
 # Optional structured async runtime for long-running conformance/artifact jobs.
 asupersync = { version = "0.3.1", default-features = false }
 
-# Profiling profile: optimized + debug symbols + frame pointers for flamegraphs
+# Profiling profile: optimized + debug symbols + frame pointers for flamegraphs.
+# Build with: RUSTFLAGS="-C force-frame-pointers=yes" cargo build --profile release-perf
+# `strip`/`opt-level` are pinned explicitly so this stays profilable even if a
+# size-optimized [profile.release] (strip=true) is ever added to the workspace.
 [profile.release-perf]
 inherits = "release"
+opt-level = 3
 lto = "thin"
 codegen-units = 1
 debug = "line-tables-only"
+strip = false
+
+# Bench profile keeps line tables + symbols so criterion bench binaries are
+# profilable with samply/perf (pair with RUSTFLAGS="-C force-frame-pointers=yes").
+# Debug-info presence does not affect the optimized code's timing.
+[profile.bench]
+debug = "line-tables-only"
+strip = false
