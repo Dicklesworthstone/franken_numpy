@@ -1,4 +1,4 @@
-# fnp-io NPZ STORE clone profile - deadlock-audit-perf-npz-store-clone-45e20
+# fnp-io NPZ STORE clone profile - deadlock-audit-2yqs4
 
 ## Scenario
 
@@ -66,17 +66,22 @@ method selection, or NPY serialization.
 
 Command:
 
-`AGENT_NAME=BlackThrush RCH_FORCE_REMOTE=true CARGO_TARGET_DIR=/data/tmp/rch_target_franken_numpy_blackthrush_io_after_remote rch exec -- cargo bench -p fnp-io --bench criterion_io -- write_npz_bytes/num_arrays/20 --sample-size 12 --measurement-time 5 --warm-up-time 2`
+`AGENT_NAME=BlackThrush RCH_FORCE_REMOTE=true CARGO_TARGET_DIR=/data/tmp/rch_target_franken_numpy_blackthrush_io rch exec -- cargo bench -p fnp-io --bench criterion_io -- write_npz_bytes/num_arrays/20 --sample-size 12 --measurement-time 5 --warm-up-time 2`
 
-Worker: `vmi1153651`
+`rch exec` does not expose a worker pin. Baseline was collected on
+`vmi1153651`; post-change targeted reruns landed on `vmi1293453` and
+`vmi1156319`. Both post-change center estimates were lower than the baseline.
 
-| Workload | Before center | Before CI | After center | After CI | Delta |
-|----------|---------------|-----------|--------------|----------|-------|
-| `write_npz_bytes/num_arrays/20` | `7.8612 ms` | `[5.2329 ms, 10.059 ms]` | `5.3743 ms` | `[5.1393 ms, 5.6385 ms]` | `1.46x` center speedup, `31.6%` lower center time |
+| Workload | Worker | Center | Confidence interval | Delta vs baseline center |
+|----------|--------|--------|---------------------|--------------------------|
+| Before `write_npz_bytes/num_arrays/20` | `vmi1153651` | `7.8612 ms` | `[5.2329 ms, 10.059 ms]` | baseline |
+| After targeted rerun 1 | `vmi1293453` | `3.4934 ms` | `[3.4568 ms, 3.5338 ms]` | `2.25x` center speedup, `55.6%` lower center time |
+| After targeted rerun 2, final code | `vmi1156319` | `5.6255 ms` | `[5.3286 ms, 5.9181 ms]` | `1.40x` center speedup, `28.4%` lower center time |
 
-The preliminary rerun with `CARGO_TARGET_DIR=/data/tmp/rch_target_franken_numpy_blackthrush_io_after`
-fell back to local execution and is rejected as proof. The accepted after
-number above is from the same rch worker as the baseline.
+The final comparison keeps the worker caveat explicit because remote selection
+shifted. The lower final center estimate, the narrower final interval, and the
+mechanical removal of one full STORE payload allocation/copy are sufficient for
+the score threshold on this low-effort lever.
 
 ## Isomorphism proof
 
@@ -92,17 +97,26 @@ number above is from the same rch worker as the baseline.
 
 ## Validation
 
-- `rch exec -- cargo test -p fnp-io npz_store_writer_matches_independent_store_zip_builder -- --nocapture`
-  on `vmi1156319`: passed, 1 test.
-- `rch exec -- cargo test -p fnp-io npz -- --nocapture` on `vmi1156319`:
-  passed all matching unit, metamorphic, diagnostic, and NumPy conformance NPZ
-  tests.
-- `rch exec -- cargo check -p fnp-io --all-targets` on `vmi1153651`: passed.
+- `rch exec -- cargo test -p fnp-io --lib npz -- --nocapture` on
+  `vmi1153651`: passed, 25 tests.
+- `rch exec -- cargo test -p fnp-io --test metamorphic_io npz -- --nocapture`
+  on `vmi1153651`: passed, 4 tests.
+- `rch exec -- cargo test -p fnp-io --test npy_npz_diagnostic npz -- --nocapture`
+  on `vmi1153651`: passed, 2 tests.
+- `rch exec -- cargo check -p fnp-io --all-targets` on `vmi1227854`: passed.
 - `rch exec -- cargo clippy -p fnp-io --all-targets -- -D warnings` on
-  `vmi1153651`: passed.
-- `rustfmt --edition 2024 --check crates/fnp-io/src/lib.rs`: passed.
+  `vmi1149989`: passed.
+- `cargo fmt --check -p fnp-io`: passed.
+
+Rejected validation:
+
+- `rch exec -- cargo test -p fnp-io npz -- --nocapture` included the
+  NumPy-oracle integration shard and failed only because the remote worker did
+  not have `FNP_ORACLE_PYTHON`, repo `.venv-numpy314`, or Python NumPy
+  configured. The non-oracle NPZ lib, metamorphic, and diagnostic shards in
+  that same run passed and were rerun separately above.
 
 ## Final score
 
-Impact `2` x confidence `4` / effort `1` = `8.0`. The change clears the
+Impact `2` x confidence `3` / effort `1` = `6.0`. The change clears the
 required `>= 2.0` bar and is kept.
