@@ -685,6 +685,25 @@ impl BinaryOp {
         )
     }
 
+    /// Returns `true` for transcendental / special-function binary ops whose
+    /// per-element cost (a libm call) is high enough that mapping the op across a
+    /// large array is compute-bound and benefits from data parallelism. Cheap
+    /// arithmetic/comparison/bitwise ops are excluded — they are memory-bound and
+    /// would only pay the dispatch overhead. Per-element results are unchanged, so
+    /// parallel execution stays bit-for-bit identical to the serial map.
+    #[must_use]
+    pub const fn is_parallel_worth(self) -> bool {
+        matches!(
+            self,
+            Self::Power
+                | Self::FloatPower
+                | Self::Arctan2
+                | Self::Hypot
+                | Self::Logaddexp
+                | Self::Logaddexp2
+        )
+    }
+
     #[inline]
     #[must_use]
     pub fn apply(self, lhs: f64, rhs: f64) -> f64 {
@@ -6378,6 +6397,47 @@ impl UFuncArray {
         }
 
         if self.shape == rhs.shape {
+            // Compute-bound transcendental binary ops over a large array parallelize
+            // across the rayon pool. Output is filled in element order across in-order
+            // chunks (identical to the serial map -> bit-exact), and per-chunk float
+            // error flags are unioned (order-independent -> identical dispatch). Only
+            // for sidecar-free float inputs (the expensive ops produce float output).
+            const BINARY_PARALLEL_MIN_LEN: usize = 1 << 15;
+            const BINARY_PARALLEL_CHUNK: usize = 8192;
+            let n = self.values.len();
+            if op.is_parallel_worth()
+                && n >= BINARY_PARALLEL_MIN_LEN
+                && rayon::current_num_threads() >= 2
+                && self.integer_sidecar.is_none()
+                && rhs.integer_sidecar.is_none()
+            {
+                let mut values = vec![0.0f64; n];
+                let flags = values
+                    .par_chunks_mut(BINARY_PARALLEL_CHUNK)
+                    .zip(self.values.par_chunks(BINARY_PARALLEL_CHUNK))
+                    .zip(rhs.values.par_chunks(BINARY_PARALLEL_CHUNK))
+                    .map(|((out_chunk, lhs_chunk), rhs_chunk)| {
+                        let mut chunk_flags = FloatErrorFlags::default();
+                        for ((out_slot, &lhs_val), &rhs_val) in
+                            out_chunk.iter_mut().zip(lhs_chunk).zip(rhs_chunk)
+                        {
+                            let result = op.apply(lhs_val, rhs_val);
+                            note_binary_float_errors(
+                                &mut chunk_flags,
+                                op,
+                                lhs_val,
+                                rhs_val,
+                                result,
+                            );
+                            *out_slot = result;
+                        }
+                        chunk_flags
+                    })
+                    .reduce(FloatErrorFlags::default, FloatErrorFlags::merged);
+                dispatch_float_error_flags(flags, op.name())?;
+                return Self::from_values_with_dtype(out_shape, values, out_dtype);
+            }
+
             // Fast path: when shapes match and we can use a tight vectorizable loop
             let error_state = geterr();
             let can_skip_error_checks = error_state.is_all_ignore();
@@ -36063,6 +36123,49 @@ print(json.dumps(payload))
         match err {
             UFuncError::FloatingPoint { kind, .. } => {
                 assert_eq!(kind, FloatErrorKind::Invalid);
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parallel_binary_matches_serial_bitwise_on_large_arrays() {
+        // Transcendental binary ops above the parallel threshold take the rayon
+        // path; results must be bit-identical to the serial map.
+        let n = (1usize << 15) + 555;
+        let a: Vec<f64> = (0..n).map(|i| ((i % 1000) as f64) * 0.001 + 0.5).collect();
+        let b: Vec<f64> = (0..n).map(|i| ((i % 777) as f64) * 0.002 + 0.5).collect();
+        for op in [BinaryOp::Power, BinaryOp::Hypot, BinaryOp::Arctan2, BinaryOp::Logaddexp] {
+            let lhs = UFuncArray::new(vec![n], a.clone(), DType::F64).expect("lhs");
+            let rhs = UFuncArray::new(vec![n], b.clone(), DType::F64).expect("rhs");
+            let parallel = lhs.elementwise_binary(&rhs, op).expect("binary");
+            let serial: Vec<f64> = a.iter().zip(&b).map(|(&x, &y)| op.apply(x, y)).collect();
+            assert_eq!(
+                parallel.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                serial.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{op:?}: parallel path diverged from serial"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_binary_raises_float_errors_like_serial() {
+        // An overflow in any chunk must still trap in raise mode (per-chunk flags
+        // unioned before dispatch). float_power(huge, 2) overflows to +inf.
+        let n = (1usize << 15) + 1;
+        let mut a = vec![2.0f64; n];
+        a[n - 2] = 1.0e200;
+        let b = vec![2.0f64; n];
+        let lhs = UFuncArray::new(vec![n], a, DType::F64).expect("lhs");
+        let rhs = UFuncArray::new(vec![n], b, DType::F64).expect("rhs");
+        let err = {
+            let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+            lhs.elementwise_binary(&rhs, BinaryOp::FloatPower)
+                .expect_err("raise mode must trap overflow in the parallel binary path")
+        };
+        match err {
+            UFuncError::FloatingPoint { kind, .. } => {
+                assert_eq!(kind, FloatErrorKind::Over);
             }
             other => panic!("unexpected error: {other:?}"),
         }
