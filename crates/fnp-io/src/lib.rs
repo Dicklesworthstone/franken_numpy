@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -1319,7 +1320,7 @@ pub fn write_npz_bytes_with_compression(
         })?;
         let crc = crc32_ieee(&npy_data);
         let encoded_data = match compression {
-            NpzCompression::Store => npy_data.clone(),
+            NpzCompression::Store => Cow::Borrowed(npy_data.as_slice()),
             NpzCompression::Deflate => {
                 let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
                 encoder.write_all(&npy_data).map_err(|_| {
@@ -1327,11 +1328,14 @@ pub fn write_npz_bytes_with_compression(
                         "npz: failed to deflate-compress entry payload",
                     )
                 })?;
-                encoder.finish().map_err(|_| {
-                    IOError::NpzArchiveContractViolation(
-                        "npz: failed to finalize deflate-compressed entry payload",
-                    )
-                })?
+                encoder
+                    .finish()
+                    .map_err(|_| {
+                        IOError::NpzArchiveContractViolation(
+                            "npz: failed to finalize deflate-compressed entry payload",
+                        )
+                    })
+                    .map(Cow::Owned)?
             }
         };
         let compression_method = match compression {
@@ -5473,6 +5477,7 @@ pub fn load_strings(data: &[u8]) -> Result<NpyLoadedStrings, IOError> {
 mod tests {
     use bytemuck::cast_slice;
     use flate2::{Compression, write::DeflateEncoder};
+    use sha2::{Digest, Sha256};
     use std::io::Write;
     use std::process::Command;
 
@@ -7962,6 +7967,33 @@ mm.flush()
         assert_eq!(entries[0].array.header.shape, vec![3]);
         assert_eq!(entries[0].array.header.descr, IOSupportedDType::F64);
         assert_eq!(entries[0].array.payload, payload.into());
+    }
+
+    #[test]
+    fn npz_store_writer_matches_independent_store_zip_builder() {
+        let header = NpyHeader {
+            shape: vec![2, 2],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload = [1.0_f64, -0.0, f64::INFINITY, -2.5]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let npy_data = write_npy_bytes(&header, &payload, false).expect("encode npy");
+        let expected = build_single_store_npz("arr.npy", &npy_data);
+        let actual = write_npz_bytes(&[("arr", &header, &payload)]).expect("write npz");
+
+        assert_eq!(actual, expected);
+        let golden_sha256 = Sha256::digest(&actual)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            golden_sha256,
+            "2112e8eb6aa3e6d2fcbdb7ccd75d21f99c162f38977fdcbed12d698f875523f0"
+        );
     }
 
     #[test]
