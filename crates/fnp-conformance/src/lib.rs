@@ -19779,8 +19779,8 @@ fn generate_rng_samples(
             .logseries(case.param_a, draws)
             .map(|vals| vals.into_iter().map(|v| v as f64).collect())
             .map_err(|e| RngSuiteError::new("parameter_violation", e.to_string())),
-        "maxwell" => Ok(generator.maxwell(case.param_a, draws)),
-        "halfnormal" => Ok(generator.halfnormal(case.param_a, draws)),
+        "maxwell" => map_fallible_random_values(generator.maxwell(case.param_a, draws)),
+        "halfnormal" => map_fallible_random_values(generator.halfnormal(case.param_a, draws)),
         "truncated_normal" => Ok(generator.truncated_normal(
             case.param_a,
             case.param_b,
@@ -19788,8 +19788,8 @@ fn generate_rng_samples(
             case.param_d,
             draws,
         )),
-        "lomax" => Ok(generator.lomax(case.param_a, draws)),
-        "levy" => Ok(generator.levy(case.param_a, case.param_b, draws)),
+        "lomax" => map_fallible_random_values(generator.lomax(case.param_a, draws)),
+        "levy" => map_fallible_random_values(generator.levy(case.param_a, case.param_b, draws)),
         other => Err(RngSuiteError::new(
             "rng_policy_unknown_metadata",
             format!("unsupported statistical distribution {other}"),
@@ -22692,7 +22692,7 @@ mod tests {
         );
         check_seq!(
             "maxwell(1)",
-            |g: &mut Generator| g.maxwell(1.0, 5),
+            |g: &mut Generator| g.maxwell(1.0, 5).unwrap(),
             [
                 1.94143180485294953e0,
                 7.99090430292215381e-1,
@@ -22703,7 +22703,7 @@ mod tests {
         );
         check_seq!(
             "halfnormal(1)",
-            |g: &mut Generator| g.halfnormal(1.0, 5),
+            |g: &mut Generator| g.halfnormal(1.0, 5).unwrap(),
             [
                 6.48970595720086973e-1,
                 1.08908349922134495e0,
@@ -22773,7 +22773,7 @@ mod tests {
 
         check_seq!(
             "lomax(3)",
-            |g: &mut Generator| g.lomax(3.0, 5),
+            |g: &mut Generator| g.lomax(3.0, 5).unwrap(),
             [
                 1.45096839094341590e0,
                 1.47112281973488912e-1,
@@ -22784,7 +22784,7 @@ mod tests {
         );
         check_seq!(
             "levy(0,1)",
-            |g: &mut Generator| g.levy(0.0, 1.0, 5),
+            |g: &mut Generator| g.levy(0.0, 1.0, 5).unwrap(),
             [
                 2.37437855150465893e0,
                 8.43097193967099146e-1,

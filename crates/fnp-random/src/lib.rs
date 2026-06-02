@@ -5266,15 +5266,22 @@ impl Generator {
     /// PDF: sqrt(2/pi) * x^2 * exp(-x^2 / (2*scale^2)) / scale^3
     /// Generated via: scale * sqrt(chi2(3)) = scale * sqrt(X1^2 + X2^2 + X3^2)
     /// where X1, X2, X3 are independent standard normals.
-    pub fn maxwell(&mut self, scale: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    /// Maxwell distribution with the given `scale`.
+    /// Returns `Err(InvalidParameter)` if `scale < 0` (including `-0.0`),
+    /// matching `scipy.stats.maxwell`, which treats `scale` as non-negative
+    /// (`scale == 0` collapses to a point mass at 0).
+    pub fn maxwell(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let x1 = self.sample_standard_normal_single();
                 let x2 = self.sample_standard_normal_single();
                 let x3 = self.sample_standard_normal_single();
                 scale * (x1 * x1 + x2 * x2 + x3 * x3).sqrt()
             })
-            .collect()
+            .collect())
     }
 
     /// Multivariate hypergeometric distribution.
@@ -5405,10 +5412,18 @@ impl Generator {
 
     /// Half-normal distribution: |X| where X ~ N(0, sigma^2).
     /// Equivalent to the folded normal with mean 0.
-    pub fn halfnormal(&mut self, sigma: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    /// Half-normal distribution with the given `sigma` (scale).
+    /// Returns `Err(InvalidParameter)` if `sigma < 0` (including `-0.0`).
+    /// Without this guard a negative `sigma` is silently swallowed by the
+    /// `.abs()` and produces the same samples as `|sigma|`; `scipy.stats.halfnorm`
+    /// rejects negative scale.
+    pub fn halfnormal(&mut self, sigma: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if sigma < 0.0 || (sigma == 0.0 && sigma.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| (self.sample_standard_normal_single() * sigma).abs())
-            .collect()
+            .collect())
     }
 
     /// Truncated normal distribution on `[low, high]` using rejection sampling.
@@ -5437,20 +5452,32 @@ impl Generator {
     /// Lomax (Pareto Type II) distribution with shape `c` and scale 1.
     /// If X ~ Pareto(c), then X - 1 ~ Lomax(c).
     /// PDF: c / (1 + x)^(c+1) for x >= 0.
-    pub fn lomax(&mut self, c: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    pub fn lomax(&mut self, c: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        // `c` is a strictly-positive shape parameter; `c <= 0` makes the inverse
+        // CDF degenerate (`(1-u)^(-1/c)` blows up). `scipy.stats.lomax` rejects
+        // `c <= 0`. (`c <= 0.0` already catches `-0.0`.)
+        if c <= 0.0 || c.is_sign_negative() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let u = self.next_f64();
                 (1.0 - u).powf(-1.0 / c) - 1.0
             })
-            .collect()
+            .collect())
     }
 
     /// Levy distribution with location `loc` and scale `c`.
     /// Uses the inverse CDF method: X = loc + c / (Phi^{-1}(1-U/2))^2
     /// where Phi^{-1} is the standard normal quantile.
-    pub fn levy(&mut self, loc: f64, c: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    /// Lévy distribution with location `loc` and scale `c`.
+    /// Returns `Err(InvalidParameter)` if `c < 0` (including `-0.0`); `scipy.stats.levy`
+    /// treats the scale as non-negative (`c == 0` collapses to a point mass at `loc`).
+    pub fn levy(&mut self, loc: f64, c: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if c < 0.0 || (c == 0.0 && c.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let z = self.sample_standard_normal_single().abs();
                 if z < 1e-15 {
@@ -5459,7 +5486,7 @@ impl Generator {
                     loc + c / (z * z)
                 }
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -10182,7 +10209,7 @@ for child in rng.spawn(n_children):
     #[test]
     fn maxwell_all_positive() {
         let mut rng = test_generator();
-        let samples = rng.maxwell(1.0, 1000);
+        let samples = rng.maxwell(1.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         for &v in &samples {
             assert!(v >= 0.0, "Maxwell samples must be non-negative, got {v}");
@@ -10194,7 +10221,7 @@ for child in rng.spawn(n_children):
         // E[X] = 2 * scale * sqrt(2/pi) ≈ 1.5958 * scale for scale=1
         let mut rng = test_generator();
         let n = 50_000;
-        let samples = rng.maxwell(1.0, n);
+        let samples = rng.maxwell(1.0, n).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / n as f64;
         let expected = 2.0 * (2.0 / std::f64::consts::PI).sqrt();
         assert!(
@@ -10207,8 +10234,8 @@ for child in rng.spawn(n_children):
     fn maxwell_scale_parameter() {
         let mut rng1 = test_generator();
         let mut rng2 = test_generator();
-        let samples1 = rng1.maxwell(1.0, 1000);
-        let samples2 = rng2.maxwell(3.0, 1000);
+        let samples1 = rng1.maxwell(1.0, 1000).unwrap();
+        let samples2 = rng2.maxwell(3.0, 1000).unwrap();
         let mean1: f64 = samples1.iter().sum::<f64>() / 1000.0;
         let mean2: f64 = samples2.iter().sum::<f64>() / 1000.0;
         // Mean should scale linearly with scale parameter
@@ -10302,7 +10329,7 @@ for child in rng.spawn(n_children):
     #[test]
     fn halfnormal_all_nonnegative() {
         let mut rng = test_generator();
-        let samples = rng.halfnormal(2.0, 1000);
+        let samples = rng.halfnormal(2.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&x| x >= 0.0));
     }
@@ -10318,7 +10345,7 @@ for child in rng.spawn(n_children):
     #[test]
     fn lomax_all_nonnegative() {
         let mut rng = test_generator();
-        let samples = rng.lomax(2.0, 1000);
+        let samples = rng.lomax(2.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&x| x >= 0.0));
     }
@@ -10327,9 +10354,30 @@ for child in rng.spawn(n_children):
     fn levy_all_at_least_loc() {
         let mut rng = test_generator();
         let loc = 1.0;
-        let samples = rng.levy(loc, 2.0, 1000);
+        let samples = rng.levy(loc, 2.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&x| x >= loc));
+    }
+
+    #[test]
+    fn scipy_extra_distributions_reject_invalid_scale() {
+        let mut rng = test_generator();
+        // Negative scale/shape must error (scipy.stats rejects these); -0.0 too.
+        assert!(rng.maxwell(-1.0, 4).is_err());
+        assert!(rng.maxwell(-0.0, 4).is_err());
+        assert!(rng.halfnormal(-1.0, 4).is_err());
+        assert!(rng.halfnormal(-0.0, 4).is_err());
+        assert!(rng.levy(0.0, -1.0, 4).is_err());
+        assert!(rng.levy(0.0, -0.0, 4).is_err());
+        // lomax shape c must be strictly positive.
+        assert!(rng.lomax(-1.0, 4).is_err());
+        assert!(rng.lomax(0.0, 4).is_err());
+        assert!(rng.lomax(-0.0, 4).is_err());
+
+        // Boundary: scale == +0.0 is a valid point mass for maxwell/halfnormal/levy.
+        assert_eq!(rng.maxwell(0.0, 3).unwrap(), vec![0.0, 0.0, 0.0]);
+        assert_eq!(rng.halfnormal(0.0, 3).unwrap(), vec![0.0, 0.0, 0.0]);
+        assert_eq!(rng.levy(5.0, 0.0, 3).unwrap(), vec![5.0, 5.0, 5.0]);
     }
 
     #[test]
