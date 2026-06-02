@@ -12185,7 +12185,11 @@ fn median(
         Ok(median_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) || overwrite_input || keepdims {
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
+        || overwrite_input
+        || keepdims
+        || numpy_dtype_is_narrow_float(py, a.bind(py))
+    {
         return fallback();
     }
 
@@ -13181,6 +13185,7 @@ fn percentile(
         || keepdims
         || method.is_some()
         || weights.is_some()
+        || numpy_dtype_is_narrow_float(py, a.bind(py))
     {
         return fallback();
     }
@@ -21578,6 +21583,7 @@ fn quantile(
         || keepdims
         || method.is_some()
         || weights.is_some()
+        || numpy_dtype_is_narrow_float(py, a.bind(py))
     {
         return fallback();
     }
@@ -25029,6 +25035,24 @@ fn numpy_dtype_is_f64(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
         let kind: String = dtype.getattr("kind")?.extract()?;
         let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
         Ok(kind == "f" && itemsize == 8)
+    };
+    probe().unwrap_or(false)
+}
+
+// True when `value` is a narrow float (float16 / float32). NumPy preserves the
+// input float width for reductions like median/percentile/quantile, but our
+// in-Rust kernels accumulate in float64. The native fast path therefore matches
+// NumPy for float64 and integer/bool inputs (integer reductions promote to
+// float64 in both), but would widen float16/float32 results to float64. Callers
+// gate on this to defer narrow-float inputs to numpy, preserving exact dtype.
+fn numpy_dtype_is_narrow_float(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    let probe = || -> PyResult<bool> {
+        let numpy = py.import("numpy")?;
+        let array = numpy.call_method1("asarray", (value,))?;
+        let dtype = array.getattr("dtype")?;
+        let kind: String = dtype.getattr("kind")?.extract()?;
+        let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+        Ok(kind == "f" && itemsize < 8)
     };
     probe().unwrap_or(false)
 }
@@ -56242,6 +56266,85 @@ mod tests {
             let ok_cross: bool = isclose.call1((&q_via_quant, &q_via_pct))?.extract()?;
             assert!(ok_cross, "quantile(0.5) must equal percentile(50)");
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn percentile_family_preserves_input_float_dtype() {
+        // NumPy's percentile/quantile/median preserve the input float width
+        // (float16 -> float16, float32 -> float32, float64 -> float64) and
+        // promote integer/bool inputs to float64. Our in-Rust kernel accumulates
+        // in float64, so narrow-float inputs defer to numpy; this locks the
+        // result dtype to NumPy's across all four float widths and an integer.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let make = |dtype: &str| -> PyResult<Py<PyAny>> {
+                Ok(numpy
+                    .getattr("array")?
+                    .call(
+                        (vec![4.0_f64, 1.0, 3.0, 2.0, 5.0, 9.0, 7.0, 6.0],),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("dtype", numpy.getattr(dtype)?)?;
+                            kw
+                        }),
+                    )?
+                    .unbind())
+            };
+            // (input dtype, expected output dtype): floats preserved, int -> float64.
+            let cases = [
+                ("float16", "float16"),
+                ("float32", "float32"),
+                ("float64", "float64"),
+                ("int32", "float64"),
+            ];
+            for (in_dt, out_dt) in cases {
+                let arr = make(in_dt)?;
+                let expected = numpy.getattr(out_dt)?;
+                for (name, q) in [("median", None), ("percentile", Some(50.0_f64))] {
+                    let func = module.getattr(name)?;
+                    let np_func = numpy.getattr(name)?;
+                    let (ours, theirs) = match q {
+                        Some(q) => (
+                            func.call1((arr.bind(py).clone(), q))?,
+                            np_func.call1((arr.bind(py).clone(), q))?,
+                        ),
+                        None => (
+                            func.call1((arr.bind(py).clone(),))?,
+                            np_func.call1((arr.bind(py).clone(),))?,
+                        ),
+                    };
+                    let ours_dt = ours.getattr("dtype")?;
+                    let theirs_dt = theirs.getattr("dtype")?;
+                    assert!(
+                        ours_dt.eq(&expected)?,
+                        "{name}({in_dt}) dtype {ours_dt:?} != expected {out_dt}"
+                    );
+                    assert!(
+                        ours_dt.eq(&theirs_dt)?,
+                        "{name}({in_dt}) dtype {ours_dt:?} != numpy {theirs_dt:?}"
+                    );
+                    let isclose = numpy.getattr("isclose")?;
+                    let ok: bool = isclose.call1((&ours, &theirs))?.extract()?;
+                    assert!(ok, "{name}({in_dt}) value mismatch vs numpy");
+                }
+                // quantile mirrors percentile at q=0.5.
+                let qfunc = module.getattr("quantile")?;
+                let np_q = numpy.getattr("quantile")?;
+                let ours_q = qfunc.call1((arr.bind(py).clone(), 0.5_f64))?;
+                let theirs_q = np_q.call1((arr.bind(py).clone(), 0.5_f64))?;
+                assert!(
+                    ours_q.getattr("dtype")?.eq(&expected)?,
+                    "quantile({in_dt}) dtype != expected {out_dt}"
+                );
+                assert!(ours_q.getattr("dtype")?.eq(&theirs_q.getattr("dtype")?)?);
+            }
             Ok(())
         });
     }
