@@ -174,7 +174,8 @@ fn cumsum_cumprod_native_fnp_python_paths_match_numpy() {
             }
         }
 
-        let complex_axis_cases: &[(Vec<Vec<(f64, f64)>>, i64)] = &[
+        type ComplexAxisCase = (Vec<Vec<(f64, f64)>>, i64);
+        let complex_axis_cases: &[ComplexAxisCase] = &[
             (
                 vec![vec![(1.0, 1.0), (2.0, -1.0)], vec![(3.0, 2.0), (4.0, -2.0)]],
                 0,

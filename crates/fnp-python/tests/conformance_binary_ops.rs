@@ -266,9 +266,8 @@ fn classify_error(script: &str) -> String {
         "ok".to_string()
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("ValueError") {
-            "ValueError".to_string()
-        } else if stderr.contains("broadcast") || stderr.contains("shape") {
+        if stderr.contains("ValueError") || stderr.contains("broadcast") || stderr.contains("shape")
+        {
             "ValueError".to_string()
         } else {
             format!("other: {}", stderr.lines().last().unwrap_or(""))

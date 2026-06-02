@@ -180,7 +180,14 @@ fn convolution_fnp_python_module_paths_match_numpy() {
         }
 
         // Complex dtype tests
-        let complex_cases: &[(&str, &str, &[(f64, f64)], &[(f64, f64)], &str)] = &[
+        type ComplexConvCase = (
+            &'static str,
+            &'static str,
+            &'static [(f64, f64)],
+            &'static [(f64, f64)],
+            &'static str,
+        );
+        let complex_cases: &[ComplexConvCase] = &[
             (
                 "convolve",
                 "complex-full",

@@ -452,9 +452,10 @@ fn classify_error(script: &str) -> String {
         "ok".to_string()
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("ValueError") {
-            "ValueError".to_string()
-        } else if stderr.contains("invalid") || stderr.contains("subscript") {
+        if stderr.contains("ValueError")
+            || stderr.contains("invalid")
+            || stderr.contains("subscript")
+        {
             "ValueError".to_string()
         } else {
             format!("other: {}", stderr.lines().last().unwrap_or(""))

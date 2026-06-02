@@ -334,7 +334,7 @@ fn conformance_random_matrix() {
 
 #[test]
 fn multinomial_rejects_empty_pvals() {
-    with_fnp_and_numpy(|py, module, numpy| {
+    with_fnp_and_numpy(|_py, module, numpy| {
         let our_rng = module.getattr("random")?.call_method0("default_rng")?;
         let np_rng = numpy.getattr("random")?.call_method0("default_rng")?;
         let pvals: Vec<f64> = vec![];

@@ -139,9 +139,10 @@ fn classify_error(script: &str) -> String {
         "ok".to_string()
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if stderr.contains("ValueError") {
-            "ValueError".to_string()
-        } else if stderr.contains("incompatible") || stderr.contains("dimension") {
+        if stderr.contains("ValueError")
+            || stderr.contains("incompatible")
+            || stderr.contains("dimension")
+        {
             "ValueError".to_string()
         } else {
             format!("other: {}", stderr.lines().last().unwrap_or(""))
