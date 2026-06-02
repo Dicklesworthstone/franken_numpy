@@ -24825,6 +24825,30 @@ fn exact_i64_counting_sort_output(data: &[f64]) -> Option<Vec<f64>> {
         return None;
     }
 
+    if range_len == data.len() {
+        const BITS_PER_WORD: usize = u64::BITS as usize;
+        let mut seen = vec![0u64; range_len.div_ceil(BITS_PER_WORD)];
+        let mut all_unique = true;
+        for &value in data {
+            let bucket = ((value as i64) - min_value) as usize;
+            let word = bucket / BITS_PER_WORD;
+            let mask = 1u64 << (bucket % BITS_PER_WORD);
+            if seen[word] & mask != 0 {
+                all_unique = false;
+                break;
+            }
+            seen[word] |= mask;
+        }
+
+        if all_unique {
+            return Some(
+                (0..data.len())
+                    .map(|idx| (min_value + idx as i64) as f64)
+                    .collect(),
+            );
+        }
+    }
+
     let mut counts = vec![0usize; range_len];
     let mut all_unique = true;
     for &value in data {
@@ -39816,6 +39840,13 @@ print(json.dumps(payload))
         .unwrap();
         let out = arr.sort(None, Some("quicksort")).unwrap();
         assert_eq!(out.values(), &[0.0, 0.0, 1.0, 1.0, 1.0, 2.0, 2.0, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn sort_kind_quicksort_dense_span_duplicate_uses_counting_fallback() {
+        let arr = UFuncArray::new(vec![3], vec![2.0, 0.0, 0.0], DType::F64).unwrap();
+        let out = arr.sort(None, Some("quicksort")).unwrap();
+        assert_eq!(out.values(), &[0.0, 0.0, 2.0]);
     }
 
     #[test]
