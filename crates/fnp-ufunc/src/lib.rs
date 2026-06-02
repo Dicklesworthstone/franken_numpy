@@ -33,6 +33,7 @@ use fnp_runtime::{
     CompatibilityClass, DecisionAction as RuntimeDecisionAction, DecisionAuditContext,
     DecisionEvent, EvidenceLedger, RuntimeMode,
 };
+use rayon::prelude::*;
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::io::Write;
@@ -25942,7 +25943,53 @@ fn reduce_sum_axis_contiguous(
 const MATMUL_MR: usize = 4;
 const MATMUL_NR: usize = 8;
 
+// Minimum MAC-op count below which GEMM stays single-threaded (pool dispatch
+// would cost more than it saves on tiny / batched-small matrices).
+const MATMUL_PARALLEL_MIN_FLOPS: usize = 1 << 21;
+
+// Parallel GEMM driver: split the output into contiguous MR-aligned row bands and
+// run the serial register-tiled kernel on each band independently across the
+// rayon pool. Row bands are disjoint, share `rhs` read-only, and each band keeps
+// the full sequential-k accumulation per element — so the result is bit-for-bit
+// identical to the serial kernel for any thread count. The register-tiled kernel
+// is compute-bound (high arithmetic intensity), so this scales with cores.
 fn matmul_accumulate(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
+    debug_assert_eq!(lhs.len(), m * k);
+    debug_assert_eq!(rhs.len(), k * n);
+    debug_assert_eq!(out.len(), m * n);
+
+    let flops = m.saturating_mul(k).saturating_mul(n);
+    let threads = rayon::current_num_threads();
+    if threads < 2 || flops < MATMUL_PARALLEL_MIN_FLOPS || m < 2 * MATMUL_MR {
+        matmul_accumulate_serial(lhs, rhs, m, k, n, out);
+        return;
+    }
+
+    // Aim for a few bands per thread (work-stealing load balance), each an
+    // MR-aligned row count so every band runs the full register-tiled path.
+    let target_bands = threads * 4;
+    let band_rows = m
+        .div_ceil(target_bands)
+        .div_ceil(MATMUL_MR)
+        .max(1)
+        * MATMUL_MR;
+
+    out.par_chunks_mut(band_rows * n)
+        .zip(lhs.par_chunks(band_rows * k))
+        .for_each(|(out_band, lhs_band)| {
+            let band_m = out_band.len() / n;
+            matmul_accumulate_serial(lhs_band, rhs, band_m, k, n, out_band);
+        });
+}
+
+fn matmul_accumulate_serial(
+    lhs: &[f64],
+    rhs: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    out: &mut [f64],
+) {
     debug_assert_eq!(lhs.len(), m * k);
     debug_assert_eq!(rhs.len(), k * n);
     debug_assert_eq!(out.len(), m * n);

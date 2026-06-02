@@ -556,6 +556,7 @@ dependencies = [
  "fnp-ndarray",
  "fnp-runtime",
  "proptest",
+ "rayon",
  "serde",
  "serde_json",
  "sha2",
