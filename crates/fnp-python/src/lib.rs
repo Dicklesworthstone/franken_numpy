@@ -7673,6 +7673,7 @@ impl PyFromPyFunc {
         })
     }
 
+    #[pyo3(signature = (*args))]
     fn __call__(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         self.call_bound(py, args)
     }
@@ -7758,6 +7759,7 @@ impl PyVectorize {
         self.excluded.clone()
     }
 
+    #[pyo3(signature = (*args))]
     fn __call__(&self, py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
         self.call_bound(py, args)
     }
@@ -34798,6 +34800,49 @@ mod tests {
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn vectorize_and_frompyfunc_accept_positional_call_args() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_call_dispatch")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let operator = py.import("operator")?;
+            let neg = operator.getattr("neg")?;
+            let add = operator.getattr("add")?;
+
+            // vectorize: calling g(array) with a positional arg used to raise
+            // TypeError because __call__ lacked a (*args) signature and so
+            // demanded a single literal tuple.
+            let arr = numpy.call_method1("array", (vec![1, 2, 3],))?;
+            let fnp_vec = module.getattr("vectorize")?.call1((neg.clone(),))?;
+            let np_vec = numpy.getattr("vectorize")?.call1((neg.clone(),))?;
+            let got = fnp_vec.call1((&arr,))?;
+            let want = np_vec.call1((&arr,))?;
+            assert_eq!(
+                repr_string(&got.call_method0("tolist")?),
+                repr_string(&want.call_method0("tolist")?)
+            );
+
+            // frompyfunc: calling the ufunc with two positional arrays likewise
+            // used to raise "takes 1 positional argument but 2 were given".
+            let a = numpy.call_method1("array", (vec![1, 2, 3],))?;
+            let b = numpy.call_method1("array", (vec![10, 20, 30],))?;
+            let fnp_uf = module.getattr("frompyfunc")?.call1((add.clone(), 2, 1))?;
+            let np_uf = numpy.getattr("frompyfunc")?.call1((add.clone(), 2, 1))?;
+            let got2 = fnp_uf.call1((&a, &b))?;
+            let want2 = np_uf.call1((&a, &b))?;
+            assert_eq!(
+                repr_string(&got2.call_method0("tolist")?),
+                repr_string(&want2.call_method0("tolist")?)
             );
             Ok(())
         });
