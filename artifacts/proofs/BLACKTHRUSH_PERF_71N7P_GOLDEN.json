@@ -1,0 +1,21 @@
+{
+  "bead": "franken_numpy-71n7p",
+  "target": "UFuncArray::from_storage_with_dtype matching F64 storage",
+  "fast_path_bit_preservation": {
+    "shape": [4],
+    "dtype": "F64",
+    "expected_bits_hex": [
+      "0000000000000000",
+      "8000000000000000",
+      "7ff8000000000001",
+      "7ff0000000000000"
+    ]
+  },
+  "broadcast_add_reference": {
+    "lhs_shape": [2, 3],
+    "rhs_shape": [3],
+    "dtype": "F64",
+    "expected_shape": [2, 3],
+    "expected_values": [11.0, 22.0, 33.0, 14.0, 25.0, 36.0]
+  }
+}

@@ -4772,6 +4772,13 @@ impl UFuncArray {
             || (matches!(storage, ArrayStorage::I64(_))
                 && matches!(dtype, DType::DateTime64 | DType::TimeDelta64));
 
+        if is_storage_compatible && matches!(&storage, ArrayStorage::F64(_)) {
+            let ArrayStorage::F64(values) = storage else {
+                unreachable!("matches! already established F64 storage");
+            };
+            return Self::new(shape, values, dtype);
+        }
+
         if is_storage_compatible {
             match &storage {
                 ArrayStorage::I64(_) | ArrayStorage::U64(_) => {
@@ -35138,6 +35145,27 @@ print(json.dumps(payload))
         .expect("from_storage_with_dtype");
         assert_eq!(arr.dtype(), DType::Bool);
         assert_eq!(arr.values(), &[0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn from_storage_with_dtype_f64_fast_path_preserves_bits() {
+        let values = vec![
+            0.0,
+            -0.0,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            f64::INFINITY,
+        ];
+        let expected_bits: Vec<u64> = values.iter().map(|value| value.to_bits()).collect();
+
+        let arr =
+            UFuncArray::from_storage_with_dtype(vec![4], ArrayStorage::F64(values), DType::F64)
+                .expect("matching F64 storage should construct directly");
+
+        assert_eq!(arr.dtype(), DType::F64);
+        assert_eq!(arr.shape(), &[4]);
+        let actual_bits: Vec<u64> = arr.values().iter().map(|value| value.to_bits()).collect();
+        assert_eq!(actual_bits, expected_bits);
+        assert!(!arr.has_integer_sidecar());
     }
 
     #[test]
