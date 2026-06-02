@@ -26594,7 +26594,7 @@ fn cumulate_axis(
     shape: &[usize],
     axis: usize,
     identity: f64,
-    fold: impl Fn(f64, f64) -> f64,
+    fold: impl Fn(f64, f64) -> f64 + Sync,
 ) -> Result<Vec<f64>, UFuncError> {
     debug_assert!(axis < shape.len());
     let total = element_count(shape).map_err(UFuncError::Shape)?;
@@ -26607,6 +26607,31 @@ fn cumulate_axis(
 
     let inner: usize = fnp_ndarray::element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?;
     let outer: usize = fnp_ndarray::element_count(&shape[..axis]).map_err(UFuncError::Shape)?;
+
+    if inner == 1 {
+        // Last-axis scan: each lane is a contiguous chunk, scanned sequentially and
+        // independently. The per-lane left-to-right fold is identical to the serial
+        // path (preserving floating-point accumulation order), so parallelizing
+        // across lanes is bit-for-bit identical for any thread count.
+        let scan_lane = |(out_lane, in_lane): (&mut [f64], &[f64])| {
+            let mut acc = identity;
+            for (out_slot, &value) in out_lane.iter_mut().zip(in_lane.iter()) {
+                acc = fold(acc, value);
+                *out_slot = acc;
+            }
+        };
+        const CUM_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+        if outer >= 2 && total >= CUM_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+            out.par_chunks_mut(axis_len)
+                .zip(values.par_chunks(axis_len))
+                .for_each(scan_lane);
+        } else {
+            out.chunks_mut(axis_len)
+                .zip(values.chunks(axis_len))
+                .for_each(scan_lane);
+        }
+        return Ok(out);
+    }
 
     for outer_idx in 0..outer {
         let base = outer_idx * axis_len * inner;
@@ -40241,6 +40266,39 @@ print(json.dumps(payload))
                 .map(|&v| v as usize)
                 .collect();
             assert_eq!(got, expected, "argsort lane {r} diverged");
+        }
+    }
+
+    #[test]
+    fn cumulate_last_axis_parallel_matches_serial_reference() {
+        // Above the parallel threshold the last-axis cumsum/cumprod runs across the
+        // rayon pool; each lane's sequential scan must be bit-identical to a serial
+        // left-to-right fold of that contiguous lane.
+        let (rows, cols) = (256usize, 137usize);
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| (((i as u64).wrapping_mul(6364136223846793005) >> 33) as f64) / 1.0e9 - 1.5)
+            .collect();
+        let arr = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).expect("arr");
+
+        for (is_sum, out) in [
+            (true, arr.cumsum(Some(-1)).expect("cumsum")),
+            (false, arr.cumprod(Some(-1)).expect("cumprod")),
+        ] {
+            let mut expected = vec![0.0f64; rows * cols];
+            for r in 0..rows {
+                let mut acc = if is_sum { 0.0 } else { 1.0 };
+                for c in 0..cols {
+                    let v = data[r * cols + c];
+                    acc = if is_sum { acc + v } else { acc * v };
+                    expected[r * cols + c] = acc;
+                }
+            }
+            assert_eq!(
+                out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "parallel last-axis {} diverged from serial reference",
+                if is_sum { "cumsum" } else { "cumprod" }
+            );
         }
     }
 
