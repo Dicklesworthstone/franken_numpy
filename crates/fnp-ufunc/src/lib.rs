@@ -15768,6 +15768,41 @@ impl UFuncArray {
                     fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
                 let mut out_shape = self.shape.clone();
                 out_shape.remove(ax);
+                if inner == 1 {
+                    // Last-axis median: each output element reduces one contiguous
+                    // lane of length axis_len. The per-lane sort + median arithmetic
+                    // is deterministic and lane-independent, so an indexed parallel
+                    // map over the contiguous lanes is bit-for-bit identical to the
+                    // serial loop for any thread count.
+                    const MEDIAN_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                    let compute_lane = |lane: &[f64]| -> f64 {
+                        // NumPy propagates NaN in median
+                        if lane.iter().any(|v| v.is_nan()) {
+                            return f64::NAN;
+                        }
+                        let mut sorted_lane = lane.to_vec();
+                        sorted_lane.sort_by(|a, b| a.total_cmp(b));
+                        if axis_len % 2 == 1 {
+                            sorted_lane[axis_len / 2]
+                        } else {
+                            (sorted_lane[axis_len / 2 - 1] + sorted_lane[axis_len / 2]) / 2.0
+                        }
+                    };
+                    let values: Vec<f64> = if outer >= 2
+                        && self.values.len() >= MEDIAN_PARALLEL_MIN_ELEMS
+                        && rayon::current_num_threads() >= 2
+                    {
+                        self.values.par_chunks(axis_len).map(compute_lane).collect()
+                    } else {
+                        self.values.chunks(axis_len).map(compute_lane).collect()
+                    };
+                    return Ok(Self {
+                        shape: out_shape,
+                        values,
+                        dtype: DType::F64,
+                        integer_sidecar: None,
+                    });
+                }
                 let mut values = Vec::with_capacity(outer * inner);
                 for o in 0..outer {
                     for i in 0..inner {
@@ -40808,6 +40843,51 @@ print(json.dumps(payload))
                 perm[kth + 1..].iter().all(|&i| lane[i] >= pivot),
                 "lane {r} right side"
             );
+        }
+    }
+
+    #[test]
+    fn median_last_axis_parallel_matches_serial_reference() {
+        // Last-axis median above the parallel threshold must be bit-identical to a
+        // serial per-lane sort + median over each contiguous lane. Use an even
+        // axis_len so the (a+b)/2 averaging path is exercised, and include lanes
+        // with NaN to lock the propagation branch.
+        let (rows, cols) = (256usize, 138usize);
+        let mut data: Vec<f64> = (0..rows * cols)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
+            .collect();
+        // Poison a few lanes with NaN to cover the propagation branch.
+        for r in (0..rows).step_by(37) {
+            data[r * cols + (r % cols)] = f64::NAN;
+        }
+        let arr = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).expect("arr");
+        let out = arr.median(Some(-1)).expect("median");
+        assert_eq!(out.shape(), &[rows]);
+
+        let mut expected = vec![0.0f64; rows];
+        for (r, slot) in expected.iter_mut().enumerate() {
+            let lane = &data[r * cols..(r + 1) * cols];
+            *slot = if lane.iter().any(|v| v.is_nan()) {
+                f64::NAN
+            } else {
+                let mut s = lane.to_vec();
+                s.sort_by(|a, b| a.total_cmp(b));
+                (s[cols / 2 - 1] + s[cols / 2]) / 2.0
+            };
+        }
+        // Compare bit patterns, treating NaN lanes explicitly (NaN != NaN).
+        for r in 0..rows {
+            let got = out.values()[r];
+            let exp = expected[r];
+            if exp.is_nan() {
+                assert!(got.is_nan(), "lane {r} expected NaN, got {got}");
+            } else {
+                assert_eq!(
+                    got.to_bits(),
+                    exp.to_bits(),
+                    "parallel last-axis median lane {r} diverged from serial reference"
+                );
+            }
         }
     }
 
