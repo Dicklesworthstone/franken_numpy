@@ -6775,40 +6775,6 @@ fn build_numpy_masked_array(py: Python<'_>, array: &MaskedArray) -> PyResult<Py<
         .unbind())
 }
 
-fn build_numpy_complex_array_from_interleaved(
-    py: Python<'_>,
-    array: &UFuncArray,
-) -> PyResult<Py<PyAny>> {
-    let Some((&2, logical_shape)) = array.shape().split_last() else {
-        return Err(PyTypeError::new_err(
-            "complex output must use an interleaved trailing dimension of size 2",
-        ));
-    };
-
-    let numpy = py.import("numpy")?;
-    let builtins = py.import("builtins")?;
-    let complex_values = array
-        .values()
-        .chunks_exact(2)
-        .map(|chunk| builtins.getattr("complex")?.call1((chunk[0], chunk[1])))
-        .collect::<PyResult<Vec<_>>>()?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", numpy.getattr("complex128")?)?;
-    let result = numpy
-        .getattr("array")?
-        .call((PyList::new(py, complex_values.iter())?,), Some(&kwargs))?;
-    if logical_shape.len() <= 1 {
-        Ok(result.unbind())
-    } else {
-        Ok(result
-            .call_method1(
-                "reshape",
-                (PyTuple::new(py, logical_shape.iter().copied())?,),
-            )?
-            .unbind())
-    }
-}
-
 fn build_numpy_eigvals_vector_from_flat_interleaved(
     py: Python<'_>,
     values: &[f64],
@@ -8794,6 +8760,28 @@ fn clip(
     if matches!(array.dtype(), DType::Complex64 | DType::Complex128) {
         return fallback();
     }
+
+    // NumPy promotes clip's result to `result_type(a, a_min, a_max)`, but the
+    // native path preserves the input array's dtype. Taking it when the two
+    // differ would either crash (e.g. an integer array clamped by fractional
+    // float bounds cannot round-trip through integer storage) or silently
+    // return the wrong dtype (integer/bool arrays with float bounds, or a
+    // strong NumPy-scalar bound wider than the array). Defer to NumPy unless
+    // the promotion is a no-op so dtype parity is exact. Any failure probing
+    // the promotion (e.g. an input NumPy's `result_type` rejects) also defers.
+    let promotion_is_noop = (|| -> PyResult<bool> {
+        let a_arr = numpy.getattr("asarray")?.call1((a.bind(py),))?;
+        let input_dtype = a_arr.getattr("dtype")?;
+        let promoted_dtype =
+            numpy
+                .getattr("result_type")?
+                .call1((&a_arr, a_min.bind(py), a_max.bind(py)))?;
+        promoted_dtype.eq(&input_dtype)
+    })();
+    if !matches!(promotion_is_noop, Ok(true)) {
+        return fallback();
+    }
+
     let result = array.clip(min_val, max_val);
     build_numpy_scalar_or_array(py, &result)
 }
@@ -22438,17 +22426,6 @@ fn fftfreq(py: Python<'_>, n: usize, d: f64, device: Option<Py<PyAny>>) -> PyRes
     build_numpy_array_from_ufunc(py, &result)
 }
 
-fn rfft_norm_scale(norm: Option<&str>, n: usize) -> PyResult<f64> {
-    match norm {
-        None | Some("backward") => Ok(1.0),
-        Some("ortho") => Ok(1.0 / (n as f64).sqrt()),
-        Some("forward") => Ok(1.0 / n as f64),
-        Some(other) => Err(PyValueError::new_err(format!(
-            "Invalid norm value {other}; should be \"backward\",\"ortho\" or \"forward\"."
-        ))),
-    }
-}
-
 fn validate_irfft_norm(norm: Option<&str>) -> PyResult<()> {
     match norm {
         None | Some("backward") | Some("ortho") | Some("forward") => Ok(()),
@@ -23310,13 +23287,6 @@ enum DdofArg {
 }
 
 impl DdofArg {
-    fn native_usize(&self) -> Option<usize> {
-        match self {
-            Self::Native(value) => Some(*value),
-            Self::Delegate(_) => None,
-        }
-    }
-
     fn set_numpy_kwarg(&self, py: Python<'_>, kw: &Bound<'_, PyDict>) -> PyResult<()> {
         match self {
             Self::Native(value) => kw.set_item("ddof", *value),
@@ -39740,6 +39710,53 @@ mod tests {
                 actual_ints.getattr("dtype")?.str()?.extract::<String>()?,
                 expected_ints.getattr("dtype")?.str()?.extract::<String>()?
             );
+
+            // NEP50 result-type promotion: the native fast path preserves the
+            // input dtype, so it must defer to NumPy whenever clip would
+            // promote. Each case below asserts both value and dtype parity.
+            let assert_clip_dtype_parity = |a_min: Bound<'_, PyAny>,
+                                            a_max: Bound<'_, PyAny>,
+                                            arr: Bound<'_, PyAny>|
+             -> PyResult<()> {
+                let actual = clip_fn.call1((arr.clone(), a_min.clone(), a_max.clone()))?;
+                let expected = numpy_clip.call1((arr, a_min, a_max))?;
+                assert_array_matches_numpy(&actual, &expected)?;
+                assert_eq!(
+                    actual.getattr("dtype")?.str()?.extract::<String>()?,
+                    expected.getattr("dtype")?.str()?.extract::<String>()?
+                );
+                Ok(())
+            };
+            let float64 = numpy.getattr("float64")?;
+            // Integer array with fractional float bounds — previously crashed
+            // (could not store 1.5 into i64 storage); now promotes to float64.
+            assert_clip_dtype_parity(
+                1.5_f64.into_pyobject(py)?.into_any(),
+                2.5_f64.into_pyobject(py)?.into_any(),
+                ints.clone(),
+            )?;
+            // Integer array with integer-valued float bounds — still float64.
+            assert_clip_dtype_parity(
+                1.0_f64.into_pyobject(py)?.into_any(),
+                50.0_f64.into_pyobject(py)?.into_any(),
+                ints.clone(),
+            )?;
+            // float32 array with strong np.float64 scalar bounds — float64.
+            let f32_arr = numpy
+                .getattr("array")?
+                .call1((vec![1.0_f64, 2.0, 3.0], numpy.getattr("float32")?))?;
+            assert_clip_dtype_parity(
+                float64.call1((1.5_f64,))?,
+                float64.call1((2.5_f64,))?,
+                f32_arr,
+            )?;
+            // Bool array with integer bounds — promotes to int64.
+            let bool_arr = numpy.getattr("array")?.call1((vec![true, false, true],))?;
+            assert_clip_dtype_parity(
+                0_i64.into_pyobject(py)?.into_any(),
+                1_i64.into_pyobject(py)?.into_any(),
+                bool_arr,
+            )?;
 
             // NaN propagation for float inputs.
             let nan_values =
