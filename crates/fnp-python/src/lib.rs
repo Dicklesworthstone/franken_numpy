@@ -24934,13 +24934,60 @@ fn float_power(
     native_binary_float_power_or_passthrough(py, args, kwargs)
 }
 
+/// Returns `true` only when `value`'s NumPy dtype is exactly `float64`. Used to
+/// gate f64-only native kernels (e.g. divmod) that would otherwise widen integer
+/// or narrow-float inputs and diverge from NumPy's output dtype. Any extraction
+/// error is treated as "not float64".
+fn numpy_dtype_is_f64(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    let probe = || -> PyResult<bool> {
+        let numpy = py.import("numpy")?;
+        let array = numpy.call_method1("asarray", (value,))?;
+        let dtype = array.getattr("dtype")?;
+        let kind: String = dtype.getattr("kind")?.extract()?;
+        let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+        Ok(kind == "f" && itemsize == 8)
+    };
+    probe().unwrap_or(false)
+}
+
 // Arithmetic: divmod + mod/remainder (3).
 #[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn divmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let x1 = extract_numeric_array(py, x1.bind(py), "divmod(x1)")?;
-    let x2 = extract_numeric_array(py, x2.bind(py), "divmod(x2)")?;
-    let (quotient, remainder) = ufunc_divmod(&x1, &x2).map_err(map_ufunc_error)?;
+    let numpy = py.import("numpy")?;
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(numpy
+            .getattr("divmod")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind())
+    };
+
+    // divmod_arrays is an f64-only kernel, but NumPy's divmod preserves the
+    // integer result dtype for integer inputs (int32 stays int32) and the narrow
+    // float dtype for float16/float32. Only run the native path when both
+    // operands are float64, where the f64 kernel reproduces NumPy's dtype
+    // exactly; defer everything else to numpy.divmod.
+    if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
+        return fallback();
+    }
+
+    let x1a = match extract_numeric_array(py, x1.bind(py), "divmod(x1)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    let x2a = match extract_numeric_array(py, x2.bind(py), "divmod(x2)") {
+        Ok(arr) => arr,
+        Err(_) => return fallback(),
+    };
+    // Defer zero-divisor cases so numpy emits the RuntimeWarning (matches the
+    // floor_divide fast path).
+    if x2a.values().contains(&0.0) {
+        return fallback();
+    }
+    let (quotient, remainder) = match ufunc_divmod(&x1a, &x2a) {
+        Ok(pair) => pair,
+        Err(_) => return fallback(),
+    };
     let outputs = [quotient, remainder];
     build_numpy_scalar_or_array_tuple(py, &outputs)
 }
@@ -34489,6 +34536,73 @@ mod tests {
                     .call1((&ours_mv, &theirs_mv))?
                     .extract::<bool>()?,
                 "matvec passthrough diverged"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn divmod_preserves_input_dtype_like_numpy() {
+        // Regression for franken_numpy-xstsw: the f64-only divmod_arrays kernel
+        // returned float64 for integer inputs; NumPy preserves the integer
+        // result dtype (int32 stays int32) and narrow floats. The prior test
+        // used array_equal (value-only) which masked the dtype difference.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let dm = module.getattr("divmod")?;
+            let np_dm = numpy.getattr("divmod")?;
+            let array_fn = numpy.getattr("array")?;
+
+            let typed_pair = |dtype: &str| -> PyResult<(Bound<'_, PyAny>, Bound<'_, PyAny>)> {
+                let kw = PyDict::new(py);
+                kw.set_item("dtype", dtype)?;
+                let a = array_fn.call((vec![7_i64, 8, 9],), Some(&kw))?;
+                let kw2 = PyDict::new(py);
+                kw2.set_item("dtype", dtype)?;
+                let b = array_fn.call((vec![3_i64, 3, 4],), Some(&kw2))?;
+                Ok((a, b))
+            };
+
+            for dtype in [
+                "int64", "int32", "int16", "int8", "uint8", "uint32", "uint64", "float64",
+                "float32", "float16",
+            ] {
+                let (a, b) = typed_pair(dtype)?;
+                let ours = dm.call1((a.clone(), b.clone()))?;
+                let theirs = np_dm.call1((a, b))?;
+                assert_eq!(
+                    repr_string(&ours),
+                    repr_string(&theirs),
+                    "divmod dtype/value must match numpy for {dtype}",
+                );
+            }
+
+            // Mixed int/float promotes to float (numpy result_type), and python
+            // scalars must match too.
+            let (ai, bf) = (
+                array_fn.call1((vec![7_i64, 8],))?,
+                {
+                    let kw = PyDict::new(py);
+                    kw.set_item("dtype", "float64")?;
+                    array_fn.call((vec![2_i64, 3],), Some(&kw))?
+                },
+            );
+            assert_eq!(
+                repr_string(&dm.call1((ai.clone(), bf.clone()))?),
+                repr_string(&np_dm.call1((ai, bf))?),
+                "divmod mixed int/float must match numpy",
+            );
+            assert_eq!(
+                repr_string(&dm.call1((7_i64, 3_i64))?),
+                repr_string(&np_dm.call1((7_i64, 3_i64))?),
+                "divmod int scalars must match numpy",
             );
 
             Ok(())
