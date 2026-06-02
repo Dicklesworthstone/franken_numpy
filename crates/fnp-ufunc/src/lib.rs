@@ -10944,6 +10944,45 @@ impl UFuncArray {
                             .map_err(UFuncError::Shape)?;
                         let mut out_values = vec![0.0f64; self.values.len()];
 
+                        if inner == 1 {
+                            // Last-axis integer argsort: each output lane is a
+                            // contiguous chunk and the per-lane index sort reads only
+                            // that lane's (contiguous) values. Parallelize across
+                            // lanes; the per-lane sort and tie-breaking are identical
+                            // to the serial loop -> bit-for-bit identical indices.
+                            const ARGSORT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                            let sort_lane = |(outer_idx, out_chunk): (usize, &mut [f64])| {
+                                let base = outer_idx * axis_len;
+                                let mut idx_lane: Vec<usize> = (0..axis_len).collect();
+                                let cmp =
+                                    |a: &usize, b: &usize| values[base + a].cmp(&values[base + b]);
+                                match kind {
+                                    "stable" => idx_lane.sort_by(cmp),
+                                    _ => idx_lane.sort_unstable_by(cmp),
+                                }
+                                for (slot, &i) in out_chunk.iter_mut().zip(idx_lane.iter()) {
+                                    *slot = i as f64;
+                                }
+                            };
+                            if outer >= 2
+                                && self.values.len() >= ARGSORT_PARALLEL_MIN_ELEMS
+                                && rayon::current_num_threads() >= 2
+                            {
+                                out_values
+                                    .par_chunks_mut(axis_len)
+                                    .enumerate()
+                                    .for_each(sort_lane);
+                            } else {
+                                out_values.chunks_mut(axis_len).enumerate().for_each(sort_lane);
+                            }
+                            return Ok(Self {
+                                shape: self.shape.clone(),
+                                values: out_values,
+                                dtype: DType::I64,
+                                integer_sidecar: None,
+                            });
+                        }
+
                         let mut idx_lane: Vec<usize> = (0..axis_len).collect();
                         for outer_idx in 0..outer {
                             let base = outer_idx * axis_len * inner;
@@ -10990,6 +11029,42 @@ impl UFuncArray {
                         let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
                             .map_err(UFuncError::Shape)?;
                         let mut out_values = vec![0.0f64; self.values.len()];
+
+                        if inner == 1 {
+                            // Last-axis integer argsort: independent contiguous lanes,
+                            // parallelized identically to the i64 path (bit-exact).
+                            const ARGSORT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                            let sort_lane = |(outer_idx, out_chunk): (usize, &mut [f64])| {
+                                let base = outer_idx * axis_len;
+                                let mut idx_lane: Vec<usize> = (0..axis_len).collect();
+                                let cmp =
+                                    |a: &usize, b: &usize| values[base + a].cmp(&values[base + b]);
+                                match kind {
+                                    "stable" => idx_lane.sort_by(cmp),
+                                    _ => idx_lane.sort_unstable_by(cmp),
+                                }
+                                for (slot, &i) in out_chunk.iter_mut().zip(idx_lane.iter()) {
+                                    *slot = i as f64;
+                                }
+                            };
+                            if outer >= 2
+                                && self.values.len() >= ARGSORT_PARALLEL_MIN_ELEMS
+                                && rayon::current_num_threads() >= 2
+                            {
+                                out_values
+                                    .par_chunks_mut(axis_len)
+                                    .enumerate()
+                                    .for_each(sort_lane);
+                            } else {
+                                out_values.chunks_mut(axis_len).enumerate().for_each(sort_lane);
+                            }
+                            return Ok(Self {
+                                shape: self.shape.clone(),
+                                values: out_values,
+                                dtype: DType::I64,
+                                integer_sidecar: None,
+                            });
+                        }
 
                         let mut idx_lane: Vec<usize> = (0..axis_len).collect();
                         for outer_idx in 0..outer {
@@ -40388,6 +40463,35 @@ print(json.dumps(payload))
             expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "parallel integer last-axis sort diverged from serial reference"
         );
+    }
+
+    #[test]
+    fn integer_argsort_last_axis_parallel_matches_reference() {
+        // Integer (sidecar) argsort along the last axis above the parallel threshold
+        // runs across the rayon pool. With distinct per-lane values the indices are
+        // unambiguous, so each lane must equal the indices that sort that lane.
+        let (rows, cols) = (256usize, 137usize);
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| {
+                let c = (i % cols) as i64;
+                let r = (i / cols) as i64;
+                // Distinct within each row.
+                (c * 1000 + (c * 7 % 13) - r) as f64
+            })
+            .collect();
+        let arr = UFuncArray::new(vec![rows, cols], data.clone(), DType::I64).expect("arr");
+        let out = arr.argsort(Some(-1), Some("quicksort")).expect("int argsort");
+        assert_eq!(out.dtype(), DType::I64);
+        for r in 0..rows {
+            let lane = &data[r * cols..(r + 1) * cols];
+            let mut expected: Vec<usize> = (0..cols).collect();
+            expected.sort_by(|&a, &b| lane[a].total_cmp(&lane[b]));
+            let got: Vec<usize> = out.values()[r * cols..(r + 1) * cols]
+                .iter()
+                .map(|&v| v as usize)
+                .collect();
+            assert_eq!(got, expected, "integer argsort lane {r} diverged");
+        }
     }
 
     #[test]
