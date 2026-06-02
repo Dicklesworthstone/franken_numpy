@@ -10481,6 +10481,30 @@ fn select(
         }
     };
 
+    // numpy.select's output dtype is result_type(choices..., default); our native
+    // where_select chain runs through extract_numeric_array, which canonicalizes
+    // narrow widths (int32 -> int64, float32 -> float64). Only take the native path
+    // when every choice (and an explicit default) is float64 — the one case the
+    // round-trip reproduces exactly — and defer every other dtype mix to numpy,
+    // which preserves the promoted result dtype.
+    let choices_all_f64 = || -> PyResult<bool> {
+        for item in choicelist.bind(py).try_iter()? {
+            if !numpy_dtype_is_f64(py, &item?) {
+                return Ok(false);
+            }
+        }
+        if let Some(default_val) = default.as_ref() {
+            let bound = default_val.bind(py);
+            if !bound.is_none() && !numpy_dtype_is_f64(py, bound) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    };
+    if !choices_all_f64().unwrap_or(false) {
+        return fallback();
+    }
+
     let condlist = match extract_numeric_array_sequence(py, condlist.bind(py), "select(condlist)") {
         Ok(condlist) => condlist,
         Err(_) => return fallback(),
@@ -56667,6 +56691,55 @@ mod tests {
             // median(bool) is allowed and returns float64.
             let med = module.getattr("median")?.call1((b.clone(),))?;
             assert!(med.getattr("dtype")?.eq(&numpy.getattr("float64")?)?);
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn select_preserves_choice_dtype() {
+        // numpy.select returns result_type(choices...); our native path only
+        // matches for float64 choices, so narrow/integer choices defer to numpy.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let select_fn = module.getattr("select")?;
+            let np_select = numpy.getattr("select")?;
+            let base = numpy.getattr("arange")?.call1((6_i64,))?;
+            let cond0 = numpy.getattr("less")?.call1((base.clone(), 2_i64))?;
+            let cond1 = numpy.getattr("greater")?.call1((base.clone(), 3_i64))?;
+            for dt in ["int16", "int32", "int64", "float32", "float64"] {
+                let mk = |scale: i64| -> PyResult<Bound<'_, PyAny>> {
+                    numpy.getattr("array")?.call(
+                        (vec![scale, scale * 2, scale * 3, scale * 4, scale * 5, scale * 6],),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("dtype", numpy.getattr(dt)?)?;
+                            kw
+                        }),
+                    )
+                };
+                let condlist = vec![cond0.clone(), cond1.clone()];
+                let choicelist = vec![mk(10)?, mk(100)?];
+                let ours = select_fn.call1((condlist.clone(), choicelist.clone()))?;
+                let theirs = np_select.call1((condlist, choicelist))?;
+                assert!(
+                    ours.getattr("dtype")?.eq(&theirs.getattr("dtype")?)?,
+                    "select({dt}) dtype {:?} != numpy {:?}",
+                    ours.getattr("dtype")?,
+                    theirs.getattr("dtype")?
+                );
+                assert!(
+                    numpy
+                        .getattr("array_equal")?
+                        .call1((&ours, &theirs))?
+                        .extract::<bool>()?,
+                    "select({dt}) value mismatch"
+                );
+            }
             Ok(())
         });
     }
