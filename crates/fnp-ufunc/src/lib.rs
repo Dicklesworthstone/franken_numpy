@@ -12147,16 +12147,33 @@ impl UFuncArray {
             fnp_ndarray::element_count(b_prefix_shape).map_err(UFuncError::Shape)?;
         let b_matrix_size = k * b_last_dim;
 
-        for i in 0..a_batch_count {
-            let a_row_ptr = i * k;
-            for j in 0..b_prefix_count {
-                let b_batch_ptr = j * b_matrix_size;
-                let out_batch_ptr = (i * b_prefix_count + j) * b_last_dim;
-                for p in 0..k {
-                    let a_val = self.values[a_row_ptr + p];
-                    let b_row_ptr = b_batch_ptr + p * b_last_dim;
-                    for l in 0..b_last_dim {
-                        out_values[out_batch_ptr + l] += a_val * rhs.values[b_row_ptr + l];
+        if b_prefix_count == 1 {
+            // Every A row multiplies the same (k x b_last_dim) B matrix, i.e. this
+            // is exactly the GEMM (a_batch_count x k) @ (k x b_last_dim) (covers the
+            // 2-D @ 2-D and N-D @ 2-D cases). Route through the register-tiled,
+            // cache-blocked, parallel kernel instead of the naive triple loop. Each
+            // output element still accumulates p=0..k in order, so the result is
+            // bit-identical to the naive path.
+            matmul_accumulate(
+                &self.values,
+                &rhs.values,
+                a_batch_count,
+                k,
+                b_last_dim,
+                &mut out_values,
+            );
+        } else {
+            for i in 0..a_batch_count {
+                let a_row_ptr = i * k;
+                for j in 0..b_prefix_count {
+                    let b_batch_ptr = j * b_matrix_size;
+                    let out_batch_ptr = (i * b_prefix_count + j) * b_last_dim;
+                    for p in 0..k {
+                        let a_val = self.values[a_row_ptr + p];
+                        let b_row_ptr = b_batch_ptr + p * b_last_dim;
+                        for l in 0..b_last_dim {
+                            out_values[out_batch_ptr + l] += a_val * rhs.values[b_row_ptr + l];
+                        }
                     }
                 }
             }
