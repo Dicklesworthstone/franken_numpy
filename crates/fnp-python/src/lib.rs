@@ -10135,32 +10135,53 @@ fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn floor(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // NumPy's floor/ceil/trunc preserve the input dtype exactly (int32 -> int32,
+    // float32 -> float32, bool -> bool). extract_numeric_array canonicalizes narrow
+    // widths, so the native path only matches NumPy for float64; defer the rest.
+    if !numpy_dtype_is_f64(py, x.bind(py)) {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("floor")?.call1((x.bind(py),))?.unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "floor(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Floor))
 }
 
 #[pyfunction]
 fn ceil(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // See floor: NumPy preserves the exact input dtype; native path matches only
+    // for float64, so defer the rest to numpy.
+    if !numpy_dtype_is_f64(py, x.bind(py)) {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("ceil")?.call1((x.bind(py),))?.unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "ceil(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Ceil))
 }
 
 #[pyfunction]
 fn trunc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // See floor: NumPy preserves the exact input dtype; native path matches only
+    // for float64, so defer the rest to numpy.
+    if !numpy_dtype_is_f64(py, x.bind(py)) {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("trunc")?.call1((x.bind(py),))?.unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "trunc(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Trunc))
 }
 
 #[pyfunction]
 fn rint(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // NumPy's rint preserves float64 but applies a graded int/bool -> float
+    // promotion (bool/int8/uint8 -> float16, int16/uint16 -> float32, wider int ->
+    // float64). extract_numeric_array canonicalizes every narrow width away, so the
+    // native path only reproduces NumPy's dtype for float64; defer the rest.
+    if !numpy_dtype_is_f64(py, x.bind(py)) {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("rint")?.call1((x.bind(py),))?.unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "rint(x)")?;
-    let result = x.elementwise_unary(UnaryOp::Rint);
-    let result = match x.dtype() {
-        DType::Bool => result.astype(DType::F16),
-        DType::I64 | DType::U64 => result.astype(DType::F64),
-        _ => result,
-    };
-    build_numpy_scalar_or_array(py, &result)
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Rint))
 }
 
 #[pyfunction]
@@ -56501,6 +56522,55 @@ mod tests {
                     numpy.getattr("array_equal")?.call1((&ours, &theirs))?.extract::<bool>()?,
                     "trace({dt}) value mismatch"
                 );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn rounding_ufuncs_match_numpy_dtype() {
+        // NumPy 2.x: floor/ceil/trunc/fix preserve the exact input dtype; rint
+        // applies a graded int/bool -> float promotion. Our native path only
+        // matches for float64, so narrow widths must defer to numpy. Lock dtype +
+        // value across the dtype spread for the whole rounding family.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            for name in ["floor", "ceil", "trunc", "fix", "rint"] {
+                let ours_fn = module.getattr(name)?;
+                let np_fn = numpy.getattr(name)?;
+                for dt in [
+                    "bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32",
+                    "uint64", "float16", "float32", "float64",
+                ] {
+                    let a = numpy.getattr("array")?.call(
+                        (vec![1_i64, 2, 3, 2],),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("dtype", numpy.getattr(dt)?)?;
+                            kw
+                        }),
+                    )?;
+                    let ours = ours_fn.call1((a.clone(),))?;
+                    let theirs = np_fn.call1((a.clone(),))?;
+                    assert!(
+                        ours.getattr("dtype")?.eq(&theirs.getattr("dtype")?)?,
+                        "{name}({dt}) dtype {:?} != numpy {:?}",
+                        ours.getattr("dtype")?,
+                        theirs.getattr("dtype")?
+                    );
+                    assert!(
+                        numpy
+                            .getattr("array_equal")?
+                            .call1((&ours, &theirs))?
+                            .extract::<bool>()?,
+                        "{name}({dt}) value mismatch"
+                    );
+                }
             }
             Ok(())
         });
