@@ -5096,6 +5096,19 @@ impl UFuncArray {
     /// `Vec<f64>` bridge, this falls back to `F64` rather than manufacturing
     /// invalid complex or temporal metadata.
     fn from_values_with_dtype_lossy(shape: Vec<usize>, values: Vec<f64>, dtype: DType) -> Self {
+        if dtype == DType::F64
+            && element_count(&shape)
+                .map(|expected| expected == values.len())
+                .unwrap_or(false)
+        {
+            return Self {
+                shape,
+                values,
+                dtype,
+                integer_sidecar: None,
+            };
+        }
+
         match Self::from_values_with_dtype(shape.clone(), values.clone(), dtype) {
             Ok(array) => array,
             Err(err) => {
@@ -40256,6 +40269,15 @@ print(json.dumps(payload))
         let arr = UFuncArray::from_vec(vec![]);
         assert_eq!(arr.shape(), &[0]);
         assert!(arr.values().is_empty());
+    }
+
+    #[test]
+    fn lossy_f64_constructor_keeps_invalid_shape_fallback() {
+        let arr =
+            UFuncArray::from_values_with_dtype_lossy(vec![2], vec![1.0, 2.0, 3.0], DType::F64);
+        assert_eq!(arr.shape(), &[3]);
+        assert_eq!(arr.values(), &[1.0, 2.0, 3.0]);
+        assert_eq!(arr.dtype(), DType::F64);
     }
 
     #[test]
