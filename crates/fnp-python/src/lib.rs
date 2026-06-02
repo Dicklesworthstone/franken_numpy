@@ -12419,6 +12419,16 @@ fn cov(
 
     let m_bound = m.bind(py);
     let y_binding = y.as_ref().map(|value| value.bind(py));
+    // numpy.cov promotes every input to float64 before accumulating and always
+    // returns float64 (float32/float16/int input -> float64). Our native kernel
+    // accumulates in the input float width, so its float32 result differs from
+    // numpy in both dtype and value. Only run it for float64 inputs; defer the
+    // rest to numpy for exact parity.
+    if !numpy_dtype_is_f64(py, m_bound)
+        || y_binding.is_some_and(|y_val| !numpy_dtype_is_f64(py, y_val))
+    {
+        return fallback(py);
+    }
     let native = match native_cov_unweighted(py, m_bound, y_binding, rowvar, resolved_ddof) {
         Ok(Some(value)) => value,
         _ => return fallback(py),
@@ -13212,6 +13222,7 @@ fn percentile(
         || method.is_some()
         || weights.is_some()
         || numpy_dtype_is_narrow_float(py, a.bind(py))
+        || numpy_dtype_is_bool(py, a.bind(py))
     {
         return fallback();
     }
@@ -21610,6 +21621,7 @@ fn quantile(
         || method.is_some()
         || weights.is_some()
         || numpy_dtype_is_narrow_float(py, a.bind(py))
+        || numpy_dtype_is_bool(py, a.bind(py))
     {
         return fallback();
     }
@@ -25095,6 +25107,19 @@ fn numpy_dtype_is_narrow_float(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool
         let kind: String = dtype.getattr("kind")?.extract()?;
         let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
         Ok(kind == "f" && itemsize < 8)
+    };
+    probe().unwrap_or(false)
+}
+
+// True when `value` is a boolean array/scalar. percentile/quantile reject bool in
+// NumPy (the interpolation subtracts, and `-` is unsupported on bool -> TypeError),
+// while median allows it; callers gate on this to reproduce that asymmetry.
+fn numpy_dtype_is_bool(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    let probe = || -> PyResult<bool> {
+        let numpy = py.import("numpy")?;
+        let array = numpy.call_method1("asarray", (value,))?;
+        let kind: String = array.getattr("dtype")?.getattr("kind")?.extract()?;
+        Ok(kind == "b")
     };
     probe().unwrap_or(false)
 }
@@ -56572,6 +56597,76 @@ mod tests {
                     );
                 }
             }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn cov_always_returns_float64() {
+        // numpy.cov promotes any numeric input to float64 and returns float64.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let cov_fn = module.getattr("cov")?;
+            let np_cov = numpy.getattr("cov")?;
+            for dt in ["float16", "float32", "float64", "int32", "int64"] {
+                let m = numpy.getattr("array")?.call(
+                    (vec![vec![1.0_f64, 2.0, 3.0, 5.0], vec![2.0, 4.0, 6.0, 8.0]],),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("dtype", numpy.getattr(dt)?)?;
+                        kw
+                    }),
+                )?;
+                let ours = cov_fn.call1((m.clone(),))?;
+                let theirs = np_cov.call1((m.clone(),))?;
+                assert!(
+                    ours.getattr("dtype")?.eq(&theirs.getattr("dtype")?)?,
+                    "cov({dt}) dtype {:?} != numpy {:?}",
+                    ours.getattr("dtype")?,
+                    theirs.getattr("dtype")?
+                );
+                assert!(
+                    numpy
+                        .getattr("allclose")?
+                        .call1((&ours, &theirs))?
+                        .extract::<bool>()?,
+                    "cov({dt}) value mismatch"
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn percentile_quantile_reject_bool_like_numpy() {
+        // numpy.percentile/quantile raise TypeError on bool input (interpolation
+        // subtracts); median allows it. Mirror that asymmetry.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let b = numpy
+                .getattr("array")?
+                .call1((vec![true, false, true, true],))?;
+            assert!(
+                module.getattr("percentile")?.call1((b.clone(), 50.0_f64)).is_err(),
+                "percentile(bool) should raise like numpy"
+            );
+            assert!(
+                module.getattr("quantile")?.call1((b.clone(), 0.5_f64)).is_err(),
+                "quantile(bool) should raise like numpy"
+            );
+            // median(bool) is allowed and returns float64.
+            let med = module.getattr("median")?.call1((b.clone(),))?;
+            assert!(med.getattr("dtype")?.eq(&numpy.getattr("float64")?)?);
             Ok(())
         });
     }
