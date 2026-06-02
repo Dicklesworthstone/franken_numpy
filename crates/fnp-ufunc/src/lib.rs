@@ -10762,6 +10762,33 @@ impl UFuncArray {
                     fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
                 let mut values = self.values.clone();
 
+                if inner == 1 {
+                    // Last-axis sort: each lane is a contiguous chunk of `values`,
+                    // sorted independently. The per-lane operation is identical to
+                    // the serial gather/scatter, so parallelizing across lanes is
+                    // bit-for-bit identical for any thread count. Sort is
+                    // compute-bound, so this scales with cores.
+                    const SORT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                    if outer >= 2
+                        && values.len() >= SORT_PARALLEL_MIN_ELEMS
+                        && rayon::current_num_threads() >= 2
+                    {
+                        values
+                            .par_chunks_mut(axis_len)
+                            .for_each(|lane| sort_slice_by_kind(lane, kind));
+                    } else {
+                        values
+                            .chunks_mut(axis_len)
+                            .for_each(|lane| sort_slice_by_kind(lane, kind));
+                    }
+                    return Ok(Self {
+                        shape: self.shape.clone(),
+                        values,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
+                }
+
                 let mut lane = vec![0.0f64; axis_len];
                 for outer_idx in 0..outer {
                     let base = outer_idx * axis_len * inner;
@@ -40114,6 +40141,42 @@ print(json.dumps(payload))
         let out = arr.sort(Some(1), None).expect("sort axis=1");
         assert_eq!(out.shape(), &[2, 3]);
         assert_eq!(out.values(), &[1.0, 3.0, 5.0, 0.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn sort_last_axis_parallel_matches_serial_reference() {
+        // Above the parallel threshold the last-axis sort runs across the rayon
+        // pool; each contiguous lane must match a serial total_cmp sort, including
+        // NaN-at-end handling, bit-for-bit.
+        let (rows, cols) = (256usize, 137usize); // > 16384 elems, >= 2 lanes
+        let mut data: Vec<f64> = (0..rows * cols)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
+            .collect();
+        // Sprinkle a NaN into a couple of lanes.
+        data[5 * cols + 3] = f64::NAN;
+        data[200 * cols + cols - 1] = f64::NAN;
+
+        let arr = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).expect("arr");
+        let out = arr.sort(Some(-1), Some("quicksort")).expect("parallel sort");
+
+        let mut expected = data.clone();
+        for r in 0..rows {
+            let lane = &mut expected[r * cols..(r + 1) * cols];
+            let non_nan = lane.iter().filter(|v| !v.is_nan()).count();
+            lane.sort_by(|a, b| match (a.is_nan(), b.is_nan()) {
+                (false, false) => a.total_cmp(b),
+                (false, true) => std::cmp::Ordering::Less,
+                (true, false) => std::cmp::Ordering::Greater,
+                (true, true) => std::cmp::Ordering::Equal,
+            });
+            // sanity: NaNs land at the tail
+            assert!(lane[..non_nan].iter().all(|v| !v.is_nan()));
+        }
+        assert_eq!(
+            out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "parallel last-axis sort diverged from serial reference"
+        );
     }
 
     #[test]
