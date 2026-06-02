@@ -1,0 +1,17 @@
+# Enable AVX2 (256-bit, 4-wide f64) autovectorization for the numeric kernels.
+#
+# IMPORTANT: we enable ONLY `+avx2`, NOT `+fma`. The full `x86-64-v3`
+# microarchitecture level bundles FMA, which lets LLVM *contract* a separate
+# multiply and add/subtract (e.g. the `a*d - b*c` 2x2 determinant, or matmul/LU
+# AXPY updates) into a single-rounding fused instruction. That changes the
+# floating-point result bit pattern and breaks bit-for-bit parity with the SSE2
+# build and with NumPy's oracle (verified: `target-cpu=x86-64-v3` regresses 16
+# fnp-linalg conformance tests; `+avx2` alone keeps all 37 green).
+#
+# Without the `fma` target feature LLVM cannot emit a fused multiply-add, so each
+# `*` and `+`/`-` keeps its own IEEE rounding step — identical results to the
+# generic build, only with wider (4-wide vs 2-wide f64) SIMD on the autovectorized
+# elementwise/AXPY inner loops (GEMM, LU, ufuncs). Reductions are never
+# reassociated (no fast-math), so sums keep their exact order too.
+[build]
+rustflags = ["-C", "target-feature=+avx2"]
