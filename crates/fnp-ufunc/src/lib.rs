@@ -24813,9 +24813,21 @@ fn exact_i64_counting_sort_output(data: &[f64]) -> Option<Vec<f64>> {
     }
 
     let mut counts = vec![0usize; range_len];
+    let mut all_unique = true;
     for &value in data {
         let bucket = ((value as i64) - min_value) as usize;
+        if counts[bucket] != 0 {
+            all_unique = false;
+        }
         counts[bucket] += 1;
+    }
+
+    if all_unique && range_len == data.len() {
+        return Some(
+            (0..data.len())
+                .map(|idx| (min_value + idx as i64) as f64)
+                .collect(),
+        );
     }
 
     let mut sorted = Vec::with_capacity(data.len());
