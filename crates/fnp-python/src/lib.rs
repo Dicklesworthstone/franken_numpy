@@ -24258,6 +24258,15 @@ fn trace(
         return fallback();
     }
 
+    // NumPy's trace uses the same default accumulator dtype as sum: bool and
+    // sub-platform integers/unsigned promote to int64/uint64, while float widths
+    // are preserved. Our native trace_axis preserves the input dtype, so it only
+    // matches NumPy for int64/uint64/float inputs; defer bool and narrow int/uint
+    // (which NumPy widens) to numpy.trace.
+    if numpy_dtype_is_subplatform_integer(py, a.bind(py)) {
+        return fallback();
+    }
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "trace(a)") {
         Ok(arr) => arr,
@@ -25084,6 +25093,23 @@ fn numpy_dtype_native_roundtrip_preserves(py: Python<'_>, value: &Bound<'_, PyAn
         let kind: String = dtype.getattr("kind")?.extract()?;
         let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
         Ok(kind == "b" || (matches!(kind.as_str(), "i" | "u" | "f") && itemsize == 8))
+    };
+    probe().unwrap_or(false)
+}
+
+// True when `value`'s dtype is one NumPy widens to the platform accumulator under
+// its default sum/trace reduction: bool and any integer/unsigned narrower than
+// 8 bytes (-> int64 / uint64). Float dtypes are preserved (not widened) and so are
+// excluded. Callers whose native kernel preserves the input dtype gate on this to
+// defer the widened cases to NumPy.
+fn numpy_dtype_is_subplatform_integer(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    let probe = || -> PyResult<bool> {
+        let numpy = py.import("numpy")?;
+        let array = numpy.call_method1("asarray", (value,))?;
+        let dtype = array.getattr("dtype")?;
+        let kind: String = dtype.getattr("kind")?.extract()?;
+        let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+        Ok(kind == "b" || (matches!(kind.as_str(), "i" | "u") && itemsize < 8))
     };
     probe().unwrap_or(false)
 }
@@ -56430,6 +56456,50 @@ mod tests {
                     "extract({dt}) dtype {:?} != numpy {:?}",
                     ours_e.getattr("dtype")?,
                     theirs_e.getattr("dtype")?
+                );
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn trace_matches_numpy_accumulator_dtype() {
+        // NumPy's trace widens bool and sub-platform int/uint to int64/uint64 and
+        // preserves float widths. Lock our result dtype (and value) to NumPy's.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let trace_fn = module.getattr("trace")?;
+            let np_trace = numpy.getattr("trace")?;
+            let eye = numpy.getattr("eye")?;
+
+            for dt in [
+                "bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+                "float16", "float32", "float64",
+            ] {
+                let a = eye.call(
+                    (3_i64,),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("dtype", numpy.getattr(dt)?)?;
+                        kw
+                    }),
+                )?;
+                let ours = trace_fn.call1((a.clone(),))?;
+                let theirs = np_trace.call1((a.clone(),))?;
+                assert!(
+                    ours.getattr("dtype")?.eq(&theirs.getattr("dtype")?)?,
+                    "trace({dt}) dtype {:?} != numpy {:?}",
+                    ours.getattr("dtype")?,
+                    theirs.getattr("dtype")?
+                );
+                assert!(
+                    numpy.getattr("array_equal")?.call1((&ours, &theirs))?.extract::<bool>()?,
+                    "trace({dt}) value mismatch"
                 );
             }
             Ok(())
