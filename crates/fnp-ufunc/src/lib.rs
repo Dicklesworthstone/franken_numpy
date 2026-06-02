@@ -26569,26 +26569,100 @@ fn reduce_argfold_axis_contiguous_u64(
 
 /// Modified Bessel function of the first kind, order 0.
 /// Uses the polynomial approximation from Abramowitz and Stegun.
+/// Modified Bessel function of the first kind, order 0.
+///
+/// Matches NumPy's `np.i0` to machine precision by reusing the same Cephes
+/// Chebyshev expansion (`chbevl`) NumPy evaluates internally (`_i0_1` for
+/// `|x| <= 8`, `_i0_2` otherwise). The previous Abramowitz & Stegun polynomial
+/// only reached ~1.6e-7 accuracy and diverged from NumPy in the 8th
+/// significant digit (e.g. `i0(1.0)` gave `1.2660658480` vs NumPy's
+/// `1.2660658778`), which also propagated into the `kaiser` window.
 fn bessel_i0(x: f64) -> f64 {
     let ax = x.abs();
-    if ax < 3.75 {
-        let t = (ax / 3.75).powi(2);
-        1.0 + t
-            * (3.5156229
-                + t * (3.0899424
-                    + t * (1.2067492 + t * (0.2659732 + t * (0.0360768 + t * 0.0045813)))))
+    if ax <= 8.0 {
+        ax.exp() * chbevl(ax / 2.0 - 2.0, &I0_CHEB_A)
     } else {
-        let t = 3.75 / ax;
-        let e = ax.exp() / ax.sqrt();
-        e * (0.39894228
-            + t * (0.01328592
-                + t * (0.00225319
-                    + t * (-0.00157565
-                        + t * (0.00916281
-                            + t * (-0.02057706
-                                + t * (0.02635537 + t * (-0.01647633 + t * 0.00392377))))))))
+        ax.exp() * chbevl(32.0 / ax - 2.0, &I0_CHEB_B) / ax.sqrt()
     }
 }
+
+/// Evaluate a Chebyshev series at `x`, matching NumPy's Cephes `_chbevl`.
+fn chbevl(x: f64, coeffs: &[f64]) -> f64 {
+    let mut b0 = coeffs[0];
+    let mut b1 = 0.0_f64;
+    let mut b2 = 0.0_f64;
+    for &c in &coeffs[1..] {
+        b2 = b1;
+        b1 = b0;
+        b0 = x * b1 - b2 + c;
+    }
+    0.5 * (b0 - b2)
+}
+
+/// Cephes Chebyshev coefficients for `i0` on `|x| <= 8` (NumPy `_i0A`).
+#[rustfmt::skip]
+static I0_CHEB_A: [f64; 30] = [
+    -4.415_341_646_479_339_5e-18,
+    3.330_794_518_822_238_4e-17,
+    -2.431_279_846_547_955e-16,
+    1.715_391_285_555_133e-15,
+    -1.168_533_287_799_345_1e-14,
+    7.676_185_498_604_936e-14,
+    -4.856_446_783_111_929e-13,
+    2.955_052_663_129_64e-12,
+    -1.726_826_291_441_556e-11,
+    9.675_809_035_373_237e-11,
+    -5.189_795_601_635_263e-10,
+    2.659_823_724_682_386_6e-9,
+    -1.300_025_009_986_248e-8,
+    6.046_995_022_541_919e-8,
+    -2.670_793_853_940_612e-7,
+    1.117_387_539_120_103_7e-6,
+    -4.416_738_358_458_750_5e-6,
+    1.644_844_807_072_889_6e-5,
+    -5.754_195_010_082_104e-5,
+    1.885_028_850_958_416_5e-4,
+    -5.763_755_745_385_824e-4,
+    1.639_475_616_941_335_7e-3,
+    -4.324_309_995_050_576e-3,
+    1.054_646_039_459_499_8e-2,
+    -2.373_741_480_589_947e-2,
+    4.930_528_423_967_071e-2,
+    -9.490_109_704_804_764e-2,
+    1.716_209_015_222_087_7e-1,
+    -3.046_826_723_431_984e-1,
+    6.767_952_744_094_761e-1,
+];
+
+/// Cephes Chebyshev coefficients for `i0` on `|x| > 8` (NumPy `_i0B`).
+#[rustfmt::skip]
+static I0_CHEB_B: [f64; 25] = [
+    -7.233_180_487_874_754e-18,
+    -4.830_504_485_944_182e-18,
+    4.465_621_420_296_76e-17,
+    3.461_222_867_697_461e-17,
+    -2.827_623_980_516_583_6e-16,
+    -3.425_485_619_677_219e-16,
+    1.772_560_133_056_526_3e-15,
+    3.811_680_669_352_622_4e-15,
+    -9.554_846_698_828_307e-15,
+    -4.150_569_347_287_222e-14,
+    1.540_086_217_521_41e-14,
+    3.852_778_382_742_142_6e-13,
+    7.180_124_451_383_666e-13,
+    -1.794_178_531_506_806_2e-12,
+    -1.321_581_184_044_771_3e-11,
+    -3.149_916_527_963_241_6e-11,
+    1.188_914_710_784_643_9e-11,
+    4.940_602_388_224_97e-10,
+    3.396_232_025_708_386_5e-9,
+    2.266_668_990_498_178e-8,
+    2.048_918_589_469_063_8e-7,
+    2.891_370_520_834_756_7e-6,
+    6.889_758_346_916_825e-5,
+    3.369_116_478_255_694_3e-3,
+    8.044_904_110_141_088e-1,
+];
 
 /// Bessel function of the first kind, order 0.
 /// Uses polynomial approximations from Abramowitz and Stegun (9.4.1, 9.4.3).
