@@ -27067,9 +27067,35 @@ fn fft_pow2(re: &mut [f64], im: &mut [f64], inverse: bool) {
         j += m;
     }
 
+    let mut pair = 0usize;
+    while pair < n {
+        let odd = pair + 1;
+        let even_re = re[pair];
+        let even_im = im[pair];
+        let odd_re = re[odd];
+        let odd_im = im[odd];
+        let zero_times_odd_im = if odd_im.is_finite() {
+            0.0 * odd_im
+        } else {
+            0.0
+        };
+        let zero_times_odd_re = if odd_re.is_finite() {
+            0.0 * odd_re
+        } else {
+            0.0
+        };
+        let tr = odd_re - zero_times_odd_im;
+        let ti = odd_im + zero_times_odd_re;
+        re[odd] = even_re - tr;
+        im[odd] = even_im - ti;
+        re[pair] = even_re + tr;
+        im[pair] = even_im + ti;
+        pair += 2;
+    }
+
     // Butterfly passes
     let sign = if inverse { 1.0 } else { -1.0 };
-    let mut len = 2;
+    let mut len = 4;
     while len <= n {
         let half = len / 2;
         let angle_step = sign * std::f64::consts::TAU / len as f64;
