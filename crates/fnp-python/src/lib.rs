@@ -11308,21 +11308,42 @@ fn dsplit(py: Python<'_>, ary: Py<PyAny>, indices_or_sections: Py<PyAny>) -> PyR
 }
 
 #[pyfunction]
-fn put(py: Python<'_>, a: Py<PyAny>, ind: Py<PyAny>, v: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (a, ind, v, mode="raise"))]
+fn put(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    ind: Py<PyAny>,
+    v: Py<PyAny>,
+    mode: &str,
+) -> PyResult<Py<PyAny>> {
     let a_for_fallback = a.clone_ref(py);
     let ind_for_fallback = ind.clone_ref(py);
     let v_for_fallback = v.clone_ref(py);
+    let mode_owned = mode.to_string();
     let fallback = || -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("mode", &mode_owned)?;
         Ok(numpy
             .getattr("put")?
-            .call1((
-                a_for_fallback.bind(py),
-                ind_for_fallback.bind(py),
-                v_for_fallback.bind(py),
-            ))?
+            .call(
+                (
+                    a_for_fallback.bind(py),
+                    ind_for_fallback.bind(py),
+                    v_for_fallback.bind(py),
+                ),
+                Some(&kwargs),
+            )?
             .unbind())
     };
+
+    // The native path only models the default 'raise' mode; 'wrap'/'clip' (and
+    // any invalid mode string, which NumPy rejects with ValueError) defer to
+    // numpy.put.
+    if mode != "raise" {
+        return fallback();
+    }
+
     let a = a.bind(py);
     require_numpy_ndarray(py, a, "put")?;
 
@@ -20037,6 +20058,12 @@ fn average(
                 Ok(weights) => weights,
                 Err(_) => return fallback(),
             };
+            // NumPy raises ZeroDivisionError("Weights sum to zero, can't be
+            // normalized") when the weights sum to zero; the native path would
+            // divide by zero and yield NaN. Defer to numpy for the exact error.
+            if weights.values().iter().sum::<f64>() == 0.0 {
+                return fallback();
+            }
             match axis {
                 None => {
                     if weights.shape() != a.shape() {
@@ -36596,6 +36623,104 @@ mod tests {
     }
 
     #[test]
+    fn put_mode_clip_wrap_and_invalid_match_numpy() {
+        // numpy.put accepts mode='raise'|'wrap'|'clip'; fnp used to lack the
+        // kwarg entirely (TypeError). wrap/clip values and the invalid-mode
+        // ValueError must match numpy.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let put = module.getattr("put")?;
+            let np_put = numpy.getattr("put")?;
+
+            for mode in ["clip", "wrap"] {
+                let ours = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+                let theirs = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+                let kw = PyDict::new(py);
+                kw.set_item("mode", mode)?;
+                let kw2 = PyDict::new(py);
+                kw2.set_item("mode", mode)?;
+                put.call(
+                    (
+                        &ours,
+                        PyList::new(py, [10_i64])?,
+                        PyList::new(py, [99_i64])?,
+                    ),
+                    Some(&kw),
+                )?;
+                np_put.call(
+                    (
+                        &theirs,
+                        PyList::new(py, [10_i64])?,
+                        PyList::new(py, [99_i64])?,
+                    ),
+                    Some(&kw2),
+                )?;
+                assert_eq!(
+                    repr_string(&ours.call_method0("tolist")?),
+                    repr_string(&theirs.call_method0("tolist")?),
+                    "put mode={mode} result diverges from numpy"
+                );
+            }
+
+            let arr = numpy.getattr("array")?.call1((vec![1_i64, 2, 3],))?;
+            let bad = PyDict::new(py);
+            bad.set_item("mode", "zzz")?;
+            let err = put
+                .call(
+                    (&arr, PyList::new(py, [0_i64])?, PyList::new(py, [9_i64])?),
+                    Some(&bad),
+                )
+                .expect_err("invalid put mode must error");
+            assert_eq!(err.get_type(py).name()?.extract::<String>()?, "ValueError");
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn average_zero_sum_weights_matches_numpy_zerodivision() {
+        // numpy.average raises ZeroDivisionError when the weights sum to zero;
+        // the native weighted path used to return NaN.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let a = numpy.getattr("array")?.call1((vec![1.0_f64, 2.0, 3.0],))?;
+            let w = numpy.getattr("array")?.call1((vec![0.0_f64, 0.0, 0.0],))?;
+            let kw = PyDict::new(py);
+            kw.set_item("weights", &w)?;
+            let kw2 = PyDict::new(py);
+            kw2.set_item("weights", &w)?;
+            let ours = module
+                .getattr("average")?
+                .call((&a,), Some(&kw))
+                .expect_err("average zero-weights must error");
+            let theirs = numpy
+                .getattr("average")?
+                .call((&a,), Some(&kw2))
+                .expect_err("numpy average zero-weights must error");
+            assert_eq!(
+                ours.get_type(py).name()?.extract::<String>()?,
+                theirs.get_type(py).name()?.extract::<String>()?,
+                "average zero-weights error type diverges from numpy"
+            );
+            assert_eq!(
+                ours.value(py).str()?.extract::<String>()?,
+                theirs.value(py).str()?.extract::<String>()?
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
     fn bincount_negative_input_matches_numpy_valueerror() {
         // numpy.bincount raises ValueError ("'list' argument must have no
         // negative elements") when given negative values. Confirms our
@@ -42635,6 +42760,7 @@ mod tests {
                 arr.clone().unbind(),
                 indices.clone().unbind(),
                 values.clone().unbind(),
+                "raise",
             )?;
             assert!(actual.bind(py).is_none());
 
@@ -42667,6 +42793,7 @@ mod tests {
                 arr.clone().unbind(),
                 indices.clone().unbind(),
                 values.clone().unbind(),
+                "raise",
             )?;
             assert!(actual.bind(py).is_none());
 
