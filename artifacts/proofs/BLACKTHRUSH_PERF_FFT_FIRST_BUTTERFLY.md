@@ -61,7 +61,22 @@ AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/tmp/rch_target_franken_numpy_black
 Result on `vmi1227854`: `4.6574 ms` center, CI
 `[4.3350 ms, 5.0250 ms]`. This is cross-worker supporting evidence only.
 
-Score: Impact `1` x Confidence `3` / Effort `1` = `3.0`.
+Independent post-close Criterion command:
+
+```bash
+RCH_FORCE_REMOTE=true CARGO_TARGET_DIR=/tmp/rch_target_franken_numpy_3any2_bench \
+  rch exec -- cargo bench -p fnp-conformance --bench criterion_core_ops -- \
+  fft_65536 --sample-size 12 --measurement-time 5 --warm-up-time 2
+```
+
+Result on `vmi1227854`: `5.1367 ms` center, CI
+`[4.7235 ms, 5.7594 ms]`.
+
+Final decision: rejected and reverted. The same-worker golden harness was useful
+as an equivalence check, but Criterion did not confirm a real win: the official
+after run overlapped the baseline and the independent rerun regressed. Score:
+Impact `0` x Confidence `4` / Effort `1` = `0.0`, below the required keep
+threshold.
 
 ## Behavior proof
 
@@ -82,6 +97,23 @@ Score: Impact `1` x Confidence `3` / Effort `1` = `3.0`.
 - `rch exec -- cargo check -p fnp-ufunc --all-targets`: passed.
 - `rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings`: passed.
 - `rustfmt --edition 2024 --check crates/fnp-ufunc/src/lib.rs`: passed.
+- Public golden sha256:
+  `1caa4743eb3f8f97cfc6bb08e373d14c17eafb2573583c2d8b9c2847d7bc0ad1`.
+- `ubs crates/fnp-ufunc/src/lib.rs`: exit 1 for pre-existing monolith inventory;
+  UBS fmt, clippy, cargo check, test build, audit, and deny sections were clean.
+
+No source optimization is kept after the final decision. Observable FFT ordering,
+floating-point edge behavior, inverse scaling, Bluestein fallback, and RNG state
+remain on the pre-candidate implementation after the revert.
+
+## Revert validation
+
+- `rch exec -- cargo test -p fnp-ufunc fft --lib -- --nocapture`: 38 passed.
+- `rch exec -- cargo test -p fnp-ufunc --test public_api_golden public_api_output_matches_golden -- --nocapture`: passed.
+- `rch exec -- cargo check -p fnp-ufunc --all-targets`: passed.
+- `rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings`: passed.
+- `rustfmt --edition 2024 --check crates/fnp-ufunc/src/lib.rs`: passed.
+- `git diff --check`: passed.
 - Public golden sha256:
   `1caa4743eb3f8f97cfc6bb08e373d14c17eafb2573583c2d8b9c2847d7bc0ad1`.
 - `ubs crates/fnp-ufunc/src/lib.rs`: exit 1 for pre-existing monolith inventory;
