@@ -7820,18 +7820,58 @@ fn bincount(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, xp, fp, left=None, right=None))]
+#[pyo3(signature = (x, xp, fp, left=None, right=None, period=None))]
 fn interp(
     py: Python<'_>,
     x: Py<PyAny>,
     xp: Py<PyAny>,
     fp: Py<PyAny>,
-    left: Option<f64>,
-    right: Option<f64>,
+    left: Option<Py<PyAny>>,
+    right: Option<Py<PyAny>>,
+    period: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let x = extract_numeric_array(py, x.bind(py), "interp(x)")?;
-    let xp = extract_numeric_array(py, xp.bind(py), "interp(xp)")?;
-    let fp = extract_numeric_array(py, fp.bind(py), "interp(fp)")?;
+    let numpy = py.import("numpy")?;
+    // Defer to NumPy's full interp surface for anything the native real-valued
+    // fast path can't represent: a `period` (angular interpolation), a complex
+    // `fp` (interpolated component-wise), or complex/non-float `left`/`right`
+    // bounds. Mirror numpy's signature so these kwargs are accepted instead of
+    // raising "unexpected keyword".
+    let fallback = || -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        if let Some(l) = left.as_ref() {
+            kwargs.set_item("left", l.bind(py))?;
+        }
+        if let Some(r) = right.as_ref() {
+            kwargs.set_item("right", r.bind(py))?;
+        }
+        if let Some(p) = period.as_ref() {
+            kwargs.set_item("period", p.bind(py))?;
+        }
+        Ok(numpy
+            .getattr("interp")?
+            .call((x.bind(py), xp.bind(py), fp.bind(py)), Some(&kwargs))?
+            .unbind())
+    };
+
+    if period.as_ref().is_some_and(|p| !p.bind(py).is_none()) {
+        return fallback();
+    }
+    let extract_bound = |value: &Option<Py<PyAny>>| -> Option<Option<f64>> {
+        match value.as_ref() {
+            Some(v) if !v.bind(py).is_none() => v.bind(py).extract::<f64>().ok().map(Some),
+            _ => Some(None),
+        }
+    };
+    let (Some(left), Some(right)) = (extract_bound(&left), extract_bound(&right)) else {
+        return fallback();
+    };
+    let (Ok(x), Ok(xp), Ok(fp)) = (
+        extract_numeric_array(py, x.bind(py), "interp(x)"),
+        extract_numeric_array(py, xp.bind(py), "interp(xp)"),
+        extract_numeric_array(py, fp.bind(py), "interp(fp)"),
+    ) else {
+        return fallback();
+    };
     let result = UFuncArray::interp_lr(&x, &xp, &fp, left, right).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
 }
@@ -35036,6 +35076,7 @@ mod tests {
                 fp.clone().unbind(),
                 None,
                 None,
+                None,
             )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("interp")?.call1((x, xp, fp))?;
@@ -35068,8 +35109,9 @@ mod tests {
                 x.clone().unbind(),
                 xp.clone().unbind(),
                 fp.clone().unbind(),
-                Some(-5.0),
-                Some(99.0),
+                Some((-5.0_f64).into_pyobject(py)?.into_any().unbind()),
+                Some((99.0_f64).into_pyobject(py)?.into_any().unbind()),
+                None,
             )?;
             let numpy = py.import("numpy")?;
             let kwargs = PyDict::new(py);
@@ -35103,6 +35145,7 @@ mod tests {
                 fp.clone().unbind(),
                 None,
                 None,
+                None,
             )?;
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("interp")?.call1((x, xp, fp))?;
@@ -35118,6 +35161,58 @@ mod tests {
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn interp_matches_numpy_for_complex_fp_and_period() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test_interp_extra")?;
+            fnp_python(&module)?;
+            let fnp_interp = module.getattr("interp")?;
+            let numpy = py.import("numpy")?;
+            let numpy_interp = numpy.getattr("interp")?;
+            let complex_ctor = py.import("builtins")?.getattr("complex")?;
+
+            // Complex fp: NumPy interpolates real and imaginary parts
+            // independently; the native fast path used to raise TypeError.
+            let xp = numpy.call_method1("array", (vec![0.0, 1.0, 2.0, 3.0],))?;
+            let fp_list = PyList::new(
+                py,
+                [
+                    complex_ctor.call1((0.0, 0.0))?,
+                    complex_ctor.call1((1.0, 1.0))?,
+                    complex_ctor.call1((2.0, 2.0))?,
+                    complex_ctor.call1((3.0, 3.0))?,
+                ],
+            )?;
+            let fp = numpy.call_method1("array", (fp_list,))?;
+            let x = numpy.call_method1("array", (vec![0.5, 2.5],))?;
+            let actual = fnp_interp.call1((&x, &xp, &fp))?;
+            let expected = numpy_interp.call1((&x, &xp, &fp))?;
+            assert_eq!(
+                repr_string(&actual.call_method0("tolist")?),
+                repr_string(&expected.call_method0("tolist")?)
+            );
+
+            // period= kwarg (angular interpolation): used to raise
+            // "unexpected keyword argument 'period'".
+            let xp2 = numpy.call_method1("array", (vec![0.0, 1.0, 2.0, 3.0],))?;
+            let fp2 = numpy.call_method1("array", (vec![0.0, 10.0, 20.0, 30.0],))?;
+            let x2 = numpy.call_method1("array", (vec![0.5, 5.5],))?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("period", 4.0)?;
+            let actual2 = fnp_interp.call((&x2, &xp2, &fp2), Some(&kwargs))?;
+            let expected2 = numpy_interp.call((&x2, &xp2, &fp2), Some(&kwargs))?;
+            assert_eq!(
+                repr_string(&actual2.call_method0("tolist")?),
+                repr_string(&expected2.call_method0("tolist")?)
             );
             Ok(())
         });
