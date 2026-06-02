@@ -12555,6 +12555,11 @@ fn nanmean(
         return fallback();
     }
 
+    // The native kernel computes in f64; defer float16/float32/complex inputs
+    // to numpy.nanmean so the narrow float dtype is preserved.
+    if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanmean(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -12575,7 +12580,9 @@ fn nanmean(
     if contains_nan_value(&result) {
         return fallback();
     }
-    build_numpy_array_from_ufunc(py, &result)
+    // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
+    // 0-d ndarray; collapse the 0-d case to a scalar to match.
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -12614,6 +12621,11 @@ fn nansum(
         return fallback();
     }
 
+    // The native kernel computes in f64; defer float16/float32/complex inputs
+    // to numpy.nansum so the narrow float dtype is preserved.
+    if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nansum(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -12628,7 +12640,9 @@ fn nansum(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
-    build_numpy_array_from_ufunc(py, &result)
+    // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
+    // 0-d ndarray; collapse the 0-d case to a scalar to match.
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -12684,6 +12698,11 @@ fn nanprod(
         return fallback();
     }
 
+    // The native kernel computes in f64; defer float16/float32/complex inputs
+    // to numpy.nanprod so the narrow float dtype is preserved.
+    if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanprod(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -12698,7 +12717,9 @@ fn nanprod(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
-    build_numpy_array_from_ufunc(py, &result)
+    // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
+    // 0-d ndarray; collapse the 0-d case to a scalar to match.
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -12731,6 +12752,11 @@ fn nanmax(
         return fallback();
     }
 
+    // nanmax preserves the input dtype exactly; the native kernel widens
+    // narrow ints/floats, so defer anything but bool/8-byte numerics to numpy.
+    if !native_minmax_preserves_dtype(py, a.bind(py)) {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanmax(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -12745,7 +12771,9 @@ fn nanmax(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
-    build_numpy_array_from_ufunc(py, &result)
+    // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
+    // 0-d ndarray; collapse the 0-d case to a scalar to match.
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -12778,6 +12806,11 @@ fn nanmin(
         return fallback();
     }
 
+    // nanmin preserves the input dtype exactly; the native kernel widens
+    // narrow ints/floats, so defer anything but bool/8-byte numerics to numpy.
+    if !native_minmax_preserves_dtype(py, a.bind(py)) {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanmin(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -12792,7 +12825,9 @@ fn nanmin(
         Ok(result) => result,
         Err(_) => return fallback(),
     };
-    build_numpy_array_from_ufunc(py, &result)
+    // NumPy returns a numpy scalar (np.float64) for a full reduction, not a
+    // 0-d ndarray; collapse the 0-d case to a scalar to match.
+    build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
@@ -19978,12 +20013,13 @@ fn isrealobj(x: Py<PyAny>) -> PyResult<bool> {
     Python::attach(|py| Ok(!python_is_complex_obj(x.bind(py))?))
 }
 
-/// Returns `true` when `value`'s NumPy dtype yields a float64 `average`
-/// result, so the native f64 fast-path reproduces NumPy's output dtype
-/// exactly. Integer/bool inputs upcast to float64; only `float64` floats
-/// stay float64 (float16/float32 and complex are preserved by NumPy and
-/// must defer to it). Any extraction error is treated as "not safe".
-fn average_output_is_f64_safe(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+/// Returns `true` when a native f64 reduction over `value` reproduces NumPy's
+/// output dtype exactly. The native path computes in f64, so it matches NumPy
+/// for bool/integer/unsigned inputs (NumPy's own promotion to int64/float64 is
+/// preserved by the f64 kernel) and for `float64` floats, but it cannot
+/// preserve float16/float32 (NumPy keeps the narrow float) or complex — those
+/// must defer to NumPy. Any extraction error is treated as "not safe".
+fn native_f64_reduction_preserves_dtype(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     let probe = || -> PyResult<bool> {
         let numpy = py.import("numpy")?;
         let array = numpy.call_method1("asarray", (value,))?;
@@ -19993,6 +20029,28 @@ fn average_output_is_f64_safe(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool 
         Ok(match kind.as_str() {
             "b" | "i" | "u" => true,
             "f" => itemsize == 8,
+            _ => false,
+        })
+    };
+    probe().unwrap_or(false)
+}
+
+/// Like [`native_f64_reduction_preserves_dtype`] but for min/max reductions,
+/// which preserve the input dtype *exactly* (NumPy's `nanmax`/`nanmin` keep
+/// int32/uint8 rather than promoting to int64/uint64 the way sum/prod do).
+/// The native kernel widens integers to i64/u64 and floats to f64, so only
+/// bool and the 8-byte numeric dtypes survive losslessly; everything else
+/// must defer to NumPy. Any extraction error is treated as "not safe".
+fn native_minmax_preserves_dtype(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    let probe = || -> PyResult<bool> {
+        let numpy = py.import("numpy")?;
+        let array = numpy.call_method1("asarray", (value,))?;
+        let dtype = array.getattr("dtype")?;
+        let kind: String = dtype.getattr("kind")?.extract()?;
+        let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+        Ok(match kind.as_str() {
+            "b" => true,
+            "i" | "u" | "f" => itemsize == 8,
             _ => false,
         })
     };
@@ -20037,11 +20095,11 @@ fn average(
     // float64. float16/float32/complex inputs (and weights that would alter the
     // result dtype) are preserved by NumPy, so defer those to numpy.average to
     // match both the averaged values and the returned sum-of-weights dtype.
-    if !average_output_is_f64_safe(py, a.bind(py)) {
+    if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
         return fallback();
     }
     if let Some(weights_val) = weights.as_ref()
-        && !average_output_is_f64_safe(py, weights_val.bind(py))
+        && !native_f64_reduction_preserves_dtype(py, weights_val.bind(py))
     {
         return fallback();
     }
@@ -54274,6 +54332,66 @@ mod tests {
                 ours_shape, theirs_shape,
                 "nanmin keepdims shape must match numpy",
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn nan_reductions_return_numpy_scalar_not_zero_d_array_for_full_reduction() {
+        // Regression for franken_numpy-s3w9n: a full (axis=None) reduction must
+        // return a numpy scalar (np.float64) like NumPy, not a 0-d ndarray.
+        // The prior code used build_numpy_array_from_ufunc which always wraps in
+        // an ndarray; isclose-based tests masked the type difference.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ndarray_ty = numpy.getattr("ndarray")?;
+            let array_fn = numpy.getattr("array")?;
+
+            // float64-with-NaN, integer, and float32 inputs all exercise both
+            // the scalar-return (s3w9n) and dtype-preservation (cj4vp) paths.
+            let f64_data = array_fn.call1((vec![1.0_f64, f64::NAN, 3.0, 5.0],))?;
+            let int_data = array_fn.call1((vec![1_i64, 2, 3, 4],))?;
+            let typed = |dtype: &str| -> PyResult<Bound<'_, PyAny>> {
+                let kw = PyDict::new(py);
+                kw.set_item("dtype", dtype)?;
+                array_fn.call((vec![1.0_f64, 2.0, 3.0, 4.0],), Some(&kw))
+            };
+            // float32/float16 exercise narrow-float fallback; int32/uint8
+            // exercise nanmax/nanmin's exact-dtype preservation (cj4vp).
+            let f32_data = typed("float32")?;
+            let f16_data = typed("float16")?;
+            let i32_data = typed("int32")?;
+            let u8_data = typed("uint8")?;
+
+            for data in [
+                f64_data, int_data, f32_data, f16_data, i32_data, u8_data,
+            ] {
+                for name in ["nansum", "nanprod", "nanmax", "nanmin", "nanmean"] {
+                    let ours = module.getattr(name)?.call1((data.clone(),))?;
+                    let theirs = numpy.getattr(name)?.call1((data.clone(),))?;
+                    // NumPy returns a scalar, not an ndarray.
+                    let theirs_is_nd = theirs.is_instance(&ndarray_ty)?;
+                    assert!(!theirs_is_nd, "sanity: numpy.{name} should return a scalar");
+                    let ours_is_nd = ours.is_instance(&ndarray_ty)?;
+                    assert!(
+                        !ours_is_nd,
+                        "{name} full reduction must return a numpy scalar, not a 0-d ndarray",
+                    );
+                    // Full dtype-sensitive repr must match (scalar dtype too).
+                    assert_eq!(
+                        repr_string(&ours),
+                        repr_string(&theirs),
+                        "{name} full-reduction scalar repr must match numpy",
+                    );
+                }
+            }
 
             Ok(())
         });
