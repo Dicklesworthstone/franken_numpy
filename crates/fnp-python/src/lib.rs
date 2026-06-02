@@ -10404,6 +10404,11 @@ fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<
             .call1((condition_for_fallback.bind(py), arr_for_fallback.bind(py)))?
             .unbind())
     };
+    // NumPy's extract preserves the data array's dtype; our native kernel
+    // canonicalizes narrow ints/floats, so defer non-canonical widths to NumPy.
+    if !numpy_dtype_native_roundtrip_preserves(py, arr.bind(py)) {
+        return fallback();
+    }
     let condition = match extract_numeric_array(py, condition.bind(py), "extract(condition)") {
         Ok(condition) => condition,
         Err(_) => return fallback(),
@@ -24485,7 +24490,14 @@ fn unique(
 ) -> PyResult<Py<PyAny>> {
     // Fast path for simple single-arg calls
     if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 1 {
-        let arr = match extract_numeric_array(py, &args.get_item(0)?, "unique(ar)") {
+        let item = args.get_item(0)?;
+        // NumPy's unique preserves the input dtype exactly; our native kernel
+        // canonicalizes narrow ints/floats (int32 -> int64, float32 -> float64),
+        // so defer any non-canonical width to NumPy.
+        if !numpy_dtype_native_roundtrip_preserves(py, &item) {
+            return core_numpy_passthrough(py, "unique", args, kwargs);
+        }
+        let arr = match extract_numeric_array(py, &item, "unique(ar)") {
             Ok(a) => a,
             Err(_) => return core_numpy_passthrough(py, "unique", args, kwargs),
         };
@@ -25053,6 +25065,25 @@ fn numpy_dtype_is_narrow_float(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool
         let kind: String = dtype.getattr("kind")?.extract()?;
         let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
         Ok(kind == "f" && itemsize < 8)
+    };
+    probe().unwrap_or(false)
+}
+
+// True when the native UFuncArray round-trip (extract_numeric_array -> kernel ->
+// build_numpy_array_from_ufunc) reproduces NumPy's exact dtype. extract_numeric_array
+// canonicalizes storage to bool / int64 / uint64 / float64, so the fast path only
+// preserves dtype for those four widths; a narrow int/uint/float input would be
+// silently widened (e.g. int32 -> int64). Functions whose NumPy contract is to
+// preserve the input element dtype (unique, extract, ...) gate on this and defer
+// every other dtype to NumPy, which keeps the original width.
+fn numpy_dtype_native_roundtrip_preserves(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    let probe = || -> PyResult<bool> {
+        let numpy = py.import("numpy")?;
+        let array = numpy.call_method1("asarray", (value,))?;
+        let dtype = array.getattr("dtype")?;
+        let kind: String = dtype.getattr("kind")?.extract()?;
+        let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+        Ok(kind == "b" || (matches!(kind.as_str(), "i" | "u" | "f") && itemsize == 8))
     };
     probe().unwrap_or(false)
 }
@@ -56344,6 +56375,62 @@ mod tests {
                     "quantile({in_dt}) dtype != expected {out_dt}"
                 );
                 assert!(ours_q.getattr("dtype")?.eq(&theirs_q.getattr("dtype")?)?);
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn unique_and_extract_preserve_input_integer_dtype() {
+        // NumPy's unique/extract preserve the input element dtype exactly
+        // (int8 -> int8, uint16 -> uint16, float32 -> float32). Our native fast
+        // path canonicalizes narrow widths, so it must defer them to NumPy. This
+        // locks the result dtype to NumPy's across a representative dtype spread.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let unique_fn = module.getattr("unique")?;
+            let np_unique = numpy.getattr("unique")?;
+            let extract_fn = module.getattr("extract")?;
+            let np_extract = numpy.getattr("extract")?;
+
+            for dt in [
+                "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+                "float16", "float32", "float64", "bool",
+            ] {
+                let data = numpy.getattr("array")?.call(
+                    (vec![3_i64, 1, 2, 1, 3],),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("dtype", numpy.getattr(dt)?)?;
+                        kw
+                    }),
+                )?;
+
+                let ours_u = unique_fn.call1((data.clone(),))?;
+                let theirs_u = np_unique.call1((data.clone(),))?;
+                assert!(
+                    ours_u.getattr("dtype")?.eq(&theirs_u.getattr("dtype")?)?,
+                    "unique({dt}) dtype {:?} != numpy {:?}",
+                    ours_u.getattr("dtype")?,
+                    theirs_u.getattr("dtype")?
+                );
+
+                let mask = numpy
+                    .getattr("array")?
+                    .call1((vec![true, false, true, true, false],))?;
+                let ours_e = extract_fn.call1((mask.clone(), data.clone()))?;
+                let theirs_e = np_extract.call1((mask.clone(), data.clone()))?;
+                assert!(
+                    ours_e.getattr("dtype")?.eq(&theirs_e.getattr("dtype")?)?,
+                    "extract({dt}) dtype {:?} != numpy {:?}",
+                    ours_e.getattr("dtype")?,
+                    theirs_e.getattr("dtype")?
+                );
             }
             Ok(())
         });
