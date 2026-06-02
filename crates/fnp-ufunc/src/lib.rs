@@ -11667,6 +11667,45 @@ impl UFuncArray {
                         let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
                             .map_err(UFuncError::Shape)?;
                         let mut result = vec![0.0f64; self.values.len()];
+                        if inner == 1 {
+                            // Last-axis integer argpartition: independent contiguous
+                            // lanes. Each lane runs select_nth_unstable over its own
+                            // 0..axis_len index range against the lane's values, so the
+                            // per-lane (relative) indices are bit-for-bit identical to
+                            // the serial loop for any thread count.
+                            const ARGPARTITION_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                            let select_lane =
+                                |(outer_idx, out_chunk): (usize, &mut [f64])| {
+                                    let base = outer_idx * axis_len;
+                                    let mut lane_indices: Vec<usize> = (0..axis_len).collect();
+                                    lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                        values[base + a].cmp(&values[base + b])
+                                    });
+                                    for (k, &idx) in lane_indices.iter().enumerate() {
+                                        out_chunk[k] = idx as f64;
+                                    }
+                                };
+                            if outer >= 2
+                                && self.values.len() >= ARGPARTITION_PARALLEL_MIN_ELEMS
+                                && rayon::current_num_threads() >= 2
+                            {
+                                result
+                                    .par_chunks_mut(axis_len)
+                                    .enumerate()
+                                    .for_each(select_lane);
+                            } else {
+                                result
+                                    .chunks_mut(axis_len)
+                                    .enumerate()
+                                    .for_each(select_lane);
+                            }
+                            return Ok(Self {
+                                shape: self.shape.clone(),
+                                values: result,
+                                dtype: DType::I64,
+                                integer_sidecar: None,
+                            });
+                        }
                         let mut indices: Vec<usize> = (0..axis_len).collect();
                         for outer_idx in 0..outer {
                             let base = outer_idx * axis_len * inner;
@@ -11721,6 +11760,43 @@ impl UFuncArray {
                         let outer: usize = fnp_ndarray::element_count(&self.shape[..axis])
                             .map_err(UFuncError::Shape)?;
                         let mut result = vec![0.0f64; self.values.len()];
+                        if inner == 1 {
+                            // Last-axis integer argpartition: independent contiguous
+                            // lanes, parallelized identically to the i64 path (bit-exact
+                            // per-lane relative indices).
+                            const ARGPARTITION_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                            let select_lane =
+                                |(outer_idx, out_chunk): (usize, &mut [f64])| {
+                                    let base = outer_idx * axis_len;
+                                    let mut lane_indices: Vec<usize> = (0..axis_len).collect();
+                                    lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                        values[base + a].cmp(&values[base + b])
+                                    });
+                                    for (k, &idx) in lane_indices.iter().enumerate() {
+                                        out_chunk[k] = idx as f64;
+                                    }
+                                };
+                            if outer >= 2
+                                && self.values.len() >= ARGPARTITION_PARALLEL_MIN_ELEMS
+                                && rayon::current_num_threads() >= 2
+                            {
+                                result
+                                    .par_chunks_mut(axis_len)
+                                    .enumerate()
+                                    .for_each(select_lane);
+                            } else {
+                                result
+                                    .chunks_mut(axis_len)
+                                    .enumerate()
+                                    .for_each(select_lane);
+                            }
+                            return Ok(Self {
+                                shape: self.shape.clone(),
+                                values: result,
+                                dtype: DType::I64,
+                                integer_sidecar: None,
+                            });
+                        }
                         let mut indices: Vec<usize> = (0..axis_len).collect();
                         for outer_idx in 0..outer {
                             let base = outer_idx * axis_len * inner;
@@ -11780,6 +11856,45 @@ impl UFuncArray {
                 let outer: usize =
                     fnp_ndarray::element_count(&self.shape[..axis]).map_err(UFuncError::Shape)?;
                 let mut result = vec![0.0f64; self.values.len()];
+                if inner == 1 {
+                    // Last-axis argpartition: each lane is a contiguous chunk, and
+                    // select_nth_unstable_by over the lane's own 0..axis_len index
+                    // range is deterministic, so an independent per-lane select is
+                    // bit-identical to the serial gather/select/scatter. Parallelizing
+                    // across the independent lanes is therefore bit-exact.
+                    const ARGPARTITION_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                    let values = &self.values;
+                    let select_lane = |(outer_idx, out_chunk): (usize, &mut [f64])| {
+                        let base = outer_idx * axis_len;
+                        let mut lane_indices: Vec<usize> = (0..axis_len).collect();
+                        lane_indices.select_nth_unstable_by(kth, |&a, &b| {
+                            values[base + a].total_cmp(&values[base + b])
+                        });
+                        for (k, &idx) in lane_indices.iter().enumerate() {
+                            out_chunk[k] = idx as f64;
+                        }
+                    };
+                    if outer >= 2
+                        && self.values.len() >= ARGPARTITION_PARALLEL_MIN_ELEMS
+                        && rayon::current_num_threads() >= 2
+                    {
+                        result
+                            .par_chunks_mut(axis_len)
+                            .enumerate()
+                            .for_each(select_lane);
+                    } else {
+                        result
+                            .chunks_mut(axis_len)
+                            .enumerate()
+                            .for_each(select_lane);
+                    }
+                    return Ok(Self {
+                        shape: self.shape.clone(),
+                        values: result,
+                        dtype: DType::I64,
+                        integer_sidecar: None,
+                    });
+                }
                 let mut indices: Vec<usize> = (0..axis_len).collect();
                 for outer_idx in 0..outer {
                     let base = outer_idx * axis_len * inner;
@@ -40640,6 +40755,59 @@ print(json.dumps(payload))
             let pivot = lane[kth];
             assert!(lane[..kth].iter().all(|&x| x <= pivot), "lane {r} left side");
             assert!(lane[kth + 1..].iter().all(|&x| x >= pivot), "lane {r} right side");
+        }
+    }
+
+    #[test]
+    fn argpartition_last_axis_parallel_matches_serial_reference() {
+        // f64 last-axis argpartition above the parallel threshold must be
+        // bit-identical to a serial per-lane select_nth_unstable_by over each
+        // lane's own 0..cols index range (deterministic selection).
+        let (rows, cols, kth) = (256usize, 137usize, 50usize);
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
+            .collect();
+        let arr = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).expect("arr");
+        let out = arr.argpartition(kth, Some(-1)).expect("argpartition");
+        assert_eq!(out.dtype(), DType::I64);
+        let mut expected = vec![0.0f64; rows * cols];
+        for r in 0..rows {
+            let lane = &data[r * cols..(r + 1) * cols];
+            let mut idx: Vec<usize> = (0..cols).collect();
+            idx.select_nth_unstable_by(kth, |&a, &b| lane[a].total_cmp(&lane[b]));
+            for (k, &i) in idx.iter().enumerate() {
+                expected[r * cols + k] = i as f64;
+            }
+        }
+        assert_eq!(
+            out.values(),
+            expected.as_slice(),
+            "parallel f64 last-axis argpartition diverged from serial reference"
+        );
+
+        // Integer last-axis argpartition: verify the partition invariant per lane,
+        // applied to the gathered values via the returned per-lane indices.
+        let idata: Vec<f64> = (0..rows * cols)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as i64 - 5000) as f64)
+            .collect();
+        let iarr = UFuncArray::new(vec![rows, cols], idata.clone(), DType::I64).expect("iarr");
+        let iout = iarr.argpartition(kth, Some(-1)).expect("int argpartition");
+        assert_eq!(iout.dtype(), DType::I64);
+        for r in 0..rows {
+            let lane = &idata[r * cols..(r + 1) * cols];
+            let perm: Vec<usize> = iout.values()[r * cols..(r + 1) * cols]
+                .iter()
+                .map(|&v| v as usize)
+                .collect();
+            let pivot = lane[perm[kth]];
+            assert!(
+                perm[..kth].iter().all(|&i| lane[i] <= pivot),
+                "lane {r} left side"
+            );
+            assert!(
+                perm[kth + 1..].iter().all(|&i| lane[i] >= pivot),
+                "lane {r} right side"
+            );
         }
     }
 
