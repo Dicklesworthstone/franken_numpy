@@ -345,42 +345,23 @@ impl PyUFunc {
             .unbind())
     }
 
-    #[pyo3(signature = (array, axis=None, dtype=None, out=None, keepdims=false, initial=None, where_arg=None))]
-    #[allow(clippy::too_many_arguments)]
+    // Forward `reduce` verbatim to NumPy's own ufunc.reduce. Manually
+    // re-mapping the keyword surface had drifted from NumPy: `where=` was
+    // exposed as `where_arg` (so `add.reduce(a, where=mask)` raised), and an
+    // explicit `axis=None` was indistinguishable from an omitted axis (both
+    // collapsed to NumPy's default axis=0 instead of reducing all axes). A
+    // straight passthrough keeps every positional/keyword form bit-for-bit
+    // identical to NumPy, which is also signature-less for this builtin.
+    #[pyo3(signature = (*args, **kwargs))]
     fn reduce(
         &self,
         py: Python<'_>,
-        array: Py<PyAny>,
-        axis: Option<Py<PyAny>>,
-        dtype: Option<Py<PyAny>>,
-        out: Option<Py<PyAny>>,
-        keepdims: bool,
-        initial: Option<Py<PyAny>>,
-        where_arg: Option<Py<PyAny>>,
+        args: &Bound<'_, PyTuple>,
+        kwargs: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         let np_ufunc = numpy.getattr(self.kind.name())?;
-        let kwargs = PyDict::new(py);
-        if let Some(a) = axis.as_ref() {
-            kwargs.set_item("axis", a.bind(py))?;
-        }
-        if let Some(d) = dtype.as_ref() {
-            kwargs.set_item("dtype", d.bind(py))?;
-        }
-        if let Some(o) = out.as_ref() {
-            kwargs.set_item("out", o.bind(py))?;
-        }
-        kwargs.set_item("keepdims", keepdims)?;
-        if let Some(i) = initial.as_ref() {
-            kwargs.set_item("initial", i.bind(py))?;
-        }
-        if let Some(w) = where_arg.as_ref() {
-            kwargs.set_item("where", w.bind(py))?;
-        }
-        Ok(np_ufunc
-            .getattr("reduce")?
-            .call((array.bind(py),), Some(&kwargs))?
-            .unbind())
+        Ok(np_ufunc.getattr("reduce")?.call(args, kwargs)?.unbind())
     }
 
     #[pyo3(signature = (array, axis=0, dtype=None, out=None))]
@@ -69564,6 +69545,32 @@ mod tests {
                     .call1((&fnp_mul_reduce, &np_mul_reduce))?
                     .extract::<bool>()?,
                 "multiply reduce mismatch"
+            );
+
+            // reduce(where=) parity — regression: the mask kwarg was exposed as
+            // `where_arg`, so NumPy's `where=` raised TypeError.
+            let mask = numpy.call_method1("array", (vec![true, false, true, false],))?;
+            let kwargs_where = PyDict::new(py);
+            kwargs_where.set_item("where", &mask)?;
+            let fnp_where = fnp_add.call_method("reduce", (&a1d,), Some(&kwargs_where))?;
+            let np_where = np_add.call_method("reduce", (&a1d,), Some(&kwargs_where))?;
+            assert!(
+                array_equal
+                    .call1((&fnp_where, &np_where))?
+                    .extract::<bool>()?,
+                "reduce where= mismatch"
+            );
+
+            // reduce(axis=None) reduces over all axes — regression: an explicit
+            // None was indistinguishable from an omitted axis and fell back to
+            // NumPy's default axis=0.
+            let kwargs_axis_none = PyDict::new(py);
+            kwargs_axis_none.set_item("axis", py.None())?;
+            let fnp_an = fnp_add.call_method("reduce", (&a2d,), Some(&kwargs_axis_none))?;
+            let np_an = np_add.call_method("reduce", (&a2d,), Some(&kwargs_axis_none))?;
+            assert!(
+                array_equal.call1((&fnp_an, &np_an))?.extract::<bool>()?,
+                "reduce axis=None mismatch"
             );
 
             Ok(())
