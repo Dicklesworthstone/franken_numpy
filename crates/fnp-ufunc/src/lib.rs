@@ -347,6 +347,20 @@ impl FloatErrorFlags {
         }
     }
 
+    // Union of two flag sets. The dispatched error depends only on *which* kinds
+    // occurred anywhere in the array (kinds() emits a fixed order independent of
+    // element order), so merging per-chunk flags from parallel workers reproduces
+    // the serial result exactly.
+    #[must_use]
+    fn merged(self, other: Self) -> Self {
+        Self {
+            divide: self.divide || other.divide,
+            over: self.over || other.over,
+            under: self.under || other.under,
+            invalid: self.invalid || other.invalid,
+        }
+    }
+
     #[must_use]
     fn kinds(self) -> Vec<FloatErrorKind> {
         let mut kinds = Vec::new();
@@ -1111,6 +1125,40 @@ impl UnaryOp {
     #[must_use]
     pub const fn is_integer_only(self) -> bool {
         matches!(self, Self::Invert)
+    }
+
+    /// Returns `true` for transcendental / special-function ops whose per-element
+    /// cost (a libm call or polynomial series) is high enough that mapping the op
+    /// across a large array is compute-bound and benefits from data parallelism.
+    /// Cheap arithmetic/bitwise/rounding ops are excluded — they are memory-bound
+    /// and would only pay the dispatch overhead. Per-element results are unchanged,
+    /// so parallel execution stays bit-for-bit identical to the serial map.
+    #[must_use]
+    pub const fn is_parallel_worth(self) -> bool {
+        matches!(
+            self,
+            Self::Exp
+                | Self::Exp2
+                | Self::Expm1
+                | Self::Log
+                | Self::Log2
+                | Self::Log10
+                | Self::Log1p
+                | Self::Sin
+                | Self::Cos
+                | Self::Tan
+                | Self::Sinh
+                | Self::Cosh
+                | Self::Tanh
+                | Self::Arcsin
+                | Self::Arccos
+                | Self::Arctan
+                | Self::Arcsinh
+                | Self::Arccosh
+                | Self::Arctanh
+                | Self::Cbrt
+                | Self::I0
+        )
     }
 
     #[inline]
@@ -7549,6 +7597,39 @@ impl UFuncArray {
                 op.name()
             )));
         }
+        let dtype = if op.is_bool_output() {
+            DType::Bool
+        } else {
+            self.dtype
+        };
+
+        // Compute-bound transcendental ops over a large array parallelize across
+        // the rayon pool. Output is filled in element order across in-order chunks
+        // (identical to the serial map -> bit-exact), and per-chunk float-error
+        // flags are unioned (order-independent -> identical dispatch).
+        const UNARY_PARALLEL_MIN_LEN: usize = 1 << 15;
+        const UNARY_PARALLEL_CHUNK: usize = 8192;
+        let n = self.values.len();
+        if op.is_parallel_worth() && n >= UNARY_PARALLEL_MIN_LEN && rayon::current_num_threads() >= 2
+        {
+            let mut values = vec![0.0f64; n];
+            let flags = values
+                .par_chunks_mut(UNARY_PARALLEL_CHUNK)
+                .zip(self.values.par_chunks(UNARY_PARALLEL_CHUNK))
+                .map(|(out_chunk, in_chunk)| {
+                    let mut chunk_flags = FloatErrorFlags::default();
+                    for (out_slot, &value) in out_chunk.iter_mut().zip(in_chunk.iter()) {
+                        let result = op.apply(value);
+                        note_unary_float_errors(&mut chunk_flags, op, value, result);
+                        *out_slot = result;
+                    }
+                    chunk_flags
+                })
+                .reduce(FloatErrorFlags::default, FloatErrorFlags::merged);
+            dispatch_float_error_flags(flags, op.name())?;
+            return Self::from_values_with_dtype(self.shape.clone(), values, dtype);
+        }
+
         let mut float_error_flags = FloatErrorFlags::default();
         let values = self
             .values
@@ -7560,11 +7641,6 @@ impl UFuncArray {
             })
             .collect();
         dispatch_float_error_flags(float_error_flags, op.name())?;
-        let dtype = if op.is_bool_output() {
-            DType::Bool
-        } else {
-            self.dtype
-        };
         Self::from_values_with_dtype(self.shape.clone(), values, dtype)
     }
 
@@ -35943,6 +36019,52 @@ print(json.dumps(payload))
                 let msg = format!("{other:?}");
                 assert_eq!(msg, "", "unexpected error");
             }
+        }
+    }
+
+    #[test]
+    fn parallel_unary_matches_serial_bitwise_on_large_arrays() {
+        // Arrays above the parallel threshold take the rayon path; results and
+        // float-error dispatch must be bit-identical to the serial map.
+        let n = (1usize << 15) + 777; // above threshold, not a chunk multiple
+        let data: Vec<f64> = (0..n).map(|i| ((i % 1000) as f64) * 0.001 + 0.5).collect();
+        for op in [
+            UnaryOp::Exp,
+            UnaryOp::Sin,
+            UnaryOp::Cos,
+            UnaryOp::Log,
+            UnaryOp::Tanh,
+            UnaryOp::Cbrt,
+        ] {
+            let arr = UFuncArray::new(vec![n], data.clone(), DType::F64).expect("arr");
+            let parallel = arr.try_elementwise_unary(op).expect("parallel unary");
+            let serial: Vec<f64> = data.iter().map(|&v| op.apply(v)).collect();
+            assert_eq!(
+                parallel.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                serial.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{op:?}: parallel path diverged from serial"
+            );
+        }
+    }
+
+    #[test]
+    fn parallel_unary_raises_float_errors_like_serial() {
+        // A domain error in any chunk must still trap in raise mode (per-chunk
+        // flags are unioned before dispatch).
+        let n = (1usize << 15) + 1;
+        let mut data = vec![1.0f64; n];
+        data[n - 3] = -1.0; // log(-1) -> NaN (Invalid) in the last chunk
+        let arr = UFuncArray::new(vec![n], data, DType::F64).expect("arr");
+        let err = {
+            let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+            arr.try_elementwise_unary(UnaryOp::Log)
+                .expect_err("raise mode must trap log domain error in the parallel path")
+        };
+        match err {
+            UFuncError::FloatingPoint { kind, .. } => {
+                assert_eq!(kind, FloatErrorKind::Invalid);
+            }
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 
