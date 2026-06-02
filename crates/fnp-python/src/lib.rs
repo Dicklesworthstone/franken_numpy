@@ -7904,6 +7904,23 @@ fn bincount(
     if minlength < 0 {
         return Err(PyValueError::new_err("'minlength' must not be negative"));
     }
+    // NumPy requires an integer (or bool) input and rejects float/complex with
+    // a safe-cast TypeError — even integer-valued floats. Match that (reporting
+    // the original input dtype) instead of silently truncating. Read the dtype
+    // from the source object since extraction upcasts e.g. float32 -> float64.
+    let numpy = py.import("numpy")?;
+    let input_dtype = numpy
+        .getattr("asarray")?
+        .call1((x.bind(py),))?
+        .getattr("dtype")?;
+    let kind = input_dtype.getattr("kind")?.extract::<String>()?;
+    if kind == "f" || kind == "c" {
+        let src = input_dtype.getattr("name")?.extract::<String>()?;
+        return Err(PyTypeError::new_err(format!(
+            "Cannot cast array data from dtype('{src}') to dtype('int64') \
+             according to the rule 'safe'"
+        )));
+    }
     let x = extract_numeric_array(py, x.bind(py), "bincount(x)")?;
     let weights = weights
         .map(|w| extract_numeric_array(py, w.bind(py), "bincount(weights)"))
@@ -36604,6 +36621,42 @@ mod tests {
                 ours.get_type(py).name()?.extract::<String>()?,
                 theirs.get_type(py).name()?.extract::<String>()?,
                 "bincount negative-input error type diverges from numpy"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn bincount_float_input_matches_numpy_typeerror() {
+        // numpy.bincount rejects a float/complex first argument (even
+        // integer-valued floats) with a safe-cast TypeError; we must match
+        // instead of silently truncating.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+
+            let floats = numeric_array(py, vec![1.5_f64, 2.5, 1.5], "float64");
+            let ours = module
+                .getattr("bincount")?
+                .call1((floats.clone(),))
+                .expect_err("bincount(float) must error");
+            let theirs = numpy
+                .getattr("bincount")?
+                .call1((floats,))
+                .expect_err("numpy bincount(float) must error");
+            assert_eq!(
+                ours.get_type(py).name()?.extract::<String>()?,
+                theirs.get_type(py).name()?.extract::<String>()?,
+                "bincount float-input error type diverges from numpy"
+            );
+            assert_eq!(
+                ours.value(py).str()?.extract::<String>()?,
+                theirs.value(py).str()?.extract::<String>()?,
+                "bincount float-input error message diverges from numpy"
             );
             Ok(())
         });
