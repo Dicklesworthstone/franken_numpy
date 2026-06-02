@@ -10207,6 +10207,13 @@ fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn copysign(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
+        return Ok(numpy
+            .getattr("copysign")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
+    }
     let x1 = extract_numeric_array(py, x1.bind(py), "copysign(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "copysign(x2)")?;
     let result = ufunc_copysign(&x1, &x2).map_err(map_ufunc_error)?;
@@ -10215,6 +10222,13 @@ fn copysign(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>>
 
 #[pyfunction]
 fn nextafter(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
+        return Ok(numpy
+            .getattr("nextafter")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
+    }
     let x1 = extract_numeric_array(py, x1.bind(py), "nextafter(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "nextafter(x2)")?;
     let result = ufunc_nextafter(&x1, &x2).map_err(map_ufunc_error)?;
@@ -10223,6 +10237,13 @@ fn nextafter(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
 
 #[pyfunction]
 fn hypot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
+        return Ok(numpy
+            .getattr("hypot")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
+    }
     let x1 = extract_numeric_array(py, x1.bind(py), "hypot(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "hypot(x2)")?;
     let result = ufunc_hypot(&x1, &x2).map_err(map_ufunc_error)?;
@@ -10244,6 +10265,13 @@ fn ldexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn logaddexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
+        return Ok(numpy
+            .getattr("logaddexp")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
+    }
     let x1 = extract_numeric_array(py, x1.bind(py), "logaddexp(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "logaddexp(x2)")?;
     let result = ufunc_logaddexp(&x1, &x2).map_err(map_ufunc_error)?;
@@ -10252,6 +10280,13 @@ fn logaddexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
 
 #[pyfunction]
 fn logaddexp2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
+        return Ok(numpy
+            .getattr("logaddexp2")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
+    }
     let x1 = extract_numeric_array(py, x1.bind(py), "logaddexp2(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "logaddexp2(x2)")?;
     let result = ufunc_logaddexp2(&x1, &x2).map_err(map_ufunc_error)?;
@@ -14796,6 +14831,13 @@ fn blackman(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn heaviside(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
+        return Ok(numpy
+            .getattr("heaviside")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
+    }
     let x1 = extract_numeric_array(py, x1.bind(py), "heaviside(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "heaviside(x2)")?;
     let result = ufunc_heaviside(&x1, &x2).map_err(map_ufunc_error)?;
@@ -14857,6 +14899,13 @@ fn conjugate(
 #[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn fmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
+        return Ok(py
+            .import("numpy")?
+            .getattr("fmod")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
+    }
     let x1_array = extract_numeric_array(py, x1.bind(py), "fmod(x1)")?;
     let x2_array = extract_numeric_array(py, x2.bind(py), "fmod(x2)")?;
     if contains_zero_divisor(&x2_array) {
@@ -14986,6 +15035,11 @@ fn native_binary_arctan2_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        if !numpy_dtype_is_f64(py, &args.get_item(0)?)
+            || !numpy_dtype_is_f64(py, &args.get_item(1)?)
+        {
+            return core_numpy_passthrough(py, "arctan2", args, kwargs);
+        }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "arctan2(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "arctan2(x2)")?;
         let result = ufunc_arctan2(&x1, &x2).map_err(map_ufunc_error)?;
@@ -15015,6 +15069,13 @@ fn native_binary_fmax_or_passthrough(
         if dtype1_kind == "c" || dtype2_kind == "c" {
             return core_numpy_passthrough(py, "fmax", args, kwargs);
         }
+        // fmax preserves the input dtype exactly; the f64 kernel widens narrow
+        // ints/floats, so defer anything but float64 to numpy.
+        if !numpy_dtype_is_f64(py, &args.get_item(0)?)
+            || !numpy_dtype_is_f64(py, &args.get_item(1)?)
+        {
+            return core_numpy_passthrough(py, "fmax", args, kwargs);
+        }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "fmax(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "fmax(x2)")?;
         let result = ufunc_fmax(&x1, &x2).map_err(map_ufunc_error)?;
@@ -15042,6 +15103,13 @@ fn native_binary_fmin_or_passthrough(
             .getattr("kind")?
             .extract::<String>()?;
         if dtype1_kind == "c" || dtype2_kind == "c" {
+            return core_numpy_passthrough(py, "fmin", args, kwargs);
+        }
+        // fmin preserves the input dtype exactly; the f64 kernel widens narrow
+        // ints/floats, so defer anything but float64 to numpy.
+        if !numpy_dtype_is_f64(py, &args.get_item(0)?)
+            || !numpy_dtype_is_f64(py, &args.get_item(1)?)
+        {
             return core_numpy_passthrough(py, "fmin", args, kwargs);
         }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "fmin(x1)")?;
@@ -15152,6 +15220,13 @@ fn native_binary_remainder_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        // mod/remainder preserve the input dtype; the f64 kernel widens narrow
+        // ints/floats, so defer anything but float64 to numpy.
+        if !numpy_dtype_is_f64(py, &args.get_item(0)?)
+            || !numpy_dtype_is_f64(py, &args.get_item(1)?)
+        {
+            return core_numpy_passthrough(py, "remainder", args, kwargs);
+        }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "remainder(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "remainder(x2)")?;
         if contains_zero_divisor(&x2) {
@@ -17237,6 +17312,14 @@ fn true_divide(
 ) -> PyResult<Py<PyAny>> {
     // Fast path for simple two-arg calls
     if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
+        // true_divide derives a narrow float for narrow/int inputs (float32 stays
+        // float32); the f64 elementwise path widens them, so only run native when
+        // both operands are float64 and defer everything else to numpy.
+        if !numpy_dtype_is_f64(py, &args.get_item(0)?)
+            || !numpy_dtype_is_f64(py, &args.get_item(1)?)
+        {
+            return core_numpy_passthrough(py, "true_divide", args, kwargs);
+        }
         let x1 = match extract_numeric_array(py, &args.get_item(0)?, "true_divide(x1)") {
             Ok(arr) => arr,
             Err(_) => return core_numpy_passthrough(py, "true_divide", args, kwargs),
@@ -34604,6 +34687,71 @@ mod tests {
                 repr_string(&np_dm.call1((7_i64, 3_i64))?),
                 "divmod int scalars must match numpy",
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn binary_ufuncs_preserve_input_dtype_like_numpy() {
+        // Regression for franken_numpy-3cmh5: these f64-only kernels returned
+        // float64 regardless of input dtype. NumPy preserves the integer dtype
+        // for fmax/fmin/fmod/mod and derives the narrow float for the float-output
+        // ufuncs (int16 -> float32, uint8 -> float16, float32 -> float32). The
+        // native path is only correct when both operands are float64.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array_fn = numpy.getattr("array")?;
+
+            let typed_pair = |dtype: &str| -> PyResult<(Bound<'_, PyAny>, Bound<'_, PyAny>)> {
+                let kw = PyDict::new(py);
+                kw.set_item("dtype", dtype)?;
+                let a = array_fn.call((vec![6_i64, 7, 8, 9],), Some(&kw))?;
+                let kw2 = PyDict::new(py);
+                kw2.set_item("dtype", dtype)?;
+                let b = array_fn.call((vec![2_i64, 3, 4, 2],), Some(&kw2))?;
+                Ok((a, b))
+            };
+
+            let names = [
+                "fmax",
+                "fmin",
+                "fmod",
+                "mod",
+                "true_divide",
+                "hypot",
+                "arctan2",
+                "logaddexp",
+                "logaddexp2",
+                "copysign",
+                "heaviside",
+                "nextafter",
+            ];
+            let dtypes = [
+                "float64", "float32", "float16", "int64", "int32", "int16", "int8", "uint8",
+                "uint32", "uint64",
+            ];
+
+            for name in names {
+                let ours_fn = module.getattr(name)?;
+                let np_fn = numpy.getattr(name)?;
+                for dtype in dtypes {
+                    let (a, b) = typed_pair(dtype)?;
+                    let ours = ours_fn.call1((a.clone(), b.clone()))?;
+                    let theirs = np_fn.call1((a, b))?;
+                    assert_eq!(
+                        repr_string(&ours),
+                        repr_string(&theirs),
+                        "{name} dtype/value must match numpy for {dtype}",
+                    );
+                }
+            }
 
             Ok(())
         });
