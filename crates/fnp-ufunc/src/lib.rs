@@ -25922,26 +25922,101 @@ fn reduce_sum_axis_contiguous(
     }
 }
 
+// Register-tiled GEMM micro-kernel (bit-exact with the i-k-j naive form).
+//
+// Each output element C[i,j] = sum_{k=0}^{K-1} A[i,k]*B[k,j] is still summed in
+// strictly increasing `k` with a separate multiply and add (no FMA contraction),
+// so the result is bit-identical to the naive triple loop and to the prior
+// row-blocked form (the public golden SHA-256 is unchanged). The blocking only
+// changes which elements are computed together, never any single element's
+// accumulation order:
+//   * an MR x NR tile of C is held in register accumulators across the entire
+//     k-loop, so C is written to memory once per tile instead of read+written on
+//     every k step (the row-blocked form streamed each C row K times), and
+//   * each B[k, j..] vector loaded feeds all MR accumulator rows and each
+//     A[i,k] scalar feeds all NR columns — raising arithmetic intensity to
+//     ~MR*NR/(MR+NR) flops/load and giving MR*NR independent FMA chains for ILP.
+// Remainder rows/columns use a sequential-k scalar tail that preserves the order.
+// MR*NR = 32 f64 accumulators = 8 AVX2 registers, leaving headroom for the A/B
+// operands under the workspace `+avx2` build.
+const MATMUL_MR: usize = 4;
+const MATMUL_NR: usize = 8;
+
 fn matmul_accumulate(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
     debug_assert_eq!(lhs.len(), m * k);
     debug_assert_eq!(rhs.len(), k * n);
     debug_assert_eq!(out.len(), m * n);
 
-    const ROW_BLOCK: usize = 8;
+    let m_full = m - m % MATMUL_MR;
+    let n_full = n - n % MATMUL_NR;
 
-    let mut row_start = 0usize;
-    while row_start < m {
-        let row_end = (row_start + ROW_BLOCK).min(m);
-        for (kk, rhs_row) in rhs.chunks_exact(n).enumerate() {
-            for row in row_start..row_end {
-                let a_val = lhs[row * k + kk];
-                let out_row = &mut out[row * n..(row + 1) * n];
-                for (slot, &rhs_value) in out_row.iter_mut().zip(rhs_row.iter()) {
-                    *slot += a_val * rhs_value;
+    // Column-panel (NC) blocking: process a [K x nc] panel of B against the whole
+    // height of A before moving to the next panel (loop order jc -> i0 -> j0 -> kk).
+    // Each B panel is reused across every MR-row block, so B is streamed from
+    // DRAM roughly once total instead of once per row block — without this, large
+    // matrices become bound on re-reading B. `nc` is sized so the panel targets
+    // ~256 KiB (an L2-resident working set on current x86 cores); it never changes
+    // any element's k-accumulation order, so results stay bit-identical.
+    let nc = {
+        const PANEL_BYTES: usize = 256 * 1024;
+        let cols = PANEL_BYTES / (k.max(1) * core::mem::size_of::<f64>());
+        (cols / MATMUL_NR).max(1) * MATMUL_NR
+    };
+
+    let mut jc = 0;
+    while jc < n_full {
+        let jc_end = (jc + nc).min(n_full);
+        let mut i0 = 0;
+        while i0 < m_full {
+            let mut j0 = jc;
+            while j0 < jc_end {
+                // MR x NR register tile, full-K accumulation in increasing k.
+                let mut acc = [[0.0f64; MATMUL_NR]; MATMUL_MR];
+                for kk in 0..k {
+                    let b = &rhs[kk * n + j0..kk * n + j0 + MATMUL_NR];
+                    for (ii, row) in acc.iter_mut().enumerate() {
+                        let a_val = lhs[(i0 + ii) * k + kk];
+                        for (slot, &b_val) in row.iter_mut().zip(b.iter()) {
+                            *slot += a_val * b_val;
+                        }
+                    }
                 }
+                // out is supplied pre-zeroed; `+= acc` preserves the accumulate
+                // contract while being bit-identical (0.0 + acc == acc) to the sum.
+                for (ii, row) in acc.iter().enumerate() {
+                    let base = (i0 + ii) * n + j0;
+                    let o = &mut out[base..base + MATMUL_NR];
+                    for (slot, &acc_val) in o.iter_mut().zip(row.iter()) {
+                        *slot += acc_val;
+                    }
+                }
+                j0 += MATMUL_NR;
             }
+            i0 += MATMUL_MR;
         }
-        row_start = row_end;
+        jc += nc;
+    }
+
+    // Remainder columns (n_full..n) for the full row block.
+    for i in 0..m_full {
+        matmul_row_tail(lhs, rhs, out, i, k, n, n_full);
+    }
+    // Remainder rows (all columns).
+    for i in m_full..m {
+        matmul_row_tail(lhs, rhs, out, i, k, n, 0);
+    }
+}
+
+// out[i, j0..n] += sum_k lhs[i,k]*rhs[k,j], summed in increasing k (bit-exact).
+fn matmul_row_tail(lhs: &[f64], rhs: &[f64], out: &mut [f64], i: usize, k: usize, n: usize, j0: usize) {
+    let a_base = i * k;
+    let o_base = i * n;
+    for j in j0..n {
+        let mut s = 0.0f64;
+        for kk in 0..k {
+            s += lhs[a_base + kk] * rhs[kk * n + j];
+        }
+        out[o_base + j] += s;
     }
 }
 
