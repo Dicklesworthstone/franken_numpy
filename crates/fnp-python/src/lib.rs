@@ -19978,6 +19978,27 @@ fn isrealobj(x: Py<PyAny>) -> PyResult<bool> {
     Python::attach(|py| Ok(!python_is_complex_obj(x.bind(py))?))
 }
 
+/// Returns `true` when `value`'s NumPy dtype yields a float64 `average`
+/// result, so the native f64 fast-path reproduces NumPy's output dtype
+/// exactly. Integer/bool inputs upcast to float64; only `float64` floats
+/// stay float64 (float16/float32 and complex are preserved by NumPy and
+/// must defer to it). Any extraction error is treated as "not safe".
+fn average_output_is_f64_safe(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
+    let probe = || -> PyResult<bool> {
+        let numpy = py.import("numpy")?;
+        let array = numpy.call_method1("asarray", (value,))?;
+        let dtype = array.getattr("dtype")?;
+        let kind: String = dtype.getattr("kind")?.extract()?;
+        let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+        Ok(match kind.as_str() {
+            "b" | "i" | "u" => true,
+            "f" => itemsize == 8,
+            _ => false,
+        })
+    };
+    probe().unwrap_or(false)
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, weights=None, returned=false, keepdims=false))]
 fn average(
@@ -20009,6 +20030,19 @@ fn average(
     };
 
     if keepdims {
+        return fallback();
+    }
+
+    // The native f64 fast-path only reproduces NumPy when the output dtype is
+    // float64. float16/float32/complex inputs (and weights that would alter the
+    // result dtype) are preserved by NumPy, so defer those to numpy.average to
+    // match both the averaged values and the returned sum-of-weights dtype.
+    if !average_output_is_f64_safe(py, a.bind(py)) {
+        return fallback();
+    }
+    if let Some(weights_val) = weights.as_ref()
+        && !average_output_is_f64_safe(py, weights_val.bind(py))
+    {
         return fallback();
     }
 
@@ -20070,8 +20104,15 @@ fn average(
                         return fallback();
                     }
                     if returned {
-                        sum_of_weights =
-                            Some(weights.reduce_sum(None, false).map_err(map_ufunc_error)?);
+                        // NumPy computes scl = wgt.sum(dtype=result_dtype); for the
+                        // float64-safe inputs that reach this path result_dtype is
+                        // float64, so emit the weight total as F64 (mirrors the
+                        // axis=Some branch) rather than the weights' native int dtype.
+                        let weight_total = weights.values().iter().sum::<f64>();
+                        sum_of_weights = Some(
+                            UFuncArray::new(vec![], vec![weight_total], DType::F64)
+                                .map_err(map_ufunc_error)?,
+                        );
                     }
                     match a.average(Some(&weights), None) {
                         Ok(average) => average,
@@ -62415,6 +62456,72 @@ mod tests {
                 }),
             )?;
             assert_eq!(repr_string(&ours_full), repr_string(&theirs_full));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn average_output_dtype_matches_numpy_across_input_dtypes() {
+        // Regression for franken_numpy-w11sj: the native fast-path used to emit
+        // a float64 average for float16/float32 inputs (NumPy preserves the
+        // narrow float) and an integer sum-of-weights for integer weights
+        // (NumPy promotes to float64). Compare full repr (dtype-sensitive),
+        // not just values.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let avg_fn = module.getattr("average")?;
+            let numpy = py.import("numpy")?;
+            let numpy_avg = numpy.getattr("average")?;
+            let array_fn = numpy.getattr("array")?;
+
+            let make = |dtype: &str| -> PyResult<Bound<'_, PyAny>> {
+                let kw = PyDict::new(py);
+                kw.set_item("dtype", dtype)?;
+                array_fn.call((vec![1_i64, 2, 3, 4],), Some(&kw))
+            };
+
+            let input_dtypes = ["int8", "int32", "int64", "uint64", "float16", "float32", "float64", "bool"];
+            let weight_dtypes = ["int64", "float32", "float64"];
+
+            for adt in input_dtypes {
+                let a = make(adt)?;
+
+                // Unweighted, with and without returned.
+                for returned in [false, true] {
+                    let kw = PyDict::new(py);
+                    kw.set_item("returned", returned)?;
+                    let ours = avg_fn.call((a.clone(),), Some(&kw))?;
+                    let theirs = numpy_avg.call((a.clone(),), Some(&kw))?;
+                    assert_eq!(
+                        repr_string(&ours),
+                        repr_string(&theirs),
+                        "average dtype mismatch: a={adt} returned={returned}",
+                    );
+                }
+
+                // Weighted, with and without returned.
+                for wdt in weight_dtypes {
+                    let w = make(wdt)?;
+                    for returned in [false, true] {
+                        let kw = PyDict::new(py);
+                        kw.set_item("weights", w.clone())?;
+                        kw.set_item("returned", returned)?;
+                        let ours = avg_fn.call((a.clone(),), Some(&kw))?;
+                        let theirs = numpy_avg.call((a.clone(),), Some(&kw))?;
+                        assert_eq!(
+                            repr_string(&ours),
+                            repr_string(&theirs),
+                            "average dtype mismatch: a={adt} w={wdt} returned={returned}",
+                        );
+                    }
+                }
+            }
 
             Ok(())
         });
