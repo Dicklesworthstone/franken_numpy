@@ -10741,7 +10741,22 @@ impl UFuncArray {
                     });
                 }
                 let mut values = self.values.clone();
-                sort_slice_by_kind(&mut values, kind);
+                // Large 1-D quicksort parallelizes: NaNs are partitioned to the tail
+                // (the same serial pass), then the finite prefix is sorted by
+                // total_cmp across the rayon pool. This reproduces the serial
+                // quicksort path's output exactly — NaN arrangement is identical
+                // (same partition fn) and total_cmp is a total order, so the sorted
+                // finite values are bit-for-bit identical regardless of thread count.
+                const SORT_1D_PARALLEL_MIN: usize = 1 << 16;
+                if kind == "quicksort"
+                    && values.len() >= SORT_1D_PARALLEL_MIN
+                    && rayon::current_num_threads() >= 2
+                {
+                    let non_nan = partition_nan_tail(&mut values);
+                    values[..non_nan].par_sort_unstable_by(f64::total_cmp);
+                } else {
+                    sort_slice_by_kind(&mut values, kind);
+                }
                 Ok(Self {
                     shape: vec![values.len()],
                     values,
@@ -40236,6 +40251,31 @@ print(json.dumps(payload))
             out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "parallel last-axis sort diverged from serial reference"
+        );
+    }
+
+    #[test]
+    fn sort_1d_parallel_matches_serial_reference() {
+        // A large 1-D quicksort takes the parallel path; it must match the serial
+        // quicksort path exactly (NaNs partitioned to the tail, finite prefix sorted
+        // by total_cmp).
+        let n = (1usize << 16) + 333;
+        let mut data: Vec<f64> = (0..n)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 100_003) as f64) / 7.0 - 5000.0)
+            .collect();
+        data[100] = f64::NAN;
+        data[n - 50] = f64::NAN;
+        let arr = UFuncArray::new(vec![n], data.clone(), DType::F64).expect("arr");
+        let out = arr.sort(None, Some("quicksort")).expect("sort 1d");
+
+        let mut expected = data.clone();
+        let non_nan = super::partition_nan_tail(&mut expected);
+        expected[..non_nan].sort_unstable_by(f64::total_cmp);
+
+        assert_eq!(
+            out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "parallel 1-D sort diverged from serial reference"
         );
     }
 

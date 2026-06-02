@@ -75,4 +75,28 @@ fn main() {
     println!(
         "sort_{rows}x{cols} fnv1a=0x{checksum:016x} serial_ms={ser_ms:.4} parallel_ms={par_ms:.4} speedup={speedup:.2}x"
     );
+
+    // 1-D sort (axis=None): a single large array.
+    let n1 = rows * cols;
+    let flat: Vec<f64> = (0..n1)
+        .map(|i| (((i as u64).wrapping_mul(11400714819323198485) >> 11) as f64) / 1.0e9)
+        .collect();
+    let arr1 = UFuncArray::new(vec![n1], flat.clone(), DType::F64).unwrap();
+    let par1 = arr1.sort(None, Some("quicksort")).expect("sort 1d");
+    let mut ser1 = flat.clone();
+    ser1.sort_unstable_by(f64::total_cmp);
+    assert_eq!(par1.values(), ser1.as_slice(), "1d parallel sort != serial");
+    for _ in 0..2 {
+        std::hint::black_box(arr1.sort(None, Some("quicksort")).unwrap());
+    }
+    let par1_ms = time_median_ms(7, || arr1.sort(None, Some("quicksort")).unwrap());
+    let ser1_ms = time_median_ms(7, || {
+        let mut v = flat.clone();
+        v.sort_unstable_by(f64::total_cmp);
+        v
+    });
+    println!(
+        "sort_1d_n{n1} serial_ms={ser1_ms:.4} parallel_ms={par1_ms:.4} speedup={:.2}x",
+        ser1_ms / par1_ms
+    );
 }
