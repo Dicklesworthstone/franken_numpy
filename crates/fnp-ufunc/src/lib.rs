@@ -25927,12 +25927,21 @@ fn matmul_accumulate(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out
     debug_assert_eq!(rhs.len(), k * n);
     debug_assert_eq!(out.len(), m * n);
 
-    for (lhs_row, out_row) in lhs.chunks_exact(k).zip(out.chunks_exact_mut(n)) {
-        for (&a_val, rhs_row) in lhs_row.iter().zip(rhs.chunks_exact(n)) {
-            for (slot, &rhs_value) in out_row.iter_mut().zip(rhs_row.iter()) {
-                *slot += a_val * rhs_value;
+    const ROW_BLOCK: usize = 8;
+
+    let mut row_start = 0usize;
+    while row_start < m {
+        let row_end = (row_start + ROW_BLOCK).min(m);
+        for (kk, rhs_row) in rhs.chunks_exact(n).enumerate() {
+            for row in row_start..row_end {
+                let a_val = lhs[row * k + kk];
+                let out_row = &mut out[row * n..(row + 1) * n];
+                for (slot, &rhs_value) in out_row.iter_mut().zip(rhs_row.iter()) {
+                    *slot += a_val * rhs_value;
+                }
             }
         }
+        row_start = row_end;
     }
 }
 
@@ -34612,6 +34621,8 @@ mod tests {
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
     use fnp_runtime::{CompatibilityClass, DecisionAction as RuntimeDecisionAction, RuntimeMode};
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
     use std::process::Command;
     use std::sync::{Arc, Mutex, RwLock};
 
@@ -41320,6 +41331,70 @@ print(json.dumps(payload))
         let r = a.matmul(&b).unwrap();
         assert_eq!(r.shape(), &[2, 2]);
         assert_eq!(r.values(), &[58.0, 64.0, 139.0, 154.0]);
+    }
+
+    #[test]
+    fn matmul_row_blocking_preserves_scalar_accumulation_bits() -> Result<(), String> {
+        fn scalar_reference(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
+            let mut out = vec![0.0f64; m * n];
+            for (lhs_row, out_row) in lhs.chunks_exact(k).zip(out.chunks_exact_mut(n)) {
+                for (&a_val, rhs_row) in lhs_row.iter().zip(rhs.chunks_exact(n)) {
+                    for (slot, &rhs_value) in out_row.iter_mut().zip(rhs_row.iter()) {
+                        *slot += a_val * rhs_value;
+                    }
+                }
+            }
+            out
+        }
+
+        let (m, k, n) = (9usize, 7usize, 6usize);
+        let lhs: Vec<f64> = (0..m * k)
+            .map(|idx| {
+                let centered = (idx as i64 * 17 % 29) - 14;
+                if idx % 11 == 0 {
+                    -0.0
+                } else {
+                    centered as f64 / 7.0
+                }
+            })
+            .collect();
+        let rhs: Vec<f64> = (0..k * n)
+            .map(|idx| {
+                let centered = (idx as i64 * 19 % 31) - 15;
+                centered as f64 / 5.0
+            })
+            .collect();
+        let expected = scalar_reference(&lhs, &rhs, m, k, n);
+
+        let left = UFuncArray::new(vec![m, k], lhs, DType::F64).map_err(|err| err.to_string())?;
+        let right = UFuncArray::new(vec![k, n], rhs, DType::F64).map_err(|err| err.to_string())?;
+        let actual = left.matmul(&right).map_err(|err| err.to_string())?;
+        let mut hasher = Sha256::new();
+        for value in actual.values() {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let mut actual_sha = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            let _ = write!(&mut actual_sha, "{byte:02x}");
+        }
+
+        assert_eq!(actual.shape(), &[m, n]);
+        assert_eq!(
+            actual
+                .values()
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            actual_sha,
+            "dd19822c9ba24f9a17d5c6f3e112451265c4ac4659cd5d8e78de97c77f7c2df7"
+        );
+        Ok(())
     }
 
     #[test]
