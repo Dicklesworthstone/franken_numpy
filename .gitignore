@@ -147,3 +147,4 @@ nohup.out
 **/fuzz/corpus/*/[0-9a-f][0-9a-f]*
 # Source-directory backups left behind by agent renames (e.g. fuzz/src.bak/)
 **/*.bak/
+.env
