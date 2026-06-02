@@ -703,7 +703,7 @@ pub fn inv_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     for i in 0..n {
         eye[i * n + i] = 1.0;
     }
-    lu_solve_multi(&lu, &perm, &eye, n, n)
+    Ok(lu_forward_back_multi(&lu, &perm, &eye, n, n))
 }
 
 /// Solve A*X = B for multiple right-hand sides given the LU factor.
