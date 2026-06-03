@@ -1153,6 +1153,7 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
     }
     let mut r = a.to_vec();
 
+    let mut v = vec![0.0; n];
     for k in 0..n {
         // Extract column k below diagonal
         let mut col_norm_sq = 0.0;
@@ -1165,7 +1166,6 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
         }
 
         // Householder vector v = x + sign(x_k)*||x||*e_k
-        let mut v = vec![0.0; n];
         let sign = if r[k * n + k] >= 0.0 { 1.0 } else { -1.0 };
         for i in k..n {
             v[i] = r[i * n + k];
@@ -7217,6 +7217,125 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn qr_nxn_reused_householder_workspace_preserves_reference_bits() -> Result<(), String> {
+        fn allocation_reference(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+            if Some(a.len()) != n.checked_mul(n) || n == 0 {
+                return Err(LinAlgError::ShapeContractViolation(
+                    "qr_nxn: input must be n*n with n > 0",
+                ));
+            }
+            if a.iter().any(|v| !v.is_finite()) {
+                return Err(LinAlgError::NormDetRankPolicyViolation(
+                    "matrix entries must be finite for QR",
+                ));
+            }
+
+            let mut q = vec![0.0; n * n];
+            for i in 0..n {
+                q[i * n + i] = 1.0;
+            }
+            let mut r = a.to_vec();
+
+            for k in 0..n {
+                let mut col_norm_sq = 0.0;
+                for i in k..n {
+                    col_norm_sq += r[i * n + k] * r[i * n + k];
+                }
+                let col_norm = col_norm_sq.sqrt();
+                if col_norm == 0.0 {
+                    continue;
+                }
+
+                let mut v = vec![0.0; n];
+                let sign = if r[k * n + k] >= 0.0 { 1.0 } else { -1.0 };
+                for i in k..n {
+                    v[i] = r[i * n + k];
+                }
+                v[k] += sign * col_norm;
+                let v_norm_sq: f64 = v[k..].iter().map(|x| x * x).sum();
+                if v_norm_sq == 0.0 {
+                    continue;
+                }
+
+                let scale = 2.0 / v_norm_sq;
+                for j in k..n {
+                    let mut dot = 0.0;
+                    for i in k..n {
+                        dot += v[i] * r[i * n + j];
+                    }
+                    let factor = scale * dot;
+                    for i in k..n {
+                        r[i * n + j] -= factor * v[i];
+                    }
+                }
+
+                for i in 0..n {
+                    let mut dot = 0.0;
+                    for j in k..n {
+                        dot += q[i * n + j] * v[j];
+                    }
+                    let factor = scale * dot;
+                    for j in k..n {
+                        q[i * n + j] -= factor * v[j];
+                    }
+                }
+            }
+
+            Ok((q, r))
+        }
+
+        let n = 8usize;
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                let centered = ((state >> 33) as f64) / (u32::MAX as f64) - 0.5;
+                a[i * n + j] = if i == j {
+                    centered + 2.0 + i as f64 * 0.125
+                } else {
+                    centered
+                };
+            }
+        }
+
+        let (expected_q, expected_r) =
+            allocation_reference(&a, n).map_err(|err| err.to_string())?;
+        let (actual_q, actual_r) = qr_nxn(&a, n).map_err(|err| err.to_string())?;
+        for (label, actual, expected) in [
+            ("Q", actual_q.as_slice(), expected_q.as_slice()),
+            ("R", actual_r.as_slice(), expected_r.as_slice()),
+        ] {
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                expected
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{label} bits changed when reusing Householder workspace"
+            );
+        }
+
+        let mut hasher = Sha256::new();
+        for value in actual_q.iter().chain(actual_r.iter()) {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "613184a2d10d3d5d1a19a0dfc5f4d785817fb6e324c4a99e08f5d533bb752c7f",
+            "QR Q/R bit pattern must remain fixed"
+        );
+        Ok(())
     }
 
     #[test]
