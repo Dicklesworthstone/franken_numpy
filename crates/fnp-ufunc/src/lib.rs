@@ -10640,7 +10640,7 @@ impl UFuncArray {
                 IntegerSidecar::I64(values) => match axis {
                     None => {
                         let mut source_indices: Vec<usize> = (0..values.len()).collect();
-                        sort_indices_by_kind_ord(&mut source_indices, &values, kind);
+                        sort_value_indices_by_kind(&mut source_indices, &values, kind);
                         let sorted_values = source_indices
                             .iter()
                             .map(|&idx| values[idx] as f64)
@@ -10680,7 +10680,7 @@ impl UFuncArray {
                                     let base = outer_idx * axis_len;
                                     let mut lane_indices: Vec<usize> =
                                         (base..base + axis_len).collect();
-                                    sort_indices_by_kind_ord(&mut lane_indices, &values, kind);
+                                    sort_value_indices_by_kind(&mut lane_indices, &values, kind);
                                     for (k, &src) in lane_indices.iter().enumerate() {
                                         out_chunk[k] = values[src] as f64;
                                         src_chunk[k] = src;
@@ -10717,7 +10717,7 @@ impl UFuncArray {
                                 for (k, idx) in lane_indices.iter_mut().enumerate() {
                                     *idx = base + k * inner + inner_idx;
                                 }
-                                sort_indices_by_kind_ord(&mut lane_indices, &values, kind);
+                                sort_value_indices_by_kind(&mut lane_indices, &values, kind);
                                 for (k, &src) in lane_indices.iter().enumerate() {
                                     let dst = base + k * inner + inner_idx;
                                     out_values[dst] = values[src] as f64;
@@ -10737,7 +10737,7 @@ impl UFuncArray {
                 IntegerSidecar::U64(values) => match axis {
                     None => {
                         let mut source_indices: Vec<usize> = (0..values.len()).collect();
-                        sort_indices_by_kind_ord(&mut source_indices, &values, kind);
+                        sort_value_indices_by_kind(&mut source_indices, &values, kind);
                         let sorted_values = source_indices
                             .iter()
                             .map(|&idx| values[idx] as f64)
@@ -10774,7 +10774,7 @@ impl UFuncArray {
                                     let base = outer_idx * axis_len;
                                     let mut lane_indices: Vec<usize> =
                                         (base..base + axis_len).collect();
-                                    sort_indices_by_kind_ord(&mut lane_indices, &values, kind);
+                                    sort_value_indices_by_kind(&mut lane_indices, &values, kind);
                                     for (k, &src) in lane_indices.iter().enumerate() {
                                         out_chunk[k] = values[src] as f64;
                                         src_chunk[k] = src;
@@ -10811,7 +10811,7 @@ impl UFuncArray {
                                 for (k, idx) in lane_indices.iter_mut().enumerate() {
                                     *idx = base + k * inner + inner_idx;
                                 }
-                                sort_indices_by_kind_ord(&mut lane_indices, &values, kind);
+                                sort_value_indices_by_kind(&mut lane_indices, &values, kind);
                                 for (k, &src) in lane_indices.iter().enumerate() {
                                     let dst = base + k * inner + inner_idx;
                                     out_values[dst] = values[src] as f64;
@@ -25894,6 +25894,84 @@ fn sort_indices_by_kind_ord<T: Ord>(indices: &mut [usize], values: &[T], kind: &
     match kind {
         "stable" => indices.sort_by(cmp),
         _ => indices.sort_unstable_by(cmp),
+    }
+}
+
+/// Order-preserving mapping from a signed/unsigned integer key onto `u64` so that
+/// ascending `u64` order matches ascending native order. This is what lets a
+/// byte-wise radix sort reproduce `Ord` ordering exactly.
+trait RadixKey: Copy {
+    fn to_radix_key(self) -> u64;
+}
+
+impl RadixKey for i64 {
+    fn to_radix_key(self) -> u64 {
+        // Flip the sign bit: i64::MIN -> 0, i64::MAX -> u64::MAX, monotonic.
+        (self as u64) ^ (1u64 << 63)
+    }
+}
+
+impl RadixKey for u64 {
+    fn to_radix_key(self) -> u64 {
+        self
+    }
+}
+
+/// Stable least-significant-digit radix sort of `indices` by `values[idx]`.
+///
+/// Eight 8-bit counting passes give an O(n) (in `indices.len()`) sort versus the
+/// O(n log n) comparison sort, and the gathered-key buffer removes the random
+/// `values[src]` indirection from the inner loop. Stability is irrelevant to the
+/// value-sort callers (equal integer keys carry identical payloads), but it keeps
+/// the permutation deterministic and lets a single golden hash pin the result.
+fn radix_sort_value_indices<T: RadixKey>(indices: &mut [usize], values: &[T]) {
+    let n = indices.len();
+    let mut keys: Vec<u64> = indices.iter().map(|&i| values[i].to_radix_key()).collect();
+    let mut idx: Vec<usize> = indices.to_vec();
+    let mut keys_tmp = vec![0u64; n];
+    let mut idx_tmp = vec![0usize; n];
+
+    for shift in (0..64).step_by(8) {
+        let mut counts = [0usize; 256];
+        for &k in &keys {
+            counts[((k >> shift) & 0xff) as usize] += 1;
+        }
+        // Every key shares this byte -> the pass is a no-op; skip it. For
+        // small-magnitude data this collapses to a couple of effective passes.
+        if counts.iter().any(|&c| c == n) {
+            continue;
+        }
+        let mut running = 0usize;
+        for slot in counts.iter_mut() {
+            let count = *slot;
+            *slot = running;
+            running += count;
+        }
+        for k in 0..n {
+            let bucket = ((keys[k] >> shift) & 0xff) as usize;
+            let pos = counts[bucket];
+            counts[bucket] += 1;
+            keys_tmp[pos] = keys[k];
+            idx_tmp[pos] = idx[k];
+        }
+        std::mem::swap(&mut keys, &mut keys_tmp);
+        std::mem::swap(&mut idx, &mut idx_tmp);
+    }
+
+    indices.copy_from_slice(&idx);
+}
+
+/// Value-sort index permutation: identical *result* to
+/// [`sort_indices_by_kind_ord`] for the `sort` callers (where equal integer keys
+/// are byte-indistinguishable in the output), but uses [`radix_sort_value_indices`]
+/// once a lane is large enough for the linear-time passes to pay off.
+fn sort_value_indices_by_kind<T: Ord + RadixKey>(indices: &mut [usize], values: &[T], kind: &str) {
+    // Below this length the comparison sort's lower constant factor wins.
+    const RADIX_MIN_ELEMS: usize = 256;
+    if indices.len() >= RADIX_MIN_ELEMS {
+        radix_sort_value_indices(indices, values);
+    } else {
+        sort_indices_by_kind_ord(indices, values, kind);
     }
 }
 
@@ -41069,6 +41147,139 @@ print(json.dumps(payload))
             out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "parallel 1-D sort diverged from serial reference"
+        );
+    }
+
+    // Run with: cargo test -p fnp-ufunc --release --lib bench_radix_value_sort -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn bench_radix_value_sort_vs_comparison() {
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        // f64-exact signed keys spanning a wide magnitude range with ties.
+        let data: Vec<f64> = (0..n)
+            .map(|i| {
+                let raw = ((i as u64).wrapping_mul(2654435761) % 4_000_037) as i64 - 2_000_000;
+                (raw * 1009) as f64
+            })
+            .collect();
+        let values: Vec<i64> = data.iter().map(|&v| v as i64).collect();
+
+        // Baseline: the comparison index-sort this lever replaced.
+        let mut t_cmp = f64::INFINITY;
+        for _ in 0..3 {
+            let mut idx: Vec<usize> = (0..n).collect();
+            let start = Instant::now();
+            idx.sort_unstable_by(|&a, &b| values[a].cmp(&values[b]));
+            let el = start.elapsed().as_secs_f64();
+            std::hint::black_box(&idx);
+            t_cmp = t_cmp.min(el);
+        }
+
+        // Lever: stable LSD radix index-sort.
+        let mut t_radix = f64::INFINITY;
+        for _ in 0..3 {
+            let mut idx: Vec<usize> = (0..n).collect();
+            let start = Instant::now();
+            super::radix_sort_value_indices(&mut idx, &values);
+            let el = start.elapsed().as_secs_f64();
+            std::hint::black_box(&idx);
+            t_radix = t_radix.min(el);
+        }
+
+        println!(
+            "radix value-sort n={n}: comparison={:.4}s radix={:.4}s speedup={:.2}x",
+            t_cmp,
+            t_radix,
+            t_cmp / t_radix
+        );
+    }
+
+    #[test]
+    fn radix_value_sort_matches_comparison_and_golden_sha256() {
+        // The LSD radix value-sort must reproduce the comparison sort byte-for-byte
+        // for both signed and unsigned integer storage, across the flat (axis=None)
+        // and large-lane (last-axis) code paths, including negatives, ties, zeros,
+        // and wide-magnitude keys. A pinned sha256 over the concatenated output bit
+        // patterns locks the exact result so any future regression is caught.
+        fn hash_bits(values: &[f64], hasher: &mut Sha256) {
+            for v in values {
+                hasher.update(v.to_bits().to_le_bytes());
+            }
+        }
+
+        // Deterministic spread of signed keys with deliberate ties and negatives,
+        // bounded to the exact-integer f64 bridge range (|x| < 2^53).
+        let n = 50_000usize;
+        let i64_data: Vec<f64> = (0..n)
+            .map(|i| {
+                let raw = ((i as u64).wrapping_mul(2654435761) % 20011) as i64 - 10000;
+                // Scale to widen the byte range while staying f64-exact.
+                (raw * 1_000_003) as f64
+            })
+            .collect();
+        let u64_data: Vec<f64> = (0..n)
+            .map(|i| (((i as u64).wrapping_mul(40503) % 30013) * 70_001) as f64)
+            .collect();
+
+        let mut hasher = Sha256::new();
+
+        // Flat (axis=None) radix path, signed.
+        let arr_i = UFuncArray::new(vec![n], i64_data.clone(), DType::I64).expect("i64 arr");
+        let sorted_i = arr_i.sort(None, Some("quicksort")).expect("i64 flat sort");
+        let mut ref_i = i64_data.clone();
+        ref_i.sort_by(f64::total_cmp);
+        assert_eq!(
+            sorted_i.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            ref_i.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "radix i64 flat sort diverged from comparison reference"
+        );
+        hash_bits(sorted_i.values(), &mut hasher);
+
+        // Flat (axis=None) radix path, unsigned.
+        let arr_u = UFuncArray::new(vec![n], u64_data.clone(), DType::U64).expect("u64 arr");
+        let sorted_u = arr_u.sort(None, Some("quicksort")).expect("u64 flat sort");
+        let mut ref_u = u64_data.clone();
+        ref_u.sort_by(f64::total_cmp);
+        assert_eq!(
+            sorted_u.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            ref_u.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "radix u64 flat sort diverged from comparison reference"
+        );
+        hash_bits(sorted_u.values(), &mut hasher);
+
+        // Last-axis radix path with lanes above both the radix and parallel
+        // thresholds (cols >= 256, rows*cols >= 1<<14).
+        let (rows, cols) = (96usize, 512usize);
+        let lane_data: Vec<f64> = (0..rows * cols)
+            .map(|i| {
+                let raw = ((i as u64).wrapping_mul(11400714819323198485) >> 40) as i64 % 40009;
+                ((raw - 20000) * 257) as f64
+            })
+            .collect();
+        let arr_lane = UFuncArray::new(vec![rows, cols], lane_data.clone(), DType::I64)
+            .expect("lane arr");
+        let sorted_lane = arr_lane.sort(Some(-1), Some("quicksort")).expect("lane sort");
+        let mut ref_lane = lane_data.clone();
+        for r in 0..rows {
+            ref_lane[r * cols..(r + 1) * cols].sort_by(f64::total_cmp);
+        }
+        assert_eq!(
+            sorted_lane.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            ref_lane.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "radix last-axis lane sort diverged from comparison reference"
+        );
+        hash_bits(sorted_lane.values(), &mut hasher);
+
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            digest,
+            "62c7ec66c3405e849ff4f0dede799939486bd9b8860873c050ff6c99e9d704c5",
+            "radix value-sort golden digest changed -- output is no longer bit-stable"
         );
     }
 
