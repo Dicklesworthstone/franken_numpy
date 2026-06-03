@@ -8188,14 +8188,18 @@ fn take(
             .unbind())
     };
 
-    // The native path only handles real numeric dtypes (bool/int/uint/float).
-    // Everything else numpy.take supports as a pure gather — complex, string
-    // ('U'/'S'), datetime64 ('M'), timedelta64 ('m'), object, void — must
-    // delegate to numpy so those dtypes round-trip instead of being rejected.
+    // numpy.take is a pure gather that preserves the input dtype exactly. The
+    // native path canonicalizes through extract_numeric_array, which widens
+    // narrow widths to i64/u64/f64, so it only reproduces numpy's dtype for
+    // bool and the 8-byte int/uint/float widths. Delegate everything else
+    // (narrow numeric, complex, string, datetime64, timedelta64, object, void)
+    // to numpy so the dtype round-trips instead of widening or being rejected.
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (a.bind(py),))?;
-    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
+    let dtype = arr.getattr("dtype")?;
+    let dtype_kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if !(dtype_kind == "b" || (matches!(dtype_kind.as_str(), "i" | "u" | "f") && itemsize == 8)) {
         return fallback();
     }
 
@@ -13642,13 +13646,17 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
             .unbind())
     };
 
-    // flip is a pure reversal that numpy applies to any dtype. The native path
-    // only handles real numeric dtypes, so delegate every other kind (complex,
-    // string, datetime64, timedelta64, object, void) to numpy.flip.
+    // flip is a pure reversal that preserves the input dtype. The native path
+    // widens narrow widths via extract_numeric_array, so it only matches numpy's
+    // dtype for bool and 8-byte int/uint/float. Delegate every other dtype
+    // (narrow numeric, complex, string, datetime64, timedelta64, object, void)
+    // to numpy.flip so the dtype round-trips.
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
-    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
+    let dtype = arr.getattr("dtype")?;
+    let dtype_kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if !(dtype_kind == "b" || (matches!(dtype_kind.as_str(), "i" | "u" | "f") && itemsize == 8)) {
         return fallback();
     }
 
@@ -13680,13 +13688,16 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Pure reversal — numpy.flipud accepts any dtype. Native path is numeric
-    // only, so delegate every non-numeric kind (complex, string, datetime64,
-    // timedelta64, object, void) to numpy.flipud.
+    // Pure reversal — numpy.flipud preserves the input dtype. Native path
+    // widens narrow widths, so it only matches numpy for bool and 8-byte
+    // int/uint/float; delegate every other dtype (narrow numeric, complex,
+    // string, datetime64, timedelta64, object, void) to numpy.flipud.
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
-    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
+    let dtype = arr.getattr("dtype")?;
+    let dtype_kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if !(dtype_kind == "b" || (matches!(dtype_kind.as_str(), "i" | "u" | "f") && itemsize == 8)) {
         return Ok(numpy.getattr("flipud")?.call1((arr,))?.unbind());
     }
     let m = extract_numeric_array(py, m.bind(py), "flipud(m)")?;
@@ -13697,13 +13708,16 @@ fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Pure reversal — numpy.fliplr accepts any dtype. Native path is numeric
-    // only, so delegate every non-numeric kind (complex, string, datetime64,
-    // timedelta64, object, void) to numpy.fliplr.
+    // Pure reversal — numpy.fliplr preserves the input dtype. Native path
+    // widens narrow widths, so it only matches numpy for bool and 8-byte
+    // int/uint/float; delegate every other dtype (narrow numeric, complex,
+    // string, datetime64, timedelta64, object, void) to numpy.fliplr.
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
-    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
+    let dtype = arr.getattr("dtype")?;
+    let dtype_kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if !(dtype_kind == "b" || (matches!(dtype_kind.as_str(), "i" | "u" | "f") && itemsize == 8)) {
         return Ok(numpy.getattr("fliplr")?.call1((arr,))?.unbind());
     }
     let m = extract_numeric_array(py, m.bind(py), "fliplr(m)")?;
@@ -45890,6 +45904,60 @@ mod tests {
             let got = sign(py, td.clone().unbind())?;
             same(got.bind(py), &numpy.call_method1("sign", (td,))?)?;
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn take_and_flip_preserve_numeric_dtype_like_numpy() {
+        // take/flip/flipud/fliplr are pure reorder/select: numpy preserves the
+        // exact input dtype. The native path widens narrow widths, so narrow
+        // dtypes must delegate to numpy. Verify dtype AND values round-trip for
+        // every numeric width (bool/int/uint/float, 1-8 bytes).
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let check = |got: &Bound<'_, PyAny>, expected: &Bound<'_, PyAny>| -> PyResult<()> {
+                assert_eq!(
+                    got.getattr("dtype")?.str()?.extract::<String>()?,
+                    expected.getattr("dtype")?.str()?.extract::<String>()?
+                );
+                assert_eq!(
+                    repr_string(&got.call_method0("tolist")?),
+                    repr_string(&expected.call_method0("tolist")?)
+                );
+                Ok(())
+            };
+            for dt in [
+                "bool", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+                "float16", "float32", "float64",
+            ] {
+                // 2x2 grid so flipud/fliplr have a non-trivial axis.
+                let base = numpy.call_method1("arange", (4,))?;
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("copy", false)?;
+                let grid = base
+                    .call_method("astype", (dt,), Some(&kwargs))?
+                    .call_method1("reshape", ((2, 2),))?;
+
+                let idx = numeric_array(py, vec![1_i64, 0_i64], "int64");
+                let got = take(py, grid.clone().unbind(), idx.clone().unbind(), Some(0), "raise")?;
+                let kw = PyDict::new(py);
+                kw.set_item("axis", 0)?;
+                check(
+                    got.bind(py),
+                    &numpy.call_method("take", (grid.clone(), idx), Some(&kw))?,
+                )?;
+
+                let got = flip(py, grid.clone().unbind(), None)?;
+                check(got.bind(py), &numpy.call_method1("flip", (grid.clone(),))?)?;
+                let got = flipud(py, grid.clone().unbind())?;
+                check(got.bind(py), &numpy.call_method1("flipud", (grid.clone(),))?)?;
+                let got = fliplr(py, grid.clone().unbind())?;
+                check(got.bind(py), &numpy.call_method1("fliplr", (grid,))?)?;
+            }
             Ok(())
         });
     }
