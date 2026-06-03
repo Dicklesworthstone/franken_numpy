@@ -52,10 +52,24 @@ fn bench_einsum_reduce(c: &mut Criterion) {
     group.finish();
 }
 
+/// `tensordot(A, B, axes=1)` over square matrices — GEMM-shaped contraction.
+fn bench_tensordot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("tensordot_axes1");
+    for size in [64usize, 128, 256].iter() {
+        let a = make_2d(*size, *size);
+        let b = make_2d(*size, *size);
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter(|| black_box(&a).tensordot(black_box(&b), 1).unwrap())
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_einsum_matmul,
     bench_einsum_batched,
-    bench_einsum_reduce
+    bench_einsum_reduce,
+    bench_tensordot
 );
 criterion_main!(benches);
