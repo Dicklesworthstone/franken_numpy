@@ -2064,6 +2064,11 @@ impl ZigguratRngCore for RngBackend {
 }
 
 #[inline]
+fn random_f64_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
+    (0..size).map(|_| rng.ziggurat_next_f64()).collect()
+}
+
+#[inline]
 fn standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
     (0..size)
         .map(|_| sample_ziggurat_normal_core(rng))
@@ -3482,7 +3487,19 @@ impl Generator {
     /// Mimics `rng.random(size)`.
     #[must_use]
     pub fn random(&mut self, size: usize) -> Vec<f64> {
-        (0..size).map(|_| self.next_f64()).collect()
+        if size == 0 {
+            return Vec::new();
+        }
+
+        self.u32_buf_ready = false;
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => random_f64_from_core(rng, size),
+            RngBackend::Pcg64(rng) => random_f64_from_core(rng, size),
+            RngBackend::Pcg64Dxsm(rng) => random_f64_from_core(rng, size),
+            RngBackend::Mt19937(rng) => random_f64_from_core(rng, size),
+            RngBackend::Philox(rng) => random_f64_from_core(rng, size),
+            RngBackend::Sfc64(rng) => random_f64_from_core(rng, size),
+        }
     }
 
     /// Generate an array of uniform random `float32` values in `[0.0, 1.0)`.
@@ -8882,6 +8899,45 @@ for child in rng.spawn(n_children):
         let mean: f64 = vals.iter().sum::<f64>() / vals.len() as f64;
         // Mean should be close to 0 with 10000 samples
         assert!(mean.abs() < 0.1, "mean was {mean}");
+    }
+
+    #[test]
+    fn random_specialized_backend_preserves_scalar_stream_and_digest() {
+        let size = 1024;
+        let mut batch_rng = test_generator();
+        let mut scalar_rng = test_generator();
+
+        assert_eq!(
+            batch_rng.next_f32().to_bits(),
+            scalar_rng.next_f32().to_bits()
+        );
+
+        let batch = batch_rng.random(size);
+        let scalar: Vec<f64> = (0..size).map(|_| scalar_rng.next_f64()).collect();
+
+        for (index, (actual, expected)) in batch.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "random bit pattern changed at index {index}"
+            );
+        }
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "412084c3862b80c4d4a6623d9f55553b9b78f2f711798fa5b0d2a379a5a01777"
+        );
     }
 
     #[test]
