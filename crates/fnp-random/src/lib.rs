@@ -2070,6 +2070,18 @@ fn standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Ve
         .collect()
 }
 
+#[inline]
+fn normal_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    (0..size)
+        .map(|_| loc + scale * sample_ziggurat_normal_core(rng))
+        .collect()
+}
+
 #[inline(always)]
 fn sample_ziggurat_normal_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) -> f64 {
     use crate::ziggurat::{
@@ -3652,11 +3664,19 @@ impl Generator {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::ScaleNegative);
         }
-        Ok(self
-            .standard_normal(size)
-            .into_iter()
-            .map(|z| loc + scale * z)
-            .collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => normal_from_core(rng, loc, scale, size),
+            RngBackend::Pcg64(rng) => normal_from_core(rng, loc, scale, size),
+            RngBackend::Pcg64Dxsm(rng) => normal_from_core(rng, loc, scale, size),
+            RngBackend::Mt19937(rng) => normal_from_core(rng, loc, scale, size),
+            RngBackend::Philox(rng) => normal_from_core(rng, loc, scale, size),
+            RngBackend::Sfc64(rng) => normal_from_core(rng, loc, scale, size),
+        })
     }
 
     /// Generate normal samples with NumPy `size` metadata preserved.
@@ -8897,6 +8917,44 @@ for child in rng.spawn(n_children):
         assert_eq!(
             digest_hex,
             "406ce26ec3aeefada7e2250f16d24a89361c1da2041c6775599be394008e7e5f"
+        );
+    }
+
+    #[test]
+    fn normal_specialized_backend_preserves_scalar_stream_and_digest() {
+        let size = 1024;
+        let loc = 5.0;
+        let scale = 2.0;
+        let mut batch_rng = test_generator();
+        let batch = batch_rng.normal(loc, scale, size).unwrap();
+
+        let mut scalar_rng = test_generator();
+        let scalar: Vec<f64> = (0..size)
+            .map(|_| loc + scale * scalar_rng.sample_ziggurat_normal())
+            .collect();
+
+        for (index, (actual, expected)) in batch.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "normal bit pattern changed at index {index}"
+            );
+        }
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "611fd0b80d38e8a8efcc7bf3e5f390c745f73ce62b6efd5b349e63ae68bc7bbe"
         );
     }
 
