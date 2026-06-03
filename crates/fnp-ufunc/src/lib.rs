@@ -18111,15 +18111,46 @@ impl UFuncArray {
         let out_h = h1 + h2 - 1;
         let out_w = w1 + w2 - 1;
         let mut values = vec![0.0f64; out_h * out_w];
-        for i in 0..h1 {
-            for j in 0..w1 {
-                let a_val = self.values[i * w1 + j];
-                for ki in 0..h2 {
-                    for kj in 0..w2 {
-                        values[(i + ki) * out_w + (j + kj)] += a_val * kernel.values[ki * w2 + kj];
+
+        // Gather form of the scatter `out[(i+ki),(j+kj)] += a[i,j]*k[ki,kj]` loop:
+        // each output (oi,oj) sums a[i,j]*k[oi-i,oj-j] over the contributing inputs.
+        // In the original scatter, contributions to a fixed output arrive in
+        // i-ascending then j-ascending order; iterating i then j ascending here
+        // reproduces that exact accumulation order, so the result is bit-for-bit
+        // identical. Output rows are independent and contiguous, so par_chunks_mut
+        // distributes them across the rayon pool with no aliasing.
+        let a = &self.values;
+        let k = &kernel.values;
+        let fill_row = |(oi, row): (usize, &mut [f64])| {
+            let i_lo = oi.saturating_sub(h2 - 1);
+            let i_hi = oi.min(h1 - 1);
+            for (oj, out) in row.iter_mut().enumerate() {
+                let j_lo = oj.saturating_sub(w2 - 1);
+                let j_hi = oj.min(w1 - 1);
+                let mut acc = 0.0f64;
+                for i in i_lo..=i_hi {
+                    let ki = oi - i;
+                    let a_row = i * w1;
+                    let k_row = ki * w2;
+                    for j in j_lo..=j_hi {
+                        acc += a[a_row + j] * k[k_row + (oj - j)];
                     }
                 }
+                *out = acc;
             }
+        };
+
+        const CONV2D_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+        if out_h >= 2
+            && out_h * out_w >= CONV2D_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+        {
+            values
+                .par_chunks_mut(out_w)
+                .enumerate()
+                .for_each(fill_row);
+        } else {
+            values.chunks_mut(out_w).enumerate().for_each(fill_row);
         }
         Ok(Self {
             shape: vec![out_h, out_w],
@@ -40989,6 +41020,45 @@ print(json.dumps(payload))
                 );
             }
         }
+    }
+
+    #[test]
+    fn convolve2d_parallel_matches_scatter_reference() {
+        // The gather/parallel convolve2d must be bit-for-bit identical to the
+        // original scatter-accumulate loop. Use an output (h1+h2-1)x(w1+w2-1) above
+        // the parallel threshold (1<<12) so the row split takes the parallel path.
+        let (h1, w1) = (70usize, 64usize);
+        let (h2, w2) = (5usize, 4usize);
+        let a: Vec<f64> = (0..h1 * w1)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 17.0 - 200.0)
+            .collect();
+        let k: Vec<f64> = (0..h2 * w2)
+            .map(|i| (((i as u64).wrapping_mul(40503).wrapping_add(7) % 211) as f64) / 5.0 - 20.0)
+            .collect();
+        let arr = UFuncArray::new(vec![h1, w1], a.clone(), DType::F64).expect("a");
+        let ker = UFuncArray::new(vec![h2, w2], k.clone(), DType::F64).expect("k");
+        let out = arr.convolve2d(&ker).expect("convolve2d");
+
+        let out_h = h1 + h2 - 1;
+        let out_w = w1 + w2 - 1;
+        assert_eq!(out.shape(), &[out_h, out_w]);
+        // Original scatter-accumulate reference.
+        let mut expected = vec![0.0f64; out_h * out_w];
+        for i in 0..h1 {
+            for j in 0..w1 {
+                let a_val = a[i * w1 + j];
+                for ki in 0..h2 {
+                    for kj in 0..w2 {
+                        expected[(i + ki) * out_w + (j + kj)] += a_val * k[ki * w2 + kj];
+                    }
+                }
+            }
+        }
+        assert_eq!(
+            out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "parallel convolve2d diverged from scatter reference"
+        );
     }
 
     #[test]
