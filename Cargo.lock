@@ -520,6 +520,7 @@ dependencies = [
 name = "fnp-python"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "fnp-dtype",
  "fnp-io",
  "fnp-iter",

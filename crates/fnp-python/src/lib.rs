@@ -28382,20 +28382,22 @@ mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, argwhere, bincount, ceil, choose, compress, copysign,
         count_nonzero, degrees, diag, diag_indices, diag_indices_from, diagflat, diagonal,
-        digitize, extract, fill_diagonal, flatnonzero, floor, fnp_python, frexp, hypot, indices,
-        interp, isfinite, isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2,
-        meshgrid, modf, nan_to_num, nextafter, place, put, put_along_axis, putmask, radians,
-        ravel_multi_index, required_dict_item, rfftfreq, rint, searchsorted, select, sign, signbit,
-        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
-        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
+        digitize, extract, extract_numeric_array, extract_precise_numeric_array, fill_diagonal,
+        flatnonzero, floor, fnp_python, frexp, hypot, indices, interp, isfinite, isinf, isnan,
+        isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf, nan_to_num,
+        nextafter, place, put, put_along_axis, putmask, radians, ravel_multi_index,
+        required_dict_item, rfftfreq, rint, searchsorted, select, sign, signbit, sinc,
+        solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid, trapz,
+        tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
         unravel_index, where_py,
     };
+    use fnp_dtype::ArrayStorage;
     use pyo3::Bound;
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
     use pyo3::types::{
-        PyAny, PyAnyMethods, PyDict, PyDictMethods, PyList, PyListMethods, PyModule, PyTuple,
-        PyTypeMethods,
+        PyAny, PyAnyMethods, PyBytes, PyDict, PyDictMethods, PyList, PyListMethods, PyModule,
+        PyTuple, PyTypeMethods,
     };
     use pyo3::{Py, PyResult, Python};
 
@@ -28536,8 +28538,188 @@ mod tests {
             .expect("np.array should work")
     }
 
+    fn append_numeric_storage_bytes(storage: &ArrayStorage, out: &mut Vec<u8>) -> PyResult<()> {
+        out.extend_from_slice(storage.dtype().name().as_bytes());
+        out.push(0);
+        match storage {
+            ArrayStorage::I8(values) => {
+                for value in values {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            ArrayStorage::I16(values) => {
+                for value in values {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            ArrayStorage::I32(values) => {
+                for value in values {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            ArrayStorage::I64(values) => {
+                for value in values {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            ArrayStorage::U8(values) => out.extend_from_slice(values),
+            ArrayStorage::U16(values) => {
+                for value in values {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            ArrayStorage::U32(values) => {
+                for value in values {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            ArrayStorage::U64(values) => {
+                for value in values {
+                    out.extend_from_slice(&value.to_le_bytes());
+                }
+            }
+            ArrayStorage::F32(values) => {
+                for value in values {
+                    out.extend_from_slice(&value.to_bits().to_le_bytes());
+                }
+            }
+            ArrayStorage::F64(values) => {
+                for value in values {
+                    out.extend_from_slice(&value.to_bits().to_le_bytes());
+                }
+            }
+            _ => {
+                return Err(PyValueError::new_err(
+                    "unexpected storage variant for buffer extraction proof",
+                ));
+            }
+        }
+        out.push(0xff);
+        Ok(())
+    }
+
+    fn py_sha256_hex(py: Python<'_>, bytes: &[u8]) -> PyResult<String> {
+        let digest = py
+            .import("hashlib")?
+            .getattr("sha256")?
+            .call1((PyBytes::new(py, bytes),))?;
+        digest.call_method0("hexdigest")?.extract::<String>()
+    }
+
     fn repr_string(value: &pyo3::Bound<'_, pyo3::types::PyAny>) -> String {
         value.repr().unwrap().extract::<String>().unwrap()
+    }
+
+    #[test]
+    fn buffer_protocol_numeric_extraction_matches_pylist_golden_sha() {
+        with_python(|py| {
+            let precise_cases = vec![
+                (
+                    "precise-int8",
+                    numeric_array(py, vec![-5_i64, 0, 7], "int8"),
+                    ArrayStorage::I8(vec![-5, 0, 7]),
+                ),
+                (
+                    "precise-int16",
+                    numeric_array(py, vec![-32000_i64, 0, 12345], "int16"),
+                    ArrayStorage::I16(vec![-32000, 0, 12345]),
+                ),
+                (
+                    "precise-int32",
+                    numeric_array(py, vec![-2_000_000_i64, 0, 2_000_000], "int32"),
+                    ArrayStorage::I32(vec![-2_000_000, 0, 2_000_000]),
+                ),
+                (
+                    "precise-int64",
+                    numeric_array(
+                        py,
+                        vec![-9_007_199_254_740_993_i64, -1, 9_007_199_254_740_993],
+                        "int64",
+                    ),
+                    ArrayStorage::I64(vec![-9_007_199_254_740_993, -1, 9_007_199_254_740_993]),
+                ),
+                (
+                    "precise-uint8",
+                    numeric_array(py, vec![0_u64, 127, 255], "uint8"),
+                    ArrayStorage::U8(vec![0, 127, 255]),
+                ),
+                (
+                    "precise-uint16",
+                    numeric_array(py, vec![0_u64, 1024, 65535], "uint16"),
+                    ArrayStorage::U16(vec![0, 1024, 65535]),
+                ),
+                (
+                    "precise-uint32",
+                    numeric_array(py, vec![0_u64, 1024, 4_000_000_000], "uint32"),
+                    ArrayStorage::U32(vec![0, 1024, 4_000_000_000]),
+                ),
+                (
+                    "precise-uint64",
+                    numeric_array(py, vec![0_u64, 7, 9_007_199_254_740_993], "uint64"),
+                    ArrayStorage::U64(vec![0, 7, 9_007_199_254_740_993]),
+                ),
+                (
+                    "precise-float32",
+                    numeric_array(py, vec![1.25_f64, -0.0, 3.5], "float32"),
+                    ArrayStorage::F32(vec![1.25, -0.0, 3.5]),
+                ),
+                (
+                    "precise-float64",
+                    numeric_array(py, vec![1.25_f64, -0.0, 3.5], "float64"),
+                    ArrayStorage::F64(vec![1.25, -0.0, 3.5]),
+                ),
+            ];
+
+            let mut proof_bytes = Vec::new();
+            for (label, input, expected_storage) in precise_cases {
+                let extracted = extract_precise_numeric_array(py, &input, label)?;
+                assert_eq!(extracted.shape(), &[3], "{label} shape drift");
+                let storage = extracted
+                    .to_storage()
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                assert_eq!(storage, expected_storage, "{label} storage drift");
+                proof_bytes.extend_from_slice(label.as_bytes());
+                proof_bytes.push(0);
+                append_numeric_storage_bytes(&storage, &mut proof_bytes)?;
+            }
+
+            let generic_cases = vec![
+                (
+                    "generic-int",
+                    numeric_array(py, vec![-7_i64, 0, 12], "int32"),
+                    ArrayStorage::I64(vec![-7, 0, 12]),
+                ),
+                (
+                    "generic-uint",
+                    numeric_array(py, vec![0_u64, 7, 12], "uint32"),
+                    ArrayStorage::U64(vec![0, 7, 12]),
+                ),
+                (
+                    "generic-float",
+                    numeric_array(py, vec![1.25_f64, -0.0, 3.5], "float32"),
+                    ArrayStorage::F64(vec![1.25, -0.0, 3.5]),
+                ),
+            ];
+
+            for (label, input, expected_storage) in generic_cases {
+                let extracted = extract_numeric_array(py, &input, label)?;
+                assert_eq!(extracted.shape(), &[3], "{label} shape drift");
+                let storage = extracted
+                    .to_storage()
+                    .map_err(|err| PyValueError::new_err(err.to_string()))?;
+                assert_eq!(storage, expected_storage, "{label} storage drift");
+                proof_bytes.extend_from_slice(label.as_bytes());
+                proof_bytes.push(0);
+                append_numeric_storage_bytes(&storage, &mut proof_bytes)?;
+            }
+
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest,
+                "92b607a7e4d64fd01b975e9795f2f2a0ecf68c126fec5948651afb01af8e9f04"
+            );
+            Ok(())
+        });
     }
 
     fn reduce_outcome(

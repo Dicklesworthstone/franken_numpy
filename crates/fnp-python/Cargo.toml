@@ -39,3 +39,10 @@ fnp-ufunc = { path = "../fnp-ufunc" }
 fnp-linalg = { path = "../fnp-linalg" }
 fnp-random = { path = "../fnp-random" }
 fnp-io = { path = "../fnp-io" }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "criterion_python_surface"
+harness = false
