@@ -17915,22 +17915,19 @@ impl UFuncArray {
         let yedges = Self::linspace(ymin, ymax, ybins + 1, DType::F64)?;
 
         let mut hist = vec![0.0f64; xbins * ybins];
-        let xstep = if xbins > 0 && xmax > xmin {
-            (xmax - xmin) / xbins as f64
-        } else {
-            1.0
+        // Bin each axis via partition_point over its edge array (numpy semantics),
+        // not naive floor division, which mis-bins values on internal edges under f64
+        // rounding. Consistent with histogram/histogram_full. (franken_numpy-40n4u)
+        let xe = xedges.values();
+        let ye = yedges.values();
+        let bin_of = |edges: &[f64], v: f64, nbins: usize| -> usize {
+            let count_le = edges.partition_point(|edge| *edge <= v);
+            let idx = if count_le == 0 { 0 } else { count_le - 1 };
+            idx.min(nbins - 1)
         };
-        let ystep = if ybins > 0 && ymax > ymin {
-            (ymax - ymin) / ybins as f64
-        } else {
-            1.0
-        };
-
         for (&xv, &yv) in self.values.iter().zip(y.values.iter()) {
-            let xi = ((xv - xmin) / xstep).floor() as usize;
-            let yi = ((yv - ymin) / ystep).floor() as usize;
-            let xi = xi.min(xbins - 1);
-            let yi = yi.min(ybins - 1);
+            let xi = bin_of(xe, xv, xbins);
+            let yi = bin_of(ye, yv, ybins);
             hist[xi * ybins + yi] += 1.0;
         }
 
@@ -18045,16 +18042,9 @@ impl UFuncArray {
 
         // Build edges per dimension
         let mut edges_list: Vec<Self> = Vec::with_capacity(n_dim);
-        let mut steps: Vec<f64> = Vec::with_capacity(n_dim);
         for d in 0..n_dim {
             let e = Self::linspace(mins[d], maxs[d], bins_per_dim[d] + 1, DType::F64)?;
-            let step = if bins_per_dim[d] > 0 && maxs[d] > mins[d] {
-                (maxs[d] - mins[d]) / bins_per_dim[d] as f64
-            } else {
-                1.0
-            };
             edges_list.push(e);
-            steps.push(step);
         }
 
         // Histogram: shape = bins_per_dim
@@ -18073,7 +18063,13 @@ impl UFuncArray {
             let mut valid = true;
             for d in 0..n_dim {
                 let v = self.values[i * n_dim + d];
-                let idx = ((v - mins[d]) / steps[d]).floor() as usize;
+                // partition_point over this dimension's edge array (numpy semantics),
+                // not floor division which mis-bins internal-edge values under f64
+                // rounding. Consistent with histogram/histogram_full/histogram2d.
+                // (franken_numpy-40n4u)
+                let edges = edges_list[d].values();
+                let count_le = edges.partition_point(|edge| *edge <= v);
+                let idx = if count_le == 0 { 0 } else { count_le - 1 };
                 let idx = idx.min(bins_per_dim[d] - 1);
                 flat_idx += idx * bin_strides[d];
                 if flat_idx >= total_bins {
