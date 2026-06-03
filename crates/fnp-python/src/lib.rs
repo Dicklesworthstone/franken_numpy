@@ -8188,11 +8188,14 @@ fn take(
             .unbind())
     };
 
-    // Check for complex dtype and fallback to numpy
+    // The native path only handles real numeric dtypes (bool/int/uint/float).
+    // Everything else numpy.take supports as a pure gather — complex, string
+    // ('U'/'S'), datetime64 ('M'), timedelta64 ('m'), object, void — must
+    // delegate to numpy so those dtypes round-trip instead of being rejected.
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (a.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    if dtype_kind == "c" {
+    if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
         return fallback();
     }
 
@@ -10148,7 +10151,11 @@ fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (x.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    if dtype_kind == "c" {
+    // Native UnaryOp::Sign only covers real numeric dtypes. Delegate every
+    // other kind to numpy.sign so it matches exactly: timedelta64 ('m') yields
+    // signs, while complex ('c'), datetime64 ('M'), string, etc. raise numpy's
+    // own error rather than our generic numeric-only TypeError.
+    if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
         return Ok(numpy.getattr("sign")?.call1((arr,))?.unbind());
     }
     let x = extract_numeric_array(py, x.bind(py), "sign(x)")?;
@@ -10608,6 +10615,26 @@ fn searchsorted(
     side: &str,
     sorter: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    // The native binary-search path only handles real numeric dtypes. numpy
+    // also searches sorted string ('U'/'S'), datetime64 ('M'), timedelta64
+    // ('m'), and complex haystacks; for any non-numeric `a` dtype delegate the
+    // whole call to numpy.searchsorted so it returns the right index (and the
+    // right scalar-vs-array shape) instead of being rejected as non-numeric.
+    let numpy = py.import("numpy")?;
+    let a_arr = numpy.call_method1("asarray", (a.bind(py),))?;
+    let a_kind = a_arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if !matches!(a_kind.as_str(), "b" | "i" | "u" | "f") {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("side", side)?;
+        if let Some(sorter) = sorter.as_ref() {
+            kwargs.set_item("sorter", sorter.bind(py))?;
+        }
+        return Ok(numpy
+            .getattr("searchsorted")?
+            .call((a_arr, v.bind(py)), Some(&kwargs))?
+            .unbind());
+    }
+
     // Mirror numpy's scalar-vs-array return shape: when `v` is a Python
     // scalar or a 0-D ndarray, numpy.searchsorted returns a numpy scalar
     // (e.g. np.int64(2)); otherwise it returns an ndarray. Detect on the
@@ -13615,11 +13642,13 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
             .unbind())
     };
 
-    // Check for complex dtype and fallback to numpy
+    // flip is a pure reversal that numpy applies to any dtype. The native path
+    // only handles real numeric dtypes, so delegate every other kind (complex,
+    // string, datetime64, timedelta64, object, void) to numpy.flip.
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    if dtype_kind == "c" {
+    if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
         return fallback();
     }
 
@@ -13651,11 +13680,13 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Check for complex dtype and fallback to numpy
+    // Pure reversal — numpy.flipud accepts any dtype. Native path is numeric
+    // only, so delegate every non-numeric kind (complex, string, datetime64,
+    // timedelta64, object, void) to numpy.flipud.
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    if dtype_kind == "c" {
+    if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
         return Ok(numpy.getattr("flipud")?.call1((arr,))?.unbind());
     }
     let m = extract_numeric_array(py, m.bind(py), "flipud(m)")?;
@@ -13666,11 +13697,13 @@ fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Check for complex dtype and fallback to numpy
+    // Pure reversal — numpy.fliplr accepts any dtype. Native path is numeric
+    // only, so delegate every non-numeric kind (complex, string, datetime64,
+    // timedelta64, object, void) to numpy.fliplr.
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    if dtype_kind == "c" {
+    if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
         return Ok(numpy.getattr("fliplr")?.call1((arr,))?.unbind());
     }
     let m = extract_numeric_array(py, m.bind(py), "fliplr(m)")?;
@@ -28383,7 +28416,8 @@ mod tests {
         PyFromPyFunc, PyVectorize, argwhere, bincount, ceil, choose, compress, copysign,
         count_nonzero, degrees, diag, diag_indices, diag_indices_from, diagflat, diagonal,
         digitize, extract, extract_numeric_array, extract_precise_numeric_array, fill_diagonal,
-        flatnonzero, floor, fnp_python, frexp, hypot, indices, interp, isfinite, isinf, isnan,
+        flatnonzero, flip, fliplr, flipud, floor, fnp_python, frexp, hypot, indices, interp,
+        isfinite, isinf, isnan,
         isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf, nan_to_num,
         nextafter, place, put, put_along_axis, putmask, radians, ravel_multi_index,
         required_dict_item, rfftfreq, rint, searchsorted, select, sign, signbit, sinc,
@@ -45776,6 +45810,86 @@ mod tests {
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn reorder_and_search_delegate_non_numeric_dtypes_to_numpy() {
+        // take/searchsorted/flip/flipud/fliplr/sign must not reject string,
+        // datetime64, or timedelta64 dtypes: numpy handles them as pure
+        // gather/reverse/elementwise, and the native numeric path only covers
+        // bool/int/uint/float, so every other dtype kind delegates to numpy.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let same = |a: &Bound<'_, PyAny>, b: &Bound<'_, PyAny>| -> PyResult<()> {
+                assert_eq!(
+                    repr_string(&a.call_method0("tolist")?),
+                    repr_string(&b.call_method0("tolist")?)
+                );
+                assert_eq!(
+                    a.getattr("dtype")?.str()?.extract::<String>()?,
+                    b.getattr("dtype")?.str()?.extract::<String>()?
+                );
+                Ok(())
+            };
+            let arr = |items: Vec<&str>, dt: &str| -> PyResult<Bound<'_, PyAny>> {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("dtype", dt)?;
+                numpy.call_method("array", (items,), Some(&kwargs))
+            };
+
+            // string take
+            let s = arr(vec!["a", "b", "c"], "<U1")?;
+            let idx = numeric_array(py, vec![0_i64, 2_i64], "int64");
+            let got = take(py, s.clone().unbind(), idx.clone().unbind(), None, "raise")?;
+            same(
+                got.bind(py),
+                &numpy.call_method1("take", (s.clone(), idx))?,
+            )?;
+
+            // string flip / flipud / fliplr
+            let got = flip(py, s.clone().unbind(), None)?;
+            same(got.bind(py), &numpy.call_method1("flip", (s.clone(),))?)?;
+            let grid = arr(vec!["a", "b", "c", "d"], "<U1")?
+                .call_method1("reshape", ((2, 2),))?;
+            let got = flipud(py, grid.clone().unbind())?;
+            same(got.bind(py), &numpy.call_method1("flipud", (grid.clone(),))?)?;
+            let got = fliplr(py, grid.clone().unbind())?;
+            same(got.bind(py), &numpy.call_method1("fliplr", (grid,))?)?;
+
+            // datetime64 searchsorted (scalar v -> numpy scalar) + take + flip
+            let dt = arr(
+                vec!["2021-01-01", "2021-06-15", "2021-12-31"],
+                "datetime64[D]",
+            )?;
+            // numpy.datetime64 infers the [D] unit from the YYYY-MM-DD string.
+            let probe = numpy.call_method1("datetime64", ("2021-03-01",))?;
+            let got = searchsorted(py, dt.clone().unbind(), probe.clone().unbind(), "left", None)?;
+            let expected = {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("side", "left")?;
+                numpy.call_method("searchsorted", (dt.clone(), probe), Some(&kwargs))?
+            };
+            assert_eq!(
+                repr_string(&got.bind(py).call_method0("item")?),
+                repr_string(&expected.call_method0("item")?)
+            );
+            let got = flip(py, dt.clone().unbind(), None)?;
+            same(got.bind(py), &numpy.call_method1("flip", (dt,))?)?;
+
+            // timedelta64 sign (numpy returns signed timedelta) + searchsorted
+            let td = {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("dtype", "timedelta64[D]")?;
+                numpy.call_method("array", (vec![1_i64, -2_i64, 0_i64],), Some(&kwargs))?
+            };
+            let got = sign(py, td.clone().unbind())?;
+            same(got.bind(py), &numpy.call_method1("sign", (td,))?)?;
+
             Ok(())
         });
     }
