@@ -27821,13 +27821,43 @@ fn fftn_along_axis(shape: &[usize], re: &mut [f64], im: &mut [f64], axis: usize,
     };
 
     const FFT_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 12;
-    if outer_size >= 2
-        && re.len() >= FFT_AXIS_PARALLEL_MIN_ELEMS
-        && rayon::current_num_threads() >= 2
-    {
+    let want_parallel =
+        re.len() >= FFT_AXIS_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2;
+    if outer_size >= 2 && want_parallel {
         re.par_chunks_mut(block)
             .zip(im.par_chunks_mut(block))
             .for_each(process_block);
+    } else if outer_size == 1 && inner_size >= 2 && want_parallel {
+        // Leading-axis transform: a single super-block holds inner_size strided
+        // lanes (stride = inner_size, base = inner). par_chunks_mut can't split
+        // strided lanes, so transform them in parallel into owned buffers (each
+        // task only reads re/im), then scatter back serially. fft_dit is
+        // deterministic per lane and the scatter order is fixed, so the result is
+        // bit-for-bit identical to the serial gather/fft/scatter for any thread
+        // count. Extra O(total) allocation is amortized by the O(n log n) FFTs.
+        let re_ro: &[f64] = re;
+        let im_ro: &[f64] = im;
+        let lanes: Vec<(Vec<f64>, Vec<f64>)> = (0..inner_size)
+            .into_par_iter()
+            .map(|inner| {
+                let mut buf_re = vec![0.0; axis_len];
+                let mut buf_im = vec![0.0; axis_len];
+                for k in 0..axis_len {
+                    let idx = k * inner_size + inner;
+                    buf_re[k] = re_ro[idx];
+                    buf_im[k] = im_ro[idx];
+                }
+                fft_dit(&mut buf_re, &mut buf_im, inverse);
+                (buf_re, buf_im)
+            })
+            .collect();
+        for (inner, (buf_re, buf_im)) in lanes.into_iter().enumerate() {
+            for k in 0..axis_len {
+                let idx = k * inner_size + inner;
+                re[idx] = buf_re[k];
+                im[idx] = buf_im[k];
+            }
+        }
     } else {
         re.chunks_mut(block)
             .zip(im.chunks_mut(block))
