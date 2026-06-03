@@ -20281,43 +20281,70 @@ impl UFuncArray {
 
         let mut result = vec![0.0; output_size];
 
+        // Precompute integer stride tables once, keyed by each label's position in
+        // `all_labels`, so the hot loop is pure index arithmetic — no per-iteration
+        // HashMap allocation or hashing. The iteration order (flat scan over
+        // output+contracted labels) and the per-output accumulation order are
+        // identical to the prior scalar form, so the FP-bit output is unchanged.
+        let label_pos: std::collections::HashMap<char, usize> = all_labels
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (c, i))
+            .collect();
+
+        // For each output label: (position in all_labels, contribution stride).
+        let mut output_terms: Vec<(usize, usize)> = Vec::with_capacity(output_labels.len());
+        {
+            let mut stride = 1usize;
+            for i in (0..output_labels.len()).rev() {
+                output_terms.push((label_pos[&output_labels[i]], stride));
+                stride *= output_shape[i];
+            }
+        }
+
+        // For each operand: list of (position in all_labels, operand stride) per
+        // axis. A broadcast axis (dim == 1) contributes stride 0, matching the
+        // prior `local_index = 0` behavior. Repeated labels within one operand
+        // (e.g. "ii" trace) sum their strides, reproducing diagonal indexing.
+        let op_terms: Vec<Vec<(usize, usize)>> = operands
+            .iter()
+            .enumerate()
+            .map(|(op_idx, op)| {
+                let chars = &input_chars[op_idx];
+                let mut terms: Vec<(usize, usize)> = Vec::with_capacity(chars.len());
+                let mut op_stride = 1usize;
+                for i in (0..chars.len()).rev() {
+                    let dim = op.shape[i];
+                    let stride = if dim == 1 { 0 } else { op_stride };
+                    terms.push((label_pos[&chars[i]], stride));
+                    op_stride *= dim;
+                }
+                terms
+            })
+            .collect();
+
+        let n_labels = all_labels.len();
+        let mut label_vals = vec![0usize; n_labels];
+
         for flat_idx in 0..total_iters {
-            // Decode flat index into label values
+            // Decode flat index into per-label values (indexed by all_labels pos).
             let mut remaining = flat_idx;
-            let mut label_vals: std::collections::HashMap<char, usize> =
-                std::collections::HashMap::new();
-            for i in (0..all_labels.len()).rev() {
+            for i in (0..n_labels).rev() {
                 let dim = all_dims[i];
-                label_vals.insert(all_labels[i], remaining % dim);
+                label_vals[i] = remaining % dim;
                 remaining /= dim;
             }
 
-            // Compute output flat index
-            let mut out_flat = 0;
-            let mut stride = 1;
-            for i in (0..output_labels.len()).rev() {
-                out_flat += label_vals[&output_labels[i]] * stride;
-                stride *= output_shape[i];
+            let mut out_flat = 0usize;
+            for &(pos, stride) in &output_terms {
+                out_flat += label_vals[pos] * stride;
             }
 
-            // Compute product of operand elements
             let mut product = 1.0;
             for (op_idx, op) in operands.iter().enumerate() {
-                let chars = &input_chars[op_idx];
-                let mut op_flat = 0;
-                let mut op_stride = 1;
-                for i in (0..chars.len()).rev() {
-                    let dim = op.shape[i];
-                    let label_value = label_vals[&chars[i]];
-                    let local_index = if dim == 1 { 0 } else { label_value };
-                    if local_index >= dim {
-                        return Err(UFuncError::Msg(format!(
-                            "einsum: label '{}' index {} exceeds operand dimension {}",
-                            chars[i], local_index, dim
-                        )));
-                    }
-                    op_flat += local_index * op_stride;
-                    op_stride *= dim;
+                let mut op_flat = 0usize;
+                for &(pos, stride) in &op_terms[op_idx] {
+                    op_flat += label_vals[pos] * stride;
                 }
                 product *= op.values[op_flat];
             }
@@ -50256,6 +50283,68 @@ print(json.dumps(payload))
         assert!((c.values[1] - 64.0).abs() < 1e-10);
         assert!((c.values[2] - 139.0).abs() < 1e-10);
         assert!((c.values[3] - 154.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn einsum_contraction_golden_sha256_is_bit_stable() {
+        // Locks the exact FP-bit output of `einsum` across a battery of
+        // subscript shapes (matmul, batched, trace, broadcast, implicit
+        // output, sum-over-axis, outer product, scalar reduction). The stride
+        // table refactor must reproduce this hash bit-for-bit; the accumulation
+        // order (flat iteration over output+contracted labels) is unchanged.
+        use sha2::{Digest, Sha256};
+
+        fn seq(n: usize, scale: f64, bias: f64) -> Vec<f64> {
+            (0..n).map(|i| (i as f64) * scale + bias).collect()
+        }
+
+        let a23 = UFuncArray::new(vec![2, 3], seq(6, 0.5, 1.0), DType::F64).unwrap();
+        let b32 = UFuncArray::new(vec![3, 2], seq(6, 0.25, -0.5), DType::F64).unwrap();
+        let m44 = UFuncArray::new(vec![4, 4], seq(16, 0.125, 0.3), DType::F64).unwrap();
+        let t234 = UFuncArray::new(vec![2, 3, 4], seq(24, 0.1, 0.7), DType::F64).unwrap();
+        let t243 = UFuncArray::new(vec![2, 4, 3], seq(24, 0.2, -0.4), DType::F64).unwrap();
+        let row13 = UFuncArray::new(vec![1, 3], seq(3, 0.9, 0.2), DType::F64).unwrap();
+        let u3 = UFuncArray::new(vec![3], seq(3, 0.7, -0.1), DType::F64).unwrap();
+        let v5 = UFuncArray::new(vec![5], seq(5, 0.3, 0.05), DType::F64).unwrap();
+        let w4 = UFuncArray::new(vec![4], seq(4, 0.6, -0.2), DType::F64).unwrap();
+
+        let cases: Vec<UFuncArray> = vec![
+            UFuncArray::einsum("ij,jk->ik", &[&a23, &b32]).unwrap(),
+            UFuncArray::einsum("ij,jk", &[&a23, &b32]).unwrap(),
+            UFuncArray::einsum("ii->", &[&m44]).unwrap(),
+            UFuncArray::einsum("ii->i", &[&m44]).unwrap(),
+            UFuncArray::einsum("ijk,ikl->ijl", &[&t234, &t243]).unwrap(),
+            UFuncArray::einsum("ij,ij->", &[&a23, &a23]).unwrap(),
+            UFuncArray::einsum("ij->j", &[&a23]).unwrap(),
+            UFuncArray::einsum("ij->i", &[&a23]).unwrap(),
+            // Broadcast: row13 has a singleton leading dim against a23's i=2.
+            UFuncArray::einsum("ij,ij->j", &[&a23, &row13]).unwrap(),
+            UFuncArray::einsum("ij,kj->ik", &[&a23, &a23]).unwrap(),
+            UFuncArray::einsum("i,j->ij", &[&v5, &w4]).unwrap(),
+            UFuncArray::einsum("ij,j->i", &[&a23, &u3]).unwrap(),
+        ];
+
+        let mut hasher = Sha256::new();
+        for c in &cases {
+            for &d in &c.shape {
+                hasher.update((d as u64).to_le_bytes());
+            }
+            hasher.update(b"|");
+            for &v in &c.values {
+                hasher.update(v.to_bits().to_le_bytes());
+            }
+            hasher.update(b";");
+        }
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        assert_eq!(
+            digest,
+            "d4a2b5137fd48c9f2ebaae51760bb8ccd357c09ea3482eba833f750248946918",
+            "einsum output bit pattern changed"
+        );
     }
 
     #[test]
