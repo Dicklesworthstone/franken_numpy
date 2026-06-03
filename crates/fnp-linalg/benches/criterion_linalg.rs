@@ -16,7 +16,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
     batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, det_nxn, eigvalsh_nxn, inv_nxn,
-    matrix_norm_frobenius, qr_nxn, solve_nxn, svd_nxn,
+    matrix_norm_frobenius, matrix_power_nxn, qr_nxn, solve_nxn, svd_nxn,
 };
 use std::hint::black_box;
 
@@ -290,8 +290,28 @@ fn bench_batch_cholesky(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_matrix_power(c: &mut Criterion) {
+    let mut group = c.benchmark_group("matrix_power_nxn");
+
+    // matrix_power(A, 3) performs three full n*n*n GEMMs via the internal
+    // mat_mul_flat kernel — the compute-bound regime (n >= 128) where
+    // intra-matrix row parallelism dominates the per-call dispatch cost.
+    for n in [128usize, 256, 512] {
+        let a = generate_random_matrix(n, 0x9E37_79B9_7F4A_7C15);
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = matrix_power_nxn(black_box(&a), black_box(n), black_box(3));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_matrix_power,
     bench_solve,
     bench_det,
     bench_inv,
