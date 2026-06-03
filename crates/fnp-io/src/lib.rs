@@ -1281,6 +1281,95 @@ pub fn write_npz_bytes(entries: &[(&str, &NpyHeader, &[u8])]) -> Result<Vec<u8>,
     write_npz_bytes_with_compression(entries, NpzCompression::Store)
 }
 
+fn npz_member_file_name_len(name: &str) -> Option<usize> {
+    if name.ends_with(".npy") {
+        Some(name.len())
+    } else {
+        name.len().checked_add(4)
+    }
+}
+
+fn decimal_digits_usize(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn shape_tuple_encoded_len(shape: &[usize]) -> Option<usize> {
+    match shape {
+        [] => Some(2),
+        [single] => decimal_digits_usize(*single).checked_add(3),
+        _ => {
+            let mut len = 2usize;
+            for (index, dim) in shape.iter().copied().enumerate() {
+                if index > 0 {
+                    len = len.checked_add(2)?;
+                }
+                len = len.checked_add(decimal_digits_usize(dim))?;
+            }
+            Some(len)
+        }
+    }
+}
+
+fn header_dict_encoded_len_for_capacity(header: &NpyHeader) -> Option<usize> {
+    "{'descr': '"
+        .len()
+        .checked_add(header.descr.descr().len())?
+        .checked_add("', 'fortran_order': ".len())?
+        .checked_add(if header.fortran_order {
+            "True".len()
+        } else {
+            "False".len()
+        })?
+        .checked_add(", 'shape': ".len())?
+        .checked_add(shape_tuple_encoded_len(&header.shape)?)?
+        .checked_add(", }".len())
+}
+
+fn npy_v1_encoded_len_for_capacity(header: &NpyHeader, payload_len: usize) -> Option<usize> {
+    let length_field_size = npy_length_field_size((1, 0)).ok()?;
+    let prefix_len = NPY_MAGIC_PREFIX
+        .len()
+        .checked_add(2)?
+        .checked_add(length_field_size)?;
+    let dictionary_len = header_dict_encoded_len_for_capacity(header)?;
+    let base_header_len = dictionary_len.checked_add(1)?;
+    let padding = (NPY_ARRAY_ALIGN
+        - ((prefix_len.checked_add(base_header_len)?) % NPY_ARRAY_ALIGN))
+        % NPY_ARRAY_ALIGN;
+    prefix_len
+        .checked_add(base_header_len.checked_add(padding)?)?
+        .checked_add(payload_len)
+}
+
+fn npz_central_directory_capacity(entries: &[(&str, &NpyHeader, &[u8])]) -> Option<usize> {
+    let mut capacity = 0usize;
+    for &(name, _, _) in entries {
+        capacity = capacity
+            .checked_add(46)?
+            .checked_add(npz_member_file_name_len(name)?)?;
+    }
+    Some(capacity)
+}
+
+fn npz_store_archive_capacity(entries: &[(&str, &NpyHeader, &[u8])]) -> Option<usize> {
+    let mut capacity = 22usize;
+    for &(name, header, payload) in entries {
+        let name_len = npz_member_file_name_len(name)?;
+        capacity = capacity
+            .checked_add(30)?
+            .checked_add(name_len)?
+            .checked_add(npy_v1_encoded_len_for_capacity(header, payload.len())?)?
+            .checked_add(46)?
+            .checked_add(name_len)?;
+    }
+    Some(capacity)
+}
+
 /// Write multiple named arrays into an NPZ archive with optional compression.
 ///
 /// Supports ZIP STORE (method 0) and DEFLATE (method 8).
@@ -1299,8 +1388,13 @@ pub fn write_npz_bytes_with_compression(
         ));
     }
 
-    let mut buf: Vec<u8> = Vec::new();
-    let mut central_directory: Vec<u8> = Vec::new();
+    let buf_capacity = match compression {
+        NpzCompression::Store => npz_store_archive_capacity(entries).unwrap_or(0),
+        NpzCompression::Deflate => 0,
+    };
+    let mut buf: Vec<u8> = Vec::with_capacity(buf_capacity);
+    let mut central_directory: Vec<u8> =
+        Vec::with_capacity(npz_central_directory_capacity(entries).unwrap_or(0));
     let mut entry_count: u16 = 0;
 
     for &(name, header, payload) in entries {
@@ -7994,6 +8088,58 @@ mm.flush()
             golden_sha256,
             "2112e8eb6aa3e6d2fcbdb7ccd75d21f99c162f38977fdcbed12d698f875523f0"
         );
+    }
+
+    #[test]
+    fn npz_store_writer_multi_array_golden_sha256() {
+        let h_f64 = NpyHeader {
+            shape: vec![3],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let p_f64: Vec<u8> = [1.0_f64, -0.0, f64::INFINITY]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect();
+        let h_i32 = NpyHeader {
+            shape: vec![2, 2],
+            fortran_order: true,
+            descr: IOSupportedDType::I32,
+        };
+        let p_i32: Vec<u8> = [7_i32, -3, 0, i32::MAX]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        let h_bool = NpyHeader {
+            shape: vec![4],
+            fortran_order: false,
+            descr: IOSupportedDType::Bool,
+        };
+        let p_bool = [1_u8, 0, 1, 1];
+
+        let actual = write_npz_bytes(&[
+            ("alpha", &h_f64, &p_f64),
+            ("beta.npy", &h_i32, &p_i32),
+            ("gamma", &h_bool, &p_bool),
+        ])
+        .expect("write npz");
+        let golden_sha256 = Sha256::digest(&actual)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            golden_sha256,
+            "f7efcd0a5d267f63fdda6b8e1006aacf27309d93191fc71e97050d8adbc69788"
+        );
+
+        let entries = read_npz_bytes(&actual, false).expect("read npz");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].name, "alpha");
+        assert_eq!(entries[0].array.payload, p_f64.into());
+        assert_eq!(entries[1].name, "beta");
+        assert_eq!(entries[1].array.payload, p_i32.into());
+        assert_eq!(entries[2].name, "gamma");
+        assert_eq!(entries[2].array.payload, p_bool.as_slice().into());
     }
 
     #[test]
