@@ -15,8 +15,8 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
-    batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, det_nxn, eigvalsh_nxn, inv_nxn,
-    matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn, solve_nxn, svd_nxn,
+    batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, complex_matmul, det_nxn, eigvalsh_nxn,
+    inv_nxn, matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn, solve_nxn, svd_nxn,
 };
 use std::hint::black_box;
 
@@ -290,6 +290,34 @@ fn bench_batch_cholesky(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_complex_matmul(c: &mut Criterion) {
+    let mut group = c.benchmark_group("complex_matmul");
+
+    // Interleaved complex n*n*n GEMM (each operand is 2*n*n reals); all dims >=
+    // the parallel threshold so the rayon row-partition path runs.
+    let gen_interleaved = |len: usize, seed: u64| -> Vec<f64> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+            })
+            .collect()
+    };
+    for n in [128usize, 256, 512] {
+        let a = gen_interleaved(2 * n * n, 0xCAFE_F00D_1234_5678);
+        let b = gen_interleaved(2 * n * n, 0xDEAD_BEEF_9876_5432);
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = complex_matmul(black_box(&a), black_box(&b), n, n, n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_multi_dot(c: &mut Criterion) {
     let mut group = c.benchmark_group("multi_dot");
 
@@ -301,10 +329,7 @@ fn bench_multi_dot(c: &mut Criterion) {
         let b = generate_random_matrix(n, 0x0FED_CBA9_8765_4321);
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
             bench.iter(|| {
-                let result = multi_dot(black_box(&[
-                    (a.as_slice(), n, n),
-                    (b.as_slice(), n, n),
-                ]));
+                let result = multi_dot(black_box(&[(a.as_slice(), n, n), (b.as_slice(), n, n)]));
                 black_box(result)
             });
         });
@@ -334,6 +359,7 @@ fn bench_matrix_power(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_complex_matmul,
     bench_multi_dot,
     bench_matrix_power,
     bench_solve,

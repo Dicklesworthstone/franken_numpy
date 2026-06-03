@@ -5587,7 +5587,11 @@ pub fn complex_matvec(a: &[f64], x: &[f64], m: usize, n: usize) -> Vec<f64> {
 /// A is 2·m·k interleaved, B is 2·k·n interleaved, result is 2·m·n interleaved.
 pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     let mut c = vec![0.0; 2 * m * n];
-    for i in 0..m {
+    // Output row i (an interleaved 2n-wide slice of c) depends only on row i of
+    // a plus all of b, and each element's p-reduction order is preserved, so
+    // partitioning the rows across the rayon pool is bit-for-bit identical to
+    // the serial loop. Gate on the dominant dims like the real GEMM kernels.
+    let row = |i: usize, c_row: &mut [f64]| {
         for j in 0..n {
             let mut sr = 0.0;
             let mut si = 0.0;
@@ -5601,8 +5605,22 @@ pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec
                 sr += pr;
                 si += pi;
             }
-            c[2 * (i * n + j)] = sr;
-            c[2 * (i * n + j) + 1] = si;
+            c_row[2 * j] = sr;
+            c_row[2 * j + 1] = si;
+        }
+    };
+    if m >= MATMUL_PARALLEL_MIN_DIM
+        && k >= MATMUL_PARALLEL_MIN_DIM
+        && n >= MATMUL_PARALLEL_MIN_DIM
+        && rayon::current_num_threads() >= 2
+    {
+        c.par_chunks_mut(2 * n)
+            .enumerate()
+            .for_each(|(i, c_row)| row(i, c_row));
+    } else {
+        for i in 0..m {
+            let c_row = &mut c[2 * i * n..2 * (i + 1) * n];
+            row(i, c_row);
         }
     }
     c
@@ -5650,6 +5668,7 @@ mod tests {
         cholesky_nxn,
         cholesky_solve,
         cholesky_solve_multi,
+        cmul,
         // Complex linalg
         complex_cholesky_nxn,
         complex_conjugate_transpose,
@@ -5880,7 +5899,11 @@ mod tests {
         let parallel_out = pool.install(|| matrix_power_nxn(&a, n, 3).unwrap());
         assert_eq!(parallel_out.len(), serial_ref.len());
         for (p, s) in parallel_out.iter().zip(&serial_ref) {
-            assert_eq!(p.to_bits(), s.to_bits(), "mat_mul_flat row-parallel drifted");
+            assert_eq!(
+                p.to_bits(),
+                s.to_bits(),
+                "mat_mul_flat row-parallel drifted"
+            );
         }
 
         // Golden SHA-256 over the little-endian output bits pins the exact
@@ -5940,7 +5963,11 @@ mod tests {
         assert_eq!((out_m, out_n), (m, n));
         assert_eq!(out.len(), serial_ref.len());
         for (p, s) in out.iter().zip(&serial_ref) {
-            assert_eq!(p.to_bits(), s.to_bits(), "mat_mul_rect row-parallel drifted");
+            assert_eq!(
+                p.to_bits(),
+                s.to_bits(),
+                "mat_mul_rect row-parallel drifted"
+            );
         }
 
         let mut hasher = Sha256::new();
@@ -5955,6 +5982,71 @@ mod tests {
         assert_eq!(
             digest, "9016722803dc4256abe1d21b2d31c0da7a85afde89098848195f1a52cf677897",
             "mat_mul_rect parallel golden digest drifted"
+        );
+    }
+
+    #[test]
+    fn complex_matmul_row_parallel_matches_serial_reference_and_golden_sha256() {
+        // Interleaved complex GEMM with all dims >= MATMUL_PARALLEL_MIN_DIM so
+        // the rayon row-partition path runs. Row-disjoint output + preserved
+        // per-element p-reduction order => bit-for-bit identical to serial.
+        let (m, k, n) = (128usize, 128usize, 128usize);
+        let mut state: u64 = 0xCAFE_F00D_1234_5678;
+        let mut fill = |len: usize| -> Vec<f64> {
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+                })
+                .collect()
+        };
+        let a = fill(2 * m * k);
+        let b = fill(2 * k * n);
+
+        // Serial reference: the pre-parallelization ijp kernel.
+        let mut serial_ref = vec![0.0_f64; 2 * m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut sr = 0.0f64;
+                let mut si = 0.0f64;
+                for p in 0..k {
+                    let (ar, ai) = (a[2 * (i * k + p)], a[2 * (i * k + p) + 1]);
+                    let (br, bi) = (b[2 * (p * n + j)], b[2 * (p * n + j) + 1]);
+                    let (pr, pi) = cmul(ar, ai, br, bi);
+                    sr += pr;
+                    si += pi;
+                }
+                serial_ref[2 * (i * n + j)] = sr;
+                serial_ref[2 * (i * n + j) + 1] = si;
+            }
+        }
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("build local rayon pool");
+        let out = pool.install(|| complex_matmul(&a, &b, m, k, n));
+        assert_eq!(out.len(), serial_ref.len());
+        for (p, s) in out.iter().zip(&serial_ref) {
+            assert_eq!(
+                p.to_bits(),
+                s.to_bits(),
+                "complex_matmul row-parallel drifted"
+            );
+        }
+
+        let mut hasher = Sha256::new();
+        for v in &out {
+            hasher.update(v.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "b2ce594b8b5b6da625364c07b32ac1a8c4bc09275b0291c425497ceb44ab2eb6",
+            "complex_matmul parallel golden digest drifted"
         );
     }
 
