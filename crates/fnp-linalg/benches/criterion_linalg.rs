@@ -16,7 +16,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
     batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, det_nxn, eigvalsh_nxn, inv_nxn,
-    matrix_norm_frobenius, matrix_power_nxn, qr_nxn, solve_nxn, svd_nxn,
+    matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn, solve_nxn, svd_nxn,
 };
 use std::hint::black_box;
 
@@ -290,6 +290,29 @@ fn bench_batch_cholesky(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_multi_dot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("multi_dot");
+
+    // Two-matrix multi_dot dispatches straight to the rectangular GEMM
+    // (mat_mul_rect). Square n*n*n inputs keep all three dims >= the parallel
+    // threshold so the rayon row-partition path runs.
+    for n in [128usize, 256, 512] {
+        let a = generate_random_matrix(n, 0x1234_5678_9ABC_DEF0);
+        let b = generate_random_matrix(n, 0x0FED_CBA9_8765_4321);
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = multi_dot(black_box(&[
+                    (a.as_slice(), n, n),
+                    (b.as_slice(), n, n),
+                ]));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_matrix_power(c: &mut Criterion) {
     let mut group = c.benchmark_group("matrix_power_nxn");
 
@@ -311,6 +334,7 @@ fn bench_matrix_power(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_multi_dot,
     bench_matrix_power,
     bench_solve,
     bench_det,

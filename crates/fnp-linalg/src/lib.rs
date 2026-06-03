@@ -3842,9 +3842,10 @@ pub fn pinv_hermitian_nxn_with_tolerance_aliases(
 /// Helper: flat NxN matrix multiply C = A * B (row-major).
 /// Minimum dimension at which the square GEMM parallelizes across the rayon
 /// pool. Below this the O(n³) work is too small to amortize thread dispatch, so
-/// the serial ikj loop wins. At n ≥ 64 the per-row work (n² fused-multiply-adds)
-/// and the n rows give the pool enough independent, compute-bound tasks.
-const MATMUL_PARALLEL_MIN_DIM: usize = 64;
+/// the serial ikj loop wins. At n >= 128 the per-row work (n^2
+/// fused-multiply-adds) and the n rows give the pool enough independent,
+/// compute-bound tasks in the measured Criterion lane.
+const MATMUL_PARALLEL_MIN_DIM: usize = 128;
 
 fn mat_mul_flat(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     let mut c = vec![0.0; n * n];
@@ -3961,11 +3962,33 @@ fn sqrtm_non_finite_compat(a: &[f64], n: usize) -> Option<Vec<f64>> {
 /// Rectangular matrix multiply: A (m×k) × B (k×n) → C (m×n).
 fn mat_mul_rect(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     let mut c = vec![0.0; m * n];
-    for i in 0..m {
-        for p in 0..k {
-            let a_ip = a[i * k + p];
-            for j in 0..n {
-                c[i * n + j] += a_ip * b[p * n + j];
+    // Same row-disjoint partitioning as mat_mul_flat: output row i reads row i
+    // of a (k wide) plus all of b and writes a disjoint n-wide slice of c with
+    // the identical p/j accumulation order, so the parallel result is bit-for-
+    // bit identical to the serial loop. Gate on the dominant dimension so the
+    // O(m·k·n) work amortizes thread dispatch.
+    if m >= MATMUL_PARALLEL_MIN_DIM
+        && k >= MATMUL_PARALLEL_MIN_DIM
+        && n >= MATMUL_PARALLEL_MIN_DIM
+        && rayon::current_num_threads() >= 2
+    {
+        c.par_chunks_mut(n).enumerate().for_each(|(i, c_row)| {
+            let a_row = &a[i * k..i * k + k];
+            for p in 0..k {
+                let a_ip = a_row[p];
+                let b_row = &b[p * n..p * n + n];
+                for j in 0..n {
+                    c_row[j] += a_ip * b_row[j];
+                }
+            }
+        });
+    } else {
+        for i in 0..m {
+            for p in 0..k {
+                let a_ip = a[i * k + p];
+                for j in 0..n {
+                    c[i * n + j] += a_ip * b[p * n + j];
+                }
             }
         }
     }
@@ -5800,11 +5823,12 @@ mod tests {
     #[test]
     fn mat_mul_flat_row_parallel_matches_serial_reference_and_golden_sha256() {
         // matrix_power_nxn(a, 3) drives the internal square GEMM (mat_mul_flat).
-        // At n = 128 (>= MATMUL_PARALLEL_MIN_DIM) the rayon row-partition path
-        // runs on a multi-core worker. Because each output row is computed from
-        // a disjoint slice of `c` with the identical k/j accumulation order as
-        // the serial loop, the parallel result must equal a hand-written serial
-        // reference bit-for-bit.
+        // At n = 128 (>= MATMUL_PARALLEL_MIN_DIM), the local rayon pool below
+        // forces the row-partition path even if the process-global pool is
+        // single-threaded. Because each output row is computed from a disjoint
+        // slice of `c` with the identical k/j accumulation order as the serial
+        // loop, the parallel result must equal a hand-written serial reference
+        // bit-for-bit.
         let n = 128usize;
 
         // Deterministic LCG fill (same generator as the criterion bench).
@@ -5849,7 +5873,11 @@ mod tests {
             result
         };
 
-        let parallel_out = matrix_power_nxn(&a, n, 3).unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("build local rayon pool");
+        let parallel_out = pool.install(|| matrix_power_nxn(&a, n, 3).unwrap());
         assert_eq!(parallel_out.len(), serial_ref.len());
         for (p, s) in parallel_out.iter().zip(&serial_ref) {
             assert_eq!(p.to_bits(), s.to_bits(), "mat_mul_flat row-parallel drifted");
@@ -5869,6 +5897,64 @@ mod tests {
         assert_eq!(
             digest, "99adb17b3a1e6490bc5d3dc5d19e0ec5fd5bfb185384bd3e75f1647061f5920e",
             "mat_mul_flat parallel golden digest drifted"
+        );
+    }
+
+    #[test]
+    fn mat_mul_rect_row_parallel_matches_serial_reference_and_golden_sha256() {
+        // multi_dot of two matrices dispatches straight to mat_mul_rect. Use a
+        // genuinely rectangular shape with every dim >= MATMUL_PARALLEL_MIN_DIM
+        // so the rayon row-partition path runs and the rectangular a/b/c index
+        // arithmetic is exercised. Row-disjoint output + identical p/j order =>
+        // bit-for-bit identical to a serial reference.
+        let (m, k, n) = (130usize, 128usize, 129usize);
+        let mut state: u64 = 0x1234_5678_9ABC_DEF0;
+        let mut fill = |len: usize| -> Vec<f64> {
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+                })
+                .collect()
+        };
+        let a = fill(m * k);
+        let b = fill(k * n);
+
+        // Serial reference: the pre-parallelization ikj rectangular kernel.
+        let mut serial_ref = vec![0.0; m * n];
+        for i in 0..m {
+            for p in 0..k {
+                let a_ip = a[i * k + p];
+                for j in 0..n {
+                    serial_ref[i * n + j] += a_ip * b[p * n + j];
+                }
+            }
+        }
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("build local rayon pool");
+        let (out, out_m, out_n) =
+            pool.install(|| multi_dot(&[(a.as_slice(), m, k), (b.as_slice(), k, n)]).unwrap());
+        assert_eq!((out_m, out_n), (m, n));
+        assert_eq!(out.len(), serial_ref.len());
+        for (p, s) in out.iter().zip(&serial_ref) {
+            assert_eq!(p.to_bits(), s.to_bits(), "mat_mul_rect row-parallel drifted");
+        }
+
+        let mut hasher = Sha256::new();
+        for v in &out {
+            hasher.update(v.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "9016722803dc4256abe1d21b2d31c0da7a85afde89098848195f1a52cf677897",
+            "mat_mul_rect parallel golden digest drifted"
         );
     }
 
