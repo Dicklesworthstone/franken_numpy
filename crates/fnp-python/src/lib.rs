@@ -11103,6 +11103,27 @@ fn reshape(py: Python<'_>, a: Py<PyAny>, newshape: Py<PyAny>, order: &str) -> Py
             .unbind())
     };
 
+    // numpy.reshape accepts only 'C', 'F', and 'A' (NOT 'K' — that's a ravel/
+    // copy order, and numpy raises ValueError for it here). The native path
+    // always reads the logical elements in C order, so 'A' — which numpy
+    // resolves to Fortran iff the input is F-contiguous and not C-contiguous,
+    // else C — must be mapped to the concrete order before dispatch. Delegate
+    // 'K' and any other value so numpy raises its exact ValueError.
+    let resolved_order: &str = match order {
+        "C" | "F" => order,
+        "A" => {
+            let flags = numpy.call_method1("asarray", (a.bind(py),))?.getattr("flags")?;
+            let f_contig = flags.getattr("f_contiguous")?.extract::<bool>()?;
+            let c_contig = flags.getattr("c_contiguous")?.extract::<bool>()?;
+            if f_contig && !c_contig {
+                "F"
+            } else {
+                "C"
+            }
+        }
+        _ => return fallback(),
+    };
+
     let array = match extract_numeric_array(py, a.bind(py), "reshape(a)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
@@ -11123,7 +11144,7 @@ fn reshape(py: Python<'_>, a: Py<PyAny>, newshape: Py<PyAny>, order: &str) -> Py
         }
     };
 
-    let result = match array.reshape_order(&shape, order) {
+    let result = match array.reshape_order(&shape, resolved_order) {
         Ok(r) => r,
         Err(_) => return fallback(),
     };
@@ -58350,6 +58371,48 @@ mod tests {
                 .unwrap_err();
             let expected_err = numpy_reshape
                 .call1((bad_source.clone(), (2_i64, 2_i64)))
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn reshape_order_a_resolves_by_layout_and_rejects_order_k() {
+        // order='A' resolves to Fortran iff the input is F-contiguous and not
+        // C-contiguous (else C), so the result depends on the input's memory
+        // layout; order='K' is not a valid reshape order and numpy raises
+        // ValueError. The native path always reads C order, so both must be
+        // handled explicitly.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let reshape_fn = module.getattr("reshape")?;
+            let numpy = py.import("numpy")?;
+            let numpy_reshape = numpy.getattr("reshape")?;
+
+            let c_contig = numpy.call_method1("arange", (12_i64,))?.call_method1("reshape", ((3_i64, 4_i64),))?;
+            let f_contig = numpy.call_method1("asfortranarray", (c_contig.clone(),))?;
+            let transposed = c_contig.call_method0("transpose")?;
+
+            // order='A' across every layout must match numpy exactly.
+            for src in [&c_contig, &f_contig, &transposed] {
+                assert_array_matches_numpy(
+                    &reshape_fn.call1((src.clone(), (4_i64, 3_i64), "A"))?,
+                    &numpy_reshape.call1((src.clone(), (4_i64, 3_i64), "A"))?,
+                )?;
+            }
+
+            // order='K' is rejected by numpy.reshape with ValueError.
+            let actual_err = reshape_fn
+                .call1((c_contig.clone(), (4_i64, 3_i64), "K"))
+                .unwrap_err();
+            let expected_err = numpy_reshape
+                .call1((c_contig.clone(), (4_i64, 3_i64), "K"))
                 .unwrap_err();
             assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
 
