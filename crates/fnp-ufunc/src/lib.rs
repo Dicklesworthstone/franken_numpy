@@ -17453,40 +17453,52 @@ impl UFuncArray {
         let left_val = left.unwrap_or(fp.values[0]);
         let right_val = right.unwrap_or(fp.values[n - 1]);
 
-        let values: Vec<f64> = x
-            .values
-            .iter()
-            .map(|&xi| {
-                if n == 1 {
-                    if xi < xp.values[0] {
-                        return left_val;
-                    }
-                    if xi > xp.values[0] {
-                        return right_val;
-                    }
-                    return fp.values[0];
-                }
-                if xi < xp.values[0] {
+        // Each query point xi runs an independent binary search over the (shared,
+        // read-only) xp/fp plus a fixed-order linear blend, with no cross-point
+        // state, so an indexed parallel map over the query points is bit-for-bit
+        // identical to the serial map for any thread count. Compute-bound at
+        // O(points * log n).
+        let xpv = &xp.values;
+        let fpv = &fp.values;
+        let interp_at = |&xi: &f64| -> f64 {
+            if n == 1 {
+                if xi < xpv[0] {
                     return left_val;
                 }
-                if xi > xp.values[n - 1] {
+                if xi > xpv[0] {
                     return right_val;
                 }
-                // Binary search for interval
-                let mut lo = 0;
-                let mut hi = n - 1;
-                while lo < hi - 1 {
-                    let mid = (lo + hi) / 2;
-                    if xp.values[mid] <= xi {
-                        lo = mid;
-                    } else {
-                        hi = mid;
-                    }
+                return fpv[0];
+            }
+            if xi < xpv[0] {
+                return left_val;
+            }
+            if xi > xpv[n - 1] {
+                return right_val;
+            }
+            // Binary search for interval
+            let mut lo = 0;
+            let mut hi = n - 1;
+            while lo < hi - 1 {
+                let mid = (lo + hi) / 2;
+                if xpv[mid] <= xi {
+                    lo = mid;
+                } else {
+                    hi = mid;
                 }
-                let t = (xi - xp.values[lo]) / (xp.values[hi] - xp.values[lo]);
-                fp.values[lo] * (1.0 - t) + fp.values[hi] * t
-            })
-            .collect();
+            }
+            let t = (xi - xpv[lo]) / (xpv[hi] - xpv[lo]);
+            fpv[lo] * (1.0 - t) + fpv[hi] * t
+        };
+        const INTERP_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+        let values: Vec<f64> = if x.values.len() >= INTERP_PARALLEL_MIN_ELEMS
+            && n >= 2
+            && rayon::current_num_threads() >= 2
+        {
+            x.values.par_iter().map(interp_at).collect()
+        } else {
+            x.values.iter().map(interp_at).collect()
+        };
 
         let shape = x.shape.clone();
         Ok(Self {
@@ -41061,6 +41073,58 @@ print(json.dumps(payload))
                 );
             }
         }
+    }
+
+    #[test]
+    fn interp_parallel_matches_serial_reference() {
+        // Parallel interp (query points above threshold) must be bit-for-bit
+        // identical to a serial per-point binary-search + linear blend. 8192 query
+        // points (> 1<<12) with a 257-point table engages the parallel path; include
+        // out-of-range points on both ends to lock the left/right fill branches.
+        let n = 257usize;
+        let xp: Vec<f64> = (0..n).map(|i| (i as f64) * 0.25 - 10.0).collect();
+        let fp: Vec<f64> = (0..n)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 31.0 - 100.0)
+            .collect();
+        let npts = 8192usize;
+        let xs: Vec<f64> = (0..npts)
+            .map(|i| (((i as u64).wrapping_mul(40503).wrapping_add(3) % 7000) as f64) / 100.0 - 15.0)
+            .collect();
+        let xparr = UFuncArray::new(vec![n], xp.clone(), DType::F64).expect("xp");
+        let fparr = UFuncArray::new(vec![n], fp.clone(), DType::F64).expect("fp");
+        let xarr = UFuncArray::new(vec![npts], xs.clone(), DType::F64).expect("x");
+        let out = UFuncArray::interp(&xarr, &xparr, &fparr).expect("interp");
+
+        let left_val = fp[0];
+        let right_val = fp[n - 1];
+        let expected: Vec<f64> = xs
+            .iter()
+            .map(|&xi| {
+                if xi < xp[0] {
+                    return left_val;
+                }
+                if xi > xp[n - 1] {
+                    return right_val;
+                }
+                let mut lo = 0;
+                let mut hi = n - 1;
+                while lo < hi - 1 {
+                    let mid = (lo + hi) / 2;
+                    if xp[mid] <= xi {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let t = (xi - xp[lo]) / (xp[hi] - xp[lo]);
+                fp[lo] * (1.0 - t) + fp[hi] * t
+            })
+            .collect();
+        assert_eq!(
+            out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "parallel interp diverged from serial reference"
+        );
     }
 
     #[test]
