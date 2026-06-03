@@ -1257,17 +1257,28 @@ impl ArrayStorage {
     #[must_use]
     pub fn to_complex128_vec(&self) -> Vec<(f64, f64)> {
         match self {
+            Self::Bool(v) => v
+                .iter()
+                .map(|&x| (if x { 1.0 } else { 0.0 }, 0.0))
+                .collect(),
+            Self::I8(v) => v.iter().map(|&x| (f64::from(x), 0.0)).collect(),
+            Self::I16(v) => v.iter().map(|&x| (f64::from(x), 0.0)).collect(),
+            Self::I32(v) => v.iter().map(|&x| (f64::from(x), 0.0)).collect(),
+            Self::I64(v) => v.iter().map(|&x| (x as f64, 0.0)).collect(),
+            Self::U8(v) => v.iter().map(|&x| (f64::from(x), 0.0)).collect(),
+            Self::U16(v) => v.iter().map(|&x| (f64::from(x), 0.0)).collect(),
+            Self::U32(v) => v.iter().map(|&x| (f64::from(x), 0.0)).collect(),
+            Self::U64(v) => v.iter().map(|&x| (x as f64, 0.0)).collect(),
+            Self::F16(v) => v.iter().map(|&x| (f64::from(x), 0.0)).collect(),
+            Self::F32(v) => v.iter().map(|&x| (f64::from(x), 0.0)).collect(),
+            Self::F64(v) => v.iter().map(|&x| (x, 0.0)).collect(),
             Self::Complex128(v) => v.clone(),
             Self::Complex64(v) => v
                 .iter()
                 .map(|&(r, i)| (f64::from(r), f64::from(i)))
                 .collect(),
-            _ => {
-                let n = self.len();
-                (0..n)
-                    .map(|i| (self.get_f64(i).unwrap_or(f64::NAN), 0.0))
-                    .collect()
-            }
+            Self::String(v) => vec![(f64::NAN, 0.0); v.len()],
+            Self::Structured(s) => vec![(f64::NAN, 0.0); s.len()],
         }
     }
 
@@ -1619,9 +1630,24 @@ mod tests {
     /// element through `get_f64`, exactly as the previous per-element loop did.
     fn reference_to_f64_vec(s: &ArrayStorage) -> Vec<f64> {
         let n = s.len();
-        (0..n)
-            .map(|i| s.get_f64(i).unwrap_or(f64::NAN))
-            .collect()
+        (0..n).map(|i| s.get_f64(i).unwrap_or(f64::NAN)).collect()
+    }
+
+    /// Reference implementation of the pre-optimization `to_complex128_vec`
+    /// fallback: read each element through `get_f64`, then attach zero imaginary
+    /// components. Complex variants are spelled out to match their original
+    /// fast paths.
+    fn reference_to_complex128_vec(s: &ArrayStorage) -> Vec<(f64, f64)> {
+        match s {
+            ArrayStorage::Complex128(v) => v.clone(),
+            ArrayStorage::Complex64(v) => v
+                .iter()
+                .map(|&(r, i)| (f64::from(r), f64::from(i)))
+                .collect(),
+            _ => (0..s.len())
+                .map(|i| (s.get_f64(i).unwrap_or(f64::NAN), 0.0))
+                .collect(),
+        }
     }
 
     /// Fixtures exercising every storage variant with bit-tricky values
@@ -1661,6 +1687,32 @@ mod tests {
             ArrayStorage::Complex64(vec![(-0.0, 9.0), (1.5, -2.0), (f32::INFINITY, 3.0)]),
             ArrayStorage::Complex128(vec![(-0.0, 9.0), (1.25, -2.0), (f64::INFINITY, 3.0)]),
             ArrayStorage::String(vec!["x".into(), "y".into()]),
+        ]
+    }
+
+    fn to_complex128_vec_fixtures() -> Vec<ArrayStorage> {
+        vec![
+            ArrayStorage::Bool(vec![true, false, true, false]),
+            ArrayStorage::I8(vec![i8::MIN, -1, 0, i8::MAX]),
+            ArrayStorage::I16(vec![i16::MIN, -1, 0, i16::MAX]),
+            ArrayStorage::I32(vec![i32::MIN, -1, 0, i32::MAX]),
+            ArrayStorage::I64(vec![i64::MIN, -(1 << 53) - 1, (1 << 53) + 1, i64::MAX]),
+            ArrayStorage::U8(vec![0, 1, 128, u8::MAX]),
+            ArrayStorage::U16(vec![0, 1, 32768, u16::MAX]),
+            ArrayStorage::U32(vec![0, 1, 1 << 24, u32::MAX]),
+            ArrayStorage::U64(vec![0, 1, (1 << 53) + 1, u64::MAX]),
+            ArrayStorage::F16(vec![
+                f16::from_f64(-0.0),
+                f16::from_f64(0.0),
+                f16::from_f64(1.5),
+                f16::from_bits(0x0001),
+            ]),
+            ArrayStorage::F32(vec![-0.0, 0.0, 1.5, f32::from_bits(0x7fc0_0001)]),
+            ArrayStorage::F64(vec![-0.0, 0.0, 1.25, f64::from_bits(0x7ff8_0000_0000_0001)]),
+            ArrayStorage::Complex64(vec![(-0.0, 9.0), (1.5, -2.0), (f32::INFINITY, 3.0)]),
+            ArrayStorage::Complex128(vec![(-0.0, 9.0), (1.25, -2.0), (f64::INFINITY, 3.0)]),
+            ArrayStorage::String(vec!["x".into(), "y".into()]),
+            ArrayStorage::Structured(StructuredStorage::empty_with_len(2)),
         ]
     }
 
@@ -1704,6 +1756,56 @@ mod tests {
         assert_eq!(
             hex,
             "5aef9987814afd65ac759315827f7e56e669682b4dbabd258b6a682cb5483216"
+        );
+    }
+
+    #[test]
+    fn to_complex128_vec_matches_per_element_reference_bit_exact() {
+        for storage in to_complex128_vec_fixtures() {
+            let fast = storage.to_complex128_vec();
+            let reference = reference_to_complex128_vec(&storage);
+            assert_eq!(
+                fast.len(),
+                reference.len(),
+                "length mismatch for {:?}",
+                storage.dtype()
+            );
+            for (idx, ((ar, ai), (br, bi))) in fast.iter().zip(reference.iter()).enumerate() {
+                assert_eq!(
+                    ar.to_bits(),
+                    br.to_bits(),
+                    "real bit mismatch at {idx} for {:?}",
+                    storage.dtype()
+                );
+                assert_eq!(
+                    ai.to_bits(),
+                    bi.to_bits(),
+                    "imag bit mismatch at {idx} for {:?}",
+                    storage.dtype()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn to_complex128_vec_golden_sha256() {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for storage in to_complex128_vec_fixtures() {
+            for (real, imag) in storage.to_complex128_vec() {
+                hasher.update(real.to_bits().to_le_bytes());
+                hasher.update(imag.to_bits().to_le_bytes());
+            }
+        }
+        let digest = hasher.finalize();
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut hex, "{byte:02x}");
+        }
+        assert_eq!(
+            hex,
+            "29f7120d926d18e42c0012d64a502efbfc0f32740b6148b402c6a8d3f9ed0a60"
         );
     }
 

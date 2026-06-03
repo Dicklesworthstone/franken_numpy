@@ -171,23 +171,49 @@ fn bench_to_f64_vec(c: &mut Criterion) {
     let size = 100_000usize;
 
     let f64_storage = ArrayStorage::F64((0..size).map(|x| x as f64 * 0.5).collect());
+    group.bench_function("f64", |b| b.iter(|| black_box(&f64_storage).to_f64_vec()));
+
+    let f32_storage = ArrayStorage::F32((0..size).map(|x| x as f32 * 0.5).collect());
+    group.bench_function("f32", |b| b.iter(|| black_box(&f32_storage).to_f64_vec()));
+
+    let i32_storage = ArrayStorage::I32((0..size as i32).collect());
+    group.bench_function("i32", |b| b.iter(|| black_box(&i32_storage).to_f64_vec()));
+
+    let i64_storage = ArrayStorage::I64((0..size as i64).collect());
+    group.bench_function("i64", |b| b.iter(|| black_box(&i64_storage).to_f64_vec()));
+
+    group.finish();
+}
+
+fn bench_to_complex128_vec(c: &mut Criterion) {
+    let mut group = c.benchmark_group("to_complex128_vec");
+
+    let size = 100_000usize;
+
+    let f64_storage = ArrayStorage::F64((0..size).map(|x| x as f64 * 0.5).collect());
     group.bench_function("f64", |b| {
-        b.iter(|| black_box(&f64_storage).to_f64_vec())
+        b.iter(|| black_box(&f64_storage).to_complex128_vec())
     });
 
     let f32_storage = ArrayStorage::F32((0..size).map(|x| x as f32 * 0.5).collect());
     group.bench_function("f32", |b| {
-        b.iter(|| black_box(&f32_storage).to_f64_vec())
+        b.iter(|| black_box(&f32_storage).to_complex128_vec())
     });
 
     let i32_storage = ArrayStorage::I32((0..size as i32).collect());
     group.bench_function("i32", |b| {
-        b.iter(|| black_box(&i32_storage).to_f64_vec())
+        b.iter(|| black_box(&i32_storage).to_complex128_vec())
     });
 
     let i64_storage = ArrayStorage::I64((0..size as i64).collect());
     group.bench_function("i64", |b| {
-        b.iter(|| black_box(&i64_storage).to_f64_vec())
+        b.iter(|| black_box(&i64_storage).to_complex128_vec())
+    });
+
+    let complex128_storage =
+        ArrayStorage::Complex128((0..size).map(|x| (x as f64, -(x as f64))).collect());
+    group.bench_function("complex128", |b| {
+        b.iter(|| black_box(&complex128_storage).to_complex128_vec())
     });
 
     group.finish();
@@ -235,6 +261,7 @@ criterion_group!(
     bench_dtype_parse,
     bench_array_storage_cast,
     bench_to_f64_vec,
+    bench_to_complex128_vec,
     bench_array_storage_get_set,
 );
 
