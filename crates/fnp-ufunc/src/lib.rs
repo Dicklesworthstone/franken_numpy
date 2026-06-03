@@ -22547,32 +22547,48 @@ impl UFuncArray {
                 let strides = c_strides_elems(&self.shape);
                 let out_shape = reduced_shape(&self.shape, ax, false);
                 let outer_count = self.values.len() / axis_len;
-                let mut out_values = Vec::with_capacity(outer_count);
 
-                for outer in 0..outer_count {
+                // Each output element is a pure function of its `outer` index: derive
+                // the lane's base offset from the coordinate decomposition, gather the
+                // strided lane, drop NaNs, sort, and interpolate the 0.5 quantile. The
+                // per-lane work is deterministic and lane-independent, so an indexed
+                // parallel map over `outer` is bit-for-bit identical to the serial loop
+                // for any thread count (and works for any axis, not just the last).
+                let strides_ref = &strides;
+                let shape_ref = &self.shape;
+                let values_ref = &self.values;
+                let compute_outer = move |outer: usize| -> f64 {
                     let mut remainder = outer;
                     let mut base_flat = 0usize;
-                    for (d, (&_s, &stride)) in self.shape.iter().zip(strides.iter()).enumerate() {
+                    for (d, (&_s, &stride)) in shape_ref.iter().zip(strides_ref.iter()).enumerate() {
                         if d == ax {
                             continue;
                         }
                         let outer_stride = if d < ax {
-                            strides[d] / axis_len
+                            strides_ref[d] / axis_len
                         } else {
-                            strides[d]
+                            strides_ref[d]
                         };
                         let coord = remainder / outer_stride;
                         remainder %= outer_stride;
                         base_flat += coord * stride;
                     }
                     let mut lane: Vec<f64> = (0..axis_len)
-                        .map(|k| self.values[base_flat + k * strides[ax]])
+                        .map(|k| values_ref[base_flat + k * strides_ref[ax]])
                         .filter(|v| !v.is_nan())
                         .collect();
                     lane.sort_by(|a, b| a.total_cmp(b));
-                    let median = interpolate_percentile(&lane, 0.5);
-                    out_values.push(median);
-                }
+                    interpolate_percentile(&lane, 0.5)
+                };
+                const NANMEDIAN_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                let out_values: Vec<f64> = if outer_count >= 2
+                    && self.values.len() >= NANMEDIAN_PARALLEL_MIN_ELEMS
+                    && rayon::current_num_threads() >= 2
+                {
+                    (0..outer_count).into_par_iter().map(compute_outer).collect()
+                } else {
+                    (0..outer_count).map(compute_outer).collect()
+                };
                 Ok(Self {
                     shape: out_shape,
                     values: out_values,
@@ -40920,6 +40936,64 @@ print(json.dumps(payload))
                     exp.to_bits(),
                     "parallel last-axis median lane {r} diverged from serial reference"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn nanmedian_axis_parallel_matches_serial_reference() {
+        // nanmedian above the parallel threshold runs an indexed parallel map over
+        // the output lanes (any axis, strided gather). It must be bit-identical to a
+        // serial per-lane NaN-drop + sort + 0.5-interpolate. Exercise both a strided
+        // (middle) axis and the contiguous last axis, with scattered NaNs.
+        let (d0, d1, d2) = (24usize, 23usize, 31usize);
+        let mut data: Vec<f64> = (0..d0 * d1 * d2)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
+            .collect();
+        for i in (0..data.len()).step_by(13) {
+            data[i] = f64::NAN;
+        }
+        let arr = UFuncArray::new(vec![d0, d1, d2], data.clone(), DType::F64).expect("arr");
+        let strides = [d1 * d2, d2, 1usize];
+
+        for ax in [1isize, 2isize] {
+            let axu = ax as usize;
+            let axis_len = [d0, d1, d2][axu];
+            let out = arr.nanmedian(Some(ax)).expect("nanmedian");
+            let outer_count = data.len() / axis_len;
+            for outer in 0..outer_count {
+                // Reproduce the base-offset decomposition serially.
+                let mut remainder = outer;
+                let mut base_flat = 0usize;
+                for d in 0..3 {
+                    if d == axu {
+                        continue;
+                    }
+                    let outer_stride = if d < axu {
+                        strides[d] / axis_len
+                    } else {
+                        strides[d]
+                    };
+                    let coord = remainder / outer_stride;
+                    remainder %= outer_stride;
+                    base_flat += coord * strides[d];
+                }
+                let mut lane: Vec<f64> = (0..axis_len)
+                    .map(|k| data[base_flat + k * strides[axu]])
+                    .filter(|v| !v.is_nan())
+                    .collect();
+                lane.sort_by(|a, b| a.total_cmp(b));
+                let exp = interpolate_percentile(&lane, 0.5);
+                let got = out.values()[outer];
+                if exp.is_nan() {
+                    assert!(got.is_nan(), "ax={ax} outer {outer} expected NaN, got {got}");
+                } else {
+                    assert_eq!(
+                        got.to_bits(),
+                        exp.to_bits(),
+                        "parallel nanmedian ax={ax} outer {outer} diverged from serial"
+                    );
+                }
             }
         }
     }
