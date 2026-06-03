@@ -18,6 +18,7 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
+use rayon::prelude::*;
 
 /// Result of `lstsq_svd`: `(x, residuals, rank, singular_values)`.
 pub type LstsqResult = (Vec<f64>, Vec<f64>, usize, Vec<f64>);
@@ -4711,6 +4712,47 @@ fn parse_batched_square(shape: &[usize]) -> Result<(usize, usize), LinAlgError> 
     Ok((batch, n))
 }
 
+/// Minimum *per-lane* size (scalar f64 elements per matrix) above which the
+/// independent kernels are worth dispatching across the rayon pool. The kernels
+/// are O(n³) in compute but carry fixed per-call overhead (workspace alloc,
+/// shape validation); for small matrices that overhead dominates and the
+/// allocator becomes the bottleneck across threads, so parallelizing tiny lanes
+/// is neutral-to-negative. Gating on per-lane size (≈ n ≥ 128 for square
+/// matrices) keeps the parallel path on the compute-bound regime where the
+/// O(n³) work dwarfs overhead and speedup is near-linear in cores.
+const BATCH_PARALLEL_MIN_LANE_ELEMS: usize = 1 << 14;
+
+/// Decide whether a batch of `batch` matrices, each `per_lane_elems` scalars,
+/// should run across the rayon pool: at least two lanes, at least two worker
+/// threads, and a per-lane matrix large enough that compute dominates the fixed
+/// per-call overhead.
+#[inline]
+fn batch_should_parallelize(batch: usize, per_lane_elems: usize) -> bool {
+    batch >= 2
+        && rayon::current_num_threads() >= 2
+        && per_lane_elems >= BATCH_PARALLEL_MIN_LANE_ELEMS
+}
+
+/// Run an independent per-lane kernel `f` over `0..batch`, collecting results in
+/// strict lane order. The lanes are fully independent (each touches a disjoint
+/// sub-matrix and shares no mutable state), so the parallel path produces
+/// bit-for-bit identical output to the serial path. Error behavior matches the
+/// serial loop exactly: the parallel branch first collects every lane's
+/// `Result` in order, then folds them serially so the returned error is the one
+/// from the lowest-indexed failing lane — identical to a serial `?`-loop.
+fn batch_map_lanes<T, F>(batch: usize, per_lane_elems: usize, f: F) -> Result<Vec<T>, LinAlgError>
+where
+    T: Send,
+    F: Fn(usize) -> Result<T, LinAlgError> + Send + Sync,
+{
+    if batch_should_parallelize(batch, per_lane_elems) {
+        let lanes: Vec<Result<T, LinAlgError>> = (0..batch).into_par_iter().map(f).collect();
+        lanes.into_iter().collect()
+    } else {
+        (0..batch).map(f).collect()
+    }
+}
+
 /// Batched matrix inversion: inv on (..., n, n) → (..., n, n).
 pub fn batch_inv(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError> {
     let (batch, n) = parse_batched_square(shape)?;
@@ -4720,11 +4762,12 @@ pub fn batch_inv(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
             "batch_inv: data length does not match shape",
         ));
     }
+    let lanes = batch_map_lanes(batch, mat_size, |b| {
+        inv_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
+    })?;
     let mut result = Vec::with_capacity(batch * mat_size);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        let inv = inv_nxn(sub, n)?;
-        result.extend_from_slice(&inv);
+    for lane in &lanes {
+        result.extend_from_slice(lane);
     }
     Ok(result)
 }
@@ -4738,12 +4781,9 @@ pub fn batch_det(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
             "batch_det: data length does not match shape",
         ));
     }
-    let mut result = Vec::with_capacity(batch);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        result.push(det_nxn(sub, n)?);
-    }
-    Ok(result)
+    batch_map_lanes(batch, mat_size, |b| {
+        det_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
+    })
 }
 
 /// Batched slogdet: slogdet on (..., n, n) → (signs: ..., log_abs_dets: ...).
@@ -4755,11 +4795,12 @@ pub fn batch_slogdet(data: &[f64], shape: &[usize]) -> Result<(Vec<f64>, Vec<f64
             "batch_slogdet: data length does not match shape",
         ));
     }
+    let lanes = batch_map_lanes(batch, mat_size, |b| {
+        slogdet_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
+    })?;
     let mut signs = Vec::with_capacity(batch);
     let mut logabsdets = Vec::with_capacity(batch);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        let (sign, logabsdet) = slogdet_nxn(sub, n)?;
+    for (sign, logabsdet) in lanes {
         signs.push(sign);
         logabsdets.push(logabsdet);
     }
@@ -4833,19 +4874,20 @@ pub fn batch_solve(
         ));
     }
 
-    let mut result = Vec::with_capacity(batch * rhs_width);
-    for idx in 0..batch {
+    let lanes = batch_map_lanes(batch, mat_size + rhs_width, |idx| {
         let a_idx = if a_batch == 1 { 0 } else { idx };
         let b_idx = if b_batch == 1 { 0 } else { idx };
         let a_sub = &a[a_idx * mat_size..(a_idx + 1) * mat_size];
         let b_sub = &b[b_idx * rhs_width..(b_idx + 1) * rhs_width];
         if vector_rhs {
-            let x = solve_nxn(a_sub, b_sub, n)?;
-            result.extend_from_slice(&x);
+            solve_nxn(a_sub, b_sub, n)
         } else {
-            let x = solve_nxn_multi(a_sub, b_sub, n, rhs_cols)?;
-            result.extend_from_slice(&x);
+            solve_nxn_multi(a_sub, b_sub, n, rhs_cols)
         }
+    })?;
+    let mut result = Vec::with_capacity(batch * rhs_width);
+    for x in &lanes {
+        result.extend_from_slice(x);
     }
     Ok(result)
 }
@@ -4859,11 +4901,12 @@ pub fn batch_eigvalsh(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgE
             "batch_eigvalsh: data length does not match shape",
         ));
     }
+    let lanes = batch_map_lanes(batch, mat_size, |b| {
+        eigvalsh_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
+    })?;
     let mut result = Vec::with_capacity(batch * n);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        let eigvals = eigvalsh_nxn(sub, n)?;
-        result.extend_from_slice(&eigvals);
+    for eigvals in &lanes {
+        result.extend_from_slice(eigvals);
     }
     Ok(result)
 }
@@ -4877,13 +4920,14 @@ pub fn batch_eigh(data: &[f64], shape: &[usize]) -> Result<(Vec<f64>, Vec<f64>),
             "batch_eigh: data length does not match shape",
         ));
     }
+    let lanes = batch_map_lanes(batch, mat_size, |b| {
+        eigh_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
+    })?;
     let mut eigenvalues = Vec::with_capacity(batch * n);
     let mut eigenvectors = Vec::with_capacity(batch * mat_size);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        let (vals, vecs) = eigh_nxn(sub, n)?;
-        eigenvalues.extend_from_slice(&vals);
-        eigenvectors.extend_from_slice(&vecs);
+    for (vals, vecs) in &lanes {
+        eigenvalues.extend_from_slice(vals);
+        eigenvectors.extend_from_slice(vecs);
     }
     Ok((eigenvalues, eigenvectors))
 }
@@ -4897,11 +4941,12 @@ pub fn batch_eig(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
             "batch_eig: data length does not match shape",
         ));
     }
+    let lanes = batch_map_lanes(batch, mat_size, |b| {
+        eig_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
+    })?;
     let mut result = Vec::with_capacity(batch * n * 2);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        let eigvals = eig_nxn(sub, n)?;
-        result.extend_from_slice(&eigvals);
+    for eigvals in &lanes {
+        result.extend_from_slice(eigvals);
     }
     Ok(result)
 }
@@ -4916,11 +4961,12 @@ pub fn batch_svd(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
             "batch_svd: data length does not match shape",
         ));
     }
+    let lanes = batch_map_lanes(batch, mat_size, |b| {
+        svd_mxn(&data[b * mat_size..(b + 1) * mat_size], m, n)
+    })?;
     let mut result = Vec::with_capacity(batch * k);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        let sigmas = svd_mxn(sub, m, n)?;
-        result.extend_from_slice(&sigmas);
+    for sigmas in &lanes {
+        result.extend_from_slice(sigmas);
     }
     Ok(result)
 }
@@ -4935,15 +4981,16 @@ pub fn batch_svd_full(data: &[f64], shape: &[usize]) -> Result<SvdFullResult, Li
             "batch_svd_full: data length does not match shape",
         ));
     }
+    let lanes = batch_map_lanes(batch, mat_size, |b| {
+        svd_mxn_full(&data[b * mat_size..(b + 1) * mat_size], m, n)
+    })?;
     let mut all_u = Vec::with_capacity(batch * m * m);
     let mut all_s = Vec::with_capacity(batch * k);
     let mut all_vt = Vec::with_capacity(batch * n * n);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        let (u, s, vt) = svd_mxn_full(sub, m, n)?;
-        all_u.extend_from_slice(&u);
-        all_s.extend_from_slice(&s);
-        all_vt.extend_from_slice(&vt);
+    for (u, s, vt) in &lanes {
+        all_u.extend_from_slice(u);
+        all_s.extend_from_slice(s);
+        all_vt.extend_from_slice(vt);
     }
     Ok((all_u, all_s, all_vt))
 }
@@ -4957,13 +5004,14 @@ pub fn batch_qr(data: &[f64], shape: &[usize]) -> Result<(Vec<f64>, Vec<f64>), L
             "batch_qr: data length does not match shape",
         ));
     }
+    let lanes = batch_map_lanes(batch, mat_size, |b| {
+        qr_mxn(&data[b * mat_size..(b + 1) * mat_size], m, n)
+    })?;
     let mut all_q = Vec::with_capacity(batch * m * m);
     let mut all_r = Vec::with_capacity(batch * m * n);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        let (q, r) = qr_mxn(sub, m, n)?;
-        all_q.extend_from_slice(&q);
-        all_r.extend_from_slice(&r);
+    for (q, r) in &lanes {
+        all_q.extend_from_slice(q);
+        all_r.extend_from_slice(r);
     }
     Ok((all_q, all_r))
 }
@@ -4977,11 +5025,12 @@ pub fn batch_cholesky(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgE
             "batch_cholesky: data length does not match shape",
         ));
     }
+    let lanes = batch_map_lanes(batch, mat_size, |b| {
+        cholesky_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
+    })?;
     let mut result = Vec::with_capacity(batch * mat_size);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        let chol = cholesky_nxn(sub, n)?;
-        result.extend_from_slice(&chol);
+    for chol in &lanes {
+        result.extend_from_slice(chol);
     }
     Ok(result)
 }
@@ -4999,12 +5048,9 @@ pub fn batch_matrix_norm(
             "batch_matrix_norm: data length does not match shape",
         ));
     }
-    let mut result = Vec::with_capacity(batch);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        result.push(matrix_norm_nxn(sub, m, n, ord)?);
-    }
-    Ok(result)
+    batch_map_lanes(batch, mat_size, |b| {
+        matrix_norm_nxn(&data[b * mat_size..(b + 1) * mat_size], m, n, ord)
+    })
 }
 
 /// Batched matrix rank: rank on (..., m, n) → (...).
@@ -5025,12 +5071,9 @@ pub fn batch_matrix_rank(
             "batch_matrix_rank: data length does not match shape",
         ));
     }
-    let mut result = Vec::with_capacity(batch);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        result.push(matrix_rank_nxn(sub, n, rcond)?);
-    }
-    Ok(result)
+    batch_map_lanes(batch, mat_size, |b| {
+        matrix_rank_nxn(&data[b * mat_size..(b + 1) * mat_size], n, rcond)
+    })
 }
 
 /// Batched trace: trace on (..., n, n) → (...).
@@ -5042,12 +5085,9 @@ pub fn batch_trace(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgErro
             "batch_trace: data length does not match shape",
         ));
     }
-    let mut result = Vec::with_capacity(batch);
-    for b in 0..batch {
-        let sub = &data[b * mat_size..(b + 1) * mat_size];
-        result.push(trace_nxn(sub, n)?);
-    }
-    Ok(result)
+    batch_map_lanes(batch, mat_size, |b| {
+        trace_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
+    })
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -5662,6 +5702,76 @@ mod tests {
 
     fn approx_equal(lhs: f64, rhs: f64, tol: f64) -> bool {
         (lhs - rhs).abs() <= tol
+    }
+
+    #[test]
+    fn batch_lanes_parallel_match_serial_reference_and_golden_sha256() {
+        // Per-lane size (n*n = 128*128 = 16_384) crosses
+        // BATCH_PARALLEL_MIN_LANE_ELEMS so the rayon lane path actually runs on
+        // a multi-core worker. The proof itself is threading-independent: each
+        // lane runs the identical scalar kernel on a disjoint sub-matrix and
+        // results are assembled in lane order, so the parallel output must
+        // equal a hand-written serial reference bit-for-bit.
+        let batch = 16usize;
+        let n = 128usize;
+        let mat_size = n * n;
+        let mut data = Vec::with_capacity(batch * mat_size);
+        for b in 0..batch {
+            let bump = (b % 9) as f64 * 0.5;
+            for i in 0..n {
+                for j in 0..n {
+                    // Symmetric, strongly diagonally dominant => SPD (valid for
+                    // cholesky/eigvalsh) and well-conditioned (valid for inv).
+                    let off = 1.0 / ((i as f64 - j as f64).abs() + 1.0);
+                    data.push(if i == j { n as f64 + bump + 2.0 } else { off });
+                }
+            }
+        }
+        let shape = vec![batch, n, n];
+
+        // Explicit serial reference: same scalar kernel, lane-ordered assembly.
+        let mut inv_ref = Vec::with_capacity(batch * mat_size);
+        let mut chol_ref = Vec::with_capacity(batch * mat_size);
+        let mut eig_ref = Vec::with_capacity(batch * n);
+        for b in 0..batch {
+            let sub = &data[b * mat_size..(b + 1) * mat_size];
+            inv_ref.extend_from_slice(&inv_nxn(sub, n).unwrap());
+            chol_ref.extend_from_slice(&cholesky_nxn(sub, n).unwrap());
+            eig_ref.extend_from_slice(&eigvalsh_nxn(sub, n).unwrap());
+        }
+
+        let inv_out = batch_inv(&data, &shape).unwrap();
+        let chol_out = batch_cholesky(&data, &shape).unwrap();
+        let eig_out = batch_eigvalsh(&data, &shape).unwrap();
+
+        assert_eq!(inv_out.len(), inv_ref.len());
+        assert_eq!(chol_out.len(), chol_ref.len());
+        assert_eq!(eig_out.len(), eig_ref.len());
+        for (a, b) in inv_out.iter().zip(&inv_ref) {
+            assert_eq!(a.to_bits(), b.to_bits(), "batch_inv lane drifted");
+        }
+        for (a, b) in chol_out.iter().zip(&chol_ref) {
+            assert_eq!(a.to_bits(), b.to_bits(), "batch_cholesky lane drifted");
+        }
+        for (a, b) in eig_out.iter().zip(&eig_ref) {
+            assert_eq!(a.to_bits(), b.to_bits(), "batch_eigvalsh lane drifted");
+        }
+
+        // Golden SHA-256 over the concatenated little-endian output bits pins
+        // the exact numeric result against future refactors.
+        let mut hasher = Sha256::new();
+        for v in inv_out.iter().chain(&chol_out).chain(&eig_out) {
+            hasher.update(v.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "6a15922b393172c0bb69c200d57969af56c70246a678b9882bc7307a918adc51",
+            "batch parallel golden digest drifted"
+        );
     }
 
     fn legacy_validate_matrix_shape(shape: &[usize]) -> Result<(usize, usize), LinAlgError> {

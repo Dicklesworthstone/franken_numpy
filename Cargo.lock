@@ -507,6 +507,7 @@ version = "0.1.0"
 dependencies = [
  "criterion",
  "fnp-ndarray",
+ "rayon",
  "sha2",
 ]
 

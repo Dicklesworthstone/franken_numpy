@@ -15,7 +15,8 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
-    cholesky_nxn, det_nxn, eigvalsh_nxn, inv_nxn, matrix_norm_frobenius, qr_nxn, solve_nxn, svd_nxn,
+    batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, det_nxn, eigvalsh_nxn, inv_nxn,
+    matrix_norm_frobenius, qr_nxn, solve_nxn, svd_nxn,
 };
 use std::hint::black_box;
 
@@ -194,6 +195,101 @@ fn bench_norm_frobenius(c: &mut Criterion) {
     group.finish();
 }
 
+// Stacked-matrix ("batched") workloads: NumPy-style leading batch dims. These
+// loop over many independent matrices, the embarrassingly-parallel hot path
+// exercised by np.linalg.{inv,eigvalsh,cholesky} on (..., n, n) arrays.
+
+fn generate_batch_spd(batch: usize, n: usize) -> (Vec<f64>, Vec<usize>) {
+    let mat_size = n * n;
+    let mut data = Vec::with_capacity(batch * mat_size);
+    for b in 0..batch {
+        // Per-lane diagonal perturbation keeps every matrix distinct so the
+        // benchmark measures real work rather than a single cached result.
+        let bump = (b % 7) as f64 * 0.25;
+        for i in 0..n {
+            for j in 0..n {
+                data.push(if i == j {
+                    (n + 1) as f64 + bump
+                } else {
+                    1.0 / ((i as f64 - j as f64).abs() + 1.0)
+                });
+            }
+        }
+    }
+    (data, vec![batch, n, n])
+}
+
+fn generate_batch_invertible(batch: usize, n: usize) -> (Vec<f64>, Vec<usize>) {
+    let mat_size = n * n;
+    let mut data = Vec::with_capacity(batch * mat_size);
+    for b in 0..batch {
+        let bump = (b % 5) as f64 * 0.5;
+        for i in 0..n {
+            for j in 0..n {
+                data.push(if i == j {
+                    (n * 2) as f64 + bump
+                } else {
+                    ((i + j) % 5) as f64 * 0.1
+                });
+            }
+        }
+    }
+    (data, vec![batch, n, n])
+}
+
+fn bench_batch_inv(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_inv");
+
+    // Compute-bound per-lane sizes (n >= 128): O(n^3) work dominates fixed
+    // per-call overhead, the regime where lane parallelism pays.
+    for (batch, n) in [(64usize, 128usize), (16, 256)] {
+        let (data, shape) = generate_batch_invertible(batch, n);
+        let id = format!("{batch}x{n}x{n}");
+        group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {
+            bench.iter(|| {
+                let result = batch_inv(black_box(&data), black_box(shape));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_batch_eigvalsh(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_eigvalsh");
+
+    for (batch, n) in [(64usize, 128usize), (16, 256)] {
+        let (data, shape) = generate_batch_spd(batch, n);
+        let id = format!("{batch}x{n}x{n}");
+        group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {
+            bench.iter(|| {
+                let result = batch_eigvalsh(black_box(&data), black_box(shape));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_batch_cholesky(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_cholesky");
+
+    for (batch, n) in [(64usize, 128usize), (16, 256)] {
+        let (data, shape) = generate_batch_spd(batch, n);
+        let id = format!("{batch}x{n}x{n}");
+        group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {
+            bench.iter(|| {
+                let result = batch_cholesky(black_box(&data), black_box(shape));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_solve,
@@ -204,6 +300,9 @@ criterion_group!(
     bench_svd,
     bench_eigvalsh,
     bench_norm_frobenius,
+    bench_batch_inv,
+    bench_batch_eigvalsh,
+    bench_batch_cholesky,
 );
 
 criterion_main!(benches);

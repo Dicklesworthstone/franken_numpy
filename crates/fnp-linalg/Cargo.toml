@@ -17,6 +17,12 @@ description = "Pure-Rust linear algebra: SVD, QR, Cholesky, eigendecomposition, 
 # before allocating workspace or descending into kernel code.
 fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }
 
+# rayon: data parallelism for the embarrassingly-parallel batched (stacked
+# matrix) paths. Each lane runs an identical, independent scalar kernel on a
+# disjoint sub-matrix, so parallelizing across lanes is bit-for-bit identical
+# to the serial loop while exploiting all cores.
+rayon = { workspace = true }
+
 [dev-dependencies]
 criterion.workspace = true
 sha2 = "0.11.0"
