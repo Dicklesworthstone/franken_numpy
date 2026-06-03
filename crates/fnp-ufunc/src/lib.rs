@@ -17115,14 +17115,31 @@ impl UFuncArray {
         // of bin 1). partition_point on the edges gives the exact
         // numpy semantic: bin = #edges <= v - 1, with the last edge
         // clamped to the final bin so values equal to max land there.
-        let mut counts = vec![0.0f64; bins];
-        for &v in &self.values {
+        // The per-element bin lookup (partition_point over the edges, O(log bins)) is
+        // the expensive part and is independent per element, so it is computed across
+        // the rayon pool; the count accumulation stays serial. Counts are exact
+        // integers, so the tallied result is identical regardless — the parallel map
+        // is order-preserving and the serial fold reproduces the same bin counts
+        // bit-for-bit for any thread count.
+        let bin_of = |&v: &f64| -> usize {
             let count_le = edges.partition_point(|edge| *edge <= v);
-            let mut bin = if count_le == 0 { 0 } else { count_le - 1 };
-            if bin >= bins {
-                bin = bins - 1;
+            let bin = if count_le == 0 { 0 } else { count_le - 1 };
+            if bin >= bins { bins - 1 } else { bin }
+        };
+        const HISTOGRAM_PARALLEL_MIN_ELEMS: usize = 1 << 13;
+        let mut counts = vec![0.0f64; bins];
+        if self.values.len() >= HISTOGRAM_PARALLEL_MIN_ELEMS
+            && bins >= 2
+            && rayon::current_num_threads() >= 2
+        {
+            let bin_indices: Vec<usize> = self.values.par_iter().map(bin_of).collect();
+            for &bin in &bin_indices {
+                counts[bin] += 1.0;
             }
-            counts[bin] += 1.0;
+        } else {
+            for v in &self.values {
+                counts[bin_of(v)] += 1.0;
+            }
         }
 
         let counts_arr = Self {
@@ -41124,6 +41141,43 @@ print(json.dumps(payload))
                 );
             }
         }
+    }
+
+    #[test]
+    fn histogram_parallel_matches_serial_reference() {
+        // Parallel histogram (input above threshold) must produce bin counts
+        // bit-for-bit identical to a serial accumulation. 16384 values (> 1<<13)
+        // into 64 bins engages the parallel path; include values landing exactly on
+        // internal edges to lock the partition_point semantics.
+        let nv = 16384usize;
+        let bins = 64usize;
+        let values: Vec<f64> = (0..nv)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 100000) as f64) / 1000.0)
+            .collect();
+        let arr = UFuncArray::new(vec![nv], values.clone(), DType::F64).expect("v");
+        let (counts, edges) = arr.histogram(bins).expect("histogram");
+        assert_eq!(counts.dtype(), DType::I64);
+        assert_eq!(counts.shape(), &[bins]);
+
+        // Independent serial reference over the same edges.
+        let edge_vals = edges.values();
+        let mut expected = vec![0.0f64; bins];
+        for &v in &values {
+            let count_le = edge_vals.partition_point(|e| *e <= v);
+            let mut bin = if count_le == 0 { 0 } else { count_le - 1 };
+            if bin >= bins {
+                bin = bins - 1;
+            }
+            expected[bin] += 1.0;
+        }
+        assert_eq!(
+            counts.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "parallel histogram diverged from serial reference"
+        );
+        // Total count must equal the input length (no dropped/double-counted values).
+        let total: f64 = counts.values().iter().sum();
+        assert_eq!(total, nv as f64, "histogram total count mismatch");
     }
 
     #[test]
