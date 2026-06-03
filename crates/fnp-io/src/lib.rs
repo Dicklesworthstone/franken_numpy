@@ -1933,14 +1933,14 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
         validate_npz_archive_budget(entry_count, total_uncompressed_bytes, 0)?;
 
         let stored_entry_bytes = &data[data_start..data_end];
-        let npy_bytes = match compression {
+        let npy_bytes: Cow<'_, [u8]> = match compression {
             0 => {
                 if compressed_size != uncompressed_size {
                     return Err(IOError::NpzArchiveContractViolation(
                         "npz: STORE entry has inconsistent compressed/uncompressed sizes",
                     ));
                 }
-                stored_entry_bytes.to_vec()
+                Cow::Borrowed(stored_entry_bytes)
             }
             8 => {
                 // Decode exactly uncompressed_size bytes and ensure the stream ends there.
@@ -1967,7 +1967,7 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
                         ));
                     }
                 }
-                decoded
+                Cow::Owned(decoded)
             }
             _ => {
                 return Err(IOError::NpzArchiveContractViolation(
@@ -1980,13 +1980,13 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
                 "npz: decoded entry length does not match declared uncompressed size",
             ));
         }
-        if crc32_ieee(&npy_bytes) != crc {
+        if crc32_ieee(npy_bytes.as_ref()) != crc {
             return Err(IOError::NpzArchiveContractViolation(
                 "npz: decoded entry CRC-32 does not match central directory",
             ));
         }
 
-        let array = read_npy_bytes(&npy_bytes, allow_pickle)?;
+        let array = read_npy_bytes(npy_bytes.as_ref(), allow_pickle)?;
 
         // Strip .npy suffix from name for user convenience
         let clean_name = file_name
@@ -8140,6 +8140,65 @@ mm.flush()
         assert_eq!(entries[1].array.payload, p_i32.into());
         assert_eq!(entries[2].name, "gamma");
         assert_eq!(entries[2].array.payload, p_bool.as_slice().into());
+    }
+
+    #[test]
+    fn npz_store_reader_multi_array_output_golden_sha256() {
+        let h_f64 = NpyHeader {
+            shape: vec![3],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let p_f64: Vec<u8> = [1.0_f64, -0.0, f64::INFINITY]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect();
+        let h_i32 = NpyHeader {
+            shape: vec![2, 2],
+            fortran_order: true,
+            descr: IOSupportedDType::I32,
+        };
+        let p_i32: Vec<u8> = [7_i32, -3, 0, i32::MAX]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        let h_bool = NpyHeader {
+            shape: vec![4],
+            fortran_order: false,
+            descr: IOSupportedDType::Bool,
+        };
+        let p_bool = [1_u8, 0, 1, 1];
+
+        let npz = write_npz_bytes(&[
+            ("alpha", &h_f64, &p_f64),
+            ("beta.npy", &h_i32, &p_i32),
+            ("gamma", &h_bool, &p_bool),
+        ])
+        .expect("write npz");
+        let entries = read_npz_bytes(&npz, false).expect("read npz");
+
+        let mut digest = Sha256::new();
+        for entry in &entries {
+            digest.update(entry.name.as_bytes());
+            digest.update([0]);
+            digest.update(entry.array.header.descr.descr().as_bytes());
+            digest.update([0]);
+            digest.update([u8::from(entry.array.header.fortran_order)]);
+            for dim in &entry.array.header.shape {
+                digest.update(dim.to_le_bytes());
+            }
+            digest.update([0xff]);
+            digest.update(entry.array.payload.as_ref());
+        }
+        let golden_sha256 = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            golden_sha256,
+            "86c1d69d6a1d71433fe94a8c61aba81bac55b97d1e17d24249376897af578828"
+        );
     }
 
     #[test]
