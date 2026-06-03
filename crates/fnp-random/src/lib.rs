@@ -2099,6 +2099,13 @@ fn normal_from_core<R: ZigguratRngCore>(
         .collect()
 }
 
+#[inline]
+fn exponential_from_core<R: ZigguratRngCore>(rng: &mut R, scale: f64, size: usize) -> Vec<f64> {
+    (0..size)
+        .map(|_| scale * sample_ziggurat_exponential_core(rng))
+        .collect()
+}
+
 #[inline(always)]
 fn sample_ziggurat_normal_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) -> f64 {
     use crate::ziggurat::{
@@ -2135,6 +2142,30 @@ fn sample_ziggurat_normal_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) -> f64 
             if (f_prev - f_idx) * rng.ziggurat_next_f64() + f_idx < (-0.5 * x * x).exp() {
                 return x;
             }
+        }
+    }
+}
+
+#[inline(always)]
+fn sample_ziggurat_exponential_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) -> f64 {
+    use crate::ziggurat::{ZIGGURAT_EXP_F, ZIGGURAT_EXP_K, ZIGGURAT_EXP_R, ZIGGURAT_EXP_W};
+
+    loop {
+        let mut ri = rng.ziggurat_next_u64();
+        ri >>= 3;
+        let idx = (ri & 0xFF) as usize;
+        ri >>= 8;
+        let x = ri as f64 * ZIGGURAT_EXP_W[idx];
+        if ri < ZIGGURAT_EXP_K[idx] {
+            return x;
+        }
+        if idx == 0 {
+            return ZIGGURAT_EXP_R - (-rng.ziggurat_next_f64()).ln_1p();
+        }
+        let f_idx = ZIGGURAT_EXP_F[idx];
+        let f_prev = ZIGGURAT_EXP_F[idx - 1];
+        if (f_prev - f_idx) * rng.ziggurat_next_f64() + f_idx < (-x).exp() {
+            return x;
         }
     }
 }
@@ -3741,9 +3772,19 @@ impl Generator {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::ScaleNegative);
         }
-        Ok((0..size)
-            .map(|_| scale * self.sample_ziggurat_exponential())
-            .collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => exponential_from_core(rng, scale, size),
+            RngBackend::Pcg64(rng) => exponential_from_core(rng, scale, size),
+            RngBackend::Pcg64Dxsm(rng) => exponential_from_core(rng, scale, size),
+            RngBackend::Mt19937(rng) => exponential_from_core(rng, scale, size),
+            RngBackend::Philox(rng) => exponential_from_core(rng, scale, size),
+            RngBackend::Sfc64(rng) => exponential_from_core(rng, scale, size),
+        })
     }
 
     /// Generate standard exponential samples (scale=1).
@@ -4464,27 +4505,8 @@ impl Generator {
     /// Ziggurat method for standard exponential, matching NumPy's
     /// `random_standard_exponential` in distributions.c exactly.
     fn sample_ziggurat_exponential(&mut self) -> f64 {
-        use crate::ziggurat::*;
-        loop {
-            let mut ri = self.next_u64();
-            ri >>= 3;
-            let idx = (ri & 0xFF) as usize;
-            ri >>= 8;
-            let x = ri as f64 * ZIGGURAT_EXP_W[idx];
-            if ri < ZIGGURAT_EXP_K[idx] {
-                return x;
-            }
-            // Tail: use log1p(-U) to avoid log(0), matching NumPy GH-13361
-            if idx == 0 {
-                return ZIGGURAT_EXP_R - (-self.next_f64()).ln_1p();
-            }
-            // Wedge test: (F[idx-1] - F[idx]) * U + F[idx] < exp(-x)
-            let f_idx = ZIGGURAT_EXP_F[idx];
-            let f_prev = ZIGGURAT_EXP_F[idx - 1];
-            if (f_prev - f_idx) * self.next_f64() + f_idx < (-x).exp() {
-                return x;
-            }
-        }
+        self.u32_buf_ready = false;
+        sample_ziggurat_exponential_core(&mut self.bit_generator.rng)
     }
 
     /// Beta distribution via gamma sampling.
@@ -9005,6 +9027,48 @@ for child in rng.spawn(n_children):
         assert_eq!(
             digest_hex,
             "9910a06cf85554039f5efa501e18e9ccb27270a3ebd2adfa93eeddc3cd503d61"
+        );
+    }
+
+    #[test]
+    fn exponential_specialized_backend_preserves_scalar_stream_and_digest() {
+        let size = 1024;
+        let scale = 2.5;
+        let mut batch_rng = test_generator();
+        let mut scalar_rng = test_generator();
+
+        assert_eq!(
+            batch_rng.next_f32().to_bits(),
+            scalar_rng.next_f32().to_bits()
+        );
+
+        let batch = batch_rng.exponential(scale, size).unwrap();
+        let scalar: Vec<f64> = (0..size)
+            .map(|_| scale * scalar_rng.sample_ziggurat_exponential())
+            .collect();
+
+        for (index, (actual, expected)) in batch.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "exponential bit pattern changed at index {index}"
+            );
+        }
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "60c18746a30dc8bf7d9ed944f6ffc21e36a9d381921a652afa07b35c871e09f3"
         );
     }
 
