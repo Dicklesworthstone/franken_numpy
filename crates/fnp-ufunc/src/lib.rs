@@ -17925,10 +17925,33 @@ impl UFuncArray {
             let idx = if count_le == 0 { 0 } else { count_le - 1 };
             idx.min(nbins - 1)
         };
-        for (&xv, &yv) in self.values.iter().zip(y.values.iter()) {
-            let xi = bin_of(xe, xv, xbins);
-            let yi = bin_of(ye, yv, ybins);
-            hist[xi * ybins + yi] += 1.0;
+        // The per-element bin lookup (two partition_point searches, O(log bins)) is
+        // the dominant cost and is independent per observation; it runs across the
+        // rayon pool, while the integer-count accumulation stays serial. Counts are
+        // exact integers, so the tallied histogram is identical regardless of order —
+        // bit-for-bit equal to the serial loop for any thread count. Mirrors the 1-D
+        // histogram lever (0b7f1d5d). (franken_numpy-dyd2k)
+        let flat_of = |(&xv, &yv): (&f64, &f64)| -> usize {
+            bin_of(xe, xv, xbins) * ybins + bin_of(ye, yv, ybins)
+        };
+        const HISTOGRAM2D_PARALLEL_MIN_ELEMS: usize = 1 << 13;
+        if self.values.len() >= HISTOGRAM2D_PARALLEL_MIN_ELEMS
+            && xbins * ybins >= 2
+            && rayon::current_num_threads() >= 2
+        {
+            let flat: Vec<usize> = self
+                .values
+                .par_iter()
+                .zip(y.values.par_iter())
+                .map(flat_of)
+                .collect();
+            for &idx in &flat {
+                hist[idx] += 1.0;
+            }
+        } else {
+            for pair in self.values.iter().zip(y.values.iter()) {
+                hist[flat_of(pair)] += 1.0;
+            }
         }
 
         let h = Self {
@@ -18058,27 +18081,41 @@ impl UFuncArray {
             bin_strides[d] = bin_strides[d + 1] * bins_per_dim[d + 1];
         }
 
-        for i in 0..n_obs {
+        // Each observation maps to one flat bin via D independent partition_point
+        // searches (numpy edge semantics; see franken_numpy-40n4u). That lookup is
+        // the dominant cost and is independent per observation, so it runs across the
+        // rayon pool, while the exact-integer-count accumulation stays serial — the
+        // tally is order-independent and therefore bit-for-bit identical to the serial
+        // loop for any thread count. Mirrors the 1-D histogram lever. (dyd2k)
+        let bin_obs = |i: usize| -> Option<usize> {
             let mut flat_idx = 0usize;
-            let mut valid = true;
             for d in 0..n_dim {
                 let v = self.values[i * n_dim + d];
-                // partition_point over this dimension's edge array (numpy semantics),
-                // not floor division which mis-bins internal-edge values under f64
-                // rounding. Consistent with histogram/histogram_full/histogram2d.
-                // (franken_numpy-40n4u)
                 let edges = edges_list[d].values();
                 let count_le = edges.partition_point(|edge| *edge <= v);
                 let idx = if count_le == 0 { 0 } else { count_le - 1 };
                 let idx = idx.min(bins_per_dim[d] - 1);
                 flat_idx += idx * bin_strides[d];
                 if flat_idx >= total_bins {
-                    valid = false;
-                    break;
+                    return None;
                 }
             }
-            if valid {
-                hist[flat_idx] += 1.0;
+            Some(flat_idx)
+        };
+        const HISTOGRAMDD_PARALLEL_MIN_ELEMS: usize = 1 << 13;
+        if n_obs >= 2
+            && n_obs * n_dim >= HISTOGRAMDD_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+        {
+            let flats: Vec<Option<usize>> = (0..n_obs).into_par_iter().map(bin_obs).collect();
+            for idx in flats.into_iter().flatten() {
+                hist[idx] += 1.0;
+            }
+        } else {
+            for i in 0..n_obs {
+                if let Some(idx) = bin_obs(i) {
+                    hist[idx] += 1.0;
+                }
             }
         }
 
@@ -46862,6 +46899,88 @@ print(json.dumps(payload))
         let x = UFuncArray::new(vec![2], vec![0.5, 1.5], DType::F64).unwrap();
         let bins = UFuncArray::new(vec![2], vec![0.0, 1.0], DType::Complex128).unwrap();
         assert!(x.digitize(&bins).is_err());
+    }
+
+    #[test]
+    fn histogram2d_parallel_matches_serial_reference() {
+        // Parallel histogram2d (input above threshold) must produce bin counts
+        // bit-for-bit identical to a serial partition_point accumulation. 16384
+        // points into 32x24 bins engages the parallel path.
+        let n = 16384usize;
+        let (xbins, ybins) = (32usize, 24usize);
+        let xs: Vec<f64> = (0..n)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 100000) as f64) / 1000.0)
+            .collect();
+        let ys: Vec<f64> = (0..n)
+            .map(|i| (((i as u64).wrapping_mul(40503).wrapping_add(7) % 80000) as f64) / 1000.0)
+            .collect();
+        let x = UFuncArray::new(vec![n], xs.clone(), DType::F64).expect("x");
+        let y = UFuncArray::new(vec![n], ys.clone(), DType::F64).expect("y");
+        let (h, xe, ye) = x.histogram2d(&y, xbins, ybins).expect("histogram2d");
+        assert_eq!(h.shape(), &[xbins, ybins]);
+
+        let xev = xe.values();
+        let yev = ye.values();
+        let bin = |edges: &[f64], v: f64, nb: usize| -> usize {
+            let c = edges.partition_point(|e| *e <= v);
+            (if c == 0 { 0 } else { c - 1 }).min(nb - 1)
+        };
+        let mut expected = vec![0.0f64; xbins * ybins];
+        for (&xv, &yv) in xs.iter().zip(ys.iter()) {
+            expected[bin(xev, xv, xbins) * ybins + bin(yev, yv, ybins)] += 1.0;
+        }
+        assert_eq!(
+            h.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "parallel histogram2d diverged from serial reference"
+        );
+        let total: f64 = h.values().iter().sum();
+        assert_eq!(total, n as f64, "histogram2d total count mismatch");
+    }
+
+    #[test]
+    fn histogramdd_parallel_matches_serial_reference() {
+        // Parallel histogramdd (above threshold) must match a serial partition_point
+        // accumulation bin-for-bin. 8192 observations x 3 dims, 6 bins each.
+        let n_obs = 8192usize;
+        let n_dim = 3usize;
+        let bins = [6usize, 6, 6];
+        let data: Vec<f64> = (0..n_obs * n_dim)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 5000) as f64) / 100.0)
+            .collect();
+        let sample = UFuncArray::new(vec![n_obs, n_dim], data.clone(), DType::F64).expect("s");
+        let (h, edges) = sample.histogramdd(&bins).expect("histogramdd");
+        assert_eq!(h.shape(), &bins[..]);
+
+        let total_bins: usize = bins.iter().product();
+        let mut bin_strides = vec![1usize; n_dim];
+        for d in (0..n_dim - 1).rev() {
+            bin_strides[d] = bin_strides[d + 1] * bins[d + 1];
+        }
+        let mut expected = vec![0.0f64; total_bins];
+        for i in 0..n_obs {
+            let mut flat = 0usize;
+            let mut ok = true;
+            for d in 0..n_dim {
+                let v = data[i * n_dim + d];
+                let e = edges[d].values();
+                let c = e.partition_point(|edge| *edge <= v);
+                let idx = (if c == 0 { 0 } else { c - 1 }).min(bins[d] - 1);
+                flat += idx * bin_strides[d];
+                if flat >= total_bins {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                expected[flat] += 1.0;
+            }
+        }
+        assert_eq!(
+            h.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "parallel histogramdd diverged from serial reference"
+        );
     }
 
     #[test]
