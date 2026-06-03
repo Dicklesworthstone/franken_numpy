@@ -17234,12 +17234,24 @@ impl UFuncArray {
         let span = hi - lo;
         let width = span / bins as f64;
 
+        // Bin via partition_point over the precomputed edges, identical to
+        // UFuncArray::histogram and numpy. The naive ((v-lo)/width) as usize floor
+        // drops values on internal edges into the previous bin under f64 rounding
+        // (e.g. (1.2-1.0)/0.2 = 0.9999… → bin 0 instead of bin 1); searching the
+        // actual edge values avoids that and keeps histogram_full consistent with the
+        // basic histogram path. (franken_numpy-40n4u)
+        let mut edges = Vec::with_capacity(bins + 1);
+        for i in 0..=bins {
+            edges.push(lo + i as f64 * width);
+        }
+
         let mut counts = vec![0.0f64; bins];
         for (i, &v) in self.values.iter().enumerate() {
             if !(v >= lo && v <= hi) {
                 continue; // outside range or NaN
             }
-            let idx = ((v - lo) / width) as usize;
+            let count_le = edges.partition_point(|edge| *edge <= v);
+            let idx = if count_le == 0 { 0 } else { count_le - 1 };
             let idx = idx.min(bins - 1);
             let w = weights.map_or(1.0, |wt| wt.values[i]);
             counts[idx] += w;
@@ -17251,11 +17263,6 @@ impl UFuncArray {
             for c in &mut counts {
                 *c /= denom;
             }
-        }
-
-        let mut edges = Vec::with_capacity(bins + 1);
-        for i in 0..=bins {
-            edges.push(lo + i as f64 * width);
         }
 
         Ok((
@@ -41141,6 +41148,46 @@ print(json.dumps(payload))
                 );
             }
         }
+    }
+
+    #[test]
+    fn histogram_full_edge_binning_matches_basic_histogram() {
+        // Regression for franken_numpy-40n4u: histogram_full must bin identically to
+        // the basic (partition_point) histogram for the default no-range/no-weights
+        // case, including values that land exactly on internal bin edges (where the
+        // old floor-division dropped them into the previous bin).
+        let bins = 10usize;
+        // min=0, max=10 -> width=1.0, edges at every integer. Include exact-edge
+        // values 1.0, 2.0, … which floor((v-0)/1.0) handles but FP-scaled ranges do
+        // not; also use a fractional-width case below to exercise the FP path.
+        let data: Vec<f64> = vec![
+            0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 0.5, 1.5, 9.999, 2.0, 2.0,
+        ];
+        let arr = UFuncArray::new(vec![data.len()], data.clone(), DType::F64).expect("a");
+        let (basic_counts, _) = arr.histogram(bins).expect("basic");
+        let (full_counts, _) = arr
+            .histogram_full(bins, None, None, false)
+            .expect("full");
+        assert_eq!(
+            full_counts.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            basic_counts.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "histogram_full diverged from basic histogram binning"
+        );
+
+        // Fractional-width range where floor division mis-bins internal edges:
+        // range [1.0, 2.0], 5 bins -> width 0.2, edges 1.0,1.2,1.4,1.6,1.8,2.0.
+        // Value 1.2 must land in bin 1 (interval [1.2,1.4)), not bin 0.
+        let edge_data: Vec<f64> = vec![1.2, 1.4, 1.6, 1.8];
+        let earr = UFuncArray::new(vec![edge_data.len()], edge_data, DType::F64).expect("e");
+        let (counts, _) = earr
+            .histogram_full(5, Some((1.0, 2.0)), None, false)
+            .expect("full-range");
+        // Each value sits exactly on an internal edge and must occupy its own bin.
+        assert_eq!(
+            counts.values(),
+            &[0.0, 1.0, 1.0, 1.0, 1.0],
+            "histogram_full mis-binned values on internal edges (floor-division bug)"
+        );
     }
 
     #[test]
