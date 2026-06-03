@@ -10059,7 +10059,23 @@ fn tensorinv(py: Python<'_>, a: Py<PyAny>, ind: usize) -> PyResult<Py<PyAny>> {
     }
 
     let array = extract_numeric_array(py, a.bind(py), "tensorinv(a)")?;
-    let result = array.tensorinv(ind).map_err(map_ufunc_error)?;
+    let result = match array.tensorinv(ind) {
+        Ok(result) => result,
+        // numpy raises LinAlgError for the non-square reshape and singular-
+        // matrix cases; our ufunc layer would flatten those to a plain
+        // ValueError. Delegate on error so the exact LinAlgError type and
+        // message match numpy (sibling tensorsolve/inv already do). The
+        // success path stays native.
+        Err(_) => {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("ind", ind)?;
+            return Ok(numpy
+                .getattr("linalg")?
+                .getattr("tensorinv")?
+                .call((a.bind(py),), Some(&kwargs))?
+                .unbind());
+        }
+    };
     build_numpy_array_from_ufunc(py, &result)
 }
 
@@ -39706,7 +39722,31 @@ mod tests {
                     kwargs
                 }),
             )?;
-            assert_array_matches_numpy(actual_ind.bind(py), &expected_ind)
+            assert_array_matches_numpy(actual_ind.bind(py), &expected_ind)?;
+
+            // Error parity: numpy raises LinAlgError (not a plain ValueError)
+            // for a non-square reshape and for a singular matrix.
+            let non_square = numpy.getattr("zeros")?.call1(((2, 3, 6),))?;
+            let actual_err = tensorinv(py, non_square.clone().unbind(), 1).unwrap_err();
+            let expected_err = linalg
+                .call_method(
+                    "tensorinv",
+                    (non_square,),
+                    Some(&{
+                        let kwargs = PyDict::new(py);
+                        kwargs.set_item("ind", 1)?;
+                        kwargs
+                    }),
+                )
+                .unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_err, expected_err)?;
+
+            let singular = numpy.getattr("zeros")?.call1(((2, 2, 2, 2),))?;
+            let actual_sing = tensorinv(py, singular.clone().unbind(), 2).unwrap_err();
+            let expected_sing = linalg.call_method1("tensorinv", (singular,)).unwrap_err();
+            assert_pyerr_matches_numpy(py, actual_sing, expected_sing)?;
+
+            Ok(())
         });
     }
 
