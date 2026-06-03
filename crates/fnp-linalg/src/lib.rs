@@ -2281,15 +2281,17 @@ pub fn svd_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
 
 // ── Eigenvalue infrastructure ─────────────────────────────────────────
 
-/// Reduce symmetric n×n matrix to tridiagonal form via Householder similarity
-/// transformations.  Returns `(diagonal, off_diagonal, Q)` where `A = Q T Q^T`,
-/// `T` has diagonal `d` and off-diagonal `e`, and `Q` is orthogonal (n×n row-major).
-fn tridiag_reduce(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+fn tridiag_reduce_impl(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let mut work = a.to_vec();
-    let mut q = vec![0.0; n * n];
-    for i in 0..n {
-        q[i * n + i] = 1.0;
-    }
+    let mut q = if accumulate_q {
+        let mut q = vec![0.0; n * n];
+        for i in 0..n {
+            q[i * n + i] = 1.0;
+        }
+        q
+    } else {
+        Vec::new()
+    };
 
     let mut v = vec![0.0; n];
     for j in 0..n.saturating_sub(2) {
@@ -2348,14 +2350,16 @@ fn tridiag_reduce(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
             }
         }
         // Accumulate: Q = Q * H
-        for row in 0..n {
-            let mut dot = 0.0;
-            for i in (j + 1)..n {
-                dot += v[i] * q[row * n + i];
-            }
-            let f = scale * dot;
-            for i in (j + 1)..n {
-                q[row * n + i] -= f * v[i];
+        if accumulate_q {
+            for row in 0..n {
+                let mut dot = 0.0;
+                for i in (j + 1)..n {
+                    dot += v[i] * q[row * n + i];
+                }
+                let f = scale * dot;
+                for i in (j + 1)..n {
+                    q[row * n + i] -= f * v[i];
+                }
             }
         }
     }
@@ -2365,6 +2369,18 @@ fn tridiag_reduce(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
         .map(|i| work[i * n + (i + 1)])
         .collect();
     (d, e, q)
+}
+
+/// Reduce symmetric n×n matrix to tridiagonal form via Householder similarity
+/// transformations.  Returns `(diagonal, off_diagonal, Q)` where `A = Q T Q^T`,
+/// `T` has diagonal `d` and off-diagonal `e`, and `Q` is orthogonal (n×n row-major).
+fn tridiag_reduce(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    tridiag_reduce_impl(a, n, true)
+}
+
+fn tridiag_reduce_values(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let (d, e, _) = tridiag_reduce_impl(a, n, false);
+    (d, e)
 }
 
 /// Implicit QR iteration on symmetric tridiagonal `(d, e)` to find eigenvalues.
@@ -2670,7 +2686,7 @@ pub fn eigvalsh_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         return Err(LinAlgError::SpectralConvergenceFailed);
     }
 
-    let (mut d, mut e, _q) = tridiag_reduce(a, n);
+    let (mut d, mut e) = tridiag_reduce_values(a, n);
     tridiag_eig_qr(&mut d, &mut e, None, n);
 
     d.sort_by(|a, b| a.total_cmp(b));
@@ -5623,6 +5639,8 @@ mod tests {
         tensorinv,
         tensorsolve,
         trace_nxn,
+        tridiag_reduce,
+        tridiag_reduce_values,
         validate_backend_bridge,
         validate_cholesky_diagonal,
         validate_matrix_shape,
@@ -7468,6 +7486,61 @@ mod tests {
                 "eigval {k}: got {val}, expected {expected}"
             );
         }
+    }
+
+    #[test]
+    fn eigvalsh_values_only_reduction_matches_full_reduce_bits() {
+        let n = 64;
+        let mut a = vec![0.0; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                a[i * n + j] = if i == j {
+                    (n + 1) as f64
+                } else {
+                    1.0 / ((i as f64 - j as f64).abs() + 1.0)
+                };
+            }
+        }
+
+        let (full_d, full_e, _) = tridiag_reduce(&a, n);
+        let (values_d, values_e) = tridiag_reduce_values(&a, n);
+        assert_eq!(
+            values_d
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            full_d
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "values-only tridiagonal diagonal must match full-Q reduction bits"
+        );
+        assert_eq!(
+            values_e
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            full_e
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "values-only tridiagonal off-diagonal must match full-Q reduction bits"
+        );
+
+        let eigvals = eigvalsh_nxn(&a, n).expect("eigvalsh profile matrix");
+        let mut hasher = Sha256::new();
+        for value in &eigvals {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest,
+            "2cc2fbde85385393816c1ffdbff76188712e0ff7ea6e3a57291557fcdc12ab1c"
+        );
     }
 
     #[test]
