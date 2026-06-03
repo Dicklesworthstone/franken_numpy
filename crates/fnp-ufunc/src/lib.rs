@@ -19300,28 +19300,15 @@ impl UFuncArray {
                 integer_sidecar: None,
             });
         }
-        // FFT along each row
-        let mut re = vec![0.0; rows * cols];
+        // Separable 2-D FFT: transform along each row (axis 1) then each column
+        // (axis 0). Delegating to fftn_along_axis keeps the exact same per-lane
+        // gather/fft_dit/scatter in the same axis order — bit-identical to the
+        // explicit loops — while letting the contiguous row phase (outer_size=rows)
+        // run across the rayon pool.
+        let mut re = self.values[..rows * cols].to_vec();
         let mut im = vec![0.0; rows * cols];
-        for r in 0..rows {
-            let mut row_re: Vec<f64> = (0..cols).map(|c| self.values[r * cols + c]).collect();
-            let mut row_im = vec![0.0; cols];
-            fft_dit(&mut row_re, &mut row_im, false);
-            for c in 0..cols {
-                re[r * cols + c] = row_re[c];
-                im[r * cols + c] = row_im[c];
-            }
-        }
-        // FFT along each column
-        for c in 0..cols {
-            let mut col_re: Vec<f64> = (0..rows).map(|r| re[r * cols + c]).collect();
-            let mut col_im: Vec<f64> = (0..rows).map(|r| im[r * cols + c]).collect();
-            fft_dit(&mut col_re, &mut col_im, false);
-            for r in 0..rows {
-                re[r * cols + c] = col_re[r];
-                im[r * cols + c] = col_im[r];
-            }
-        }
+        fftn_along_axis(&[rows, cols], &mut re, &mut im, 1, false);
+        fftn_along_axis(&[rows, cols], &mut re, &mut im, 0, false);
         // Interleave
         let mut values = Vec::with_capacity(rows * cols * 2);
         for i in 0..rows * cols {
@@ -19362,26 +19349,12 @@ impl UFuncArray {
             re[i] = self.values[i * 2];
             im[i] = self.values[i * 2 + 1];
         }
-        // IFFT along each row
-        for r in 0..rows {
-            let mut row_re: Vec<f64> = (0..cols).map(|c| re[r * cols + c]).collect();
-            let mut row_im: Vec<f64> = (0..cols).map(|c| im[r * cols + c]).collect();
-            fft_dit(&mut row_re, &mut row_im, true);
-            for c in 0..cols {
-                re[r * cols + c] = row_re[c];
-                im[r * cols + c] = row_im[c];
-            }
-        }
-        // IFFT along each column
-        for c in 0..cols {
-            let mut col_re: Vec<f64> = (0..rows).map(|r| re[r * cols + c]).collect();
-            let mut col_im: Vec<f64> = (0..rows).map(|r| im[r * cols + c]).collect();
-            fft_dit(&mut col_re, &mut col_im, true);
-            for r in 0..rows {
-                re[r * cols + c] = col_re[r];
-                im[r * cols + c] = col_im[r];
-            }
-        }
+        // Separable 2-D inverse FFT: transform along each row (axis 1) then each
+        // column (axis 0). Delegating to fftn_along_axis keeps the exact same
+        // per-lane gather/fft_dit/scatter in the same axis order — bit-identical to
+        // the explicit loops — while parallelizing the contiguous row phase.
+        fftn_along_axis(&[rows, cols], &mut re, &mut im, 1, true);
+        fftn_along_axis(&[rows, cols], &mut re, &mut im, 0, true);
         // Interleave
         let mut values = Vec::with_capacity(rows * cols * 2);
         for i in 0..rows * cols {
@@ -40985,6 +40958,83 @@ print(json.dumps(payload))
                     "parallel last-axis median lane {r} diverged from serial reference"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn fft2_ifft2_delegation_matches_explicit_rowcol_reference() {
+        // fft2/ifft2 now delegate to the parallel fftn_along_axis (rows phase then
+        // cols phase). This must be bit-for-bit identical to the original explicit
+        // row-then-column gather/fft_dit/scatter loops. Use rows*cols=5120 (>1<<12)
+        // with rows>=2 so the row phase takes the parallel path.
+        let (rows, cols) = (80usize, 64usize);
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 11.0 - 300.0)
+            .collect();
+
+        // Original explicit reference (rows then cols), shared fft_dit.
+        let explicit = |inverse: bool, init_re: &[f64], init_im: &[f64]| -> (Vec<f64>, Vec<f64>) {
+            let mut re = init_re.to_vec();
+            let mut im = init_im.to_vec();
+            for r in 0..rows {
+                let mut row_re: Vec<f64> = (0..cols).map(|c| re[r * cols + c]).collect();
+                let mut row_im: Vec<f64> = (0..cols).map(|c| im[r * cols + c]).collect();
+                fft_dit(&mut row_re, &mut row_im, inverse);
+                for c in 0..cols {
+                    re[r * cols + c] = row_re[c];
+                    im[r * cols + c] = row_im[c];
+                }
+            }
+            for c in 0..cols {
+                let mut col_re: Vec<f64> = (0..rows).map(|r| re[r * cols + c]).collect();
+                let mut col_im: Vec<f64> = (0..rows).map(|r| im[r * cols + c]).collect();
+                fft_dit(&mut col_re, &mut col_im, inverse);
+                for r in 0..rows {
+                    re[r * cols + c] = col_re[r];
+                    im[r * cols + c] = col_im[r];
+                }
+            }
+            (re, im)
+        };
+
+        // Forward: fft2 on real input.
+        let arr = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).expect("arr");
+        let out = arr.fft2().expect("fft2");
+        let (ref_re, ref_im) = explicit(false, &data, &vec![0.0; rows * cols]);
+        for i in 0..rows * cols {
+            assert_eq!(
+                out.values()[i * 2].to_bits(),
+                ref_re[i].to_bits(),
+                "fft2 re[{i}] diverged from explicit row/col reference"
+            );
+            assert_eq!(
+                out.values()[i * 2 + 1].to_bits(),
+                ref_im[i].to_bits(),
+                "fft2 im[{i}] diverged from explicit row/col reference"
+            );
+        }
+
+        // Inverse: ifft2 on interleaved complex (use fft2's output as input).
+        let cin = out; // shape [rows, cols, 2]
+        let iout = cin.ifft2().expect("ifft2");
+        let mut in_re = vec![0.0; rows * cols];
+        let mut in_im = vec![0.0; rows * cols];
+        for i in 0..rows * cols {
+            in_re[i] = cin.values()[i * 2];
+            in_im[i] = cin.values()[i * 2 + 1];
+        }
+        let (iref_re, iref_im) = explicit(true, &in_re, &in_im);
+        for i in 0..rows * cols {
+            assert_eq!(
+                iout.values()[i * 2].to_bits(),
+                iref_re[i].to_bits(),
+                "ifft2 re[{i}] diverged from explicit row/col reference"
+            );
+            assert_eq!(
+                iout.values()[i * 2 + 1].to_bits(),
+                iref_im[i].to_bits(),
+                "ifft2 im[{i}] diverged from explicit row/col reference"
+            );
         }
     }
 
