@@ -17623,19 +17623,37 @@ impl UFuncArray {
             })
             .collect();
 
-        // Compute covariance matrix
+        // Compute covariance matrix. Each entry cov[i,j] = sum_k (x_ik-mean_i)
+        // (x_jk-mean_j) / fact is independent, and the inner k-sum runs in fixed
+        // order. The serial version filled the upper triangle and mirrored; because
+        // IEEE multiply is commutative (per-term (a*b)==(b*a)) and the k order is
+        // identical, computing the full matrix entry-by-entry (cov[i,j] and cov[j,i]
+        // each from scratch) is bit-for-bit identical to the mirrored fill. Output
+        // rows are contiguous and disjoint, so par_chunks_mut over rows is bit-exact
+        // for any thread count. Compute-bound at O(nvars^2 * nobs) (not GEMM).
         let mut cov_values = vec![0.0; nvars * nvars];
-        for i in 0..nvars {
-            for j in i..nvars {
+        let vals = &self.values;
+        let means_ref = &means;
+        let fill_row = |(i, row): (usize, &mut [f64])| {
+            for (j, slot) in row.iter_mut().enumerate() {
                 let mut s = 0.0;
                 for k in 0..nobs {
-                    s += (self.values[i * nobs + k] - means[i])
-                        * (self.values[j * nobs + k] - means[j]);
+                    s += (vals[i * nobs + k] - means_ref[i]) * (vals[j * nobs + k] - means_ref[j]);
                 }
-                let c = if fact == 0.0 { f64::NAN } else { s / fact };
-                cov_values[i * nvars + j] = c;
-                cov_values[j * nvars + i] = c;
+                *slot = if fact == 0.0 { f64::NAN } else { s / fact };
             }
+        };
+        const COV_PARALLEL_MIN_FLOPS: usize = 1 << 16;
+        if nvars >= 2
+            && nvars.saturating_mul(nvars).saturating_mul(nobs) >= COV_PARALLEL_MIN_FLOPS
+            && rayon::current_num_threads() >= 2
+        {
+            cov_values
+                .par_chunks_mut(nvars)
+                .enumerate()
+                .for_each(fill_row);
+        } else {
+            cov_values.chunks_mut(nvars).enumerate().for_each(fill_row);
         }
 
         let out_shape = if self.shape.len() == 1 {
@@ -41091,6 +41109,43 @@ print(json.dumps(payload))
                 );
             }
         }
+    }
+
+    #[test]
+    fn cov_parallel_matches_serial_mirror_reference() {
+        // Parallel cov must be bit-for-bit identical to the original serial
+        // upper-triangle + mirror computation. Use nvars=40, nobs=50 so
+        // nvars^2*nobs=80000 > 1<<16 and the row split parallelizes.
+        let (nvars, nobs) = (40usize, 50usize);
+        let data: Vec<f64> = (0..nvars * nobs)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 19.0 - 250.0)
+            .collect();
+        let arr = UFuncArray::new(vec![nvars, nobs], data.clone(), DType::F64).expect("m");
+        let out = arr.cov().expect("cov");
+        assert_eq!(out.shape(), &[nvars, nvars]);
+
+        // Original serial reference: per-row mean, upper triangle + mirror.
+        let means: Vec<f64> = (0..nvars)
+            .map(|r| data[r * nobs..(r + 1) * nobs].iter().sum::<f64>() / nobs as f64)
+            .collect();
+        let fact = (nobs - 1) as f64;
+        let mut expected = vec![0.0f64; nvars * nvars];
+        for i in 0..nvars {
+            for j in i..nvars {
+                let mut s = 0.0;
+                for k in 0..nobs {
+                    s += (data[i * nobs + k] - means[i]) * (data[j * nobs + k] - means[j]);
+                }
+                let c = s / fact;
+                expected[i * nvars + j] = c;
+                expected[j * nvars + i] = c;
+            }
+        }
+        assert_eq!(
+            out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "parallel cov diverged from serial mirror reference"
+        );
     }
 
     #[test]
