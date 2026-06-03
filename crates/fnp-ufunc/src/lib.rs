@@ -11221,6 +11221,14 @@ impl UFuncArray {
             }
         }
         let use_right = side == "right";
+        // Each needle runs an independent binary search returning an index; there is
+        // no cross-query state and the output is integer (no FP accumulation), so an
+        // indexed parallel map over the needles is bit-for-bit identical to the
+        // serial map for any thread count. Compute-bound at O(queries * log n).
+        const SEARCHSORTED_PARALLEL_MIN_QUERIES: usize = 1 << 12;
+        let want_parallel = values.values.len() >= SEARCHSORTED_PARALLEL_MIN_QUERIES
+            && self.values.len() >= 2
+            && rayon::current_num_threads() >= 2;
         if let (Some(data_sidecar), Some(needle_sidecar)) = (
             self.synthesized_integer_sidecar("searchsorted")?,
             values.exact_integer_sidecar("searchsorted")?,
@@ -11228,61 +11236,65 @@ impl UFuncArray {
             let out_values = match (data_sidecar, needle_sidecar) {
                 (IntegerSidecar::I64(data), IntegerSidecar::I64(needles)) => {
                     let n = data.len();
-                    needles
-                        .iter()
-                        .map(|needle| {
-                            let mut lo = 0usize;
-                            let mut hi = n;
-                            while lo < hi {
-                                let mid = lo + (hi - lo) / 2;
-                                let mid_val = if let Some(s) = sorter {
-                                    data[s[mid]]
-                                } else {
-                                    data[mid]
-                                };
-                                let go_right = if use_right {
-                                    mid_val <= *needle
-                                } else {
-                                    mid_val < *needle
-                                };
-                                if go_right {
-                                    lo = mid + 1;
-                                } else {
-                                    hi = mid;
-                                }
+                    let search = |needle: &i64| -> f64 {
+                        let mut lo = 0usize;
+                        let mut hi = n;
+                        while lo < hi {
+                            let mid = lo + (hi - lo) / 2;
+                            let mid_val = if let Some(s) = sorter {
+                                data[s[mid]]
+                            } else {
+                                data[mid]
+                            };
+                            let go_right = if use_right {
+                                mid_val <= *needle
+                            } else {
+                                mid_val < *needle
+                            };
+                            if go_right {
+                                lo = mid + 1;
+                            } else {
+                                hi = mid;
                             }
-                            lo as f64
-                        })
-                        .collect()
+                        }
+                        lo as f64
+                    };
+                    if want_parallel {
+                        needles.par_iter().map(search).collect()
+                    } else {
+                        needles.iter().map(search).collect()
+                    }
                 }
                 (IntegerSidecar::U64(data), IntegerSidecar::U64(needles)) => {
                     let n = data.len();
-                    needles
-                        .iter()
-                        .map(|needle| {
-                            let mut lo = 0usize;
-                            let mut hi = n;
-                            while lo < hi {
-                                let mid = lo + (hi - lo) / 2;
-                                let mid_val = if let Some(s) = sorter {
-                                    data[s[mid]]
-                                } else {
-                                    data[mid]
-                                };
-                                let go_right = if use_right {
-                                    mid_val <= *needle
-                                } else {
-                                    mid_val < *needle
-                                };
-                                if go_right {
-                                    lo = mid + 1;
-                                } else {
-                                    hi = mid;
-                                }
+                    let search = |needle: &u64| -> f64 {
+                        let mut lo = 0usize;
+                        let mut hi = n;
+                        while lo < hi {
+                            let mid = lo + (hi - lo) / 2;
+                            let mid_val = if let Some(s) = sorter {
+                                data[s[mid]]
+                            } else {
+                                data[mid]
+                            };
+                            let go_right = if use_right {
+                                mid_val <= *needle
+                            } else {
+                                mid_val < *needle
+                            };
+                            if go_right {
+                                lo = mid + 1;
+                            } else {
+                                hi = mid;
                             }
-                            lo as f64
-                        })
-                        .collect()
+                        }
+                        lo as f64
+                    };
+                    if want_parallel {
+                        needles.par_iter().map(search).collect()
+                    } else {
+                        needles.iter().map(search).collect()
+                    }
                 }
                 _ => Vec::new(),
             };
@@ -11298,34 +11310,35 @@ impl UFuncArray {
         let data = &self.values;
         let n = data.len();
 
-        let out_values = values
-            .values
-            .iter()
-            .map(|needle| {
-                let mut lo = 0usize;
-                let mut hi = n;
-                while lo < hi {
-                    let mid = lo + (hi - lo) / 2;
-                    let mid_val = if let Some(s) = sorter {
-                        data[s[mid]]
-                    } else {
-                        data[mid]
-                    };
-                    let cmp = UFuncArray::float_membership_cmp(mid_val, *needle);
-                    let go_right = if use_right {
-                        cmp != std::cmp::Ordering::Greater
-                    } else {
-                        cmp == std::cmp::Ordering::Less
-                    };
-                    if go_right {
-                        lo = mid + 1;
-                    } else {
-                        hi = mid;
-                    }
+        let search = |needle: &f64| -> f64 {
+            let mut lo = 0usize;
+            let mut hi = n;
+            while lo < hi {
+                let mid = lo + (hi - lo) / 2;
+                let mid_val = if let Some(s) = sorter {
+                    data[s[mid]]
+                } else {
+                    data[mid]
+                };
+                let cmp = UFuncArray::float_membership_cmp(mid_val, *needle);
+                let go_right = if use_right {
+                    cmp != std::cmp::Ordering::Greater
+                } else {
+                    cmp == std::cmp::Ordering::Less
+                };
+                if go_right {
+                    lo = mid + 1;
+                } else {
+                    hi = mid;
                 }
-                lo as f64
-            })
-            .collect();
+            }
+            lo as f64
+        };
+        let out_values: Vec<f64> = if want_parallel {
+            values.values.par_iter().map(search).collect()
+        } else {
+            values.values.iter().map(search).collect()
+        };
 
         Ok(Self {
             shape: values.shape.clone(),
@@ -41045,6 +41058,63 @@ print(json.dumps(payload))
                     got.to_bits(),
                     exp.to_bits(),
                     "parallel last-axis median lane {r} diverged from serial reference"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn searchsorted_parallel_matches_serial_reference() {
+        // Parallel searchsorted (queries above threshold) must match the insertion
+        // index an independent serial reference computes, for both sides and for the
+        // f64 and i64-sidecar paths. 8192 queries > 1<<12 engages the parallel path.
+        let n = 2000usize;
+        let nq = 8192usize;
+        // Strictly increasing finite haystack.
+        let fdata: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 100.0).collect();
+        let needles: Vec<f64> = (0..nq)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 220000) as f64) / 100.0 - 150.0)
+            .collect();
+        let harr = UFuncArray::new(vec![n], fdata.clone(), DType::F64).expect("h");
+        let qarr = UFuncArray::new(vec![nq], needles.clone(), DType::F64).expect("q");
+
+        for side in ["left", "right"] {
+            let out = harr.searchsorted(&qarr, Some(side), None).expect("searchsorted");
+            assert_eq!(out.dtype(), DType::I64);
+            for (qi, &needle) in needles.iter().enumerate() {
+                let exp = if side == "left" {
+                    fdata.iter().filter(|&&d| d < needle).count()
+                } else {
+                    fdata.iter().filter(|&&d| d <= needle).count()
+                };
+                assert_eq!(
+                    out.values()[qi] as usize,
+                    exp,
+                    "f64 searchsorted side={side} query {qi} (needle={needle}) diverged"
+                );
+            }
+        }
+
+        // i64-sidecar path.
+        let idata: Vec<i64> = (0..n as i64).map(|i| i * 3 - 500).collect();
+        let ineedles: Vec<i64> = (0..nq)
+            .map(|i| ((i as i64).wrapping_mul(48271) % 7000) - 600)
+            .collect();
+        let iharr = UFuncArray::from_storage(vec![n], ArrayStorage::I64(idata.clone())).expect("ih");
+        let iqarr =
+            UFuncArray::from_storage(vec![nq], ArrayStorage::I64(ineedles.clone())).expect("iq");
+        for side in ["left", "right"] {
+            let out = iharr.searchsorted(&iqarr, Some(side), None).expect("isearchsorted");
+            for (qi, &needle) in ineedles.iter().enumerate() {
+                let exp = if side == "left" {
+                    idata.iter().filter(|&&d| d < needle).count()
+                } else {
+                    idata.iter().filter(|&&d| d <= needle).count()
+                };
+                assert_eq!(
+                    out.values()[qi] as usize,
+                    exp,
+                    "i64 searchsorted side={side} query {qi} diverged"
                 );
             }
         }
