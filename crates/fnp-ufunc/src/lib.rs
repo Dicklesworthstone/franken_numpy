@@ -5730,23 +5730,38 @@ impl UFuncArray {
 
         let m = self.shape[0];
         let n = n_cols.unwrap_or(m);
-        let mut values = Vec::with_capacity(m * n);
 
-        for &x in &self.values {
+        // Each row holds the power sequence of one input x: row[j] = x^j (or x^(n-1-j)
+        // for the default decreasing order). The per-row `power *= x` chain is a fixed
+        // left-to-right sequence and rows are mutually independent, so an indexed
+        // parallel fill of the contiguous per-row chunks is bit-for-bit identical to
+        // the serial row loop for any thread count.
+        let mut values = vec![0.0f64; m * n];
+        let xs = &self.values;
+        let fill_row = |(i, row): (usize, &mut [f64])| {
+            let x = xs[i];
+            let mut power = 1.0;
             if increasing {
-                let mut power = 1.0;
-                for _ in 0..n {
-                    values.push(power);
+                for slot in row.iter_mut() {
+                    *slot = power;
                     power *= x;
                 }
             } else {
-                let mut row = vec![0.0; n];
-                let mut power = 1.0;
-                for j in (0..n).rev() {
-                    row[j] = power;
+                for slot in row.iter_mut().rev() {
+                    *slot = power;
                     power *= x;
                 }
-                values.extend_from_slice(&row);
+            }
+        };
+        const VANDER_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+        if n >= 1 {
+            if m >= 2
+                && m * n >= VANDER_PARALLEL_MIN_ELEMS
+                && rayon::current_num_threads() >= 2
+            {
+                values.par_chunks_mut(n).enumerate().for_each(fill_row);
+            } else {
+                values.chunks_mut(n).enumerate().for_each(fill_row);
             }
         }
 
@@ -41108,6 +41123,45 @@ print(json.dumps(payload))
                     "parallel last-axis median lane {r} diverged from serial reference"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn vander_parallel_matches_serial_reference() {
+        // Parallel vander must be bit-for-bit identical to the original serial
+        // per-row power sequence, for both increasing and decreasing column order.
+        // m=4096, n=8 so m*n=32768 > 1<<14 and the row split parallelizes.
+        let m = 4096usize;
+        let n = 8usize;
+        let xs: Vec<f64> = (0..m)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 401) as f64) / 100.0 - 2.0)
+            .collect();
+        let arr = UFuncArray::new(vec![m], xs.clone(), DType::F64).expect("x");
+
+        for increasing in [true, false] {
+            let out = arr.vander(Some(n), increasing).expect("vander");
+            assert_eq!(out.shape(), &[m, n]);
+            let mut expected = vec![0.0f64; m * n];
+            for (i, &x) in xs.iter().enumerate() {
+                let row = &mut expected[i * n..(i + 1) * n];
+                let mut power = 1.0;
+                if increasing {
+                    for slot in row.iter_mut() {
+                        *slot = power;
+                        power *= x;
+                    }
+                } else {
+                    for slot in row.iter_mut().rev() {
+                        *slot = power;
+                        power *= x;
+                    }
+                }
+            }
+            assert_eq!(
+                out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "parallel vander increasing={increasing} diverged from serial reference"
+            );
         }
     }
 
