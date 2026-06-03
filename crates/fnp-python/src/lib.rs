@@ -4053,6 +4053,24 @@ fn parse_pinv_rtol_kwarg(
     Ok(rtol)
 }
 
+// Read a contiguous NumPy numeric array (already cast to the matching dtype) straight
+// out of its buffer into a Vec<T> via the buffer protocol, skipping the per-element
+// PyList boxing/unboxing of `.tolist().extract::<Vec<T>>()`. The copy is pure data
+// movement, so the values are bit-for-bit identical. Falls back to the PyList path
+// when the array is not buffer-readable as T (keeps behavior identical in every case).
+// Symmetric input-side counterpart of numpy_array_from_slice (the output bridge).
+fn numpy_contiguous_to_vec<'py, T>(py: Python<'py>, flat: &Bound<'py, PyAny>) -> PyResult<Vec<T>>
+where
+    T: pyo3::buffer::Element + Copy + for<'a, 'b> FromPyObject<'a, 'b>,
+{
+    if let Ok(buffer) = PyBuffer::<T>::get(flat) {
+        if let Ok(values) = buffer.to_vec(py) {
+            return Ok(values);
+        }
+    }
+    flat.call_method0("tolist")?.extract::<Vec<T>>()
+}
+
 fn extract_numeric_array(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -4068,21 +4086,18 @@ fn extract_numeric_array(
 
     let storage = match kind.as_str() {
         "b" => ArrayStorage::Bool(flat.call_method0("tolist")?.extract::<Vec<bool>>()?),
-        "i" => ArrayStorage::I64(
-            flat.call_method1("astype", ("int64",))?
-                .call_method0("tolist")?
-                .extract::<Vec<i64>>()?,
-        ),
-        "u" => ArrayStorage::U64(
-            flat.call_method1("astype", ("uint64",))?
-                .call_method0("tolist")?
-                .extract::<Vec<u64>>()?,
-        ),
-        "f" => ArrayStorage::F64(
-            flat.call_method1("astype", ("float64",))?
-                .call_method0("tolist")?
-                .extract::<Vec<f64>>()?,
-        ),
+        "i" => ArrayStorage::I64(numpy_contiguous_to_vec::<i64>(
+            py,
+            &flat.call_method1("astype", ("int64",))?,
+        )?),
+        "u" => ArrayStorage::U64(numpy_contiguous_to_vec::<u64>(
+            py,
+            &flat.call_method1("astype", ("uint64",))?,
+        )?),
+        "f" => ArrayStorage::F64(numpy_contiguous_to_vec::<f64>(
+            py,
+            &flat.call_method1("astype", ("float64",))?,
+        )?),
         _ => {
             return Err(PyTypeError::new_err(format!(
                 "{context}: expected a bool/int/uint/float array, got dtype {dtype_name}",
@@ -4112,46 +4127,39 @@ fn extract_precise_numeric_array(
 
     let storage = match parsed_dtype {
         DType::Bool => ArrayStorage::Bool(flat.call_method0("tolist")?.extract::<Vec<bool>>()?),
-        DType::I8 => ArrayStorage::I8(
-            flat.call_method1("astype", ("int8",))?
-                .call_method0("tolist")?
-                .extract::<Vec<i8>>()?,
-        ),
-        DType::I16 => ArrayStorage::I16(
-            flat.call_method1("astype", ("int16",))?
-                .call_method0("tolist")?
-                .extract::<Vec<i16>>()?,
-        ),
-        DType::I32 => ArrayStorage::I32(
-            flat.call_method1("astype", ("int32",))?
-                .call_method0("tolist")?
-                .extract::<Vec<i32>>()?,
-        ),
-        DType::I64 => ArrayStorage::I64(
-            flat.call_method1("astype", ("int64",))?
-                .call_method0("tolist")?
-                .extract::<Vec<i64>>()?,
-        ),
-        DType::U8 => ArrayStorage::U8(
-            flat.call_method1("astype", ("uint8",))?
-                .call_method0("tolist")?
-                .extract::<Vec<u8>>()?,
-        ),
-        DType::U16 => ArrayStorage::U16(
-            flat.call_method1("astype", ("uint16",))?
-                .call_method0("tolist")?
-                .extract::<Vec<u16>>()?,
-        ),
-        DType::U32 => ArrayStorage::U32(
-            flat.call_method1("astype", ("uint32",))?
-                .call_method0("tolist")?
-                .extract::<Vec<u32>>()?,
-        ),
-        DType::U64 => ArrayStorage::U64(
-            flat.call_method1("astype", ("uint64",))?
-                .call_method0("tolist")?
-                .extract::<Vec<u64>>()?,
-        ),
+        DType::I8 => ArrayStorage::I8(numpy_contiguous_to_vec::<i8>(
+            py,
+            &flat.call_method1("astype", ("int8",))?,
+        )?),
+        DType::I16 => ArrayStorage::I16(numpy_contiguous_to_vec::<i16>(
+            py,
+            &flat.call_method1("astype", ("int16",))?,
+        )?),
+        DType::I32 => ArrayStorage::I32(numpy_contiguous_to_vec::<i32>(
+            py,
+            &flat.call_method1("astype", ("int32",))?,
+        )?),
+        DType::I64 => ArrayStorage::I64(numpy_contiguous_to_vec::<i64>(
+            py,
+            &flat.call_method1("astype", ("int64",))?,
+        )?),
+        DType::U8 => ArrayStorage::U8(numpy_contiguous_to_vec::<u8>(
+            py,
+            &flat.call_method1("astype", ("uint8",))?,
+        )?),
+        DType::U16 => ArrayStorage::U16(numpy_contiguous_to_vec::<u16>(
+            py,
+            &flat.call_method1("astype", ("uint16",))?,
+        )?),
+        DType::U32 => ArrayStorage::U32(numpy_contiguous_to_vec::<u32>(
+            py,
+            &flat.call_method1("astype", ("uint32",))?,
+        )?),
+        DType::U64 => ArrayStorage::U64(numpy_contiguous_to_vec::<u64>(
+            py,
+            &flat.call_method1("astype", ("uint64",))?,
+        )?),
+        // f16 has no native Rust buffer Element; keep the PyList path (read as f32).
         DType::F16 => ArrayStorage::F16(
             flat.call_method1("astype", ("float16",))?
                 .call_method0("tolist")?
@@ -4160,16 +4168,14 @@ fn extract_precise_numeric_array(
                 .map(f16::from_f32)
                 .collect(),
         ),
-        DType::F32 => ArrayStorage::F32(
-            flat.call_method1("astype", ("float32",))?
-                .call_method0("tolist")?
-                .extract::<Vec<f32>>()?,
-        ),
-        DType::F64 => ArrayStorage::F64(
-            flat.call_method1("astype", ("float64",))?
-                .call_method0("tolist")?
-                .extract::<Vec<f64>>()?,
-        ),
+        DType::F32 => ArrayStorage::F32(numpy_contiguous_to_vec::<f32>(
+            py,
+            &flat.call_method1("astype", ("float32",))?,
+        )?),
+        DType::F64 => ArrayStorage::F64(numpy_contiguous_to_vec::<f64>(
+            py,
+            &flat.call_method1("astype", ("float64",))?,
+        )?),
         _ => {
             return Err(PyTypeError::new_err(format!(
                 "{context}: expected a bool/int/uint/float array, got dtype {dtype_name}",
@@ -69041,6 +69047,81 @@ mod tests {
                 ours_selected.extract::<i64>()?,
                 theirs_selected.extract::<i64>()?
             );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn native_unary_buffer_extraction_matches_numpy_across_dtypes_and_layouts() {
+        // Locks the PyBuffer input-extraction lever (numpy_contiguous_to_vec):
+        // every buffer-eligible dtype must read out of the NumPy buffer bit-for-bit
+        // identically to the old `.tolist().extract()` path, i.e. exactly matching
+        // numpy's own output. Guards against width/sign truncation, endianness, or
+        // a silent contiguity fallback regressing the native fast path.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let arange = numpy.getattr("arange")?;
+            let linspace = numpy.getattr("linspace")?;
+
+            // Integer + unsigned dtypes flow through extract_precise_numeric_array's
+            // buffer arms via the native `absolute` path (native_unary_elementwise
+            // keeps integer dtypes on the Rust kernel rather than falling back).
+            let abs_fn = module.getattr("absolute")?;
+            let numpy_abs = numpy.getattr("absolute")?;
+            for dt in [
+                "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32", "uint64",
+            ] {
+                // Span low/high of the type (wraps on cast just like numpy) so any
+                // narrowing/sign error in the buffer read surfaces.
+                let arr = arange
+                    .call1((-40_i64, 40_i64))?
+                    .call_method1("astype", (dt,))?;
+                assert_array_matches_numpy(
+                    &abs_fn.call1((arr.clone(),))?,
+                    &numpy_abs.call1((arr.clone(),))?,
+                )?;
+            }
+
+            // float32 / float64 through the native sqrt (promoting) and negative paths.
+            let sqrt_fn = module.getattr("sqrt")?;
+            let numpy_sqrt = numpy.getattr("sqrt")?;
+            let neg_fn = module.getattr("negative")?;
+            let numpy_neg = numpy.getattr("negative")?;
+            for dt in ["float32", "float64"] {
+                let pos = linspace
+                    .call1((0.0_f64, 100.0_f64, 257_i64))?
+                    .call_method1("astype", (dt,))?;
+                assert_array_matches_numpy(
+                    &sqrt_fn.call1((pos.clone(),))?,
+                    &numpy_sqrt.call1((pos.clone(),))?,
+                )?;
+                let signed = linspace
+                    .call1((-50.0_f64, 50.0_f64, 129_i64))?
+                    .call_method1("astype", (dt,))?;
+                assert_array_matches_numpy(
+                    &neg_fn.call1((signed.clone(),))?,
+                    &numpy_neg.call1((signed.clone(),))?,
+                )?;
+            }
+
+            // Non-C-contiguous 2-D input: extraction flattens via reshape(-1)
+            // (a contiguous copy in logical order) before the buffer read.
+            let transposed = arange
+                .call1((24_i64,))?
+                .call_method1("reshape", ((4_i64, 6_i64),))?
+                .call_method1("astype", ("float64",))?
+                .getattr("T")?;
+            assert_array_matches_numpy(
+                &sqrt_fn.call1((transposed.clone(),))?,
+                &numpy_sqrt.call1((transposed.clone(),))?,
+            )?;
 
             Ok(())
         });
