@@ -1310,7 +1310,7 @@ pub fn svd_mxn(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
         ));
     }
 
-    let (_, sigmas, _) = svd_bidiag_full(a, m, n)?;
+    let sigmas = svd_bidiag_values(a, m, n)?;
     Ok(sigmas)
 }
 
@@ -1575,6 +1575,37 @@ fn svd_bidiag_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAl
     svd_bidiag_full_with_max_iters(a, m, n, SVD_QR_ITERATION_COEFF * k * k)
 }
 
+fn svd_bidiag_values_with_max_iters(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    max_iter: usize,
+) -> Result<Vec<f64>, LinAlgError> {
+    if m < n {
+        let mut at = vec![0.0; n * m];
+        for i in 0..m {
+            for j in 0..n {
+                at[j * m + i] = a[i * n + j];
+            }
+        }
+        return svd_bidiag_values_with_max_iters(&at, n, m, max_iter);
+    }
+
+    match svd_bidiag_qr_values(a, m, n, max_iter) {
+        Ok(sigmas) => Ok(sigmas),
+        Err(LinAlgError::SvdNonConvergence) => {
+            let (_, sigmas, _) = svd_via_jacobi_full(a, m, n)?;
+            Ok(sigmas)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn svd_bidiag_values(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgError> {
+    let k = m.min(n);
+    svd_bidiag_values_with_max_iters(a, m, n, SVD_QR_ITERATION_COEFF * k * k)
+}
+
 /// Core QR-phase SVD implementation for the bidiagonalized matrix.
 ///
 /// Requires `m >= n`; transpose handling and fallback are done by the wrapper.
@@ -1829,6 +1860,172 @@ fn svd_bidiag_qr_full(
     }
 
     Ok((u, sigmas, vt))
+}
+
+fn svd_bidiag_qr_values(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    max_iter: usize,
+) -> Result<Vec<f64>, LinAlgError> {
+    let k = m.min(n);
+
+    let mut work = a.to_vec();
+    let mut d = vec![0.0; n];
+    let mut e = vec![0.0; n.saturating_sub(1)];
+    let mut v_house = vec![0.0; m];
+    let mut w_house = vec![0.0; n];
+
+    for j in 0..n {
+        let col_norm = {
+            let mut s = 0.0;
+            for i in j..m {
+                s += work[i * n + j] * work[i * n + j];
+            }
+            s.sqrt()
+        };
+        if col_norm > 0.0 {
+            let sign = if work[j * n + j] >= 0.0 { 1.0 } else { -1.0 };
+            for vi in &mut v_house[..j] {
+                *vi = 0.0;
+            }
+            for (i, vi) in v_house[j..m].iter_mut().enumerate() {
+                *vi = work[(i + j) * n + j];
+            }
+            v_house[j] += sign * col_norm;
+            let v_norm_sq: f64 = v_house[j..].iter().map(|x| x * x).sum();
+            if v_norm_sq > 0.0 {
+                let scale = 2.0 / v_norm_sq;
+                for col in j..n {
+                    let mut dot = 0.0;
+                    for i in j..m {
+                        dot += v_house[i] * work[i * n + col];
+                    }
+                    let f = scale * dot;
+                    for i in j..m {
+                        work[i * n + col] -= f * v_house[i];
+                    }
+                }
+            }
+        }
+        d[j] = work[j * n + j];
+
+        if j + 2 <= n {
+            let row_norm = {
+                let mut s = 0.0;
+                for col in (j + 1)..n {
+                    s += work[j * n + col] * work[j * n + col];
+                }
+                s.sqrt()
+            };
+            if row_norm > 0.0 {
+                let sign = if work[j * n + j + 1] >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                };
+                for wi in &mut w_house[..=j] {
+                    *wi = 0.0;
+                }
+                for (idx, wi) in w_house[(j + 1)..n].iter_mut().enumerate() {
+                    *wi = work[j * n + (j + 1 + idx)];
+                }
+                w_house[j + 1] += sign * row_norm;
+                let w_norm_sq: f64 = w_house[(j + 1)..].iter().map(|x| x * x).sum();
+                if w_norm_sq > 0.0 {
+                    let scale = 2.0 / w_norm_sq;
+                    for row in j..m {
+                        let mut dot = 0.0;
+                        for col in (j + 1)..n {
+                            dot += work[row * n + col] * w_house[col];
+                        }
+                        let f = scale * dot;
+                        for col in (j + 1)..n {
+                            work[row * n + col] -= f * w_house[col];
+                        }
+                    }
+                }
+            }
+            if j < n - 1 {
+                e[j] = work[j * n + j + 1];
+            }
+        } else if j < n - 1 {
+            e[j] = work[j * n + j + 1];
+        }
+    }
+
+    let eps_mach = f64::EPSILON;
+    let mut converged = false;
+    for _iter in 0..max_iter {
+        for i in 0..e.len() {
+            if e[i].abs() <= eps_mach * (d[i].abs() + d[i + 1].abs()) {
+                e[i] = 0.0;
+            }
+        }
+
+        let mut hi = n - 1;
+        while hi > 0 && e[hi - 1] == 0.0 {
+            hi -= 1;
+        }
+        if hi == 0 {
+            converged = true;
+            break;
+        }
+        let mut lo = hi - 1;
+        while lo > 0 && e[lo - 1] != 0.0 {
+            lo -= 1;
+        }
+
+        let shift = svd_shift_2x2(d[hi - 1], e[hi - 1], d[hi]);
+        let (mut f, mut g) = if d[lo].abs() > 0.0 {
+            let sign_d = if d[lo] >= 0.0 { 1.0 } else { -1.0 };
+            ((d[lo].abs() - shift) * (sign_d + shift / d[lo]), e[lo])
+        } else {
+            (0.0, e[lo])
+        };
+
+        for kk in lo..hi {
+            let r = f.hypot(g);
+            let (cs, sn) = if r > 0.0 { (f / r, g / r) } else { (1.0, 0.0) };
+
+            if kk > lo {
+                e[kk - 1] = r;
+            }
+
+            f = cs * d[kk] + sn * e[kk];
+            e[kk] = cs * e[kk] - sn * d[kk];
+            g = sn * d[kk + 1];
+            d[kk + 1] *= cs;
+
+            let r = f.hypot(g);
+            let (cs, sn) = if r > 0.0 { (f / r, g / r) } else { (1.0, 0.0) };
+
+            d[kk] = r;
+            f = cs * e[kk] + sn * d[kk + 1];
+            d[kk + 1] = cs * d[kk + 1] - sn * e[kk];
+
+            if kk + 1 < hi {
+                g = sn * e[kk + 1];
+                e[kk + 1] *= cs;
+            }
+        }
+        e[hi - 1] = f;
+    }
+
+    if !converged {
+        return Err(LinAlgError::SvdNonConvergence);
+    }
+
+    for value in &mut d {
+        if *value < 0.0 {
+            *value = -*value;
+        }
+    }
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| d[b].partial_cmp(&d[a]).unwrap_or(std::cmp::Ordering::Equal));
+
+    Ok(order.iter().take(k).map(|&i| d[i]).collect())
 }
 
 /// Transpose an m×n matrix (row-major) to n×m.
@@ -8323,6 +8520,48 @@ mod tests {
         assert!(svd_mxn(&[], 0, 0).is_err());
         assert!(svd_mxn(&[1.0, f64::NAN], 1, 2).is_err());
         assert!(qr_mxn(&[], 0, 0).is_err());
+    }
+
+    #[test]
+    fn svd_values_only_matches_full_reference_bits() {
+        let n = 32usize;
+        let mut state = 456u64;
+        let a: Vec<f64> = (0..(n * n))
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+            })
+            .collect();
+
+        let values_only = svd_mxn(&a, n, n).expect("values-only svd");
+        let (_, full_reference, _) = super::svd_bidiag_full(&a, n, n).expect("full reference svd");
+        assert_eq!(
+            values_only
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            full_reference
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "values-only SVD must preserve singular-value bits"
+        );
+
+        let mut hasher = Sha256::new();
+        for value in &values_only {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "4c7c7aa6cdf4721a02c213c87c18eec2f977fef96cb9ca52b6b79a873f413f7a",
+            "values-only SVD singular-value bit pattern must remain fixed"
+        );
     }
 
     // ── Rectangular QR tests ─────────────────────────────────────────
