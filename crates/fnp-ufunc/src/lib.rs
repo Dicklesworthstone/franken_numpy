@@ -22373,41 +22373,59 @@ impl UFuncArray {
 
                 let out_shape = reduced_shape(&self.shape, ax, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
-                let mut out_values = vec![0.0f64; out_count];
 
-                for (outer, out_val) in out_values.iter_mut().enumerate() {
-                    let mean_val = mean_arr.values[outer];
+                // Each output element is a pure function of its `outer` index: derive
+                // the lane base offset, scan the (possibly strided) lane accumulating
+                // the squared deviation from that lane's precomputed mean in serial
+                // k-order, then divide by valid-ddof. The within-lane accumulation
+                // stays serial, so an indexed parallel map over `outer` is bit-for-bit
+                // identical to the serial loop for any thread count and any axis.
+                let mean_ref = &mean_arr.values;
+                let values_ref = &self.values;
+                let strides_ref = &strides;
+                let shape_ref = &self.shape;
+                let compute_outer = move |outer: usize| -> f64 {
+                    let mean_val = mean_ref[outer];
                     let mut sq_sum = 0.0;
                     let mut valid = 0usize;
                     let mut remainder = outer;
                     let mut base_flat = 0usize;
-                    for (d, (&_s, &stride)) in self.shape.iter().zip(strides.iter()).enumerate() {
+                    for (d, (&_s, &stride)) in shape_ref.iter().zip(strides_ref.iter()).enumerate() {
                         if d == ax {
                             continue;
                         }
                         let outer_stride = if d < ax {
-                            strides[d] / axis_len
+                            strides_ref[d] / axis_len
                         } else {
-                            strides[d]
+                            strides_ref[d]
                         };
                         let coord = remainder / outer_stride;
                         remainder %= outer_stride;
                         base_flat += coord * stride;
                     }
                     for k in 0..axis_len {
-                        let v = self.values[base_flat + k * strides[ax]];
+                        let v = values_ref[base_flat + k * strides_ref[ax]];
                         if !v.is_nan() {
                             sq_sum += (v - mean_val).powi(2);
                             valid += 1;
                         }
                     }
                     let denom = valid.saturating_sub(ddof);
-                    *out_val = if denom == 0 {
+                    if denom == 0 {
                         f64::NAN
                     } else {
                         sq_sum / denom as f64
-                    };
-                }
+                    }
+                };
+                const NANVAR_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                let out_values: Vec<f64> = if out_count >= 2
+                    && self.values.len() >= NANVAR_PARALLEL_MIN_ELEMS
+                    && rayon::current_num_threads() >= 2
+                {
+                    (0..out_count).into_par_iter().map(compute_outer).collect()
+                } else {
+                    (0..out_count).map(compute_outer).collect()
+                };
 
                 Ok(Self {
                     shape: out_shape,
@@ -40948,6 +40966,81 @@ print(json.dumps(payload))
                     exp.to_bits(),
                     "parallel last-axis median lane {r} diverged from serial reference"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn nanvar_axis_parallel_matches_serial_reference() {
+        // nanvar above the parallel threshold runs an indexed parallel map over the
+        // output lanes (any axis, strided gather, serial within-lane accumulation).
+        // It must be bit-identical to a serial per-lane mean-deviation reference, for
+        // both a strided middle axis and the contiguous last axis, with ddof and a
+        // fully-NaN lane (denom==0 -> NaN). nanstd just sqrt's nanvar, so checking
+        // nanvar locks both.
+        let (d0, d1, d2) = (21usize, 19usize, 29usize);
+        let mut data: Vec<f64> = (0..d0 * d1 * d2)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
+            .collect();
+        for i in (0..data.len()).step_by(13) {
+            data[i] = f64::NAN;
+        }
+        let arr = UFuncArray::new(vec![d0, d1, d2], data.clone(), DType::F64).expect("arr");
+        let strides = [d1 * d2, d2, 1usize];
+
+        for ax in [1usize, 2usize] {
+            for ddof in [0usize, 1usize] {
+                let axis_len = [d0, d1, d2][ax];
+                let out = arr
+                    .nanvar(Some(ax as isize), false, ddof)
+                    .expect("nanvar");
+                // Use production's own per-lane mean (compensated reduce_sum), so the
+                // reference isolates the sq_sum + parallelization, not nanmean parity.
+                let mean_arr = arr.nanmean(Some(ax as isize), true).expect("nanmean");
+                let outer_count = data.len() / axis_len;
+                for outer in 0..outer_count {
+                    // Reproduce base-offset decomposition and the sq_sum scan.
+                    let mut remainder = outer;
+                    let mut base_flat = 0usize;
+                    for (d, &stride) in strides.iter().enumerate() {
+                        if d == ax {
+                            continue;
+                        }
+                        let outer_stride = if d < ax { stride / axis_len } else { stride };
+                        let coord = remainder / outer_stride;
+                        remainder %= outer_stride;
+                        base_flat += coord * stride;
+                    }
+                    let mean = mean_arr.values()[outer];
+                    let mut sq_sum = 0.0f64;
+                    let mut valid = 0usize;
+                    for k in 0..axis_len {
+                        let v = data[base_flat + k * strides[ax]];
+                        if !v.is_nan() {
+                            sq_sum += (v - mean).powi(2);
+                            valid += 1;
+                        }
+                    }
+                    let denom = valid.saturating_sub(ddof);
+                    let exp = if denom == 0 {
+                        f64::NAN
+                    } else {
+                        sq_sum / denom as f64
+                    };
+                    let got = out.values()[outer];
+                    if exp.is_nan() {
+                        assert!(
+                            got.is_nan(),
+                            "ax={ax} ddof={ddof} outer {outer} expected NaN, got {got}"
+                        );
+                    } else {
+                        assert_eq!(
+                            got.to_bits(),
+                            exp.to_bits(),
+                            "parallel nanvar ax={ax} ddof={ddof} outer {outer} diverged from serial"
+                        );
+                    }
+                }
             }
         }
     }
