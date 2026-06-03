@@ -344,7 +344,7 @@ fn bench_matrix_power(c: &mut Criterion) {
     // matrix_power(A, 3) performs three full n*n*n GEMMs via the internal
     // mat_mul_flat kernel — the compute-bound regime (n >= 128) where
     // intra-matrix row parallelism dominates the per-call dispatch cost.
-    for n in [128usize, 256, 512] {
+    for n in [128usize, 256, 512, 1024] {
         let a = generate_random_matrix(n, 0x9E37_79B9_7F4A_7C15);
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
             bench.iter(|| {

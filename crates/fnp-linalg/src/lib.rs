@@ -3846,15 +3846,36 @@ pub fn pinv_hermitian_nxn_with_tolerance_aliases(
 /// fused-multiply-adds) and the n rows give the pool enough independent,
 /// compute-bound tasks in the measured Criterion lane.
 const MATMUL_PARALLEL_MIN_DIM: usize = 128;
+const MATMUL_ROW_BLOCK: usize = 4;
 
-fn mat_mul_flat(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
-    let mut c = vec![0.0; n * n];
-    // Each output row `c[i]` depends only on row `i` of `a` and all of `b`, and
-    // is written by a disjoint slice of `c`. The k/j accumulation order within a
-    // row is identical to the serial path, so partitioning the rows across
-    // threads yields bit-for-bit identical results. Gated on size + pool width.
-    if n >= MATMUL_PARALLEL_MIN_DIM && rayon::current_num_threads() >= 2 {
-        c.par_chunks_mut(n).enumerate().for_each(|(i, c_row)| {
+fn mat_mul_flat_row_block4(a: &[f64], b: &[f64], n: usize, row_start: usize, c: &mut [f64]) {
+    if c.len() == MATMUL_ROW_BLOCK * n {
+        let (c0, rest) = c.split_at_mut(n);
+        let (c1, rest) = rest.split_at_mut(n);
+        let (c2, c3) = rest.split_at_mut(n);
+        let a0 = &a[row_start * n..row_start * n + n];
+        let a1 = &a[(row_start + 1) * n..(row_start + 1) * n + n];
+        let a2 = &a[(row_start + 2) * n..(row_start + 2) * n + n];
+        let a3 = &a[(row_start + 3) * n..(row_start + 3) * n + n];
+        for k in 0..n {
+            let b_row = &b[k * n..k * n + n];
+            let a0k = a0[k];
+            let a1k = a1[k];
+            let a2k = a2[k];
+            let a3k = a3[k];
+            for j in 0..n {
+                let b_kj = b_row[j];
+                c0[j] += a0k * b_kj;
+                c1[j] += a1k * b_kj;
+                c2[j] += a2k * b_kj;
+                c3[j] += a3k * b_kj;
+            }
+        }
+    } else {
+        let rows = c.len() / n;
+        for local_i in 0..rows {
+            let i = row_start + local_i;
+            let c_row = &mut c[local_i * n..local_i * n + n];
             let a_row = &a[i * n..i * n + n];
             for k in 0..n {
                 let a_ik = a_row[k];
@@ -3863,7 +3884,24 @@ fn mat_mul_flat(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
                     c_row[j] += a_ik * b_row[j];
                 }
             }
-        });
+        }
+    }
+}
+
+fn mat_mul_flat(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+    let mut c = vec![0.0; n * n];
+    // Each output row `c[i]` depends only on row `i` of `a` and all of `b`, and
+    // is written by a disjoint slice of `c`. The k/j accumulation order within a
+    // row is identical to the serial path, so partitioning the rows across
+    // threads yields bit-for-bit identical results. Full 4-row chunks share each
+    // streamed B row across four A rows while every c[i,j] still sees k in
+    // ascending order. Gated on size + pool width.
+    if n >= MATMUL_PARALLEL_MIN_DIM && rayon::current_num_threads() >= 2 {
+        c.par_chunks_mut(MATMUL_ROW_BLOCK * n)
+            .enumerate()
+            .for_each(|(block, c_rows)| {
+                mat_mul_flat_row_block4(a, b, n, block * MATMUL_ROW_BLOCK, c_rows);
+            });
     } else {
         for i in 0..n {
             for k in 0..n {
@@ -3875,6 +3913,53 @@ fn mat_mul_flat(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
         }
     }
     c
+}
+
+fn mat_mul_rect_row_block4(
+    a: &[f64],
+    b: &[f64],
+    k: usize,
+    n: usize,
+    row_start: usize,
+    c: &mut [f64],
+) {
+    if c.len() == MATMUL_ROW_BLOCK * n {
+        let (c0, rest) = c.split_at_mut(n);
+        let (c1, rest) = rest.split_at_mut(n);
+        let (c2, c3) = rest.split_at_mut(n);
+        let a0 = &a[row_start * k..row_start * k + k];
+        let a1 = &a[(row_start + 1) * k..(row_start + 1) * k + k];
+        let a2 = &a[(row_start + 2) * k..(row_start + 2) * k + k];
+        let a3 = &a[(row_start + 3) * k..(row_start + 3) * k + k];
+        for p in 0..k {
+            let b_row = &b[p * n..p * n + n];
+            let a0p = a0[p];
+            let a1p = a1[p];
+            let a2p = a2[p];
+            let a3p = a3[p];
+            for j in 0..n {
+                let b_pj = b_row[j];
+                c0[j] += a0p * b_pj;
+                c1[j] += a1p * b_pj;
+                c2[j] += a2p * b_pj;
+                c3[j] += a3p * b_pj;
+            }
+        }
+    } else {
+        let rows = c.len() / n;
+        for local_i in 0..rows {
+            let i = row_start + local_i;
+            let c_row = &mut c[local_i * n..local_i * n + n];
+            let a_row = &a[i * k..i * k + k];
+            for p in 0..k {
+                let a_ip = a_row[p];
+                let b_row = &b[p * n..p * n + n];
+                for j in 0..n {
+                    c_row[j] += a_ip * b_row[j];
+                }
+            }
+        }
+    }
 }
 
 fn is_diagonal_matrix_flat(a: &[f64], n: usize) -> bool {
@@ -3965,23 +4050,19 @@ fn mat_mul_rect(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> 
     // Same row-disjoint partitioning as mat_mul_flat: output row i reads row i
     // of a (k wide) plus all of b and writes a disjoint n-wide slice of c with
     // the identical p/j accumulation order, so the parallel result is bit-for-
-    // bit identical to the serial loop. Gate on the dominant dimension so the
-    // O(m·k·n) work amortizes thread dispatch.
+    // bit identical to the serial loop. Full 4-row chunks reuse each streamed B
+    // row across four A rows without changing any c[i,j] reduction order.
+    // Gate on the dominant dimension so the O(m·k·n) work amortizes dispatch.
     if m >= MATMUL_PARALLEL_MIN_DIM
         && k >= MATMUL_PARALLEL_MIN_DIM
         && n >= MATMUL_PARALLEL_MIN_DIM
         && rayon::current_num_threads() >= 2
     {
-        c.par_chunks_mut(n).enumerate().for_each(|(i, c_row)| {
-            let a_row = &a[i * k..i * k + k];
-            for p in 0..k {
-                let a_ip = a_row[p];
-                let b_row = &b[p * n..p * n + n];
-                for j in 0..n {
-                    c_row[j] += a_ip * b_row[j];
-                }
-            }
-        });
+        c.par_chunks_mut(MATMUL_ROW_BLOCK * n)
+            .enumerate()
+            .for_each(|(block, c_rows)| {
+                mat_mul_rect_row_block4(a, b, k, n, block * MATMUL_ROW_BLOCK, c_rows);
+            });
     } else {
         for i in 0..m {
             for p in 0..k {
