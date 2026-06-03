@@ -5666,43 +5666,51 @@ pub fn complex_matvec(a: &[f64], x: &[f64], m: usize, n: usize) -> Vec<f64> {
 
 /// Matrix-matrix multiply for complex: C = A*B.
 /// A is 2·m·k interleaved, B is 2·k·n interleaved, result is 2·m·n interleaved.
+/// Minimum FLOP count (m·k·n) before the interleaved-complex GEMM fans out across
+/// row bands; below this the work is too small to amortize thread dispatch.
+const COMPLEX_MATMUL_PARALLEL_MIN_FLOPS: usize = 1 << 18;
+
 pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     let mut c = vec![0.0; 2 * m * n];
-    // Output row i (an interleaved 2n-wide slice of c) depends only on row i of
-    // a plus all of b, and each element's p-reduction order is preserved, so
-    // partitioning the rows across the rayon pool is bit-for-bit identical to
-    // the serial loop. Gate on the dominant dims like the real GEMM kernels.
-    let row = |i: usize, c_row: &mut [f64]| {
-        for j in 0..n {
-            let mut sr = 0.0;
-            let mut si = 0.0;
-            for p in 0..k {
-                let (pr, pi) = cmul(
-                    a[2 * (i * k + p)],
-                    a[2 * (i * k + p) + 1],
-                    b[2 * (p * n + j)],
-                    b[2 * (p * n + j) + 1],
-                );
-                sr += pr;
-                si += pi;
+    if c.is_empty() {
+        return c;
+    }
+
+    // ikp loop order (p outer, j inner) so each B row `b[p][*]` is read as a
+    // contiguous interleaved slice and reused across all rows of the band — a
+    // huge improvement over the old i/j/p order, which walked B down column j
+    // with stride 2n (a cache line per p-step). c[i][j] still accumulates p in
+    // 0..k ascending order (using the same `cmul` as the serial reference), so
+    // the result is bit-for-bit identical to the serial loop. `c` is pre-zeroed,
+    // so `+=` into it equals the `0.0 + sum_p` of the old local accumulator.
+    let row_block = |i0: usize, c_block: &mut [f64]| {
+        let rows = c_block.len() / (2 * n);
+        for p in 0..k {
+            let b_row = &b[2 * p * n..2 * p * n + 2 * n];
+            for ii in 0..rows {
+                let i = i0 + ii;
+                let ar = a[2 * (i * k + p)];
+                let ai = a[2 * (i * k + p) + 1];
+                let c_row = &mut c_block[ii * 2 * n..ii * 2 * n + 2 * n];
+                for j in 0..n {
+                    let (pr, pi) = cmul(ar, ai, b_row[2 * j], b_row[2 * j + 1]);
+                    c_row[2 * j] += pr;
+                    c_row[2 * j + 1] += pi;
+                }
             }
-            c_row[2 * j] = sr;
-            c_row[2 * j + 1] = si;
         }
     };
-    if m >= MATMUL_PARALLEL_MIN_DIM
-        && k >= MATMUL_PARALLEL_MIN_DIM
-        && n >= MATMUL_PARALLEL_MIN_DIM
-        && rayon::current_num_threads() >= 2
-    {
-        c.par_chunks_mut(2 * n)
+
+    let flops = m.saturating_mul(k).saturating_mul(n);
+    if rayon::current_num_threads() >= 2 && flops >= COMPLEX_MATMUL_PARALLEL_MIN_FLOPS && m >= 8 {
+        // A few row bands per thread; each band is a disjoint contiguous slice of
+        // `c`, so the parallel result is bit-for-bit identical to the serial band.
+        let band_rows = m.div_ceil(rayon::current_num_threads() * 4).max(1);
+        c.par_chunks_mut(band_rows * 2 * n)
             .enumerate()
-            .for_each(|(i, c_row)| row(i, c_row));
+            .for_each(|(bi, c_block)| row_block(bi * band_rows, c_block));
     } else {
-        for i in 0..m {
-            let c_row = &mut c[2 * i * n..2 * (i + 1) * n];
-            row(i, c_row);
-        }
+        row_block(0, &mut c);
     }
     c
 }
