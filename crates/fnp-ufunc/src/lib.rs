@@ -20279,28 +20279,14 @@ impl UFuncArray {
 
         let input_chars: Vec<Vec<char>> = input_subs.iter().map(|s| s.chars().collect()).collect();
 
-        let mut result = vec![0.0; output_size];
-
         // Precompute integer stride tables once, keyed by each label's position in
         // `all_labels`, so the hot loop is pure index arithmetic — no per-iteration
-        // HashMap allocation or hashing. The iteration order (flat scan over
-        // output+contracted labels) and the per-output accumulation order are
-        // identical to the prior scalar form, so the FP-bit output is unchanged.
+        // HashMap allocation or hashing.
         let label_pos: std::collections::HashMap<char, usize> = all_labels
             .iter()
             .enumerate()
             .map(|(i, &c)| (c, i))
             .collect();
-
-        // For each output label: (position in all_labels, contribution stride).
-        let mut output_terms: Vec<(usize, usize)> = Vec::with_capacity(output_labels.len());
-        {
-            let mut stride = 1usize;
-            for i in (0..output_labels.len()).rev() {
-                output_terms.push((label_pos[&output_labels[i]], stride));
-                stride *= output_shape[i];
-            }
-        }
 
         // For each operand: list of (position in all_labels, operand stride) per
         // axis. A broadcast axis (dim == 1) contributes stride 0, matching the
@@ -20324,33 +20310,51 @@ impl UFuncArray {
             .collect();
 
         let n_labels = all_labels.len();
-        let mut label_vals = vec![0usize; n_labels];
 
-        for flat_idx in 0..total_iters {
-            // Decode flat index into per-label values (indexed by all_labels pos).
-            let mut remaining = flat_idx;
-            for i in (0..n_labels).rev() {
-                let dim = all_dims[i];
-                label_vals[i] = remaining % dim;
-                remaining /= dim;
-            }
-
-            let mut out_flat = 0usize;
-            for &(pos, stride) in &output_terms {
-                out_flat += label_vals[pos] * stride;
-            }
-
-            let mut product = 1.0;
-            for (op_idx, op) in operands.iter().enumerate() {
-                let mut op_flat = 0usize;
-                for &(pos, stride) in &op_terms[op_idx] {
-                    op_flat += label_vals[pos] * stride;
+        // The output labels occupy the most-significant positions of `all_labels`,
+        // so flat_idx = out_flat * contracted_size + contracted_idx and the prior
+        // scatter `result[out_flat] += product` accumulated each output cell over
+        // its contracted subspace in contracted row-major order. We compute each
+        // output cell independently in that exact order — identical FP bits — which
+        // makes the per-cell loop embarrassingly parallel over output cells.
+        let result: Vec<f64> = if output_size == 0 {
+            Vec::new()
+        } else {
+            let contracted_size = total_iters / output_size;
+            let compute_cell = |o: usize| -> f64 {
+                let mut label_vals = vec![0usize; n_labels];
+                let base = o * contracted_size;
+                let mut sum = 0.0;
+                for c in 0..contracted_size {
+                    let mut remaining = base + c;
+                    for i in (0..n_labels).rev() {
+                        let dim = all_dims[i];
+                        label_vals[i] = remaining % dim;
+                        remaining /= dim;
+                    }
+                    let mut product = 1.0;
+                    for (op_idx, op) in operands.iter().enumerate() {
+                        let mut op_flat = 0usize;
+                        for &(pos, stride) in &op_terms[op_idx] {
+                            op_flat += label_vals[pos] * stride;
+                        }
+                        product *= op.values[op_flat];
+                    }
+                    sum += product;
                 }
-                product *= op.values[op_flat];
-            }
+                sum
+            };
 
-            result[out_flat] += product;
-        }
+            const EINSUM_PARALLEL_MIN_ITERS: usize = 1 << 14;
+            if output_size >= 2
+                && total_iters >= EINSUM_PARALLEL_MIN_ITERS
+                && rayon::current_num_threads() >= 2
+            {
+                (0..output_size).into_par_iter().map(compute_cell).collect()
+            } else {
+                (0..output_size).map(compute_cell).collect()
+            }
+        };
 
         Ok(Self {
             shape: output_shape,
@@ -50345,6 +50349,44 @@ print(json.dumps(payload))
             "d4a2b5137fd48c9f2ebaae51760bb8ccd357c09ea3482eba833f750248946918",
             "einsum output bit pattern changed"
         );
+    }
+
+    #[test]
+    fn einsum_parallel_matmul_matches_serial_reference_bits() {
+        // A 128x128 matmul-shaped contraction has output_size = 16384 and
+        // total_iters = 2^21, so it crosses the einsum parallel gate. The
+        // parallel per-output-cell sum must equal a serial reference that
+        // accumulates the single contracted label `k` in ascending order —
+        // bit-for-bit, the identical accumulation order.
+        let n = 128usize;
+        let a_vals: Vec<f64> = (0..n * n).map(|i| ((i % 17) as f64) * 0.37 - 1.1).collect();
+        let b_vals: Vec<f64> = (0..n * n).map(|i| ((i % 23) as f64) * 0.19 + 0.4).collect();
+        let a = UFuncArray::new(vec![n, n], a_vals.clone(), DType::F64).unwrap();
+        let b = UFuncArray::new(vec![n, n], b_vals.clone(), DType::F64).unwrap();
+
+        let got = UFuncArray::einsum("ij,jk->ik", &[&a, &b]).unwrap();
+        assert_eq!(got.shape, vec![n, n]);
+
+        // Serial reference: out[i,k] = sum_j a[i,j]*b[j,k], j ascending.
+        let mut want = vec![0.0f64; n * n];
+        for i in 0..n {
+            for k in 0..n {
+                let mut sum = 0.0;
+                for j in 0..n {
+                    sum += a_vals[i * n + j] * b_vals[j * n + k];
+                }
+                want[i * n + k] = sum;
+            }
+        }
+
+        for (idx, (g, w)) in got.values.iter().zip(want.iter()).enumerate() {
+            assert_eq!(
+                g.to_bits(),
+                w.to_bits(),
+                "parallel einsum diverged from serial reference at index {}",
+                idx
+            );
+        }
     }
 
     #[test]
