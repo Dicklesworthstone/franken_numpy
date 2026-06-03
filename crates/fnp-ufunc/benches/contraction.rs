@@ -65,11 +65,25 @@ fn bench_tensordot(c: &mut Criterion) {
     group.finish();
 }
 
+/// `inner(A, B)` over square matrices — contracts the last axis (B^T-shaped).
+fn bench_inner(c: &mut Criterion) {
+    let mut group = c.benchmark_group("inner_lastaxis");
+    for size in [64usize, 128, 256].iter() {
+        let a = make_2d(*size, *size);
+        let b = make_2d(*size, *size);
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter(|| black_box(&a).inner(black_box(&b)).unwrap())
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_einsum_matmul,
     bench_einsum_batched,
     bench_einsum_reduce,
-    bench_tensordot
+    bench_tensordot,
+    bench_inner
 );
 criterion_main!(benches);

@@ -13004,18 +13004,40 @@ impl UFuncArray {
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
 
         let dtype = promote(self.dtype, rhs.dtype);
-        let mut out_values = Vec::with_capacity(out_count);
 
-        for a_idx in 0..a_batch_count {
+        // Each output row (fixed a_idx) is an independent set of dot products
+        // over all b batches, accumulating k in ascending order — independent
+        // across a_idx rows. Fill rows in parallel with the identical per-cell
+        // sum order, so the output is bit-identical to the serial form.
+        let mut out_values = vec![0.0; out_count];
+        let fill_row = |(a_idx, row): (usize, &mut [f64])| {
             let a_offset = a_idx * contract_len;
-            for b_idx in 0..b_batch_count {
+            for (b_idx, cell) in row.iter_mut().enumerate() {
                 let b_offset = b_idx * contract_len;
                 let mut sum = 0.0;
                 for k in 0..contract_len {
                     sum += self.values[a_offset + k] * rhs.values[b_offset + k];
                 }
-                out_values.push(sum);
+                *cell = sum;
             }
+        };
+        const INNER_PARALLEL_MIN_FLOPS: usize = 1 << 18;
+        if a_batch_count >= 2
+            && a_batch_count
+                .saturating_mul(b_batch_count)
+                .saturating_mul(contract_len)
+                >= INNER_PARALLEL_MIN_FLOPS
+            && rayon::current_num_threads() >= 2
+        {
+            out_values
+                .par_chunks_mut(b_batch_count.max(1))
+                .enumerate()
+                .for_each(fill_row);
+        } else {
+            out_values
+                .chunks_mut(b_batch_count.max(1))
+                .enumerate()
+                .for_each(fill_row);
         }
 
         Self::from_values_with_dtype(out_shape, out_values, dtype)
@@ -50440,6 +50462,42 @@ print(json.dumps(payload))
                 g.to_bits(),
                 w.to_bits(),
                 "parallel tensordot diverged from serial reference at index {}",
+                idx
+            );
+        }
+    }
+
+    #[test]
+    fn inner_parallel_matches_serial_reference_bits() {
+        // 256x256 inner contracts the shared last axis; a_batch*b_batch*K = 2^24
+        // crosses the inner parallel gate. The parallel per-row fill must equal
+        // a serial reference accumulating k ascending — bit-for-bit.
+        let n = 256usize;
+        let a_vals: Vec<f64> = (0..n * n).map(|i| ((i % 11) as f64) * 0.53 - 0.9).collect();
+        let b_vals: Vec<f64> = (0..n * n).map(|i| ((i % 19) as f64) * 0.27 + 0.2).collect();
+        let a = UFuncArray::new(vec![n, n], a_vals.clone(), DType::F64).unwrap();
+        let b = UFuncArray::new(vec![n, n], b_vals.clone(), DType::F64).unwrap();
+
+        let got = a.inner(&b).unwrap();
+        assert_eq!(got.shape, vec![n, n]);
+
+        // Serial reference: out[i,j] = sum_k a[i,k]*b[j,k], k ascending.
+        let mut want = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut sum = 0.0;
+                for k in 0..n {
+                    sum += a_vals[i * n + k] * b_vals[j * n + k];
+                }
+                want[i * n + j] = sum;
+            }
+        }
+
+        for (idx, (g, w)) in got.values.iter().zip(want.iter()).enumerate() {
+            assert_eq!(
+                g.to_bits(),
+                w.to_bits(),
+                "parallel inner diverged from serial reference at index {}",
                 idx
             );
         }
