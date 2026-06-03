@@ -2019,6 +2019,97 @@ impl RngBackend {
     }
 }
 
+trait ZigguratRngCore {
+    fn ziggurat_next_u64(&mut self) -> u64;
+    fn ziggurat_next_f64(&mut self) -> f64;
+}
+
+macro_rules! impl_ziggurat_rng_core {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl ZigguratRngCore for $ty {
+                #[inline(always)]
+                fn ziggurat_next_u64(&mut self) -> u64 {
+                    self.next_u64()
+                }
+
+                #[inline(always)]
+                fn ziggurat_next_f64(&mut self) -> f64 {
+                    self.next_f64()
+                }
+            }
+        )+
+    };
+}
+
+impl_ziggurat_rng_core!(
+    DeterministicRng,
+    Pcg64Rng,
+    Pcg64DxsmRng,
+    Mt19937Rng,
+    PhiloxRng,
+    Sfc64Rng,
+);
+
+impl ZigguratRngCore for RngBackend {
+    #[inline(always)]
+    fn ziggurat_next_u64(&mut self) -> u64 {
+        self.next_u64()
+    }
+
+    #[inline(always)]
+    fn ziggurat_next_f64(&mut self) -> f64 {
+        self.next_f64()
+    }
+}
+
+#[inline]
+fn standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
+    (0..size)
+        .map(|_| sample_ziggurat_normal_core(rng))
+        .collect()
+}
+
+#[inline(always)]
+fn sample_ziggurat_normal_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) -> f64 {
+    use crate::ziggurat::{
+        ZIGGURAT_NOR_F, ZIGGURAT_NOR_INV_R, ZIGGURAT_NOR_K, ZIGGURAT_NOR_R, ZIGGURAT_NOR_W,
+    };
+    loop {
+        let mut r = rng.ziggurat_next_u64();
+        let idx = (r & 0xFF) as usize;
+        r >>= 8;
+        let sign = r & 0x1;
+        let rabs = (r >> 1) & 0x000F_FFFF_FFFF_FFFF;
+        let mut x = rabs as f64 * ZIGGURAT_NOR_W[idx];
+        if (sign & 0x1) != 0 {
+            x = -x;
+        }
+        if rabs < ZIGGURAT_NOR_K[idx] {
+            return x;
+        }
+        if idx == 0 {
+            loop {
+                let xx = -ZIGGURAT_NOR_INV_R * (-rng.ziggurat_next_f64()).ln_1p();
+                let yy = -(-rng.ziggurat_next_f64()).ln_1p();
+                if yy + yy > xx * xx {
+                    return if (rabs >> 8) & 0x1 != 0 {
+                        -(ZIGGURAT_NOR_R + xx)
+                    } else {
+                        ZIGGURAT_NOR_R + xx
+                    };
+                }
+            }
+        } else {
+            let f_idx = ZIGGURAT_NOR_F[idx];
+            let f_prev = ZIGGURAT_NOR_F[idx - 1];
+            if (f_prev - f_idx) * rng.ziggurat_next_f64() + f_idx < (-0.5 * x * x).exp() {
+                return x;
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitGenerator {
     kind: BitGeneratorKind,
@@ -3527,7 +3618,19 @@ impl Generator {
     /// Mimics `rng.standard_normal(size)`.
     #[must_use]
     pub fn standard_normal(&mut self, size: usize) -> Vec<f64> {
-        (0..size).map(|_| self.sample_ziggurat_normal()).collect()
+        if size == 0 {
+            return Vec::new();
+        }
+
+        self.u32_buf_ready = false;
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Pcg64(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Pcg64Dxsm(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Mt19937(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Philox(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Sfc64(rng) => standard_normal_from_core(rng, size),
+        }
     }
 
     /// Generate standard normal samples with NumPy `size` metadata preserved.
@@ -4293,41 +4396,8 @@ impl Generator {
     /// Bit layout from a single u64: bits 0..7 = rectangle index,
     /// bit 8 = sign, bits 9..60 = rectangle position (rabs, 52 bits).
     fn sample_ziggurat_normal(&mut self) -> f64 {
-        use crate::ziggurat::*;
-        loop {
-            let mut r = self.next_u64();
-            let idx = (r & 0xFF) as usize;
-            r >>= 8;
-            let sign = r & 0x1;
-            let rabs = (r >> 1) & 0x000F_FFFF_FFFF_FFFF;
-            let mut x = rabs as f64 * ZIGGURAT_NOR_W[idx];
-            if (sign & 0x1) != 0 {
-                x = -x;
-            }
-            if rabs < ZIGGURAT_NOR_K[idx] {
-                return x;
-            }
-            if idx == 0 {
-                // Tail: Marsaglia's method using log1p(-U) to avoid log(0)
-                loop {
-                    let xx = -ZIGGURAT_NOR_INV_R * (-self.next_f64()).ln_1p();
-                    let yy = -(-self.next_f64()).ln_1p();
-                    if yy + yy > xx * xx {
-                        return if (rabs >> 8) & 0x1 != 0 {
-                            -(ZIGGURAT_NOR_R + xx)
-                        } else {
-                            ZIGGURAT_NOR_R + xx
-                        };
-                    }
-                }
-            } else {
-                let f_idx = ZIGGURAT_NOR_F[idx];
-                let f_prev = ZIGGURAT_NOR_F[idx - 1];
-                if (f_prev - f_idx) * self.next_f64() + f_idx < (-0.5 * x * x).exp() {
-                    return x;
-                }
-            }
-        }
+        self.u32_buf_ready = false;
+        sample_ziggurat_normal_core(&mut self.bit_generator.rng)
     }
 
     /// Ziggurat method for standard exponential, matching NumPy's
@@ -5677,6 +5747,8 @@ impl RandomLogRecord {
 mod tests {
     use std::process::Command;
 
+    use sha2::{Digest, Sha256};
+
     use super::{
         BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
         BitGeneratorState, DEFAULT_RNG_SEED, DeterministicRng, Generator, GeneratorPicklePayload,
@@ -6592,30 +6664,18 @@ for child in rng.spawn(n_children):
     #[test]
     fn random_state_legacy_negative_zero_parameters_match_numpy() {
         let mut state = RandomState::new(SeedMaterial::U64(42)).expect("state");
-        assert_eq!(
-            state.normal(0.0, -0.0, 1),
-            Err(RandomError::ScaleNegative)
-        );
+        assert_eq!(state.normal(0.0, -0.0, 1), Err(RandomError::ScaleNegative));
         assert_eq!(
             state.lognormal(0.0, -0.0, 1),
             Err(RandomError::InvalidParameter)
         );
-        assert_eq!(
-            state.exponential(-0.0, 1),
-            Err(RandomError::ScaleNegative)
-        );
+        assert_eq!(state.exponential(-0.0, 1), Err(RandomError::ScaleNegative));
         assert_eq!(
             state.standard_gamma(-0.0, 1),
             Err(RandomError::ShapeNegative)
         );
-        assert_eq!(
-            state.gamma(-0.0, 1.0, 1),
-            Err(RandomError::ShapeNegative)
-        );
-        assert_eq!(
-            state.gamma(1.0, -0.0, 1),
-            Err(RandomError::ScaleNegative)
-        );
+        assert_eq!(state.gamma(-0.0, 1.0, 1), Err(RandomError::ShapeNegative));
+        assert_eq!(state.gamma(1.0, -0.0, 1), Err(RandomError::ScaleNegative));
     }
 
     #[test]
@@ -8802,6 +8862,42 @@ for child in rng.spawn(n_children):
         let mean: f64 = vals.iter().sum::<f64>() / vals.len() as f64;
         // Mean should be close to 0 with 10000 samples
         assert!(mean.abs() < 0.1, "mean was {mean}");
+    }
+
+    #[test]
+    fn standard_normal_specialized_backend_preserves_stream_and_digest() {
+        let size = 1024;
+        let mut batch_rng = test_generator();
+        let batch = batch_rng.standard_normal(size);
+
+        let mut scalar_rng = test_generator();
+        let scalar: Vec<f64> = (0..size)
+            .map(|_| scalar_rng.sample_ziggurat_normal())
+            .collect();
+
+        for (index, (actual, expected)) in batch.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "standard_normal bit pattern changed at index {index}"
+            );
+        }
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "406ce26ec3aeefada7e2250f16d24a89361c1da2041c6775599be394008e7e5f"
+        );
     }
 
     #[test]
