@@ -18326,18 +18326,27 @@ impl UFuncArray {
                 "polyval: coefficients must be 1-D".to_string(),
             ));
         }
-        let values: Vec<f64> = x
-            .values
-            .iter()
-            .map(|&xi| {
-                // Horner's method
-                let mut result = 0.0;
-                for &c in &coeffs.values {
-                    result = result * xi + c;
-                }
-                result
-            })
-            .collect();
+        // Each x point is evaluated by an independent Horner fold over the (shared,
+        // read-only) coefficients in the same descending order, so an indexed
+        // parallel map over the points is bit-for-bit identical to the serial map
+        // for any thread count. Compute-bound at O(points * deg).
+        let coeffs_ref = &coeffs.values;
+        let horner = |&xi: &f64| -> f64 {
+            let mut result = 0.0;
+            for &c in coeffs_ref {
+                result = result * xi + c;
+            }
+            result
+        };
+        const POLYVAL_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+        let values: Vec<f64> = if x.values.len() >= POLYVAL_PARALLEL_MIN_ELEMS
+            && coeffs_ref.len() >= 2
+            && rayon::current_num_threads() >= 2
+        {
+            x.values.par_iter().map(horner).collect()
+        } else {
+            x.values.iter().map(horner).collect()
+        };
         Ok(Self {
             shape: x.shape.clone(),
             values,
@@ -41039,6 +41048,38 @@ print(json.dumps(payload))
                 );
             }
         }
+    }
+
+    #[test]
+    fn polyval_parallel_matches_serial_reference() {
+        // Parallel polyval must be bit-for-bit identical to a serial per-point Horner
+        // fold. Use 8192 points (> 1<<12) and degree 11 so the parallel path engages.
+        let npts = 8192usize;
+        let coeffs: Vec<f64> = (0..12)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 997) as f64) / 13.0 - 30.0)
+            .collect();
+        let xs: Vec<f64> = (0..npts)
+            .map(|i| (((i as u64).wrapping_mul(40503).wrapping_add(7) % 4001) as f64) / 1000.0 - 2.0)
+            .collect();
+        let carr = UFuncArray::new(vec![coeffs.len()], coeffs.clone(), DType::F64).expect("c");
+        let xarr = UFuncArray::new(vec![npts], xs.clone(), DType::F64).expect("x");
+        let out = UFuncArray::polyval(&carr, &xarr).expect("polyval");
+
+        let expected: Vec<f64> = xs
+            .iter()
+            .map(|&xi| {
+                let mut r = 0.0f64;
+                for &c in &coeffs {
+                    r = r * xi + c;
+                }
+                r
+            })
+            .collect();
+        assert_eq!(
+            out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "parallel polyval diverged from serial Horner reference"
+        );
     }
 
     #[test]
