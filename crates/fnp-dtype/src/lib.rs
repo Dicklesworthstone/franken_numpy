@@ -1183,20 +1183,148 @@ impl ArrayStorage {
         let src_is_int = self.dtype().is_integer() || self.dtype() == DType::Bool;
         let dst_is_int = target.is_integer() || target == DType::Bool;
 
+        // Hoist the per-element enum dispatch out of the conversion loop: read the
+        // whole source with a single match into an intermediary `Vec`, then write
+        // the target with a single match on the result variant. This is
+        // bit-identical to the previous `(0..n) { result.set_*(i, self.get_*(i)) }`
+        // loop — `to_i128_vec`/`to_f64_vec` reproduce `get_i128`/`get_f64` exactly,
+        // and each fill arm mirrors the matching `set_i128`/`set_f64` arm — but it
+        // drops the per-element variant match + bounds check on both ends and lets
+        // the compiler autovectorize each typed conversion.
         if src_is_int && dst_is_int {
-            // Integer-to-integer: use i128 for lossless transfer
-            for i in 0..n {
-                let val = self.get_i128(i)?;
-                result.set_i128(i, val)?;
-            }
+            // Integer-to-integer: use i128 for lossless transfer.
+            let vals = self.to_i128_vec();
+            result.fill_from_i128(&vals);
         } else {
-            // Numeric-to-numeric: go through f64 intermediary
-            for i in 0..n {
-                let val = self.get_f64(i)?;
-                result.set_f64(i, val)?;
-            }
+            // Numeric-to-numeric: go through f64 intermediary.
+            let vals = self.to_f64_vec();
+            result.fill_from_f64(&vals);
         }
         Ok(result)
+    }
+
+    /// Extract the underlying data as a `Vec<i128>` (lossless for integers,
+    /// truncating for floats). Mirrors `get_i128` element-by-element with the
+    /// per-element enum dispatch hoisted out of the loop.
+    fn to_i128_vec(&self) -> Vec<i128> {
+        match self {
+            Self::Bool(v) => v.iter().map(|&b| i128::from(b)).collect(),
+            Self::I8(v) => v.iter().map(|&x| i128::from(x)).collect(),
+            Self::I16(v) => v.iter().map(|&x| i128::from(x)).collect(),
+            Self::I32(v) => v.iter().map(|&x| i128::from(x)).collect(),
+            Self::I64(v) => v.iter().map(|&x| i128::from(x)).collect(),
+            Self::U8(v) => v.iter().map(|&x| i128::from(x)).collect(),
+            Self::U16(v) => v.iter().map(|&x| i128::from(x)).collect(),
+            Self::U32(v) => v.iter().map(|&x| i128::from(x)).collect(),
+            Self::U64(v) => v.iter().map(|&x| i128::from(x)).collect(),
+            Self::F16(v) => v.iter().map(|&x| f64::from(x) as i128).collect(),
+            Self::F32(v) => v.iter().map(|&x| x as i128).collect(),
+            Self::F64(v) => v.iter().map(|&x| x as i128).collect(),
+            Self::Complex64(v) => v.iter().map(|&(re, _)| f64::from(re) as i128).collect(),
+            Self::Complex128(v) => v.iter().map(|&(re, _)| re as i128).collect(),
+            Self::String(v) => vec![0; v.len()],
+            Self::Structured(s) => vec![0; s.len()],
+        }
+    }
+
+    /// Overwrite every element of `self` from an i128 slice, dispatching once on
+    /// the result variant. Each arm mirrors the matching `set_i128` arm exactly.
+    /// `vals.len()` must equal `self.len()`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn fill_from_i128(&mut self, vals: &[i128]) {
+        match self {
+            Self::Bool(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v != 0),
+            Self::I8(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as i8),
+            Self::I16(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as i16),
+            Self::I32(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as i32),
+            Self::I64(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as i64),
+            Self::U8(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as u8),
+            Self::U16(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as u16),
+            Self::U32(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as u32),
+            Self::U64(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as u64),
+            Self::F16(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = f16::from_f64(v as f64)),
+            Self::F32(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as f32),
+            Self::F64(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as f64),
+            Self::Complex64(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = (v as f32, 0.0)),
+            Self::Complex128(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = (v as f64, 0.0)),
+            Self::String(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = v.to_string()),
+            // `cast_to` rejects Structured targets before reaching the fill.
+            Self::Structured(_) => {}
+        }
+    }
+
+    /// Overwrite every element of `self` from an f64 slice, dispatching once on
+    /// the result variant. Each arm mirrors the matching `set_f64` arm exactly.
+    /// `vals.len()` must equal `self.len()`.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn fill_from_f64(&mut self, vals: &[f64]) {
+        match self {
+            Self::Bool(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v != 0.0),
+            Self::I8(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as i8),
+            Self::I16(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as i16),
+            Self::I32(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as i32),
+            Self::I64(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as i64),
+            Self::U8(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as u8),
+            Self::U16(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as u16),
+            Self::U32(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as u32),
+            Self::U64(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = f64_to_wrapping_i128(v) as u64),
+            Self::F16(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = f16::from_f64(v)),
+            Self::F32(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v as f32),
+            Self::F64(out) => out.iter_mut().zip(vals).for_each(|(o, &v)| *o = v),
+            Self::Complex64(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = (v as f32, 0.0)),
+            Self::Complex128(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = (v, 0.0)),
+            Self::String(out) => out
+                .iter_mut()
+                .zip(vals)
+                .for_each(|(o, &v)| *o = v.to_string()),
+            // `cast_to` rejects Structured targets before reaching the fill.
+            Self::Structured(_) => {}
+        }
     }
 
     /// Extract the underlying data as a `Vec<f64>` (lossy for non-f64 types).
@@ -1806,6 +1934,134 @@ mod tests {
         assert_eq!(
             hex,
             "29f7120d926d18e42c0012d64a502efbfc0f32740b6148b402c6a8d3f9ed0a60"
+        );
+    }
+
+    /// Sources exercising every numeric/bool/complex variant with bit-tricky
+    /// values; used to cover the hoisted `cast_to` conversion loops (these are
+    /// the only variants that reach the numeric/int fill paths — String and
+    /// Structured sources error out before the loop).
+    fn cast_source_fixtures() -> Vec<ArrayStorage> {
+        to_f64_vec_fixtures()
+            .into_iter()
+            .filter(|s| !matches!(s, ArrayStorage::String(_) | ArrayStorage::Structured(_)))
+            .collect()
+    }
+
+    /// Every dtype that `cast_to`'s numeric/int fill paths can target.
+    fn cast_target_dtypes() -> [DType; 14] {
+        [
+            DType::Bool,
+            DType::I8,
+            DType::I16,
+            DType::I32,
+            DType::I64,
+            DType::U8,
+            DType::U16,
+            DType::U32,
+            DType::U64,
+            DType::F16,
+            DType::F32,
+            DType::F64,
+            DType::Complex64,
+            DType::Complex128,
+        ]
+    }
+
+    /// Per-element reference for the numeric/int cast loops — the exact algorithm
+    /// `cast_to` used before the dispatch was hoisted (`set_i128(get_i128)` /
+    /// `set_f64(get_f64)` one element at a time).
+    fn reference_numeric_cast(s: &ArrayStorage, target: DType) -> ArrayStorage {
+        // Same-dtype cast is a clone (preserves e.g. a complex imaginary part the
+        // f64 loop would drop) — mirror `cast_to`'s early return.
+        if s.dtype() == target {
+            return s.clone();
+        }
+        let n = s.len();
+        let mut result = ArrayStorage::zeros(target, n);
+        let src_is_int = s.dtype().is_integer() || s.dtype() == DType::Bool;
+        let dst_is_int = target.is_integer() || target == DType::Bool;
+        if src_is_int && dst_is_int {
+            for i in 0..n {
+                result.set_i128(i, s.get_i128(i).unwrap()).unwrap();
+            }
+        } else {
+            for i in 0..n {
+                result.set_f64(i, s.get_f64(i).unwrap()).unwrap();
+            }
+        }
+        result
+    }
+
+    /// Bit-exact serialization of a storage (variant tag + raw element bits) so
+    /// NaN payloads and -0.0 compare/hash by their exact representation.
+    fn storage_to_bits(s: &ArrayStorage) -> Vec<u8> {
+        let mut out = vec![s.dtype() as u8];
+        match s {
+            ArrayStorage::Bool(v) => out.extend(v.iter().map(|&b| u8::from(b))),
+            ArrayStorage::I8(v) => v.iter().for_each(|x| out.extend(x.to_le_bytes())),
+            ArrayStorage::I16(v) => v.iter().for_each(|x| out.extend(x.to_le_bytes())),
+            ArrayStorage::I32(v) => v.iter().for_each(|x| out.extend(x.to_le_bytes())),
+            ArrayStorage::I64(v) => v.iter().for_each(|x| out.extend(x.to_le_bytes())),
+            ArrayStorage::U8(v) => out.extend(v.iter().copied()),
+            ArrayStorage::U16(v) => v.iter().for_each(|x| out.extend(x.to_le_bytes())),
+            ArrayStorage::U32(v) => v.iter().for_each(|x| out.extend(x.to_le_bytes())),
+            ArrayStorage::U64(v) => v.iter().for_each(|x| out.extend(x.to_le_bytes())),
+            ArrayStorage::F16(v) => v.iter().for_each(|x| out.extend(x.to_bits().to_le_bytes())),
+            ArrayStorage::F32(v) => v.iter().for_each(|x| out.extend(x.to_bits().to_le_bytes())),
+            ArrayStorage::F64(v) => v.iter().for_each(|x| out.extend(x.to_bits().to_le_bytes())),
+            ArrayStorage::Complex64(v) => v.iter().for_each(|(re, im)| {
+                out.extend(re.to_bits().to_le_bytes());
+                out.extend(im.to_bits().to_le_bytes());
+            }),
+            ArrayStorage::Complex128(v) => v.iter().for_each(|(re, im)| {
+                out.extend(re.to_bits().to_le_bytes());
+                out.extend(im.to_bits().to_le_bytes());
+            }),
+            ArrayStorage::String(v) => v.iter().for_each(|sv| {
+                out.extend((sv.len() as u64).to_le_bytes());
+                out.extend(sv.as_bytes());
+            }),
+            ArrayStorage::Structured(st) => out.extend((st.len() as u64).to_le_bytes()),
+        }
+        out
+    }
+
+    #[test]
+    fn cast_to_matches_per_element_reference_bit_exact() {
+        for src in cast_source_fixtures() {
+            for target in cast_target_dtypes() {
+                let fast = src.cast_to(target).unwrap();
+                let reference = reference_numeric_cast(&src, target);
+                assert_eq!(
+                    storage_to_bits(&fast),
+                    storage_to_bits(&reference),
+                    "cast {:?} -> {:?} diverges from per-element reference",
+                    src.dtype(),
+                    target
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn cast_to_golden_sha256() {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        for src in cast_source_fixtures() {
+            for target in cast_target_dtypes() {
+                hasher.update(storage_to_bits(&src.cast_to(target).unwrap()));
+            }
+        }
+        let digest = hasher.finalize();
+        let mut hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut hex, "{byte:02x}");
+        }
+        assert_eq!(
+            hex,
+            "ccfe83d87e56647e91a2387a7b1e26ac8a105767e4310bde6b9e81dd1ec9cd6d"
         );
     }
 

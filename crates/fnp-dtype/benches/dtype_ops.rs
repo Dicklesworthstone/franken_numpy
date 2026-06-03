@@ -138,7 +138,7 @@ fn bench_dtype_parse(c: &mut Criterion) {
 fn bench_array_storage_cast(c: &mut Criterion) {
     let mut group = c.benchmark_group("array_storage_cast");
 
-    let sizes = [100, 1000, 10000];
+    let sizes = [100, 1000, 10000, 100_000];
 
     for &size in &sizes {
         let i32_data: Vec<i32> = (0..size).collect();
@@ -157,6 +157,18 @@ fn bench_array_storage_cast(c: &mut Criterion) {
 
         group.bench_with_input(
             BenchmarkId::new("f64_to_i32", size),
+            &storage,
+            |b, storage| b.iter(|| storage.cast_to(black_box(DType::I32))),
+        );
+    }
+
+    // Integer-to-integer path (goes through the i128 intermediary).
+    for &size in &sizes {
+        let i64_data: Vec<i64> = (0..size as i64).collect();
+        let storage = ArrayStorage::I64(i64_data);
+
+        group.bench_with_input(
+            BenchmarkId::new("i64_to_i32", size),
             &storage,
             |b, storage| b.iter(|| storage.cast_to(black_box(DType::I32))),
         );
