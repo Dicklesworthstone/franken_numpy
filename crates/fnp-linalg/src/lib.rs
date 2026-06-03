@@ -2295,6 +2295,9 @@ fn tridiag_reduce_impl(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>, Ve
     };
 
     let mut v = vec![0.0; n];
+    // Scratch for the cache-friendly left Householder transform (see below).
+    let mut d = vec![0.0; n];
+    let mut f_vec = vec![0.0; n];
     for j in 0..n.saturating_sub(2) {
         // Householder to zero column j below row j+1
         let col_norm = {
@@ -2328,15 +2331,29 @@ fn tridiag_reduce_impl(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>, Ve
         let scale = 2.0 / v_norm_sq;
 
         // Similarity: work = H * work * H  where H = I - scale·v·v^T
-        // Left: work = H * work
-        for col in 0..n {
-            let mut dot = 0.0;
-            for i in (j + 1)..n {
-                dot += v[i] * work[i * n + col];
+        // Left: work = H * work. Done as two row-contiguous passes instead of the
+        // naive per-column walk (which strode `work[i*n+col]` down each column
+        // with stride n — a cache line per step). Bit-exact: pass 1 sums each
+        // d[col] = Σ_i v[i]·work[i][col] in the same i-ascending order, and pass 2
+        // applies the identical `(scale·d[col])·v[i]` product grouping per element.
+        for dc in d.iter_mut() {
+            *dc = 0.0;
+        }
+        for i in (j + 1)..n {
+            let vi = v[i];
+            let row = &work[i * n..i * n + n];
+            for (dc, &w) in d.iter_mut().zip(row.iter()) {
+                *dc += vi * w;
             }
-            let f = scale * dot;
-            for i in (j + 1)..n {
-                work[i * n + col] -= f * v[i];
+        }
+        for (fc, &dc) in f_vec.iter_mut().zip(d.iter()) {
+            *fc = scale * dc;
+        }
+        for i in (j + 1)..n {
+            let vi = v[i];
+            let row = &mut work[i * n..i * n + n];
+            for (w, &fc) in row.iter_mut().zip(f_vec.iter()) {
+                *w -= fc * vi;
             }
         }
         // Right: work = work * H

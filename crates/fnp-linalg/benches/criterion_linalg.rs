@@ -164,7 +164,7 @@ fn bench_svd(c: &mut Criterion) {
 fn bench_eigvalsh(c: &mut Criterion) {
     let mut group = c.benchmark_group("eigvalsh_nxn");
 
-    for n in [16, 32, 64, 128] {
+    for n in [16, 32, 64, 128, 256, 512] {
         let a = generate_spd_matrix(n);
 
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
