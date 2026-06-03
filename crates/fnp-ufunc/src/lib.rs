@@ -18021,14 +18021,33 @@ impl UFuncArray {
         if m == 0 {
             return Err(UFuncError::Msg("v cannot be empty".to_string()));
         }
-        // Compute full convolution
+        // Compute full convolution. Gather form of the scatter `full[i+j] +=
+        // a[i]*k[j]` loop: each output p sums a[i]*k[p-i] over the contributing i.
+        // In the scatter, contributions to a fixed p arrive in i-ascending order;
+        // iterating i ascending here reproduces that exact FP accumulation order, so
+        // the result is bit-for-bit identical. Output positions are independent, so
+        // an indexed parallel map is bit-exact for any thread count.
         let full_len = n + m - 1;
-        let mut full = vec![0.0f64; full_len];
-        for i in 0..n {
-            for j in 0..m {
-                full[i + j] += self.values[i] * kernel.values[j];
+        let a = &self.values;
+        let k = &kernel.values;
+        let conv_at = |p: usize| -> f64 {
+            let i_lo = p.saturating_sub(m - 1);
+            let i_hi = p.min(n - 1);
+            let mut acc = 0.0f64;
+            for i in i_lo..=i_hi {
+                acc += a[i] * k[p - i];
             }
-        }
+            acc
+        };
+        const CONVOLVE_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+        let full: Vec<f64> = if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
+            && n.min(m) >= 2
+            && rayon::current_num_threads() >= 2
+        {
+            (0..full_len).into_par_iter().map(conv_at).collect()
+        } else {
+            (0..full_len).map(conv_at).collect()
+        };
         // Trim based on mode
         let values = match mode {
             "full" => full,
@@ -41019,6 +41038,53 @@ print(json.dumps(payload))
                     "parallel last-axis median lane {r} diverged from serial reference"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn convolve_1d_parallel_matches_scatter_reference() {
+        // The gather/parallel 1-D convolve must be bit-for-bit identical to the
+        // original scatter-accumulate loop, for full/same/valid modes. Use
+        // n=4096, m=33 so full_len=4128 > 1<<12 and the output map parallelizes.
+        let (n, m) = (4096usize, 33usize);
+        let a: Vec<f64> = (0..n)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 17.0 - 200.0)
+            .collect();
+        let k: Vec<f64> = (0..m)
+            .map(|i| (((i as u64).wrapping_mul(40503).wrapping_add(7) % 211) as f64) / 5.0 - 20.0)
+            .collect();
+        let arr = UFuncArray::new(vec![n], a.clone(), DType::F64).expect("a");
+        let ker = UFuncArray::new(vec![m], k.clone(), DType::F64).expect("k");
+
+        // Original scatter-accumulate reference for the full convolution.
+        let full_len = n + m - 1;
+        let mut full_ref = vec![0.0f64; full_len];
+        for i in 0..n {
+            for j in 0..m {
+                full_ref[i + j] += a[i] * k[j];
+            }
+        }
+        for mode in ["full", "same", "valid"] {
+            let out = arr.convolve_mode(&ker, mode).expect("convolve");
+            let expected: Vec<f64> = match mode {
+                "full" => full_ref.clone(),
+                "same" => {
+                    let same_len = n.max(m);
+                    let start = (n.min(m) - 1) / 2;
+                    full_ref[start..start + same_len].to_vec()
+                }
+                "valid" => {
+                    let valid_len = n.max(m) - n.min(m) + 1;
+                    let start = n.min(m) - 1;
+                    full_ref[start..start + valid_len].to_vec()
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(
+                out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "parallel 1-D convolve mode={mode} diverged from scatter reference"
+            );
         }
     }
 
