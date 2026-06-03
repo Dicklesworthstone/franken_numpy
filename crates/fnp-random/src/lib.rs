@@ -2069,6 +2069,18 @@ fn random_f64_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64
 }
 
 #[inline]
+fn uniform_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    low: f64,
+    range: f64,
+    size: usize,
+) -> Vec<f64> {
+    (0..size)
+        .map(|_| low + rng.ziggurat_next_f64() * range)
+        .collect()
+}
+
+#[inline]
 fn standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
     (0..size)
         .map(|_| sample_ziggurat_normal_core(rng))
@@ -3546,7 +3558,19 @@ impl Generator {
             return Err(RandomError::HighMinusLowNegative);
         }
         let range = high - low;
-        Ok((0..size).map(|_| low + self.next_f64() * range).collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => uniform_from_core(rng, low, range, size),
+            RngBackend::Pcg64(rng) => uniform_from_core(rng, low, range, size),
+            RngBackend::Pcg64Dxsm(rng) => uniform_from_core(rng, low, range, size),
+            RngBackend::Mt19937(rng) => uniform_from_core(rng, low, range, size),
+            RngBackend::Philox(rng) => uniform_from_core(rng, low, range, size),
+            RngBackend::Sfc64(rng) => uniform_from_core(rng, low, range, size),
+        })
     }
 
     /// Generate uniform random floats with NumPy `size` metadata preserved.
@@ -8937,6 +8961,50 @@ for child in rng.spawn(n_children):
         assert_eq!(
             digest_hex,
             "412084c3862b80c4d4a6623d9f55553b9b78f2f711798fa5b0d2a379a5a01777"
+        );
+    }
+
+    #[test]
+    fn uniform_specialized_backend_preserves_scalar_stream_and_digest() {
+        let size = 1024;
+        let low = -3.5;
+        let high = 7.25;
+        let range = high - low;
+        let mut batch_rng = test_generator();
+        let mut scalar_rng = test_generator();
+
+        assert_eq!(
+            batch_rng.next_f32().to_bits(),
+            scalar_rng.next_f32().to_bits()
+        );
+
+        let batch = batch_rng.uniform(low, high, size).unwrap();
+        let scalar: Vec<f64> = (0..size)
+            .map(|_| low + scalar_rng.next_f64() * range)
+            .collect();
+
+        for (index, (actual, expected)) in batch.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "uniform bit pattern changed at index {index}"
+            );
+        }
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "9910a06cf85554039f5efa501e18e9ccb27270a3ebd2adfa93eeddc3cd503d61"
         );
     }
 
