@@ -15266,8 +15266,21 @@ impl UFuncArray {
                 .iter()
                 .map(|&v| if v != 0.0 { 1.0 } else { 0.0 })
                 .collect(),
-            DType::I8 | DType::I16 | DType::I32 | DType::I64 => {
+            DType::I8 | DType::I16 | DType::I64 => {
                 self.values.iter().map(|&v| (v as i64) as f64).collect()
+            }
+            DType::I32 => {
+                const ASTYPE_I32_PARALLEL_MIN_LEN: usize = 1 << 15;
+                if self.values.len() >= ASTYPE_I32_PARALLEL_MIN_LEN
+                    && rayon::current_num_threads() >= 2
+                {
+                    self.values
+                        .par_iter()
+                        .map(|&v| (v as i64) as f64)
+                        .collect()
+                } else {
+                    self.values.iter().map(|&v| (v as i64) as f64).collect()
+                }
             }
             DType::U8 | DType::U16 | DType::U32 | DType::U64 => {
                 self.values.iter().map(|&v| (v as u64) as f64).collect()
@@ -17723,37 +17736,42 @@ impl UFuncArray {
                 "digitize: bins must be monotonically increasing or decreasing".to_string(),
             ));
         }
-        let values: Vec<f64> = self
-            .values
-            .iter()
-            .map(|&v| {
-                if v.is_nan() {
-                    return if is_increasing { b.len() as f64 } else { 0.0 };
-                }
-                if is_increasing {
-                    if right {
-                        // right=true: intervals (bins[i-1], bins[i]]
-                        // Find leftmost position where bins[pos] >= v
-                        let idx = b.partition_point(|&probe| probe < v);
-                        idx as f64
-                    } else {
-                        // right=false (default): intervals [bins[i-1], bins[i])
-                        // Find leftmost position where bins[pos] > v
-                        let idx = b.partition_point(|&probe| probe <= v);
-                        idx as f64
-                    }
+        // Each element runs an independent binary search (partition_point) over the
+        // shared, read-only bins and emits an integer index — no cross-element state,
+        // no FP accumulation — so an indexed parallel map is bit-for-bit identical to
+        // the serial map for any thread count. Compute-bound at O(elems * log bins).
+        let bin_for = |&v: &f64| -> f64 {
+            if v.is_nan() {
+                return if is_increasing { b.len() as f64 } else { 0.0 };
+            }
+            if is_increasing {
+                if right {
+                    // right=true: intervals (bins[i-1], bins[i]]
+                    // Find leftmost position where bins[pos] >= v
+                    b.partition_point(|&probe| probe < v) as f64
                 } else {
-                    // Decreasing bins: reverse the logic
-                    if right {
-                        let idx = b.partition_point(|&probe| probe >= v);
-                        idx as f64
-                    } else {
-                        let idx = b.partition_point(|&probe| probe > v);
-                        idx as f64
-                    }
+                    // right=false (default): intervals [bins[i-1], bins[i])
+                    // Find leftmost position where bins[pos] > v
+                    b.partition_point(|&probe| probe <= v) as f64
                 }
-            })
-            .collect();
+            } else {
+                // Decreasing bins: reverse the logic
+                if right {
+                    b.partition_point(|&probe| probe >= v) as f64
+                } else {
+                    b.partition_point(|&probe| probe > v) as f64
+                }
+            }
+        };
+        const DIGITIZE_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+        let values: Vec<f64> = if self.values.len() >= DIGITIZE_PARALLEL_MIN_ELEMS
+            && b.len() >= 2
+            && rayon::current_num_threads() >= 2
+        {
+            self.values.par_iter().map(bin_for).collect()
+        } else {
+            self.values.iter().map(bin_for).collect()
+        };
         Ok(Self {
             shape: self.shape.clone(),
             values,
@@ -41076,6 +41094,61 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn digitize_parallel_matches_serial_reference() {
+        // Parallel digitize (elements above threshold) must be bit-for-bit identical
+        // to a serial per-element partition_point lookup, for increasing and
+        // decreasing bins, both right settings, including NaN inputs. 8192 elements
+        // (> 1<<12) engages the parallel path.
+        let nb = 64usize;
+        let inc_bins: Vec<f64> = (0..nb).map(|i| (i as f64) * 0.7 - 20.0).collect();
+        let dec_bins: Vec<f64> = inc_bins.iter().rev().copied().collect();
+        let nx = 8192usize;
+        let mut xs: Vec<f64> = (0..nx)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 6000) as f64) / 100.0 - 30.0)
+            .collect();
+        for i in (0..nx).step_by(97) {
+            xs[i] = f64::NAN;
+        }
+        let xarr = UFuncArray::new(vec![nx], xs.clone(), DType::F64).expect("x");
+
+        let serial_ref = |bins: &[f64], right: bool| -> Vec<f64> {
+            let inc = bins.windows(2).all(|w| w[0] <= w[1]);
+            xs.iter()
+                .map(|&v| {
+                    if v.is_nan() {
+                        return if inc { bins.len() as f64 } else { 0.0 };
+                    }
+                    if inc {
+                        if right {
+                            bins.partition_point(|&p| p < v) as f64
+                        } else {
+                            bins.partition_point(|&p| p <= v) as f64
+                        }
+                    } else if right {
+                        bins.partition_point(|&p| p >= v) as f64
+                    } else {
+                        bins.partition_point(|&p| p > v) as f64
+                    }
+                })
+                .collect()
+        };
+
+        for (bins, label) in [(&inc_bins, "inc"), (&dec_bins, "dec")] {
+            let barr = UFuncArray::new(vec![nb], bins.clone(), DType::F64).expect("bins");
+            for right in [false, true] {
+                let out = xarr.digitize_right(&barr, right).expect("digitize");
+                assert_eq!(out.dtype(), DType::I64);
+                let expected = serial_ref(bins, right);
+                assert_eq!(
+                    out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "parallel digitize {label} right={right} diverged from serial"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn interp_parallel_matches_serial_reference() {
         // Parallel interp (query points above threshold) must be bit-for-bit
         // identical to a serial per-point binary-search + linear blend. 8192 query
@@ -43801,6 +43874,42 @@ print(json.dumps(payload))
         let r = a.astype(DType::I32);
         assert_eq!(r.dtype(), DType::I32);
         assert_eq!(r.values(), &[1.0, -2.0, 3.0]); // truncated
+    }
+
+    #[test]
+    fn astype_i32_parallel_golden_sha256_locks_bit_pattern() {
+        let len = 1 << 16;
+        let values: Vec<f64> = (0..len)
+            .map(|i| {
+                let centered = ((i * 23) % 10_003) as i64 - 5_001;
+                if i % 257 == 0 {
+                    f64::NAN
+                } else if i % 263 == 0 {
+                    f64::INFINITY
+                } else {
+                    centered as f64 + 0.75
+                }
+            })
+            .collect();
+        let arr = UFuncArray::new(vec![len], values.clone(), DType::F64).unwrap();
+        let cast = arr.astype(DType::I32);
+        let reference: Vec<f64> = values.iter().map(|&value| (value as i64) as f64).collect();
+
+        assert_eq!(cast.dtype(), DType::I32);
+        assert_eq!(cast.values(), reference.as_slice());
+
+        let mut hasher = Sha256::new();
+        for value in cast.values() {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let mut actual_sha = String::with_capacity(64);
+        for byte in hasher.finalize() {
+            let _ = write!(&mut actual_sha, "{byte:02x}");
+        }
+        assert_eq!(
+            actual_sha,
+            "9b705b8e29c06c01b2c837e98c93555b742f16fb896381142fed728257db5a79"
+        );
     }
 
     #[test]
