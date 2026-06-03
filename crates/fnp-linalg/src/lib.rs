@@ -910,21 +910,23 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
 
     let mut l = vec![0.0; n * n];
     for i in 0..n {
+        let row_i = i * n;
         for j in 0..=i {
+            let row_j = j * n;
             let mut sum = 0.0;
             for k in 0..j {
-                sum += l[i * n + k] * l[j * n + k];
+                sum += l[row_i + k] * l[row_j + k];
             }
             if i == j {
-                let diag = a[i * n + i] - sum;
+                let diag = a[row_i + i] - sum;
                 if diag <= 0.0 {
                     return Err(LinAlgError::CholeskyContractViolation(
                         "matrix is not positive definite",
                     ));
                 }
-                l[i * n + j] = diag.sqrt();
+                l[row_i + j] = diag.sqrt();
             } else {
-                l[i * n + j] = (a[i * n + j] - sum) / l[j * n + j];
+                l[row_i + j] = (a[row_i + j] - sum) / l[row_j + j];
             }
         }
     }
@@ -5433,6 +5435,7 @@ mod tests {
         validate_tolerance_policy,
         vector_norm,
     };
+    use sha2::{Digest, Sha256};
     use std::process::Command;
 
     fn packet008_artifacts() -> Vec<String> {
@@ -6887,6 +6890,75 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn cholesky_nxn_index_hoist_preserves_scalar_reference_bits() -> Result<(), String> {
+        fn scalar_reference(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+            let mut l = vec![0.0; n * n];
+            for i in 0..n {
+                for j in 0..=i {
+                    let mut sum = 0.0;
+                    for k in 0..j {
+                        sum += l[i * n + k] * l[j * n + k];
+                    }
+                    if i == j {
+                        let diag = a[i * n + i] - sum;
+                        if diag <= 0.0 {
+                            return Err(LinAlgError::CholeskyContractViolation(
+                                "matrix is not positive definite",
+                            ));
+                        }
+                        l[i * n + j] = diag.sqrt();
+                    } else {
+                        l[i * n + j] = (a[i * n + j] - sum) / l[j * n + j];
+                    }
+                }
+            }
+            Ok(l)
+        }
+
+        let n = 12usize;
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let distance = i.abs_diff(j) as f64;
+                a[i * n + j] = if i == j {
+                    32.0 + i as f64 * 0.25
+                } else {
+                    1.0 / (distance + 2.0)
+                };
+            }
+        }
+
+        let expected = scalar_reference(&a, n).map_err(|err| err.to_string())?;
+        let actual = cholesky_nxn(&a, n).map_err(|err| err.to_string())?;
+        assert_eq!(
+            actual
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "row-base index hoist changed Cholesky output bits"
+        );
+
+        let mut hasher = Sha256::new();
+        for value in &actual {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "287798e558ddd98292d5eb5546085eb3c41c9981d2da152dd84b87c7d586ad50",
+            "Cholesky output bit pattern must remain fixed"
+        );
+        Ok(())
     }
 
     #[test]
