@@ -27822,26 +27822,43 @@ fn fftn_along_axis(shape: &[usize], re: &mut [f64], im: &mut [f64], axis: usize,
     let outer_size: usize = shape[..axis].iter().product::<usize>().max(1);
     let inner_size: usize = shape[axis + 1..].iter().product::<usize>().max(1);
 
-    let mut buf_re = vec![0.0; axis_len];
-    let mut buf_im = vec![0.0; axis_len];
-
-    for outer in 0..outer_size {
+    // Each `outer` index owns a contiguous super-block of axis_len*inner_size
+    // elements; within it the `inner_size` lanes (stride = inner_size) are mutually
+    // independent 1-D transforms. fft_dit is deterministic per lane, so processing
+    // the blocks across the rayon pool is bit-for-bit identical to the serial loop
+    // for any thread count. par_chunks_mut hands each block a disjoint &mut slice,
+    // so this stays #![forbid(unsafe_code)]-clean with zero extra allocation.
+    let block = axis_len * inner_size;
+    let process_block = |(re_blk, im_blk): (&mut [f64], &mut [f64])| {
+        let mut buf_re = vec![0.0; axis_len];
+        let mut buf_im = vec![0.0; axis_len];
         for inner in 0..inner_size {
-            // Extract 1-D slice along axis
             for k in 0..axis_len {
-                let idx = outer * axis_len * inner_size + k * inner_size + inner;
-                buf_re[k] = re[idx];
-                buf_im[k] = im[idx];
+                let idx = k * inner_size + inner;
+                buf_re[k] = re_blk[idx];
+                buf_im[k] = im_blk[idx];
             }
-            // Apply 1-D FFT
             fft_dit(&mut buf_re, &mut buf_im, inverse);
-            // Write back
             for k in 0..axis_len {
-                let idx = outer * axis_len * inner_size + k * inner_size + inner;
-                re[idx] = buf_re[k];
-                im[idx] = buf_im[k];
+                let idx = k * inner_size + inner;
+                re_blk[idx] = buf_re[k];
+                im_blk[idx] = buf_im[k];
             }
         }
+    };
+
+    const FFT_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+    if outer_size >= 2
+        && re.len() >= FFT_AXIS_PARALLEL_MIN_ELEMS
+        && rayon::current_num_threads() >= 2
+    {
+        re.par_chunks_mut(block)
+            .zip(im.par_chunks_mut(block))
+            .for_each(process_block);
+    } else {
+        re.chunks_mut(block)
+            .zip(im.chunks_mut(block))
+            .for_each(process_block);
     }
 }
 
@@ -35477,7 +35494,8 @@ mod tests {
         UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset,
         busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
         chebint, chebmul, chebroots, chebsub, chebval, checked_window_total, copysign,
-        datetime_as_string, divmod_arrays, errstate, financial_fv, financial_ipmt, financial_irr,
+        datetime_as_string, divmod_arrays, errstate, fft_dit, fftn_along_axis, financial_fv,
+        financial_ipmt, financial_irr,
         financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
         financial_rate, frexp, frompyfunc, frompyfunc_object, frompyfunc_python,
         frompyfunc_python_import, frompyfunc_python_import_with_interpreter,
@@ -40965,6 +40983,74 @@ print(json.dumps(payload))
                     got.to_bits(),
                     exp.to_bits(),
                     "parallel last-axis median lane {r} diverged from serial reference"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fftn_along_axis_parallel_matches_serial_reference() {
+        // The blocked/parallel fftn_along_axis must be bit-for-bit identical to the
+        // original straightforward serial gather/fft_dit/scatter, for every axis of a
+        // multi-D array sized above the parallel threshold. Both share fft_dit, so any
+        // divergence would come purely from the blocking/scheduling — exactly what we
+        // lock here.
+        // total = 5168 >= FFT_AXIS_PARALLEL_MIN_ELEMS (1<<12=4096), so axis 1
+        // (outer_size=16) and axis 2 (outer_size=272) take the parallel path; axis 0
+        // (outer_size=1) stays serial and trivially matches.
+        let shape = [16usize, 17usize, 19usize];
+        let total: usize = shape.iter().product();
+        let mk = |salt: u64| -> Vec<f64> {
+            (0..total)
+                .map(|i| {
+                    (((i as u64).wrapping_mul(2654435761).wrapping_add(salt) % 9973) as f64) / 13.0
+                        - 300.0
+                })
+                .collect()
+        };
+
+        // Serial reference mirroring the original nested outer/inner loop.
+        let serial_along_axis = |shp: &[usize], re: &mut [f64], im: &mut [f64], axis: usize, inv: bool| {
+            let axis_len = shp[axis];
+            if axis_len <= 1 {
+                return;
+            }
+            let outer_size: usize = shp[..axis].iter().product::<usize>().max(1);
+            let inner_size: usize = shp[axis + 1..].iter().product::<usize>().max(1);
+            let mut buf_re = vec![0.0; axis_len];
+            let mut buf_im = vec![0.0; axis_len];
+            for outer in 0..outer_size {
+                for inner in 0..inner_size {
+                    for k in 0..axis_len {
+                        let idx = outer * axis_len * inner_size + k * inner_size + inner;
+                        buf_re[k] = re[idx];
+                        buf_im[k] = im[idx];
+                    }
+                    fft_dit(&mut buf_re, &mut buf_im, inv);
+                    for k in 0..axis_len {
+                        let idx = outer * axis_len * inner_size + k * inner_size + inner;
+                        re[idx] = buf_re[k];
+                        im[idx] = buf_im[k];
+                    }
+                }
+            }
+        };
+
+        for inverse in [false, true] {
+            for axis in 0..shape.len() {
+                let (mut p_re, mut p_im) = (mk(1), mk(2));
+                let (mut s_re, mut s_im) = (p_re.clone(), p_im.clone());
+                fftn_along_axis(&shape, &mut p_re, &mut p_im, axis, inverse);
+                serial_along_axis(&shape, &mut s_re, &mut s_im, axis, inverse);
+                assert_eq!(
+                    p_re.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    s_re.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "fftn_along_axis re diverged (axis={axis}, inverse={inverse})"
+                );
+                assert_eq!(
+                    p_im.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    s_im.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                    "fftn_along_axis im diverged (axis={axis}, inverse={inverse})"
                 );
             }
         }
