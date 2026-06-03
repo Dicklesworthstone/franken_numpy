@@ -55,7 +55,8 @@ use fnp_ufunc::{
     signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
 };
 use pyo3::exceptions::{
-    PyDeprecationWarning, PyOSError, PyTypeError, PyValueError, PyZeroDivisionError,
+    PyDeprecationWarning, PyOSError, PyOverflowError, PyTypeError, PyValueError,
+    PyZeroDivisionError,
 };
 use pyo3::prelude::*;
 use pyo3::buffer::PyBuffer;
@@ -4314,7 +4315,45 @@ fn extract_take_indices(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<(Vec<usize>, Vec<i64>)> {
-    let indices = extract_integer_array(py, value, context)?;
+    // numpy's take/put still accept float index arrays, but only when the index
+    // argument is a Python sequence/scalar (not an existing float ndarray):
+    // PyArray_FromAny converts Python floats to intp via per-element int()
+    // truncation, while refusing to *cast* a float ndarray. Mirror that exactly,
+    // including the int()-conversion guards for NaN / infinity / overflow.
+    let numpy = py.import("numpy")?;
+    let is_ndarray = value.is_instance(&numpy.getattr("ndarray")?)?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    let normalized = if !is_ndarray
+        && array.getattr("dtype")?.getattr("kind")?.extract::<String>()? == "f"
+    {
+        for v in array
+            .call_method1("reshape", (-1,))?
+            .call_method0("tolist")?
+            .extract::<Vec<f64>>()?
+        {
+            if v.is_nan() {
+                return Err(PyValueError::new_err(
+                    "cannot convert float NaN to integer",
+                ));
+            }
+            if v.is_infinite() {
+                return Err(PyOverflowError::new_err(
+                    "cannot convert float infinity to integer",
+                ));
+            }
+            // intp is i64 on the 64-bit targets we support; values outside its
+            // range overflow the C-long conversion just as CPython's int() does.
+            if v < -(2f64.powi(63)) || v >= 2f64.powi(63) {
+                return Err(PyOverflowError::new_err(
+                    "Python int too large to convert to C long",
+                ));
+            }
+        }
+        array.call_method1("astype", ("int64",))?
+    } else {
+        array
+    };
+    let indices = extract_integer_array(py, &normalized, context)?;
     let shape = indices.shape().to_vec();
     let storage = indices.to_storage().map_err(map_ufunc_error)?;
 

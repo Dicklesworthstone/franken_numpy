@@ -287,3 +287,121 @@ print(np.array_equal(fnp_result, np_result))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// float-index acceptance (numpy 2.4.3 still accepts Python float sequences as
+// take/put indices, truncating toward zero, while rejecting float ndarrays)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn take_float_list_indices_truncate() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(5)
+fnp_result = fnp.take(a, [1.9, 2.9, -1.0])
+np_result = np.take(a, [1.9, 2.9, -1.0])
+print(repr(fnp_result.tolist()) == repr(np_result.tolist()) and repr(np_result.tolist()) == '[1, 2, 4]')
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take should truncate Python float indices toward zero like numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn take_float_ndarray_indices_rejected() -> Result<(), String> {
+    // numpy refuses to *cast* a float ndarray to intp; fnp must also raise.
+    let script = fnp_script(
+        r#"
+a = np.arange(5)
+raised = False
+try:
+    fnp.take(a, np.array([1.0, 2.0]))
+except (TypeError, ValueError):
+    raised = True
+print(raised)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take should reject float ndarray indices like numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn take_float_nan_index_raises_value_error() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(5)
+def err(fn):
+    try:
+        fn()
+        return None
+    except Exception as exc:
+        return type(exc).__name__
+print(err(lambda: fnp.take(a, [float('nan')])) == err(lambda: np.take(a, [float('nan')])) == 'ValueError')
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take float NaN index should raise ValueError like numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn take_float_inf_index_raises_overflow_error() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(5)
+def err(fn):
+    try:
+        fn()
+        return None
+    except Exception as exc:
+        return type(exc).__name__
+print(err(lambda: fnp.take(a, [float('inf')])) == err(lambda: np.take(a, [float('inf')])) == 'OverflowError')
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take float infinity index should raise OverflowError like numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn put_float_list_indices_truncate() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+fnp_arr = np.arange(5)
+np_arr = np.arange(5)
+fnp.put(fnp_arr, [1.0, 2.9], [9, 8])
+np.put(np_arr, [1.0, 2.9], [9, 8])
+print(np.array_equal(fnp_arr, np_arr) and np_arr.tolist() == [0, 9, 8, 3, 4])
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "put should truncate Python float indices toward zero like numpy"
+    );
+    Ok(())
+}
