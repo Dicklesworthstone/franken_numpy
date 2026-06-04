@@ -22180,16 +22180,7 @@ impl UFuncArray {
         {
             set.sort_unstable();
             set.dedup();
-            let values: Vec<f64> = values
-                .iter()
-                .map(|v| {
-                    if set.binary_search(v).is_ok() {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                })
-                .collect();
+            let values = in1d_membership_mask(&values, |v| set.binary_search(v).is_ok());
             return Self {
                 shape: self.shape.clone(),
                 values,
@@ -22206,16 +22197,7 @@ impl UFuncArray {
         {
             set.sort_unstable();
             set.dedup();
-            let values: Vec<f64> = values
-                .iter()
-                .map(|v| {
-                    if set.binary_search(v).is_ok() {
-                        1.0
-                    } else {
-                        0.0
-                    }
-                })
-                .collect();
+            let values = in1d_membership_mask(&values, |v| set.binary_search(v).is_ok());
             return Self {
                 shape: self.shape.clone(),
                 values,
@@ -22226,20 +22208,10 @@ impl UFuncArray {
         let mut set: Vec<f64> = test_elements.values.clone();
         set.sort_by(nan_last_cmp);
         Self::dedup_sorted_float_set_values(&mut set);
-        let values: Vec<f64> = self
-            .values
-            .iter()
-            .map(|&v| {
-                if v.is_nan() {
-                    return 0.0;
-                }
-                if Self::float_membership_contains(&set, v) {
-                    1.0
-                } else {
-                    0.0
-                }
-            })
-            .collect();
+        let values =
+            in1d_membership_mask(&self.values, |&v| {
+                !v.is_nan() && Self::float_membership_contains(&set, v)
+            });
         Self {
             shape: self.shape.clone(),
             values,
@@ -25790,6 +25762,25 @@ fn select_percentile_method(data: &mut [f64], fraction: f64, method: QuantileInt
             }
         }
         QuantileInterp::Midpoint => (v_lo + v_hi) / 2.0,
+    }
+}
+
+/// Build a 0.0/1.0 membership mask for `np.in1d`/`np.isin`: 1.0 where `contains`
+/// holds. Each element is an independent lookup, so an indexed parallel map is
+/// bit-identical to the serial one (order-preserving collect). Gated on size so
+/// small inputs avoid the rayon overhead.
+fn in1d_membership_mask<T: Sync>(values: &[T], contains: impl Fn(&T) -> bool + Sync) -> Vec<f64> {
+    const IN1D_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+    if values.len() >= IN1D_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+        values
+            .par_iter()
+            .map(|v| if contains(v) { 1.0 } else { 0.0 })
+            .collect()
+    } else {
+        values
+            .iter()
+            .map(|v| if contains(v) { 1.0 } else { 0.0 })
+            .collect()
     }
 }
 
@@ -47103,6 +47094,48 @@ print(json.dumps(payload))
         let result = ar1.in1d(&ar2);
         assert_eq!(result.values(), &[0.0, 1.0, 0.0, 1.0]);
         assert_eq!(result.dtype, DType::Bool);
+    }
+
+    #[test]
+    #[ignore = "perf A/B report; run with --release -- --ignored --nocapture"]
+    fn in1d_membership_mask_parallel_vs_serial_speedup() {
+        // Same-process A/B for the parallelized membership lookup (the dominant cost
+        // of np.isin after the bool-bridge fix). Proves bit-identical output AND
+        // times serial vs parallel over a sorted-set binary search.
+        use std::time::Instant;
+        let mut set: Vec<i64> = (0..1000i64).map(|i| i * 7).collect();
+        set.sort_unstable();
+        for &len in &[1usize << 20, 1 << 21] {
+            let values: Vec<i64> = (0..len)
+                .map(|i| {
+                    let s = (i as u64)
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    (s >> 24) as i64 % 8000
+                })
+                .collect();
+            let contains = |v: &i64| set.binary_search(v).is_ok();
+            let t0 = Instant::now();
+            let serial: Vec<f64> = values
+                .iter()
+                .map(|v| if contains(v) { 1.0 } else { 0.0 })
+                .collect();
+            let t_serial = t0.elapsed().as_secs_f64() * 1e3;
+            let t1 = Instant::now();
+            let parallel = super::in1d_membership_mask(&values, contains);
+            let t_par = t1.elapsed().as_secs_f64() * 1e3;
+            let maxd = serial
+                .iter()
+                .zip(&parallel)
+                .map(|(a, b)| a.to_bits() ^ b.to_bits())
+                .max()
+                .unwrap();
+            assert_eq!(maxd, 0, "parallel membership mask diverged from serial (len={len})");
+            println!(
+                "len={len:8} serial={t_serial:8.3}ms parallel={t_par:8.3}ms speedup={:.2}x (bit-exact)",
+                t_serial / t_par
+            );
+        }
     }
 
     #[test]
