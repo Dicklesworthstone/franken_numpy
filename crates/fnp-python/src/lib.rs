@@ -54,12 +54,12 @@ use fnp_ufunc::{
     reduce_frompyfunc_values, remainder as ufunc_remainder, right_shift as ufunc_right_shift,
     signbit as ufunc_signbit, spacing as ufunc_spacing, where_nonzero,
 };
+use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{
     PyDeprecationWarning, PyOSError, PyOverflowError, PyTypeError, PyValueError,
     PyZeroDivisionError,
 };
 use pyo3::prelude::*;
-use pyo3::buffer::PyBuffer;
 use pyo3::types::{PyAny, PyBool, PyBytes, PyComplex, PyDict, PyList, PyModule, PyTuple};
 use pyo3::wrap_pyfunction;
 use pyo3::{Bound, IntoPyObject};
@@ -4064,10 +4064,10 @@ fn numpy_contiguous_to_vec<'py, T>(py: Python<'py>, flat: &Bound<'py, PyAny>) ->
 where
     T: pyo3::buffer::Element + Copy + for<'a, 'b> FromPyObject<'a, 'b>,
 {
-    if let Ok(buffer) = PyBuffer::<T>::get(flat) {
-        if let Ok(values) = buffer.to_vec(py) {
-            return Ok(values);
-        }
+    if let Ok(buffer) = PyBuffer::<T>::get(flat)
+        && let Ok(values) = buffer.to_vec(py)
+    {
+        return Ok(values);
     }
     flat.call_method0("tolist")?.extract::<Vec<T>>()
 }
@@ -4324,7 +4324,11 @@ fn extract_take_indices(
     let is_ndarray = value.is_instance(&numpy.getattr("ndarray")?)?;
     let array = numpy.call_method1("asarray", (value,))?;
     let normalized = if !is_ndarray
-        && array.getattr("dtype")?.getattr("kind")?.extract::<String>()? == "f"
+        && array
+            .getattr("dtype")?
+            .getattr("kind")?
+            .extract::<String>()?
+            == "f"
     {
         for v in array
             .call_method1("reshape", (-1,))?
@@ -4332,9 +4336,7 @@ fn extract_take_indices(
             .extract::<Vec<f64>>()?
         {
             if v.is_nan() {
-                return Err(PyValueError::new_err(
-                    "cannot convert float NaN to integer",
-                ));
+                return Err(PyValueError::new_err("cannot convert float NaN to integer"));
             }
             if v.is_infinite() {
                 return Err(PyOverflowError::new_err(
@@ -6751,14 +6753,21 @@ fn build_numpy_array_from_storage(
         ArrayStorage::Bool(values) => {
             let kwargs = PyDict::new(py);
             kwargs.set_item("dtype", "bool_")?;
-            numpy.call_method("array", (PyList::new(py, values.iter().copied())?,), Some(&kwargs))?
+            numpy.call_method(
+                "array",
+                (PyList::new(py, values.iter().copied())?,),
+                Some(&kwargs),
+            )?
         }
         ArrayStorage::F16(values) => {
             let kwargs = PyDict::new(py);
             kwargs.set_item("dtype", "float16")?;
             numpy.call_method(
                 "array",
-                (PyList::new(py, values.iter().map(|value| f32::from(*value)))?,),
+                (PyList::new(
+                    py,
+                    values.iter().map(|value| f32::from(*value)),
+                )?,),
                 Some(&kwargs),
             )?
         }
@@ -10681,7 +10690,10 @@ fn searchsorted(
     // right scalar-vs-array shape) instead of being rejected as non-numeric.
     let numpy = py.import("numpy")?;
     let a_arr = numpy.call_method1("asarray", (a.bind(py),))?;
-    let a_kind = a_arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    let a_kind = a_arr
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?;
     if !matches!(a_kind.as_str(), "b" | "i" | "u" | "f") {
         let kwargs = PyDict::new(py);
         kwargs.set_item("side", side)?;
@@ -11167,14 +11179,12 @@ fn reshape(py: Python<'_>, a: Py<PyAny>, newshape: Py<PyAny>, order: &str) -> Py
     let resolved_order: &str = match order {
         "C" | "F" => order,
         "A" => {
-            let flags = numpy.call_method1("asarray", (a.bind(py),))?.getattr("flags")?;
+            let flags = numpy
+                .call_method1("asarray", (a.bind(py),))?
+                .getattr("flags")?;
             let f_contig = flags.getattr("f_contiguous")?.extract::<bool>()?;
             let c_contig = flags.getattr("c_contiguous")?.extract::<bool>()?;
-            if f_contig && !c_contig {
-                "F"
-            } else {
-                "C"
-            }
+            if f_contig && !c_contig { "F" } else { "C" }
         }
         _ => return fallback(),
     };
@@ -24647,7 +24657,131 @@ fn argmin(
     Ok(output)
 }
 
-// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
+const PY_NATIVE_GEMM_MIN_FLOPS: usize = 320 * 320 * 320;
+const PY_NATIVE_GEMM_MAX_DIM: usize = 896;
+
+#[derive(Clone, Copy)]
+enum PythonNativeGemmOp {
+    Matmul,
+    Dot,
+}
+
+fn python_native_gemm_f64_2d_eligible(a: &UFuncArray, b: &UFuncArray) -> bool {
+    if !matches!(a.dtype(), DType::F64)
+        || !matches!(b.dtype(), DType::F64)
+        || a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || a.shape().len() != 2
+        || b.shape().len() != 2
+    {
+        return false;
+    }
+    let (m, k1) = (a.shape()[0], a.shape()[1]);
+    let (k2, n) = (b.shape()[0], b.shape()[1]);
+    if k1 != k2
+        || [m, k1, n]
+            .iter()
+            .any(|&dim| dim == 0 || dim > PY_NATIVE_GEMM_MAX_DIM)
+    {
+        return false;
+    }
+    if a.values()
+        .iter()
+        .chain(b.values().iter())
+        .any(|value| !value.is_finite())
+    {
+        return false;
+    }
+    m.saturating_mul(k1).saturating_mul(n) >= PY_NATIVE_GEMM_MIN_FLOPS
+}
+
+fn python_native_gemm_f64_2d_metadata_gate(
+    py: Python<'_>,
+    a_obj: &Bound<'_, PyAny>,
+    b_obj: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let numpy = py.import("numpy")?;
+    let ndarray = numpy.getattr("ndarray")?;
+    if !a_obj.is_instance(&ndarray)? || !b_obj.is_instance(&ndarray)? {
+        return Ok(false);
+    }
+
+    let a_shape = a_obj.getattr("shape")?.extract::<Vec<usize>>()?;
+    let b_shape = b_obj.getattr("shape")?.extract::<Vec<usize>>()?;
+    if a_shape.len() != 2 || b_shape.len() != 2 {
+        return Ok(false);
+    }
+
+    let (m, k1) = (a_shape[0], a_shape[1]);
+    let (k2, n) = (b_shape[0], b_shape[1]);
+    if k1 != k2
+        || [m, k1, n]
+            .iter()
+            .any(|&dim| dim == 0 || dim > PY_NATIVE_GEMM_MAX_DIM)
+        || m.saturating_mul(k1).saturating_mul(n) < PY_NATIVE_GEMM_MIN_FLOPS
+    {
+        return Ok(false);
+    }
+
+    let a_dtype = a_obj.getattr("dtype")?;
+    let b_dtype = b_obj.getattr("dtype")?;
+    let a_kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    let b_kind = b_dtype.getattr("kind")?.extract::<String>()?;
+    let a_itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    let b_itemsize = b_dtype.getattr("itemsize")?.extract::<usize>()?;
+    Ok(a_kind == "f" && b_kind == "f" && a_itemsize == 8 && b_itemsize == 8)
+}
+
+fn python_native_gemm_f64_2d(
+    py: Python<'_>,
+    a_obj: &Bound<'_, PyAny>,
+    b_obj: &Bound<'_, PyAny>,
+    op: PythonNativeGemmOp,
+    require_profile_gate: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if require_profile_gate && !python_native_gemm_f64_2d_metadata_gate(py, a_obj, b_obj)? {
+        return Ok(None);
+    }
+
+    let a = match extract_precise_numeric_array(py, a_obj, "native_gemm(a)") {
+        Ok(array) => array,
+        Err(_) => return Ok(None),
+    };
+    let b = match extract_precise_numeric_array(py, b_obj, "native_gemm(b)") {
+        Ok(array) => array,
+        Err(_) => return Ok(None),
+    };
+    if require_profile_gate && !python_native_gemm_f64_2d_eligible(&a, &b) {
+        return Ok(None);
+    }
+    if !matches!(a.dtype(), DType::F64)
+        || !matches!(b.dtype(), DType::F64)
+        || a.has_integer_sidecar()
+        || b.has_integer_sidecar()
+        || a.shape().len() != 2
+        || b.shape().len() != 2
+        || a.shape()[1] != b.shape()[0]
+    {
+        return Ok(None);
+    }
+    let result = match op {
+        PythonNativeGemmOp::Matmul => a.matmul(&b),
+        PythonNativeGemmOp::Dot => a.dot(&b),
+    };
+    match result {
+        Ok(array) => Ok(Some(build_numpy_scalar_or_array(py, &array)?)),
+        Err(_) => Ok(None),
+    }
+}
+
+fn python_explicit_out_is_absent_or_none(py: Python<'_>, out: Option<&Py<PyAny>>) -> bool {
+    out.is_none_or(|value| value.bind(py).is_none())
+}
+
+// Medium-large float64 GEMM-shaped calls route to the native Rust kernel; the
+// rest pass through to NumPy so small matrices, out=, dtype/ufunc kwargs,
+// integer/complex dtypes, non-finite payloads, and unprofiled sizes retain the
+// exact incumbent behavior.
 #[pyfunction]
 #[pyo3(signature = (x1, x2, out=None, **kwargs))]
 fn matmul(
@@ -24657,6 +24791,19 @@ fn matmul(
     out: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && python_explicit_out_is_absent_or_none(py, out.as_ref())
+        && let Some(result) = python_native_gemm_f64_2d(
+            py,
+            x1.bind(py),
+            x2.bind(py),
+            PythonNativeGemmOp::Matmul,
+            true,
+        )?
+    {
+        return Ok(result);
+    }
+
     let numpy = py.import("numpy")?;
     let matmul_fn = numpy.getattr("matmul")?;
     match out {
@@ -24667,10 +24814,17 @@ fn matmul(
     }
 }
 
-// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
+// Same profiled native GEMM gate as matmul for the 2-D float64 dot case.
 #[pyfunction]
 #[pyo3(signature = (a, b, out=None))]
 fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    if python_explicit_out_is_absent_or_none(py, out.as_ref())
+        && let Some(result) =
+            python_native_gemm_f64_2d(py, a.bind(py), b.bind(py), PythonNativeGemmOp::Dot, true)?
+    {
+        return Ok(result);
+    }
+
     let numpy = py.import("numpy")?;
     let dot_fn = numpy.getattr("dot")?;
     match out {
@@ -24733,8 +24887,7 @@ fn einsum_native(
             Ok(a) => a,
             Err(_) => return Ok(None),
         };
-        if arr.has_integer_sidecar()
-            || matches!(arr.dtype(), DType::Complex64 | DType::Complex128)
+        if arr.has_integer_sidecar() || matches!(arr.dtype(), DType::Complex64 | DType::Complex128)
         {
             return Ok(None);
         }
@@ -28732,19 +28885,20 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PyFromPyFunc, PyVectorize, argwhere, bincount, ceil, choose, compress, copysign,
-        count_nonzero, degrees, diag, diag_indices, diag_indices_from, diagflat, diagonal,
-        digitize, extract, extract_numeric_array, extract_precise_numeric_array, fill_diagonal,
-        flatnonzero, flip, fliplr, flipud, floor, fnp_python, frexp, hypot, indices, interp,
-        isfinite, isinf, isnan,
-        isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf, nan_to_num,
-        nextafter, place, put, put_along_axis, putmask, radians, ravel_multi_index,
-        required_dict_item, rfftfreq, rint, searchsorted, select, sign, signbit, sinc,
-        solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid, trapz,
-        tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
-        unravel_index, where_py,
+        PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere, bincount, ceil, choose, compress,
+        copysign, count_nonzero, degrees, diag, diag_indices, diag_indices_from, diagflat,
+        diagonal, digitize, extract, extract_numeric_array, extract_precise_numeric_array,
+        fill_diagonal, flatnonzero, flip, fliplr, flipud, floor, fnp_python, frexp, hypot, indices,
+        interp, isfinite, isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2,
+        meshgrid, modf, nan_to_num, nextafter, place, put, put_along_axis, putmask,
+        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
+        python_native_gemm_f64_2d_metadata_gate, radians, ravel_multi_index, required_dict_item,
+        rfftfreq, rint, searchsorted, select, sign, signbit, sinc, solve_triangular, spacing, take,
+        take_along_axis, tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices,
+        tril_indices_from, triu_indices, triu_indices_from, trunc, unravel_index, where_py,
     };
-    use fnp_dtype::ArrayStorage;
+    use fnp_dtype::{ArrayStorage, DType};
+    use fnp_ufunc::UFuncArray;
     use pyo3::Bound;
     use pyo3::IntoPyObject;
     use pyo3::exceptions::{PyTypeError, PyValueError, PyZeroDivisionError};
@@ -28959,6 +29113,27 @@ mod tests {
         digest.call_method0("hexdigest")?.extract::<String>()
     }
 
+    fn append_numpy_array_bytes(
+        py: Python<'_>,
+        array: &pyo3::Bound<'_, pyo3::types::PyAny>,
+        out: &mut Vec<u8>,
+    ) -> PyResult<()> {
+        let contiguous = py
+            .import("numpy")?
+            .getattr("ascontiguousarray")?
+            .call1((array,))?;
+        let shape = contiguous.getattr("shape")?.extract::<Vec<usize>>()?;
+        for dim in shape {
+            out.extend_from_slice(&(dim as u64).to_le_bytes());
+        }
+        out.push(0);
+        out.extend_from_slice(contiguous.getattr("dtype")?.str()?.to_string().as_bytes());
+        out.push(0);
+        out.extend_from_slice(&contiguous.call_method0("tobytes")?.extract::<Vec<u8>>()?);
+        out.push(0xff);
+        Ok(())
+    }
+
     fn repr_string(value: &pyo3::Bound<'_, pyo3::types::PyAny>) -> String {
         value.repr().unwrap().extract::<String>().unwrap()
     }
@@ -29071,6 +29246,100 @@ mod tests {
                 digest,
                 "92b607a7e4d64fd01b975e9795f2f2a0ecf68c126fec5948651afb01af8e9f04"
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn native_matmul_dot_f64_gemm_gate_and_golden_sha256() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let allclose = numpy.getattr("allclose")?;
+            let a = numpy
+                .getattr("arange")?
+                .call1((12_i64,))?
+                .call_method1("reshape", (3_i64, 4_i64))?
+                .call_method1("astype", ("float64",))?;
+            let b = numpy
+                .getattr("arange")?
+                .call1((20_i64,))?
+                .call_method1("reshape", (4_i64, 5_i64))?
+                .call_method1("astype", ("float64",))?;
+
+            let native_matmul =
+                python_native_gemm_f64_2d(py, &a, &b, PythonNativeGemmOp::Matmul, false)?
+                    .expect("small f64 2-D matmul should be supported by native helper");
+            let native_dot = python_native_gemm_f64_2d(py, &a, &b, PythonNativeGemmOp::Dot, false)?
+                .expect("small f64 2-D dot should be supported by native helper");
+
+            let expected_matmul = numpy.getattr("matmul")?.call1((&a, &b))?;
+            let expected_dot = numpy.getattr("dot")?.call1((&a, &b))?;
+            assert!(
+                allclose
+                    .call1((native_matmul.bind(py), &expected_matmul))?
+                    .extract::<bool>()?,
+                "native matmul helper diverged from numpy"
+            );
+            assert!(
+                allclose
+                    .call1((native_dot.bind(py), &expected_dot))?
+                    .extract::<bool>()?,
+                "native dot helper diverged from numpy"
+            );
+
+            let mut proof_bytes = Vec::new();
+            append_numpy_array_bytes(py, native_matmul.bind(py), &mut proof_bytes)?;
+            append_numpy_array_bytes(py, native_dot.bind(py), &mut proof_bytes)?;
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest, "a2fd2db2e207c8d79c237d8b938c73d2e154ed31bd30ee9f7f7a0819739b6085",
+                "native matmul/dot helper output bit pattern changed"
+            );
+
+            let medium_a =
+                UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F64).unwrap();
+            let medium_b =
+                UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F64).unwrap();
+            assert!(
+                python_native_gemm_f64_2d_eligible(&medium_a, &medium_b),
+                "profiled 320^3 f64 GEMM should take the native gate"
+            );
+
+            let small_a =
+                UFuncArray::new(vec![256, 256], vec![1.0; 256 * 256], DType::F64).unwrap();
+            let small_b =
+                UFuncArray::new(vec![256, 256], vec![1.0; 256 * 256], DType::F64).unwrap();
+            assert!(
+                !python_native_gemm_f64_2d_eligible(&small_a, &small_b),
+                "profiled 256^3 GEMM should stay on numpy fallback"
+            );
+            let small_np = numpy
+                .getattr("ones")?
+                .call1(((256_i64, 256_i64),))?
+                .call_method1("astype", ("float64",))?;
+            assert!(
+                !python_native_gemm_f64_2d_metadata_gate(py, &small_np, &small_np)?,
+                "metadata gate must reject 256^3 before the Rust extraction copy"
+            );
+
+            let too_large_a =
+                UFuncArray::new(vec![1024, 320], vec![1.0; 1024 * 320], DType::F64).unwrap();
+            let too_large_b =
+                UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F64).unwrap();
+            assert!(
+                !python_native_gemm_f64_2d_eligible(&too_large_a, &too_large_b),
+                "unprofiled >896 dimension should stay on numpy fallback"
+            );
+
+            let f32_a = UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F32).unwrap();
+            assert!(
+                !python_native_gemm_f64_2d_eligible(&f32_a, &medium_b),
+                "non-f64 dtypes should stay on numpy fallback"
+            );
+
             Ok(())
         });
     }
@@ -35377,14 +35646,11 @@ mod tests {
 
             // Mixed int/float promotes to float (numpy result_type), and python
             // scalars must match too.
-            let (ai, bf) = (
-                array_fn.call1((vec![7_i64, 8],))?,
-                {
-                    let kw = PyDict::new(py);
-                    kw.set_item("dtype", "float64")?;
-                    array_fn.call((vec![2_i64, 3],), Some(&kw))?
-                },
-            );
+            let (ai, bf) = (array_fn.call1((vec![7_i64, 8],))?, {
+                let kw = PyDict::new(py);
+                kw.set_item("dtype", "float64")?;
+                array_fn.call((vec![2_i64, 3],), Some(&kw))?
+            });
             assert_eq!(
                 repr_string(&dm.call1((ai.clone(), bf.clone()))?),
                 repr_string(&np_dm.call1((ai, bf))?),
@@ -46189,18 +46455,17 @@ mod tests {
             let s = arr(vec!["a", "b", "c"], "<U1")?;
             let idx = numeric_array(py, vec![0_i64, 2_i64], "int64");
             let got = take(py, s.clone().unbind(), idx.clone().unbind(), None, "raise")?;
-            same(
-                got.bind(py),
-                &numpy.call_method1("take", (s.clone(), idx))?,
-            )?;
+            same(got.bind(py), &numpy.call_method1("take", (s.clone(), idx))?)?;
 
             // string flip / flipud / fliplr
             let got = flip(py, s.clone().unbind(), None)?;
             same(got.bind(py), &numpy.call_method1("flip", (s.clone(),))?)?;
-            let grid = arr(vec!["a", "b", "c", "d"], "<U1")?
-                .call_method1("reshape", ((2, 2),))?;
+            let grid = arr(vec!["a", "b", "c", "d"], "<U1")?.call_method1("reshape", ((2, 2),))?;
             let got = flipud(py, grid.clone().unbind())?;
-            same(got.bind(py), &numpy.call_method1("flipud", (grid.clone(),))?)?;
+            same(
+                got.bind(py),
+                &numpy.call_method1("flipud", (grid.clone(),))?,
+            )?;
             let got = fliplr(py, grid.clone().unbind())?;
             same(got.bind(py), &numpy.call_method1("fliplr", (grid,))?)?;
 
@@ -46211,7 +46476,13 @@ mod tests {
             )?;
             // numpy.datetime64 infers the [D] unit from the YYYY-MM-DD string.
             let probe = numpy.call_method1("datetime64", ("2021-03-01",))?;
-            let got = searchsorted(py, dt.clone().unbind(), probe.clone().unbind(), "left", None)?;
+            let got = searchsorted(
+                py,
+                dt.clone().unbind(),
+                probe.clone().unbind(),
+                "left",
+                None,
+            )?;
             let expected = {
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("side", "left")?;
@@ -46272,7 +46543,13 @@ mod tests {
                     .call_method1("reshape", ((2, 2),))?;
 
                 let idx = numeric_array(py, vec![1_i64, 0_i64], "int64");
-                let got = take(py, grid.clone().unbind(), idx.clone().unbind(), Some(0), "raise")?;
+                let got = take(
+                    py,
+                    grid.clone().unbind(),
+                    idx.clone().unbind(),
+                    Some(0),
+                    "raise",
+                )?;
                 let kw = PyDict::new(py);
                 kw.set_item("axis", 0)?;
                 check(
@@ -46283,7 +46560,10 @@ mod tests {
                 let got = flip(py, grid.clone().unbind(), None)?;
                 check(got.bind(py), &numpy.call_method1("flip", (grid.clone(),))?)?;
                 let got = flipud(py, grid.clone().unbind())?;
-                check(got.bind(py), &numpy.call_method1("flipud", (grid.clone(),))?)?;
+                check(
+                    got.bind(py),
+                    &numpy.call_method1("flipud", (grid.clone(),))?,
+                )?;
                 let got = fliplr(py, grid.clone().unbind())?;
                 check(got.bind(py), &numpy.call_method1("fliplr", (grid,))?)?;
             }
@@ -55498,9 +55778,7 @@ mod tests {
             let i32_data = typed("int32")?;
             let u8_data = typed("uint8")?;
 
-            for data in [
-                f64_data, int_data, f32_data, f16_data, i32_data, u8_data,
-            ] {
+            for data in [f64_data, int_data, f32_data, f16_data, i32_data, u8_data] {
                 for name in ["nansum", "nanprod", "nanmax", "nanmin", "nanmean"] {
                     let ours = module.getattr(name)?.call1((data.clone(),))?;
                     let theirs = numpy.getattr(name)?.call1((data.clone(),))?;
@@ -57283,7 +57561,10 @@ mod tests {
                     theirs.getattr("dtype")?
                 );
                 assert!(
-                    numpy.getattr("array_equal")?.call1((&ours, &theirs))?.extract::<bool>()?,
+                    numpy
+                        .getattr("array_equal")?
+                        .call1((&ours, &theirs))?
+                        .extract::<bool>()?,
                     "trace({dt}) value mismatch"
                 );
             }
@@ -57396,11 +57677,17 @@ mod tests {
                 .getattr("array")?
                 .call1((vec![true, false, true, true],))?;
             assert!(
-                module.getattr("percentile")?.call1((b.clone(), 50.0_f64)).is_err(),
+                module
+                    .getattr("percentile")?
+                    .call1((b.clone(), 50.0_f64))
+                    .is_err(),
                 "percentile(bool) should raise like numpy"
             );
             assert!(
-                module.getattr("quantile")?.call1((b.clone(), 0.5_f64)).is_err(),
+                module
+                    .getattr("quantile")?
+                    .call1((b.clone(), 0.5_f64))
+                    .is_err(),
                 "quantile(bool) should raise like numpy"
             );
             // median(bool) is allowed and returns float64.
@@ -57429,7 +57716,14 @@ mod tests {
             for dt in ["int16", "int32", "int64", "float32", "float64"] {
                 let mk = |scale: i64| -> PyResult<Bound<'_, PyAny>> {
                     numpy.getattr("array")?.call(
-                        (vec![scale, scale * 2, scale * 3, scale * 4, scale * 5, scale * 6],),
+                        (vec![
+                            scale,
+                            scale * 2,
+                            scale * 3,
+                            scale * 4,
+                            scale * 5,
+                            scale * 6,
+                        ],),
                         Some(&{
                             let kw = PyDict::new(py);
                             kw.set_item("dtype", numpy.getattr(dt)?)?;
@@ -58703,7 +58997,9 @@ mod tests {
             let numpy = py.import("numpy")?;
             let numpy_reshape = numpy.getattr("reshape")?;
 
-            let c_contig = numpy.call_method1("arange", (12_i64,))?.call_method1("reshape", ((3_i64, 4_i64),))?;
+            let c_contig = numpy
+                .call_method1("arange", (12_i64,))?
+                .call_method1("reshape", ((3_i64, 4_i64),))?;
             let f_contig = numpy.call_method1("asfortranarray", (c_contig.clone(),))?;
             let transposed = c_contig.call_method0("transpose")?;
 
@@ -64121,7 +64417,9 @@ mod tests {
                 array_fn.call((vec![1_i64, 2, 3, 4],), Some(&kw))
             };
 
-            let input_dtypes = ["int8", "int32", "int64", "uint64", "float16", "float32", "float64", "bool"];
+            let input_dtypes = [
+                "int8", "int32", "int64", "uint64", "float16", "float32", "float64", "bool",
+            ];
             let weight_dtypes = ["int64", "float32", "float64"];
 
             for adt in input_dtypes {
