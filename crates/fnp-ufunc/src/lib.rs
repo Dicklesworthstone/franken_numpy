@@ -13065,9 +13065,12 @@ impl UFuncArray {
             ));
         }
 
-        // For 2-D arrays, just use the simple trace
+        // For 2-D arrays, reduce to the simple diagonal trace. The diagonal is
+        // taken over (axis1, axis2): the canonical (0, 1) orientation sums
+        // diag(offset), but the swapped (1, 0) orientation is the transpose, whose
+        // k-th diagonal is the (-k)-th of the original — so negate the offset.
         if ndim == 2 {
-            return self.trace(offset);
+            return self.trace(if a1 < a2 { offset } else { -offset });
         }
 
         // Get the diagonal with axis1/axis2 specification
@@ -21240,7 +21243,10 @@ impl UFuncArray {
             ));
         }
         if ndim == 2 {
-            return self.diag(offset);
+            // The diagonal is over (axis1, axis2): canonical (0, 1) is diag(offset);
+            // the swapped (1, 0) orientation is the transpose, whose k-th diagonal
+            // is the (-k)-th of the original, so negate the offset.
+            return self.diag(if a1 < a2 { offset } else { -offset });
         }
         // N-D case: collect other axes, iterate over their indices,
         // and extract diagonal from the (axis1, axis2) 2-D slice.
@@ -48296,6 +48302,28 @@ print(json.dumps(payload))
         assert_eq!(d.values(), &[2.0, 6.0]);
         let d2 = a.diagonal(-1, 0, 1).unwrap();
         assert_eq!(d2.values(), &[4.0, 8.0]);
+    }
+
+    #[test]
+    fn diagonal_2d_swapped_axes_negates_offset() {
+        // Regression for franken_numpy-diagonal-swapped-axes-offset: the 2-D
+        // shortcut must honor axis order. diagonal(offset, axis1=1, axis2=0) is the
+        // transpose orientation, whose k-th diagonal is the (-k)-th of the original.
+        // For [[1,2,3],[4,5,6],[7,8,9]]: np.diagonal(a, 1, 1, 0) == [4, 8] (the
+        // below-diagonal), and np.diagonal(a, -1, 1, 0) == [2, 6].
+        let a = UFuncArray::new(
+            vec![3, 3],
+            vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0],
+            DType::F64,
+        )
+        .unwrap();
+        assert_eq!(a.diagonal(1, 1, 0).unwrap().values(), &[4.0, 8.0]);
+        assert_eq!(a.diagonal(-1, 1, 0).unwrap().values(), &[2.0, 6.0]);
+        // trace mirrors the same axis handling.
+        assert_eq!(a.trace_axis(1, 1, 0).unwrap().values(), &[12.0]); // 4+8
+        assert_eq!(a.trace_axis(-1, 1, 0).unwrap().values(), &[8.0]); // 2+6
+        // Canonical orientation is unchanged.
+        assert_eq!(a.diagonal(1, 0, 1).unwrap().values(), &[2.0, 6.0]);
     }
 
     #[test]
