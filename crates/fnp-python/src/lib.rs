@@ -4860,6 +4860,21 @@ fn copy_result_into_numpy_array(
     target: &Bound<'_, PyAny>,
     array: &UFuncArray,
 ) -> PyResult<()> {
+    // Fast path for the common in-place f64 write (put/place/putmask/fill_diagonal):
+    // copy the result straight into the target's buffer instead of materialising an
+    // intermediate NumPy array and calling np.copyto. Callers pass a same-shape
+    // in-place result, so writing the f64 values into a writable, C-contiguous f64
+    // buffer of the matching length is bit-identical to the copyto path.
+    if array.dtype() == DType::F64 && !array.has_integer_sidecar() {
+        if let Ok(buffer) = PyBuffer::<f64>::get(target)
+            && !buffer.readonly()
+            && buffer.is_c_contiguous()
+            && buffer.item_count() == array.values().len()
+        {
+            buffer.copy_from_slice(py, array.values())?;
+            return Ok(());
+        }
+    }
     let numpy = py.import("numpy")?;
     let updated = build_numpy_array_from_ufunc(py, array)?;
     numpy.call_method1("copyto", (target, updated.bind(py)))?;
