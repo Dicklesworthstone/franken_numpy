@@ -4217,16 +4217,12 @@ fn extract_integer_array(
     let kind = dtype.getattr("kind")?.extract::<String>()?;
 
     let storage = match kind.as_str() {
-        "i" => ArrayStorage::I64(
-            flat.call_method1("astype", ("int64",))?
-                .call_method0("tolist")?
-                .extract::<Vec<i64>>()?,
-        ),
-        "u" => ArrayStorage::U64(
-            flat.call_method1("astype", ("uint64",))?
-                .call_method0("tolist")?
-                .extract::<Vec<u64>>()?,
-        ),
+        // Read the index array straight out of its buffer (one memcpy) instead of
+        // boxing every element into a Python int via .tolist() — for a large index
+        // array (e.g. np.take with millions of indices) the PyList round-trip was
+        // the dominant cost. Bit-identical (same integer values).
+        "i" => ArrayStorage::I64(numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?),
+        "u" => ArrayStorage::U64(numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?),
         _ => {
             return Err(PyTypeError::new_err(format!(
                 "{context}: expected an integer index array, got dtype {dtype_name}",

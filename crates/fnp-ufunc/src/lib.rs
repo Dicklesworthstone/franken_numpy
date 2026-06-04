@@ -14808,6 +14808,46 @@ impl UFuncArray {
             None => {
                 // Flat indexing
                 let n = self.values.len() as i64;
+                // Fast path for the common no-sidecar gather: resolve + bounds-check
+                // serially (cheap sequential scan; keeps NumPy's first-out-of-bounds
+                // error), then do the expensive random gather in parallel. A flat
+                // gather is latency-bound (a cache miss per index), so spreading it
+                // across cores exposes memory-level parallelism. Bit-identical
+                // (each output is the same element in the same order) and skips the
+                // source-index array the generic path builds only for sidecar reindex.
+                if self.integer_sidecar.is_none() {
+                    let mut resolved = Vec::with_capacity(indices.len());
+                    for &idx in indices {
+                        let i = if idx < 0 { idx + n } else { idx };
+                        if i < 0 || i >= n {
+                            return Err(UFuncError::Msg(format!(
+                                "take: index {idx} out of bounds for size {n}"
+                            )));
+                        }
+                        resolved.push(i as usize);
+                    }
+                    let vals = &self.values;
+                    // Parallelize only when the source is large enough that the gather
+                    // actually misses cache — then spreading it across cores hides the
+                    // latency. For a cache-resident source the gather is already fast
+                    // and rayon overhead would make it slower, so stay serial there.
+                    const TAKE_PARALLEL_MIN_IDX: usize = 1 << 15;
+                    const TAKE_PARALLEL_MIN_SRC: usize = 1 << 22;
+                    let out: Vec<f64> = if resolved.len() >= TAKE_PARALLEL_MIN_IDX
+                        && vals.len() >= TAKE_PARALLEL_MIN_SRC
+                        && rayon::current_num_threads() >= 2
+                    {
+                        resolved.par_iter().map(|&i| vals[i]).collect()
+                    } else {
+                        resolved.iter().map(|&i| vals[i]).collect()
+                    };
+                    return Ok(Self {
+                        shape: vec![out.len()],
+                        values: out,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
+                }
                 let mut out = Vec::with_capacity(indices.len());
                 let mut source_indices = Vec::with_capacity(indices.len());
                 for &idx in indices {
@@ -45174,6 +45214,44 @@ print(json.dumps(payload))
         let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let r = a.take(&[-1, -2], None).unwrap();
         assert_eq!(r.values(), &[4.0, 3.0]);
+    }
+
+    #[test]
+    #[ignore = "perf A/B report; run with --release -- --ignored --nocapture"]
+    fn take_flat_parallel_gather_vs_serial_speedup() {
+        // Same-process A/B for the flat-take parallel gather: serial gather loop vs
+        // production. Proves bit-identical output AND times both (random gather is
+        // latency-bound, so parallel exposes memory-level parallelism).
+        use std::time::Instant;
+        for &(src_len, n_idx) in &[(1usize << 21, 1 << 21), (1 << 24, 1 << 21)] {
+            let data: Vec<f64> = (0..src_len).map(|i| i as f64 * 0.5).collect();
+            let indices: Vec<i64> = (0..n_idx)
+                .map(|i| {
+                    let s = (i as u64)
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    (s % src_len as u64) as i64
+                })
+                .collect();
+            let t0 = Instant::now();
+            let reference: Vec<f64> = indices.iter().map(|&i| data[i as usize]).collect();
+            let t_serial = t0.elapsed().as_secs_f64() * 1e3;
+            let arr = UFuncArray::new(vec![src_len], data.clone(), DType::F64).unwrap();
+            let t1 = Instant::now();
+            let got = arr.take(&indices, None).unwrap();
+            let t_par = t1.elapsed().as_secs_f64() * 1e3;
+            let maxd = reference
+                .iter()
+                .zip(got.values())
+                .map(|(a, b)| a.to_bits() ^ b.to_bits())
+                .max()
+                .unwrap();
+            assert_eq!(maxd, 0, "parallel gather diverged from serial (src={src_len}, idx={n_idx})");
+            println!(
+                "src={src_len:9} idx={n_idx:9} serial={t_serial:8.3}ms parallel={t_par:8.3}ms speedup={:.2}x (bit-exact)",
+                t_serial / t_par
+            );
+        }
     }
 
     #[test]
