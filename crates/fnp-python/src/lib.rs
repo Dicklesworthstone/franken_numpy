@@ -24688,7 +24688,63 @@ fn einsum(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // Route the common case (string subscripts, real-float operands, no special
+    // kwargs) through our native UFuncArray::einsum — which sends GEMM-shaped
+    // contractions through the cache-blocked, register-tiled matmul_accumulate —
+    // instead of delegating to C-BLAS numpy (the NO-GAPS gap, bead 7put0). Fall
+    // back to numpy for anything our kernel can't reproduce identically: integer/
+    // complex operands, out=/dtype=/order=/casting= kwargs, the interleaved-list
+    // subscript form, or any kernel error. Behavior parity stays absolute.
+    if let Some(result) = einsum_native(py, args, kwargs)? {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "einsum", args, kwargs)
+}
+
+/// Native einsum fast path: returns `Some(result)` when the call is the common
+/// real-float, string-subscripts form our kernel handles, else `None` (caller
+/// falls back to numpy).
+fn einsum_native(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if let Some(kw) = kwargs {
+        // Only `optimize` is safe to honor natively (our kernel always picks an
+        // efficient contraction); out=/dtype=/order=/casting= go to numpy.
+        for key in kw.keys() {
+            let name: String = key.extract()?;
+            if name != "optimize" {
+                return Ok(None);
+            }
+        }
+    }
+    if args.len() < 2 {
+        return Ok(None);
+    }
+    let subscripts: String = match args.get_item(0)?.extract() {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let mut operands: Vec<UFuncArray> = Vec::with_capacity(args.len() - 1);
+    for i in 1..args.len() {
+        let item = args.get_item(i)?;
+        let arr = match extract_precise_numeric_array(py, &item, "einsum") {
+            Ok(a) => a,
+            Err(_) => return Ok(None),
+        };
+        if arr.has_integer_sidecar()
+            || matches!(arr.dtype(), DType::Complex64 | DType::Complex128)
+        {
+            return Ok(None);
+        }
+        operands.push(arr);
+    }
+    let refs: Vec<&UFuncArray> = operands.iter().collect();
+    match UFuncArray::einsum(&subscripts, &refs) {
+        Ok(result) => Ok(Some(build_numpy_scalar_or_array(py, &result)?)),
+        Err(_) => Ok(None),
+    }
 }
 
 // Set / shortcut helpers
