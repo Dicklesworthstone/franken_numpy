@@ -24658,7 +24658,11 @@ fn argmin(
 }
 
 const PY_NATIVE_GEMM_MIN_FLOPS: usize = 320 * 320 * 320;
-const PY_NATIVE_GEMM_MAX_DIM: usize = 896;
+// Upper dim bound for routing np.matmul/np.dot to the native packed GEMM. The
+// B-micropanel packing (e509860c, ~5x) moved the crossover vs the local numpy
+// BLAS from 896 to 1024 (measured same-host, parity=True: at n=1024 fnp 20.0 ms
+// vs numpy 26.0 ms; at n=1280 numpy 32.0 ms vs fnp 41.2 ms, so numpy wins above).
+const PY_NATIVE_GEMM_MAX_DIM: usize = 1024;
 
 #[derive(Clone, Copy)]
 enum PythonNativeGemmOp {
