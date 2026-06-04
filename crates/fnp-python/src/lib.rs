@@ -26045,7 +26045,95 @@ fn histogram2d(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = histogram2d_native(py, args, kwargs)? {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "histogram2d", args, kwargs)
+}
+
+/// Native histogram2d fast path: the common `(x, y, bins=int|[int,int])` form
+/// with auto range and no weights/density. numpy's histogram2d is a serial loop;
+/// our kernel bins in parallel (integer counts => bit-exact). Returns `None` to
+/// fall back to numpy for edge-array bins, range/weights/density, non-1-D or
+/// non-float operands, or any kernel error — so behavior parity stays absolute.
+fn histogram2d_native(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if args.len() != 2 {
+        return Ok(None);
+    }
+    let mut nbins_obj: Option<Bound<'_, PyAny>> = None;
+    if let Some(kw) = kwargs {
+        for (key, value) in kw.iter() {
+            match key.extract::<String>()?.as_str() {
+                "bins" => nbins_obj = Some(value),
+                // Anything that changes binning/normalization goes to numpy.
+                _ => return Ok(None),
+            }
+        }
+    }
+    let (xbins, ybins): (usize, usize) = match nbins_obj {
+        None => (10, 10),
+        Some(b) => {
+            if b.is_none() {
+                (10, 10)
+            } else if let Ok(n) = b.extract::<i64>() {
+                if n <= 0 {
+                    return Ok(None);
+                }
+                (n as usize, n as usize)
+            } else if let Ok(pair) = b.extract::<Vec<i64>>() {
+                if pair.len() != 2 || pair[0] <= 0 || pair[1] <= 0 {
+                    return Ok(None);
+                }
+                (pair[0] as usize, pair[1] as usize)
+            } else {
+                return Ok(None);
+            }
+        }
+    };
+
+    let x_arr = match extract_precise_numeric_array(py, &args.get_item(0)?, "histogram2d(x)") {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    let y_arr = match extract_precise_numeric_array(py, &args.get_item(1)?, "histogram2d(y)") {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    if x_arr.has_integer_sidecar()
+        || y_arr.has_integer_sidecar()
+        || matches!(x_arr.dtype(), DType::Complex64 | DType::Complex128)
+        || matches!(y_arr.dtype(), DType::Complex64 | DType::Complex128)
+        || x_arr.shape().len() != 1
+        || y_arr.shape().len() != 1
+        || x_arr.values().len() != y_arr.values().len()
+    {
+        return Ok(None);
+    }
+    if x_arr
+        .values()
+        .iter()
+        .chain(y_arr.values().iter())
+        .any(|v| !v.is_finite())
+    {
+        return Ok(None);
+    }
+
+    let (h, xedges, yedges) = match x_arr.histogram2d(&y_arr, xbins, ybins) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    let h_py = build_numpy_array_from_ufunc(py, &h)?;
+    let xe_py = build_numpy_array_from_ufunc(py, &xedges)?;
+    let ye_py = build_numpy_array_from_ufunc(py, &yedges)?;
+    Ok(Some(
+        PyTuple::new(py, [h_py.bind(py), xe_py.bind(py), ye_py.bind(py)])?
+            .into_any()
+            .unbind(),
+    ))
 }
 
 #[pyfunction]
