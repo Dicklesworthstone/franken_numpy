@@ -20308,20 +20308,33 @@ impl UFuncArray {
 
         let input_chars: Vec<Vec<char>> = input_subs.iter().map(|s| s.chars().collect()).collect();
 
-        // Fast path: a 2-operand contraction already laid out as a plain GEMM
-        // (op0 = [free0..., k...], op1 = [k..., free1...], output = [free0..., free1...]
-        // with the contracted axes contiguous and in matching order, no repeated
-        // labels, no broadcasting) routes through the cache-blocked, register-tiled
-        // `matmul_accumulate`. Each output cell accumulates the contracted index in
-        // the same ascending row-major order as the general scatter below, so the
-        // result is bit-for-bit identical. Transposed / batched / broadcast / traced
-        // einsums fail the shape test and fall through to the general path.
+        // Fast path: a 2-operand contraction laid out as a (possibly batched) plain
+        // GEMM — op0 = [batch..., free0..., k...], op1 = [batch..., k..., free1...],
+        // output = [batch..., free0..., free1...] with a shared leading batch prefix,
+        // the contracted axes contiguous and in matching order, no repeated labels and
+        // no broadcasting — routes each batch slice through the cache-blocked,
+        // register-tiled `matmul_accumulate`. Each output cell accumulates the
+        // contracted index in the same ascending row-major order as the general
+        // scatter below, so the result is bit-for-bit identical (batch=1 is the plain
+        // GEMM case). Transposed / shared-free / broadcast / traced einsums fail the
+        // shape test and fall through to the general path.
         if operands.len() == 2 {
-            if let Some((m, k, n)) =
-                einsum_gemm_dims(&input_chars, &output_labels, &contracted, operands)
+            if let Some((batch, m, k, n)) =
+                einsum_batched_gemm_dims(&input_chars, &output_labels, &contracted, operands)
             {
-                let mut values = vec![0.0f64; m * n];
-                matmul_accumulate(&operands[0].values, &operands[1].values, m, k, n, &mut values);
+                let mut values = vec![0.0f64; batch * m * n];
+                let (a_vals, b_vals) = (&operands[0].values, &operands[1].values);
+                let (ab, bb, cb) = (m * k, k * n, m * n);
+                for bi in 0..batch {
+                    matmul_accumulate(
+                        &a_vals[bi * ab..(bi + 1) * ab],
+                        &b_vals[bi * bb..(bi + 1) * bb],
+                        m,
+                        k,
+                        n,
+                        &mut values[bi * cb..(bi + 1) * cb],
+                    );
+                }
                 return Ok(Self {
                     shape: output_shape,
                     values,
@@ -27020,23 +27033,27 @@ fn einsum_has_dup_label(v: &[char]) -> bool {
     !v.iter().all(|c| seen.insert(*c))
 }
 
-/// Detect whether a 2-operand einsum is a plain (non-transposed, non-broadcast,
-/// non-batched) GEMM and return its `(m, k, n)` for `matmul_accumulate`.
+/// Detect whether a 2-operand einsum is a (possibly batched) plain GEMM and
+/// return `(batch, m, k, n)` for a per-batch-slice `matmul_accumulate`.
 ///
-/// Requires: operand 0 labels = `[free0..., contracted...]`, operand 1 labels =
-/// `[contracted..., free1...]` with the contracted axes contiguous and in the
-/// SAME order in both operands, output labels = `[free0..., free1...]`, no
-/// repeated label within an operand, and operand value lengths exactly `m*k` and
-/// `k*n` (rules out broadcasting). Anything else returns `None` (caller falls
-/// back to the general contraction), so accepted cases are exactly the layouts
-/// where `op0.values` is already the row-major `(m,k)` LHS and `op1.values` the
-/// `(k,n)` RHS — no transpose or repack needed, hence bit-identical sums.
-fn einsum_gemm_dims(
+/// Accepts: operand 0 = `[batch..., free0..., contracted...]`, operand 1 =
+/// `[batch..., contracted..., free1...]`, output = `[batch..., free0..., free1...]`
+/// where the batch labels are exactly the labels shared by both operands AND the
+/// output, appearing as the identical leading prefix of all three; the contracted
+/// axes are contiguous and in the SAME order in both operands; no repeated label
+/// within an operand; and operand value lengths are exactly `batch*m*k` /
+/// `batch*k*n` (rules out broadcasting). `batch == 1` is the ordinary GEMM.
+///
+/// In every accepted case `op0.values`/`op1.values` are already the contiguous
+/// row-major `(batch, m, k)` / `(batch, k, n)` operands and the output is
+/// `(batch, m, n)` — no transpose or repack — so the per-batch GEMM is bit-identical
+/// to the general per-cell sum. Anything else returns `None` (caller falls back).
+fn einsum_batched_gemm_dims(
     input_chars: &[Vec<char>],
     output_labels: &[char],
     contracted: &[char],
     operands: &[&UFuncArray],
-) -> Option<(usize, usize, usize)> {
+) -> Option<(usize, usize, usize, usize)> {
     if contracted.is_empty() || operands.len() != 2 {
         return None;
     }
@@ -27046,41 +27063,67 @@ fn einsum_gemm_dims(
         return None;
     }
     let cset: std::collections::HashSet<char> = contracted.iter().copied().collect();
-    let a_free: Vec<char> = a.iter().copied().filter(|c| !cset.contains(c)).collect();
-    let a_con: Vec<char> = a.iter().copied().filter(|c| cset.contains(c)).collect();
-    let b_free: Vec<char> = b.iter().copied().filter(|c| !cset.contains(c)).collect();
-    let b_con: Vec<char> = b.iter().copied().filter(|c| cset.contains(c)).collect();
+    let bset: std::collections::HashSet<char> = b.iter().copied().collect();
+    let oset: std::collections::HashSet<char> = output_labels.iter().copied().collect();
 
-    // op0 = [free0, contracted]; op1 = [contracted, free1].
-    if *a != [a_free.as_slice(), a_con.as_slice()].concat() {
+    // Batch labels: non-contracted labels of op0 that also appear in op1 and the
+    // output. They must form the identical leading prefix of all three.
+    let batch: Vec<char> = a
+        .iter()
+        .copied()
+        .filter(|c| !cset.contains(c) && bset.contains(c) && oset.contains(c))
+        .collect();
+    let nb = batch.len();
+    if a.len() < nb
+        || b.len() < nb
+        || output_labels.len() < nb
+        || a[..nb] != batch[..]
+        || b[..nb] != batch[..]
+        || output_labels[..nb] != batch[..]
+    {
         return None;
     }
-    if *b != [b_con.as_slice(), b_free.as_slice()].concat() {
+
+    // After the batch prefix the remainder must be a plain GEMM.
+    let (a_rest, b_rest, o_rest) = (&a[nb..], &b[nb..], &output_labels[nb..]);
+    let a_free: Vec<char> = a_rest.iter().copied().filter(|c| !cset.contains(c)).collect();
+    let a_con: Vec<char> = a_rest.iter().copied().filter(|c| cset.contains(c)).collect();
+    let b_free: Vec<char> = b_rest.iter().copied().filter(|c| !cset.contains(c)).collect();
+    let b_con: Vec<char> = b_rest.iter().copied().filter(|c| cset.contains(c)).collect();
+
+    if *a_rest != [a_free.as_slice(), a_con.as_slice()].concat() {
         return None;
     }
-    // Contracted axes appear in the same order in both operands and cover the
-    // full contracted set.
+    if *b_rest != [b_con.as_slice(), b_free.as_slice()].concat() {
+        return None;
+    }
     if a_con != b_con || a_con.len() != contracted.len() {
         return None;
     }
-    // Output is exactly free0 ++ free1 (rules out batched/shared free labels).
-    if output_labels != [a_free.as_slice(), b_free.as_slice()].concat() {
+    if *o_rest != [a_free.as_slice(), b_free.as_slice()].concat() {
         return None;
     }
 
+    // Batch dims must match between operands (and pin the batch count).
+    if operands[0].shape[..nb] != operands[1].shape[..nb] {
+        return None;
+    }
+    let batch_sz: usize = operands[0].shape[..nb].iter().product();
     let nfree0 = a_free.len();
-    let m: usize = operands[0].shape[..nfree0].iter().product();
-    let k: usize = operands[0].shape[nfree0..].iter().product();
+    let m: usize = operands[0].shape[nb..nb + nfree0].iter().product();
+    let k: usize = operands[0].shape[nb + nfree0..].iter().product();
     let ncon1 = b_con.len();
-    let k2: usize = operands[1].shape[..ncon1].iter().product();
-    let n: usize = operands[1].shape[ncon1..].iter().product();
+    let k2: usize = operands[1].shape[nb..nb + ncon1].iter().product();
+    let n: usize = operands[1].shape[nb + ncon1..].iter().product();
     if k != k2 {
         return None;
     }
-    if operands[0].values.len() != m * k || operands[1].values.len() != k * n {
+    if operands[0].values.len() != batch_sz * m * k
+        || operands[1].values.len() != batch_sz * k * n
+    {
         return None;
     }
-    Some((m, k, n))
+    Some((batch_sz, m, k, n))
 }
 
 fn matmul_accumulate(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
@@ -50619,6 +50662,46 @@ print(json.dumps(payload))
         assert!((c.values[1] - 64.0).abs() < 1e-10);
         assert!((c.values[2] - 139.0).abs() < 1e-10);
         assert!((c.values[3] - 154.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn einsum_batched_gemm_matches_manual_reference_bits() {
+        // "bij,bjk->bik" is a batched GEMM: the einsum_batched_gemm_dims fast path
+        // runs one matmul_accumulate per batch slice. Validate it against a manual
+        // nested-loop reference summed in the identical ascending-j order — must be
+        // bit-for-bit identical.
+        let (batch, mm, kk, nn) = (3usize, 4usize, 5usize, 2usize);
+        let mut state: u64 = 0xA5A5_1234_DEAD_BEEF;
+        let mut fill = |len: usize| -> Vec<f64> {
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+                })
+                .collect()
+        };
+        let a = UFuncArray::new(vec![batch, mm, kk], fill(batch * mm * kk), DType::F64).unwrap();
+        let b = UFuncArray::new(vec![batch, kk, nn], fill(batch * kk * nn), DType::F64).unwrap();
+
+        let mut reference = vec![0.0f64; batch * mm * nn];
+        for bi in 0..batch {
+            for i in 0..mm {
+                for j2 in 0..nn {
+                    let mut sum = 0.0f64;
+                    for p in 0..kk {
+                        sum += a.values[(bi * mm + i) * kk + p] * b.values[(bi * kk + p) * nn + j2];
+                    }
+                    reference[(bi * mm + i) * nn + j2] = sum;
+                }
+            }
+        }
+
+        let out = UFuncArray::einsum("bij,bjk->bik", &[&a, &b]).unwrap();
+        assert_eq!(out.shape, vec![batch, mm, nn]);
+        assert_eq!(out.values.len(), reference.len());
+        for (o, r) in out.values.iter().zip(&reference) {
+            assert_eq!(o.to_bits(), r.to_bits(), "batched einsum GEMM drifted");
+        }
     }
 
     #[test]
