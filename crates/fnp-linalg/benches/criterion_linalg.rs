@@ -147,7 +147,7 @@ fn bench_qr(c: &mut Criterion) {
 fn bench_svd(c: &mut Criterion) {
     let mut group = c.benchmark_group("svd_nxn");
 
-    for n in [16, 32, 64, 128] {
+    for n in [16, 32, 64, 128, 256, 512] {
         let a = generate_random_matrix(n, 456);
 
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
