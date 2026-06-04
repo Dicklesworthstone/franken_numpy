@@ -8247,6 +8247,11 @@ impl UFuncArray {
 
     pub fn reduce_min(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         // NumPy's np.min propagates NaN: if any element is NaN, result is NaN.
+        // DO NOT vectorize/parallelize: like np.max this is a sequential left-fold,
+        // ORDER-DEPENDENT on signed zeros — np.min([0.0, -0.0]) is -0.0 but
+        // np.min([-0.0, 0.0]) is 0.0 (np.minimum keeps the 2nd arg when equal). The
+        // `a < b ? a : b` form reproduces that; any reordered/SIMD reduction would
+        // break it. Locked by reduce_max_min_signed_zero_order_matches_numpy.
         fn nan_min(a: f64, b: f64) -> f64 {
             if a.is_nan() || b.is_nan() {
                 f64::NAN
@@ -8394,6 +8399,12 @@ impl UFuncArray {
 
     pub fn reduce_max(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         // NumPy's np.max propagates NaN: if any element is NaN, result is NaN.
+        // DO NOT vectorize/parallelize this reduction: NumPy's max is a sequential
+        // left-fold and is ORDER-DEPENDENT on signed zeros — np.max([0.0, -0.0]) is
+        // -0.0 but np.max([-0.0, 0.0]) is 0.0 (np.maximum keeps the 2nd arg when
+        // equal). The `a > b ? a : b` form here reproduces that exactly; f64::max or
+        // any reordered/SIMD reduction would return 0.0 for [0.0, -0.0] and break
+        // bit-parity. Locked by reduce_max_min_signed_zero_order_matches_numpy.
         fn nan_max(a: f64, b: f64) -> f64 {
             if a.is_nan() || b.is_nan() {
                 f64::NAN
@@ -39359,6 +39370,23 @@ print(json.dumps(payload))
         let arr = UFuncArray::new(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0], DType::I32).expect("arr");
         let out = arr.reduce_min(None, false).expect("min");
         assert_eq!(out.dtype(), DType::I32);
+    }
+
+    #[test]
+    fn reduce_max_min_signed_zero_order_matches_numpy() {
+        // NumPy's max/min reductions are a sequential left-fold and ORDER-DEPENDENT
+        // on signed zeros (np.maximum/np.minimum keep the 2nd arg when equal):
+        //   np.max([0.0, -0.0]) == -0.0   np.max([-0.0, 0.0]) == 0.0
+        //   np.min([0.0, -0.0]) == -0.0   np.min([-0.0, 0.0]) == 0.0
+        // This locks that bit-pattern parity and guards against a future
+        // vectorize/parallelize that would reorder the fold and break it.
+        let bits = |v: &UFuncArray| v.values()[0].to_bits();
+        let pz_nz = UFuncArray::new(vec![2], vec![0.0, -0.0], DType::F64).unwrap();
+        let nz_pz = UFuncArray::new(vec![2], vec![-0.0, 0.0], DType::F64).unwrap();
+        assert_eq!(bits(&pz_nz.reduce_max(None, false).unwrap()), (-0.0f64).to_bits());
+        assert_eq!(bits(&nz_pz.reduce_max(None, false).unwrap()), (0.0f64).to_bits());
+        assert_eq!(bits(&pz_nz.reduce_min(None, false).unwrap()), (-0.0f64).to_bits());
+        assert_eq!(bits(&nz_pz.reduce_min(None, false).unwrap()), (0.0f64).to_bits());
     }
 
     #[test]
