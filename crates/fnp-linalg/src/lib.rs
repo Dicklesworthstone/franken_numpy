@@ -3321,6 +3321,9 @@ fn hessenberg_reduce(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     }
 
     let mut v = vec![0.0; n];
+    // Scratch for the cache-friendly two-pass left Householder transform.
+    let mut dbuf = vec![0.0; n];
+    let mut f_vec = vec![0.0; n];
     for j in 0..n.saturating_sub(2) {
         // Householder to zero column j below row j+1 (entries j+2..n)
         let col_norm = {
@@ -3349,15 +3352,29 @@ fn hessenberg_reduce(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
         }
         let scale = 2.0 / v_norm_sq;
 
-        // Left: H = P * H
-        for col in 0..n {
-            let mut dot = 0.0;
-            for i in (j + 1)..n {
-                dot += v[i] * h[i * n + col];
+        // Left: H = P * H. Two row-contiguous passes instead of the naive
+        // per-column walk (which strode `h[i*n+col]` down each column with stride
+        // n — a cache line per step). Bit-exact: pass 1 sums each
+        // d[col] = Σ_i v[i]·h[i][col] in the same i-ascending order, pass 2 applies
+        // the identical (scale·d[col])·v[i] product grouping per element.
+        for dc in dbuf.iter_mut() {
+            *dc = 0.0;
+        }
+        for i in (j + 1)..n {
+            let vi = v[i];
+            let row = &h[i * n..i * n + n];
+            for (dc, &hv) in dbuf.iter_mut().zip(row.iter()) {
+                *dc += vi * hv;
             }
-            let f = scale * dot;
-            for i in (j + 1)..n {
-                h[i * n + col] -= f * v[i];
+        }
+        for (fc, &dc) in f_vec.iter_mut().zip(dbuf.iter()) {
+            *fc = scale * dc;
+        }
+        for i in (j + 1)..n {
+            let vi = v[i];
+            let row = &mut h[i * n..i * n + n];
+            for (hv, &fc) in row.iter_mut().zip(f_vec.iter()) {
+                *hv -= fc * vi;
             }
         }
         // Right: H = H * P
@@ -9856,6 +9873,113 @@ mod tests {
                 tn.push(t.elapsed().as_secs_f64() * 1e3);
             }
             println!("n={n:5} single-shift={:9.2}ms double-shift={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
+        }
+    }
+
+    // Old Hessenberg reduction with the stride-n column-walk left apply, for the
+    // same-process A/B. (H only; Q not needed for the timing comparison.)
+    fn hessenberg_reduce_stridn_ref(a: &[f64], n: usize) -> Vec<f64> {
+        let mut h = a.to_vec();
+        let mut q = vec![0.0f64; n * n];
+        for i in 0..n {
+            q[i * n + i] = 1.0;
+        }
+        let mut v = vec![0.0f64; n];
+        for j in 0..n.saturating_sub(2) {
+            let cn = {
+                let mut s = 0.0;
+                for i in (j + 1)..n {
+                    s += h[i * n + j] * h[i * n + j];
+                }
+                s.sqrt()
+            };
+            if cn < f64::EPSILON {
+                continue;
+            }
+            let sign = if h[(j + 1) * n + j] >= 0.0 { 1.0 } else { -1.0 };
+            for vi in &mut v[..=j] {
+                *vi = 0.0;
+            }
+            for (i, vi) in v[(j + 1)..n].iter_mut().enumerate() {
+                *vi = h[(i + j + 1) * n + j];
+            }
+            v[j + 1] += sign * cn;
+            let vns: f64 = v[(j + 1)..].iter().map(|x| x * x).sum();
+            if vns == 0.0 {
+                continue;
+            }
+            let scale = 2.0 / vns;
+            for col in 0..n {
+                let mut dot = 0.0;
+                for i in (j + 1)..n {
+                    dot += v[i] * h[i * n + col];
+                }
+                let f = scale * dot;
+                for i in (j + 1)..n {
+                    h[i * n + col] -= f * v[i];
+                }
+            }
+            for row in 0..n {
+                let mut dot = 0.0;
+                for i in (j + 1)..n {
+                    dot += v[i] * h[row * n + i];
+                }
+                let f = scale * dot;
+                for i in (j + 1)..n {
+                    h[row * n + i] -= f * v[i];
+                }
+            }
+            for row in 0..n {
+                let mut dot = 0.0;
+                for i in (j + 1)..n {
+                    dot += v[i] * q[row * n + i];
+                }
+                let f = scale * dot;
+                for i in (j + 1)..n {
+                    q[row * n + i] -= f * v[i];
+                }
+            }
+        }
+        h
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn hessenberg_left_apply_speedup() {
+        use std::time::Instant;
+        fn rnd(n: usize, seed: u64) -> Vec<f64> {
+            let mut s = seed | 1;
+            (0..n * n)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                })
+                .collect()
+        }
+        for &n in &[512usize, 1024] {
+            let a = rnd(n, 0x33);
+            // bit-exactness of the new contiguous left apply vs the stride-n ref.
+            let hs = hessenberg_reduce_stridn_ref(&a, n);
+            let (hn, _q) = super::hessenberg_reduce(&a, n);
+            let maxd = hs.iter().zip(&hn).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+            assert!(maxd == 0.0, "Hessenberg not bit-exact: {maxd:e} (n={n})");
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs[xs.len() / 2]
+            };
+            let it = 3;
+            let (mut to, mut tn) = (Vec::new(), Vec::new());
+            for _ in 0..it {
+                let t = Instant::now();
+                let r = hessenberg_reduce_stridn_ref(&a, n);
+                std::hint::black_box(&r);
+                to.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                let r = super::hessenberg_reduce(&a, n);
+                std::hint::black_box(&r);
+                tn.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            println!("n={n:5} stride-n={:9.2}ms contiguous={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
         }
     }
 
