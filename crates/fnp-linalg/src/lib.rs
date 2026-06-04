@@ -5722,28 +5722,54 @@ pub fn complex_matvec(a: &[f64], x: &[f64], m: usize, n: usize) -> Vec<f64> {
 /// row bands; below this the work is too small to amortize thread dispatch.
 const COMPLEX_MATMUL_PARALLEL_MIN_FLOPS: usize = 1 << 18;
 
-pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
-    let mut c = vec![0.0; 2 * m * n];
-    if c.is_empty() {
-        return c;
-    }
+fn complex_matmul_row_block4(
+    a: &[f64],
+    b: &[f64],
+    k: usize,
+    n: usize,
+    row_start: usize,
+    c: &mut [f64],
+) {
+    if c.len() == MATMUL_ROW_BLOCK * 2 * n {
+        let (c0, rest) = c.split_at_mut(2 * n);
+        let (c1, rest) = rest.split_at_mut(2 * n);
+        let (c2, c3) = rest.split_at_mut(2 * n);
+        let a0 = &a[2 * row_start * k..2 * row_start * k + 2 * k];
+        let a1 = &a[2 * (row_start + 1) * k..2 * (row_start + 1) * k + 2 * k];
+        let a2 = &a[2 * (row_start + 2) * k..2 * (row_start + 2) * k + 2 * k];
+        let a3 = &a[2 * (row_start + 3) * k..2 * (row_start + 3) * k + 2 * k];
 
-    // ikp loop order (p outer, j inner) so each B row `b[p][*]` is read as a
-    // contiguous interleaved slice and reused across all rows of the band — a
-    // huge improvement over the old i/j/p order, which walked B down column j
-    // with stride 2n (a cache line per p-step). c[i][j] still accumulates p in
-    // 0..k ascending order (using the same `cmul` as the serial reference), so
-    // the result is bit-for-bit identical to the serial loop. `c` is pre-zeroed,
-    // so `+=` into it equals the `0.0 + sum_p` of the old local accumulator.
-    let row_block = |i0: usize, c_block: &mut [f64]| {
-        let rows = c_block.len() / (2 * n);
         for p in 0..k {
             let b_row = &b[2 * p * n..2 * p * n + 2 * n];
-            for ii in 0..rows {
-                let i = i0 + ii;
-                let ar = a[2 * (i * k + p)];
-                let ai = a[2 * (i * k + p) + 1];
-                let c_row = &mut c_block[ii * 2 * n..ii * 2 * n + 2 * n];
+            let (a0r, a0i) = (a0[2 * p], a0[2 * p + 1]);
+            let (a1r, a1i) = (a1[2 * p], a1[2 * p + 1]);
+            let (a2r, a2i) = (a2[2 * p], a2[2 * p + 1]);
+            let (a3r, a3i) = (a3[2 * p], a3[2 * p + 1]);
+            for j in 0..n {
+                let (br, bi) = (b_row[2 * j], b_row[2 * j + 1]);
+                let (p0r, p0i) = cmul(a0r, a0i, br, bi);
+                let (p1r, p1i) = cmul(a1r, a1i, br, bi);
+                let (p2r, p2i) = cmul(a2r, a2i, br, bi);
+                let (p3r, p3i) = cmul(a3r, a3i, br, bi);
+                c0[2 * j] += p0r;
+                c0[2 * j + 1] += p0i;
+                c1[2 * j] += p1r;
+                c1[2 * j + 1] += p1i;
+                c2[2 * j] += p2r;
+                c2[2 * j + 1] += p2i;
+                c3[2 * j] += p3r;
+                c3[2 * j + 1] += p3i;
+            }
+        }
+    } else {
+        let rows = c.len() / (2 * n);
+        for ii in 0..rows {
+            let i = row_start + ii;
+            let c_row = &mut c[ii * 2 * n..ii * 2 * n + 2 * n];
+            let a_row = &a[2 * i * k..2 * i * k + 2 * k];
+            for p in 0..k {
+                let (ar, ai) = (a_row[2 * p], a_row[2 * p + 1]);
+                let b_row = &b[2 * p * n..2 * p * n + 2 * n];
                 for j in 0..n {
                     let (pr, pi) = cmul(ar, ai, b_row[2 * j], b_row[2 * j + 1]);
                     c_row[2 * j] += pr;
@@ -5751,18 +5777,28 @@ pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec
                 }
             }
         }
-    };
+    }
+}
 
+pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
+    let mut c = vec![0.0; 2 * m * n];
+    if c.is_empty() {
+        return c;
+    }
+
+    // Four-row ikp microkernel: each streamed B row feeds four A rows before
+    // advancing, while every c[i,j] still accumulates p in 0..k ascending order
+    // through the same `cmul` operation as the serial reference. The tail path
+    // handles non-multiple-of-four row blocks with the same p-ascending sequence.
     let flops = m.saturating_mul(k).saturating_mul(n);
     if rayon::current_num_threads() >= 2 && flops >= COMPLEX_MATMUL_PARALLEL_MIN_FLOPS && m >= 8 {
-        // A few row bands per thread; each band is a disjoint contiguous slice of
-        // `c`, so the parallel result is bit-for-bit identical to the serial band.
-        let band_rows = m.div_ceil(rayon::current_num_threads() * 4).max(1);
-        c.par_chunks_mut(band_rows * 2 * n)
+        c.par_chunks_mut(MATMUL_ROW_BLOCK * 2 * n)
             .enumerate()
-            .for_each(|(bi, c_block)| row_block(bi * band_rows, c_block));
+            .for_each(|(block, c_block)| {
+                complex_matmul_row_block4(a, b, k, n, block * MATMUL_ROW_BLOCK, c_block);
+            });
     } else {
-        row_block(0, &mut c);
+        complex_matmul_row_block4(a, b, k, n, 0, &mut c);
     }
     c
 }
