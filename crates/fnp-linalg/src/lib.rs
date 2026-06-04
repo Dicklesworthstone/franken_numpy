@@ -3394,12 +3394,12 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
     let eps = f64::EPSILON;
     let max_iter = EIGEN_QR_ITERATION_COEFF * n * n;
     let mut p = n; // active upper bound (exclusive of converged tail)
+    // Stagnation tracking: force an exceptional shift if the active block has not
+    // deflated for several iterations (guards rare double-shift cycling).
+    let mut since_defl = 0usize;
+    let mut last_p = n;
 
-    // QR factorization of H[lo..p, lo..p] using Givens rotations
-    let mut cos_vals = vec![0.0; n];
-    let mut sin_vals = vec![0.0; n];
-
-    for iter in 0..max_iter {
+    for _iter in 0..max_iter {
         if p <= 1 {
             break;
         }
@@ -3452,85 +3452,105 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
             }
         }
 
-        // Wilkinson shift from trailing 2×2 of active block
-        let a11 = h[(p - 2) * n + (p - 2)];
-        let a12 = h[(p - 2) * n + (p - 1)];
-        let a21 = h[(p - 1) * n + (p - 2)];
-        let a22 = h[(p - 1) * n + (p - 1)];
-        let trace = a11 + a22;
-        let det = a11 * a22 - a12 * a21;
-        let disc = trace * trace - 4.0 * det;
-        let mu = if disc >= 0.0 {
-            let sqrt_disc = disc.sqrt();
-            let lam1 = (trace + sqrt_disc) / 2.0;
-            let lam2 = (trace - sqrt_disc) / 2.0;
-            if (lam1 - a22).abs() < (lam2 - a22).abs() {
-                lam1
-            } else {
-                lam2
-            }
+        // Track stagnation: reset the counter whenever the block deflated.
+        if p < last_p {
+            since_defl = 0;
+            last_p = p;
         } else {
-            // Complex eigenvalue pair: use exceptional shift every 10 iterations
-            if iter % 10 == 0 {
-                a22 + h[(p - 1) * n + (p - 2)].abs()
-            } else {
-                trace / 2.0
-            }
+            since_defl += 1;
+        }
+
+        // --- Francis double-shift implicit QR step on active block [lo, p) ---
+        // The two shifts are the eigenvalues of the trailing 2×2, used as a
+        // conjugate pair in real arithmetic (Golub & Van Loan, Alg. 7.5.1). This
+        // gives cubic convergence and resolves complex pairs without the
+        // single-shift stagnation that made eigvals pathologically slow.
+        let m = p - 1;
+        let (s, t) = if since_defl > 0 && since_defl % 10 == 0 {
+            // Exceptional shift to break a rare cycle: complex shifts of magnitude
+            // ~the local subdiagonal scale.
+            let sa = h[m * n + (m - 1)].abs()
+                + if m >= lo + 2 { h[(m - 1) * n + (m - 2)].abs() } else { 0.0 };
+            (1.5 * sa, sa * sa)
+        } else {
+            let tr = h[(p - 2) * n + (p - 2)] + h[(p - 1) * n + (p - 1)];
+            let dt = h[(p - 2) * n + (p - 2)] * h[(p - 1) * n + (p - 1)]
+                - h[(p - 2) * n + (p - 1)] * h[(p - 1) * n + (p - 2)];
+            (tr, dt)
         };
 
-        // Subtract shift
-        for i in lo..p {
-            h[i * n + i] -= mu;
-        }
+        // First column of (H - λ1 I)(H - λ2 I) = H² - sH + tI (entries x, y, z).
+        let h00 = h[lo * n + lo];
+        let h10 = h[(lo + 1) * n + lo];
+        let h11 = h[(lo + 1) * n + (lo + 1)];
+        let h01 = h[lo * n + (lo + 1)];
+        let mut x = h00 * h00 + h01 * h10 - s * h00 + t;
+        let mut y = h10 * (h00 + h11 - s);
+        let mut zz = if lo + 2 <= m { h10 * h[(lo + 2) * n + (lo + 1)] } else { 0.0 };
 
-        for k in lo..(p - 1) {
-            let ff = h[k * n + k];
-            let gg = h[(k + 1) * n + k];
-            let r = ff.hypot(gg);
-            let (c, s) = if r > 0.0 {
-                (ff / r, gg / r)
-            } else {
-                (1.0, 0.0)
-            };
-            cos_vals[k] = c;
-            sin_vals[k] = s;
-            // Apply left rotation to rows k, k+1 (columns k..n)
-            for j in k..n {
-                let t1 = c * h[k * n + j] + s * h[(k + 1) * n + j];
-                h[(k + 1) * n + j] = -s * h[k * n + j] + c * h[(k + 1) * n + j];
-                h[k * n + j] = t1;
-            }
-        }
+        let mut k = lo;
+        while k <= p - 2 {
+            let nr = if k + 2 <= m { 3 } else { 2 };
+            let a0 = x;
+            let a1 = y;
+            let a2 = if nr == 3 { zz } else { 0.0 };
+            let norm2 = a0 * a0 + a1 * a1 + a2 * a2;
+            if norm2 > 0.0 {
+                let norm = norm2.sqrt();
+                let alpha = if a0 >= 0.0 { -norm } else { norm };
+                let denom = a0 - alpha;
+                let v1 = a1 / denom;
+                let v2 = if nr == 3 { a2 / denom } else { 0.0 };
+                let tau = (alpha - a0) / alpha; // H = I − tau·v·vᵀ, v = (1, v1, v2)
 
-        // Form R * Q (right-multiply by G_lo .. G_{p-2})
-        for k in lo..(p - 1) {
-            let c = cos_vals[k];
-            let s = sin_vals[k];
-            // Apply right rotation to columns k, k+1 (rows 0..min(k+2, p))
-            let row_end = (k + 2).min(p);
-            for i in 0..row_end {
-                let t1 = c * h[i * n + k] + s * h[i * n + k + 1];
-                h[i * n + k + 1] = -s * h[i * n + k] + c * h[i * n + k + 1];
-                h[i * n + k] = t1;
-            }
-        }
-
-        // Add shift back
-        for i in lo..p {
-            h[i * n + i] += mu;
-        }
-
-        // Accumulate into Z: Z = Z * G_lo * ... * G_{p-2}
-        if let Some(ref mut z) = z {
-            for k in lo..(p - 1) {
-                let c = cos_vals[k];
-                let s = sin_vals[k];
-                for row in 0..n {
-                    let t1 = c * z[row * n + k] + s * z[row * n + k + 1];
-                    z[row * n + k + 1] = -s * z[row * n + k] + c * z[row * n + k + 1];
-                    z[row * n + k] = t1;
+                // Left: P·H on rows k..k+nr, columns [colstart, n).
+                let colstart = if k > lo { k - 1 } else { lo };
+                for j in colstart..n {
+                    let w0 = h[k * n + j];
+                    let w1 = h[(k + 1) * n + j];
+                    let w2 = if nr == 3 { h[(k + 2) * n + j] } else { 0.0 };
+                    let td = tau * (w0 + v1 * w1 + v2 * w2);
+                    h[k * n + j] = w0 - td;
+                    h[(k + 1) * n + j] = w1 - td * v1;
+                    if nr == 3 {
+                        h[(k + 2) * n + j] = w2 - td * v2;
+                    }
+                }
+                // Right: H·P on columns k..k+nr, rows [0, rowend).
+                let rowend = (k + nr + 1).min(p);
+                for i in 0..rowend {
+                    let w0 = h[i * n + k];
+                    let w1 = h[i * n + k + 1];
+                    let w2 = if nr == 3 { h[i * n + k + 2] } else { 0.0 };
+                    let td = tau * (w0 + v1 * w1 + v2 * w2);
+                    h[i * n + k] = w0 - td;
+                    h[i * n + k + 1] = w1 - td * v1;
+                    if nr == 3 {
+                        h[i * n + k + 2] = w2 - td * v2;
+                    }
+                }
+                // Schur-vector accumulation: Z·P on columns k..k+nr, all rows.
+                if let Some(ref mut z) = z {
+                    for i in 0..n {
+                        let w0 = z[i * n + k];
+                        let w1 = z[i * n + k + 1];
+                        let w2 = if nr == 3 { z[i * n + k + 2] } else { 0.0 };
+                        let td = tau * (w0 + v1 * w1 + v2 * w2);
+                        z[i * n + k] = w0 - td;
+                        z[i * n + k + 1] = w1 - td * v1;
+                        if nr == 3 {
+                            z[i * n + k + 2] = w2 - td * v2;
+                        }
+                    }
                 }
             }
+            // Recompute the bulge from column k for the next reflector.
+            if k < p - 2 {
+                x = h[(k + 1) * n + k];
+                y = h[(k + 2) * n + k];
+                zz = if k + 3 <= m { h[(k + 3) * n + k] } else { 0.0 };
+            }
+            k += 1;
         }
     }
 }
@@ -9695,6 +9715,147 @@ mod tests {
             super::tridiag_eig_qr(&mut d, &mut e, Some(&mut q), n);
             let t_qr = t.elapsed().as_secs_f64() * 1e3;
             println!("eigh n={n}: tridiag_reduce(Q)={t_red:.1}ms tridiag_qr(Q)={t_qr:.1}ms");
+        }
+    }
+
+    // Old single-shift explicit-QR iteration (with the complex-2×2 deflation),
+    // eigenvalues only, for the same-process A/B against the double-shift.
+    fn hessenberg_qr_iter_singleshift_ref(h: &mut [f64], n: usize) {
+        let eps = f64::EPSILON;
+        let max_iter = super::EIGEN_QR_ITERATION_COEFF * n * n;
+        let mut p = n;
+        let mut cos_vals = vec![0.0; n];
+        let mut sin_vals = vec![0.0; n];
+        for iter in 0..max_iter {
+            if p <= 1 {
+                break;
+            }
+            while p > 1
+                && h[(p - 1) * n + (p - 2)].abs()
+                    <= eps * (h[(p - 2) * n + (p - 2)].abs() + h[(p - 1) * n + (p - 1)].abs())
+            {
+                h[(p - 1) * n + (p - 2)] = 0.0;
+                p -= 1;
+            }
+            if p <= 1 {
+                break;
+            }
+            let mut lo = p - 1;
+            while lo > 0
+                && h[lo * n + (lo - 1)].abs()
+                    > eps * (h[(lo - 1) * n + (lo - 1)].abs() + h[lo * n + lo].abs())
+            {
+                lo -= 1;
+            }
+            if lo > 0 {
+                h[lo * n + (lo - 1)] = 0.0;
+            }
+            if p - lo <= 1 {
+                continue;
+            }
+            if p - lo == 2 {
+                let a11 = h[(p - 2) * n + (p - 2)];
+                let a12 = h[(p - 2) * n + (p - 1)];
+                let a21 = h[(p - 1) * n + (p - 2)];
+                let a22 = h[(p - 1) * n + (p - 1)];
+                if (a11 + a22) * (a11 + a22) - 4.0 * (a11 * a22 - a12 * a21) < 0.0 {
+                    p -= 2;
+                    continue;
+                }
+            }
+            let a11 = h[(p - 2) * n + (p - 2)];
+            let a12 = h[(p - 2) * n + (p - 1)];
+            let a21 = h[(p - 1) * n + (p - 2)];
+            let a22 = h[(p - 1) * n + (p - 1)];
+            let trace = a11 + a22;
+            let det = a11 * a22 - a12 * a21;
+            let disc = trace * trace - 4.0 * det;
+            let mu = if disc >= 0.0 {
+                let sd = disc.sqrt();
+                let l1 = (trace + sd) / 2.0;
+                let l2 = (trace - sd) / 2.0;
+                if (l1 - a22).abs() < (l2 - a22).abs() { l1 } else { l2 }
+            } else if iter % 10 == 0 {
+                a22 + h[(p - 1) * n + (p - 2)].abs()
+            } else {
+                trace / 2.0
+            };
+            for i in lo..p {
+                h[i * n + i] -= mu;
+            }
+            for k in lo..(p - 1) {
+                let ff = h[k * n + k];
+                let gg = h[(k + 1) * n + k];
+                let r = ff.hypot(gg);
+                let (c, s) = if r > 0.0 { (ff / r, gg / r) } else { (1.0, 0.0) };
+                cos_vals[k] = c;
+                sin_vals[k] = s;
+                for j in k..n {
+                    let t1 = c * h[k * n + j] + s * h[(k + 1) * n + j];
+                    h[(k + 1) * n + j] = -s * h[k * n + j] + c * h[(k + 1) * n + j];
+                    h[k * n + j] = t1;
+                }
+            }
+            for k in lo..(p - 1) {
+                let c = cos_vals[k];
+                let s = sin_vals[k];
+                let row_end = (k + 2).min(p);
+                for i in 0..row_end {
+                    let t1 = c * h[i * n + k] + s * h[i * n + k + 1];
+                    h[i * n + k + 1] = -s * h[i * n + k] + c * h[i * n + k + 1];
+                    h[i * n + k] = t1;
+                }
+            }
+            for i in lo..p {
+                h[i * n + i] += mu;
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn hessenberg_qr_double_vs_single_shift() {
+        use std::time::Instant;
+        fn rnd(n: usize, seed: u64) -> Vec<f64> {
+            let mut s = seed | 1;
+            (0..n * n)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                })
+                .collect()
+        }
+        for &n in &[256usize, 512] {
+            let a = rnd(n, 0x77);
+            let (h0, _q) = super::hessenberg_reduce(&a, n);
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs[xs.len() / 2]
+            };
+            let it = 3;
+            let (mut to, mut tn) = (Vec::new(), Vec::new());
+            // eigenvalue sets must match (both reach the same real-Schur form).
+            let mut hs = h0.clone();
+            hessenberg_qr_iter_singleshift_ref(&mut hs, n);
+            let mut hd = h0.clone();
+            super::hessenberg_qr_iter(&mut hd, None, n);
+            let mut es = super::extract_schur_eigenvalues(&hs, n);
+            let mut ed = super::extract_schur_eigenvalues(&hd, n);
+            es.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            ed.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let maxd = es.iter().zip(&ed).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+            assert!(maxd < 1e-6, "eigenvalue mismatch {maxd:e} (n={n})");
+            for _ in 0..it {
+                let mut h1 = h0.clone();
+                let t = Instant::now();
+                hessenberg_qr_iter_singleshift_ref(&mut h1, n);
+                to.push(t.elapsed().as_secs_f64() * 1e3);
+                let mut h2 = h0.clone();
+                let t = Instant::now();
+                super::hessenberg_qr_iter(&mut h2, None, n);
+                tn.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            println!("n={n:5} single-shift={:9.2}ms double-shift={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
         }
     }
 
