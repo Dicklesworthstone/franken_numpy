@@ -15677,6 +15677,50 @@ impl UFuncArray {
             ));
         }
 
+        // Fast path for the common single difference (n == 1): the generic loop
+        // below clones the entire input up front even though the first (and here
+        // only) pass reads it read-only — a wasted O(n) copy. Compute the
+        // difference straight from `self`. For the contiguous last-axis case
+        // (inner == 1) each lane is a tight windows(2) subtraction the compiler
+        // can vectorize. Bit-identical to the generic path (same v1 - v0 order).
+        if n == 1 {
+            let axis_len = self.shape[ax];
+            let outer: usize =
+                fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
+            let inner: usize =
+                fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
+            let new_axis_len = axis_len.saturating_sub(1);
+            let mut out_shape = self.shape.clone();
+            out_shape[ax] = new_axis_len;
+            let mut values = Vec::with_capacity(outer * new_axis_len * inner);
+            if inner == 1 {
+                for o in 0..outer {
+                    let lane = &self.values[o * axis_len..o * axis_len + axis_len];
+                    for w in lane.windows(2) {
+                        values.push(w[1] - w[0]);
+                    }
+                }
+            } else {
+                for o in 0..outer {
+                    let base = o * axis_len * inner;
+                    for a in 0..new_axis_len {
+                        for i in 0..inner {
+                            values.push(
+                                self.values[base + (a + 1) * inner + i]
+                                    - self.values[base + a * inner + i],
+                            );
+                        }
+                    }
+                }
+            }
+            return Ok(Self {
+                shape: out_shape,
+                values,
+                dtype: self.dtype,
+                integer_sidecar: None,
+            });
+        }
+
         let mut current = self.clone();
         for _ in 0..n {
             let axis_len = current.shape[ax];
@@ -45295,6 +45339,52 @@ print(json.dumps(payload))
         let r = a.diff(2, None).unwrap();
         assert_eq!(r.shape(), &[3]);
         assert_eq!(r.values(), &[1.0, 1.0, 1.0]); // second differences
+    }
+
+    #[test]
+    #[ignore = "perf A/B report; run with --release -- --ignored --nocapture"]
+    fn diff_n1_noclone_vs_clone_speedup() {
+        // Same-process A/B (load-independent) for the n==1 fast path: the prior
+        // generic path cloned the whole input before computing; the fast path reads
+        // self directly. Proves bit-identical output AND times both.
+        use std::time::Instant;
+        for &len in &[1usize << 20, 1 << 21] {
+            let data: Vec<f64> = (0..len)
+                .map(|i| {
+                    let s = (i as u64)
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                })
+                .collect();
+            // Reference: the old clone-then-strided-loop path.
+            let clone_diff = |v: &[f64]| -> Vec<f64> {
+                let current = v.to_vec(); // the wasteful clone the fast path removes
+                let mut out = Vec::with_capacity(current.len().saturating_sub(1));
+                for a in 0..current.len().saturating_sub(1) {
+                    out.push(current[a + 1] - current[a]);
+                }
+                out
+            };
+            let arr = UFuncArray::new(vec![len], data.clone(), DType::F64).unwrap();
+            let t0 = Instant::now();
+            let reference = clone_diff(&data);
+            let t_clone = t0.elapsed().as_secs_f64() * 1e3;
+            let t1 = Instant::now();
+            let got = arr.diff(1, None).unwrap();
+            let t_fast = t1.elapsed().as_secs_f64() * 1e3;
+            let maxd = reference
+                .iter()
+                .zip(got.values())
+                .map(|(a, b)| a.to_bits() ^ b.to_bits())
+                .max()
+                .unwrap();
+            assert_eq!(maxd, 0, "diff n==1 fast path diverged from clone reference (len={len})");
+            println!(
+                "len={len:8} clone={t_clone:8.3}ms fast={t_fast:8.3}ms speedup={:.2}x (bit-exact)",
+                t_clone / t_fast
+            );
+        }
     }
 
     #[test]
