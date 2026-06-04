@@ -85,7 +85,9 @@ fn main() {
     // --- Stage isolation: construction vs raw arithmetic ---
     // Cost of building one result array (the path every elementwise op runs on
     // its output: from_storage_with_dtype -> cast_to -> to_f64_vec -> new).
-    let proto: Vec<f64> = (0..dim * dim).map(|i| (i % 257) as f64 * 0.5 + 1.0).collect();
+    let proto: Vec<f64> = (0..dim * dim)
+        .map(|i| (i % 257) as f64 * 0.5 + 1.0)
+        .collect();
     let construct_only = time_op(iters, warmup, || {
         std::hint::black_box(fnp_ufunc::UFuncArray::from_vec(proto.clone()));
     });
@@ -133,7 +135,9 @@ struct UFuncArrayLike(fnp_ufunc::UFuncArray);
 
 impl UFuncArrayLike {
     fn matrix(dim: usize) -> Self {
-        let values: Vec<f64> = (0..dim * dim).map(|i| (i % 257) as f64 * 0.5 + 1.0).collect();
+        let values: Vec<f64> = (0..dim * dim)
+            .map(|i| (i % 257) as f64 * 0.5 + 1.0)
+            .collect();
         Self(fnp_ufunc::UFuncArray::new(vec![dim, dim], values, DType::F64).unwrap())
     }
     fn row(dim: usize) -> Self {

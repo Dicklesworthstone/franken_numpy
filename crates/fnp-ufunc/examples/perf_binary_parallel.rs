@@ -53,7 +53,11 @@ fn main() {
         let rhs = UFuncArray::new(vec![n], b.clone(), DType::F64).unwrap();
         let parallel = lhs.elementwise_binary(&rhs, op).expect("binary");
         let serial: Vec<f64> = a.iter().zip(&b).map(|(&x, &y)| op.apply(x, y)).collect();
-        assert_eq!(parallel.values(), serial.as_slice(), "{op:?}: parallel != serial");
+        assert_eq!(
+            parallel.values(),
+            serial.as_slice(),
+            "{op:?}: parallel != serial"
+        );
         let checksum = fnv1a(parallel.values());
 
         for _ in 0..2 {
@@ -61,7 +65,10 @@ fn main() {
         }
         let par_ms = time_median_ms(11, || lhs.elementwise_binary(&rhs, op).unwrap());
         let ser_ms = time_median_ms(11, || {
-            a.iter().zip(&b).map(|(&x, &y)| op.apply(x, y)).collect::<Vec<f64>>()
+            a.iter()
+                .zip(&b)
+                .map(|(&x, &y)| op.apply(x, y))
+                .collect::<Vec<f64>>()
         });
         let speedup = ser_ms / par_ms;
         let melem_s = (n as f64) / (par_ms * 1e-3) / 1e6;

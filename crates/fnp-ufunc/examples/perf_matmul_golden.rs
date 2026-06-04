@@ -114,7 +114,11 @@ fn main() {
 
     // Bit-exactness vs row-block too (must be identical).
     let row_block_out = matmul_row_block_reference(lhs.values(), rhs.values(), dim);
-    assert_eq!(out.values(), row_block_out.as_slice(), "register-tile != row-block");
+    assert_eq!(
+        out.values(),
+        row_block_out.as_slice(),
+        "register-tile != row-block"
+    );
 
     let current_median = time_median_ms(iters, || lhs.matmul(&rhs).unwrap());
     let reference_median = time_median_ms(iters.max(3), || {

@@ -40,10 +40,8 @@ fn fnp_script(body: String) -> String {
 
 #[test]
 fn add_reduce_empty_returns_zero() {
-    let fnp_result = numpy_oracle(&fnp_script(
-        "print(float(fnp.add.reduce([])))".to_string(),
-    ))
-    .expect("fnp add.reduce");
+    let fnp_result = numpy_oracle(&fnp_script("print(float(fnp.add.reduce([])))".to_string()))
+        .expect("fnp add.reduce");
     let np_result =
         numpy_oracle("import numpy as np; print(float(np.add.reduce([])))").expect("np");
     assert_eq!(fnp_result, np_result, "add.reduce([]) should return 0");
@@ -58,10 +56,7 @@ fn multiply_reduce_empty_returns_one() {
     .expect("fnp multiply.reduce");
     let np_result =
         numpy_oracle("import numpy as np; print(float(np.multiply.reduce([])))").expect("np");
-    assert_eq!(
-        fnp_result, np_result,
-        "multiply.reduce([]) should return 1"
-    );
+    assert_eq!(fnp_result, np_result, "multiply.reduce([]) should return 1");
     assert_eq!(fnp_result.trim(), "1.0", "identity is 1");
 }
 
@@ -88,7 +83,10 @@ fn add_outer_empty_first() {
     .expect("fnp add.outer");
     let np_result =
         numpy_oracle("import numpy as np; print(np.add.outer([], [1,2,3]).shape)").expect("np");
-    assert_eq!(fnp_result, np_result, "add.outer([],arr).shape should match");
+    assert_eq!(
+        fnp_result, np_result,
+        "add.outer([],arr).shape should match"
+    );
 }
 
 #[test]
@@ -99,7 +97,10 @@ fn add_outer_empty_second() {
     .expect("fnp add.outer");
     let np_result =
         numpy_oracle("import numpy as np; print(np.add.outer([1,2,3], []).shape)").expect("np");
-    assert_eq!(fnp_result, np_result, "add.outer(arr,[]).shape should match");
+    assert_eq!(
+        fnp_result, np_result,
+        "add.outer(arr,[]).shape should match"
+    );
 }
 
 #[test]
@@ -118,8 +119,7 @@ fn add_reduce_keepdims_empty() {
 
 #[test]
 fn add_identity_is_zero() {
-    let fnp_result =
-        numpy_oracle(&fnp_script("print(fnp.add.identity)".to_string())).expect("fnp");
+    let fnp_result = numpy_oracle(&fnp_script("print(fnp.add.identity)".to_string())).expect("fnp");
     let np_result = numpy_oracle("import numpy as np; print(np.add.identity)").expect("np");
     assert_eq!(fnp_result, np_result, "add.identity should be 0");
 }
@@ -181,10 +181,9 @@ fn add_reduce_with_initial() {
         "print(float(fnp.add.reduce([1,2,3], initial=10)))".to_string(),
     ))
     .expect("fnp");
-    let np_result = numpy_oracle(
-        "import numpy as np; print(float(np.add.reduce([1,2,3], initial=10)))",
-    )
-    .expect("np");
+    let np_result =
+        numpy_oracle("import numpy as np; print(float(np.add.reduce([1,2,3], initial=10)))")
+            .expect("np");
     assert_eq!(fnp_result, np_result, "reduce with initial");
     assert_eq!(fnp_result.trim(), "16.0");
 }
@@ -195,8 +194,8 @@ fn add_reduce_empty_with_initial() {
         "print(float(fnp.add.reduce([], initial=42)))".to_string(),
     ))
     .expect("fnp");
-    let np_result =
-        numpy_oracle("import numpy as np; print(float(np.add.reduce([], initial=42)))").expect("np");
+    let np_result = numpy_oracle("import numpy as np; print(float(np.add.reduce([], initial=42)))")
+        .expect("np");
     assert_eq!(fnp_result, np_result, "reduce empty with initial");
     assert_eq!(fnp_result.trim(), "42.0");
 }

@@ -63,7 +63,11 @@ fn main() {
     let arr = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).unwrap();
     let parallel = arr.sort(Some(-1), Some("quicksort")).expect("sort");
     let serial = serial_row_sort(&data, rows, cols);
-    assert_eq!(parallel.values(), serial.as_slice(), "parallel sort != serial");
+    assert_eq!(
+        parallel.values(),
+        serial.as_slice(),
+        "parallel sort != serial"
+    );
     let checksum = fnv1a(parallel.values());
 
     for _ in 0..2 {

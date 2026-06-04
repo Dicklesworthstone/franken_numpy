@@ -84,7 +84,10 @@ fn finite_2d(
 ) -> impl Strategy<Value = Vec<Vec<f64>>> {
     (min_rows..=max_rows).prop_flat_map(move |rows| {
         (min_cols..=max_cols).prop_flat_map(move |cols| {
-            prop::collection::vec(prop::collection::vec(bounded_f64(), cols..=cols), rows..=rows)
+            prop::collection::vec(
+                prop::collection::vec(bounded_f64(), cols..=cols),
+                rows..=rows,
+            )
         })
     })
 }

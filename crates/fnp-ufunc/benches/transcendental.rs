@@ -14,7 +14,9 @@ fn make_trig_array(n: usize) -> UFuncArray {
 }
 
 fn make_domain_array(n: usize) -> UFuncArray {
-    let values: Vec<f64> = (0..n).map(|i| (i as f64) / (n as f64) * 0.999 - 0.4995).collect();
+    let values: Vec<f64> = (0..n)
+        .map(|i| (i as f64) / (n as f64) * 0.999 - 0.4995)
+        .collect();
     UFuncArray::new(vec![n], values, DType::F64).unwrap()
 }
 
