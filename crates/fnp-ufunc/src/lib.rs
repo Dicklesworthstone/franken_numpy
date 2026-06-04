@@ -13190,37 +13190,23 @@ impl UFuncArray {
             fnp_ndarray::element_count(&self.shape[..a_ndim - axes]).map_err(UFuncError::Shape)?;
         let b_outer: usize =
             fnp_ndarray::element_count(&other.shape[axes..]).map_err(UFuncError::Shape)?;
-        // Each output row `i` depends only on row `i` of `self` and all of
-        // `other`, and accumulates `k` in ascending order — independent across
-        // rows, so we fill rows in parallel with the identical per-cell sum
-        // order (bit-exact vs the serial form).
+        // After flattening the contracted axes, tensordot is exactly the GEMM
+        // (a_outer × contract_size) @ (contract_size × b_outer): `self.values` is
+        // the row-major LHS and `other.values` the row-major RHS. Route it through
+        // the register-tiled, NC-cache-blocked, parallel `matmul_accumulate`
+        // instead of a hand-rolled contraction that strode `other[k*b_outer+j]`
+        // down each column with stride b_outer. Every output cell still
+        // accumulates k=0..contract_size in ascending order, so the result is
+        // bit-for-bit identical to the naive sum.
         let mut values = vec![0.0; a_outer * b_outer];
-        let fill_row = |(i, row): (usize, &mut [f64])| {
-            let a_base = i * contract_size;
-            for (j, cell) in row.iter_mut().enumerate() {
-                let mut sum = 0.0;
-                for k in 0..contract_size {
-                    sum += self.values[a_base + k] * other.values[k * b_outer + j];
-                }
-                *cell = sum;
-            }
-        };
-        const TENSORDOT_PARALLEL_MIN_FLOPS: usize = 1 << 18;
-        if a_outer >= 2
-            && a_outer.saturating_mul(b_outer).saturating_mul(contract_size)
-                >= TENSORDOT_PARALLEL_MIN_FLOPS
-            && rayon::current_num_threads() >= 2
-        {
-            values
-                .par_chunks_mut(b_outer.max(1))
-                .enumerate()
-                .for_each(fill_row);
-        } else {
-            values
-                .chunks_mut(b_outer.max(1))
-                .enumerate()
-                .for_each(fill_row);
-        }
+        matmul_accumulate(
+            &self.values,
+            &other.values,
+            a_outer,
+            contract_size,
+            b_outer,
+            &mut values,
+        );
         let mut out_shape: Vec<usize> = self.shape[..a_ndim - axes].to_vec();
         out_shape.extend_from_slice(&other.shape[axes..]);
         if out_shape.is_empty() {
