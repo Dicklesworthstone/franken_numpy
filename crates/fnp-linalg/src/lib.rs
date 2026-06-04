@@ -3145,6 +3145,21 @@ fn tridiag_eig_qr(d: &mut [f64], e: &mut [f64], mut q: Option<&mut [f64]>, n: us
     let eps = f64::EPSILON;
     let max_iter = EIGEN_QR_ITERATION_COEFF * n * n;
 
+    // Each implicit-QR Givens rotation right-multiplies Q (Q := Q·G), updating two
+    // COLUMNS — a stride-n walk down the rows that thrashes cache (the dominant
+    // cost of eigh-with-eigenvectors: ~83 MFLOP/s at n=1024). Accumulate into Q
+    // TRANSPOSED instead, so each rotation updates two contiguous ROWS; transpose
+    // back at the end. Identical arithmetic per element (c·t1 + s·t2) — bit-exact.
+    let mut qt: Option<Vec<f64>> = q.as_deref().map(|qq| {
+        let mut t = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                t[i * n + j] = qq[j * n + i];
+            }
+        }
+        t
+    });
+
     for _iter in 0..max_iter {
         // Deflation: set small off-diagonals to zero
         for i in 0..e.len() {
@@ -3211,14 +3226,26 @@ fn tridiag_eig_qr(d: &mut [f64], e: &mut [f64], mut q: Option<&mut [f64]>, n: us
             x = e[kk];
             z = bulge;
 
-            // Accumulate rotation into Q (columns kk, kk+1)
-            if let Some(ref mut q) = q {
-                for row in 0..n {
-                    let t1 = q[row * n + kk];
-                    let t2 = q[row * n + kk + 1];
-                    q[row * n + kk] = c * t1 + s * t2;
-                    q[row * n + kk + 1] = -s * t1 + c * t2;
+            // Accumulate rotation into Q^T (rows kk, kk+1 — contiguous).
+            if let Some(ref mut qt) = qt {
+                let (lo_row, hi_row) = qt.split_at_mut((kk + 1) * n);
+                let row_kk = &mut lo_row[kk * n..kk * n + n];
+                let row_kk1 = &mut hi_row[0..n];
+                for col in 0..n {
+                    let t1 = row_kk[col];
+                    let t2 = row_kk1[col];
+                    row_kk[col] = c * t1 + s * t2;
+                    row_kk1[col] = -s * t1 + c * t2;
                 }
+            }
+        }
+    }
+
+    // Transpose the accumulated Q^T back into the caller's Q.
+    if let (Some(qq), Some(t)) = (q.as_deref_mut(), qt.as_ref()) {
+        for i in 0..n {
+            for j in 0..n {
+                qq[i * n + j] = t[j * n + i];
             }
         }
     }
@@ -9475,6 +9502,101 @@ mod tests {
                 ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
             })
             .collect()
+    }
+
+    // Old stride-n column accumulation (pre-transpose) for the same-process A/B.
+    fn tridiag_eig_qr_stridn_ref(d: &mut [f64], e: &mut [f64], q: &mut [f64], n: usize) {
+        let eps = f64::EPSILON;
+        let max_iter = super::EIGEN_QR_ITERATION_COEFF * n * n;
+        for _iter in 0..max_iter {
+            for i in 0..e.len() {
+                if e[i].abs() <= eps * (d[i].abs() + d[i + 1].abs()) {
+                    e[i] = 0.0;
+                }
+            }
+            let mut hi = n - 1;
+            while hi > 0 && e[hi - 1] == 0.0 {
+                hi -= 1;
+            }
+            if hi == 0 {
+                break;
+            }
+            let mut lo = hi - 1;
+            while lo > 0 && e[lo - 1] != 0.0 {
+                lo -= 1;
+            }
+            let delta = (d[hi - 1] - d[hi]) / 2.0;
+            let shift = if delta == 0.0 {
+                d[hi] - e[hi - 1].abs()
+            } else {
+                let sign = if delta >= 0.0 { 1.0 } else { -1.0 };
+                d[hi] - e[hi - 1] * e[hi - 1] / (delta + sign * (delta * delta + e[hi - 1] * e[hi - 1]).sqrt())
+            };
+            let mut x = d[lo] - shift;
+            let mut z = e[lo];
+            let mut bulge = 0.0;
+            for kk in lo..hi {
+                let r = x.hypot(z);
+                let (c, s) = if r > 0.0 { (x / r, z / r) } else { (1.0, 0.0) };
+                if kk > lo {
+                    e[kk - 1] = r;
+                }
+                let dk = d[kk];
+                let dk1 = d[kk + 1];
+                let ek = e[kk];
+                d[kk] = c * c * dk + 2.0 * c * s * ek + s * s * dk1;
+                d[kk + 1] = s * s * dk - 2.0 * c * s * ek + c * c * dk1;
+                e[kk] = c * s * (dk1 - dk) + (c * c - s * s) * ek;
+                if kk + 1 < hi {
+                    bulge = s * e[kk + 1];
+                    e[kk + 1] *= c;
+                }
+                x = e[kk];
+                z = bulge;
+                for row in 0..n {
+                    let t1 = q[row * n + kk];
+                    let t2 = q[row * n + kk + 1];
+                    q[row * n + kk] = c * t1 + s * t2;
+                    q[row * n + kk + 1] = -s * t1 + c * t2;
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn tridiag_eig_qr_accum_speedup() {
+        use std::time::Instant;
+        for &n in &[512usize, 1024] {
+            // Build a symmetric matrix, reduce to tridiagonal + Householder Q.
+            let a = chol_spd(n, 0x99);
+            let (d0, e0, q0) = super::tridiag_reduce(&a, n);
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs[xs.len() / 2]
+            };
+            let it = if n <= 512 { 3 } else { 2 };
+            let (mut to, mut tn) = (Vec::new(), Vec::new());
+            for _ in 0..it {
+                let (mut d, mut e, mut q) = (d0.clone(), e0.clone(), q0.clone());
+                let t = Instant::now();
+                tridiag_eig_qr_stridn_ref(&mut d, &mut e, &mut q, n);
+                to.push(t.elapsed().as_secs_f64() * 1e3);
+                let (mut d2, mut e2, mut q2) = (d0.clone(), e0.clone(), q0.clone());
+                let t = Instant::now();
+                super::tridiag_eig_qr(&mut d2, &mut e2, Some(&mut q2), n);
+                tn.push(t.elapsed().as_secs_f64() * 1e3);
+                // Results must match (bit-exact accumulation, transposed storage).
+                let maxq = q
+                    .iter()
+                    .zip(&q2)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f64, f64::max);
+                assert!(maxq < 1e-12, "Q mismatch {maxq:e}");
+            }
+            let (o, nn) = (med(to), med(tn));
+            println!("n={n:5} stride-n={o:9.2}ms transposed={nn:9.2}ms speedup={:.2}x", o / nn);
+        }
     }
 
     #[test]
