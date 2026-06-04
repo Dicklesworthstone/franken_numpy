@@ -15837,13 +15837,11 @@ impl UFuncArray {
                         if lane.iter().any(|v| v.is_nan()) {
                             return f64::NAN;
                         }
-                        let mut sorted_lane = lane.to_vec();
-                        sorted_lane.sort_by(|a, b| a.total_cmp(b));
-                        if axis_len % 2 == 1 {
-                            sorted_lane[axis_len / 2]
-                        } else {
-                            (sorted_lane[axis_len / 2 - 1] + sorted_lane[axis_len / 2]) / 2.0
-                        }
+                        // O(L) quickselect instead of an O(L log L) per-lane sort;
+                        // bit-identical to the sort path (median reads only the
+                        // n/2 (and n/2-1) order statistics, whose values are unique).
+                        let mut buf = lane.to_vec();
+                        select_median(&mut buf)
                     };
                     let values: Vec<f64> = if outer >= 2
                         && self.values.len() >= MEDIAN_PARALLEL_MIN_ELEMS
@@ -15871,13 +15869,8 @@ impl UFuncArray {
                             values.push(f64::NAN);
                             continue;
                         }
-                        let mut sorted_lane = lane;
-                        sorted_lane.sort_by(|a, b| a.total_cmp(b));
-                        let med = if axis_len % 2 == 1 {
-                            sorted_lane[axis_len / 2]
-                        } else {
-                            (sorted_lane[axis_len / 2 - 1] + sorted_lane[axis_len / 2]) / 2.0
-                        };
+                        let mut buf = lane;
+                        let med = select_median(&mut buf);
                         values.push(med);
                     }
                 }
@@ -15946,9 +15939,11 @@ impl UFuncArray {
                         if lane.iter().any(|v| v.is_nan()) {
                             return f64::NAN;
                         }
-                        let mut sorted_lane = lane.to_vec();
-                        sorted_lane.sort_by(|a, b| a.total_cmp(b));
-                        interpolate_percentile(&sorted_lane, fraction)
+                        // O(L) quickselect instead of an O(L log L) per-lane sort;
+                        // a percentile reads only sorted[lo] and sorted[lo+1], whose
+                        // values are unique, so this is bit-identical to the sort path.
+                        let mut buf = lane.to_vec();
+                        select_percentile_method(&mut buf, fraction, QuantileInterp::Linear)
                     };
                     let values: Vec<f64> = if outer >= 2
                         && self.values.len() >= PERCENTILE_PARALLEL_MIN_ELEMS
@@ -15976,9 +15971,12 @@ impl UFuncArray {
                             values.push(f64::NAN);
                             continue;
                         }
-                        let mut sorted_lane = lane;
-                        sorted_lane.sort_by(|a, b| a.total_cmp(b));
-                        values.push(interpolate_percentile(&sorted_lane, fraction));
+                        let mut buf = lane;
+                        values.push(select_percentile_method(
+                            &mut buf,
+                            fraction,
+                            QuantileInterp::Linear,
+                        ));
                     }
                 }
                 Ok(Self {
@@ -16110,13 +16108,11 @@ impl UFuncArray {
                             values.push(f64::NAN);
                             continue;
                         }
-                        let mut sorted_lane = lane;
-                        sorted_lane.sort_by(|a, b| a.total_cmp(b));
-                        values.push(interpolate_percentile_method(
-                            &sorted_lane,
-                            fraction,
-                            method,
-                        ));
+                        // O(L) quickselect instead of an O(L log L) per-lane sort;
+                        // bit-identical for every QuantileInterp method (reads only
+                        // sorted[lo]/sorted[lo+1], whose values are unique).
+                        let mut buf = lane;
+                        values.push(select_percentile_method(&mut buf, fraction, method));
                     }
                 }
                 Ok(Self {
@@ -41856,6 +41852,74 @@ print(json.dumps(payload))
                     "parallel last-axis median lane {r} diverged from serial reference"
                 );
             }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B report; run with --ignored --nocapture"]
+    fn percentile_axis_quickselect_vs_sort_speedup() {
+        // Same-process A/B for the per-lane order-statistic lever: full sort vs
+        // quickselect (production path). Proves bit-identical output AND times both.
+        use std::time::Instant;
+        for &(outer, axis_len) in &[(4096usize, 256usize), (1024, 2048), (256, 16384)] {
+            let n = outer * axis_len;
+            let data: Vec<f64> = (0..n)
+                .map(|i| {
+                    let s = (i as u64)
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                })
+                .collect();
+            // Reference: full per-lane sort, median + p25 + p90.
+            let sort_lane = |lane: &[f64], frac: f64, median: bool| -> f64 {
+                let mut s = lane.to_vec();
+                s.sort_by(|a, b| a.total_cmp(b));
+                if median {
+                    if axis_len % 2 == 1 {
+                        s[axis_len / 2]
+                    } else {
+                        (s[axis_len / 2 - 1] + s[axis_len / 2]) / 2.0
+                    }
+                } else {
+                    interpolate_percentile(&s, frac)
+                }
+            };
+            let mut ref_out = vec![0.0f64; outer * 3];
+            let t0 = Instant::now();
+            for o in 0..outer {
+                let lane = &data[o * axis_len..(o + 1) * axis_len];
+                ref_out[o * 3] = sort_lane(lane, 0.0, true);
+                ref_out[o * 3 + 1] = sort_lane(lane, 0.25, false);
+                ref_out[o * 3 + 2] = sort_lane(lane, 0.90, false);
+            }
+            let t_sort = t0.elapsed().as_secs_f64() * 1e3;
+            // Production: quickselect helpers.
+            let mut qs_out = vec![0.0f64; outer * 3];
+            let t1 = Instant::now();
+            for o in 0..outer {
+                let lane = &data[o * axis_len..(o + 1) * axis_len];
+                let mut b = lane.to_vec();
+                qs_out[o * 3] = super::select_median(&mut b);
+                let mut b = lane.to_vec();
+                qs_out[o * 3 + 1] =
+                    super::select_percentile_method(&mut b, 0.25, QuantileInterp::Linear);
+                let mut b = lane.to_vec();
+                qs_out[o * 3 + 2] =
+                    super::select_percentile_method(&mut b, 0.90, QuantileInterp::Linear);
+            }
+            let t_qs = t1.elapsed().as_secs_f64() * 1e3;
+            let maxd = ref_out
+                .iter()
+                .zip(&qs_out)
+                .map(|(a, b)| (a.to_bits() ^ b.to_bits()))
+                .max()
+                .unwrap();
+            assert_eq!(maxd, 0, "quickselect diverged from sort (outer={outer}, L={axis_len})");
+            println!(
+                "outer={outer:5} L={axis_len:6} sort={t_sort:8.3}ms quickselect={t_qs:8.3}ms speedup={:.2}x (bit-exact)",
+                t_sort / t_qs
+            );
         }
     }
 
