@@ -16,7 +16,8 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
     batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, complex_matmul, det_nxn, eigvalsh_nxn,
-    inv_nxn, matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn, solve_nxn, svd_nxn,
+    inv_nxn, matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn, solve_nxn, svd_mxn_full,
+    svd_nxn,
 };
 use std::hint::black_box;
 
@@ -153,6 +154,23 @@ fn bench_svd(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
             bench.iter(|| {
                 let result = svd_nxn(black_box(&a), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_svd_full(c: &mut Criterion) {
+    let mut group = c.benchmark_group("svd_mxn_full");
+
+    for n in [128usize, 256, 512] {
+        let a = generate_random_matrix(n, 456);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = svd_mxn_full(black_box(&a), black_box(n), black_box(n));
                 black_box(result)
             });
         });
@@ -368,6 +386,7 @@ criterion_group!(
     bench_cholesky,
     bench_qr,
     bench_svd,
+    bench_svd_full,
     bench_eigvalsh,
     bench_norm_frobenius,
     bench_batch_inv,

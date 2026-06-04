@@ -1779,6 +1779,21 @@ fn svd_bidiag_qr_full(
     // Phase 2: Golub-Reinsch implicit QR iteration directly on the bidiagonal.
     // Works with (d, e) without forming B^T*B, avoiding condition-number squaring.
     // Left rotations accumulate into U (column operations), right into Vt (row operations).
+    //
+    // The left Givens rotations touch two COLUMNS of U (u[row][kk], u[row][kk+1])
+    // for every row, striding down U with stride m as the cache-dominant cost of
+    // full SVD (O(n^2 * sweeps) rotations). Accumulate them instead on the transpose
+    // `u_t` (u_t[i][j] = U[j][i]): a column rotation of U becomes a rotation of two
+    // CONTIGUOUS rows of u_t. Transpose once here and once back after convergence
+    // (O(m^2) each, negligible vs the O(m^3) sweeps). Bit-exact: identical cs/sn
+    // and per-element arithmetic, just relocated in memory.
+    let mut u_t = vec![0.0; m * m];
+    for i in 0..m {
+        for j in 0..m {
+            u_t[i * m + j] = u[j * m + i];
+        }
+    }
+
     let eps_mach = f64::EPSILON;
 
     let mut converged = false;
@@ -1852,12 +1867,16 @@ fn svd_bidiag_qr_full(
                 e[kk + 1] *= cs;
             }
 
-            // Accumulate left rotation into U (columns kk, kk+1)
-            for row in 0..m {
-                let t1 = u[row * m + kk];
-                let t2 = u[row * m + kk + 1];
-                u[row * m + kk] = cs * t1 + sn * t2;
-                u[row * m + kk + 1] = -sn * t1 + cs * t2;
+            // Accumulate left rotation into U's columns kk, kk+1, applied as a
+            // contiguous rotation of rows kk, kk+1 of the transpose u_t.
+            let (head, tail) = u_t.split_at_mut((kk + 1) * m);
+            let row_k = &mut head[kk * m..kk * m + m];
+            let row_k1 = &mut tail[..m];
+            for r in 0..m {
+                let t1 = row_k[r];
+                let t2 = row_k1[r];
+                row_k[r] = cs * t1 + sn * t2;
+                row_k1[r] = -sn * t1 + cs * t2;
             }
         }
         e[hi - 1] = f;
@@ -1865,6 +1884,13 @@ fn svd_bidiag_qr_full(
 
     if !converged {
         return Err(LinAlgError::SvdNonConvergence);
+    }
+
+    // Transpose the accumulated rotations back into U (row-major).
+    for i in 0..m {
+        for j in 0..m {
+            u[j * m + i] = u_t[i * m + j];
+        }
     }
 
     // Make all singular values non-negative
@@ -9333,6 +9359,38 @@ mod tests {
         assert_eq!(
             digest, "4c7c7aa6cdf4721a02c213c87c18eec2f977fef96cb9ca52b6b79a873f413f7a",
             "values-only SVD singular-value bit pattern must remain fixed"
+        );
+    }
+
+    #[test]
+    fn svd_full_output_matches_clean_head_digest() {
+        let n = 24usize;
+        let mut state = 0xCAFE_BABE_D15E_A5E5u64;
+        let a: Vec<f64> = (0..(n * n))
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+            })
+            .collect();
+
+        let (u, s, vt) = svd_mxn_full(&a, n, n).expect("full svd");
+        let mut hasher = Sha256::new();
+        for part in [&u[..], &s[..], &vt[..]] {
+            hasher.update(part.len().to_le_bytes());
+            for value in part {
+                hasher.update(value.to_bits().to_le_bytes());
+            }
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "4a06f40391aae9cc82d3cb1a711624a8b08e85878d44e9279ae77758fc1c4c9f",
+            "full SVD output bit pattern must remain fixed: {digest}"
         );
     }
 
