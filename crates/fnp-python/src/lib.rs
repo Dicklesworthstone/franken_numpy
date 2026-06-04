@@ -4093,6 +4093,18 @@ where
     numpy_contiguous_to_vec::<T>(py, &cast)
 }
 
+// Read a NumPy boolean array into a Vec<bool> through its uint8 buffer (bool_ is
+// a single byte, 0/1) rather than boxing every element with .tolist(). The
+// per-element PyList round-trip was the dominant cost of boolean-mask consumers
+// (compress/extract/count_nonzero/all/any/where on large masks). Bit-identical:
+// 0 -> false, nonzero -> true, same as the elementwise tolist conversion.
+fn numpy_bool_to_vec(py: Python<'_>, flat: &Bound<'_, PyAny>) -> PyResult<Vec<bool>> {
+    Ok(numpy_cast_contiguous_to_vec::<u8>(py, flat, "uint8")?
+        .into_iter()
+        .map(|byte| byte != 0)
+        .collect())
+}
+
 fn extract_numeric_array(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -4107,7 +4119,7 @@ fn extract_numeric_array(
     let kind = dtype.getattr("kind")?.extract::<String>()?;
 
     let storage = match kind.as_str() {
-        "b" => ArrayStorage::Bool(flat.call_method0("tolist")?.extract::<Vec<bool>>()?),
+        "b" => ArrayStorage::Bool(numpy_bool_to_vec(py, &flat)?),
         "i" => ArrayStorage::I64(numpy_contiguous_to_vec::<i64>(
             py,
             &flat.call_method1("astype", ("int64",))?,
@@ -4148,7 +4160,7 @@ fn extract_precise_numeric_array(
     })?;
 
     let storage = match parsed_dtype {
-        DType::Bool => ArrayStorage::Bool(flat.call_method0("tolist")?.extract::<Vec<bool>>()?),
+        DType::Bool => ArrayStorage::Bool(numpy_bool_to_vec(py, &flat)?),
         DType::I8 => ArrayStorage::I8(numpy_cast_contiguous_to_vec::<i8>(py, &flat, "int8")?),
         DType::I16 => ArrayStorage::I16(numpy_cast_contiguous_to_vec::<i16>(py, &flat, "int16")?),
         DType::I32 => ArrayStorage::I32(numpy_cast_contiguous_to_vec::<i32>(py, &flat, "int32")?),
