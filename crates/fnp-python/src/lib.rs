@@ -36,7 +36,7 @@ use fnp_random::{
 };
 use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
-    FromPyFuncReduceOptions, GridSpec, MAError, MaskedArray, UFuncArray, UnaryOp,
+    FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError, MaskedArray, UFuncArray, UnaryOp,
     arctan2 as ufunc_arctan2, bitwise_and as ufunc_bitwise_and,
     bitwise_count as ufunc_bitwise_count, bitwise_or as ufunc_bitwise_or,
     bitwise_xor as ufunc_bitwise_xor, copysign as ufunc_copysign, divide as ufunc_divide,
@@ -6816,6 +6816,27 @@ fn build_numpy_array_from_ufunc(py: Python<'_>, array: &UFuncArray) -> PyResult<
         let flat = numpy_array_from_slice(py, &numpy, array.values(), "float64")?;
         let output_shape = PyTuple::new(py, array.shape().iter().copied())?;
         return Ok(flat.call_method1("reshape", (&output_shape,))?.unbind());
+    }
+    // Same fast path for exact integer (int64/uint64) results: the sidecar already
+    // holds the bytes NumPy wants, so copy it straight into the buffer instead of
+    // letting to_storage() clone the sidecar Vec first. Only when the dtype matches
+    // the sidecar width (int64<->I64, uint64<->U64); other integer dtypes/casts keep
+    // the generic path. Bit-identical (same integer values).
+    if let Some(sidecar) = array.integer_sidecar() {
+        let dtype_name = match (array.dtype(), sidecar) {
+            (DType::I64, IntegerSidecar::I64(_)) => Some("int64"),
+            (DType::U64, IntegerSidecar::U64(_)) => Some("uint64"),
+            _ => None,
+        };
+        if let Some(name) = dtype_name {
+            let numpy = py.import("numpy")?;
+            let flat = match sidecar {
+                IntegerSidecar::I64(v) => numpy_array_from_slice(py, &numpy, v, name)?,
+                IntegerSidecar::U64(v) => numpy_array_from_slice(py, &numpy, v, name)?,
+            };
+            let output_shape = PyTuple::new(py, array.shape().iter().copied())?;
+            return Ok(flat.call_method1("reshape", (&output_shape,))?.unbind());
+        }
     }
     let storage = array.to_storage().map_err(map_ufunc_error)?;
     build_numpy_array_from_storage(py, array.shape(), storage)

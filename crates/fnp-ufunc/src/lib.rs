@@ -5925,6 +5925,12 @@ impl UFuncArray {
         self.integer_sidecar.is_some()
     }
 
+    /// Borrow the exact-integer sidecar, if present. Lets the output bridge copy
+    /// integer results straight to a NumPy buffer without cloning the sidecar Vec.
+    pub fn integer_sidecar(&self) -> Option<&IntegerSidecar> {
+        self.integer_sidecar.as_ref()
+    }
+
     pub fn shared_view(&self) -> Result<UFuncArrayView, UFuncError> {
         let strides = c_strides_elems(&self.shape)
             .into_iter()
