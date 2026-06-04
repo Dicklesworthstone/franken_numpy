@@ -1155,6 +1155,9 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
     let mut r = a.to_vec();
 
     let mut v = vec![0.0; n];
+    // Scratch for the cache-friendly left Householder transform of R (see below).
+    let mut d = vec![0.0; n];
+    let mut f_vec = vec![0.0; n];
     for k in 0..n {
         // Extract column k below diagonal
         let mut col_norm_sq = 0.0;
@@ -1177,16 +1180,30 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
             continue;
         }
 
-        // Apply H = I - 2*v*v^T/||v||^2 to R
+        // Apply H = I - 2*v*v^T/||v||^2 to R as two row-contiguous passes instead
+        // of the naive per-column walk (which strode r[i*n+j] down each column
+        // with stride n). Bit-exact: pass 1 sums d[j] = Σ_i v[i]·r[i][j] in the
+        // same i-ascending order, pass 2 applies the identical (scale·d[j])·v[i]
+        // product grouping per element.
         let scale = 2.0 / v_norm_sq;
-        for j in k..n {
-            let mut dot = 0.0;
-            for i in k..n {
-                dot += v[i] * r[i * n + j];
+        for dj in d[k..n].iter_mut() {
+            *dj = 0.0;
+        }
+        for i in k..n {
+            let vi = v[i];
+            let row = &r[i * n + k..i * n + n];
+            for (dj, &rij) in d[k..n].iter_mut().zip(row.iter()) {
+                *dj += vi * rij;
             }
-            let factor = scale * dot;
-            for i in k..n {
-                r[i * n + j] -= factor * v[i];
+        }
+        for (fj, &dj) in f_vec[k..n].iter_mut().zip(d[k..n].iter()) {
+            *fj = scale * dj;
+        }
+        for i in k..n {
+            let vi = v[i];
+            let row = &mut r[i * n + k..i * n + n];
+            for (rij, &fj) in row.iter_mut().zip(f_vec[k..n].iter()) {
+                *rij -= fj * vi;
             }
         }
 

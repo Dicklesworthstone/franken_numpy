@@ -130,7 +130,7 @@ fn bench_cholesky(c: &mut Criterion) {
 fn bench_qr(c: &mut Criterion) {
     let mut group = c.benchmark_group("qr_nxn");
 
-    for n in [16, 32, 64, 128] {
+    for n in [16, 32, 64, 128, 256, 512] {
         let a = generate_random_matrix(n, 123);
 
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
