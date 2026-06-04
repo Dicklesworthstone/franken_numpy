@@ -13118,6 +13118,52 @@ impl UFuncArray {
         let a_count: usize = fnp_ndarray::element_count(&a_shape).map_err(UFuncError::Shape)?;
         let b_count: usize = fnp_ndarray::element_count(&b_shape).map_err(UFuncError::Shape)?;
 
+        // 2-D fast path (the overwhelmingly common np.kron(A, B) on matrices /
+        // vectors, which pad to ndim==2). Each output row `or` maps to a fixed
+        // (a-row, b-row) pair and is written contiguously as A[ia,:] ⊗ B[ib,:],
+        // dropping the per-element odometer + out_idx recomputation of the general
+        // path. The output rows are independent, so an indexed parallel map over
+        // them is bit-for-bit identical (each cell is the same single product
+        // A[ia*na+ja] * B[ib*nb+jb] written exactly once). Falls through to the
+        // N-D odometer path for ndim != 2.
+        if ndim == 2 {
+            let (na, mb, nb) = (a_shape[1], b_shape[0], b_shape[1]);
+            let out_cols = out_shape[1];
+            let a_vals = &self.values;
+            let b_vals = &other.values;
+            let fill_row = |or: usize, row: &mut [f64]| {
+                let ia = or / mb;
+                let ib = or % mb;
+                let a_base = ia * na;
+                let b_base = ib * nb;
+                for ja in 0..na {
+                    let a_val = a_vals[a_base + ja];
+                    let dst = &mut row[ja * nb..ja * nb + nb];
+                    let b_row = &b_vals[b_base..b_base + nb];
+                    for jb in 0..nb {
+                        dst[jb] = a_val * b_row[jb];
+                    }
+                }
+            };
+            const KRON_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+            if out_count >= KRON_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+                out_values
+                    .par_chunks_mut(out_cols)
+                    .enumerate()
+                    .for_each(|(or, row)| fill_row(or, row));
+            } else {
+                for (or, row) in out_values.chunks_mut(out_cols).enumerate() {
+                    fill_row(or, row);
+                }
+            }
+            return Ok(Self {
+                shape: out_shape,
+                values: out_values,
+                dtype: promote(self.dtype, other.dtype),
+                integer_sidecar: None,
+            });
+        }
+
         let mut a_multi = vec![0usize; ndim];
         for a_idx in 0..a_count {
             let a_val = self.values[a_idx];
@@ -41990,6 +42036,61 @@ print(json.dumps(payload))
             println!(
                 "nan outer={outer:5} L={axis_len:6} sort={t_sort:8.3}ms quickselect={t_qs:8.3}ms speedup={:.2}x (bit-exact)",
                 t_sort / t_qs
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B report; run with --ignored --nocapture"]
+    fn kron_2d_fastpath_vs_odometer_speedup() {
+        // Same-process A/B for the 2-D kron fast path: an inline odometer reference
+        // (the exact N-D algorithm the fast path replaces) vs production. Proves
+        // bit-identical output (golden FNV over all cells) AND times both.
+        use std::time::Instant;
+        let odometer_kron = |a: &[f64], ash: [usize; 2], b: &[f64], bsh: [usize; 2]| -> Vec<f64> {
+            let out_shape = [ash[0] * bsh[0], ash[1] * bsh[1]];
+            let out_cols = out_shape[1];
+            let mut out = vec![0.0f64; out_shape[0] * out_shape[1]];
+            for ia in 0..ash[0] {
+                for ja in 0..ash[1] {
+                    let av = a[ia * ash[1] + ja];
+                    for ib in 0..bsh[0] {
+                        for jb in 0..bsh[1] {
+                            let oi = (ia * bsh[0] + ib) * out_cols + (ja * bsh[1] + jb);
+                            out[oi] = av * b[ib * bsh[1] + jb];
+                        }
+                    }
+                }
+            }
+            out
+        };
+        let fnv = |v: &[f64]| -> u64 {
+            v.iter().fold(0xcbf29ce484222325u64, |h, x| {
+                x.to_bits()
+                    .to_le_bytes()
+                    .iter()
+                    .fold(h, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3))
+            })
+        };
+        for &(ash, bsh) in &[([256usize, 256usize], [8usize, 8usize]), ([64, 64], [16, 16])] {
+            let a: Vec<f64> = (0..ash[0] * ash[1])
+                .map(|i| ((i as u64).wrapping_mul(2654435761) % 9973) as f64 / 7.0 - 300.0)
+                .collect();
+            let b: Vec<f64> = (0..bsh[0] * bsh[1])
+                .map(|i| ((i as u64).wrapping_mul(40503) % 7919) as f64 / 3.0 - 100.0)
+                .collect();
+            let t0 = Instant::now();
+            let reference = odometer_kron(&a, ash, &b, bsh);
+            let t_ref = t0.elapsed().as_secs_f64() * 1e3;
+            let aa = UFuncArray::new(vec![ash[0], ash[1]], a.clone(), DType::F64).expect("a");
+            let bb = UFuncArray::new(vec![bsh[0], bsh[1]], b.clone(), DType::F64).expect("b");
+            let t1 = Instant::now();
+            let got = aa.kron(&bb).expect("kron");
+            let t_fast = t1.elapsed().as_secs_f64() * 1e3;
+            assert_eq!(fnv(got.values()), fnv(&reference), "kron fast path golden mismatch");
+            println!(
+                "A=[{},{}] B=[{},{}] out={} odometer={t_ref:8.3}ms fast={t_fast:8.3}ms speedup={:.2}x golden=0x{:016x}",
+                ash[0], ash[1], bsh[0], bsh[1], reference.len(), t_ref / t_fast, fnv(&reference)
             );
         }
     }
