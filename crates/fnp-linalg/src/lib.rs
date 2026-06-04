@@ -2875,7 +2875,151 @@ pub fn svd_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
 
 // ── Eigenvalue infrastructure ─────────────────────────────────────────
 
+// Blocked tridiagonalization engages here (values-only path; the Q-accumulating
+// path keeps the unblocked loop). Panel width.
+const TRIDIAG_BLOCK_MIN: usize = 384;
+const TRIDIAG_PANEL_NB: usize = 64;
+
+// Blocked symmetric tridiagonalization, values only (dsytrd/dlatrd shape). For
+// each width-nb panel, reduce nb columns producing reflectors V and vectors
+// W (w = tau·A·v − (tau²·vᵀAv/2)·v), computed from symmetric matvecs against the
+// panel-start trailing block plus rank-2 corrections from the prior panel
+// reflectors; then update the trailing block ONCE with the symmetric rank-2k
+// update A22 -= V·Wᵀ + W·Vᵀ via the packed GEMM. This roughly halves the
+// trailing-matrix memory traffic of the unblocked per-column left+right sweep
+// (which is DRAM-bound). Same reflectors as the unblocked path → tolerance
+// equivalent (reassociated updates; never bit-exact). Returns (d, e).
+fn tridiag_reduce_blocked_values(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+    let mut work = a.to_vec();
+    let mut d = vec![0.0f64; n];
+    let mut e = vec![0.0f64; n - 1];
+
+    let mut jb = 0;
+    while jb < n - 2 {
+        let pend = (jb + TRIDIAG_PANEL_NB).min(n - 2);
+        let nb = pend - jb;
+        let h = n - jb;
+        let mut vv = vec![0.0f64; h * nb]; // vv[(i-jb)*nb + t] = v_{jb+t}[i]
+        let mut ww = vec![0.0f64; h * nb];
+
+        for t in 0..nb {
+            let j = jb + t;
+            let jr = j - jb;
+            // Corrected column j (apply prior panel reflectors locally).
+            let mut col = vec![0.0f64; n];
+            for i in j..n {
+                let ir = i - jb;
+                let mut s = work[i * n + j];
+                for q in 0..t {
+                    s -= vv[ir * nb + q] * ww[jr * nb + q] + ww[ir * nb + q] * vv[jr * nb + q];
+                }
+                col[i] = s;
+            }
+            d[j] = col[j];
+            let mut cns = 0.0;
+            for &c in col.iter().take(n).skip(j + 1) {
+                cns += c * c;
+            }
+            let col_norm = cns.sqrt();
+            if col_norm < f64::EPSILON * col[j].abs().max(1.0) {
+                e[j] = col[j + 1];
+                continue; // null reflector (vv/ww column t stay 0)
+            }
+            let sign = if col[j + 1] >= 0.0 { 1.0 } else { -1.0 };
+            for i in (j + 1)..n {
+                vv[(i - jb) * nb + t] = col[i];
+            }
+            vv[(j + 1 - jb) * nb + t] += sign * col_norm;
+            let mut vns = 0.0;
+            for i in (j + 1)..n {
+                let x = vv[(i - jb) * nb + t];
+                vns += x * x;
+            }
+            if vns == 0.0 {
+                e[j] = col[j + 1];
+                continue;
+            }
+            let tau = 2.0 / vns;
+            e[j] = -sign * col_norm;
+            // u = A_current·v (rows [j+1,n)): A_ps·v − V·(Wᵀv) − W·(Vᵀv).
+            let mut u = vec![0.0f64; n];
+            for i in (j + 1)..n {
+                let mut s = 0.0;
+                for l in (j + 1)..n {
+                    s += work[i * n + l] * vv[(l - jb) * nb + t];
+                }
+                u[i] = s;
+            }
+            for q in 0..t {
+                let (mut wtv, mut vtv) = (0.0, 0.0);
+                for l in (j + 1)..n {
+                    let lr = l - jb;
+                    let vl = vv[lr * nb + t];
+                    wtv += ww[lr * nb + q] * vl;
+                    vtv += vv[lr * nb + q] * vl;
+                }
+                for i in (j + 1)..n {
+                    let ir = i - jb;
+                    u[i] -= vv[ir * nb + q] * wtv + ww[ir * nb + q] * vtv;
+                }
+            }
+            for ui in u.iter_mut().take(n).skip(j + 1) {
+                *ui *= tau;
+            }
+            let mut vu = 0.0;
+            for i in (j + 1)..n {
+                vu += vv[(i - jb) * nb + t] * u[i];
+            }
+            let alpha = tau * vu / 2.0;
+            for i in (j + 1)..n {
+                ww[(i - jb) * nb + t] = u[i] - alpha * vv[(i - jb) * nb + t];
+            }
+        }
+
+        // Symmetric rank-2k trailing update A22 -= V·Wᵀ + W·Vᵀ via packed GEMM.
+        let trail = n - pend;
+        if trail > 0 {
+            let off = pend - jb;
+            let mut vtr = vec![0.0f64; trail * nb];
+            let mut wtr = vec![0.0f64; trail * nb];
+            for i in 0..trail {
+                for t in 0..nb {
+                    vtr[i * nb + t] = vv[(off + i) * nb + t];
+                    wtr[i * nb + t] = ww[(off + i) * nb + t];
+                }
+            }
+            let mut vt = vec![0.0f64; nb * trail];
+            let mut wt = vec![0.0f64; nb * trail];
+            for i in 0..trail {
+                for t in 0..nb {
+                    vt[t * trail + i] = vtr[i * nb + t];
+                    wt[t * trail + i] = wtr[i * nb + t];
+                }
+            }
+            let vwt = packed_gemm(&vtr, &wt, trail, nb, trail); // V·Wᵀ
+            let wvt = packed_gemm(&wtr, &vt, trail, nb, trail); // W·Vᵀ
+            for i in 0..trail {
+                let dst = (pend + i) * n + pend;
+                for jj in 0..trail {
+                    work[dst + jj] -= vwt[i * trail + jj] + wvt[i * trail + jj];
+                }
+            }
+        }
+        jb = pend;
+    }
+
+    // Corner (last 2×2 block, fully updated by the final rank-2k update).
+    d[n - 2] = work[(n - 2) * n + (n - 2)];
+    d[n - 1] = work[(n - 1) * n + (n - 1)];
+    e[n - 2] = work[(n - 2) * n + (n - 1)];
+    (d, e)
+}
+
 fn tridiag_reduce_impl(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+    if !accumulate_q && n >= TRIDIAG_BLOCK_MIN {
+        let (d, e) = tridiag_reduce_blocked_values(a, n);
+        return (d, e, Vec::new());
+    }
     let mut work = a.to_vec();
     let mut q = if accumulate_q {
         let mut q = vec![0.0; n * n];
@@ -9311,6 +9455,133 @@ mod tests {
                 ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
             })
             .collect()
+    }
+
+    #[test]
+    fn blocked_tridiag_matches_unblocked() {
+        // n below TRIDIAG_BLOCK_MIN -> tridiag_reduce_impl takes the unblocked
+        // path; compare its (d,e) to the directly-called blocked kernel.
+        for &n in &[128usize, 160, 200] {
+            let a = chol_spd(n, 0x31 + n as u64); // symmetric
+            let (db, eb) = super::tridiag_reduce_blocked_values(&a, n);
+            let (du, eu, _) = super::tridiag_reduce_impl(&a, n, false);
+            let mut max_d = 0.0f64;
+            let mut max_e = 0.0f64;
+            for i in 0..n {
+                max_d = max_d.max((db[i] - du[i]).abs() / (1.0 + du[i].abs()));
+            }
+            for i in 0..n - 1 {
+                max_e = max_e.max((eb[i].abs() - eu[i].abs()).abs() / (1.0 + eu[i].abs()));
+            }
+            assert!(max_d < 1e-8, "blocked tridiag d err {max_d:e} (n={n})");
+            assert!(max_e < 1e-8, "blocked tridiag e err {max_e:e} (n={n})");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn blocked_tridiag_speedup_report() {
+        use std::time::Instant;
+        for &n in &[512usize, 1024, 2048] {
+            let a = chol_spd(n, 0x1234);
+            let it = if n <= 1024 { 3 } else { 2 };
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs[xs.len() / 2]
+            };
+            let mut tu = Vec::new();
+            let mut tb = Vec::new();
+            for _ in 0..it {
+                let t = Instant::now();
+                let r = super::tridiag_reduce_impl(&a, n, false); // unblocked? no — gated
+                std::hint::black_box(&r);
+                tu.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                let r = super::tridiag_reduce_blocked_values(&a, n);
+                std::hint::black_box(&r);
+                tb.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            // tridiag_reduce_impl routes to blocked for n>=384, so the "unblocked"
+            // timing above is actually blocked; recompute a true unblocked time by
+            // calling the inline reference.
+            let mut tu2 = Vec::new();
+            for _ in 0..it {
+                let t = Instant::now();
+                let r = tridiag_unblocked_ref(&a, n);
+                std::hint::black_box(&r);
+                tu2.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let (u, b) = (med(tu2), med(tb));
+            let _ = med(tu);
+            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+        }
+    }
+
+    // Inline unblocked values-only tridiagonalization (matches tridiag_reduce_impl
+    // with accumulate_q=false) for the A/B.
+    fn tridiag_unblocked_ref(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+        let mut work = a.to_vec();
+        let mut v = vec![0.0f64; n];
+        let mut d = vec![0.0f64; n];
+        let mut f_vec = vec![0.0f64; n];
+        for j in 0..n.saturating_sub(2) {
+            let cn = {
+                let mut s = 0.0;
+                for i in (j + 1)..n {
+                    s += work[i * n + j] * work[i * n + j];
+                }
+                s.sqrt()
+            };
+            if cn < f64::EPSILON * work[j * n + j].abs().max(1.0) {
+                continue;
+            }
+            let sign = if work[(j + 1) * n + j] >= 0.0 { 1.0 } else { -1.0 };
+            for vi in &mut v[..=j] {
+                *vi = 0.0;
+            }
+            for (idx, vi) in v[(j + 1)..n].iter_mut().enumerate() {
+                *vi = work[(j + 1 + idx) * n + j];
+            }
+            v[j + 1] += sign * cn;
+            let vns: f64 = v[(j + 1)..].iter().map(|x| x * x).sum();
+            if vns == 0.0 {
+                continue;
+            }
+            let scale = 2.0 / vns;
+            for dc in d.iter_mut() {
+                *dc = 0.0;
+            }
+            for i in (j + 1)..n {
+                let vi = v[i];
+                let row = &work[i * n..i * n + n];
+                for (dc, &w) in d.iter_mut().zip(row.iter()) {
+                    *dc += vi * w;
+                }
+            }
+            for (fc, &dc) in f_vec.iter_mut().zip(d.iter()) {
+                *fc = scale * dc;
+            }
+            for i in (j + 1)..n {
+                let vi = v[i];
+                let row = &mut work[i * n..i * n + n];
+                for (w, &fc) in row.iter_mut().zip(f_vec.iter()) {
+                    *w -= fc * vi;
+                }
+            }
+            for row in 0..n {
+                let mut dot = 0.0;
+                for i in (j + 1)..n {
+                    dot += v[i] * work[row * n + i];
+                }
+                let f = scale * dot;
+                for i in (j + 1)..n {
+                    work[row * n + i] -= f * v[i];
+                }
+            }
+        }
+        let dd: Vec<f64> = (0..n).map(|i| work[i * n + i]).collect();
+        let ee: Vec<f64> = (0..n - 1).map(|i| work[i * n + i + 1]).collect();
+        (dd, ee)
     }
 
     #[test]
