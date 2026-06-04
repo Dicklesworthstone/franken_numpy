@@ -4833,7 +4833,12 @@ fn packed_gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
         && rayon::current_num_threads() >= 2;
     if parallel {
         let threads = rayon::current_num_threads();
-        let band_rows = m.div_ceil(threads * 4).max(1);
+        // MR-aligned band height: a few bands per thread for work-stealing, each a
+        // whole number of register tiles so every band stays on the fast
+        // register-tiled path (a non-aligned band leaves a remainder row that
+        // falls to the slow scalar tail — measured ~4x slower overall on
+        // matrix_power and the blocked-factorization GEMMs).
+        let band_rows = (m.div_ceil(threads * 4).div_ceil(PACKED_MR).max(1)) * PACKED_MR;
         c.par_chunks_mut(band_rows * n)
             .enumerate()
             .for_each(|(bi, c_band)| {
@@ -9980,6 +9985,66 @@ mod tests {
                 tn.push(t.elapsed().as_secs_f64() * 1e3);
             }
             println!("n={n:5} stride-n={:9.2}ms contiguous={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
+        }
+    }
+
+    // Misaligned-band GEMM driver (pre-fix band_rows, same serial kernel) for A/B.
+    fn packed_gemm_misaligned(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
+        use rayon::prelude::*;
+        let mut c = vec![0.0; m * n];
+        let threads = rayon::current_num_threads();
+        if m >= 128 && k >= 128 && n >= 128 && threads >= 2 {
+            let band_rows = m.div_ceil(threads * 4).max(1);
+            c.par_chunks_mut(band_rows * n).enumerate().for_each(|(bi, c_band)| {
+                let row_start = bi * band_rows;
+                let rows = c_band.len() / n;
+                let a_band = &a[row_start * k..row_start * k + rows * k];
+                super::packed_gemm_serial(a_band, b, rows, k, n, c_band);
+            });
+        } else {
+            super::packed_gemm_serial(a, b, m, k, n, &mut c);
+        }
+        c
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn packed_gemm_band_alignment_speedup() {
+        use std::time::Instant;
+        fn rnd(rows: usize, cols: usize, seed: u64) -> Vec<f64> {
+            let mut s = seed | 1;
+            (0..rows * cols)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                })
+                .collect()
+        }
+        for &n in &[512usize, 1024] {
+            let a = rnd(n, n, 1);
+            let b = rnd(n, n, 2);
+            // bit-exactness of aligned vs misaligned (same serial kernel).
+            let ca = super::packed_gemm(&a, &b, n, n, n);
+            let cm = packed_gemm_misaligned(&a, &b, n, n, n);
+            let maxd = ca.iter().zip(&cm).map(|(x, y)| (x - y).abs()).fold(0.0f64, f64::max);
+            assert!(maxd == 0.0, "GEMM not bit-exact across band split: {maxd:e}");
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs[xs.len() / 2]
+            };
+            let it = 5;
+            let (mut to, mut tn) = (Vec::new(), Vec::new());
+            for _ in 0..it {
+                let t = Instant::now();
+                let r = packed_gemm_misaligned(&a, &b, n, n, n);
+                std::hint::black_box(&r);
+                to.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                let r = super::packed_gemm(&a, &b, n, n, n);
+                std::hint::black_box(&r);
+                tn.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            println!("n={n:5} misaligned={:9.2}ms aligned={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
         }
     }
 
