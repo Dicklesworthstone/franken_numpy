@@ -138,7 +138,9 @@ fn main() {
 
     let gflop = 2.0 / 3.0 * (dim as f64).powi(3) / 1e9;
     let speedup = reference_median / current_median;
-    println!("lu_{dim}x{dim} current_fnv1a=0x{checksum:016x} reference_fnv1a=0x{ref_checksum:016x}");
+    println!(
+        "lu_{dim}x{dim} current_fnv1a=0x{checksum:016x} reference_fnv1a=0x{ref_checksum:016x}"
+    );
     println!(
         "lu_{dim}x{dim} serial_median_ms={reference_median:.4} parallel_median_ms={current_median:.4} speedup={speedup:.2}x parallel_gflops={:.2} serial_gflops={:.2}",
         gflop / (current_median * 1e-3),
