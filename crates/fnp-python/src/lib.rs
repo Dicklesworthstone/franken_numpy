@@ -4072,6 +4072,27 @@ where
     flat.call_method0("tolist")?.extract::<Vec<T>>()
 }
 
+// Cast `flat` to `dtype_name` and read it into a Vec<T> via the buffer protocol.
+// Uses astype(copy=False): when the array already has the requested dtype (and a
+// compatible layout — the common case after reshape(-1) on a contiguous input),
+// NumPy returns the SAME array instead of a full element copy, so the only data
+// movement is the single buffer read in numpy_contiguous_to_vec. Bit-identical to
+// astype(copy=True) — copy=False only elides the redundant copy when the values
+// are already exactly the target dtype.
+fn numpy_cast_contiguous_to_vec<'py, T>(
+    py: Python<'py>,
+    flat: &Bound<'py, PyAny>,
+    dtype_name: &str,
+) -> PyResult<Vec<T>>
+where
+    T: pyo3::buffer::Element + Copy + for<'a, 'b> FromPyObject<'a, 'b>,
+{
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("copy", false)?;
+    let cast = flat.call_method("astype", (dtype_name,), Some(&kwargs))?;
+    numpy_contiguous_to_vec::<T>(py, &cast)
+}
+
 fn extract_numeric_array(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -4128,38 +4149,14 @@ fn extract_precise_numeric_array(
 
     let storage = match parsed_dtype {
         DType::Bool => ArrayStorage::Bool(flat.call_method0("tolist")?.extract::<Vec<bool>>()?),
-        DType::I8 => ArrayStorage::I8(numpy_contiguous_to_vec::<i8>(
-            py,
-            &flat.call_method1("astype", ("int8",))?,
-        )?),
-        DType::I16 => ArrayStorage::I16(numpy_contiguous_to_vec::<i16>(
-            py,
-            &flat.call_method1("astype", ("int16",))?,
-        )?),
-        DType::I32 => ArrayStorage::I32(numpy_contiguous_to_vec::<i32>(
-            py,
-            &flat.call_method1("astype", ("int32",))?,
-        )?),
-        DType::I64 => ArrayStorage::I64(numpy_contiguous_to_vec::<i64>(
-            py,
-            &flat.call_method1("astype", ("int64",))?,
-        )?),
-        DType::U8 => ArrayStorage::U8(numpy_contiguous_to_vec::<u8>(
-            py,
-            &flat.call_method1("astype", ("uint8",))?,
-        )?),
-        DType::U16 => ArrayStorage::U16(numpy_contiguous_to_vec::<u16>(
-            py,
-            &flat.call_method1("astype", ("uint16",))?,
-        )?),
-        DType::U32 => ArrayStorage::U32(numpy_contiguous_to_vec::<u32>(
-            py,
-            &flat.call_method1("astype", ("uint32",))?,
-        )?),
-        DType::U64 => ArrayStorage::U64(numpy_contiguous_to_vec::<u64>(
-            py,
-            &flat.call_method1("astype", ("uint64",))?,
-        )?),
+        DType::I8 => ArrayStorage::I8(numpy_cast_contiguous_to_vec::<i8>(py, &flat, "int8")?),
+        DType::I16 => ArrayStorage::I16(numpy_cast_contiguous_to_vec::<i16>(py, &flat, "int16")?),
+        DType::I32 => ArrayStorage::I32(numpy_cast_contiguous_to_vec::<i32>(py, &flat, "int32")?),
+        DType::I64 => ArrayStorage::I64(numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?),
+        DType::U8 => ArrayStorage::U8(numpy_cast_contiguous_to_vec::<u8>(py, &flat, "uint8")?),
+        DType::U16 => ArrayStorage::U16(numpy_cast_contiguous_to_vec::<u16>(py, &flat, "uint16")?),
+        DType::U32 => ArrayStorage::U32(numpy_cast_contiguous_to_vec::<u32>(py, &flat, "uint32")?),
+        DType::U64 => ArrayStorage::U64(numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?),
         // f16 has no native Rust buffer Element; keep the PyList path (read as f32).
         DType::F16 => ArrayStorage::F16(
             flat.call_method1("astype", ("float16",))?
@@ -4169,14 +4166,8 @@ fn extract_precise_numeric_array(
                 .map(f16::from_f32)
                 .collect(),
         ),
-        DType::F32 => ArrayStorage::F32(numpy_contiguous_to_vec::<f32>(
-            py,
-            &flat.call_method1("astype", ("float32",))?,
-        )?),
-        DType::F64 => ArrayStorage::F64(numpy_contiguous_to_vec::<f64>(
-            py,
-            &flat.call_method1("astype", ("float64",))?,
-        )?),
+        DType::F32 => ArrayStorage::F32(numpy_cast_contiguous_to_vec::<f32>(py, &flat, "float32")?),
+        DType::F64 => ArrayStorage::F64(numpy_cast_contiguous_to_vec::<f64>(py, &flat, "float64")?),
         _ => {
             return Err(PyTypeError::new_err(format!(
                 "{context}: expected a bool/int/uint/float array, got dtype {dtype_name}",
@@ -6784,6 +6775,19 @@ fn build_numpy_array_from_storage(
 }
 
 fn build_numpy_array_from_ufunc(py: Python<'_>, array: &UFuncArray) -> PyResult<Py<PyAny>> {
+    // Fast path for the overwhelmingly common float64 result with no integer
+    // sidecar: the generic to_storage() path clones the value Vec, runs a
+    // bridge-validity scan, and a cast_to(F64) element pass before the buffer
+    // copy — three extra O(n) passes that are pure waste when the storage already
+    // IS the f64 values. Copy array.values() straight into the NumPy buffer. f64
+    // holds NaN/inf, so no validity gate is needed. Bit-identical to the generic
+    // path (same bytes, same C-contiguous reshape).
+    if array.dtype() == DType::F64 && !array.has_integer_sidecar() {
+        let numpy = py.import("numpy")?;
+        let flat = numpy_array_from_slice(py, &numpy, array.values(), "float64")?;
+        let output_shape = PyTuple::new(py, array.shape().iter().copied())?;
+        return Ok(flat.call_method1("reshape", (&output_shape,))?.unbind());
+    }
     let storage = array.to_storage().map_err(map_ufunc_error)?;
     build_numpy_array_from_storage(py, array.shape(), storage)
 }
