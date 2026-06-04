@@ -4423,6 +4423,17 @@ fn extract_condition_mask(
     value: &Bound<'_, PyAny>,
     context: &str,
 ) -> PyResult<Vec<bool>> {
+    // Boolean masks are the overwhelmingly common condition for compress/extract/
+    // where/place. Read them straight from the uint8 buffer into Vec<bool> instead
+    // of routing through extract_numeric_array, which materialises a full-width f64
+    // values array (16 MB for a 2M mask) only to map it back to bools. Non-bool
+    // conditions (int/float truthiness) keep the general `!= 0` path.
+    let numpy = py.import("numpy")?;
+    let array = numpy.call_method1("asarray", (value,))?;
+    if array.getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b" {
+        let flat = array.call_method1("reshape", (-1,))?;
+        return numpy_bool_to_vec(py, &flat);
+    }
     let mask = extract_numeric_array(py, value, context)?;
     Ok(mask.values().iter().map(|&value| value != 0.0).collect())
 }
