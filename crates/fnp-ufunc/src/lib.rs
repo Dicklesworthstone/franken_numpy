@@ -22881,8 +22881,10 @@ impl UFuncArray {
                         .map(|k| values_ref[base_flat + k * strides_ref[ax]])
                         .filter(|v| !v.is_nan())
                         .collect();
-                    lane.sort_by(|a, b| a.total_cmp(b));
-                    interpolate_percentile(&lane, 0.5)
+                    // O(L) quickselect instead of an O(L log L) sort of the
+                    // NaN-filtered lane; the 0.5 linear quantile reads only
+                    // sorted[lo]/sorted[lo+1], so this is bit-identical.
+                    select_percentile_method(&mut lane, 0.5, QuantileInterp::Linear)
                 };
                 const NANMEDIAN_PARALLEL_MIN_ELEMS: usize = 1 << 14;
                 let out_values: Vec<f64> = if outer_count >= 2
@@ -23111,9 +23113,8 @@ impl UFuncArray {
                 if values.is_empty() {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
-                values.sort_by(|a, b| a.total_cmp(b));
                 Ok(Self::scalar(
-                    interpolate_percentile(&values, fraction),
+                    select_percentile_method(&mut values, fraction, QuantileInterp::Linear),
                     DType::F64,
                 ))
             }
@@ -23155,8 +23156,10 @@ impl UFuncArray {
                     if lane.is_empty() {
                         return f64::NAN;
                     }
-                    lane.sort_by(|a, b| a.total_cmp(b));
-                    interpolate_percentile(&lane, fraction)
+                    // O(L) quickselect instead of an O(L log L) sort of the
+                    // NaN-filtered lane; bit-identical (reads only sorted[lo]/
+                    // sorted[lo+1] for the linear interpolation).
+                    select_percentile_method(&mut lane, fraction, QuantileInterp::Linear)
                 };
                 const NANPERCENTILE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
                 let values: Vec<f64> = if out_count >= 2
@@ -41918,6 +41921,74 @@ print(json.dumps(payload))
             assert_eq!(maxd, 0, "quickselect diverged from sort (outer={outer}, L={axis_len})");
             println!(
                 "outer={outer:5} L={axis_len:6} sort={t_sort:8.3}ms quickselect={t_qs:8.3}ms speedup={:.2}x (bit-exact)",
+                t_sort / t_qs
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B report; run with --ignored --nocapture"]
+    fn nanpercentile_axis_quickselect_vs_sort_speedup() {
+        // Same-process A/B for the NaN-filtered per-lane lever: sort vs quickselect
+        // (production). ~1/8 of entries are NaN so lane lengths vary. Proves
+        // bit-identical output (median p50 + p25 + p90) AND times both.
+        use std::time::Instant;
+        for &(outer, axis_len) in &[(4096usize, 256usize), (1024, 2048), (256, 16384)] {
+            let n = outer * axis_len;
+            let data: Vec<f64> = (0..n)
+                .map(|i| {
+                    let s = (i as u64)
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    if (s >> 8) % 8 == 0 {
+                        f64::NAN
+                    } else {
+                        ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                    }
+                })
+                .collect();
+            let sort_lane = |lane: &[f64], frac: f64| -> f64 {
+                let mut s: Vec<f64> = lane.iter().copied().filter(|v| !v.is_nan()).collect();
+                if s.is_empty() {
+                    return f64::NAN;
+                }
+                s.sort_by(|a, b| a.total_cmp(b));
+                interpolate_percentile(&s, frac)
+            };
+            let mut ref_out = vec![0.0f64; outer * 3];
+            let t0 = Instant::now();
+            for o in 0..outer {
+                let lane = &data[o * axis_len..(o + 1) * axis_len];
+                ref_out[o * 3] = sort_lane(lane, 0.5);
+                ref_out[o * 3 + 1] = sort_lane(lane, 0.25);
+                ref_out[o * 3 + 2] = sort_lane(lane, 0.90);
+            }
+            let t_sort = t0.elapsed().as_secs_f64() * 1e3;
+            let qs_lane = |lane: &[f64], frac: f64| -> f64 {
+                let mut s: Vec<f64> = lane.iter().copied().filter(|v| !v.is_nan()).collect();
+                if s.is_empty() {
+                    return f64::NAN;
+                }
+                super::select_percentile_method(&mut s, frac, QuantileInterp::Linear)
+            };
+            let mut qs_out = vec![0.0f64; outer * 3];
+            let t1 = Instant::now();
+            for o in 0..outer {
+                let lane = &data[o * axis_len..(o + 1) * axis_len];
+                qs_out[o * 3] = qs_lane(lane, 0.5);
+                qs_out[o * 3 + 1] = qs_lane(lane, 0.25);
+                qs_out[o * 3 + 2] = qs_lane(lane, 0.90);
+            }
+            let t_qs = t1.elapsed().as_secs_f64() * 1e3;
+            let maxd = ref_out
+                .iter()
+                .zip(&qs_out)
+                .map(|(a, b)| a.to_bits() ^ b.to_bits())
+                .max()
+                .unwrap();
+            assert_eq!(maxd, 0, "nan quickselect diverged from sort (outer={outer}, L={axis_len})");
+            println!(
+                "nan outer={outer:5} L={axis_len:6} sort={t_sort:8.3}ms quickselect={t_qs:8.3}ms speedup={:.2}x (bit-exact)",
                 t_sort / t_qs
             );
         }
