@@ -5755,10 +5755,7 @@ impl UFuncArray {
         };
         const VANDER_PARALLEL_MIN_ELEMS: usize = 1 << 14;
         if n >= 1 {
-            if m >= 2
-                && m * n >= VANDER_PARALLEL_MIN_ELEMS
-                && rayon::current_num_threads() >= 2
-            {
+            if m >= 2 && m * n >= VANDER_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
                 values.par_chunks_mut(n).enumerate().for_each(fill_row);
             } else {
                 values.chunks_mut(n).enumerate().for_each(fill_row);
@@ -7685,7 +7682,9 @@ impl UFuncArray {
         const UNARY_PARALLEL_MIN_LEN: usize = 1 << 15;
         const UNARY_PARALLEL_CHUNK: usize = 8192;
         let n = self.values.len();
-        if op.is_parallel_worth() && n >= UNARY_PARALLEL_MIN_LEN && rayon::current_num_threads() >= 2
+        if op.is_parallel_worth()
+            && n >= UNARY_PARALLEL_MIN_LEN
+            && rayon::current_num_threads() >= 2
         {
             let mut values = vec![0.0f64; n];
             let flags = values
@@ -10672,20 +10671,19 @@ impl UFuncArray {
                             // across lanes is bit-for-bit identical (same per-lane
                             // sort over the same increasing global index range).
                             const SORT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                            let sort_lane =
-                                |(outer_idx, (out_chunk, src_chunk)): (
-                                    usize,
-                                    (&mut [f64], &mut [usize]),
-                                )| {
-                                    let base = outer_idx * axis_len;
-                                    let mut lane_indices: Vec<usize> =
-                                        (base..base + axis_len).collect();
-                                    sort_value_indices_by_kind(&mut lane_indices, &values, kind);
-                                    for (k, &src) in lane_indices.iter().enumerate() {
-                                        out_chunk[k] = values[src] as f64;
-                                        src_chunk[k] = src;
-                                    }
-                                };
+                            let sort_lane = |(outer_idx, (out_chunk, src_chunk)): (
+                                usize,
+                                (&mut [f64], &mut [usize]),
+                            )| {
+                                let base = outer_idx * axis_len;
+                                let mut lane_indices: Vec<usize> =
+                                    (base..base + axis_len).collect();
+                                sort_value_indices_by_kind(&mut lane_indices, &values, kind);
+                                for (k, &src) in lane_indices.iter().enumerate() {
+                                    out_chunk[k] = values[src] as f64;
+                                    src_chunk[k] = src;
+                                }
+                            };
                             if outer >= 2
                                 && self.values.len() >= SORT_PARALLEL_MIN_ELEMS
                                 && rayon::current_num_threads() >= 2
@@ -10706,8 +10704,7 @@ impl UFuncArray {
                                 shape: self.shape.clone(),
                                 values: out_values,
                                 dtype: self.dtype,
-                                integer_sidecar: self
-                                    .reindexed_integer_sidecar(&source_indices),
+                                integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
                             });
                         }
                         let mut lane_indices = vec![0usize; axis_len];
@@ -10766,20 +10763,19 @@ impl UFuncArray {
                             // Last-axis integer sort: independent contiguous lanes,
                             // parallelized identically to the i64 path (bit-exact).
                             const SORT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                            let sort_lane =
-                                |(outer_idx, (out_chunk, src_chunk)): (
-                                    usize,
-                                    (&mut [f64], &mut [usize]),
-                                )| {
-                                    let base = outer_idx * axis_len;
-                                    let mut lane_indices: Vec<usize> =
-                                        (base..base + axis_len).collect();
-                                    sort_value_indices_by_kind(&mut lane_indices, &values, kind);
-                                    for (k, &src) in lane_indices.iter().enumerate() {
-                                        out_chunk[k] = values[src] as f64;
-                                        src_chunk[k] = src;
-                                    }
-                                };
+                            let sort_lane = |(outer_idx, (out_chunk, src_chunk)): (
+                                usize,
+                                (&mut [f64], &mut [usize]),
+                            )| {
+                                let base = outer_idx * axis_len;
+                                let mut lane_indices: Vec<usize> =
+                                    (base..base + axis_len).collect();
+                                sort_value_indices_by_kind(&mut lane_indices, &values, kind);
+                                for (k, &src) in lane_indices.iter().enumerate() {
+                                    out_chunk[k] = values[src] as f64;
+                                    src_chunk[k] = src;
+                                }
+                            };
                             if outer >= 2
                                 && self.values.len() >= SORT_PARALLEL_MIN_ELEMS
                                 && rayon::current_num_threads() >= 2
@@ -10800,8 +10796,7 @@ impl UFuncArray {
                                 shape: self.shape.clone(),
                                 values: out_values,
                                 dtype: self.dtype,
-                                integer_sidecar: self
-                                    .reindexed_integer_sidecar(&source_indices),
+                                integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
                             });
                         }
                         let mut lane_indices = vec![0usize; axis_len];
@@ -10988,7 +10983,10 @@ impl UFuncArray {
                                     .enumerate()
                                     .for_each(sort_lane);
                             } else {
-                                out_values.chunks_mut(axis_len).enumerate().for_each(sort_lane);
+                                out_values
+                                    .chunks_mut(axis_len)
+                                    .enumerate()
+                                    .for_each(sort_lane);
                             }
                             return Ok(Self {
                                 shape: self.shape.clone(),
@@ -11071,7 +11069,10 @@ impl UFuncArray {
                                     .enumerate()
                                     .for_each(sort_lane);
                             } else {
-                                out_values.chunks_mut(axis_len).enumerate().for_each(sort_lane);
+                                out_values
+                                    .chunks_mut(axis_len)
+                                    .enumerate()
+                                    .for_each(sort_lane);
                             }
                             return Ok(Self {
                                 shape: self.shape.clone(),
@@ -11412,22 +11413,21 @@ impl UFuncArray {
                             // (same per-lane select_nth over the lane's global index
                             // range as serial) -> bit-exact across the rayon pool.
                             const PARTITION_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                            let select_lane =
-                                |(outer_idx, (out_chunk, src_chunk)): (
-                                    usize,
-                                    (&mut [f64], &mut [usize]),
-                                )| {
-                                    let base = outer_idx * axis_len;
-                                    let mut lane_indices: Vec<usize> =
-                                        (base..base + axis_len).collect();
-                                    lane_indices.select_nth_unstable_by(kth, |a, b| {
-                                        values[*a].cmp(&values[*b])
-                                    });
-                                    for (k, &src) in lane_indices.iter().enumerate() {
-                                        out_chunk[k] = values[src] as f64;
-                                        src_chunk[k] = src;
-                                    }
-                                };
+                            let select_lane = |(outer_idx, (out_chunk, src_chunk)): (
+                                usize,
+                                (&mut [f64], &mut [usize]),
+                            )| {
+                                let base = outer_idx * axis_len;
+                                let mut lane_indices: Vec<usize> =
+                                    (base..base + axis_len).collect();
+                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                    values[*a].cmp(&values[*b])
+                                });
+                                for (k, &src) in lane_indices.iter().enumerate() {
+                                    out_chunk[k] = values[src] as f64;
+                                    src_chunk[k] = src;
+                                }
+                            };
                             if outer >= 2
                                 && self.values.len() >= PARTITION_PARALLEL_MIN_ELEMS
                                 && rayon::current_num_threads() >= 2
@@ -11448,8 +11448,7 @@ impl UFuncArray {
                                 shape: self.shape.clone(),
                                 values: out_values,
                                 dtype: self.dtype,
-                                integer_sidecar: self
-                                    .reindexed_integer_sidecar(&source_indices),
+                                integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
                             });
                         }
                         let mut lane_indices = vec![0usize; axis_len];
@@ -11517,22 +11516,21 @@ impl UFuncArray {
                             // Last-axis integer partition: independent contiguous lanes,
                             // parallelized identically to the i64 path (bit-exact).
                             const PARTITION_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                            let select_lane =
-                                |(outer_idx, (out_chunk, src_chunk)): (
-                                    usize,
-                                    (&mut [f64], &mut [usize]),
-                                )| {
-                                    let base = outer_idx * axis_len;
-                                    let mut lane_indices: Vec<usize> =
-                                        (base..base + axis_len).collect();
-                                    lane_indices.select_nth_unstable_by(kth, |a, b| {
-                                        values[*a].cmp(&values[*b])
-                                    });
-                                    for (k, &src) in lane_indices.iter().enumerate() {
-                                        out_chunk[k] = values[src] as f64;
-                                        src_chunk[k] = src;
-                                    }
-                                };
+                            let select_lane = |(outer_idx, (out_chunk, src_chunk)): (
+                                usize,
+                                (&mut [f64], &mut [usize]),
+                            )| {
+                                let base = outer_idx * axis_len;
+                                let mut lane_indices: Vec<usize> =
+                                    (base..base + axis_len).collect();
+                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                    values[*a].cmp(&values[*b])
+                                });
+                                for (k, &src) in lane_indices.iter().enumerate() {
+                                    out_chunk[k] = values[src] as f64;
+                                    src_chunk[k] = src;
+                                }
+                            };
                             if outer >= 2
                                 && self.values.len() >= PARTITION_PARALLEL_MIN_ELEMS
                                 && rayon::current_num_threads() >= 2
@@ -11553,8 +11551,7 @@ impl UFuncArray {
                                 shape: self.shape.clone(),
                                 values: out_values,
                                 dtype: self.dtype,
-                                integer_sidecar: self
-                                    .reindexed_integer_sidecar(&source_indices),
+                                integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
                             });
                         }
                         let mut lane_indices = vec![0usize; axis_len];
@@ -11702,17 +11699,16 @@ impl UFuncArray {
                             // per-lane (relative) indices are bit-for-bit identical to
                             // the serial loop for any thread count.
                             const ARGPARTITION_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                            let select_lane =
-                                |(outer_idx, out_chunk): (usize, &mut [f64])| {
-                                    let base = outer_idx * axis_len;
-                                    let mut lane_indices: Vec<usize> = (0..axis_len).collect();
-                                    lane_indices.select_nth_unstable_by(kth, |a, b| {
-                                        values[base + a].cmp(&values[base + b])
-                                    });
-                                    for (k, &idx) in lane_indices.iter().enumerate() {
-                                        out_chunk[k] = idx as f64;
-                                    }
-                                };
+                            let select_lane = |(outer_idx, out_chunk): (usize, &mut [f64])| {
+                                let base = outer_idx * axis_len;
+                                let mut lane_indices: Vec<usize> = (0..axis_len).collect();
+                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                    values[base + a].cmp(&values[base + b])
+                                });
+                                for (k, &idx) in lane_indices.iter().enumerate() {
+                                    out_chunk[k] = idx as f64;
+                                }
+                            };
                             if outer >= 2
                                 && self.values.len() >= ARGPARTITION_PARALLEL_MIN_ELEMS
                                 && rayon::current_num_threads() >= 2
@@ -11793,17 +11789,16 @@ impl UFuncArray {
                             // lanes, parallelized identically to the i64 path (bit-exact
                             // per-lane relative indices).
                             const ARGPARTITION_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                            let select_lane =
-                                |(outer_idx, out_chunk): (usize, &mut [f64])| {
-                                    let base = outer_idx * axis_len;
-                                    let mut lane_indices: Vec<usize> = (0..axis_len).collect();
-                                    lane_indices.select_nth_unstable_by(kth, |a, b| {
-                                        values[base + a].cmp(&values[base + b])
-                                    });
-                                    for (k, &idx) in lane_indices.iter().enumerate() {
-                                        out_chunk[k] = idx as f64;
-                                    }
-                                };
+                            let select_lane = |(outer_idx, out_chunk): (usize, &mut [f64])| {
+                                let base = outer_idx * axis_len;
+                                let mut lane_indices: Vec<usize> = (0..axis_len).collect();
+                                lane_indices.select_nth_unstable_by(kth, |a, b| {
+                                    values[base + a].cmp(&values[base + b])
+                                });
+                                for (k, &idx) in lane_indices.iter().enumerate() {
+                                    out_chunk[k] = idx as f64;
+                                }
+                            };
                             if outer >= 2
                                 && self.values.len() >= ARGPARTITION_PARALLEL_MIN_ELEMS
                                 && rayon::current_num_threads() >= 2
@@ -15318,10 +15313,7 @@ impl UFuncArray {
                 if self.values.len() >= ASTYPE_I32_PARALLEL_MIN_LEN
                     && rayon::current_num_threads() >= 2
                 {
-                    self.values
-                        .par_iter()
-                        .map(|&v| (v as i64) as f64)
-                        .collect()
+                    self.values.par_iter().map(|&v| (v as i64) as f64).collect()
                 } else {
                     self.values.iter().map(|&v| (v as i64) as f64).collect()
                 }
@@ -18326,10 +18318,7 @@ impl UFuncArray {
             && out_h * out_w >= CONV2D_PARALLEL_MIN_ELEMS
             && rayon::current_num_threads() >= 2
         {
-            values
-                .par_chunks_mut(out_w)
-                .enumerate()
-                .for_each(fill_row);
+            values.par_chunks_mut(out_w).enumerate().for_each(fill_row);
         } else {
             values.chunks_mut(out_w).enumerate().for_each(fill_row);
         }
@@ -20308,40 +20297,51 @@ impl UFuncArray {
 
         let input_chars: Vec<Vec<char>> = input_subs.iter().map(|s| s.chars().collect()).collect();
 
-        // Fast path: a 2-operand contraction laid out as a (possibly batched) plain
-        // GEMM — op0 = [batch..., free0..., k...], op1 = [batch..., k..., free1...],
-        // output = [batch..., free0..., free1...] with a shared leading batch prefix,
-        // the contracted axes contiguous and in matching order, no repeated labels and
-        // no broadcasting — routes each batch slice through the cache-blocked,
-        // register-tiled `matmul_accumulate`. Each output cell accumulates the
-        // contracted index in the same ascending row-major order as the general
-        // scatter below, so the result is bit-for-bit identical (batch=1 is the plain
-        // GEMM case). Transposed / shared-free / broadcast / traced einsums fail the
-        // shape test and fall through to the general path.
-        if operands.len() == 2 {
-            if let Some((batch, m, k, n)) =
-                einsum_batched_gemm_dims(&input_chars, &output_labels, &contracted, operands)
-            {
-                let mut values = vec![0.0f64; batch * m * n];
-                let (a_vals, b_vals) = (&operands[0].values, &operands[1].values);
-                let (ab, bb, cb) = (m * k, k * n, m * n);
-                for bi in 0..batch {
-                    matmul_accumulate(
-                        &a_vals[bi * ab..(bi + 1) * ab],
-                        &b_vals[bi * bb..(bi + 1) * bb],
-                        m,
-                        k,
-                        n,
-                        &mut values[bi * cb..(bi + 1) * cb],
-                    );
-                }
-                return Ok(Self {
-                    shape: output_shape,
-                    values,
-                    dtype: DType::F64,
-                    integer_sidecar: None,
-                });
+        // Fast path: a 2-operand contraction that is a (possibly batched) GEMM
+        // after normalizing operand layout. Plain layouts use slices directly:
+        // op0 = [batch..., free0..., k...], op1 = [batch..., k..., free1...].
+        // Permuted layouts such as `ji,jk->ik` or `ij,kj->ik` repack only the
+        // misordered operand into that canonical row-major matrix form, then route
+        // through the cache-blocked `matmul_accumulate`. Each output cell still
+        // accumulates the contracted index in the same ascending row-major order as
+        // the general path, so FP bits, ordering, errors, ties, and RNG-free
+        // determinism are preserved. Shared-free, broadcast, repeated-label, and
+        // non-GEMM contractions fall through.
+        if operands.len() == 2
+            && let Some(plan) =
+                einsum_gemm_plan(&input_chars, &output_labels, &contracted, operands)
+        {
+            let mut values = vec![0.0f64; plan.batch * plan.m * plan.n];
+            let (a_vals, b_vals) = (&operands[0].values, &operands[1].values);
+            let (ab, bb, cb) = (plan.m * plan.k, plan.k * plan.n, plan.m * plan.n);
+            for bi in 0..plan.batch {
+                let a_slice = &a_vals[bi * ab..(bi + 1) * ab];
+                let b_slice = &b_vals[bi * bb..(bi + 1) * bb];
+                let a_packed = plan
+                    .lhs
+                    .needs_repack
+                    .then(|| einsum_pack_matrix_values(a_slice, &plan.lhs));
+                let b_packed = plan
+                    .rhs
+                    .needs_repack
+                    .then(|| einsum_pack_matrix_values(b_slice, &plan.rhs));
+                let lhs = a_packed.as_deref().unwrap_or(a_slice);
+                let rhs = b_packed.as_deref().unwrap_or(b_slice);
+                matmul_accumulate(
+                    lhs,
+                    rhs,
+                    plan.m,
+                    plan.k,
+                    plan.n,
+                    &mut values[bi * cb..(bi + 1) * cb],
+                );
             }
+            return Ok(Self {
+                shape: output_shape,
+                values,
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
         }
 
         // Precompute integer stride tables once, keyed by each label's position in
@@ -20382,10 +20382,7 @@ impl UFuncArray {
         // its contracted subspace in contracted row-major order. We compute each
         // output cell independently in that exact order — identical FP bits — which
         // makes the per-cell loop embarrassingly parallel over output cells.
-        let result: Vec<f64> = if output_size == 0 {
-            Vec::new()
-        } else {
-            let contracted_size = total_iters / output_size;
+        let result: Vec<f64> = if let Some(contracted_size) = total_iters.checked_div(output_size) {
             let compute_cell = |o: usize| -> f64 {
                 let mut label_vals = vec![0usize; n_labels];
                 let base = o * contracted_size;
@@ -20419,6 +20416,8 @@ impl UFuncArray {
             } else {
                 (0..output_size).map(compute_cell).collect()
             }
+        } else {
+            Vec::new()
         };
 
         Ok(Self {
@@ -22651,7 +22650,8 @@ impl UFuncArray {
                     let mut valid = 0usize;
                     let mut remainder = outer;
                     let mut base_flat = 0usize;
-                    for (d, (&_s, &stride)) in shape_ref.iter().zip(strides_ref.iter()).enumerate() {
+                    for (d, (&_s, &stride)) in shape_ref.iter().zip(strides_ref.iter()).enumerate()
+                    {
                         if d == ax {
                             continue;
                         }
@@ -22839,7 +22839,8 @@ impl UFuncArray {
                 let compute_outer = move |outer: usize| -> f64 {
                     let mut remainder = outer;
                     let mut base_flat = 0usize;
-                    for (d, (&_s, &stride)) in shape_ref.iter().zip(strides_ref.iter()).enumerate() {
+                    for (d, (&_s, &stride)) in shape_ref.iter().zip(strides_ref.iter()).enumerate()
+                    {
                         if d == ax {
                             continue;
                         }
@@ -22864,7 +22865,10 @@ impl UFuncArray {
                     && self.values.len() >= NANMEDIAN_PARALLEL_MIN_ELEMS
                     && rayon::current_num_threads() >= 2
                 {
-                    (0..outer_count).into_par_iter().map(compute_outer).collect()
+                    (0..outer_count)
+                        .into_par_iter()
+                        .map(compute_outer)
+                        .collect()
                 } else {
                     (0..outer_count).map(compute_outer).collect()
                 };
@@ -25960,7 +25964,7 @@ fn radix_sort_value_indices<T: RadixKey>(indices: &mut [usize], values: &[T]) {
         }
         // Every key shares this byte -> the pass is a no-op; skip it. For
         // small-magnitude data this collapses to a couple of effective passes.
-        if counts.iter().any(|&c| c == n) {
+        if counts.contains(&n) {
             continue;
         }
         let mut running = 0usize;
@@ -27033,27 +27037,38 @@ fn einsum_has_dup_label(v: &[char]) -> bool {
     !v.iter().all(|c| seen.insert(*c))
 }
 
-/// Detect whether a 2-operand einsum is a (possibly batched) plain GEMM and
-/// return `(batch, m, k, n)` for a per-batch-slice `matmul_accumulate`.
+struct EinsumGemmPlan {
+    batch: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+    lhs: EinsumMatrixPlan,
+    rhs: EinsumMatrixPlan,
+}
+
+struct EinsumMatrixPlan {
+    needs_repack: bool,
+    logical_dims: Vec<usize>,
+    src_strides: Vec<usize>,
+    src_positions: Vec<usize>,
+}
+
+/// Detect whether a 2-operand einsum is a (possibly batched) GEMM once operand
+/// axes are normalized to canonical row-major matrices.
 ///
-/// Accepts: operand 0 = `[batch..., free0..., contracted...]`, operand 1 =
-/// `[batch..., contracted..., free1...]`, output = `[batch..., free0..., free1...]`
-/// where the batch labels are exactly the labels shared by both operands AND the
-/// output, appearing as the identical leading prefix of all three; the contracted
-/// axes are contiguous and in the SAME order in both operands; no repeated label
-/// within an operand; and operand value lengths are exactly `batch*m*k` /
-/// `batch*k*n` (rules out broadcasting). `batch == 1` is the ordinary GEMM.
-///
-/// In every accepted case `op0.values`/`op1.values` are already the contiguous
-/// row-major `(batch, m, k)` / `(batch, k, n)` operands and the output is
-/// `(batch, m, n)` — no transpose or repack — so the per-batch GEMM is bit-identical
-/// to the general per-cell sum. Anything else returns `None` (caller falls back).
-fn einsum_batched_gemm_dims(
+/// Accepted output layout is `[batch..., free0..., free1...]`; operand free-label
+/// order must match that output order, and contracted labels must be in the same
+/// order in both operands. Within each operand, the free and contracted blocks may
+/// be permuted (`ji,jk->ik`, `ij,kj->ik`, etc.); those cases get a bounded
+/// one-time repack into `(m,k)` / `(k,n)` for each batch slice before GEMM.
+/// Repeated labels, broadcasts, shared-free labels outside the batch prefix, and
+/// non-GEMM shapes return `None` so the exact general path remains the fallback.
+fn einsum_gemm_plan(
     input_chars: &[Vec<char>],
     output_labels: &[char],
     contracted: &[char],
     operands: &[&UFuncArray],
-) -> Option<(usize, usize, usize, usize)> {
+) -> Option<EinsumGemmPlan> {
     if contracted.is_empty() || operands.len() != 2 {
         return None;
     }
@@ -27084,23 +27099,40 @@ fn einsum_batched_gemm_dims(
         return None;
     }
 
-    // After the batch prefix the remainder must be a plain GEMM.
+    // After the batch prefix the remainder must be a GEMM up to operand-axis
+    // permutation: free labels from op0, contracted labels, then free labels from
+    // op1 in the output.
     let (a_rest, b_rest, o_rest) = (&a[nb..], &b[nb..], &output_labels[nb..]);
-    let a_free: Vec<char> = a_rest.iter().copied().filter(|c| !cset.contains(c)).collect();
-    let a_con: Vec<char> = a_rest.iter().copied().filter(|c| cset.contains(c)).collect();
-    let b_free: Vec<char> = b_rest.iter().copied().filter(|c| !cset.contains(c)).collect();
-    let b_con: Vec<char> = b_rest.iter().copied().filter(|c| cset.contains(c)).collect();
+    let a_free: Vec<char> = a_rest
+        .iter()
+        .copied()
+        .filter(|c| !cset.contains(c))
+        .collect();
+    let a_con: Vec<char> = a_rest
+        .iter()
+        .copied()
+        .filter(|c| cset.contains(c))
+        .collect();
+    let b_free: Vec<char> = b_rest
+        .iter()
+        .copied()
+        .filter(|c| !cset.contains(c))
+        .collect();
+    let b_con: Vec<char> = b_rest
+        .iter()
+        .copied()
+        .filter(|c| cset.contains(c))
+        .collect();
 
-    if *a_rest != [a_free.as_slice(), a_con.as_slice()].concat() {
+    if a_free.iter().any(|c| b_free.contains(c)) {
         return None;
     }
-    if *b_rest != [b_con.as_slice(), b_free.as_slice()].concat() {
+    if a_con.as_slice() != contracted || b_con.as_slice() != contracted {
         return None;
     }
-    if a_con != b_con || a_con.len() != contracted.len() {
-        return None;
-    }
-    if *o_rest != [a_free.as_slice(), b_free.as_slice()].concat() {
+    let lhs_logical = einsum_join_labels(&a_free, &a_con);
+    let rhs_logical = einsum_join_labels(&b_con, &b_free);
+    if o_rest != einsum_join_labels(&a_free, &b_free).as_slice() {
         return None;
     }
 
@@ -27108,22 +27140,115 @@ fn einsum_batched_gemm_dims(
     if operands[0].shape[..nb] != operands[1].shape[..nb] {
         return None;
     }
-    let batch_sz: usize = operands[0].shape[..nb].iter().product();
-    let nfree0 = a_free.len();
-    let m: usize = operands[0].shape[nb..nb + nfree0].iter().product();
-    let k: usize = operands[0].shape[nb + nfree0..].iter().product();
-    let ncon1 = b_con.len();
-    let k2: usize = operands[1].shape[nb..nb + ncon1].iter().product();
-    let n: usize = operands[1].shape[nb + ncon1..].iter().product();
-    if k != k2 {
+    let a_rest_shape = &operands[0].shape[nb..];
+    let b_rest_shape = &operands[1].shape[nb..];
+    if a_rest.len() != a_rest_shape.len() || b_rest.len() != b_rest_shape.len() {
         return None;
     }
-    if operands[0].values.len() != batch_sz * m * k
-        || operands[1].values.len() != batch_sz * k * n
+    for &label in contracted {
+        if einsum_label_dim(a_rest, a_rest_shape, label)?
+            != einsum_label_dim(b_rest, b_rest_shape, label)?
+        {
+            return None;
+        }
+    }
+
+    let batch_sz: usize = operands[0].shape[..nb].iter().product();
+    let m = einsum_label_product(a_rest, a_rest_shape, &a_free)?;
+    let k = einsum_label_product(a_rest, a_rest_shape, &a_con)?;
+    let k2 = einsum_label_product(b_rest, b_rest_shape, &b_con)?;
+    let n = einsum_label_product(b_rest, b_rest_shape, &b_free)?;
+    let a_rest_elems: usize = a_rest_shape.iter().product();
+    let b_rest_elems: usize = b_rest_shape.iter().product();
+    if k != k2 || a_rest_elems != m * k || b_rest_elems != k * n {
+        return None;
+    }
+    if operands[0].values.len() != batch_sz * m * k || operands[1].values.len() != batch_sz * k * n
     {
         return None;
     }
-    Some((batch_sz, m, k, n))
+    let lhs = einsum_matrix_plan(a_rest, a_rest_shape, &lhs_logical)?;
+    let rhs = einsum_matrix_plan(b_rest, b_rest_shape, &rhs_logical)?;
+    Some(EinsumGemmPlan {
+        batch: batch_sz,
+        m,
+        k,
+        n,
+        lhs,
+        rhs,
+    })
+}
+
+fn einsum_join_labels(left: &[char], right: &[char]) -> Vec<char> {
+    let mut joined = Vec::with_capacity(left.len() + right.len());
+    joined.extend_from_slice(left);
+    joined.extend_from_slice(right);
+    joined
+}
+
+fn einsum_label_dim(labels: &[char], dims: &[usize], label: char) -> Option<usize> {
+    labels.iter().position(|&c| c == label).map(|idx| dims[idx])
+}
+
+fn einsum_label_product(labels: &[char], dims: &[usize], selected: &[char]) -> Option<usize> {
+    selected.iter().try_fold(1usize, |acc, &label| {
+        acc.checked_mul(einsum_label_dim(labels, dims, label)?)
+    })
+}
+
+fn einsum_row_major_strides(shape: &[usize]) -> Vec<usize> {
+    let mut strides = vec![1usize; shape.len()];
+    let mut stride = 1usize;
+    for idx in (0..shape.len()).rev() {
+        strides[idx] = stride;
+        stride *= shape[idx];
+    }
+    strides
+}
+
+fn einsum_matrix_plan(
+    actual_labels: &[char],
+    actual_shape: &[usize],
+    logical_labels: &[char],
+) -> Option<EinsumMatrixPlan> {
+    if actual_labels.len() != actual_shape.len() {
+        return None;
+    }
+    let src_strides = einsum_row_major_strides(actual_shape);
+    let mut logical_dims = Vec::with_capacity(logical_labels.len());
+    let mut src_positions = Vec::with_capacity(logical_labels.len());
+    for &label in logical_labels {
+        let pos = actual_labels.iter().position(|&c| c == label)?;
+        logical_dims.push(actual_shape[pos]);
+        src_positions.push(pos);
+    }
+    Some(EinsumMatrixPlan {
+        needs_repack: actual_labels != logical_labels,
+        logical_dims,
+        src_strides,
+        src_positions,
+    })
+}
+
+fn einsum_pack_matrix_values(values: &[f64], plan: &EinsumMatrixPlan) -> Vec<f64> {
+    let total: usize = plan.logical_dims.iter().product();
+    debug_assert_eq!(values.len(), total);
+    let mut packed = vec![0.0f64; total];
+    let mut coords = vec![0usize; plan.logical_dims.len()];
+    for (dst, slot) in packed.iter_mut().enumerate() {
+        let mut remaining = dst;
+        for axis in (0..plan.logical_dims.len()).rev() {
+            let dim = plan.logical_dims[axis];
+            coords[axis] = remaining % dim;
+            remaining /= dim;
+        }
+        let mut src = 0usize;
+        for (axis, &coord) in coords.iter().enumerate() {
+            src += coord * plan.src_strides[plan.src_positions[axis]];
+        }
+        *slot = values[src];
+    }
+    packed
 }
 
 fn matmul_accumulate(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
@@ -27141,11 +27266,7 @@ fn matmul_accumulate(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out
     // Aim for a few bands per thread (work-stealing load balance), each an
     // MR-aligned row count so every band runs the full register-tiled path.
     let target_bands = threads * 4;
-    let band_rows = m
-        .div_ceil(target_bands)
-        .div_ceil(MATMUL_MR)
-        .max(1)
-        * MATMUL_MR;
+    let band_rows = m.div_ceil(target_bands).div_ceil(MATMUL_MR).max(1) * MATMUL_MR;
 
     out.par_chunks_mut(band_rows * n)
         .zip(lhs.par_chunks(band_rows * k))
@@ -27228,7 +27349,15 @@ fn matmul_accumulate_serial(
 }
 
 // out[i, j0..n] += sum_k lhs[i,k]*rhs[k,j], summed in increasing k (bit-exact).
-fn matmul_row_tail(lhs: &[f64], rhs: &[f64], out: &mut [f64], i: usize, k: usize, n: usize, j0: usize) {
+fn matmul_row_tail(
+    lhs: &[f64],
+    rhs: &[f64],
+    out: &mut [f64],
+    i: usize,
+    k: usize,
+    n: usize,
+    j0: usize,
+) {
     let a_base = i * k;
     let o_base = i * n;
     for j in j0..n {
@@ -35963,29 +36092,28 @@ mod tests {
         busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
         chebint, chebmul, chebroots, chebsub, chebval, checked_window_total, copysign,
         datetime_as_string, divmod_arrays, errstate, fft_dit, fftn_along_axis, financial_fv,
-        financial_ipmt, financial_irr,
-        financial_mirr, financial_nper, financial_npv, financial_pmt, financial_ppmt, financial_pv,
-        financial_rate, frexp, frompyfunc, frompyfunc_object, frompyfunc_python,
-        frompyfunc_python_import, frompyfunc_python_import_with_interpreter,
-        frompyfunc_python_with_interpreter, gcd_arrays, geterr, herm2poly, hermadd, hermder,
-        hermdiv, herme2poly, hermeadd, hermediv, hermefit, hermefromroots, hermemul, hermeroots,
-        hermesub, hermeval, hermfit, hermfromroots, hermint, hermmul, hermroots, hermsub, hermval,
-        hypot, interpolate_percentile, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd,
-        lagder, lagdiv, lagfit,
-        lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly,
-        legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub, legval,
-        logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
-        ma_maximum_fill_value, ma_maximum_fill_value_for_dtype, ma_minimum_fill_value,
-        ma_minimum_fill_value_for_dtype, mediate_ufunc_runtime_policy, modf, nextafter,
-        normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
-        pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
-        plan_binary_dispatch, plan_binary_dispatch_with_registry,
-        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
-        reduce_frompyfunc_values, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
-        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
-        scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
-        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
-        validate_override_payload_class, where_nonzero,
+        financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
+        financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc,
+        frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
+        frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
+        geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefit,
+        hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint,
+        hermmul, hermroots, hermsub, hermval, hypot, interpolate_percentile, is_busday, isnat,
+        isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul,
+        lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv, legfit,
+        legfromroots, legint, legmul, legroots, legsub, legval, logaddexp, logaddexp2, ma_is_mask,
+        ma_is_masked, ma_make_mask, ma_mask_or, ma_maximum_fill_value,
+        ma_maximum_fill_value_for_dtype, ma_minimum_fill_value, ma_minimum_fill_value_for_dtype,
+        mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
+        normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
+        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
+        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
+        poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values,
+        resolve_override_dispatch, scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log,
+        scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_sqrt, seterr,
+        seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
+        unique_all, unique_counts, unique_inverse, unique_values, validate_override_payload_class,
+        where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -37194,7 +37322,11 @@ print(json.dumps(payload))
             let parallel = arr.try_elementwise_unary(op).expect("parallel unary");
             let serial: Vec<f64> = data.iter().map(|&v| op.apply(v)).collect();
             assert_eq!(
-                parallel.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                parallel
+                    .values()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
                 serial.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 "{op:?}: parallel path diverged from serial"
             );
@@ -37229,13 +37361,22 @@ print(json.dumps(payload))
         let n = (1usize << 15) + 555;
         let a: Vec<f64> = (0..n).map(|i| ((i % 1000) as f64) * 0.001 + 0.5).collect();
         let b: Vec<f64> = (0..n).map(|i| ((i % 777) as f64) * 0.002 + 0.5).collect();
-        for op in [BinaryOp::Power, BinaryOp::Hypot, BinaryOp::Arctan2, BinaryOp::Logaddexp] {
+        for op in [
+            BinaryOp::Power,
+            BinaryOp::Hypot,
+            BinaryOp::Arctan2,
+            BinaryOp::Logaddexp,
+        ] {
             let lhs = UFuncArray::new(vec![n], a.clone(), DType::F64).expect("lhs");
             let rhs = UFuncArray::new(vec![n], b.clone(), DType::F64).expect("rhs");
             let parallel = lhs.elementwise_binary(&rhs, op).expect("binary");
             let serial: Vec<f64> = a.iter().zip(&b).map(|(&x, &y)| op.apply(x, y)).collect();
             assert_eq!(
-                parallel.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                parallel
+                    .values()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
                 serial.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 "{op:?}: parallel path diverged from serial"
             );
@@ -41224,7 +41365,9 @@ print(json.dumps(payload))
         data[200 * cols + cols - 1] = f64::NAN;
 
         let arr = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).expect("arr");
-        let out = arr.sort(Some(-1), Some("quicksort")).expect("parallel sort");
+        let out = arr
+            .sort(Some(-1), Some("quicksort"))
+            .expect("parallel sort");
 
         let mut expected = data.clone();
         for r in 0..rows {
@@ -41351,7 +41494,11 @@ print(json.dumps(payload))
         let mut ref_i = i64_data.clone();
         ref_i.sort_by(f64::total_cmp);
         assert_eq!(
-            sorted_i.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            sorted_i
+                .values()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
             ref_i.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "radix i64 flat sort diverged from comparison reference"
         );
@@ -41363,7 +41510,11 @@ print(json.dumps(payload))
         let mut ref_u = u64_data.clone();
         ref_u.sort_by(f64::total_cmp);
         assert_eq!(
-            sorted_u.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            sorted_u
+                .values()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
             ref_u.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "radix u64 flat sort diverged from comparison reference"
         );
@@ -41378,15 +41529,21 @@ print(json.dumps(payload))
                 ((raw - 20000) * 257) as f64
             })
             .collect();
-        let arr_lane = UFuncArray::new(vec![rows, cols], lane_data.clone(), DType::I64)
-            .expect("lane arr");
-        let sorted_lane = arr_lane.sort(Some(-1), Some("quicksort")).expect("lane sort");
+        let arr_lane =
+            UFuncArray::new(vec![rows, cols], lane_data.clone(), DType::I64).expect("lane arr");
+        let sorted_lane = arr_lane
+            .sort(Some(-1), Some("quicksort"))
+            .expect("lane sort");
         let mut ref_lane = lane_data.clone();
         for r in 0..rows {
             ref_lane[r * cols..(r + 1) * cols].sort_by(f64::total_cmp);
         }
         assert_eq!(
-            sorted_lane.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            sorted_lane
+                .values()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
             ref_lane.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "radix last-axis lane sort diverged from comparison reference"
         );
@@ -41398,8 +41555,7 @@ print(json.dumps(payload))
             .map(|b| format!("{b:02x}"))
             .collect();
         assert_eq!(
-            digest,
-            "62c7ec66c3405e849ff4f0dede799939486bd9b8860873c050ff6c99e9d704c5",
+            digest, "62c7ec66c3405e849ff4f0dede799939486bd9b8860873c050ff6c99e9d704c5",
             "radix value-sort golden digest changed -- output is no longer bit-stable"
         );
     }
@@ -41443,7 +41599,9 @@ print(json.dumps(payload))
             })
             .collect();
         let arr = UFuncArray::new(vec![rows, cols], data.clone(), DType::I64).expect("arr");
-        let out = arr.argsort(Some(-1), Some("quicksort")).expect("int argsort");
+        let out = arr
+            .argsort(Some(-1), Some("quicksort"))
+            .expect("int argsort");
         assert_eq!(out.dtype(), DType::I64);
         for r in 0..rows {
             let lane = &data[r * cols..(r + 1) * cols];
@@ -41487,8 +41645,14 @@ print(json.dumps(payload))
         for r in 0..rows {
             let lane = &iout.values()[r * cols..(r + 1) * cols];
             let pivot = lane[kth];
-            assert!(lane[..kth].iter().all(|&x| x <= pivot), "lane {r} left side");
-            assert!(lane[kth + 1..].iter().all(|&x| x >= pivot), "lane {r} right side");
+            assert!(
+                lane[..kth].iter().all(|&x| x <= pivot),
+                "lane {r} left side"
+            );
+            assert!(
+                lane[kth + 1..].iter().all(|&x| x >= pivot),
+                "lane {r} right side"
+            );
         }
     }
 
@@ -41604,12 +41768,18 @@ print(json.dumps(payload))
         ];
         let arr = UFuncArray::new(vec![data.len()], data.clone(), DType::F64).expect("a");
         let (basic_counts, _) = arr.histogram(bins).expect("basic");
-        let (full_counts, _) = arr
-            .histogram_full(bins, None, None, false)
-            .expect("full");
+        let (full_counts, _) = arr.histogram_full(bins, None, None, false).expect("full");
         assert_eq!(
-            full_counts.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            basic_counts.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            full_counts
+                .values()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            basic_counts
+                .values()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
             "histogram_full diverged from basic histogram binning"
         );
 
@@ -41657,7 +41827,11 @@ print(json.dumps(payload))
             expected[bin] += 1.0;
         }
         assert_eq!(
-            counts.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            counts
+                .values()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
             expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "parallel histogram diverged from serial reference"
         );
@@ -41810,7 +41984,9 @@ print(json.dumps(payload))
             .collect();
         let npts = 8192usize;
         let xs: Vec<f64> = (0..npts)
-            .map(|i| (((i as u64).wrapping_mul(40503).wrapping_add(3) % 7000) as f64) / 100.0 - 15.0)
+            .map(|i| {
+                (((i as u64).wrapping_mul(40503).wrapping_add(3) % 7000) as f64) / 100.0 - 15.0
+            })
             .collect();
         let xparr = UFuncArray::new(vec![n], xp.clone(), DType::F64).expect("xp");
         let fparr = UFuncArray::new(vec![n], fp.clone(), DType::F64).expect("fp");
@@ -41865,7 +42041,9 @@ print(json.dumps(payload))
         let qarr = UFuncArray::new(vec![nq], needles.clone(), DType::F64).expect("q");
 
         for side in ["left", "right"] {
-            let out = harr.searchsorted(&qarr, Some(side), None).expect("searchsorted");
+            let out = harr
+                .searchsorted(&qarr, Some(side), None)
+                .expect("searchsorted");
             assert_eq!(out.dtype(), DType::I64);
             for (qi, &needle) in needles.iter().enumerate() {
                 let exp = if side == "left" {
@@ -41886,11 +42064,14 @@ print(json.dumps(payload))
         let ineedles: Vec<i64> = (0..nq)
             .map(|i| ((i as i64).wrapping_mul(48271) % 7000) - 600)
             .collect();
-        let iharr = UFuncArray::from_storage(vec![n], ArrayStorage::I64(idata.clone())).expect("ih");
+        let iharr =
+            UFuncArray::from_storage(vec![n], ArrayStorage::I64(idata.clone())).expect("ih");
         let iqarr =
             UFuncArray::from_storage(vec![nq], ArrayStorage::I64(ineedles.clone())).expect("iq");
         for side in ["left", "right"] {
-            let out = iharr.searchsorted(&iqarr, Some(side), None).expect("isearchsorted");
+            let out = iharr
+                .searchsorted(&iqarr, Some(side), None)
+                .expect("isearchsorted");
             for (qi, &needle) in ineedles.iter().enumerate() {
                 let exp = if side == "left" {
                     idata.iter().filter(|&&d| d < needle).count()
@@ -41915,7 +42096,9 @@ print(json.dumps(payload))
             .map(|i| (((i as u64).wrapping_mul(2654435761) % 997) as f64) / 13.0 - 30.0)
             .collect();
         let xs: Vec<f64> = (0..npts)
-            .map(|i| (((i as u64).wrapping_mul(40503).wrapping_add(7) % 4001) as f64) / 1000.0 - 2.0)
+            .map(|i| {
+                (((i as u64).wrapping_mul(40503).wrapping_add(7) % 4001) as f64) / 1000.0 - 2.0
+            })
             .collect();
         let carr = UFuncArray::new(vec![coeffs.len()], coeffs.clone(), DType::F64).expect("c");
         let xarr = UFuncArray::new(vec![npts], xs.clone(), DType::F64).expect("x");
@@ -42123,31 +42306,32 @@ print(json.dumps(payload))
         };
 
         // Serial reference mirroring the original nested outer/inner loop.
-        let serial_along_axis = |shp: &[usize], re: &mut [f64], im: &mut [f64], axis: usize, inv: bool| {
-            let axis_len = shp[axis];
-            if axis_len <= 1 {
-                return;
-            }
-            let outer_size: usize = shp[..axis].iter().product::<usize>().max(1);
-            let inner_size: usize = shp[axis + 1..].iter().product::<usize>().max(1);
-            let mut buf_re = vec![0.0; axis_len];
-            let mut buf_im = vec![0.0; axis_len];
-            for outer in 0..outer_size {
-                for inner in 0..inner_size {
-                    for k in 0..axis_len {
-                        let idx = outer * axis_len * inner_size + k * inner_size + inner;
-                        buf_re[k] = re[idx];
-                        buf_im[k] = im[idx];
-                    }
-                    fft_dit(&mut buf_re, &mut buf_im, inv);
-                    for k in 0..axis_len {
-                        let idx = outer * axis_len * inner_size + k * inner_size + inner;
-                        re[idx] = buf_re[k];
-                        im[idx] = buf_im[k];
+        let serial_along_axis =
+            |shp: &[usize], re: &mut [f64], im: &mut [f64], axis: usize, inv: bool| {
+                let axis_len = shp[axis];
+                if axis_len <= 1 {
+                    return;
+                }
+                let outer_size: usize = shp[..axis].iter().product::<usize>().max(1);
+                let inner_size: usize = shp[axis + 1..].iter().product::<usize>().max(1);
+                let mut buf_re = vec![0.0; axis_len];
+                let mut buf_im = vec![0.0; axis_len];
+                for outer in 0..outer_size {
+                    for inner in 0..inner_size {
+                        for k in 0..axis_len {
+                            let idx = outer * axis_len * inner_size + k * inner_size + inner;
+                            buf_re[k] = re[idx];
+                            buf_im[k] = im[idx];
+                        }
+                        fft_dit(&mut buf_re, &mut buf_im, inv);
+                        for k in 0..axis_len {
+                            let idx = outer * axis_len * inner_size + k * inner_size + inner;
+                            re[idx] = buf_re[k];
+                            im[idx] = buf_im[k];
+                        }
                     }
                 }
-            }
-        };
+            };
 
         for inverse in [false, true] {
             for axis in 0..shape.len() {
@@ -42190,9 +42374,7 @@ print(json.dumps(payload))
         for ax in [1usize, 2usize] {
             for ddof in [0usize, 1usize] {
                 let axis_len = [d0, d1, d2][ax];
-                let out = arr
-                    .nanvar(Some(ax as isize), false, ddof)
-                    .expect("nanvar");
+                let out = arr.nanvar(Some(ax as isize), false, ddof).expect("nanvar");
                 // Use production's own per-lane mean (compensated reduce_sum), so the
                 // reference isolates the sq_sum + parallelization, not nanmean parity.
                 let mean_arr = arr.nanmean(Some(ax as isize), true).expect("nanmean");
@@ -42266,7 +42448,9 @@ print(json.dumps(payload))
             let axis_len = d1;
             let inner = d2;
             let outer = d0;
-            let out = arr.nanpercentile(q, Some(ax as isize)).expect("nanpercentile");
+            let out = arr
+                .nanpercentile(q, Some(ax as isize))
+                .expect("nanpercentile");
             let fraction = q / 100.0;
             for o in 0..outer {
                 for i in 0..inner {
@@ -42339,7 +42523,10 @@ print(json.dumps(payload))
                 let exp = interpolate_percentile(&lane, 0.5);
                 let got = out.values()[outer];
                 if exp.is_nan() {
-                    assert!(got.is_nan(), "ax={ax} outer {outer} expected NaN, got {got}");
+                    assert!(
+                        got.is_nan(),
+                        "ax={ax} outer {outer} expected NaN, got {got}"
+                    );
                 } else {
                     assert_eq!(
                         got.to_bits(),
@@ -50666,7 +50853,7 @@ print(json.dumps(payload))
 
     #[test]
     fn einsum_batched_gemm_matches_manual_reference_bits() {
-        // "bij,bjk->bik" is a batched GEMM: the einsum_batched_gemm_dims fast path
+        // "bij,bjk->bik" is a batched GEMM: the einsum_gemm_plan fast path
         // runs one matmul_accumulate per batch slice. Validate it against a manual
         // nested-loop reference summed in the identical ascending-j order — must be
         // bit-for-bit identical.
@@ -50702,6 +50889,86 @@ print(json.dumps(payload))
         for (o, r) in out.values.iter().zip(&reference) {
             assert_eq!(o.to_bits(), r.to_bits(), "batched einsum GEMM drifted");
         }
+    }
+
+    #[test]
+    fn einsum_transposed_gemm_repack_matches_manual_reference_bits_and_sha256() {
+        use sha2::{Digest, Sha256};
+
+        let (mm, kk, nn) = (3usize, 4usize, 5usize);
+
+        let a_lhs_vals: Vec<f64> = (0..kk * mm).map(|i| ((i % 13) as f64) - 6.0).collect();
+        let b_lhs_vals: Vec<f64> = (0..kk * nn).map(|i| ((i % 17) as f64) - 8.0).collect();
+        let a_lhs = UFuncArray::new(vec![kk, mm], a_lhs_vals.clone(), DType::F64).unwrap();
+        let b_lhs = UFuncArray::new(vec![kk, nn], b_lhs_vals.clone(), DType::F64).unwrap();
+
+        let mut lhs_reference = vec![0.0f64; mm * nn];
+        for i in 0..mm {
+            for col in 0..nn {
+                let mut sum = 0.0f64;
+                for j in 0..kk {
+                    sum += a_lhs_vals[j * mm + i] * b_lhs_vals[j * nn + col];
+                }
+                lhs_reference[i * nn + col] = sum;
+            }
+        }
+
+        let lhs = UFuncArray::einsum("ji,jk->ik", &[&a_lhs, &b_lhs]).unwrap();
+        assert_eq!(lhs.shape, vec![mm, nn]);
+        for (got, want) in lhs.values.iter().zip(&lhs_reference) {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "lhs-transposed einsum drifted"
+            );
+        }
+
+        let a_rhs_vals: Vec<f64> = (0..mm * kk).map(|i| ((i % 11) as f64) - 5.0).collect();
+        let b_rhs_vals: Vec<f64> = (0..nn * kk).map(|i| ((i % 19) as f64) - 9.0).collect();
+        let a_rhs = UFuncArray::new(vec![mm, kk], a_rhs_vals.clone(), DType::F64).unwrap();
+        let b_rhs = UFuncArray::new(vec![nn, kk], b_rhs_vals.clone(), DType::F64).unwrap();
+
+        let mut rhs_reference = vec![0.0f64; mm * nn];
+        for i in 0..mm {
+            for col in 0..nn {
+                let mut sum = 0.0f64;
+                for j in 0..kk {
+                    sum += a_rhs_vals[i * kk + j] * b_rhs_vals[col * kk + j];
+                }
+                rhs_reference[i * nn + col] = sum;
+            }
+        }
+
+        let rhs = UFuncArray::einsum("ij,kj->ik", &[&a_rhs, &b_rhs]).unwrap();
+        assert_eq!(rhs.shape, vec![mm, nn]);
+        for (got, want) in rhs.values.iter().zip(&rhs_reference) {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "rhs-transposed einsum drifted"
+            );
+        }
+
+        let mut hasher = Sha256::new();
+        for case in [&lhs, &rhs] {
+            for &d in &case.shape {
+                hasher.update((d as u64).to_le_bytes());
+            }
+            hasher.update(b"|");
+            for &v in &case.values {
+                hasher.update(v.to_bits().to_le_bytes());
+            }
+            hasher.update(b";");
+        }
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{:02x}", b))
+            .collect();
+        assert_eq!(
+            digest, "32c185c7e9df8aa7681ef983be4234365d365b5db5559572383b1725c2efebcd",
+            "transposed einsum GEMM output bit pattern changed"
+        );
     }
 
     #[test]
@@ -50760,8 +51027,7 @@ print(json.dumps(payload))
             .map(|b| format!("{:02x}", b))
             .collect();
         assert_eq!(
-            digest,
-            "d4a2b5137fd48c9f2ebaae51760bb8ccd357c09ea3482eba833f750248946918",
+            digest, "d4a2b5137fd48c9f2ebaae51760bb8ccd357c09ea3482eba833f750248946918",
             "einsum output bit pattern changed"
         );
     }

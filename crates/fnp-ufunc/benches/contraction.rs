@@ -39,6 +39,32 @@ fn bench_einsum_batched(c: &mut Criterion) {
     group.finish();
 }
 
+/// `ji,jk->ik` — matmul-shaped contraction with operand 0 transposed in memory.
+fn bench_einsum_transposed_lhs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("einsum_ji_jk_ik");
+    for size in [32usize, 64, 96, 128].iter() {
+        let a = make_2d(*size, *size);
+        let b = make_2d(*size, *size);
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter(|| UFuncArray::einsum("ji,jk->ik", black_box(&[&a, &b])).unwrap())
+        });
+    }
+    group.finish();
+}
+
+/// `ij,kj->ik` — matmul-shaped contraction with operand 1 transposed in memory.
+fn bench_einsum_transposed_rhs(c: &mut Criterion) {
+    let mut group = c.benchmark_group("einsum_ij_kj_ik");
+    for size in [32usize, 64, 96, 128].iter() {
+        let a = make_2d(*size, *size);
+        let b = make_2d(*size, *size);
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter(|| UFuncArray::einsum("ij,kj->ik", black_box(&[&a, &b])).unwrap())
+        });
+    }
+    group.finish();
+}
+
 /// `ij,ij->` — full reduction to a scalar.
 fn bench_einsum_reduce(c: &mut Criterion) {
     let mut group = c.benchmark_group("einsum_ij_ij_scalar");
@@ -82,6 +108,8 @@ criterion_group!(
     benches,
     bench_einsum_matmul,
     bench_einsum_batched,
+    bench_einsum_transposed_lhs,
+    bench_einsum_transposed_rhs,
     bench_einsum_reduce,
     bench_tensordot,
     bench_inner
