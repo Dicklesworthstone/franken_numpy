@@ -165,6 +165,58 @@ fn gemm_packed_b(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, c: &mut [f6
     }
 }
 
+// Generic packed-B kernel over register-tile dims, to find the best MR/NR now
+// that B is contiguous. Assumes m % MR == 0 and n % NR == 0 (sweep uses sizes
+// divisible by 24). Per-element k-accumulation order is unchanged regardless of
+// tile shape, so all variants are bit-identical.
+fn gemm_packed_g<const TMR: usize, const TNR: usize>(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    c: &mut [f64],
+) {
+    let nc = {
+        const PANEL_BYTES: usize = 256 * 1024;
+        let cols = PANEL_BYTES / (k.max(1) * 8);
+        (cols / TNR).max(1) * TNR
+    };
+    let mut bp = vec![0.0f64; k * TNR];
+    let mut jc = 0;
+    while jc < n {
+        let jc_end = (jc + nc).min(n);
+        let mut j0 = jc;
+        while j0 < jc_end {
+            for kk in 0..k {
+                bp[kk * TNR..kk * TNR + TNR].copy_from_slice(&b[kk * n + j0..kk * n + j0 + TNR]);
+            }
+            let mut i0 = 0;
+            while i0 < m {
+                let mut acc = [[0.0f64; TNR]; TMR];
+                for kk in 0..k {
+                    let bs = &bp[kk * TNR..kk * TNR + TNR];
+                    for (ii, row) in acc.iter_mut().enumerate() {
+                        let av = a[(i0 + ii) * k + kk];
+                        for (slot, &bv) in row.iter_mut().zip(bs) {
+                            *slot += av * bv;
+                        }
+                    }
+                }
+                for (ii, row) in acc.iter().enumerate() {
+                    let base = (i0 + ii) * n + j0;
+                    for (slot, &v) in c[base..base + TNR].iter_mut().zip(row) {
+                        *slot += v;
+                    }
+                }
+                i0 += TMR;
+            }
+            j0 += TNR;
+        }
+        jc += nc;
+    }
+}
+
 fn fnv1a(values: &[f64]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for v in values {
@@ -218,5 +270,32 @@ fn main() {
             tb / tpb,
             hpb == hb
         );
+    }
+
+    // Register-tile (MR x NR) sweep on the packed-B kernel; sizes divisible by 24.
+    println!("\n--- MR x NR sweep (packed-B, current = 4x8) ---");
+    for &n in &[768usize, 1536, 2304] {
+        let (m, k) = (n, n);
+        let a = gen_mat(m, k, 0x1234);
+        let b = gen_mat(k, n, 0x9abc);
+        let iters = if n <= 1536 { 4 } else { 2 };
+        let g = |ms: f64| 2.0 * (n as f64).powi(3) / (ms * 1e-3) / 1e9;
+        let (t48, h48) = time(m, n, iters, |c| gemm_packed_g::<4, 8>(&a, &b, m, k, n, c));
+        let variants: [(&str, (f64, u64)); 5] = [
+            ("6x8 ", time(m, n, iters, |c| gemm_packed_g::<6, 8>(&a, &b, m, k, n, c))),
+            ("8x8 ", time(m, n, iters, |c| gemm_packed_g::<8, 8>(&a, &b, m, k, n, c))),
+            ("8x4 ", time(m, n, iters, |c| gemm_packed_g::<8, 4>(&a, &b, m, k, n, c))),
+            ("6x16", time(m, n, iters, |c| gemm_packed_g::<6, 16>(&a, &b, m, k, n, c))),
+            ("4x16", time(m, n, iters, |c| gemm_packed_g::<4, 16>(&a, &b, m, k, n, c))),
+        ];
+        println!("n={n:5}  4x8(base) {t48:8.2}ms {:6.1}GF", g(t48));
+        for (name, (t, h)) in variants {
+            println!(
+                "         {name}      {t:8.2}ms {:6.1}GF  {:.2}x  bitmatch={}",
+                g(t),
+                t48 / t,
+                h == h48
+            );
+        }
     }
 }
