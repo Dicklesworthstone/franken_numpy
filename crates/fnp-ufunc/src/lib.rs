@@ -15762,6 +15762,18 @@ impl UFuncArray {
             });
         }
 
+        // NumPy computes each successive difference in the array's own dtype, so
+        // for narrow floats (float32/float16) every pass must round to that
+        // precision before feeding the next pass — otherwise the f64 accumulation
+        // diverges from NumPy once n >= 2. round_to_f32(f64_sub(a,b)) == f32_sub(a,b)
+        // exactly for f32-representable a,b, so this matches NumPy bit-for-bit.
+        // (The n == 1 fast path above needs no rounding: its single result is
+        // rounded to the dtype at the output bridge, which is the same value.)
+        let round_narrow: fn(f64) -> f64 = match self.dtype {
+            DType::F32 => |x| x as f32 as f64,
+            DType::F16 => |x| f64::from(fnp_dtype::f16::from_f64(x)),
+            _ => |x| x,
+        };
         let mut current = self.clone();
         for _ in 0..n {
             let axis_len = current.shape[ax];
@@ -15782,7 +15794,7 @@ impl UFuncArray {
                         let base = o * axis_len * inner;
                         let v1 = current.values[base + (a + 1) * inner + i];
                         let v0 = current.values[base + a * inner + i];
-                        values.push(v1 - v0);
+                        values.push(round_narrow(v1 - v0));
                     }
                 }
             }
@@ -44087,6 +44099,32 @@ print(json.dumps(payload))
         .unwrap();
         let l = m.tril(0).unwrap();
         assert_eq!(l.values(), &[1.0, 0.0, 0.0, 4.0, 5.0, 0.0, 7.0, 8.0, 9.0]);
+    }
+
+    #[test]
+    fn triu_tril_offsets_match_elementwise_reference() {
+        // Lock the slice-copy fast path against the element-wise definition across
+        // offsets and a non-square shape, including out-of-range k.
+        let (rows, cols) = (37usize, 29usize);
+        let data: Vec<f64> = (0..rows * cols).map(|i| (i as f64) * 0.5 - 11.0).collect();
+        let m = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).unwrap();
+        for k in [-40i64, -5, -1, 0, 1, 5, 40] {
+            let mut exp_u = vec![0.0f64; rows * cols];
+            let mut exp_l = vec![0.0f64; rows * cols];
+            for r in 0..rows {
+                for c in 0..cols {
+                    let idx = r * cols + c;
+                    if c as i64 >= r as i64 + k {
+                        exp_u[idx] = data[idx];
+                    }
+                    if c as i64 <= r as i64 + k {
+                        exp_l[idx] = data[idx];
+                    }
+                }
+            }
+            assert_eq!(m.triu(k).unwrap().values(), exp_u.as_slice(), "triu k={k}");
+            assert_eq!(m.tril(k).unwrap().values(), exp_l.as_slice(), "tril k={k}");
+        }
     }
 
     #[test]
