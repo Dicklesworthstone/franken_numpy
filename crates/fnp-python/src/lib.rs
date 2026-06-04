@@ -23187,6 +23187,19 @@ fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     if dtype_kind == "c" {
         return Ok(numpy.getattr("diag")?.call1((arr, k))?.unbind());
     }
+    // 2-D input fast path: np.diag(M, k) EXTRACTS the k-diagonal (N values out of an
+    // N×N matrix). The generic path below copies the whole matrix across the bridge
+    // (O(n²)) just to read N elements; instead read NumPy's diagonal VIEW (O(1),
+    // strided) and extract only those N. Bit-identical to v.diag(k) — same diagonal
+    // elements, same order, same dtype. (1-D input CONSTRUCTS a matrix and has no
+    // such gap, so it keeps the generic path.)
+    if let Ok(shape) = arr.getattr("shape").and_then(|s| s.extract::<Vec<usize>>())
+        && shape.len() == 2
+        && let Ok(diag_view) = arr.call_method1("diagonal", (k,))
+        && let Ok(result) = extract_precise_numeric_array(py, &diag_view, "diag(diagonal)")
+    {
+        return build_numpy_array_from_ufunc(py, &result);
+    }
     let v = extract_precise_numeric_array(py, v.bind(py), "diag(v)")?;
     let result = v.diag(k).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
@@ -23223,6 +23236,24 @@ fn diagonal(
             .getattr("diagonal")?
             .call1((arr, offset, axis1, axis2))?
             .unbind());
+    }
+    // 2-D canonical-axes fast path: np.diagonal extracts N values from an N×N matrix;
+    // the generic path copies the whole matrix across the bridge first. Read NumPy's
+    // diagonal VIEW (O(1), strided) and extract only those N — bit-identical to
+    // a.diagonal(offset, 0, 1) (same elements/order/dtype). Swapped/other axes and
+    // N-D inputs keep the validated generic path.
+    if let Ok(shape) = arr.getattr("shape").and_then(|s| s.extract::<Vec<usize>>())
+        && shape.len() == 2
+    {
+        let n1 = if axis1 < 0 { axis1 + 2 } else { axis1 };
+        let n2 = if axis2 < 0 { axis2 + 2 } else { axis2 };
+        if n1 == 0
+            && n2 == 1
+            && let Ok(diag_view) = arr.call_method1("diagonal", (offset,))
+            && let Ok(result) = extract_precise_numeric_array(py, &diag_view, "diagonal(view)")
+        {
+            return build_numpy_array_from_ufunc(py, &result);
+        }
     }
     let a = extract_precise_numeric_array(py, a.bind(py), "diagonal(a)")?;
     let result = a.diagonal(offset, axis1, axis2).map_err(map_ufunc_error)?;
