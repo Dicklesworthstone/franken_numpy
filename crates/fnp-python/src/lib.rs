@@ -24479,6 +24479,35 @@ fn trace(
         return fallback();
     }
 
+    // Fast path: a 2-D matrix's trace only needs its N diagonal elements, but the
+    // generic native path below extracts the whole N×N matrix across the bridge
+    // (O(n²) data movement) just to sum the diagonal. Ask NumPy for the diagonal
+    // VIEW (O(1), strided, no copy), extract only those N elements, and sum them
+    // left-to-right. This is bit-identical to UFuncArray::trace — np.diagonal
+    // yields a[i, i+offset] in the same i-ascending order as self.diag(offset), the
+    // f64 fold and the scalar dtype match exactly. Restricted to the canonical
+    // (axis1, axis2) == (0, 1) form (trace_axis is transpose-invariant for 2-D, so
+    // swapped/other axes keep the validated full path).
+    let a_bound = a.bind(py);
+    if let Ok(shape) = a_bound
+        .getattr("shape")
+        .and_then(|s| s.extract::<Vec<usize>>())
+        && shape.len() == 2
+    {
+        let n1 = if axis1 < 0 { axis1 + 2 } else { axis1 };
+        let n2 = if axis2 < 0 { axis2 + 2 } else { axis2 };
+        if n1 == 0
+            && n2 == 1
+            && let Ok(diag_view) = a_bound.call_method1("diagonal", (offset,))
+            && let Ok(diag_array) =
+                extract_precise_numeric_array(py, &diag_view, "trace(diagonal)")
+        {
+            let sum: f64 = diag_array.values().iter().sum();
+            let result = UFuncArray::scalar(sum, diag_array.dtype());
+            return build_numpy_scalar_or_array(py, &result);
+        }
+    }
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "trace(a)") {
         Ok(arr) => arr,
