@@ -26143,7 +26143,92 @@ fn histogramdd(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = histogramdd_native(py, args, kwargs)? {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "histogramdd", args, kwargs)
+}
+
+/// Native histogramdd fast path: `(sample[N,D], bins=int|[int;D])` with auto range
+/// and no weights/density. numpy's histogramdd is a serial loop; our kernel bins
+/// in parallel (integer counts => bit-exact). Returns `None` to fall back to numpy
+/// for edge-array bins, range/weights/density, non-2-D or non-float samples, or any
+/// kernel error — preserving behavior parity.
+fn histogramdd_native(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if args.is_empty() || args.len() > 2 {
+        return Ok(None);
+    }
+    let mut bins_obj: Option<Bound<'_, PyAny>> = None;
+    if let Some(kw) = kwargs {
+        for (key, value) in kw.iter() {
+            match key.extract::<String>()?.as_str() {
+                "bins" => bins_obj = Some(value),
+                _ => return Ok(None),
+            }
+        }
+    }
+    if bins_obj.is_none() && args.len() == 2 {
+        bins_obj = Some(args.get_item(1)?);
+    }
+
+    let sample = match extract_precise_numeric_array(py, &args.get_item(0)?, "histogramdd") {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    if sample.has_integer_sidecar()
+        || matches!(sample.dtype(), DType::Complex64 | DType::Complex128)
+        || sample.shape().len() != 2
+    {
+        return Ok(None);
+    }
+    let n_dim = sample.shape()[1];
+    if n_dim == 0 {
+        return Ok(None);
+    }
+    if sample.values().iter().any(|v| !v.is_finite()) {
+        return Ok(None);
+    }
+
+    let bins_per_dim: Vec<usize> = match bins_obj {
+        None => vec![10; n_dim],
+        Some(b) => {
+            if b.is_none() {
+                vec![10; n_dim]
+            } else if let Ok(n) = b.extract::<i64>() {
+                if n <= 0 {
+                    return Ok(None);
+                }
+                vec![n as usize; n_dim]
+            } else if let Ok(list) = b.extract::<Vec<i64>>() {
+                if list.len() != n_dim || list.iter().any(|&x| x <= 0) {
+                    return Ok(None);
+                }
+                list.iter().map(|&x| x as usize).collect()
+            } else {
+                return Ok(None);
+            }
+        }
+    };
+
+    let (h, edges) = match sample.histogramdd(&bins_per_dim) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    let h_py = build_numpy_array_from_ufunc(py, &h)?;
+    let mut edge_objs: Vec<Py<PyAny>> = Vec::with_capacity(edges.len());
+    for e in &edges {
+        edge_objs.push(build_numpy_array_from_ufunc(py, e)?);
+    }
+    let edges_list = PyList::new(py, edge_objs.iter().map(|o| o.bind(py)))?;
+    Ok(Some(
+        PyTuple::new(py, [h_py.bind(py), edges_list.as_any()])?
+            .into_any()
+            .unbind(),
+    ))
 }
 
 // Busday calendar functions (3).
