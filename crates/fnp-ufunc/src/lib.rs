@@ -20308,6 +20308,29 @@ impl UFuncArray {
 
         let input_chars: Vec<Vec<char>> = input_subs.iter().map(|s| s.chars().collect()).collect();
 
+        // Fast path: a 2-operand contraction already laid out as a plain GEMM
+        // (op0 = [free0..., k...], op1 = [k..., free1...], output = [free0..., free1...]
+        // with the contracted axes contiguous and in matching order, no repeated
+        // labels, no broadcasting) routes through the cache-blocked, register-tiled
+        // `matmul_accumulate`. Each output cell accumulates the contracted index in
+        // the same ascending row-major order as the general scatter below, so the
+        // result is bit-for-bit identical. Transposed / batched / broadcast / traced
+        // einsums fail the shape test and fall through to the general path.
+        if operands.len() == 2 {
+            if let Some((m, k, n)) =
+                einsum_gemm_dims(&input_chars, &output_labels, &contracted, operands)
+            {
+                let mut values = vec![0.0f64; m * n];
+                matmul_accumulate(&operands[0].values, &operands[1].values, m, k, n, &mut values);
+                return Ok(Self {
+                    shape: output_shape,
+                    values,
+                    dtype: DType::F64,
+                    integer_sidecar: None,
+                });
+            }
+        }
+
         // Precompute integer stride tables once, keyed by each label's position in
         // `all_labels`, so the hot loop is pure index arithmetic — no per-iteration
         // HashMap allocation or hashing.
@@ -26991,6 +27014,75 @@ const MATMUL_PARALLEL_MIN_FLOPS: usize = 1 << 21;
 // the full sequential-k accumulation per element — so the result is bit-for-bit
 // identical to the serial kernel for any thread count. The register-tiled kernel
 // is compute-bound (high arithmetic intensity), so this scales with cores.
+/// Whether `v` contains a repeated element (e.g. an einsum "ii" trace operand).
+fn einsum_has_dup_label(v: &[char]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    !v.iter().all(|c| seen.insert(*c))
+}
+
+/// Detect whether a 2-operand einsum is a plain (non-transposed, non-broadcast,
+/// non-batched) GEMM and return its `(m, k, n)` for `matmul_accumulate`.
+///
+/// Requires: operand 0 labels = `[free0..., contracted...]`, operand 1 labels =
+/// `[contracted..., free1...]` with the contracted axes contiguous and in the
+/// SAME order in both operands, output labels = `[free0..., free1...]`, no
+/// repeated label within an operand, and operand value lengths exactly `m*k` and
+/// `k*n` (rules out broadcasting). Anything else returns `None` (caller falls
+/// back to the general contraction), so accepted cases are exactly the layouts
+/// where `op0.values` is already the row-major `(m,k)` LHS and `op1.values` the
+/// `(k,n)` RHS — no transpose or repack needed, hence bit-identical sums.
+fn einsum_gemm_dims(
+    input_chars: &[Vec<char>],
+    output_labels: &[char],
+    contracted: &[char],
+    operands: &[&UFuncArray],
+) -> Option<(usize, usize, usize)> {
+    if contracted.is_empty() || operands.len() != 2 {
+        return None;
+    }
+    let a = &input_chars[0];
+    let b = &input_chars[1];
+    if einsum_has_dup_label(a) || einsum_has_dup_label(b) {
+        return None;
+    }
+    let cset: std::collections::HashSet<char> = contracted.iter().copied().collect();
+    let a_free: Vec<char> = a.iter().copied().filter(|c| !cset.contains(c)).collect();
+    let a_con: Vec<char> = a.iter().copied().filter(|c| cset.contains(c)).collect();
+    let b_free: Vec<char> = b.iter().copied().filter(|c| !cset.contains(c)).collect();
+    let b_con: Vec<char> = b.iter().copied().filter(|c| cset.contains(c)).collect();
+
+    // op0 = [free0, contracted]; op1 = [contracted, free1].
+    if *a != [a_free.as_slice(), a_con.as_slice()].concat() {
+        return None;
+    }
+    if *b != [b_con.as_slice(), b_free.as_slice()].concat() {
+        return None;
+    }
+    // Contracted axes appear in the same order in both operands and cover the
+    // full contracted set.
+    if a_con != b_con || a_con.len() != contracted.len() {
+        return None;
+    }
+    // Output is exactly free0 ++ free1 (rules out batched/shared free labels).
+    if output_labels != [a_free.as_slice(), b_free.as_slice()].concat() {
+        return None;
+    }
+
+    let nfree0 = a_free.len();
+    let m: usize = operands[0].shape[..nfree0].iter().product();
+    let k: usize = operands[0].shape[nfree0..].iter().product();
+    let ncon1 = b_con.len();
+    let k2: usize = operands[1].shape[..ncon1].iter().product();
+    let n: usize = operands[1].shape[ncon1..].iter().product();
+    if k != k2 {
+        return None;
+    }
+    if operands[0].values.len() != m * k || operands[1].values.len() != k * n {
+        return None;
+    }
+    Some((m, k, n))
+}
+
 fn matmul_accumulate(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
     debug_assert_eq!(lhs.len(), m * k);
     debug_assert_eq!(rhs.len(), k * n);
