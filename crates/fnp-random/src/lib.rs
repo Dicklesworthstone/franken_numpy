@@ -2088,16 +2088,6 @@ fn standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Ve
 }
 
 #[inline]
-fn unit_normal_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
-    (0..size)
-        .map(|_| {
-            let value = sample_ziggurat_normal_core(rng);
-            if value == 0.0 { 0.0 } else { value }
-        })
-        .collect()
-}
-
-#[inline]
 fn normal_from_core<R: ZigguratRngCore>(
     rng: &mut R,
     loc: f64,
@@ -3751,16 +3741,6 @@ impl Generator {
         }
 
         self.u32_buf_ready = false;
-        if loc.to_bits() == 0.0f64.to_bits() && scale.to_bits() == 1.0f64.to_bits() {
-            return Ok(match &mut self.bit_generator.rng {
-                RngBackend::Deterministic(rng) => unit_normal_from_core(rng, size),
-                RngBackend::Pcg64(rng) => unit_normal_from_core(rng, size),
-                RngBackend::Pcg64Dxsm(rng) => unit_normal_from_core(rng, size),
-                RngBackend::Mt19937(rng) => unit_normal_from_core(rng, size),
-                RngBackend::Philox(rng) => unit_normal_from_core(rng, size),
-                RngBackend::Sfc64(rng) => unit_normal_from_core(rng, size),
-            });
-        }
         Ok(match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => normal_from_core(rng, loc, scale, size),
             RngBackend::Pcg64(rng) => normal_from_core(rng, loc, scale, size),
@@ -9164,30 +9144,6 @@ for child in rng.spawn(n_children):
             digest_hex,
             "611fd0b80d38e8a8efcc7bf3e5f390c745f73ce62b6efd5b349e63ae68bc7bbe"
         );
-    }
-
-    #[test]
-    fn normal_unit_scale_specialization_preserves_scalar_stream() {
-        let size = 1024;
-        let mut batch_rng = test_generator();
-        let batch = batch_rng.normal(0.0, 1.0, size).unwrap();
-
-        let mut scalar_rng = test_generator();
-        let scalar: Vec<f64> = (0..size)
-            .map(|_| {
-                let value = scalar_rng.sample_ziggurat_normal();
-                if value == 0.0 { 0.0 } else { value }
-            })
-            .collect();
-
-        for (index, (actual, expected)) in batch.iter().zip(&scalar).enumerate() {
-            assert_eq!(
-                actual.to_bits(),
-                expected.to_bits(),
-                "normal unit-scale bit pattern changed at index {index}"
-            );
-        }
-        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
     }
 
     #[test]
