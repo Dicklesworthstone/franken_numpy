@@ -3345,6 +3345,26 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
             continue; // 1x1 block, already converged
         }
 
+        // An isolated 2×2 active block with COMPLEX eigenvalues is already in
+        // real-Schur form (a complex-conjugate pair). The single-shift QR can
+        // never drive its subdiagonal to zero, so without deflating it here the
+        // iteration burns the entire max_iter budget — the cause of the
+        // pathological O(n²)-iteration slowdown on matrices with complex spectra.
+        // Real 2×2 blocks are left to the normal QR step, which splits them into
+        // two 1×1 blocks (the eigenvector path relies on that triangular form).
+        if p - lo == 2 {
+            let a11 = h[(p - 2) * n + (p - 2)];
+            let a12 = h[(p - 2) * n + (p - 1)];
+            let a21 = h[(p - 1) * n + (p - 2)];
+            let a22 = h[(p - 1) * n + (p - 1)];
+            let tr = a11 + a22;
+            let dt = a11 * a22 - a12 * a21;
+            if tr * tr - 4.0 * dt < 0.0 {
+                p -= 2;
+                continue;
+            }
+        }
+
         // Wilkinson shift from trailing 2×2 of active block
         let a11 = h[(p - 2) * n + (p - 2)];
         let a12 = h[(p - 2) * n + (p - 1)];
@@ -9455,6 +9475,26 @@ mod tests {
                 ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
             })
             .collect()
+    }
+
+    #[test]
+    fn eig_nxn_resolves_complex_pairs_fast() {
+        // Block-diagonal: a 2×2 rotation (eigenvalues ±i) plus a real eigenvalue 2.
+        // Before the 2×2-deflation fix the single-shift QR looped forever on the
+        // complex pair; this must now return {±i, 2} promptly and correctly.
+        let a = [0.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 2.0];
+        let ev = super::eig_nxn(&a, 3).expect("eig");
+        // ev is interleaved (re, im) per eigenvalue.
+        let mut pairs: Vec<(f64, f64)> = ev.chunks_exact(2).map(|c| (c[0], c[1])).collect();
+        pairs.sort_by(|x, y| {
+            x.0.partial_cmp(&y.0)
+                .unwrap()
+                .then(x.1.partial_cmp(&y.1).unwrap())
+        });
+        // Expected sorted by (re, im): (0,-1), (0,1), (2,0).
+        assert!((pairs[0].0 - 0.0).abs() < 1e-9 && (pairs[0].1 + 1.0).abs() < 1e-9, "{pairs:?}");
+        assert!((pairs[1].0 - 0.0).abs() < 1e-9 && (pairs[1].1 - 1.0).abs() < 1e-9, "{pairs:?}");
+        assert!((pairs[2].0 - 2.0).abs() < 1e-9 && (pairs[2].1 - 0.0).abs() < 1e-9, "{pairs:?}");
     }
 
     #[test]
