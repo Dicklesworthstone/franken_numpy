@@ -1654,6 +1654,9 @@ fn svd_bidiag_qr_full(
 
     let mut v_house = vec![0.0; m];
     let mut w_house = vec![0.0; n];
+    // Scratch for the cache-friendly two-pass left Householder transform.
+    let mut lh_dot = vec![0.0; n];
+    let mut lh_f = vec![0.0; n];
 
     for j in 0..n {
         // Left Householder: zero out column j below diagonal
@@ -1676,15 +1679,29 @@ fn svd_bidiag_qr_full(
             let v_norm_sq: f64 = v_house[j..].iter().map(|x| x * x).sum();
             if v_norm_sq > 0.0 {
                 let scale = 2.0 / v_norm_sq;
-                // Apply to work (left): work = (I - scale*v*v^T) * work
-                for col in j..n {
-                    let mut dot = 0.0;
-                    for i in j..m {
-                        dot += v_house[i] * work[i * n + col];
+                // Apply to work (left) as two row-contiguous passes (bit-exact)
+                // instead of striding work[i*n+col] down each column: pass 1 sums
+                // lh_dot[col] = Σ_i v_house[i]·work[i][col] in i-ascending order,
+                // pass 2 applies the identical (scale·lh_dot[col])·v_house[i]
+                // product per element.
+                for x in lh_dot[j..n].iter_mut() {
+                    *x = 0.0;
+                }
+                for i in j..m {
+                    let vi = v_house[i];
+                    let row = &work[i * n + j..i * n + n];
+                    for (x, &w) in lh_dot[j..n].iter_mut().zip(row.iter()) {
+                        *x += vi * w;
                     }
-                    let f = scale * dot;
-                    for i in j..m {
-                        work[i * n + col] -= f * v_house[i];
+                }
+                for (fc, &dc) in lh_f[j..n].iter_mut().zip(lh_dot[j..n].iter()) {
+                    *fc = scale * dc;
+                }
+                for i in j..m {
+                    let vi = v_house[i];
+                    let row = &mut work[i * n + j..i * n + n];
+                    for (w, &fc) in row.iter_mut().zip(lh_f[j..n].iter()) {
+                        *w -= fc * vi;
                     }
                 }
                 // Accumulate into U: U = U * (I - scale*v*v^T)
