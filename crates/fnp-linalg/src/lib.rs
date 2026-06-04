@@ -1657,6 +1657,9 @@ fn svd_bidiag_qr_full(
     // Scratch for the cache-friendly two-pass left Householder transform.
     let mut lh_dot = vec![0.0; n];
     let mut lh_f = vec![0.0; n];
+    // Scratch for the cache-friendly two-pass right Householder Vt accumulation.
+    let mut rh_dot = vec![0.0; n];
+    let mut rh_f = vec![0.0; n];
 
     for j in 0..n {
         // Left Householder: zero out column j below diagonal
@@ -1755,15 +1758,27 @@ fn svd_bidiag_qr_full(
                             work[row * n + col] -= f * w_house[col];
                         }
                     }
-                    // Accumulate into Vt: Vt = (I - scale*w*w^T) * Vt
-                    for col in 0..n {
-                        let mut dot = 0.0;
-                        for row in (j + 1)..n {
-                            dot += w_house[row] * vt[row * n + col];
+                    // Accumulate into Vt: Vt = (I - scale*w*w^T) * Vt.
+                    // Keep each column's row-ascending dot order, but compute and
+                    // apply all columns through row-contiguous Vt slices.
+                    for x in rh_dot.iter_mut() {
+                        *x = 0.0;
+                    }
+                    for row in (j + 1)..n {
+                        let wr = w_house[row];
+                        let vt_row = &vt[row * n..row * n + n];
+                        for (dot, &value) in rh_dot.iter_mut().zip(vt_row.iter()) {
+                            *dot += wr * value;
                         }
-                        let f = scale * dot;
-                        for row in (j + 1)..n {
-                            vt[row * n + col] -= f * w_house[row];
+                    }
+                    for (fc, &dot) in rh_f.iter_mut().zip(rh_dot.iter()) {
+                        *fc = scale * dot;
+                    }
+                    for row in (j + 1)..n {
+                        let wr = w_house[row];
+                        let vt_row = &mut vt[row * n..row * n + n];
+                        for (value, &fc) in vt_row.iter_mut().zip(rh_f.iter()) {
+                            *value -= fc * wr;
                         }
                     }
                 }
