@@ -2889,10 +2889,19 @@ const TRIDIAG_PANEL_NB: usize = 64;
 // trailing-matrix memory traffic of the unblocked per-column left+right sweep
 // (which is DRAM-bound). Same reflectors as the unblocked path → tolerance
 // equivalent (reassociated updates; never bit-exact). Returns (d, e).
-fn tridiag_reduce_blocked_values(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
     let mut work = a.to_vec();
     let mut d = vec![0.0f64; n];
     let mut e = vec![0.0f64; n - 1];
+    let mut q = if accumulate_q {
+        let mut qq = vec![0.0f64; n * n];
+        for i in 0..n {
+            qq[i * n + i] = 1.0;
+        }
+        qq
+    } else {
+        Vec::new()
+    };
 
     let mut jb = 0;
     while jb < n - 2 {
@@ -2901,6 +2910,7 @@ fn tridiag_reduce_blocked_values(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
         let h = n - jb;
         let mut vv = vec![0.0f64; h * nb]; // vv[(i-jb)*nb + t] = v_{jb+t}[i]
         let mut ww = vec![0.0f64; h * nb];
+        let mut taus = vec![0.0f64; nb];
 
         for t in 0..nb {
             let j = jb + t;
@@ -2940,6 +2950,7 @@ fn tridiag_reduce_blocked_values(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
                 continue;
             }
             let tau = 2.0 / vns;
+            taus[t] = tau;
             e[j] = -sign * col_norm;
             // u = A_current·v (rows [j+1,n)): A_ps·v − V·(Wᵀv) − W·(Vᵀv).
             let mut u = vec![0.0f64; n];
@@ -3005,6 +3016,56 @@ fn tridiag_reduce_blocked_values(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
                 }
             }
         }
+
+        // Q := Q·(H_jb·…·H_{pend-1}) = Q·(I − V·T·Vᵀ) via the compact-WY block
+        // reflector applied with GEMMs (same technique as the blocked QR Q build).
+        if accumulate_q {
+            // T (nb×nb upper triangular), forward direction.
+            let mut tm = vec![0.0f64; nb * nb];
+            for c in 0..nb {
+                tm[c * nb + c] = taus[c];
+                if taus[c] == 0.0 {
+                    continue;
+                }
+                let mut col = vec![0.0f64; c];
+                for (i, ci) in col.iter_mut().enumerate() {
+                    let mut dot = 0.0;
+                    for row in 0..h {
+                        dot += vv[row * nb + i] * vv[row * nb + c];
+                    }
+                    *ci = -taus[c] * dot;
+                }
+                for i in 0..c {
+                    let mut s = 0.0;
+                    for l in i..c {
+                        s += tm[i * nb + l] * col[l];
+                    }
+                    tm[i * nb + c] = s;
+                }
+            }
+            let mut vt = vec![0.0f64; nb * h];
+            for row in 0..h {
+                for c in 0..nb {
+                    vt[c * h + row] = vv[row * nb + c];
+                }
+            }
+            // Q_active = Q[:, jb..n] (n×h).
+            let mut qa = vec![0.0f64; n * h];
+            for i in 0..n {
+                let src = i * n + jb;
+                qa[i * h..i * h + h].copy_from_slice(&q[src..src + h]);
+            }
+            let qv = packed_gemm(&qa, &vv, n, h, nb); // Q_active·V
+            let qvt = packed_gemm(&qv, &tm, n, nb, nb); // ·T
+            let upd = packed_gemm(&qvt, &vt, n, nb, h); // ·Vᵀ
+            for i in 0..n {
+                let dst = i * n + jb;
+                for (cell, &x) in q[dst..dst + h].iter_mut().zip(&upd[i * h..i * h + h]) {
+                    *cell -= x;
+                }
+            }
+        }
+
         jb = pend;
     }
 
@@ -3012,13 +3073,12 @@ fn tridiag_reduce_blocked_values(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     d[n - 2] = work[(n - 2) * n + (n - 2)];
     d[n - 1] = work[(n - 1) * n + (n - 1)];
     e[n - 2] = work[(n - 2) * n + (n - 1)];
-    (d, e)
+    (d, e, q)
 }
 
 fn tridiag_reduce_impl(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
-    if !accumulate_q && n >= TRIDIAG_BLOCK_MIN {
-        let (d, e) = tridiag_reduce_blocked_values(a, n);
-        return (d, e, Vec::new());
+    if n >= TRIDIAG_BLOCK_MIN {
+        return tridiag_reduce_blocked(a, n, accumulate_q);
     }
     let mut work = a.to_vec();
     let mut q = if accumulate_q {
@@ -9600,6 +9660,45 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "profiling; run with --release -- --ignored --nocapture"]
+    fn eig_eigh_phase_profile() {
+        use std::time::Instant;
+        fn rnd(n: usize, seed: u64) -> Vec<f64> {
+            let mut s = seed | 1;
+            (0..n * n)
+                .map(|_| {
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                })
+                .collect()
+        }
+        // eig (non-symmetric): hessenberg_reduce + hessenberg_qr_iter (no Z).
+        for &n in &[512usize] {
+            let a = rnd(n, 0x77);
+            let t = Instant::now();
+            let (mut h, _q) = super::hessenberg_reduce(&a, n);
+            let t_hess = t.elapsed().as_secs_f64() * 1e3;
+            let t = Instant::now();
+            super::hessenberg_qr_iter(&mut h, None, n);
+            let t_qr = t.elapsed().as_secs_f64() * 1e3;
+            println!("eig n={n}: hessenberg={t_hess:.1}ms qr_iter={t_qr:.1}ms");
+        }
+        // eigh (with vectors): tridiag_reduce (with Q) + tridiag_eig_qr (with Q).
+        for &n in &[1024usize] {
+            let a = chol_spd(n, 0x88);
+            let t = Instant::now();
+            let (mut d, mut e, mut q) = super::tridiag_reduce(&a, n);
+            let t_red = t.elapsed().as_secs_f64() * 1e3;
+            let t = Instant::now();
+            super::tridiag_eig_qr(&mut d, &mut e, Some(&mut q), n);
+            let t_qr = t.elapsed().as_secs_f64() * 1e3;
+            println!("eigh n={n}: tridiag_reduce(Q)={t_red:.1}ms tridiag_qr(Q)={t_qr:.1}ms");
+        }
+    }
+
+    #[test]
     fn eig_nxn_resolves_complex_pairs_fast() {
         // Block-diagonal: a 2×2 rotation (eigenvalues ±i) plus a real eigenvalue 2.
         // Before the 2×2-deflation fix the single-shift QR looped forever on the
@@ -9619,13 +9718,161 @@ mod tests {
         assert!((pairs[2].0 - 2.0).abs() < 1e-9 && (pairs[2].1 - 0.0).abs() < 1e-9, "{pairs:?}");
     }
 
+    // Inline unblocked two-sided tridiagonalization WITH Q accumulation, for the
+    // same-process A/B.
+    fn tridiag_reduce_unblocked_q_ref(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
+        let mut work = a.to_vec();
+        let mut q = vec![0.0f64; n * n];
+        for i in 0..n {
+            q[i * n + i] = 1.0;
+        }
+        let mut v = vec![0.0f64; n];
+        let mut dbuf = vec![0.0f64; n];
+        let mut f_vec = vec![0.0f64; n];
+        for j in 0..n.saturating_sub(2) {
+            let cn = {
+                let mut s = 0.0;
+                for i in (j + 1)..n {
+                    s += work[i * n + j] * work[i * n + j];
+                }
+                s.sqrt()
+            };
+            if cn < f64::EPSILON * work[j * n + j].abs().max(1.0) {
+                continue;
+            }
+            let sign = if work[(j + 1) * n + j] >= 0.0 { 1.0 } else { -1.0 };
+            for vi in &mut v[..=j] {
+                *vi = 0.0;
+            }
+            for (idx, vi) in v[(j + 1)..n].iter_mut().enumerate() {
+                *vi = work[(j + 1 + idx) * n + j];
+            }
+            v[j + 1] += sign * cn;
+            let vns: f64 = v[(j + 1)..].iter().map(|x| x * x).sum();
+            if vns == 0.0 {
+                continue;
+            }
+            let scale = 2.0 / vns;
+            for dc in dbuf.iter_mut() {
+                *dc = 0.0;
+            }
+            for i in (j + 1)..n {
+                let vi = v[i];
+                let row = &work[i * n..i * n + n];
+                for (dc, &w) in dbuf.iter_mut().zip(row.iter()) {
+                    *dc += vi * w;
+                }
+            }
+            for (fc, &dc) in f_vec.iter_mut().zip(dbuf.iter()) {
+                *fc = scale * dc;
+            }
+            for i in (j + 1)..n {
+                let vi = v[i];
+                let row = &mut work[i * n..i * n + n];
+                for (w, &fc) in row.iter_mut().zip(f_vec.iter()) {
+                    *w -= fc * vi;
+                }
+            }
+            for row in 0..n {
+                let mut dot = 0.0;
+                for i in (j + 1)..n {
+                    dot += v[i] * work[row * n + i];
+                }
+                let f = scale * dot;
+                for i in (j + 1)..n {
+                    work[row * n + i] -= f * v[i];
+                }
+            }
+            for row in 0..n {
+                let mut dot = 0.0;
+                for i in (j + 1)..n {
+                    dot += v[i] * q[row * n + i];
+                }
+                let f = scale * dot;
+                for i in (j + 1)..n {
+                    q[row * n + i] -= f * v[i];
+                }
+            }
+        }
+        let d: Vec<f64> = (0..n).map(|i| work[i * n + i]).collect();
+        let e: Vec<f64> = (0..n - 1).map(|i| work[i * n + i + 1]).collect();
+        (d, e, q)
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn blocked_tridiag_q_speedup() {
+        use std::time::Instant;
+        for &n in &[512usize, 1024] {
+            let a = chol_spd(n, 0x1234);
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs[xs.len() / 2]
+            };
+            let it = if n <= 512 { 3 } else { 2 };
+            let (mut to, mut tn) = (Vec::new(), Vec::new());
+            for _ in 0..it {
+                let t = Instant::now();
+                let r = tridiag_reduce_unblocked_q_ref(&a, n);
+                std::hint::black_box(&r);
+                to.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                let r2 = super::tridiag_reduce_blocked(&a, n, true);
+                std::hint::black_box(&r2);
+                tn.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            println!("n={n:5} unblocked-Q={:9.2}ms blocked-Q={:9.2}ms speedup={:.2}x", med(to.clone()), med(tn.clone()), med(to) / med(tn));
+        }
+    }
+
+    #[test]
+    fn blocked_tridiag_with_q_reconstructs() {
+        // n >= TRIDIAG_BLOCK_MIN -> tridiag_reduce routes to the blocked with-Q
+        // path. Verify A = Q·T·Q^T (T tridiagonal from d,e) and Q orthogonal.
+        for &n in &[400usize, 512] {
+            let a = chol_spd(n, 0x61 + n as u64);
+            let (d, e, q) = super::tridiag_reduce(&a, n);
+            assert_eq!(q.len(), n * n, "Q must be accumulated");
+            let mut tqt = vec![0.0f64; n * n];
+            for k in 0..n {
+                for j in 0..n {
+                    let mut s = d[k] * q[j * n + k];
+                    if k > 0 {
+                        s += e[k - 1] * q[j * n + (k - 1)];
+                    }
+                    if k + 1 < n {
+                        s += e[k] * q[j * n + (k + 1)];
+                    }
+                    tqt[k * n + j] = s;
+                }
+            }
+            let mut max_recon = 0.0f64;
+            let mut max_orth = 0.0f64;
+            for i in 0..n {
+                for j in 0..n {
+                    let mut r = 0.0;
+                    let mut o = 0.0;
+                    for k in 0..n {
+                        r += q[i * n + k] * tqt[k * n + j];
+                        o += q[k * n + i] * q[k * n + j];
+                    }
+                    max_recon = max_recon.max((r - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+                    let t = if i == j { 1.0 } else { 0.0 };
+                    max_orth = max_orth.max((o - t).abs());
+                }
+            }
+            assert!(max_recon < 1e-9, "Q·T·Q^T=A err {max_recon:e} (n={n})");
+            assert!(max_orth < 1e-9, "Q orthogonality err {max_orth:e} (n={n})");
+        }
+    }
+
     #[test]
     fn blocked_tridiag_matches_unblocked() {
         // n below TRIDIAG_BLOCK_MIN -> tridiag_reduce_impl takes the unblocked
         // path; compare its (d,e) to the directly-called blocked kernel.
         for &n in &[128usize, 160, 200] {
             let a = chol_spd(n, 0x31 + n as u64); // symmetric
-            let (db, eb) = super::tridiag_reduce_blocked_values(&a, n);
+            let (db, eb, _) = super::tridiag_reduce_blocked(&a, n, false);
             let (du, eu, _) = super::tridiag_reduce_impl(&a, n, false);
             let mut max_d = 0.0f64;
             let mut max_e = 0.0f64;
@@ -9659,7 +9906,7 @@ mod tests {
                 std::hint::black_box(&r);
                 tu.push(t.elapsed().as_secs_f64() * 1e3);
                 let t = Instant::now();
-                let r = super::tridiag_reduce_blocked_values(&a, n);
+                let r = super::tridiag_reduce_blocked(&a, n, false);
                 std::hint::black_box(&r);
                 tb.push(t.elapsed().as_secs_f64() * 1e3);
             }
