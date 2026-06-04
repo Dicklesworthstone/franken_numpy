@@ -12496,6 +12496,23 @@ impl UFuncArray {
                 } else {
                     (n - (shift.unsigned_abs() % n)) % n
                 };
+                // A flat roll is a rotation: out = values[n-s..] ++ values[..n-s].
+                // The old path scattered element-by-element with a per-element
+                // modulo AND built a full n-element source-index array used only to
+                // reindex an integer sidecar. For the common no-sidecar case, do the
+                // two contiguous block copies directly — bit-identical (out[(i+s)%n]
+                // = values[i] is exactly that rotation), no modulo, no index array.
+                if self.integer_sidecar.is_none() {
+                    let mut values = Vec::with_capacity(n);
+                    values.extend_from_slice(&self.values[n - s..]);
+                    values.extend_from_slice(&self.values[..n - s]);
+                    return Ok(Self {
+                        shape: self.shape.clone(),
+                        values,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
+                }
                 let mut values = vec![0.0f64; n];
                 let mut source_indices = vec![0usize; n];
                 for (i, &v) in self.values.iter().enumerate() {
@@ -44293,6 +44310,58 @@ print(json.dumps(payload))
         let arr = UFuncArray::new(vec![5], vec![0.0, 1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
         let rolled = arr.roll(-1, None).unwrap();
         assert_eq!(rolled.values(), &[1.0, 2.0, 3.0, 4.0, 0.0]);
+    }
+
+    #[test]
+    #[ignore = "perf A/B report; run with --release -- --ignored --nocapture"]
+    fn roll_flat_rotation_vs_scatter_speedup() {
+        // Same-process A/B for the flat-roll rotation fast path: the old per-element
+        // modulo scatter + source-index array vs the two contiguous block copies.
+        // Proves bit-identical output AND times both across several shifts.
+        use std::time::Instant;
+        for &len in &[1usize << 20, 1 << 21] {
+            let data: Vec<f64> = (0..len)
+                .map(|i| {
+                    let s = (i as u64)
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                })
+                .collect();
+            let scatter = |v: &[f64], s: usize| -> Vec<f64> {
+                let n = v.len();
+                let mut out = vec![0.0f64; n];
+                let mut idx = vec![0usize; n]; // the wasted source-index array
+                for (i, &x) in v.iter().enumerate() {
+                    let dst = (i + s) % n;
+                    out[dst] = x;
+                    idx[dst] = i;
+                }
+                std::hint::black_box(&idx);
+                out
+            };
+            let arr = UFuncArray::new(vec![len], data.clone(), DType::F64).unwrap();
+            for &shift in &[1isize, 1000, (len / 3) as isize] {
+                let s = (shift as usize) % len;
+                let t0 = Instant::now();
+                let reference = scatter(&data, s);
+                let t_scatter = t0.elapsed().as_secs_f64() * 1e3;
+                let t1 = Instant::now();
+                let got = arr.roll(shift, None).unwrap();
+                let t_fast = t1.elapsed().as_secs_f64() * 1e3;
+                let maxd = reference
+                    .iter()
+                    .zip(got.values())
+                    .map(|(a, b)| a.to_bits() ^ b.to_bits())
+                    .max()
+                    .unwrap();
+                assert_eq!(maxd, 0, "roll rotation diverged from scatter (len={len}, shift={shift})");
+                println!(
+                    "len={len:8} shift={shift:8} scatter={t_scatter:8.3}ms rotation={t_fast:8.3}ms speedup={:.2}x (bit-exact)",
+                    t_scatter / t_fast
+                );
+            }
+        }
     }
 
     #[test]
