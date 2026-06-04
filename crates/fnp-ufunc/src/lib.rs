@@ -17686,28 +17686,62 @@ impl UFuncArray {
         // rows are contiguous and disjoint, so par_chunks_mut over rows is bit-exact
         // for any thread count. Compute-bound at O(nvars^2 * nobs) (not GEMM).
         let mut cov_values = vec![0.0; nvars * nvars];
-        let vals = &self.values;
-        let means_ref = &means;
-        let fill_row = |(i, row): (usize, &mut [f64])| {
-            for (j, slot) in row.iter_mut().enumerate() {
-                let mut s = 0.0;
-                for k in 0..nobs {
-                    s += (vals[i * nobs + k] - means_ref[i]) * (vals[j * nobs + k] - means_ref[j]);
-                }
-                *slot = if fact == 0.0 { f64::NAN } else { s / fact };
+        // The GEMM path (C·Cᵀ) wins once nvars is large enough that the cache
+        // blocking pays for its centering+transpose setup; below that the
+        // entry-by-entry parallel loop is faster. Both are bit-identical.
+        const COV_GEMM_MIN_VARS: usize = 384;
+        if fact == 0.0 {
+            for v in cov_values.iter_mut() {
+                *v = f64::NAN;
             }
-        };
-        const COV_PARALLEL_MIN_FLOPS: usize = 1 << 16;
-        if nvars >= 2
-            && nvars.saturating_mul(nvars).saturating_mul(nobs) >= COV_PARALLEL_MIN_FLOPS
-            && rayon::current_num_threads() >= 2
-        {
-            cov_values
-                .par_chunks_mut(nvars)
-                .enumerate()
-                .for_each(fill_row);
+        } else if nvars < COV_GEMM_MIN_VARS {
+            let vals = &self.values;
+            let means_ref = &means;
+            let fill_row = |(i, row): (usize, &mut [f64])| {
+                for (j, slot) in row.iter_mut().enumerate() {
+                    let mut s = 0.0;
+                    for k in 0..nobs {
+                        s += (vals[i * nobs + k] - means_ref[i])
+                            * (vals[j * nobs + k] - means_ref[j]);
+                    }
+                    *slot = s / fact;
+                }
+            };
+            const COV_PARALLEL_MIN_FLOPS: usize = 1 << 16;
+            if nvars >= 2
+                && nvars.saturating_mul(nvars).saturating_mul(nobs) >= COV_PARALLEL_MIN_FLOPS
+                && rayon::current_num_threads() >= 2
+            {
+                cov_values.par_chunks_mut(nvars).enumerate().for_each(fill_row);
+            } else {
+                cov_values.chunks_mut(nvars).enumerate().for_each(fill_row);
+            }
         } else {
-            cov_values.chunks_mut(nvars).enumerate().for_each(fill_row);
+            // cov[i,j] = (sum_k (x_ik-mean_i)(x_jk-mean_j)) / fact = (C·Cᵀ)[i,j]/fact,
+            // where C is the row-centered data. matmul_accumulate sums k in the same
+            // ascending order per output cell as the entry-by-entry loop, so the
+            // result is BIT-FOR-BIT identical — but routes the O(nvars²·nobs) work
+            // through the cache-blocked, register-tiled, parallel GEMM (numpy uses
+            // BLAS here). Centering and the Cᵀ transpose are O(nvars·nobs).
+            let mut centered = vec![0.0f64; nvars * nobs];
+            for i in 0..nvars {
+                let mi = means[i];
+                let dst = &mut centered[i * nobs..i * nobs + nobs];
+                for (d, &s) in dst.iter_mut().zip(&self.values[i * nobs..i * nobs + nobs]) {
+                    *d = s - mi;
+                }
+            }
+            let mut ct = vec![0.0f64; nobs * nvars];
+            for i in 0..nvars {
+                for k in 0..nobs {
+                    ct[k * nvars + i] = centered[i * nobs + k];
+                }
+            }
+            let mut g = vec![0.0f64; nvars * nvars];
+            matmul_accumulate(&centered, &ct, nvars, nobs, nvars, &mut g);
+            for (c, &gij) in cov_values.iter_mut().zip(g.iter()) {
+                *c = gij / fact;
+            }
         }
 
         let out_shape = if self.shape.len() == 1 {
@@ -57295,6 +57329,82 @@ print(json.dumps(payload))
         let b = UFuncArray::new(vec![1], vec![999_999_937.0], DType::F64).unwrap();
         let out = gcd_arrays(&a, &b).unwrap();
         assert_eq!(out.values(), &[1.0]);
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn cov_naive_vs_gemm_crossover() {
+        use rayon::prelude::*;
+        use std::time::Instant;
+        fn rnd(nv: usize, no: usize, seed: u64) -> Vec<f64> {
+            let mut s = seed | 1;
+            (0..nv * no)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                })
+                .collect()
+        }
+        fn means(v: &[f64], nv: usize, no: usize) -> Vec<f64> {
+            (0..nv).map(|r| v[r * no..r * no + no].iter().sum::<f64>() / no as f64).collect()
+        }
+        fn cov_naive(v: &[f64], nv: usize, no: usize) -> Vec<f64> {
+            let m = means(v, nv, no);
+            let fact = (no - 1) as f64;
+            let mut c = vec![0.0; nv * nv];
+            c.par_chunks_mut(nv).enumerate().for_each(|(i, row)| {
+                for (j, slot) in row.iter_mut().enumerate() {
+                    let mut s = 0.0;
+                    for k in 0..no {
+                        s += (v[i * no + k] - m[i]) * (v[j * no + k] - m[j]);
+                    }
+                    *slot = s / fact;
+                }
+            });
+            c
+        }
+        fn cov_gemm(v: &[f64], nv: usize, no: usize) -> Vec<f64> {
+            let m = means(v, nv, no);
+            let fact = (no - 1) as f64;
+            let mut c = vec![0.0; nv * no];
+            for i in 0..nv {
+                for k in 0..no {
+                    c[i * no + k] = v[i * no + k] - m[i];
+                }
+            }
+            let mut ct = vec![0.0; no * nv];
+            for i in 0..nv {
+                for k in 0..no {
+                    ct[k * nv + i] = c[i * no + k];
+                }
+            }
+            let mut g = vec![0.0; nv * nv];
+            super::matmul_accumulate(&c, &ct, nv, no, nv, &mut g);
+            g.iter().map(|&x| x / fact).collect()
+        }
+        let med = |mut xs: Vec<f64>| {
+            xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            xs[xs.len() / 2]
+        };
+        for &nv in &[128usize, 256, 384, 512, 1024] {
+            let no = 1000;
+            let v = rnd(nv, no, 7);
+            let cn = cov_naive(&v, nv, no);
+            let cg = cov_gemm(&v, nv, no);
+            let maxd = cn.iter().zip(&cg).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
+            assert!(maxd == 0.0, "cov naive vs gemm not bit-exact: {maxd:e} (nv={nv})");
+            let it = 3;
+            let (mut tn, mut tg) = (Vec::new(), Vec::new());
+            for _ in 0..it {
+                let t = Instant::now();
+                std::hint::black_box(cov_naive(&v, nv, no));
+                tn.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                std::hint::black_box(cov_gemm(&v, nv, no));
+                tg.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            println!("nv={nv:5} naive={:8.2}ms gemm={:8.2}ms speedup={:.2}x", med(tn.clone()), med(tg.clone()), med(tn) / med(tg));
+        }
     }
 
     // ── divmod tests ────────────────────────────────────────────────────
