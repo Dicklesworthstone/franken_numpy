@@ -12964,13 +12964,37 @@ impl UFuncArray {
         let b = &rhs.values;
         let m = a.len();
         let n = b.len();
+        let dtype = promote(self.dtype, rhs.dtype);
+        // Each output row i is the independent rank-1 product a[i] * b[..], so a
+        // parallel map over rows is bit-identical to the serial nested loop (each
+        // cell is the single product a[i]*b[j] written once). The serial path keeps
+        // the push form to avoid zero-initialising the buffer it would overwrite.
+        const OUTER_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+        if m >= 2 && n >= 1 && m * n >= OUTER_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2
+        {
+            let mut values = vec![0.0f64; m * n];
+            values
+                .par_chunks_mut(n)
+                .enumerate()
+                .for_each(|(i, row)| {
+                    let ai = a[i];
+                    for (slot, &bj) in row.iter_mut().zip(b.iter()) {
+                        *slot = ai * bj;
+                    }
+                });
+            return Ok(Self {
+                shape: vec![m, n],
+                values,
+                dtype,
+                integer_sidecar: None,
+            });
+        }
         let mut values = Vec::with_capacity(m * n);
         for &ai in a {
             for &bj in b {
                 values.push(ai * bj);
             }
         }
-        let dtype = promote(self.dtype, rhs.dtype);
         Ok(Self {
             shape: vec![m, n],
             values,
@@ -44957,6 +44981,54 @@ print(json.dumps(payload))
         let r = a.outer(&b).unwrap();
         assert_eq!(r.shape(), &[3, 2]);
         assert_eq!(r.values(), &[4.0, 5.0, 8.0, 10.0, 12.0, 15.0]);
+    }
+
+    #[test]
+    #[ignore = "perf A/B report; run with --release -- --ignored --nocapture"]
+    fn outer_parallel_vs_serial_speedup() {
+        // Same-process A/B for the row-parallel outer product: the serial nested
+        // push loop vs production. Proves bit-identical output AND times both.
+        use std::time::Instant;
+        let gen_vec = |len: usize, seed: u64| -> Vec<f64> {
+            let mut s = seed | 1;
+            (0..len)
+                .map(|_| {
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                })
+                .collect()
+        };
+        for &(m, n) in &[(2048usize, 2048usize), (4096, 1024)] {
+            let av = gen_vec(m, 1);
+            let bv = gen_vec(n, 2);
+            // Serial reference: the exact nested push loop production replaces.
+            let t0 = Instant::now();
+            let mut reference = Vec::with_capacity(m * n);
+            for &ai in &av {
+                for &bj in &bv {
+                    reference.push(ai * bj);
+                }
+            }
+            let t_serial = t0.elapsed().as_secs_f64() * 1e3;
+            let a = UFuncArray::new(vec![m], av.clone(), DType::F64).unwrap();
+            let b = UFuncArray::new(vec![n], bv.clone(), DType::F64).unwrap();
+            let t1 = Instant::now();
+            let got = a.outer(&b).unwrap();
+            let t_par = t1.elapsed().as_secs_f64() * 1e3;
+            let maxd = reference
+                .iter()
+                .zip(got.values())
+                .map(|(x, y)| x.to_bits() ^ y.to_bits())
+                .max()
+                .unwrap();
+            assert_eq!(maxd, 0, "parallel outer diverged from serial (m={m}, n={n})");
+            println!(
+                "m={m:6} n={n:6} serial={t_serial:8.3}ms parallel={t_par:8.3}ms speedup={:.2}x (bit-exact)",
+                t_serial / t_par
+            );
+        }
     }
 
     #[test]
