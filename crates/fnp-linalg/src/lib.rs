@@ -2141,10 +2141,12 @@ fn svd_bidiag_qr_full(
     let mut d = vec![0.0; n]; // diagonal
     let mut e = vec![0.0; n.saturating_sub(1)]; // superdiagonal
 
-    // U1 = product of left Householder reflections (m×m)
-    let mut u = vec![0.0; m * m];
+    // U1^T = transpose of the product of left Householder reflections. Keeping
+    // this accumulator transposed makes both Householder and QR left rotations
+    // row-contiguous while preserving the same scalar recurrence.
+    let mut u_t = vec![0.0; m * m];
     for i in 0..m {
-        u[i * m + i] = 1.0;
+        u_t[i * m + i] = 1.0;
     }
     // V1 = product of right Householder reflections (n×n)
     let mut vt = vec![0.0; n * n];
@@ -2160,6 +2162,9 @@ fn svd_bidiag_qr_full(
     // Scratch for the cache-friendly two-pass right Householder Vt accumulation.
     let mut rh_dot = vec![0.0; n];
     let mut rh_f = vec![0.0; n];
+    // Scratch for transposed-U left Householder accumulation.
+    let mut uh_dot = vec![0.0; m];
+    let mut uh_f = vec![0.0; m];
 
     for j in 0..n {
         // Left Householder: zero out column j below diagonal
@@ -2207,15 +2212,29 @@ fn svd_bidiag_qr_full(
                         *w -= fc * vi;
                     }
                 }
-                // Accumulate into U: U = U * (I - scale*v*v^T)
-                for row in 0..m {
-                    let mut dot = 0.0;
-                    for i in j..m {
-                        dot += u[row * m + i] * v_house[i];
+                // Accumulate into U^T: U^T = (I - scale*v*v^T) * U^T.
+                // This is the exact transpose of U = U * H. For each output
+                // element the dot still runs reflector indices in ascending
+                // order, and the update uses the same scale*dot then *v scalar
+                // sequence as the row-major U path.
+                for x in uh_dot.iter_mut() {
+                    *x = 0.0;
+                }
+                for i in j..m {
+                    let vi = v_house[i];
+                    let u_row = &u_t[i * m..i * m + m];
+                    for (dot, &value) in uh_dot.iter_mut().zip(u_row.iter()) {
+                        *dot += vi * value;
                     }
-                    let f = scale * dot;
-                    for i in j..m {
-                        u[row * m + i] -= f * v_house[i];
+                }
+                for (fc, &dot) in uh_f.iter_mut().zip(uh_dot.iter()) {
+                    *fc = scale * dot;
+                }
+                for i in j..m {
+                    let vi = v_house[i];
+                    let u_row = &mut u_t[i * m..i * m + m];
+                    for (value, &fc) in u_row.iter_mut().zip(uh_f.iter()) {
+                        *value -= fc * vi;
                     }
                 }
             }
@@ -2295,20 +2314,8 @@ fn svd_bidiag_qr_full(
     // Works with (d, e) without forming B^T*B, avoiding condition-number squaring.
     // Left rotations accumulate into U (column operations), right into Vt (row operations).
     //
-    // The left Givens rotations touch two COLUMNS of U (u[row][kk], u[row][kk+1])
-    // for every row, striding down U with stride m as the cache-dominant cost of
-    // full SVD (O(n^2 * sweeps) rotations). Accumulate them instead on the transpose
-    // `u_t` (u_t[i][j] = U[j][i]): a column rotation of U becomes a rotation of two
-    // CONTIGUOUS rows of u_t. Transpose once here and once back after convergence
-    // (O(m^2) each, negligible vs the O(m^3) sweeps). Bit-exact: identical cs/sn
-    // and per-element arithmetic, just relocated in memory.
-    let mut u_t = vec![0.0; m * m];
-    for i in 0..m {
-        for j in 0..m {
-            u_t[i * m + j] = u[j * m + i];
-        }
-    }
-
+    // The left Givens rotations touch two COLUMNS of U. Because phase 1 already
+    // kept U transposed, each rotation below touches two contiguous rows of u_t.
     let eps_mach = f64::EPSILON;
 
     let mut converged = false;
@@ -2402,6 +2409,7 @@ fn svd_bidiag_qr_full(
     }
 
     // Transpose the accumulated rotations back into U (row-major).
+    let mut u = vec![0.0; m * m];
     for i in 0..m {
         for j in 0..m {
             u[j * m + i] = u_t[i * m + j];
