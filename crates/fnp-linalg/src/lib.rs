@@ -689,7 +689,126 @@ fn lu_forward_back(lu: &[f64], perm: &[usize], b: &[f64], n: usize) -> Vec<f64> 
 }
 
 /// Forward-substitution then back-substitution for multiple right-hand sides.
+// Engage blocked TRSM at this size; below it the row-by-row substitution wins.
+const TRSM_BLOCK_MIN: usize = 896;
+const TRSM_PANEL_NB: usize = 128;
+
+// Blocked multi-RHS forward+back substitution (LAPACK dtrsm shape) for A·X = B
+// given the LU factor. Forward (unit-lower L) processes row-blocks top-down:
+// solve the nb×nb diagonal block, then update the trailing rows
+// X[be..] -= L21·X[block] with the packed GEMM. Back (upper U) processes
+// row-blocks bottom-up: solve the diagonal block, then update the rows above
+// X[..ib] -= U12·X[block]. The GEMMs re-associate the substitution sums, so the
+// result matches the row-by-row path within tolerance (triangular solve is not
+// bit-reproducible; conformance is tolerance-based like NumPy's LAPACK).
+fn lu_forward_back_multi_blocked(
+    lu: &[f64],
+    perm: &[usize],
+    b: &[f64],
+    n: usize,
+    m: usize,
+) -> Vec<f64> {
+    let mut x = vec![0.0f64; n * m];
+    for i in 0..n {
+        let p_i = perm[i];
+        x[i * m..i * m + m].copy_from_slice(&b[p_i * m..p_i * m + m]);
+    }
+
+    // Forward: L·Y = P·B, L unit-lower.
+    let mut ib = 0;
+    while ib < n {
+        let be = (ib + TRSM_PANEL_NB).min(n);
+        for i in ib..be {
+            let (head, tail) = x.split_at_mut(i * m);
+            let row_i = &mut tail[0..m];
+            for j in ib..i {
+                let lij = lu[i * n + j];
+                if lij != 0.0 {
+                    let row_j = &head[j * m..j * m + m];
+                    for col in 0..m {
+                        row_i[col] -= lij * row_j[col];
+                    }
+                }
+            }
+        }
+        let bw = be - ib;
+        let trail = n - be;
+        if trail > 0 {
+            let mut l21 = vec![0.0f64; trail * bw];
+            for i in 0..trail {
+                let src = (be + i) * n + ib;
+                l21[i * bw..i * bw + bw].copy_from_slice(&lu[src..src + bw]);
+            }
+            let mut xb = vec![0.0f64; bw * m];
+            for i in 0..bw {
+                xb[i * m..i * m + m].copy_from_slice(&x[(ib + i) * m..(ib + i) * m + m]);
+            }
+            let g = packed_gemm(&l21, &xb, trail, bw, m);
+            for i in 0..trail {
+                let dst = (be + i) * m;
+                for (cell, &gij) in x[dst..dst + m].iter_mut().zip(&g[i * m..i * m + m]) {
+                    *cell -= gij;
+                }
+            }
+        }
+        ib = be;
+    }
+
+    // Back: U·X = Y, U upper with non-unit diagonal.
+    let mut be = n;
+    while be > 0 {
+        let ib = be.saturating_sub(TRSM_PANEL_NB);
+        for i in (ib..be).rev() {
+            let (head, tail) = x.split_at_mut((i + 1) * m);
+            let row_i = &mut head[i * m..i * m + m];
+            for j in (i + 1)..be {
+                let uij = lu[i * n + j];
+                if uij != 0.0 {
+                    let row_j = &tail[(j - i - 1) * m..(j - i - 1) * m + m];
+                    for col in 0..m {
+                        row_i[col] -= uij * row_j[col];
+                    }
+                }
+            }
+            let uii = lu[i * n + i];
+            for col in 0..m {
+                row_i[col] /= uii;
+            }
+        }
+        if ib > 0 {
+            let bw = be - ib;
+            let mut u12 = vec![0.0f64; ib * bw];
+            for i in 0..ib {
+                let src = i * n + ib;
+                u12[i * bw..i * bw + bw].copy_from_slice(&lu[src..src + bw]);
+            }
+            let mut xb = vec![0.0f64; bw * m];
+            for i in 0..bw {
+                xb[i * m..i * m + m].copy_from_slice(&x[(ib + i) * m..(ib + i) * m + m]);
+            }
+            let g = packed_gemm(&u12, &xb, ib, bw, m);
+            for i in 0..ib {
+                let dst = i * m;
+                for (cell, &gij) in x[dst..dst + m].iter_mut().zip(&g[i * m..i * m + m]) {
+                    *cell -= gij;
+                }
+            }
+        }
+        be = ib;
+    }
+
+    x
+}
+
 fn lu_forward_back_multi(lu: &[f64], perm: &[usize], b: &[f64], n: usize, m: usize) -> Vec<f64> {
+    // Many right-hand sides (e.g. inv solves m=n columns of the identity): the
+    // O(n^2·m) forward/back substitution becomes the dominant cost once the LU is
+    // blocked, so route it through the blocked-TRSM path (panel solve + packed
+    // GEMM trailing update). Gated on n and m large enough for the GEMM to win.
+    if n >= TRSM_BLOCK_MIN && m >= MATMUL_PARALLEL_MIN_DIM {
+        return lu_forward_back_multi_blocked(lu, perm, b, n, m);
+    }
+
     let mut x = vec![0.0; n * m];
 
     // Apply permutation (Pb)
@@ -9020,6 +9139,114 @@ mod tests {
             }
         }
         l
+    }
+
+    #[test]
+    fn blocked_trsm_matches_unblocked_and_solves() {
+        // Blocked multi-RHS solve (inv-shaped, m=n). Call the blocked TRSM
+        // directly (n below TRSM_BLOCK_MIN) and compare to the unblocked path,
+        // and verify A·X = B.
+        for &n in &[160usize, 200, 256] {
+            let m = n;
+            let a = lu_spd_like(n, 0x91 + n as u64);
+            let (lu, perm, _s) = super::lu_factor_nxn(&a, n).expect("lu");
+            let mut bmat = vec![0.0f64; n * m]; // identity RHS (inv)
+            for i in 0..n {
+                bmat[i * m + i] = 1.0;
+            }
+            let xb = super::lu_forward_back_multi_blocked(&lu, &perm, &bmat, n, m);
+            let xu = super::lu_forward_back_multi(&lu, &perm, &bmat, n, m);
+            let mut max_diff = 0.0f64;
+            for idx in 0..n * m {
+                max_diff = max_diff.max((xb[idx] - xu[idx]).abs() / (1.0 + xu[idx].abs()));
+            }
+            assert!(max_diff < 1e-9, "blocked vs unblocked TRSM err {max_diff:e} (n={n})");
+            // A·X must reconstruct B (identity).
+            let mut max_recon = 0.0f64;
+            for i in 0..n {
+                for col in 0..m {
+                    let mut s = 0.0;
+                    for k in 0..n {
+                        s += a[i * n + k] * xb[k * m + col];
+                    }
+                    let target = if i == col { 1.0 } else { 0.0 };
+                    max_recon = max_recon.max((s - target).abs());
+                }
+            }
+            assert!(max_recon < 1e-7, "A·X=I reconstruction err {max_recon:e} (n={n})");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn blocked_trsm_speedup_report() {
+        use std::time::Instant;
+        for &n in &[1024usize, 1536, 2048] {
+            let m = n;
+            let a = lu_spd_like(n, 0x1234);
+            let (lu, perm, _s) = super::lu_factor_nxn(&a, n).unwrap();
+            let mut bmat = vec![0.0f64; n * m];
+            for i in 0..n {
+                bmat[i * m + i] = 1.0;
+            }
+            let it = if n <= 1024 { 5 } else { 3 };
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs[xs.len() / 2]
+            };
+            // Unblocked reference path is reached by calling the blocked function's
+            // sibling with the same body — re-run lu_forward_back_multi at a forced
+            // small m is wrong; instead time the production entry (blocked) vs an
+            // inline unblocked solve.
+            let unblocked = |lu: &[f64], perm: &[usize], b: &[f64]| -> Vec<f64> {
+                let mut x = vec![0.0f64; n * m];
+                for i in 0..n {
+                    let p = perm[i];
+                    x[i * m..i * m + m].copy_from_slice(&b[p * m..p * m + m]);
+                }
+                for i in 1..n {
+                    let (head, tail) = x.split_at_mut(i * m);
+                    let row_i = &mut tail[0..m];
+                    for j in 0..i {
+                        let lij = lu[i * n + j];
+                        let row_j = &head[j * m..j * m + m];
+                        for col in 0..m {
+                            row_i[col] -= lij * row_j[col];
+                        }
+                    }
+                }
+                for i in (0..n).rev() {
+                    let (head, tail) = x.split_at_mut((i + 1) * m);
+                    let row_i = &mut head[i * m..i * m + m];
+                    for j in (i + 1)..n {
+                        let uij = lu[i * n + j];
+                        let row_j = &tail[(j - i - 1) * m..(j - i - 1) * m + m];
+                        for col in 0..m {
+                            row_i[col] -= uij * row_j[col];
+                        }
+                    }
+                    let uii = lu[i * n + i];
+                    for col in 0..m {
+                        row_i[col] /= uii;
+                    }
+                }
+                x
+            };
+            let mut tu = Vec::new();
+            let mut tb = Vec::new();
+            for _ in 0..it {
+                let t = Instant::now();
+                let r = unblocked(&lu, &perm, &bmat);
+                std::hint::black_box(&r);
+                tu.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                let r = super::lu_forward_back_multi_blocked(&lu, &perm, &bmat, n, m);
+                std::hint::black_box(&r);
+                tb.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let (u, b) = (med(tu), med(tb));
+            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+        }
     }
 
     #[test]
