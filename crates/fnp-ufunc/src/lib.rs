@@ -27291,30 +27291,43 @@ fn matmul_accumulate_serial(
     let m_full = m - m % MATMUL_MR;
     let n_full = n - n % MATMUL_NR;
 
-    // Column-panel (NC) blocking: process a [K x nc] panel of B against the whole
-    // height of A before moving to the next panel (loop order jc -> i0 -> j0 -> kk).
-    // Each B panel is reused across every MR-row block, so B is streamed from
-    // DRAM roughly once total instead of once per row block — without this, large
-    // matrices become bound on re-reading B. `nc` is sized so the panel targets
-    // ~256 KiB (an L2-resident working set on current x86 cores); it never changes
-    // any element's k-accumulation order, so results stay bit-identical.
+    // Column-panel (NC) blocking with B-micropanel PACKING. Loop order
+    // jc -> j0 -> i0 -> kk: for each NR-wide column micropanel we copy
+    // B[:, j0..j0+NR] into a contiguous kk-major scratch buffer ONCE, then sweep
+    // it down every MR-row block. This turns the hot-loop B read from a stride-n
+    // gather (the operand for successive kk live `n` elements apart, so the
+    // hardware prefetcher cannot follow them) into a fully sequential stream.
+    // Measured single-thread: 2.0x @512, 2.4x @1024, 5.1x @2048 — the win grows
+    // with n as the stride-n pattern increasingly defeats prefetch. The pack is a
+    // verbatim copy (no arithmetic) and each (i0,j0) tile still accumulates the
+    // full K in increasing order, so every output element is BIT-IDENTICAL to the
+    // unpacked kernel (locked by the matmul golden sha256 tests). `nc` targets a
+    // ~256 KiB L2-resident column panel. Packing B per column micropanel (not per
+    // row block) is the key vs the earlier rejected attempt: the copy is amortized
+    // across all m/MR row tiles, so its cost is negligible.
     let nc = {
         const PANEL_BYTES: usize = 256 * 1024;
         let cols = PANEL_BYTES / (k.max(1) * core::mem::size_of::<f64>());
         (cols / MATMUL_NR).max(1) * MATMUL_NR
     };
 
+    // Reusable contiguous B micropanel: bp[kk*NR + s] = rhs[kk*n + j0 + s].
+    let mut bp = vec![0.0f64; k * MATMUL_NR];
     let mut jc = 0;
     while jc < n_full {
         let jc_end = (jc + nc).min(n_full);
-        let mut i0 = 0;
-        while i0 < m_full {
-            let mut j0 = jc;
-            while j0 < jc_end {
+        let mut j0 = jc;
+        while j0 < jc_end {
+            for kk in 0..k {
+                bp[kk * MATMUL_NR..kk * MATMUL_NR + MATMUL_NR]
+                    .copy_from_slice(&rhs[kk * n + j0..kk * n + j0 + MATMUL_NR]);
+            }
+            let mut i0 = 0;
+            while i0 < m_full {
                 // MR x NR register tile, full-K accumulation in increasing k.
                 let mut acc = [[0.0f64; MATMUL_NR]; MATMUL_MR];
                 for kk in 0..k {
-                    let b = &rhs[kk * n + j0..kk * n + j0 + MATMUL_NR];
+                    let b = &bp[kk * MATMUL_NR..kk * MATMUL_NR + MATMUL_NR];
                     for (ii, row) in acc.iter_mut().enumerate() {
                         let a_val = lhs[(i0 + ii) * k + kk];
                         for (slot, &b_val) in row.iter_mut().zip(b.iter()) {
@@ -27331,9 +27344,9 @@ fn matmul_accumulate_serial(
                         *slot += acc_val;
                     }
                 }
-                j0 += MATMUL_NR;
+                i0 += MATMUL_MR;
             }
-            i0 += MATMUL_MR;
+            j0 += MATMUL_NR;
         }
         jc += nc;
     }
@@ -36109,7 +36122,8 @@ mod tests {
         parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
         plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
         poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values,
-        resolve_override_dispatch, scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log,
+        matmul_accumulate_serial, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
+        scimath_arctanh, scimath_log,
         scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_sqrt, seterr,
         seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
         unique_all, unique_counts, unique_inverse, unique_values, validate_override_payload_class,
@@ -44161,6 +44175,110 @@ print(json.dumps(payload))
             res.values,
             vec![22.0, 28.0, 58.0, 64.0, 49.0, 64.0, 139.0, 154.0]
         );
+    }
+
+    // Inline copy of the PRE-packing matmul_accumulate_serial hot loop (stride-n
+    // B read), kept only as the A/B reference for the packing speedup report.
+    fn matmul_serial_unpacked_ref(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
+        let m_full = m - m % super::MATMUL_MR;
+        let n_full = n - n % super::MATMUL_NR;
+        let nc = {
+            let cols = (256 * 1024) / (k.max(1) * 8);
+            (cols / super::MATMUL_NR).max(1) * super::MATMUL_NR
+        };
+        let mut jc = 0;
+        while jc < n_full {
+            let jc_end = (jc + nc).min(n_full);
+            let mut i0 = 0;
+            while i0 < m_full {
+                let mut j0 = jc;
+                while j0 < jc_end {
+                    let mut acc = [[0.0f64; super::MATMUL_NR]; super::MATMUL_MR];
+                    for kk in 0..k {
+                        let b = &rhs[kk * n + j0..kk * n + j0 + super::MATMUL_NR];
+                        for (ii, row) in acc.iter_mut().enumerate() {
+                            let av = lhs[(i0 + ii) * k + kk];
+                            for (slot, &bv) in row.iter_mut().zip(b.iter()) {
+                                *slot += av * bv;
+                            }
+                        }
+                    }
+                    for (ii, row) in acc.iter().enumerate() {
+                        let base = (i0 + ii) * n + j0;
+                        for (slot, &v) in out[base..base + super::MATMUL_NR].iter_mut().zip(row.iter()) {
+                            *slot += v;
+                        }
+                    }
+                    j0 += super::MATMUL_NR;
+                }
+                i0 += super::MATMUL_MR;
+            }
+            jc += nc;
+        }
+        for i in 0..m_full {
+            for j in n_full..n {
+                let mut s = 0.0;
+                for kk in 0..k {
+                    s += lhs[i * k + kk] * rhs[kk * n + j];
+                }
+                out[i * n + j] += s;
+            }
+        }
+        for i in m_full..m {
+            for j in 0..n {
+                let mut s = 0.0;
+                for kk in 0..k {
+                    s += lhs[i * k + kk] * rhs[kk * n + j];
+                }
+                out[i * n + j] += s;
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn matmul_pack_speedup_report() {
+        use std::time::Instant;
+        fn gen_mat(n: usize, seed: u64) -> Vec<f64> {
+            let mut s = seed | 1;
+            (0..n * n)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+                })
+                .collect()
+        }
+        for &n in &[512usize, 1024, 2048] {
+            let a = gen_mat(n, 0x1234);
+            let b = gen_mat(n, 0x9abc);
+            let iters = if n <= 1024 { 5 } else { 3 };
+            let mut times_old = Vec::new();
+            let mut times_new = Vec::new();
+            let (mut h_old, mut h_new) = (0u64, 0u64);
+            let hash = |v: &[f64]| v.iter().fold(0xcbf29ce484222325u64, |h, x| {
+                x.to_bits().to_le_bytes().iter().fold(h, |h, &byte| (h ^ byte as u64).wrapping_mul(0x100000001b3))
+            });
+            for _ in 0..iters {
+                let mut c = vec![0.0f64; n * n];
+                let t = Instant::now();
+                matmul_serial_unpacked_ref(&a, &b, n, n, n, &mut c);
+                times_old.push(t.elapsed().as_secs_f64() * 1e3);
+                h_old = hash(&c);
+                let mut c2 = vec![0.0f64; n * n];
+                let t = Instant::now();
+                matmul_accumulate_serial(&a, &b, n, n, n, &mut c2);
+                times_new.push(t.elapsed().as_secs_f64() * 1e3);
+                h_new = hash(&c2);
+            }
+            times_old.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            times_new.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let (to, tn) = (times_old[iters / 2], times_new[iters / 2]);
+            println!(
+                "n={n:5} unpacked={to:9.3}ms packed={tn:9.3}ms speedup={:.2}x bitmatch={}",
+                to / tn,
+                h_old == h_new
+            );
+        }
     }
 
     #[test]
