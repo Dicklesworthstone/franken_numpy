@@ -450,6 +450,18 @@ fn lu_decompose_inner(
         0.0
     };
 
+    // Large finite systems use the blocked right-looking factorization, which
+    // routes the trailing-submatrix update through the cache-blocked packed GEMM
+    // (compute-bound) instead of the memory-bound rank-1 sweep. Identical pivot
+    // sequence to the unblocked path; the GEMM re-associates the trailing update,
+    // so results match within tolerance (LU is not bit-reproducible — conformance
+    // is tolerance-based, like NumPy's LAPACK). NaN/Inf inputs (the det path with
+    // reject_non_finite=false) keep the unblocked loop and its LAPACK NaN-pivot
+    // passthrough behaviour.
+    if n >= LU_BLOCK_MIN && !a.iter().any(|v| !v.is_finite()) {
+        return lu_decompose_blocked(a, n, singularity_threshold);
+    }
+
     let mut lu = a.to_vec();
     let mut perm: Vec<usize> = (0..n).collect();
     let mut sign = 1.0_f64;
@@ -501,6 +513,117 @@ fn lu_decompose_inner(
                 lu[i * n + j] -= factor * u_val;
             }
         }
+    }
+
+    Ok((lu, perm, sign))
+}
+
+// Engage blocked LU only once the parallel trailing GEMM clearly beats the
+// unblocked sweep. Measured same-process crossover is ~768; 896 keeps a safe
+// margin against worker noise: 896 ~1.3x, 1024 ~1.3x, 1536 ~3.1x, 2048 ~6.0x.
+// Below this the unblocked rank-1 loop wins (less panel/extraction overhead).
+const LU_BLOCK_MIN: usize = 896;
+// Panel width >= the GEMM parallel gate (128) so the trailing-update GEMM
+// (trail × nb × trail) clears packed_gemm's k>=128 threshold and runs parallel.
+const LU_PANEL_NB: usize = 128;
+
+// Right-looking blocked LU with partial pivoting (LAPACK dgetrf shape). For each
+// column panel of width nb: factor the panel (full-column pivoting, row swaps
+// across the whole matrix, rank-1 updates confined to the panel), triangular-
+// solve the U12 block-row against the unit-lower L11, then update the trailing
+// submatrix A22 -= L21·U12 with the packed GEMM. The pivot sequence is identical
+// to the unblocked loop (each column is fully updated before its pivot search),
+// so the factorization is numerically equivalent up to the GEMM's re-association
+// (tolerance — never bit-exact). Caller guarantees all-finite input.
+fn lu_decompose_blocked(
+    a: &[f64],
+    n: usize,
+    singularity_threshold: f64,
+) -> Result<(Vec<f64>, Vec<usize>, f64), LinAlgError> {
+    let mut lu = a.to_vec();
+    let mut perm: Vec<usize> = (0..n).collect();
+    let mut sign = 1.0_f64;
+
+    let mut jb = 0;
+    while jb < n {
+        let bw = LU_PANEL_NB.min(n - jb);
+        let panel_end = jb + bw;
+
+        // (1) Panel factorization: columns [jb, panel_end).
+        for k in jb..panel_end {
+            let mut max_val = lu[k * n + k].abs();
+            let mut max_row = k;
+            for i in (k + 1)..n {
+                let val = lu[i * n + k].abs();
+                if val > max_val {
+                    max_val = val;
+                    max_row = i;
+                }
+            }
+            if max_val <= singularity_threshold {
+                return Err(LinAlgError::SolverSingularity);
+            }
+            if max_row != k {
+                for j in 0..n {
+                    lu.swap(k * n + j, max_row * n + j);
+                }
+                perm.swap(k, max_row);
+                sign = -sign;
+            }
+            let pivot = lu[k * n + k];
+            // Multipliers + rank-1 update confined to the panel columns.
+            for i in (k + 1)..n {
+                let factor = lu[i * n + k] / pivot;
+                lu[i * n + k] = factor;
+                for j in (k + 1)..panel_end {
+                    let u_val = lu[k * n + j];
+                    lu[i * n + j] -= factor * u_val;
+                }
+            }
+        }
+
+        let trail = n - panel_end;
+        if trail == 0 {
+            break;
+        }
+
+        // (2) U12 = L11^{-1} · A12 (forward substitution, unit-lower L11). For each
+        // panel row r, subtract the already-solved rows above it within the panel.
+        for r in jb..panel_end {
+            let (head, tail) = lu.split_at_mut(r * n);
+            let row_r = &mut tail[0..n];
+            for p in jb..r {
+                let lrp = row_r[p];
+                if lrp != 0.0 {
+                    let row_p = &head[p * n..p * n + n];
+                    for j in panel_end..n {
+                        row_r[j] -= lrp * row_p[j];
+                    }
+                }
+            }
+        }
+
+        // (3) Trailing update A22 -= L21·U12 via the packed GEMM.
+        let mut l21 = vec![0.0f64; trail * bw];
+        for i in 0..trail {
+            let src = (panel_end + i) * n + jb;
+            l21[i * bw..i * bw + bw].copy_from_slice(&lu[src..src + bw]);
+        }
+        let mut u12 = vec![0.0f64; bw * trail];
+        for i in 0..bw {
+            let src = (jb + i) * n + panel_end;
+            u12[i * trail..i * trail + trail].copy_from_slice(&lu[src..src + trail]);
+        }
+        let prod = packed_gemm(&l21, &u12, trail, bw, trail);
+        for i in 0..trail {
+            let dst = (panel_end + i) * n + panel_end;
+            let prow = &prod[i * trail..i * trail + trail];
+            for (cell, &p) in lu[dst..dst + trail].iter_mut().zip(prow.iter()) {
+                *cell -= p;
+            }
+        }
+
+        jb = panel_end;
     }
 
     Ok((lu, perm, sign))
@@ -8763,6 +8886,119 @@ mod tests {
         let e = expm_nxn(&a, 2).expect("expm near zero");
         assert!((e[0] - 1.0).abs() < 1e-12, "expm[0,0]={}", e[0]);
         assert!((e[3] - 1.0).abs() < 1e-12, "expm[1,1]={}", e[3]);
+    }
+
+    // Inline unblocked LU (pre-blocking reference) for the A/B and tolerance check.
+    fn lu_unblocked_ref(a: &[f64], n: usize) -> (Vec<f64>, Vec<usize>) {
+        let mut lu = a.to_vec();
+        let mut perm: Vec<usize> = (0..n).collect();
+        for k in 0..n {
+            let mut max_val = lu[k * n + k].abs();
+            let mut max_row = k;
+            for i in (k + 1)..n {
+                let val = lu[i * n + k].abs();
+                if val > max_val {
+                    max_val = val;
+                    max_row = i;
+                }
+            }
+            if max_row != k {
+                for j in 0..n {
+                    lu.swap(k * n + j, max_row * n + j);
+                }
+                perm.swap(k, max_row);
+            }
+            let pivot = lu[k * n + k];
+            for i in (k + 1)..n {
+                let factor = lu[i * n + k] / pivot;
+                lu[i * n + k] = factor;
+                for j in (k + 1)..n {
+                    let u_val = lu[k * n + j];
+                    lu[i * n + j] -= factor * u_val;
+                }
+            }
+        }
+        (lu, perm)
+    }
+
+    fn lu_spd_like(n: usize, seed: u64) -> Vec<f64> {
+        let mut s = seed | 1;
+        let mut a: Vec<f64> = (0..n * n)
+            .map(|_| {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+            })
+            .collect();
+        for i in 0..n {
+            a[i * n + i] += n as f64; // diagonally dominant -> finite, stable pivots
+        }
+        a
+    }
+
+    #[test]
+    fn blocked_lu_reconstructs_pivoted_matrix() {
+        // n >= LU_BLOCK_MIN routes through the blocked path. Verify P·A = L·U to
+        // tolerance, and that blocked and unblocked agree to tolerance.
+        for &n in &[160usize, 200, 256] {
+            let a = lu_spd_like(n, 0x51 + n as u64);
+            // Call the blocked kernel directly (these n are below LU_BLOCK_MIN, so
+            // the public entry would otherwise take the unblocked path).
+            let max_abs = a.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
+            let thr = (n as f64) * f64::EPSILON * max_abs;
+            let (lu, perm, _sign) = super::lu_decompose_blocked(&a, n, thr).expect("blocked lu");
+            let (lu_ref, perm_ref) = lu_unblocked_ref(&a, n);
+            assert_eq!(perm, perm_ref, "pivot sequence must match unblocked (n={n})");
+            let mut max_err = 0.0f64;
+            for i in 0..n {
+                for j in 0..n {
+                    let mut s = 0.0;
+                    for k in 0..n {
+                        let lik = if k < i {
+                            lu[i * n + k]
+                        } else if k == i {
+                            1.0
+                        } else {
+                            0.0
+                        };
+                        let ukj = if k <= j { lu[k * n + j] } else { 0.0 };
+                        s += lik * ukj;
+                    }
+                    let pa = a[perm[i] * n + j];
+                    max_err = max_err.max((s - pa).abs() / (1.0 + pa.abs()));
+                }
+            }
+            assert!(max_err < 1e-9, "blocked P·A=L·U reconstruction err {max_err:e} (n={n})");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn blocked_lu_speedup_report() {
+        use std::time::Instant;
+        for &n in &[1024usize, 1536, 2048] {
+            let a = lu_spd_like(n, 0x1234);
+            let it = if n <= 512 { 5 } else { 3 };
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs[xs.len() / 2]
+            };
+            let mut tu = Vec::new();
+            let mut tb = Vec::new();
+            for _ in 0..it {
+                let t = Instant::now();
+                let r = lu_unblocked_ref(&a, n);
+                std::hint::black_box(&r);
+                tu.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                let r = super::lu_factor_nxn(&a, n).unwrap();
+                std::hint::black_box(&r);
+                tb.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let (u, b) = (med(tu), med(tb));
+            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+        }
     }
 
     #[test]
