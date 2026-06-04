@@ -26159,6 +26159,41 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
         return fallback();
     }
 
+    if mode == "valid" && a_arr.dtype() == DType::F64 && v_arr.dtype() == DType::F64 {
+        let n = a_arr.shape()[0];
+        let m = v_arr.shape()[0];
+        if n == 0 || m == 0 {
+            return fallback();
+        }
+
+        let a_values = a_arr.values();
+        let v_values = v_arr.values();
+        let out_len = n.max(m) - n.min(m) + 1;
+        let mut values = Vec::with_capacity(out_len);
+        if n >= m {
+            for offset in 0..out_len {
+                let mut acc = 0.0;
+                for j in 0..m {
+                    acc += a_values[offset + j] * v_values[j];
+                }
+                values.push(acc);
+            }
+        } else {
+            let base = m - n;
+            for offset in 0..out_len {
+                let v_start = base - offset;
+                let mut acc = 0.0;
+                for j in 0..n {
+                    acc += a_values[j] * v_values[v_start + j];
+                }
+                values.push(acc);
+            }
+        }
+
+        let result = UFuncArray::new(vec![out_len], values, DType::F64).map_err(map_ufunc_error)?;
+        return build_numpy_array_from_ufunc(py, &result);
+    }
+
     let result = match a_arr.correlate_mode(&v_arr, mode) {
         Ok(result) => result,
         Err(_) => return fallback(),
@@ -29392,13 +29427,23 @@ mod tests {
                 "metadata gate must reject 256^3 before the Rust extraction copy"
             );
 
+            // A dimension above PY_NATIVE_GEMM_MAX_DIM (1024 since e6468d9c raised the
+            // crossover from 896) must stay on the numpy fallback. 1024 itself is now
+            // at the cap and eligible, so test one genuinely above it.
+            let cap = super::PY_NATIVE_GEMM_MAX_DIM;
             let too_large_a =
-                UFuncArray::new(vec![1024, 320], vec![1.0; 1024 * 320], DType::F64).unwrap();
+                UFuncArray::new(vec![1280, 320], vec![1.0; 1280 * 320], DType::F64).unwrap();
             let too_large_b =
                 UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F64).unwrap();
             assert!(
                 !python_native_gemm_f64_2d_eligible(&too_large_a, &too_large_b),
-                "unprofiled >896 dimension should stay on numpy fallback"
+                "dimension above the {cap} cap should stay on numpy fallback"
+            );
+            // And the cap boundary itself is eligible under the raised crossover.
+            let at_cap_a = UFuncArray::new(vec![cap, 320], vec![1.0; cap * 320], DType::F64).unwrap();
+            assert!(
+                python_native_gemm_f64_2d_eligible(&at_cap_a, &too_large_b),
+                "dimension at the {cap} cap should take the native gate"
             );
 
             let f32_a = UFuncArray::new(vec![320, 320], vec![1.0; 320 * 320], DType::F32).unwrap();
