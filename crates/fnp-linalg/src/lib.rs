@@ -771,8 +771,8 @@ fn lu_forward_back_multi_blocked(
                 }
             }
             let uii = lu[i * n + i];
-            for col in 0..m {
-                row_i[col] /= uii;
+            for cell in row_i.iter_mut().take(m) {
+                *cell /= uii;
             }
         }
         if ib > 0 {
@@ -2969,9 +2969,9 @@ fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>,
                     wtv += ww[lr * nb + q] * vl;
                     vtv += vv[lr * nb + q] * vl;
                 }
-                for i in (j + 1)..n {
+                for (i, ui) in u.iter_mut().enumerate().take(n).skip(j + 1) {
                     let ir = i - jb;
-                    u[i] -= vv[ir * nb + q] * wtv + ww[ir * nb + q] * vtv;
+                    *ui -= vv[ir * nb + q] * wtv + ww[ir * nb + q] * vtv;
                 }
             }
             for ui in u.iter_mut().take(n).skip(j + 1) {
@@ -3201,7 +3201,7 @@ fn tridiag_reduce_values(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
 /// Implicit QR iteration on symmetric tridiagonal `(d, e)` to find eigenvalues.
 /// Modifies `d` and `e` in-place; eigenvalues end up on `d`.  If `q` is `Some`,
 /// accumulates the rotation product into the n×n matrix (for eigenvectors).
-fn tridiag_eig_qr(d: &mut [f64], e: &mut [f64], mut q: Option<&mut [f64]>, n: usize) {
+fn tridiag_eig_qr(d: &mut [f64], e: &mut [f64], q: Option<&mut [f64]>, n: usize) {
     let eps = f64::EPSILON;
     let max_iter = EIGEN_QR_ITERATION_COEFF * n * n;
 
@@ -3302,7 +3302,7 @@ fn tridiag_eig_qr(d: &mut [f64], e: &mut [f64], mut q: Option<&mut [f64]>, n: us
     }
 
     // Transpose the accumulated Q^T back into the caller's Q.
-    if let (Some(qq), Some(t)) = (q.as_deref_mut(), qt.as_ref()) {
+    if let (Some(qq), Some(t)) = (q, qt.as_ref()) {
         for i in 0..n {
             for j in 0..n {
                 qq[i * n + j] = t[j * n + i];
@@ -3483,7 +3483,7 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
         // gives cubic convergence and resolves complex pairs without the
         // single-shift stagnation that made eigvals pathologically slow.
         let m = p - 1;
-        let (s, t) = if since_defl > 0 && since_defl % 10 == 0 {
+        let (s, t) = if since_defl > 0 && since_defl.is_multiple_of(10) {
             // Exceptional shift to break a rare cycle: complex shifts of magnitude
             // ~the local subdiagonal scale.
             let sa = h[m * n + (m - 1)].abs()
@@ -4185,6 +4185,22 @@ pub fn matrix_power_nxn(a: &[f64], n: usize, p: i64) -> Result<Vec<f64>, LinAlgE
     }
 
     let base = if p < 0 { inv_nxn(a, n)? } else { a.to_vec() };
+
+    let can_elide_initial_identity_gemm =
+        p > 0 && (p as u64) & 1 == 1 && base.iter().all(|&v| v.is_finite() && v != 0.0);
+    if can_elide_initial_identity_gemm {
+        let mut exp = (p as u64) >> 1;
+        let mut cur = base;
+        let mut result = cur.clone();
+        while exp > 0 {
+            cur = mat_mul_flat(&cur, &cur, n);
+            if exp & 1 == 1 {
+                result = mat_mul_flat(&result, &cur, n);
+            }
+            exp >>= 1;
+        }
+        return Ok(result);
+    }
 
     let mut exp = p.unsigned_abs();
     let mut result = vec![0.0; n * n];
@@ -9181,6 +9197,101 @@ mod tests {
     }
 
     #[test]
+    fn matrix_power_initial_identity_elision_matches_old_schedule_sha256() {
+        fn old_schedule(a: &[f64], n: usize, p: u64) -> Vec<f64> {
+            let mut exp = p;
+            let mut result = vec![0.0; n * n];
+            for i in 0..n {
+                result[i * n + i] = 1.0;
+            }
+            let mut cur = a.to_vec();
+            while exp > 0 {
+                if exp & 1 == 1 {
+                    result = mat_mul_flat(&result, &cur, n);
+                }
+                exp >>= 1;
+                if exp > 0 {
+                    cur = mat_mul_flat(&cur, &cur, n);
+                }
+            }
+            result
+        }
+
+        let n = 32usize;
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let a: Vec<f64> = (0..n * n)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                0.25 + ((state >> 33) as f64) / (u32::MAX as f64)
+            })
+            .collect();
+
+        let actual = matrix_power_nxn(&a, n, 3).expect("A^3");
+        let expected = old_schedule(&a, n, 3);
+        assert_eq!(actual.len(), expected.len());
+        for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
+            assert_eq!(
+                a.to_bits(),
+                e.to_bits(),
+                "matrix_power optimized schedule drifted at {index}"
+            );
+        }
+
+        let mut hasher = Sha256::new();
+        for v in &actual {
+            hasher.update(v.to_bits().to_le_bytes());
+        }
+        let digest = hasher.finalize();
+        let digest = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "4cc72d5780b2d27b5e8e544630012f09bb268738be641b8481476fa7e15541a3",
+            "matrix_power finite-nonzero golden digest drifted"
+        );
+    }
+
+    #[test]
+    fn matrix_power_identity_elision_falls_back_for_zero_and_nan_bits() {
+        fn old_schedule(a: &[f64], n: usize, p: u64) -> Vec<f64> {
+            let mut exp = p;
+            let mut result = vec![0.0; n * n];
+            for i in 0..n {
+                result[i * n + i] = 1.0;
+            }
+            let mut cur = a.to_vec();
+            while exp > 0 {
+                if exp & 1 == 1 {
+                    result = mat_mul_flat(&result, &cur, n);
+                }
+                exp >>= 1;
+                if exp > 0 {
+                    cur = mat_mul_flat(&cur, &cur, n);
+                }
+            }
+            result
+        }
+
+        let cases = [
+            [1.0, -0.0, 2.0, 3.0],
+            [1.0, f64::NAN, 2.0, 3.0],
+            [1.0, f64::INFINITY, 2.0, 3.0],
+        ];
+        for a in cases {
+            let actual = matrix_power_nxn(&a, 2, 3).expect("fallback A^3");
+            let expected = old_schedule(&a, 2, 3);
+            for (index, (a, e)) in actual.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    a.to_bits(),
+                    e.to_bits(),
+                    "matrix_power fallback drifted at {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn lstsq_nxn_exact_system() {
         // 3x2 system with exact solution: A*x = b
         // A = [[1,0],[0,1],[1,1]], b = [1,2,3]
@@ -9717,7 +9828,8 @@ mod tests {
                 .collect()
         }
         // eig (non-symmetric): hessenberg_reduce + hessenberg_qr_iter (no Z).
-        for &n in &[512usize] {
+        {
+            let n = 512usize;
             let a = rnd(n, 0x77);
             let t = Instant::now();
             let (mut h, _q) = super::hessenberg_reduce(&a, n);
@@ -9728,7 +9840,8 @@ mod tests {
             println!("eig n={n}: hessenberg={t_hess:.1}ms qr_iter={t_qr:.1}ms");
         }
         // eigh (with vectors): tridiag_reduce (with Q) + tridiag_eig_qr (with Q).
-        for &n in &[1024usize] {
+        {
+            let n = 1024usize;
             let a = chol_spd(n, 0x88);
             let t = Instant::now();
             let (mut d, mut e, mut q) = super::tridiag_reduce(&a, n);
@@ -10549,8 +10662,8 @@ mod tests {
                         }
                     }
                     let uii = lu[i * n + i];
-                    for col in 0..m {
-                        row_i[col] /= uii;
+                    for cell in row_i.iter_mut().take(m) {
+                        *cell /= uii;
                     }
                 }
                 x
@@ -10686,7 +10799,7 @@ mod tests {
             let max_abs = a.iter().map(|v| v.abs()).fold(0.0f64, f64::max);
             let thr = (n as f64) * f64::EPSILON * max_abs;
             let (lu, perm, _sign) = super::lu_decompose_blocked(&a, n, thr).expect("blocked lu");
-            let (lu_ref, perm_ref) = lu_unblocked_ref(&a, n);
+            let (_lu_ref, perm_ref) = lu_unblocked_ref(&a, n);
             assert_eq!(perm, perm_ref, "pivot sequence must match unblocked (n={n})");
             let mut max_err = 0.0f64;
             for i in 0..n {

@@ -23,7 +23,7 @@ fn main() {
             let t = Instant::now();
             let (dr, di) = complex_det_nxn(&a, n).unwrap();
             ts.push(t.elapsed().as_secs_f64() * 1e3);
-            cs = (dr.to_bits() ^ di.to_bits());
+            cs = dr.to_bits() ^ di.to_bits();
         }
         println!("n={n:5} {:9.3} ms checksum=0x{cs:016x}", median(ts));
     }
