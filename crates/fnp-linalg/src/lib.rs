@@ -1026,6 +1026,92 @@ pub fn solve_triangular(
 /// Cholesky decomposition for NxN positive-definite matrix.
 /// Returns the lower-triangular factor L such that A = L L^T.
 /// `a` is n*n row-major.
+// Blocked Cholesky engages at this dimension (same crossover rationale as the
+// blocked LU); below it the unblocked dot-product factorization wins. Panel width
+// >= the GEMM parallel gate (128) so the trailing-update GEMM runs parallel.
+const CHOL_BLOCK_MIN: usize = 896;
+const CHOL_PANEL_NB: usize = 128;
+
+// Right-looking blocked Cholesky (LAPACK dpotrf shape). For each width-nb column
+// panel: factor the nb×nb diagonal block (unblocked), solve the panel below it
+// (L21 = A21·L11^{-T}), then update the trailing block A22 -= L21·L21^T with the
+// cache-blocked packed GEMM. Numerically equivalent to the unblocked dot-product
+// factorization up to the GEMM's re-association (tolerance — Cholesky is not
+// bit-reproducible). Caller guarantees finite input.
+fn cholesky_blocked(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    let mut l = vec![0.0f64; n * n]; // output (lower triangular)
+    let mut work = a.to_vec(); // trailing submatrix, updated in place (lower read)
+    let mut jb = 0;
+    while jb < n {
+        let bw = CHOL_PANEL_NB.min(n - jb);
+        let pend = jb + bw;
+
+        // (1) Factor the diagonal block A11 [jb,pend)×[jb,pend) into L11.
+        for i in jb..pend {
+            for j in jb..=i {
+                let mut sum = work[i * n + j];
+                for k in jb..j {
+                    sum -= l[i * n + k] * l[j * n + k];
+                }
+                if i == j {
+                    if sum <= 0.0 {
+                        return Err(LinAlgError::CholeskyContractViolation(
+                            "matrix is not positive definite",
+                        ));
+                    }
+                    l[i * n + j] = sum.sqrt();
+                } else {
+                    l[i * n + j] = sum / l[j * n + j];
+                }
+            }
+        }
+
+        let trail = n - pend;
+        if trail == 0 {
+            break;
+        }
+
+        // (2) Panel below the diagonal: L21 = A21·L11^{-T} (forward substitution
+        // per row over the panel columns).
+        for i in pend..n {
+            for j in jb..pend {
+                let mut sum = work[i * n + j];
+                for k in jb..j {
+                    sum -= l[i * n + k] * l[j * n + k];
+                }
+                l[i * n + j] = sum / l[j * n + j];
+            }
+        }
+
+        // (3) Trailing update A22 -= L21·L21^T via the packed GEMM.
+        let mut l21 = vec![0.0f64; trail * bw];
+        for i in 0..trail {
+            let src = (pend + i) * n + jb;
+            l21[i * bw..i * bw + bw].copy_from_slice(&l[src..src + bw]);
+        }
+        let mut l21t = vec![0.0f64; bw * trail];
+        for i in 0..trail {
+            for k in 0..bw {
+                l21t[k * trail + i] = l21[i * bw + k];
+            }
+        }
+        let g = packed_gemm(&l21, &l21t, trail, bw, trail);
+        for i in 0..trail {
+            let dst = (pend + i) * n + pend;
+            for (cell, &gij) in work[dst..dst + trail]
+                .iter_mut()
+                .zip(&g[i * trail..i * trail + trail])
+            {
+                *cell -= gij;
+            }
+        }
+
+        jb = pend;
+    }
+
+    Ok(l)
+}
+
 pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) || n == 0 {
         return Err(LinAlgError::CholeskyContractViolation(
@@ -1036,6 +1122,10 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         return Err(LinAlgError::CholeskyContractViolation(
             "cholesky requires finite entries",
         ));
+    }
+
+    if n >= CHOL_BLOCK_MIN {
+        return cholesky_blocked(a, n);
     }
 
     let mut l = vec![0.0; n * n];
@@ -8886,6 +8976,104 @@ mod tests {
         let e = expm_nxn(&a, 2).expect("expm near zero");
         assert!((e[0] - 1.0).abs() < 1e-12, "expm[0,0]={}", e[0]);
         assert!((e[3] - 1.0).abs() < 1e-12, "expm[1,1]={}", e[3]);
+    }
+
+    // Random symmetric positive-definite matrix: A = B·B^T + n·I.
+    fn chol_spd(n: usize, seed: u64) -> Vec<f64> {
+        let mut s = seed | 1;
+        let b: Vec<f64> = (0..n * n)
+            .map(|_| {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+            })
+            .collect();
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut acc = 0.0;
+                for k in 0..n {
+                    acc += b[i * n + k] * b[j * n + k];
+                }
+                a[i * n + j] = acc;
+            }
+            a[i * n + i] += n as f64;
+        }
+        a
+    }
+
+    // Inline unblocked dot-product Cholesky (pre-blocking reference).
+    fn cholesky_unblocked_ref(a: &[f64], n: usize) -> Vec<f64> {
+        let mut l = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..=i {
+                let mut sum = a[i * n + j];
+                for k in 0..j {
+                    sum -= l[i * n + k] * l[j * n + k];
+                }
+                if i == j {
+                    l[i * n + j] = sum.sqrt();
+                } else {
+                    l[i * n + j] = sum / l[j * n + j];
+                }
+            }
+        }
+        l
+    }
+
+    #[test]
+    fn blocked_cholesky_reconstructs_and_matches_unblocked() {
+        // n below CHOL_BLOCK_MIN, so call the blocked kernel directly. Verify
+        // L·L^T = A and that blocked agrees with the unblocked reference (tol).
+        for &n in &[160usize, 200, 256] {
+            let a = chol_spd(n, 0x71 + n as u64);
+            let lb = super::cholesky_blocked(&a, n).expect("blocked chol");
+            let lr = cholesky_unblocked_ref(&a, n);
+            let mut max_recon = 0.0f64;
+            let mut max_diff = 0.0f64;
+            for i in 0..n {
+                for j in 0..=i {
+                    let mut s = 0.0;
+                    for k in 0..=j {
+                        s += lb[i * n + k] * lb[j * n + k];
+                    }
+                    max_recon = max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+                    max_diff =
+                        max_diff.max((lb[i * n + j] - lr[i * n + j]).abs() / (1.0 + lr[i * n + j].abs()));
+                }
+            }
+            assert!(max_recon < 1e-9, "blocked L·L^T=A err {max_recon:e} (n={n})");
+            assert!(max_diff < 1e-9, "blocked vs unblocked err {max_diff:e} (n={n})");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn blocked_cholesky_speedup_report() {
+        use std::time::Instant;
+        for &n in &[1024usize, 1536, 2048] {
+            let a = chol_spd(n, 0x1234);
+            let it = if n <= 1024 { 5 } else { 3 };
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs[xs.len() / 2]
+            };
+            let mut tu = Vec::new();
+            let mut tb = Vec::new();
+            for _ in 0..it {
+                let t = Instant::now();
+                let r = cholesky_unblocked_ref(&a, n);
+                std::hint::black_box(&r);
+                tu.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                let r = super::cholesky_nxn(&a, n).unwrap();
+                std::hint::black_box(&r);
+                tb.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let (u, b) = (med(tu), med(tb));
+            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+        }
     }
 
     // Inline unblocked LU (pre-blocking reference) for the A/B and tolerance check.
