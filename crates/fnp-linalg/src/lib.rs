@@ -1473,6 +1473,162 @@ pub fn tensorinv(
 
 /// QR decomposition via Householder reflections for NxN matrix.
 /// Returns (q, r) as flat row-major n*n buffers.
+// Blocked QR engages at this size; below it the unblocked Householder loop wins.
+const QR_BLOCK_MIN: usize = 896;
+const QR_PANEL_NB: usize = 128;
+
+// Blocked Householder QR via the compact-WY representation (LAPACK dgeqrf +
+// dlarft/dlarfb shape). For each width-nb column panel: factor the panel
+// unblocked (storing the reflector vectors V and coefficients tau), build the
+// nb×nb upper-triangular T so that H_jb·…·H_{pend-1} = I − V·T·V^T, then apply
+// that single block reflector to the trailing R columns and to Q as GEMMs
+// (I − V·T·V^T)·R_trail and Q·(I − V·T·V^T). Same reflector/sign convention as
+// the unblocked path, so Q and R match it within tolerance — never bit-exact
+// (Householder QR is not bit-reproducible; conformance is tolerance-based like
+// NumPy's LAPACK). Caller guarantees finite input.
+fn qr_blocked(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
+    let mut q = vec![0.0f64; n * n];
+    for i in 0..n {
+        q[i * n + i] = 1.0;
+    }
+    let mut r = a.to_vec();
+
+    let mut jb = 0;
+    while jb < n {
+        let nb = QR_PANEL_NB.min(n - jb);
+        let pend = jb + nb;
+        let h = n - jb; // active row height (reflectors touch rows jb..n)
+
+        // V stored as h×nb (row r-th = global row jb+r); column t = reflector v_{jb+t}.
+        let mut vv = vec![0.0f64; h * nb];
+        let mut taus = vec![0.0f64; nb];
+
+        // (1) Panel factorization — unblocked within the panel columns [jb, pend).
+        for t in 0..nb {
+            let k = jb + t;
+            let mut col_norm_sq = 0.0;
+            for i in k..n {
+                col_norm_sq += r[i * n + k] * r[i * n + k];
+            }
+            let col_norm = col_norm_sq.sqrt();
+            if col_norm == 0.0 {
+                continue; // null reflector (tau=0, v=0)
+            }
+            let sign = if r[k * n + k] >= 0.0 { 1.0 } else { -1.0 };
+            for i in k..n {
+                vv[(i - jb) * nb + t] = r[i * n + k];
+            }
+            vv[(k - jb) * nb + t] += sign * col_norm;
+            let mut v_norm_sq = 0.0;
+            for i in k..n {
+                let x = vv[(i - jb) * nb + t];
+                v_norm_sq += x * x;
+            }
+            if v_norm_sq == 0.0 {
+                continue;
+            }
+            let scale = 2.0 / v_norm_sq;
+            taus[t] = scale;
+            // Apply H_k to the panel columns [k, pend) (the trailing columns
+            // [pend, n) are deferred to the block GEMM in step 3).
+            for j in k..pend {
+                let mut dot = 0.0;
+                for i in k..n {
+                    dot += vv[(i - jb) * nb + t] * r[i * n + j];
+                }
+                let f = scale * dot;
+                for i in k..n {
+                    r[i * n + j] -= f * vv[(i - jb) * nb + t];
+                }
+            }
+        }
+
+        // (2) Build T (nb×nb upper triangular), forward direction.
+        let mut tm = vec![0.0f64; nb * nb];
+        for t in 0..nb {
+            tm[t * nb + t] = taus[t];
+            if taus[t] == 0.0 {
+                continue;
+            }
+            // col[i] = -tau_t · (V[:,i]·V[:,t]) for i in 0..t.
+            let mut col = vec![0.0f64; t];
+            for (i, ci) in col.iter_mut().enumerate() {
+                let mut dot = 0.0;
+                for row in 0..h {
+                    dot += vv[row * nb + i] * vv[row * nb + t];
+                }
+                *ci = -taus[t] * dot;
+            }
+            // T[0:t, t] = T[0:t, 0:t] · col (T upper triangular).
+            for i in 0..t {
+                let mut s = 0.0;
+                for l in i..t {
+                    s += tm[i * nb + l] * col[l];
+                }
+                tm[i * nb + t] = s;
+            }
+        }
+
+        // V^T (nb×h), reused by steps 3 and 4.
+        let mut vt = vec![0.0f64; nb * h];
+        for row in 0..h {
+            for t in 0..nb {
+                vt[t * h + row] = vv[row * nb + t];
+            }
+        }
+
+        // (3) Trailing R is applied on the LEFT in increasing-k order, i.e.
+        // H_{pend-1}·…·H_jb = (I − V·T·V^T)^T = I − V·T^T·V^T, so use T^T here
+        // (Q, applied on the right in forward order, uses T in step 4).
+        let mut tmt = vec![0.0f64; nb * nb];
+        for i in 0..nb {
+            for j in 0..nb {
+                tmt[i * nb + j] = tm[j * nb + i];
+            }
+        }
+        let trail = n - pend;
+        if trail > 0 {
+            let mut rt = vec![0.0f64; h * trail];
+            for row in 0..h {
+                let src = (jb + row) * n + pend;
+                rt[row * trail..row * trail + trail].copy_from_slice(&r[src..src + trail]);
+            }
+            let w1 = packed_gemm(&vt, &rt, nb, h, trail); // V^T·R_trail
+            let w2 = packed_gemm(&tmt, &w1, nb, nb, trail); // T^T·W1
+            let vw2 = packed_gemm(&vv, &w2, h, nb, trail); // V·W2
+            for row in 0..h {
+                let dst = (jb + row) * n + pend;
+                for (cell, &x) in r[dst..dst + trail]
+                    .iter_mut()
+                    .zip(&vw2[row * trail..row * trail + trail])
+                {
+                    *cell -= x;
+                }
+            }
+        }
+
+        // (4) Q := Q·(I − V·T·V^T) = Q − ((Q_active·V)·T)·V^T.
+        let mut qa = vec![0.0f64; n * h];
+        for i in 0..n {
+            let src = i * n + jb;
+            qa[i * h..i * h + h].copy_from_slice(&q[src..src + h]);
+        }
+        let qv = packed_gemm(&qa, &vv, n, h, nb); // Q_active·V
+        let qvt = packed_gemm(&qv, &tm, n, nb, nb); // ·T
+        let upd = packed_gemm(&qvt, &vt, n, nb, h); // ·V^T
+        for i in 0..n {
+            let dst = i * n + jb;
+            for (cell, &x) in q[dst..dst + h].iter_mut().zip(&upd[i * h..i * h + h]) {
+                *cell -= x;
+            }
+        }
+
+        jb = pend;
+    }
+
+    Ok((q, r))
+}
+
 pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) || n == 0 {
         return Err(LinAlgError::ShapeContractViolation(
@@ -1483,6 +1639,10 @@ pub fn qr_nxn(a: &[f64], n: usize) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> 
         return Err(LinAlgError::NormDetRankPolicyViolation(
             "matrix entries must be finite for QR",
         ));
+    }
+
+    if n >= QR_BLOCK_MIN {
+        return qr_blocked(a, n);
     }
 
     // Start with Q = I, R = A
@@ -9139,6 +9299,139 @@ mod tests {
             }
         }
         l
+    }
+
+    fn qr_rand(n: usize, seed: u64) -> Vec<f64> {
+        let mut s = seed | 1;
+        (0..n * n)
+            .map(|_| {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn blocked_qr_reconstructs_and_matches_unblocked() {
+        // n below QR_BLOCK_MIN -> call the blocked kernel directly; compare to the
+        // unblocked path. Verify Q·R = A, Q orthogonal, and blocked == unblocked.
+        for &n in &[160usize, 200, 256] {
+            let a = qr_rand(n, 0x41 + n as u64);
+            let (qb, rb) = super::qr_blocked(&a, n).expect("blocked qr");
+            let (qu, ru) = super::qr_nxn(&a, n).expect("unblocked qr");
+            let mut max_recon = 0.0f64;
+            let mut max_orth = 0.0f64;
+            let mut max_q = 0.0f64;
+            let mut max_r = 0.0f64;
+            for i in 0..n {
+                for j in 0..n {
+                    // Q·R
+                    let mut s = 0.0;
+                    for k in 0..n {
+                        s += qb[i * n + k] * rb[k * n + j];
+                    }
+                    max_recon = max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+                    // Q^T·Q
+                    let mut o = 0.0;
+                    for k in 0..n {
+                        o += qb[k * n + i] * qb[k * n + j];
+                    }
+                    let target = if i == j { 1.0 } else { 0.0 };
+                    max_orth = max_orth.max((o - target).abs());
+                    max_q = max_q.max((qb[i * n + j] - qu[i * n + j]).abs() / (1.0 + qu[i * n + j].abs()));
+                    max_r = max_r.max((rb[i * n + j] - ru[i * n + j]).abs() / (1.0 + ru[i * n + j].abs()));
+                }
+            }
+            assert!(max_recon < 1e-9, "Q·R=A err {max_recon:e} (n={n})");
+            assert!(max_orth < 1e-9, "Q orthogonality err {max_orth:e} (n={n})");
+            assert!(max_q < 1e-9, "blocked vs unblocked Q err {max_q:e} (n={n})");
+            assert!(max_r < 1e-9, "blocked vs unblocked R err {max_r:e} (n={n})");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn blocked_qr_speedup_report() {
+        use std::time::Instant;
+        for &n in &[1024usize, 1536, 2048] {
+            let a = qr_rand(n, 0x1234);
+            let it = if n <= 1024 { 5 } else { 3 };
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                xs[xs.len() / 2]
+            };
+            let mut tu = Vec::new();
+            let mut tb = Vec::new();
+            for _ in 0..it {
+                let t = Instant::now();
+                // Force the unblocked reference path by temporarily ... call qr_nxn
+                // requires n<QR_BLOCK_MIN; instead time the blocked entry and an
+                // explicit unblocked clone below. Here `super::qr_nxn` would route to
+                // blocked, so we time qr_blocked vs the inline unblocked.
+                let r = qr_unblocked_ref(&a, n);
+                std::hint::black_box(&r);
+                tu.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                let r = super::qr_blocked(&a, n).unwrap();
+                std::hint::black_box(&r);
+                tb.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let (u, b) = (med(tu), med(tb));
+            println!("n={n:5} unblocked={u:9.2}ms blocked={b:9.2}ms speedup={:.2}x", u / b);
+        }
+    }
+
+    // Inline unblocked Householder QR (matches qr_nxn's algorithm) for the A/B.
+    fn qr_unblocked_ref(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
+        let mut q = vec![0.0f64; n * n];
+        for i in 0..n {
+            q[i * n + i] = 1.0;
+        }
+        let mut r = a.to_vec();
+        let mut v = vec![0.0f64; n];
+        for k in 0..n {
+            let mut cns = 0.0;
+            for i in k..n {
+                cns += r[i * n + k] * r[i * n + k];
+            }
+            let cn = cns.sqrt();
+            if cn == 0.0 {
+                continue;
+            }
+            let sign = if r[k * n + k] >= 0.0 { 1.0 } else { -1.0 };
+            for i in k..n {
+                v[i] = r[i * n + k];
+            }
+            v[k] += sign * cn;
+            let vns: f64 = v[k..].iter().map(|x| x * x).sum();
+            if vns == 0.0 {
+                continue;
+            }
+            let scale = 2.0 / vns;
+            for j in k..n {
+                let mut dot = 0.0;
+                for i in k..n {
+                    dot += v[i] * r[i * n + j];
+                }
+                let f = scale * dot;
+                for i in k..n {
+                    r[i * n + j] -= f * v[i];
+                }
+            }
+            for i in 0..n {
+                let mut dot = 0.0;
+                for j in k..n {
+                    dot += q[i * n + j] * v[j];
+                }
+                let f = scale * dot;
+                for j in k..n {
+                    q[i * n + j] -= f * v[j];
+                }
+            }
+        }
+        (q, r)
     }
 
     #[test]
