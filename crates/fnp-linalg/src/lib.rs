@@ -429,6 +429,10 @@ pub fn inv_2x2(matrix: [[f64; 2]; 2]) -> Result<[[f64; 2]; 2], LinAlgError> {
 /// Returns (lu, perm, sign) with L and U packed into one flat row-major
 /// buffer.  `perm[i]` records the original row index that ended up at
 /// position i after pivoting; `sign` is +1 or -1.
+// Minimum trailing-submatrix height below which the rank-1 LU update stays
+// serial (per-pivot rayon dispatch would cost more than the small update saves).
+const LU_PARALLEL_MIN_TRAILING: usize = 128;
+
 fn lu_decompose_inner(
     a: &[f64],
     n: usize,
@@ -487,12 +491,32 @@ fn lu_decompose_inner(
             continue;
         }
 
-        for i in (k + 1)..n {
-            let factor = lu[i * n + k] / pivot;
-            lu[i * n + k] = factor;
-            for j in (k + 1)..n {
-                let u_val = lu[k * n + j];
-                lu[i * n + j] -= factor * u_val;
+        // Rank-1 trailing-submatrix update. For a fixed pivot k every trailing
+        // row i depends only on its own data and the (unchanged) pivot row, and
+        // writes a disjoint row slice, so the rows update independently. Each
+        // lu[i,j] takes exactly one `-= factor*u_val`, so there is no
+        // reassociation — the parallel result is BIT-IDENTICAL to the serial
+        // loop (all existing goldens hold). Gated on the trailing height so the
+        // O(n^3) elimination amortizes the per-pivot dispatch.
+        let trailing_rows = n - (k + 1);
+        if trailing_rows >= LU_PARALLEL_MIN_TRAILING && rayon::current_num_threads() >= 2 {
+            let (head, tail) = lu.split_at_mut((k + 1) * n);
+            let u_row = &head[k * n..k * n + n];
+            tail.par_chunks_mut(n).for_each(|row| {
+                let factor = row[k] / pivot;
+                row[k] = factor;
+                for j in (k + 1)..n {
+                    row[j] -= factor * u_row[j];
+                }
+            });
+        } else {
+            for i in (k + 1)..n {
+                let factor = lu[i * n + k] / pivot;
+                lu[i * n + k] = factor;
+                for j in (k + 1)..n {
+                    let u_val = lu[k * n + j];
+                    lu[i * n + j] -= factor * u_val;
+                }
             }
         }
     }
