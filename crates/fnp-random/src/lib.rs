@@ -2117,10 +2117,8 @@ fn sample_ziggurat_normal_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) -> f64 
         r >>= 8;
         let sign = r & 0x1;
         let rabs = (r >> 1) & 0x000F_FFFF_FFFF_FFFF;
-        let mut x = rabs as f64 * ZIGGURAT_NOR_W[idx];
-        if (sign & 0x1) != 0 {
-            x = -x;
-        }
+        let x_abs = rabs as f64 * ZIGGURAT_NOR_W[idx];
+        let x = f64::from_bits(x_abs.to_bits() | (sign << 63));
         if rabs < ZIGGURAT_NOR_K[idx] {
             return x;
         }
