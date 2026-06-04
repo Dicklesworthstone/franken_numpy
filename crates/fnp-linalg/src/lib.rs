@@ -3958,118 +3958,114 @@ pub fn pinv_hermitian_nxn_with_tolerance_aliases(
 const MATMUL_PARALLEL_MIN_DIM: usize = 128;
 const MATMUL_ROW_BLOCK: usize = 4;
 
-fn mat_mul_flat_row_block4(a: &[f64], b: &[f64], n: usize, row_start: usize, c: &mut [f64]) {
-    if c.len() == MATMUL_ROW_BLOCK * n {
-        let (c0, rest) = c.split_at_mut(n);
-        let (c1, rest) = rest.split_at_mut(n);
-        let (c2, c3) = rest.split_at_mut(n);
-        let a0 = &a[row_start * n..row_start * n + n];
-        let a1 = &a[(row_start + 1) * n..(row_start + 1) * n + n];
-        let a2 = &a[(row_start + 2) * n..(row_start + 2) * n + n];
-        let a3 = &a[(row_start + 3) * n..(row_start + 3) * n + n];
-        for k in 0..n {
-            let b_row = &b[k * n..k * n + n];
-            let a0k = a0[k];
-            let a1k = a1[k];
-            let a2k = a2[k];
-            let a3k = a3[k];
-            for j in 0..n {
-                let b_kj = b_row[j];
-                c0[j] += a0k * b_kj;
-                c1[j] += a1k * b_kj;
-                c2[j] += a2k * b_kj;
-                c3[j] += a3k * b_kj;
+const PACKED_MR: usize = 4;
+const PACKED_NR: usize = 8;
+
+// Cache-blocked, B-packed GEMM serial kernel: A(m×k)·B(k×n) accumulated into a
+// pre-zeroed `out` (m×n). Ported from fnp-ufunc's matmul_accumulate_serial
+// (e509860c): NC column-panel blocking keeps a ~256 KiB B panel L2-resident, the
+// panel is packed into a contiguous kk-major micropanel so the hot B read is a
+// sequential (prefetchable) stream instead of the stride-n / DRAM-restreamed
+// access of the old ikj kernel, and an MR×NR register tile accumulates the full
+// k in ascending order. Every output element sums k in the SAME ascending order
+// as the naive ikj loop, so the result is BIT-IDENTICAL (locked by the
+// mat_mul_*_row_parallel_matches_serial_reference_and_golden_sha256 tests).
+fn packed_gemm_serial(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
+    let m_full = m - m % PACKED_MR;
+    let n_full = n - n % PACKED_NR;
+    let nc = {
+        let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
+        (cols / PACKED_NR).max(1) * PACKED_NR
+    };
+    let mut bp = vec![0.0f64; k * PACKED_NR];
+    let mut jc = 0;
+    while jc < n_full {
+        let jc_end = (jc + nc).min(n_full);
+        let mut j0 = jc;
+        while j0 < jc_end {
+            for kk in 0..k {
+                bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]
+                    .copy_from_slice(&b[kk * n + j0..kk * n + j0 + PACKED_NR]);
             }
-        }
-    } else {
-        let rows = c.len() / n;
-        for local_i in 0..rows {
-            let i = row_start + local_i;
-            let c_row = &mut c[local_i * n..local_i * n + n];
-            let a_row = &a[i * n..i * n + n];
-            for k in 0..n {
-                let a_ik = a_row[k];
-                let b_row = &b[k * n..k * n + n];
-                for j in 0..n {
-                    c_row[j] += a_ik * b_row[j];
+            let mut i0 = 0;
+            while i0 < m_full {
+                let mut acc = [[0.0f64; PACKED_NR]; PACKED_MR];
+                for kk in 0..k {
+                    let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
+                    for (ii, row) in acc.iter_mut().enumerate() {
+                        let av = a[(i0 + ii) * k + kk];
+                        for (slot, &bv) in row.iter_mut().zip(brow) {
+                            *slot += av * bv;
+                        }
+                    }
                 }
+                for (ii, row) in acc.iter().enumerate() {
+                    let base = (i0 + ii) * n + j0;
+                    for (slot, &v) in out[base..base + PACKED_NR].iter_mut().zip(row) {
+                        *slot += v;
+                    }
+                }
+                i0 += PACKED_MR;
             }
+            j0 += PACKED_NR;
         }
+        jc += nc;
+    }
+    // Remainder columns for the full row blocks, then all remainder rows.
+    for i in 0..m_full {
+        packed_row_tail(a, b, out, i, k, n, n_full);
+    }
+    for i in m_full..m {
+        packed_row_tail(a, b, out, i, k, n, 0);
     }
 }
 
-fn mat_mul_flat(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
-    let mut c = vec![0.0; n * n];
-    // Each output row `c[i]` depends only on row `i` of `a` and all of `b`, and
-    // is written by a disjoint slice of `c`. The k/j accumulation order within a
-    // row is identical to the serial path, so partitioning the rows across
-    // threads yields bit-for-bit identical results. Full 4-row chunks share each
-    // streamed B row across four A rows while every c[i,j] still sees k in
-    // ascending order. Gated on size + pool width.
-    if n >= MATMUL_PARALLEL_MIN_DIM && rayon::current_num_threads() >= 2 {
-        c.par_chunks_mut(MATMUL_ROW_BLOCK * n)
+// out[i, j0..n] += sum_k a[i,k]*b[k,j], summed in ascending k (bit-exact tail).
+fn packed_row_tail(a: &[f64], b: &[f64], out: &mut [f64], i: usize, k: usize, n: usize, j0: usize) {
+    let a_base = i * k;
+    let o_base = i * n;
+    for j in j0..n {
+        let mut s = 0.0f64;
+        for kk in 0..k {
+            s += a[a_base + kk] * b[kk * n + j];
+        }
+        out[o_base + j] += s;
+    }
+}
+
+// Band-parallel driver shared by the square and rectangular wrappers: split the
+// output rows into bands (several per thread for work-stealing balance), each
+// band runs the packed serial kernel on its disjoint row slice. Per-row k-order
+// is unchanged, so the parallel result is bit-identical to the serial kernel.
+fn packed_gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
+    let mut c = vec![0.0; m * n];
+    let parallel = m >= MATMUL_PARALLEL_MIN_DIM
+        && k >= MATMUL_PARALLEL_MIN_DIM
+        && n >= MATMUL_PARALLEL_MIN_DIM
+        && rayon::current_num_threads() >= 2;
+    if parallel {
+        let threads = rayon::current_num_threads();
+        let band_rows = m.div_ceil(threads * 4).max(1);
+        c.par_chunks_mut(band_rows * n)
             .enumerate()
-            .for_each(|(block, c_rows)| {
-                mat_mul_flat_row_block4(a, b, n, block * MATMUL_ROW_BLOCK, c_rows);
+            .for_each(|(bi, c_band)| {
+                let row_start = bi * band_rows;
+                let rows = c_band.len() / n;
+                let a_band = &a[row_start * k..row_start * k + rows * k];
+                packed_gemm_serial(a_band, b, rows, k, n, c_band);
             });
     } else {
-        for i in 0..n {
-            for k in 0..n {
-                let a_ik = a[i * n + k];
-                for j in 0..n {
-                    c[i * n + j] += a_ik * b[k * n + j];
-                }
-            }
-        }
+        packed_gemm_serial(a, b, m, k, n, &mut c);
     }
     c
 }
 
-fn mat_mul_rect_row_block4(
-    a: &[f64],
-    b: &[f64],
-    k: usize,
-    n: usize,
-    row_start: usize,
-    c: &mut [f64],
-) {
-    if c.len() == MATMUL_ROW_BLOCK * n {
-        let (c0, rest) = c.split_at_mut(n);
-        let (c1, rest) = rest.split_at_mut(n);
-        let (c2, c3) = rest.split_at_mut(n);
-        let a0 = &a[row_start * k..row_start * k + k];
-        let a1 = &a[(row_start + 1) * k..(row_start + 1) * k + k];
-        let a2 = &a[(row_start + 2) * k..(row_start + 2) * k + k];
-        let a3 = &a[(row_start + 3) * k..(row_start + 3) * k + k];
-        for p in 0..k {
-            let b_row = &b[p * n..p * n + n];
-            let a0p = a0[p];
-            let a1p = a1[p];
-            let a2p = a2[p];
-            let a3p = a3[p];
-            for j in 0..n {
-                let b_pj = b_row[j];
-                c0[j] += a0p * b_pj;
-                c1[j] += a1p * b_pj;
-                c2[j] += a2p * b_pj;
-                c3[j] += a3p * b_pj;
-            }
-        }
-    } else {
-        let rows = c.len() / n;
-        for local_i in 0..rows {
-            let i = row_start + local_i;
-            let c_row = &mut c[local_i * n..local_i * n + n];
-            let a_row = &a[i * k..i * k + k];
-            for p in 0..k {
-                let a_ip = a_row[p];
-                let b_row = &b[p * n..p * n + n];
-                for j in 0..n {
-                    c_row[j] += a_ip * b_row[j];
-                }
-            }
-        }
-    }
+fn mat_mul_flat(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
+    // Square GEMM via the cache-blocked, B-packed kernel (band-parallel over
+    // output rows). Bit-identical to the previous ikj kernel — same ascending-k
+    // per-element reduction — but keeps B L2-resident instead of re-streaming it
+    // from DRAM per row block (~2-4.5x at n>=1024).
+    packed_gemm(a, b, n, n, n)
 }
 
 fn is_diagonal_matrix_flat(a: &[f64], n: usize) -> bool {
@@ -4156,34 +4152,10 @@ fn sqrtm_non_finite_compat(a: &[f64], n: usize) -> Option<Vec<f64>> {
 
 /// Rectangular matrix multiply: A (m×k) × B (k×n) → C (m×n).
 fn mat_mul_rect(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
-    let mut c = vec![0.0; m * n];
-    // Same row-disjoint partitioning as mat_mul_flat: output row i reads row i
-    // of a (k wide) plus all of b and writes a disjoint n-wide slice of c with
-    // the identical p/j accumulation order, so the parallel result is bit-for-
-    // bit identical to the serial loop. Full 4-row chunks reuse each streamed B
-    // row across four A rows without changing any c[i,j] reduction order.
-    // Gate on the dominant dimension so the O(m·k·n) work amortizes dispatch.
-    if m >= MATMUL_PARALLEL_MIN_DIM
-        && k >= MATMUL_PARALLEL_MIN_DIM
-        && n >= MATMUL_PARALLEL_MIN_DIM
-        && rayon::current_num_threads() >= 2
-    {
-        c.par_chunks_mut(MATMUL_ROW_BLOCK * n)
-            .enumerate()
-            .for_each(|(block, c_rows)| {
-                mat_mul_rect_row_block4(a, b, k, n, block * MATMUL_ROW_BLOCK, c_rows);
-            });
-    } else {
-        for i in 0..m {
-            for p in 0..k {
-                let a_ip = a[i * k + p];
-                for j in 0..n {
-                    c[i * n + j] += a_ip * b[p * n + j];
-                }
-            }
-        }
-    }
-    c
+    // Rectangular GEMM via the same cache-blocked, B-packed band-parallel kernel
+    // as mat_mul_flat. Bit-identical to the previous ikj kernel (same ascending-k
+    // per-element reduction); keeps B L2-resident rather than DRAM-restreamed.
+    packed_gemm(a, b, m, k, n)
 }
 
 fn singular_values_2x2(matrix: [[f64; 2]; 2]) -> Result<[f64; 2], LinAlgError> {

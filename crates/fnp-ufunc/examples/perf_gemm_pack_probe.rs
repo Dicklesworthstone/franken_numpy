@@ -217,6 +217,36 @@ fn gemm_packed_g<const TMR: usize, const TNR: usize>(
     }
 }
 
+// Mirror of fnp-linalg's mat_mul_flat_row_block4: ikj/axpy form, 4 rows of C
+// share each streamed contiguous B row, but ALL of B is re-streamed for every
+// 4-row block (no cache blocking) -> DRAM-bound at large n.
+fn gemm_ikj4(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, c: &mut [f64]) {
+    let mut i = 0;
+    while i + 4 <= m {
+        let (c0, rest) = c[i * n..].split_at_mut(n);
+        let (c1, rest) = rest.split_at_mut(n);
+        let (c2, c3) = rest.split_at_mut(n);
+        let (a0, a1, a2, a3) = (
+            &a[i * k..i * k + k],
+            &a[(i + 1) * k..(i + 1) * k + k],
+            &a[(i + 2) * k..(i + 2) * k + k],
+            &a[(i + 3) * k..(i + 3) * k + k],
+        );
+        for kk in 0..k {
+            let br = &b[kk * n..kk * n + n];
+            let (a0k, a1k, a2k, a3k) = (a0[kk], a1[kk], a2[kk], a3[kk]);
+            for j in 0..n {
+                let bkj = br[j];
+                c0[j] += a0k * bkj;
+                c1[j] += a1k * bkj;
+                c2[j] += a2k * bkj;
+                c3[j] += a3k * bkj;
+            }
+        }
+        i += 4;
+    }
+}
+
 fn fnv1a(values: &[f64]) -> u64 {
     let mut h: u64 = 0xcbf29ce484222325;
     for v in values {
@@ -255,6 +285,7 @@ fn main() {
         let (tb, hb) = time(m, n, iters, |c| gemm_base(&a, &b, m, k, n, c));
         let (tp, hp) = time(m, n, iters, |c| gemm_packed(&a, &b, m, k, n, c));
         let (tpb, hpb) = time(m, n, iters, |c| gemm_packed_b(&a, &b, m, k, n, c));
+        let (tik, hik) = time(m, n, iters, |c| gemm_ikj4(&a, &b, m, k, n, c));
         let g = |ms: f64| 2.0 * (n as f64).powi(3) / (ms * 1e-3) / 1e9;
         println!("n={n:5}");
         println!("  base     {tb:9.3} ms  {:6.1} GF  hash=0x{hb:016x}", g(tb));
@@ -269,6 +300,12 @@ fn main() {
             g(tpb),
             tb / tpb,
             hpb == hb
+        );
+        println!(
+            "  ikj4(lnlg){tik:9.3} ms  {:6.1} GF  packedB/ikj4={:.2}x  bitmatch={}",
+            g(tik),
+            tik / tpb,
+            hik == hb
         );
     }
 
