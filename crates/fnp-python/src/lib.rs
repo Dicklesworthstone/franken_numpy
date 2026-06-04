@@ -4120,18 +4120,13 @@ fn extract_numeric_array(
 
     let storage = match kind.as_str() {
         "b" => ArrayStorage::Bool(numpy_bool_to_vec(py, &flat)?),
-        "i" => ArrayStorage::I64(numpy_contiguous_to_vec::<i64>(
-            py,
-            &flat.call_method1("astype", ("int64",))?,
-        )?),
-        "u" => ArrayStorage::U64(numpy_contiguous_to_vec::<u64>(
-            py,
-            &flat.call_method1("astype", ("uint64",))?,
-        )?),
-        "f" => ArrayStorage::F64(numpy_contiguous_to_vec::<f64>(
-            py,
-            &flat.call_method1("astype", ("float64",))?,
-        )?),
+        // astype(copy=False): when the array is already int64/uint64/float64 (and
+        // contiguous after reshape) NumPy returns it as-is, so the only data movement
+        // is the single buffer read instead of a redundant widening copy. Narrower
+        // widths still copy (the widen is required) — bit-identical either way.
+        "i" => ArrayStorage::I64(numpy_cast_contiguous_to_vec::<i64>(py, &flat, "int64")?),
+        "u" => ArrayStorage::U64(numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?),
+        "f" => ArrayStorage::F64(numpy_cast_contiguous_to_vec::<f64>(py, &flat, "float64")?),
         _ => {
             return Err(PyTypeError::new_err(format!(
                 "{context}: expected a bool/int/uint/float array, got dtype {dtype_name}",
