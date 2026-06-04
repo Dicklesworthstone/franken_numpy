@@ -15802,13 +15802,8 @@ impl UFuncArray {
                 if self.values.iter().any(|v| v.is_nan()) {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
-                let mut sorted = self.values.clone();
-                sorted.sort_by(|a, b| a.total_cmp(b));
-                let med = if n % 2 == 1 {
-                    sorted[n / 2]
-                } else {
-                    (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
-                };
+                let mut data = self.values.clone();
+                let med = select_median(&mut data);
                 Ok(Self::scalar(med, DType::F64))
             }
             Some(ax) => {
@@ -15915,9 +15910,8 @@ impl UFuncArray {
                 if self.values.iter().any(|v| v.is_nan()) {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
-                let mut sorted = self.values.clone();
-                sorted.sort_by(|a, b| a.total_cmp(b));
-                let val = interpolate_percentile(&sorted, fraction);
+                let mut data = self.values.clone();
+                let val = select_percentile_method(&mut data, fraction, QuantileInterp::Linear);
                 Ok(Self::scalar(val, DType::F64))
             }
             Some(ax) => {
@@ -25603,6 +25597,70 @@ fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: Quantile
             }
         }
         QuantileInterp::Midpoint => (sorted[lo] + sorted[hi]) / 2.0,
+    }
+}
+
+/// O(n) order-statistic percentile via quickselect (`select_nth_unstable_by`,
+/// std's introselect) instead of a full O(n log n) sort. Reorders `data` in
+/// place. Returns the IDENTICAL value to `interpolate_percentile_method` on the
+/// fully-sorted array: a percentile reads only `sorted[lo]` and `sorted[lo+1]`,
+/// and the k-th order statistic's value is unique, so selecting those two
+/// positions yields bit-identical results. `data` must be NaN-free (callers
+/// short-circuit NaN as NumPy does).
+fn select_percentile_method(data: &mut [f64], fraction: f64, method: QuantileInterp) -> f64 {
+    let n = data.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    if n == 1 {
+        return data[0];
+    }
+    let idx = fraction * (n - 1) as f64;
+    let lo = idx.floor() as usize;
+    let frac = idx - lo as f64;
+    if frac == 0.0 || lo >= n - 1 {
+        let k = lo.min(n - 1);
+        let (_, kth, _) = data.select_nth_unstable_by(k, |a, b| a.total_cmp(b));
+        return *kth;
+    }
+    let hi = lo + 1;
+    // After selecting position `hi`, data[hi] == sorted[hi] and data[0..hi] are
+    // the `hi` smallest values, so sorted[lo] == max(data[0..hi]).
+    let (left, kth_hi, _) = data.select_nth_unstable_by(hi, |a, b| a.total_cmp(b));
+    let v_hi = *kth_hi;
+    let v_lo = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    match method {
+        QuantileInterp::Linear => v_lo * (1.0 - frac) + v_hi * frac,
+        QuantileInterp::Lower => v_lo,
+        QuantileInterp::Higher => v_hi,
+        QuantileInterp::Nearest => {
+            if frac < 0.5 || (frac == 0.5 && lo.is_multiple_of(2)) {
+                v_lo
+            } else {
+                v_hi
+            }
+        }
+        QuantileInterp::Midpoint => (v_lo + v_hi) / 2.0,
+    }
+}
+
+/// O(n) median (axis=None) via quickselect, bit-identical to the sort-based
+/// path: odd n picks sorted[n/2]; even n averages sorted[n/2-1] and sorted[n/2]
+/// as `(a+b)/2.0` (NOT the linear-percentile `a*0.5+b*0.5`, to match the
+/// incumbent rounding). `data` must be NaN-free.
+fn select_median(data: &mut [f64]) -> f64 {
+    let n = data.len();
+    if n == 0 {
+        return f64::NAN;
+    }
+    if n % 2 == 1 {
+        let (_, kth, _) = data.select_nth_unstable_by(n / 2, |a, b| a.total_cmp(b));
+        *kth
+    } else {
+        let (left, kth, _) = data.select_nth_unstable_by(n / 2, |a, b| a.total_cmp(b));
+        let hi = *kth;
+        let lo = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        (lo + hi) / 2.0
     }
 }
 
