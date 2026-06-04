@@ -951,13 +951,11 @@ pub fn write_npy_bytes(
     write_npy_bytes_with_version(header, payload, (1, 0), allow_pickle)
 }
 
-pub fn write_npy_bytes_with_version(
+fn validate_npy_write_payload(
     header: &NpyHeader,
     payload: &[u8],
-    version: (u8, u8),
     allow_pickle: bool,
-) -> Result<Vec<u8>, IOError> {
-    validate_npy_version(version)?;
+) -> Result<(), IOError> {
     enforce_pickle_policy(header.descr, allow_pickle)?;
     if header.descr == IOSupportedDType::Object {
         validate_object_write_payload(&header.shape, payload)?;
@@ -986,6 +984,17 @@ pub fn write_npy_bytes_with_version(
             .unwrap_or(expected_count);
         let _ = validate_write_contract(&header.shape, value_count, header.descr)?;
     }
+    Ok(())
+}
+
+pub fn write_npy_bytes_with_version(
+    header: &NpyHeader,
+    payload: &[u8],
+    version: (u8, u8),
+    allow_pickle: bool,
+) -> Result<Vec<u8>, IOError> {
+    validate_npy_version(version)?;
+    validate_npy_write_payload(header, payload, allow_pickle)?;
 
     let header_bytes = encode_npy_header_bytes(header, version)?;
     let mut encoded = Vec::with_capacity(
@@ -1370,6 +1379,99 @@ fn npz_store_archive_capacity(entries: &[(&str, &NpyHeader, &[u8])]) -> Option<u
     Some(capacity)
 }
 
+struct NpzStorePayload<'a> {
+    preamble: Vec<u8>,
+    header: Vec<u8>,
+    payload: &'a [u8],
+    len: usize,
+    crc: u32,
+}
+
+impl NpzStorePayload<'_> {
+    fn append_to(&self, output: &mut Vec<u8>) {
+        output.extend_from_slice(&self.preamble);
+        output.extend_from_slice(&self.header);
+        output.extend_from_slice(self.payload);
+    }
+}
+
+enum NpzWritableEntry<'a> {
+    Store(NpzStorePayload<'a>),
+    Deflate {
+        data: Vec<u8>,
+        uncompressed_len: usize,
+        crc: u32,
+    },
+}
+
+impl NpzWritableEntry<'_> {
+    fn compression_method(&self) -> u16 {
+        match self {
+            Self::Store(_) => 0,
+            Self::Deflate { .. } => 8,
+        }
+    }
+
+    fn compressed_len(&self) -> usize {
+        match self {
+            Self::Store(payload) => payload.len,
+            Self::Deflate { data, .. } => data.len(),
+        }
+    }
+
+    fn uncompressed_len(&self) -> usize {
+        match self {
+            Self::Store(payload) => payload.len,
+            Self::Deflate {
+                uncompressed_len, ..
+            } => *uncompressed_len,
+        }
+    }
+
+    fn crc(&self) -> u32 {
+        match self {
+            Self::Store(payload) => payload.crc,
+            Self::Deflate { crc, .. } => *crc,
+        }
+    }
+
+    fn append_to(&self, output: &mut Vec<u8>) {
+        match self {
+            Self::Store(payload) => payload.append_to(output),
+            Self::Deflate { data, .. } => output.extend_from_slice(data),
+        }
+    }
+}
+
+fn npz_store_payload_parts<'a>(
+    header: &NpyHeader,
+    payload: &'a [u8],
+) -> Result<NpzStorePayload<'a>, IOError> {
+    validate_npy_version((1, 0))?;
+    validate_npy_write_payload(header, payload, false)?;
+
+    let header_bytes = encode_npy_header_bytes(header, (1, 0))?;
+    let mut preamble =
+        Vec::with_capacity(NPY_MAGIC_PREFIX.len() + 2 + npy_length_field_size((1, 0))?);
+    write_npy_preamble(&mut preamble, (1, 0), header_bytes.len())?;
+    let len = preamble
+        .len()
+        .checked_add(header_bytes.len())
+        .and_then(|len| len.checked_add(payload.len()))
+        .ok_or(IOError::NpzArchiveContractViolation(
+            "npz: entry payload exceeds 4GB zip limit",
+        ))?;
+    let crc = crc32_ieee_three(&preamble, &header_bytes, payload);
+
+    Ok(NpzStorePayload {
+        preamble,
+        header: header_bytes,
+        payload,
+        len,
+        crc,
+    })
+}
+
 /// Write multiple named arrays into an NPZ archive with optional compression.
 ///
 /// Supports ZIP STORE (method 0) and DEFLATE (method 8).
@@ -1398,7 +1500,32 @@ pub fn write_npz_bytes_with_compression(
     let mut entry_count: u16 = 0;
 
     for &(name, header, payload) in entries {
-        let npy_data = write_npy_bytes(header, payload, false)?;
+        let entry_payload = match compression {
+            NpzCompression::Store => {
+                NpzWritableEntry::Store(npz_store_payload_parts(header, payload)?)
+            }
+            NpzCompression::Deflate => {
+                let npy_data = write_npy_bytes(header, payload, false)?;
+                let crc = crc32_ieee(&npy_data);
+                let uncompressed_len = npy_data.len();
+                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(&npy_data).map_err(|_| {
+                    IOError::NpzArchiveContractViolation(
+                        "npz: failed to deflate-compress entry payload",
+                    )
+                })?;
+                let data = encoder.finish().map_err(|_| {
+                    IOError::NpzArchiveContractViolation(
+                        "npz: failed to finalize deflate-compressed entry payload",
+                    )
+                })?;
+                NpzWritableEntry::Deflate {
+                    data,
+                    uncompressed_len,
+                    crc,
+                }
+            }
+        };
         let file_name = if name.ends_with(".npy") {
             name.to_string()
         } else {
@@ -1412,34 +1539,12 @@ pub fn write_npz_bytes_with_compression(
         let local_offset = u32::try_from(buf.len()).map_err(|_| {
             IOError::NpzArchiveContractViolation("npz: file offset exceeds 4GB limits")
         })?;
-        let crc = crc32_ieee(&npy_data);
-        let encoded_data = match compression {
-            NpzCompression::Store => Cow::Borrowed(npy_data.as_slice()),
-            NpzCompression::Deflate => {
-                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-                encoder.write_all(&npy_data).map_err(|_| {
-                    IOError::NpzArchiveContractViolation(
-                        "npz: failed to deflate-compress entry payload",
-                    )
-                })?;
-                encoder
-                    .finish()
-                    .map_err(|_| {
-                        IOError::NpzArchiveContractViolation(
-                            "npz: failed to finalize deflate-compressed entry payload",
-                        )
-                    })
-                    .map(Cow::Owned)?
-            }
-        };
-        let compression_method = match compression {
-            NpzCompression::Store => 0_u16,
-            NpzCompression::Deflate => 8_u16,
-        };
-        let compressed_size = u32::try_from(encoded_data.len()).map_err(|_| {
+        let crc = entry_payload.crc();
+        let compression_method = entry_payload.compression_method();
+        let compressed_size = u32::try_from(entry_payload.compressed_len()).map_err(|_| {
             IOError::NpzArchiveContractViolation("npz: entry payload exceeds 4GB zip limit")
         })?;
-        let uncompressed_size = u32::try_from(npy_data.len()).map_err(|_| {
+        let uncompressed_size = u32::try_from(entry_payload.uncompressed_len()).map_err(|_| {
             IOError::NpzArchiveContractViolation("npz: entry payload exceeds 4GB zip limit")
         })?;
 
@@ -1456,7 +1561,7 @@ pub fn write_npz_bytes_with_compression(
         buf.extend_from_slice(&fname_len.to_le_bytes()); // filename len
         buf.extend_from_slice(&0_u16.to_le_bytes()); // extra field len
         buf.extend_from_slice(fname_bytes);
-        buf.extend_from_slice(&encoded_data);
+        entry_payload.append_to(&mut buf);
 
         // Central directory entry (46 bytes + filename)
         central_directory.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]); // signature
@@ -2013,6 +2118,16 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
 /// IEEE 802.3 CRC-32 (used by ZIP format).
 /// Uses a table-based implementation for performance.
 fn crc32_ieee(data: &[u8]) -> u32 {
+    !crc32_ieee_update(0xFFFF_FFFF, data)
+}
+
+fn crc32_ieee_three(first: &[u8], second: &[u8], third: &[u8]) -> u32 {
+    let crc = crc32_ieee_update(0xFFFF_FFFF, first);
+    let crc = crc32_ieee_update(crc, second);
+    !crc32_ieee_update(crc, third)
+}
+
+fn crc32_ieee_update(mut crc: u32, data: &[u8]) -> u32 {
     const TABLE: [u32; 256] = {
         let mut table = [0u32; 256];
         let mut i = 0;
@@ -2033,11 +2148,10 @@ fn crc32_ieee(data: &[u8]) -> u32 {
         table
     };
 
-    let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
         crc = TABLE[(crc as u8 ^ byte) as usize] ^ (crc >> 8);
     }
-    !crc
+    crc
 }
 
 // ── loadtxt / savetxt ────────
