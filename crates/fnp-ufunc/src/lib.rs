@@ -17730,8 +17730,11 @@ impl UFuncArray {
         let mut cov_values = vec![0.0; nvars * nvars];
         // The GEMM path (C·Cᵀ) wins once nvars is large enough that the cache
         // blocking pays for its centering+transpose setup; below that the
-        // entry-by-entry parallel loop is faster. Both are bit-identical.
-        const COV_GEMM_MIN_VARS: usize = 384;
+        // entry-by-entry parallel loop is faster. Both are bit-identical. Measured
+        // crossover (nobs=1000, same-process A/B, cov_naive_vs_gemm_crossover):
+        // GEMM wins from nv≥128 (1.21× @128, 1.57× @160, 1.92× @200, 2.20× @384);
+        // at nv 48–96 the naive loop is equal-or-better, so gate at 128.
+        const COV_GEMM_MIN_VARS: usize = 128;
         if fact == 0.0 {
             for v in cov_values.iter_mut() {
                 *v = f64::NAN;
@@ -57622,7 +57625,7 @@ print(json.dumps(payload))
             xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
             xs[xs.len() / 2]
         };
-        for &nv in &[128usize, 256, 384, 512, 1024] {
+        for &nv in &[32usize, 48, 64, 96, 128, 160, 200, 256, 384] {
             let no = 1000;
             let v = rnd(nv, no, 7);
             let cn = cov_naive(&v, nv, no);
