@@ -482,3 +482,32 @@ print(np.array_equal(result, expected))
     assert_eq!(result.trim(), "True", "fix should match numpy");
     Ok(())
 }
+
+/// Locks the zero-copy f64 fast path for `numpy.fix` (round toward zero, reusing
+/// the `UnaryOp::Trunc` zero-copy unary) to bit-exact parity. fix is exactly
+/// trunc on reals, so parity must hold at the IEEE-754 bit level (signed zero,
+/// half-integers, nan/inf). Compares sha256 of raw output bytes against the
+/// NumPy oracle across multi-D float64 inputs and extreme values.
+#[test]
+fn fix_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for shp in [(1000,), (3, 4), (100003,)]:
+    chunks.append(np.asarray(mod.fix(rng.standard_normal(shp) * 1e6)).tobytes())
+xe = np.array([0.0, -0.0, 0.4, -0.4, 2.5, -2.5, np.inf, -np.inf, np.nan], dtype=np.float64)
+chunks.append(np.asarray(mod.fix(xe)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy fix must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
