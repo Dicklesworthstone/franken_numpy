@@ -7337,6 +7337,140 @@ fn try_zerocopy_f64_where(
     Ok(Some(output))
 }
 
+// Zero-copy np.select(condlist, choicelist, default) for the common all-float64
+// form: K bool-ndarray conditions and K float64-ndarray choices, all of one
+// identical shape, with a scalar default (numpy's default is 0). For each output
+// element it walks the conditions in order and copies the first matching choice
+// (verbatim — bit-identical incl. nan/inf/signed zeros), else the default. This
+// is numpy.select's first-match-wins semantics in a single pass, replacing the
+// chained where_select fold (K full-array passes + K intermediate Vecs) and the
+// cold extract/build Vecs (bead lglck). The bool buffers' '?' format is rejected
+// by PyBuffer::<u8>, so each condition is viewed as uint8 (bytes 0x00/0x01)
+// first. Returns Ok(None) — caller falls through to the general path — for an
+// empty/length-mismatched list, a non-scalar / non-float default, any non-bool
+// condition, any non-f64 / shape-mismatched / non-ndarray choice, or a
+// non-iterable condlist/choicelist.
+fn try_zerocopy_f64_select(
+    py: Python<'_>,
+    condlist: &Bound<'_, PyAny>,
+    choicelist: &Bound<'_, PyAny>,
+    default: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+
+    let Ok(cond_iter) = condlist.try_iter() else {
+        return Ok(None);
+    };
+    let cond_items: Vec<Bound<'_, PyAny>> = cond_iter.collect::<PyResult<Vec<_>>>()?;
+    let Ok(choice_iter) = choicelist.try_iter() else {
+        return Ok(None);
+    };
+    let choice_items: Vec<Bound<'_, PyAny>> = choice_iter.collect::<PyResult<Vec<_>>>()?;
+    let k = cond_items.len();
+    if k == 0 || k != choice_items.len() {
+        return Ok(None);
+    }
+
+    // numpy's default is the scalar 0; only a scalar float default keeps the fast
+    // path (array-like defaults broadcast and are deferred to numpy).
+    let default_val: f64 = match default {
+        None => 0.0,
+        Some(d) => {
+            let bound = d.bind(py);
+            if bound.is_none() {
+                0.0
+            } else if let Ok(value) = bound.extract::<f64>() {
+                value
+            } else {
+                return Ok(None);
+            }
+        }
+    };
+
+    let uint8 = numpy.getattr("uint8")?;
+    let mut cond_buffers: Vec<PyBuffer<u8>> = Vec::with_capacity(k);
+    let mut shape: Option<Vec<usize>> = None;
+    for condition in &cond_items {
+        if !condition.is_exact_instance(&ndarray_type) {
+            return Ok(None);
+        }
+        if condition.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+            return Ok(None);
+        }
+        let view = condition.call_method1("view", (&uint8,))?;
+        let Ok(buffer) = PyBuffer::<u8>::get(&view) else {
+            return Ok(None);
+        };
+        let this_shape = buffer.shape().to_vec();
+        match &shape {
+            None => shape = Some(this_shape),
+            Some(existing) if *existing != this_shape => return Ok(None),
+            _ => {}
+        }
+        cond_buffers.push(buffer);
+    }
+    let shape = shape.expect("k >= 1 guarantees a shape");
+
+    let mut choice_buffers: Vec<PyBuffer<f64>> = Vec::with_capacity(k);
+    for choice in &choice_items {
+        if !choice.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, choice) {
+            return Ok(None);
+        }
+        let Ok(buffer) = PyBuffer::<f64>::get(choice) else {
+            return Ok(None);
+        };
+        if buffer.shape() != shape.as_slice() {
+            return Ok(None);
+        }
+        choice_buffers.push(buffer);
+    }
+
+    let mut cond_slices: Vec<&[pyo3::buffer::ReadOnlyCell<u8>]> = Vec::with_capacity(k);
+    for buffer in &cond_buffers {
+        let Some(slice) = buffer.as_slice(py) else {
+            return Ok(None);
+        };
+        cond_slices.push(slice);
+    }
+    let mut choice_slices: Vec<&[pyo3::buffer::ReadOnlyCell<f64>]> = Vec::with_capacity(k);
+    for buffer in &choice_buffers {
+        let Some(slice) = buffer.as_slice(py) else {
+            return Ok(None);
+        };
+        choice_slices.push(slice);
+    }
+
+    let n = choice_slices[0].len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (i, slot) in output.iter().enumerate() {
+            let mut value = default_val;
+            for j in 0..k {
+                if cond_slices[j][i].get() != 0 {
+                    value = choice_slices[j][i].get();
+                    break;
+                }
+            }
+            slot.set(value);
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
 // ndarray. Output[i] = a[i+1] - a[i], length len-1 (empty for len 0 or 1, which
 // matches numpy). Reads the input buffer and writes the (len-1)-length output
@@ -11412,6 +11546,19 @@ fn select(
     };
     if !choices_all_f64().unwrap_or(false) {
         return fallback();
+    }
+
+    // Single-pass zero-copy select for the all-f64 common case (bool conditions +
+    // f64 choices of one shape, scalar default); skips the chained where_select
+    // fold and the cold extract/build Vecs. Bit-identical; broadcasting,
+    // non-contiguous, or non-scalar-default cases fall through below.
+    if let Some(out) = try_zerocopy_f64_select(
+        py,
+        condlist.bind(py),
+        choicelist.bind(py),
+        default.as_ref(),
+    )? {
+        return Ok(out);
     }
 
     let condlist = match extract_numeric_array_sequence(py, condlist.bind(py), "select(condlist)") {
