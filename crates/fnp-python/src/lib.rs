@@ -7337,6 +7337,56 @@ fn try_zerocopy_f64_where(
     Ok(Some(output))
 }
 
+// Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
+// ndarray. Output[i] = a[i+1] - a[i], length len-1 (empty for len 0 or 1, which
+// matches numpy). Reads the input buffer and writes the (len-1)-length output
+// buffer with no intermediate Rust Vec, dropping the cold extract/build Vecs
+// (bead lglck). The per-element subtraction is the same op numpy performs, so it
+// is bit-identical (nan/inf propagate: e.g. inf-inf -> nan). Returns Ok(None)
+// for n != 1, multi-dim, an axis that is not the single 1-D axis (-1 or 0), or
+// any non-f64 / non-contiguous / non-ndarray input (caller falls through to the
+// general a.diff path).
+fn try_zerocopy_f64_diff1d(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+    axis: i64,
+) -> PyResult<Option<Py<PyAny>>> {
+    if n != 1 || !(axis == -1 || axis == 0) {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    if in_buffer.shape().len() != 1 {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n_out = input.len().saturating_sub(1);
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n_out,), Some(&kwargs))?;
+    if n_out > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (i, slot) in output.iter().enumerate() {
+            slot.set(input[i + 1].get() - input[i].get());
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -11614,6 +11664,12 @@ fn diff(
     let Ok(n) = usize::try_from(n) else {
         return fallback();
     };
+    // Zero-copy first difference for 1-D f64 ndarrays (the common case); skips
+    // the cold extract/build Vecs. Bit-identical; everything else (n>1, multi-
+    // dim, other axes) falls through to the general a.diff path below.
+    if let Some(out) = try_zerocopy_f64_diff1d(py, a.bind(py), n, axis)? {
+        return Ok(out);
+    }
     let a = match extract_precise_numeric_array(py, a.bind(py), "diff(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),

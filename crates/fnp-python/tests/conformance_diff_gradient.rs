@@ -552,3 +552,50 @@ print(np.allclose(fnp_result, np_result))
     );
     Ok(())
 }
+
+/// Locks the zero-copy first-difference fast path (`try_zerocopy_f64_diff1d`) to
+/// bit-exact parity with numpy. Unlike the `floats_close` tests above, this
+/// compares the raw IEEE-754 uint64 bit patterns of the output, so it catches
+/// signed-zero (`-0.0` vs `0.0`), nan payloads, and any last-bit drift the
+/// tolerance-based checks would miss. Covers the n==1, axis in {-1, 0}, 1-D f64
+/// ndarray cases that take the zero-copy path, plus extreme values and lengths
+/// 0/1 (empty output).
+#[test]
+fn diff_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [0, 1, 2, 3, 17, 1000, 100003]:
+    x = rng.standard_normal(n) * 1e7
+    for axis in [-1, 0]:
+        chunks.append(fnp.diff(x, axis=axis).tobytes())
+x = np.array([0.0, -0.0, 1e308, -1e308, np.inf, -np.inf, np.nan, 1.0, -1.0], dtype=np.float64)
+chunks.append(fnp.diff(x).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#
+        .into(),
+    );
+    let fnp_hash = numpy_oracle(&script)?;
+
+    let numpy_script = r#"
+import numpy as np, hashlib
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [0, 1, 2, 3, 17, 1000, 100003]:
+    x = rng.standard_normal(n) * 1e7
+    for axis in [-1, 0]:
+        chunks.append(np.diff(x, axis=axis).tobytes())
+x = np.array([0.0, -0.0, 1e308, -1e308, np.inf, -np.inf, np.nan, 1.0, -1.0], dtype=np.float64)
+chunks.append(np.diff(x).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+    let numpy_hash = numpy_oracle(numpy_script)?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy diff must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
