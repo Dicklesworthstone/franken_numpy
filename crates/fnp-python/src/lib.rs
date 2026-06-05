@@ -10592,6 +10592,153 @@ fn finish_count_nonzero<F: Fn(usize) -> bool>(
     }
 }
 
+// Zero-copy boolean reduction for np.all / np.any over C-contiguous bool / f64
+// ndarrays. `is_all` selects all (AND-fold, short-circuit on first zero) vs any
+// (OR-fold, short-circuit on first nonzero). Truthiness is order-independent so
+// the short-circuit result is bit-identical to numpy; the f64 predicate x != 0.0
+// excludes +-0.0 and treats NaN as truthy, matching numpy. Skips the cold extract
+// Vec that the fallback path allocates.
+fn try_zerocopy_any_all(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    is_all: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    let shape: Vec<usize> = a.getattr("shape")?.extract::<Vec<usize>>()?;
+    match kind.as_str() {
+        "b" => {
+            let a_u8: Bound<'_, PyAny> = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+            let Ok(buffer) = PyBuffer::<u8>::get(&a_u8) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            if axis.is_none() {
+                // Hot path: iterate the slice directly (elides per-element bounds
+                // checks the index-closure form would keep) with short-circuit.
+                if shape.is_empty() {
+                    return Ok(None);
+                }
+                let value = if is_all {
+                    input.iter().all(|c| c.get() != 0)
+                } else {
+                    input.iter().any(|c| c.get() != 0)
+                };
+                let scalar = numpy.getattr("bool_")?.call1((value,))?;
+                return Ok(Some(scalar.unbind()));
+            }
+            finish_any_all(py, &numpy, input.len(), &shape, axis, is_all, |i| {
+                input[i].get() != 0
+            })
+        }
+        "f" if numpy_dtype_is_f64(py, a) => {
+            let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            if axis.is_none() {
+                if shape.is_empty() {
+                    return Ok(None);
+                }
+                let value = if is_all {
+                    input.iter().all(|c| c.get() != 0.0)
+                } else {
+                    input.iter().any(|c| c.get() != 0.0)
+                };
+                let scalar = numpy.getattr("bool_")?.call1((value,))?;
+                return Ok(Some(scalar.unbind()));
+            }
+            finish_any_all(py, &numpy, input.len(), &shape, axis, is_all, |i| {
+                input[i].get() != 0.0
+            })
+        }
+        _ => Ok(None),
+    }
+}
+
+fn finish_any_all<F: Fn(usize) -> bool>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    n: usize,
+    shape: &[usize],
+    axis: Option<isize>,
+    is_all: bool,
+    is_nonzero: F,
+) -> PyResult<Option<Py<PyAny>>> {
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let reduce = |range: std::ops::Range<usize>| -> bool {
+        // is_all -> AND-fold (short-circuit on first zero);
+        // !is_all -> OR-fold (short-circuit on first nonzero).
+        if is_all {
+            range.into_iter().all(&is_nonzero)
+        } else {
+            range.into_iter().any(&is_nonzero)
+        }
+    };
+    match axis {
+        None => {
+            // numpy.all/any(axis=None) returns a numpy.bool_ scalar, not a Python bool.
+            let value = reduce(0..n);
+            let scalar = numpy.getattr("bool_")?.call1((value,))?;
+            Ok(Some(scalar.unbind()))
+        }
+        Some(ax) => {
+            let ndim = shape.len() as isize;
+            let norm = if ax < 0 { ax + ndim } else { ax };
+            if norm < 0 || norm >= ndim {
+                return Ok(None);
+            }
+            let axu = norm as usize;
+            let outer: usize = shape[..axu].iter().product();
+            let axis_len = shape[axu];
+            let inner: usize = shape[axu + 1..].iter().product();
+            let mut out_shape = shape.to_vec();
+            out_shape.remove(axu);
+            let out_elems = outer * inner;
+            let flat = numpy.call_method1("empty", (out_elems,))?;
+            // numpy.empty defaults to f64; view as bool for an output buffer.
+            let flat = flat.call_method1("astype", (numpy.getattr("bool_")?,))?;
+            let flat_u8 = flat.call_method1("view", (numpy.getattr("uint8")?,))?;
+            if out_elems > 0 {
+                let Ok(out_buffer) = PyBuffer::<u8>::get(&flat_u8) else {
+                    return Ok(None);
+                };
+                let Some(output) = out_buffer.as_mut_slice(py) else {
+                    return Ok(None);
+                };
+                let lane = axis_len * inner;
+                for o in 0..outer {
+                    let obase = o * inner;
+                    let ibase = o * lane;
+                    for i in 0..inner {
+                        // Fold across the axis with the same short-circuit semantics.
+                        let folded = if is_all {
+                            (0..axis_len).all(|a| is_nonzero(ibase + a * inner + i))
+                        } else {
+                            (0..axis_len).any(|a| is_nonzero(ibase + a * inner + i))
+                        };
+                        output[obase + i].set(u8::from(folded));
+                    }
+                }
+            }
+            let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+            let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+            Ok(Some(output))
+        }
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, keepdims=false))]
 fn count_nonzero(
@@ -27486,6 +27633,13 @@ fn all(
         }
     };
 
+    // Zero-copy AND-fold for C-contiguous bool / f64 ndarrays (axis=None or a
+    // single integer axis); skips the cold extract Vec. Truthiness is
+    // order-independent so the short-circuit result is bit-identical.
+    if let Some(out) = try_zerocopy_any_all(py, a.bind(py), axis_val, true)? {
+        return Ok(out);
+    }
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "all(a)") {
         Ok(arr) => arr,
@@ -27563,6 +27717,13 @@ fn any(
             }
         }
     };
+
+    // Zero-copy OR-fold for C-contiguous bool / f64 ndarrays (axis=None or a
+    // single integer axis); skips the cold extract Vec. Truthiness is
+    // order-independent so the short-circuit result is bit-identical.
+    if let Some(out) = try_zerocopy_any_all(py, a.bind(py), axis_val, false)? {
+        return Ok(out);
+    }
 
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "any(a)") {
