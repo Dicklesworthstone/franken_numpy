@@ -7617,6 +7617,70 @@ fn try_zerocopy_f64_extract(
     Ok(Some(flat.unbind()))
 }
 
+// Zero-copy np.compress(condition, a, axis=None) for a bool condition ndarray and
+// a float64 a ndarray: numpy flattens a and returns a.flat[i] for the first
+// len(condition) positions where condition is True (condition may be shorter than
+// a; longer is an error left to numpy). Two passes over the buffers — count the
+// selected elements among the first m=len(condition), then gather them into a
+// numpy.empty(count) output — with no intermediate Rust Vec, dropping the cold
+// extract/build Vecs (bead lglck). Gathered values are copied verbatim, so the
+// result is bit-identical incl. nan/inf/signed zeros. Returns Ok(None) — caller
+// falls through — for a per-axis compress (axis given), a non-bool condition, a
+// condition longer than a, or any non-f64 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_compress(
+    py: Python<'_>,
+    condition: &Bound<'_, PyAny>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if axis.is_some() {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !condition.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if condition.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+        return Ok(None);
+    }
+    let cond_u8 = condition.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let (Ok(cond_buffer), Ok(arr_buffer)) =
+        (PyBuffer::<u8>::get(&cond_u8), PyBuffer::<f64>::get(a))
+    else {
+        return Ok(None);
+    };
+    let (Some(cond_in), Some(arr_in)) = (cond_buffer.as_slice(py), arr_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    // numpy.compress only inspects the first len(condition) flattened elements and
+    // errors if the condition is longer than the array; defer that error to numpy.
+    let m = cond_in.len();
+    if m > arr_in.len() {
+        return Ok(None);
+    }
+    let count = cond_in.iter().filter(|cell| cell.get() != 0).count();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (count,), Some(&kwargs))?;
+    if count > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let mut w = 0usize;
+        for (cond_cell, arr_cell) in cond_in.iter().zip(arr_in.iter()) {
+            if cond_cell.get() != 0 {
+                output[w].set(arr_cell.get());
+                w += 1;
+            }
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
 // ndarray. Output[i] = a[i+1] - a[i], length len-1 (empty for len 0 or 1, which
 // matches numpy). Reads the input buffer and writes the (len-1)-length output
@@ -11588,6 +11652,12 @@ fn compress(
             )?
             .unbind())
     };
+    // Zero-copy gather for the common case (axis=None, bool condition + f64 a);
+    // skips the cold extract/build Vecs. Bit-identical; per-axis compress,
+    // non-bool conditions, and other dtypes fall through.
+    if let Some(out) = try_zerocopy_f64_compress(py, condition.bind(py), a.bind(py), axis)? {
+        return Ok(out);
+    }
     let condition = match extract_condition_mask(py, condition.bind(py), "compress(condition)") {
         Ok(condition) => condition,
         Err(_) => return fallback(),

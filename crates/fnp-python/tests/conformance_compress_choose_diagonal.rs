@@ -451,3 +451,34 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "choose complex should match numpy");
     Ok(())
 }
+
+/// Locks the zero-copy gather fast path for `numpy.compress` with axis=None
+/// (`try_zerocopy_f64_compress`) to bit-exact parity. compress copies selected
+/// values verbatim, so parity must hold at the IEEE-754 bit level (signed zero,
+/// nan, inf). Compares sha256 of raw output bytes across same-length and shorter
+/// conditions and extreme values — the bool-condition + f64-array zero-copy path.
+#[test]
+fn compress_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [1000, 100003]:
+    x = rng.standard_normal(n)
+    chunks.append(np.asarray(mod.compress(x > 0.1, x)).tobytes())
+    chunks.append(np.asarray(mod.compress(x[:n // 3] > 0, x)).tobytes())
+xe = np.array([0.0, -0.0, np.inf, -np.inf, np.nan], dtype=np.float64)
+chunks.append(np.asarray(mod.compress(np.array([True, True, False, True, True]), xe)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy compress must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
