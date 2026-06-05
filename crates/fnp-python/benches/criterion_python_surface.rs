@@ -4,7 +4,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use fnp_python::fnp_python;
-use pyo3::types::{PyAnyMethods, PyModule};
+use pyo3::types::{PyAnyMethods, PyModule, PyTuple};
 use pyo3::{PyResult, Python};
 use std::hint::black_box;
 use std::time::Duration;
@@ -72,5 +72,62 @@ fn bench_ediff1d_boundary(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_sqrt_input_extraction, bench_ediff1d_boundary);
+fn bench_select_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_select_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let base = numpy
+            .call_method1("linspace", (-1.0_f64, 1.0_f64, 2_000_000_usize))
+            .expect("2M f64 input");
+        let cond_low = numpy
+            .getattr("less")
+            .expect("numpy.less")
+            .call1((&base, -0.25_f64))
+            .expect("low condition");
+        let cond_high = numpy
+            .getattr("greater")
+            .expect("numpy.greater")
+            .call1((&base, 0.25_f64))
+            .expect("high condition");
+        let choice_low = numpy
+            .getattr("multiply")
+            .expect("numpy.multiply")
+            .call1((&base, -3.0_f64))
+            .expect("low choice");
+        let choice_high = numpy
+            .getattr("add")
+            .expect("numpy.add")
+            .call1((&base, 7.0_f64))
+            .expect("high choice");
+        let condlist = PyTuple::new(py, [&cond_low, &cond_high]).expect("condlist");
+        let choicelist = PyTuple::new(py, [&choice_low, &choice_high]).expect("choicelist");
+        let select = module.getattr("select").expect("fnp_python.select");
+
+        group.bench_function("select_2conds_f64_2m", |bench| {
+            bench.iter(|| {
+                let result = select
+                    .call1((&condlist, &choicelist))
+                    .expect("select benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_sqrt_input_extraction,
+    bench_ediff1d_boundary,
+    bench_select_boundary
+);
 criterion_main!(benches);

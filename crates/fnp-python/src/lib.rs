@@ -48463,6 +48463,155 @@ mod tests {
     }
 
     #[test]
+    fn select_f64_boundary_matches_numpy_golden_sha256() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let numpy = py.import("numpy")?;
+            let mut proof_bytes = Vec::new();
+
+            let condlist = PyTuple::new(
+                py,
+                [
+                    numeric_array(
+                        py,
+                        vec![true, false, true, false, false, true, false, false],
+                        "bool",
+                    )
+                    .into_any()
+                    .unbind(),
+                    numeric_array(
+                        py,
+                        vec![true, true, false, false, true, true, false, false],
+                        "bool",
+                    )
+                    .into_any()
+                    .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+            let choicelist = PyTuple::new(
+                py,
+                [
+                    numeric_array(
+                        py,
+                        vec![-0.0, 1.0, f64::NAN, f64::INFINITY, 5.0, -6.0, 7.0, 8.0],
+                        "float64",
+                    )
+                    .into_any()
+                    .unbind(),
+                    numeric_array(
+                        py,
+                        vec![
+                            100.0,
+                            -0.0,
+                            200.0,
+                            f64::NEG_INFINITY,
+                            -5.0,
+                            600.0,
+                            700.0,
+                            800.0,
+                        ],
+                        "float64",
+                    )
+                    .into_any()
+                    .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+            let default = numpy.getattr("float64")?.call1((-9.0_f64,))?.unbind();
+            let actual = select(
+                py,
+                condlist.clone().into_any().unbind(),
+                choicelist.clone().into_any().unbind(),
+                Some(default.clone_ref(py)),
+            )?;
+            let expected =
+                numpy.call_method1("select", (condlist, choicelist, default.clone_ref(py)))?;
+            assert_array_matches_numpy(actual.bind(py), &expected)?;
+            assert_eq!(
+                actual
+                    .bind(py)
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                expected.call_method0("tobytes")?.extract::<Vec<u8>>()?
+            );
+            append_numpy_array_bytes(py, actual.bind(py), &mut proof_bytes)?;
+
+            let condlist_2d = PyTuple::new(
+                py,
+                [
+                    numeric_array(
+                        py,
+                        vec![vec![true, false, false], vec![false, true, false]],
+                        "bool",
+                    )
+                    .into_any()
+                    .unbind(),
+                    numeric_array(
+                        py,
+                        vec![vec![false, true, false], vec![true, true, false]],
+                        "bool",
+                    )
+                    .into_any()
+                    .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+            let choicelist_2d = PyTuple::new(
+                py,
+                [
+                    numeric_array(
+                        py,
+                        vec![vec![-0.0, 1.5, 2.5], vec![3.5, f64::INFINITY, 5.5]],
+                        "float64",
+                    )
+                    .into_any()
+                    .unbind(),
+                    numeric_array(
+                        py,
+                        vec![vec![10.0, -10.0, 20.0], vec![f64::NEG_INFINITY, -0.0, 30.0]],
+                        "float64",
+                    )
+                    .into_any()
+                    .unbind(),
+                ]
+                .iter()
+                .map(|item| item.bind(py)),
+            )?;
+            let actual_2d = select(
+                py,
+                condlist_2d.clone().into_any().unbind(),
+                choicelist_2d.clone().into_any().unbind(),
+                None,
+            )?;
+            let expected_2d = numpy.call_method1("select", (condlist_2d, choicelist_2d))?;
+            assert_array_matches_numpy(actual_2d.bind(py), &expected_2d)?;
+            assert_eq!(
+                actual_2d
+                    .bind(py)
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?,
+                expected_2d.call_method0("tobytes")?.extract::<Vec<u8>>()?
+            );
+            append_numpy_array_bytes(py, actual_2d.bind(py), &mut proof_bytes)?;
+
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest,
+                "b4dde462b172d68c32e4e0e9dfbaa486846c07973166cc696ec5e640c79fa4fd"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn select_broadcasts_conditions_and_choices_like_numpy() {
         with_python(|py| {
             if !numpy_available(py) {
