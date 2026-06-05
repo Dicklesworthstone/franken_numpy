@@ -476,3 +476,33 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// Locks the zero-copy single-pass 2-D multi-axis roll fast path
+/// (`try_zerocopy_f64_roll_2d_multi`) to bit-exact parity with numpy. A tuple
+/// roll moves values verbatim by the net per-axis shift, so parity must hold at
+/// the IEEE-754 bit level. Covers both axis orders, negative shifts, and repeated
+/// axes (which accumulate).
+#[test]
+fn roll_2d_multi_axis_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for shp in [(30, 40), (200, 150)]:
+    a = rng.standard_normal(shp)
+    chunks.append(np.asarray(mod.roll(a, (3, 5), axis=(0, 1))).tobytes())
+    chunks.append(np.asarray(mod.roll(a, (-2, 7), axis=(1, 0))).tobytes())
+    chunks.append(np.asarray(mod.roll(a, (3, 5), axis=(0, 0))).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy 2-D multi-axis roll must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

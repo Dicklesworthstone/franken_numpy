@@ -7722,6 +7722,80 @@ fn try_zerocopy_f64_roll_axis(
     Ok(Some(output))
 }
 
+// Zero-copy multi-axis np.roll for a 2-D C-contiguous float64 ndarray: a roll
+// along independent axes (a tuple of shifts + matching axes) moves each element
+// by the net shift on each axis simultaneously. This accumulates the net row and
+// column shift, then rolls in a SINGLE pass / single allocation: each output row
+// i is copied from source row (i - s_row) mod rows with a fused column roll (two
+// contiguous segments) — far cheaper than composing per-axis rolls (which would
+// allocate and copy the whole matrix once per axis). Values are moved verbatim,
+// so it is bit-identical to numpy incl. nan/inf/signed zeros. Returns Ok(None) —
+// caller falls through — for a non-2-D array, an out-of-range axis, or any non-f64
+// / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_roll_2d_multi(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    shifts: &[i64],
+    axes: &[i64],
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let shape = in_buffer.shape();
+    if shape.len() != 2 {
+        return Ok(None);
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    // Accumulate the net shift per axis (axes normalized into {0, 1}); any
+    // out-of-range axis defers to the general path so numpy raises its AxisError.
+    let mut s_row: i64 = 0;
+    let mut s_col: i64 = 0;
+    for (&sh, &ax) in shifts.iter().zip(axes.iter()) {
+        let norm = if ax < 0 { ax + 2 } else { ax };
+        match norm {
+            0 => s_row += sh,
+            1 => s_col += sh,
+            _ => return Ok(None),
+        }
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", ((rows, cols),), Some(&kwargs))?;
+    if rows > 0 && cols > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let sr = (((s_row % rows as i64) + rows as i64) % rows as i64) as usize;
+        let sc = (((s_col % cols as i64) + cols as i64) % cols as i64) as usize;
+        // Each output row = input row[cols-sc..] ++ input row[..cols-sc].
+        let split = cols - sc;
+        for i in 0..rows {
+            let src_row = (i + rows - sr) % rows;
+            let in_base = src_row * cols;
+            let out_base = i * cols;
+            for j in 0..sc {
+                output[out_base + j].set(input[in_base + split + j].get());
+            }
+            for j in 0..split {
+                output[out_base + sc + j].set(input[in_base + j].get());
+            }
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 // Zero-copy np.extract(condition, arr) for a bool condition ndarray and a float64
 // arr ndarray of the same flattened length: returns the 1-D run of arr values at
 // the positions where condition is True (numpy.extract == take(ravel(arr),
@@ -13107,6 +13181,19 @@ fn roll(
         {
             return Ok(out);
         }
+    }
+
+    // Zero-copy multi-axis roll for a tuple/list of shifts with matching axes on a
+    // 2-D f64 array: a single-pass fused roll (one allocation) of the net per-axis
+    // shift. Bit-identical; higher-dim, non-f64, or out-of-range axes fall through.
+    if let (Ok(shifts), Some(axis_obj)) =
+        (shift.bind(py).extract::<Vec<i64>>(), axis.as_ref())
+        && let Ok(axes) = axis_obj.bind(py).extract::<Vec<i64>>()
+        && !axes.is_empty()
+        && axes.len() == shifts.len()
+        && let Some(result) = try_zerocopy_f64_roll_2d_multi(py, a.bind(py), &shifts, &axes)?
+    {
+        return Ok(result);
     }
 
     let array = match extract_precise_numeric_array(py, a.bind(py), "roll(a)") {
