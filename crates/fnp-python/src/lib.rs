@@ -6984,6 +6984,93 @@ fn try_zerocopy_f64_predicate(
     Ok(Some(output))
 }
 
+// Two-input bool counterpart (for isclose) of zerocopy_f64_predicate_flat. When
+// a and b are exact same-shape C-contiguous float64 ndarrays, read both buffers
+// and write the per-element isclose predicate into a uint8 buffer, returned as
+// bool via `.view` — no intermediate Rust Vec for either input or the output,
+// removing the three cold allocations whose first-touch page faults dominate
+// the op (~5x vs numpy, bead lglck). numpy's formula, matched bit-for-bit:
+//   both finite:           |a-b| <= atol + rtol*|b|   (asymmetric — uses |b|)
+//   not both finite:       a == b                     (inf==inf True; nan False)
+//   equal_nan && both nan: True                       (overrides nan==nan False)
+// Returns Ok(None) — fall through to the extract path, all other inputs
+// unchanged — for non-float64, broadcasting/shape-mismatch, complex, scalar, or
+// non-ndarray operands.
+fn zerocopy_f64_isclose_flat<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    b: &Bound<'py, PyAny>,
+    rtol: f64,
+    atol: f64,
+    equal_nan: bool,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.get_type().is(&ndarray_type) || !b.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
+        return Ok(None);
+    };
+    let (Some(a_in), Some(b_in)) = (a_buffer.as_slice(py), b_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    // No broadcasting: identical shapes only, so flat index i pairs a[i] with b[i].
+    if a_buffer.shape() != b_buffer.shape() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a_buffer.shape().to_vec();
+    let n = a_in.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let bytes = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+            let x = a_cell.get();
+            let y = b_cell.get();
+            let close = if x.is_finite() && y.is_finite() {
+                (x - y).abs() <= atol + rtol * y.abs()
+            } else if equal_nan && x.is_nan() && y.is_nan() {
+                true
+            } else {
+                x == y
+            };
+            slot.set(u8::from(close));
+        }
+    }
+    let flat = bytes.call_method1("view", (numpy.getattr("bool_")?,))?;
+    Ok(Some((flat, shape)))
+}
+
+// Wrap zerocopy_f64_isclose_flat with the shared reshape / 0-d scalar handling.
+fn try_zerocopy_f64_isclose(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    rtol: f64,
+    atol: f64,
+    equal_nan: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some((flat, shape)) =
+        zerocopy_f64_isclose_flat(py, &numpy, a, b, rtol, atol, equal_nan)?
+    else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -26709,6 +26796,13 @@ fn isclose(
             )?
             .unbind())
     };
+
+    // Zero-copy fast path: same-shape f64 C-contiguous ndarray operands read
+    // both buffers and write the predicate straight to the output, skipping the
+    // three cold extract/build Vecs. Bit-identical; all else falls through.
+    if let Some(out) = try_zerocopy_f64_isclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)? {
+        return Ok(out);
+    }
 
     let arr_a = match extract_precise_numeric_array(py, a.bind(py), "isclose(a)") {
         Ok(arr) => arr,
