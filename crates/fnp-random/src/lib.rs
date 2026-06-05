@@ -3629,10 +3629,32 @@ impl Generator {
         let off = low as u64;
         // rng is the inclusive upper bound relative to off
         let rng = (high as u64).wrapping_sub(low as u64) - 1;
+        if rng == 0 {
+            return Ok(vec![low; size]);
+        }
         let mut result = Vec::with_capacity(size);
-        for _ in 0..size {
-            let val = (off.wrapping_add(self.numpy_bounded_uint64(rng))) as i64;
-            result.push(val);
+        if rng <= 0xFFFF_FFFE {
+            #[expect(clippy::cast_possible_truncation)]
+            let rng32 = rng as u32;
+            let rng_excl = u64::from(rng32) + 1;
+            let threshold = (u32::MAX - rng32) % (rng32 + 1);
+            for _ in 0..size {
+                let mut m = u64::from(self.next_uint32()) * rng_excl;
+                let mut leftover = m as u32;
+                if u64::from(leftover) < rng_excl {
+                    while leftover < threshold {
+                        m = u64::from(self.next_uint32()) * rng_excl;
+                        leftover = m as u32;
+                    }
+                }
+                let val = (off.wrapping_add(m >> 32)) as i64;
+                result.push(val);
+            }
+        } else {
+            for _ in 0..size {
+                let val = (off.wrapping_add(self.numpy_bounded_uint64(rng))) as i64;
+                result.push(val);
+            }
         }
         Ok(result)
     }
@@ -8933,6 +8955,42 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         assert_eq!(rng.integers(5, 5, 0).unwrap(), Vec::<i64>::new());
         assert_eq!(rng.integers(5, 4, 0).unwrap(), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn integers_small_range_batch_preserves_scalar_stream_and_digest() -> Result<(), RandomError> {
+        let size = 1024;
+        let low = 0i64;
+        let high = 100i64;
+        let off = low as u64;
+        let relative_bound = (high as u64).wrapping_sub(low as u64) - 1;
+
+        let mut batch_rng = test_generator();
+        let batch = batch_rng.integers(low, high, size)?;
+
+        let mut scalar_rng = test_generator();
+        let scalar: Vec<i64> = (0..size)
+            .map(|_| (off.wrapping_add(scalar_rng.numpy_bounded_uint64(relative_bound))) as i64)
+            .collect();
+
+        assert_eq!(batch, scalar);
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "41fda33a9fcbbefeff9cf1756cfe9e78bb00813c9c8718a782e8d119bc20eee7"
+        );
+        Ok(())
     }
 
     #[test]
