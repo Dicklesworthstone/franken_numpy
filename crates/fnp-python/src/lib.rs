@@ -6915,6 +6915,72 @@ fn try_zerocopy_f64_unary(
     Ok(Some(output))
 }
 
+// Bool-output counterpart of zerocopy_f64_unary_flat for the IEEE predicates
+// (isnan/isinf/isfinite/signbit). When x is exactly a C-contiguous float64
+// ndarray, read its values from the buffer view and write the predicate result
+// into a fresh uint8 buffer (1/0), then return it viewed as bool — numpy stores
+// True/False as 0x01/0x00, byte-identical to uint8 1/0. No intermediate Rust
+// Vec, so the cold first-touch page faults that dominated these ops (~40x vs
+// numpy) disappear. numpy's bool dtype uses format '?', which PyBuffer::<u8>
+// rejects, hence the uint8 buffer + zero-copy `.view(bool)`. Returns Ok(None)
+// (fall through to the extract path, all other inputs unchanged) for anything
+// that is not an exact float64 C-contiguous ndarray. Bit-identical to numpy:
+// the Rust IEEE predicate matches numpy on every value incl. ±0.0 and ±nan
+// sign bits.
+fn zerocopy_f64_predicate_flat<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    x: &Bound<'py, PyAny>,
+    pred: fn(f64) -> bool,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let bytes = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            slot.set(u8::from(pred(cell.get())));
+        }
+    }
+    let flat = bytes.call_method1("view", (numpy.getattr("bool_")?,))?;
+    Ok(Some((flat, shape)))
+}
+
+// Wrap zerocopy_f64_predicate_flat with the shared reshape / 0-d scalar handling.
+fn try_zerocopy_f64_predicate(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    pred: fn(f64) -> bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some((flat, shape)) = zerocopy_f64_predicate_flat(py, &numpy, x, pred)? else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -10404,6 +10470,9 @@ fn isneginf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn signbit(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_predicate(py, x.bind(py), f64::is_sign_negative)? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x.bind(py), "signbit(x)")?;
     let result = ufunc_signbit(&x).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
@@ -10411,18 +10480,27 @@ fn signbit(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn isnan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_predicate(py, x.bind(py), f64::is_nan)? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x.bind(py), "isnan(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isnan))
 }
 
 #[pyfunction]
 fn isinf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_predicate(py, x.bind(py), f64::is_infinite)? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x.bind(py), "isinf(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isinf))
 }
 
 #[pyfunction]
 fn isfinite(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_predicate(py, x.bind(py), f64::is_finite)? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x.bind(py), "isfinite(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isfinite))
 }
