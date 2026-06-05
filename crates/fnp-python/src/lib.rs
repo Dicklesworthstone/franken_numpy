@@ -7058,8 +7058,7 @@ fn try_zerocopy_f64_isclose(
     equal_nan: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
-    let Some((flat, shape)) =
-        zerocopy_f64_isclose_flat(py, &numpy, a, b, rtol, atol, equal_nan)?
+    let Some((flat, shape)) = zerocopy_f64_isclose_flat(py, &numpy, a, b, rtol, atol, equal_nan)?
     else {
         return Ok(None);
     };
@@ -7282,7 +7281,12 @@ fn try_zerocopy_f64_where(
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
     // cond must be a bool dtype ndarray; other kinds keep the dtype-aware path.
-    if condition.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+    if condition
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        != "b"
+    {
         return Ok(None);
     }
     let cond_u8 = condition.call_method1("view", (numpy.getattr("uint8")?,))?;
@@ -7395,7 +7399,12 @@ fn try_zerocopy_f64_select(
         if !condition.is_exact_instance(&ndarray_type) {
             return Ok(None);
         }
-        if condition.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+        if condition
+            .getattr("dtype")?
+            .getattr("kind")?
+            .extract::<String>()?
+            != "b"
+        {
             return Ok(None);
         }
         let view = condition.call_method1("view", (&uint8,))?;
@@ -11629,12 +11638,9 @@ fn select(
     // f64 choices of one shape, scalar default); skips the chained where_select
     // fold and the cold extract/build Vecs. Bit-identical; broadcasting,
     // non-contiguous, or non-scalar-default cases fall through below.
-    if let Some(out) = try_zerocopy_f64_select(
-        py,
-        condlist.bind(py),
-        choicelist.bind(py),
-        default.as_ref(),
-    )? {
+    if let Some(out) =
+        try_zerocopy_f64_select(py, condlist.bind(py), choicelist.bind(py), default.as_ref())?
+    {
         return Ok(out);
     }
 
@@ -18746,6 +18752,15 @@ fn fix(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let x_for_fallback = x.clone_ref(py);
     let fallback =
         || -> PyResult<Py<PyAny>> { Ok(fix_fn.call1((x_for_fallback.bind(py),))?.unbind()) };
+
+    // np.fix rounds toward zero, which is exactly np.trunc on real values; reuse
+    // the zero-copy unary trunc path for f64 ndarrays to skip the cold
+    // extract/build Vecs (bead lglck). Bit-identical (incl. -0.0/inf/nan).
+    if numpy_dtype_is_f64(py, x.bind(py))
+        && let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Trunc)?
+    {
+        return Ok(out);
+    }
 
     let array = match extract_precise_numeric_array(py, x.bind(py), "fix(x)") {
         Ok(array) => array,
@@ -27458,7 +27473,8 @@ fn isclose(
     // Zero-copy fast path: same-shape f64 C-contiguous ndarray operands read
     // both buffers and write the predicate straight to the output, skipping the
     // three cold extract/build Vecs. Bit-identical; all else falls through.
-    if let Some(out) = try_zerocopy_f64_isclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)? {
+    if let Some(out) = try_zerocopy_f64_isclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
+    {
         return Ok(out);
     }
 
