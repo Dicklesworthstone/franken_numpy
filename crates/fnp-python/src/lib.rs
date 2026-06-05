@@ -26379,6 +26379,15 @@ fn around(
         return fallback();
     }
 
+    // decimals==0 is plain round-half-even (Rint); take the zero-copy buffer
+    // path for exact f64 C-contiguous ndarrays (bit-identical to the
+    // elementwise(Rint) branch below). Other inputs fall through unchanged.
+    if decimals == 0 {
+        if let Some(result) = try_zerocopy_f64_unary(py, a.bind(py), UnaryOp::Rint)? {
+            return Ok(result);
+        }
+    }
+
     let array = match extract_precise_numeric_array(py, a.bind(py), "around(a)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
