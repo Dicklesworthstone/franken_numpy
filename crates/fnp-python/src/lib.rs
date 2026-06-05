@@ -7265,6 +7265,78 @@ fn try_zerocopy_f64_nan_to_num(
     Ok(Some(output))
 }
 
+// Zero-copy np.where(cond, x, y) for the common select form: a bool cond ndarray
+// with float64 x and y of the identical shape. out[i] = x[i] if cond[i] else
+// y[i] — a pure element-wise select (the chosen value is copied verbatim, so it
+// is bit-identical incl. nan/inf/signed zeros). Reads all three buffers and
+// writes the output buffer with no intermediate Rust Vec, dropping the four cold
+// extract/build Vecs (bead lglck). The bool buffer's format is '?' which
+// PyBuffer::<u8> rejects, so cond is viewed as uint8 (its bytes are 0x00/0x01)
+// first. Returns Ok(None) — caller falls through — for non-bool cond, non-f64 /
+// broadcasting / shape-mismatch x or y, or any non-ndarray operand.
+fn try_zerocopy_f64_where(
+    py: Python<'_>,
+    condition: &Bound<'_, PyAny>,
+    x: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    // cond must be a bool dtype ndarray; other kinds keep the dtype-aware path.
+    if condition.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+        return Ok(None);
+    }
+    let cond_u8 = condition.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let (Ok(cond_buffer), Ok(x_buffer), Ok(y_buffer)) = (
+        PyBuffer::<u8>::get(&cond_u8),
+        PyBuffer::<f64>::get(x),
+        PyBuffer::<f64>::get(y),
+    ) else {
+        return Ok(None);
+    };
+    let (Some(cond_in), Some(x_in), Some(y_in)) = (
+        cond_buffer.as_slice(py),
+        x_buffer.as_slice(py),
+        y_buffer.as_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    // No broadcasting: all three identical shapes so flat index i aligns.
+    if cond_buffer.shape() != x_buffer.shape() || x_buffer.shape() != y_buffer.shape() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = x_buffer.shape().to_vec();
+    let n = x_in.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (((slot, cond_cell), x_cell), y_cell) in output
+            .iter()
+            .zip(cond_in.iter())
+            .zip(x_in.iter())
+            .zip(y_in.iter())
+        {
+            slot.set(if cond_cell.get() != 0 {
+                x_cell.get()
+            } else {
+                y_cell.get()
+            });
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -8700,6 +8772,18 @@ fn where_py(
     let condition_bound = condition.bind(py);
     if !condition_bound.is_exact_instance(&ndarray_type) {
         return fallback();
+    }
+
+    // Zero-copy select fast path: bool cond + same-shape f64 x/y ndarrays read
+    // all three buffers and write x[i]/y[i] straight to the output, skipping the
+    // four cold extract/build Vecs. Bit-identical (pure select); everything else
+    // falls through to the broadcasting where_select / nonzero paths below.
+    if args.len() == 2 {
+        let x_arg = args.get_item(0)?;
+        let y_arg = args.get_item(1)?;
+        if let Some(out) = try_zerocopy_f64_where(py, condition_bound, &x_arg, &y_arg)? {
+            return Ok(out);
+        }
     }
 
     let condition = match extract_precise_numeric_array(py, condition_bound, "where(condition)") {
