@@ -465,3 +465,33 @@ np.repeat(a, 2, axis=5)
         "repeat with out-of-bounds axis should raise same error as numpy"
     );
 }
+
+/// Locks the zero-copy block-copy fast path for `numpy.tile` of a 1-D f64 array
+/// with scalar reps (`try_zerocopy_f64_tile`) to bit-exact parity. tile lays the
+/// input down end to end, copying every value verbatim, so parity must hold at
+/// the IEEE-754 bit level (signed zero, nan, inf). Compares sha256 of raw output
+/// bytes against numpy across several rep counts and extreme values.
+#[test]
+fn tile_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [1000, 100003]:
+    for reps in [1, 2, 7]:
+        chunks.append(np.asarray(mod.tile(rng.standard_normal(n), reps)).tobytes())
+xe = np.array([0.0, -0.0, np.inf, -np.inf, np.nan], dtype=np.float64)
+chunks.append(np.asarray(mod.tile(xe, 5)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy tile must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

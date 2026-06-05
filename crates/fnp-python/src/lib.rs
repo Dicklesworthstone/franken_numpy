@@ -8038,6 +8038,63 @@ fn try_zerocopy_f64_cumprod(
     Ok(Some(flat.unbind()))
 }
 
+// Zero-copy np.tile(a, reps) for the 1-D scalar-reps form: a C-contiguous float64
+// 1-D ndarray tiled `reps` times into a length-(n*reps) result. numpy.tile lays
+// the input down end to end, so each output block is a verbatim copy of the
+// input — bit-identical incl. nan/inf/signed zeros. Writes the reps blocks
+// straight into a numpy.empty(n*reps) buffer with no intermediate Rust Vec,
+// dropping the cold extract/build Vecs (bead lglck). Returns Ok(None) — caller
+// falls through — for a multi-dim input, a multi-element reps tuple (which adds
+// leading axes), or any non-f64 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_tile(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    reps: &[usize],
+) -> PyResult<Option<Py<PyAny>>> {
+    // Only the single-axis tile of a 1-D array maps to a flat block copy; a
+    // multi-element reps tuple promotes dimensions and is left to the general path.
+    if reps.len() != 1 {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    if in_buffer.shape().len() != 1 {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = input.len();
+    let r = reps[0];
+    let Some(total) = n.checked_mul(r) else {
+        return Ok(None);
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for block in 0..r {
+            let base = block * n;
+            for i in 0..n {
+                output[base + i].set(input[i].get());
+            }
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
 // ndarray. Output[i] = a[i+1] - a[i], length len-1 (empty for len 0 or 1, which
 // matches numpy). Reads the input buffer and writes the (len-1)-length output
@@ -17672,6 +17729,13 @@ fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
     } else {
         return fallback();
     };
+
+    // Zero-copy block copy for the common case (1-D f64 ndarray, scalar reps);
+    // skips the cold extract/build Vecs. Bit-identical; multi-dim inputs and
+    // multi-element reps tuples fall through to the general path.
+    if let Some(out) = try_zerocopy_f64_tile(py, a.bind(py), &reps_vec)? {
+        return Ok(out);
+    }
 
     let array = match extract_precise_numeric_array(py, a.bind(py), "tile(a)") {
         Ok(array) => array,
