@@ -1,10 +1,9 @@
 //! Conformance tests for re-exported numpy submodules:
 //! np.char, np.rec, np.emath, np.matrixlib (plus np.strings sanity).
 //!
-//! fnp_python re-exports these submodules verbatim from numpy. The tests
-//! verify each submodule is reachable, is identity-equal to its numpy peer,
-//! and that a representative call from each submodule produces numpy-equal
-//! output.
+//! fnp_python re-exports most of these submodules verbatim from numpy. `char`
+//! and `strings` are shallow native overlays for ASCII upper/lower, so the tests
+//! verify reachability, copied non-overridden attributes, and numpy-equal output.
 
 use std::{
     io::Write,
@@ -70,12 +69,14 @@ fn expect_equal(actual: &str, expected: &str, context: &str) -> Result<(), Strin
 }
 
 #[test]
-fn submodules_identity_equal_to_numpy() -> Result<(), String> {
+fn submodules_identity_or_overlay_match_numpy() -> Result<(), String> {
     let script = fnp_script(
         r#"
 checks = {
-    'strings':   fnp.strings   is np.strings,
-    'char':      fnp.char      is np.char,
+    'strings_upper_reachable': hasattr(fnp.strings, 'upper'),
+    'strings_non_overridden_identity': fnp.strings.add is np.strings.add,
+    'char_upper_reachable': hasattr(fnp.char, 'upper'),
+    'char_non_overridden_identity': fnp.char.add is np.char.add,
     'rec':       fnp.rec       is np.rec,
     'emath':     fnp.emath     is np.emath,
     'matrixlib': fnp.matrixlib is np.matrixlib,
@@ -91,7 +92,7 @@ print(all(checks.values()))
         last,
         "True",
         &format!(
-            "all re-exported submodules must be identity-equal to their numpy peers; output: {result}"
+            "re-exported submodules must preserve numpy identity or overlay contract; output: {result}"
         ),
     )
 }
@@ -111,6 +112,43 @@ print(ok)
         numpy_oracle(&script)?.trim(),
         "True",
         "fnp.char.lower/upper must match numpy",
+    )
+}
+
+#[test]
+fn char_strings_ascii_case_golden_sha256() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+cases = [
+    np.array(['azByCxD0123_', 'HELLO_world', '', 'MiXeD'], dtype='<U20').reshape(2, 2),
+    np.array(['éclair', 'MÜNCHEN', 'ASCII'], dtype='<U20'),
+]
+chunks = []
+for namespace in ['char', 'strings']:
+    for method in ['upper', 'lower']:
+        fnp_func = getattr(getattr(fnp, namespace), method)
+        np_func = getattr(getattr(np, namespace), method)
+        for arr in cases:
+            got = fnp_func(arr)
+            want = np_func(arr)
+            if not np.array_equal(got, want):
+                raise AssertionError((namespace, method, got, want))
+            chunks.extend([
+                namespace.encode(),
+                method.encode(),
+                str(got.shape).encode(),
+                str(got.dtype).encode(),
+                got.tobytes(),
+            ])
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#
+        .into(),
+    );
+    expect_equal(
+        numpy_oracle(&script)?.trim(),
+        "46c7c95b14749dc8f5ea6951e9134cec0f1a461c530984898b5df4860678f1b7",
+        "char/strings ASCII case golden SHA-256 must match numpy",
     )
 }
 

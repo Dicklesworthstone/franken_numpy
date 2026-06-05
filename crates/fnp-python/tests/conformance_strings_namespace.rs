@@ -1,9 +1,9 @@
 //! Conformance tests for fnp_python.strings — the numpy.strings submodule.
 //!
-//! fnp_python.strings is a re-export of numpy.strings (45+ string element-wise
-//! ops). These tests verify the submodule is reachable, that every documented
-//! function exists, and that representative call paths produce numpy-equal
-//! output across the standard function families.
+//! fnp_python.strings is a shallow native overlay over numpy.strings. These
+//! tests verify the submodule is reachable, that every documented function
+//! exists, and that representative call paths produce numpy-equal output across
+//! the standard function families.
 
 use std::process::Command;
 
@@ -41,17 +41,17 @@ fn fnp_script(body: String) -> String {
 }
 
 #[test]
-fn strings_namespace_attached_and_is_numpy_strings() -> Result<(), String> {
+fn strings_namespace_attached_and_preserves_numpy_surface() -> Result<(), String> {
     let script = fnp_script(
         r#"
-print(fnp.strings is np.strings)
+print(hasattr(fnp.strings, 'upper') and fnp.strings.add is np.strings.add)
 "#
         .into(),
     );
     assert_eq!(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.strings must be the numpy.strings submodule"
+        "fnp.strings must expose the native overlay plus copied numpy.strings surface"
     );
     Ok(())
 }

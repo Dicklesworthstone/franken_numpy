@@ -10515,7 +10515,9 @@ fn try_zerocopy_count_nonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            finish_count_nonzero(py, &numpy, input.len(), &shape, axis, |i| input[i].get() != 0)
+            finish_count_nonzero(py, &numpy, input.len(), &shape, axis, |i| {
+                input[i].get() != 0
+            })
         }
         "f" if numpy_dtype_is_f64(py, a) => {
             let Ok(buffer) = PyBuffer::<f64>::get(a) else {
@@ -10524,7 +10526,9 @@ fn try_zerocopy_count_nonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            finish_count_nonzero(py, &numpy, input.len(), &shape, axis, |i| input[i].get() != 0.0)
+            finish_count_nonzero(py, &numpy, input.len(), &shape, axis, |i| {
+                input[i].get() != 0.0
+            })
         }
         _ => Ok(None),
     }
@@ -29003,6 +29007,117 @@ fn numpy_dtype_is_f64(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     probe().unwrap_or(false)
 }
 
+fn try_zerocopy_unicode_ascii_case(
+    py: Python<'_>,
+    input: &Bound<'_, PyAny>,
+    uppercase: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !input.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = input.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "U" {
+        return Ok(None);
+    }
+    if !input
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+
+    let uint32_dtype = numpy.getattr("uint32")?;
+    let codepoints = input.call_method1("view", (&uint32_dtype,))?;
+    let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
+        return Ok(None);
+    };
+    let Some(codepoints_in) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if codepoints_in.iter().any(|codepoint| codepoint.get() > 0x7f) {
+        return Ok(None);
+    }
+
+    let codepoints_out = numpy.call_method1("empty_like", (&codepoints,))?;
+    let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
+        return Ok(None);
+    };
+    let Some(output) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    for (src, dst) in codepoints_in.iter().zip(output.iter()) {
+        let codepoint = src.get();
+        let mapped = if uppercase {
+            if (u32::from(b'a')..=u32::from(b'z')).contains(&codepoint) {
+                codepoint - 32
+            } else {
+                codepoint
+            }
+        } else if (u32::from(b'A')..=u32::from(b'Z')).contains(&codepoint) {
+            codepoint + 32
+        } else {
+            codepoint
+        };
+        dst.set(mapped);
+    }
+
+    Ok(Some(
+        codepoints_out.call_method1("view", (&dtype,))?.unbind(),
+    ))
+}
+
+fn unicode_ascii_case_or_numpy(
+    py: Python<'_>,
+    input: Py<PyAny>,
+    namespace: &str,
+    method: &str,
+    uppercase: bool,
+) -> PyResult<Py<PyAny>> {
+    if let Some(result) = try_zerocopy_unicode_ascii_case(py, input.bind(py), uppercase)? {
+        return Ok(result);
+    }
+    Ok(py
+        .import("numpy")?
+        .getattr(namespace)?
+        .getattr(method)?
+        .call1((input.bind(py),))?
+        .unbind())
+}
+
+#[pyfunction(name = "upper", signature = (a))]
+fn char_upper_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_case_or_numpy(py, a, "char", "upper", true)
+}
+
+#[pyfunction(name = "lower", signature = (a))]
+fn char_lower_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_case_or_numpy(py, a, "char", "lower", false)
+}
+
+#[pyfunction(name = "upper", signature = (a))]
+fn strings_upper_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_case_or_numpy(py, a, "strings", "upper", true)
+}
+
+#[pyfunction(name = "lower", signature = (a))]
+fn strings_lower_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_case_or_numpy(py, a, "strings", "lower", false)
+}
+
+fn copy_numpy_module_attrs(from: &Bound<'_, PyAny>, to: &Bound<'_, PyModule>) -> PyResult<()> {
+    let dict_any = from.getattr("__dict__")?;
+    let dict = dict_any.cast::<PyDict>()?;
+    for (key, value) in dict.iter() {
+        if let Ok(name) = key.extract::<String>() {
+            to.setattr(name, value)?;
+        }
+    }
+    Ok(())
+}
+
 // True when `value` is a narrow float (float16 / float32). NumPy preserves the
 // input float width for reductions like median/percentile/quantile, but our
 // in-Rust kernels accumulate in float64. The native fast path therefore matches
@@ -31682,9 +31797,9 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     }
 
     // Re-export upstream numpy submodules whose entire surface is pure numpy
-    // semantics with no fnp engine substitute. Each is m.add(name, &np_submod)
-    // verbatim, mirroring how m.add("linalg", ...) is wired but without a
-    // wrapping PyModule layer (these have no native overlays):
+    // semantics with no fnp engine substitute. `strings` and `char` use a
+    // shallow overlay so ASCII upper/lower can take the native UCS4 fast path
+    // while every other attribute stays copied from NumPy:
     //   numpy.strings   - 45+ string element-wise ops
     //   numpy.char      - 53 char-array ops (older sibling of numpy.strings)
     //   numpy.rec       - record-array helpers (fromarrays, fromrecords, ...)
@@ -31696,7 +31811,23 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // breaking the whole pymodule init).
     {
         let numpy = py.import("numpy")?;
-        for name in ["strings", "char", "rec", "emath", "matrixlib"] {
+        if let Ok(strings_upstream) = numpy.getattr("strings") {
+            let strings = PyModule::new(py, "strings")?;
+            copy_numpy_module_attrs(&strings_upstream, &strings)?;
+            strings.add_function(wrap_pyfunction!(strings_upper_ascii, &strings)?)?;
+            strings.add_function(wrap_pyfunction!(strings_lower_ascii, &strings)?)?;
+            m.add_submodule(&strings)?;
+            m.add("strings", strings)?;
+        }
+        if let Ok(char_upstream) = numpy.getattr("char") {
+            let char_mod = PyModule::new(py, "char")?;
+            copy_numpy_module_attrs(&char_upstream, &char_mod)?;
+            char_mod.add_function(wrap_pyfunction!(char_upper_ascii, &char_mod)?)?;
+            char_mod.add_function(wrap_pyfunction!(char_lower_ascii, &char_mod)?)?;
+            m.add_submodule(&char_mod)?;
+            m.add("char", char_mod)?;
+        }
+        for name in ["rec", "emath", "matrixlib"] {
             if let Ok(submod) = numpy.getattr(name) {
                 m.add(name, &submod)?;
             }

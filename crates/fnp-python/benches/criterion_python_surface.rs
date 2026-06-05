@@ -4,7 +4,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use fnp_python::fnp_python;
-use pyo3::types::{PyAnyMethods, PyModule, PyTuple};
+use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
 use pyo3::{PyResult, Python};
 use std::hint::black_box;
 use std::time::Duration;
@@ -210,12 +210,77 @@ fn bench_concat_hstack_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_char_ascii_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_char_ascii_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "<U20").expect("dtype kwarg");
+        let input = numpy
+            .call_method("full", ((1_000_000_usize,), "azByCxD0123_"), Some(&kwargs))
+            .expect("1M U20 ASCII input");
+        let fnp_char = module.getattr("char").expect("fnp_python.char");
+        let numpy_char = numpy.getattr("char").expect("numpy.char");
+        let fnp_upper = fnp_char.getattr("upper").expect("fnp.char.upper");
+        let fnp_lower = fnp_char.getattr("lower").expect("fnp.char.lower");
+        let numpy_upper = numpy_char.getattr("upper").expect("numpy.char.upper");
+        let numpy_lower = numpy_char.getattr("lower").expect("numpy.char.lower");
+
+        group.bench_function("fnp_char_upper_u20_ascii_1m", |bench| {
+            bench.iter(|| {
+                let result = fnp_upper
+                    .call1((&input,))
+                    .expect("fnp char.upper benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_char_upper_u20_ascii_1m", |bench| {
+            bench.iter(|| {
+                let result = numpy_upper
+                    .call1((&input,))
+                    .expect("numpy char.upper benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_char_lower_u20_ascii_1m", |bench| {
+            bench.iter(|| {
+                let result = fnp_lower
+                    .call1((&input,))
+                    .expect("fnp char.lower benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_char_lower_u20_ascii_1m", |bench| {
+            bench.iter(|| {
+                let result = numpy_lower
+                    .call1((&input,))
+                    .expect("numpy char.lower benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sqrt_input_extraction,
     bench_ediff1d_boundary,
     bench_select_boundary,
     bench_ldexp_boundary,
-    bench_concat_hstack_boundary
+    bench_concat_hstack_boundary,
+    bench_char_ascii_boundary
 );
 criterion_main!(benches);
