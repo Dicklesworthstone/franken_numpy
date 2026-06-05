@@ -148,3 +148,7 @@ nohup.out
 # Source-directory backups left behind by agent renames (e.g. fuzz/src.bak/)
 **/*.bak/
 .env
+
+# Ephemeral agent/skill scratch (repo-janitor 2026-06-04)
+.skill-loop-progress.md
+.skill-loop-progress-*.md
