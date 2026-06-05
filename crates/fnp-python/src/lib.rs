@@ -7154,6 +7154,28 @@ fn ndarray_has_native_i32_dtype(value: &Bound<'_, PyAny>) -> PyResult<bool> {
     Ok(matches!(dtype_kind.as_str(), "i") && dtype_itemsize == 4 && is_native)
 }
 
+fn scalbn_f64_normal_result(mantissa: f64, exponent: i32) -> Option<f64> {
+    const SIGN_MASK: u64 = 0x8000_0000_0000_0000;
+    const FRACTION_MASK: u64 = 0x000f_ffff_ffff_ffff;
+    const EXPONENT_MASK: u64 = 0x7ff0_0000_0000_0000;
+    const EXPONENT_SHIFT: u32 = 52;
+
+    let bits = mantissa.to_bits();
+    let exponent_bits = ((bits & EXPONENT_MASK) >> EXPONENT_SHIFT) as i64;
+    if exponent_bits == 0 || exponent_bits == 0x7ff {
+        return None;
+    }
+
+    let scaled_exponent = exponent_bits + i64::from(exponent);
+    if !(1..0x7ff).contains(&scaled_exponent) {
+        return None;
+    }
+
+    let scaled_bits =
+        (bits & SIGN_MASK) | ((scaled_exponent as u64) << EXPONENT_SHIFT) | (bits & FRACTION_MASK);
+    Some(f64::from_bits(scaled_bits))
+}
+
 // Zero-copy np.ldexp for the profiled native-boundary shape: exact C-contiguous
 // float64 mantissas and exact same-shape native int32 exponents. The element
 // formula is identical to the existing Rust path (`x * 2.0.powf(exp as f64)`),
@@ -7205,7 +7227,9 @@ fn try_zerocopy_f64_i32_ldexp(
             if mantissa.is_nan() {
                 return Ok(None);
             }
-            let result = mantissa * 2.0_f64.powf(f64::from(exponent_cell.get()));
+            let exponent = exponent_cell.get();
+            let result = scalbn_f64_normal_result(mantissa, exponent)
+                .unwrap_or_else(|| mantissa * 2.0_f64.powf(f64::from(exponent)));
             let mantissa_magnitude_bits = mantissa.to_bits() & 0x7fff_ffff_ffff_ffff;
             let result_magnitude_bits = result.to_bits() & 0x7fff_ffff_ffff_ffff;
             if mantissa.is_finite()
