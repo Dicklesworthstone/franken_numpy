@@ -7886,6 +7886,57 @@ fn try_zerocopy_f64_cumsum(
     Ok(Some(flat.unbind()))
 }
 
+// Zero-copy np.cumprod — the cumulative-product sibling of try_zerocopy_f64_cumsum
+// with identical gating (axis=None any ndim, or 1-D with axis 0/-1). The running
+// product is strictly sequential (out[i] = out[i-1] * in[i]), matching numpy's
+// left-to-right accumulation, so it is bit-identical. The first element is copied
+// verbatim (preserving a leading -0.0). Returns Ok(None) for a per-axis cumprod
+// on a multi-dim array or any non-f64 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_cumprod(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let ndim = in_buffer.shape().len();
+    let flatten_ok = match axis {
+        None => true,
+        Some(ax) => ndim == 1 && (ax == 0 || ax == -1),
+    };
+    if !flatten_ok {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let mut acc = input[0].get();
+        output[0].set(acc);
+        for i in 1..n {
+            acc *= input[i].get();
+            output[i].set(acc);
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
 // ndarray. Output[i] = a[i+1] - a[i], length len-1 (empty for len 0 or 1, which
 // matches numpy). Reads the input buffer and writes the (len-1)-length output
@@ -26028,6 +26079,13 @@ fn cumprod(
             }
         }
     };
+
+    // Zero-copy flatten cumprod for C-contiguous f64 ndarrays (axis=None any ndim,
+    // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical
+    // (strictly sequential accumulation); per-axis multi-dim cumprods fall through.
+    if let Some(result) = try_zerocopy_f64_cumprod(py, a.bind(py), axis_val)? {
+        return Ok(result);
+    }
 
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "cumprod(a)") {
