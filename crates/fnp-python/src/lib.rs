@@ -6938,6 +6938,81 @@ fn zerocopy_f64_unary_flat<'py>(
     Ok(Some((flat, shape)))
 }
 
+// int64 counterpart of unary_map_f64: monomorphic, inlined, autovectorizable.
+#[inline(always)]
+fn unary_map_i64<F: Fn(i64) -> i64>(
+    input: &[pyo3::buffer::ReadOnlyCell<i64>],
+    output: &[std::cell::Cell<i64>],
+    f: F,
+) {
+    for (slot, cell) in output.iter().zip(input.iter()) {
+        slot.set(f(cell.get()));
+    }
+}
+
+// Zero-copy fast path for the int64-preserving unary maps (negative / positive /
+// abs / square). For int64 ndarray input these previously paid the full
+// `extract_precise_numeric_array` cost and THEN fell straight back to numpy
+// (native_unary_elementwise rejects integer dtypes) — ~180-200x slower than
+// numpy for a result it threw away. Instead read the int64 buffer in place and
+// write the wrapping op into a fresh int64 buffer. numpy's integer ufuncs wrap
+// silently on two's-complement overflow (no RuntimeWarning for ndarray ops), so
+// `wrapping_neg` / `wrapping_abs` / `wrapping_mul` are bit-identical, including
+// abs(i64::MIN)==i64::MIN. Returns None for any non-int64 / non-C-contiguous /
+// non-ndarray input, or for an op outside the wrapping-closed set.
+fn zerocopy_i64_unary_flat<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    x: &Bound<'py, PyAny>,
+    op: UnaryOp,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    if !matches!(
+        op,
+        UnaryOp::Negative | UnaryOp::Positive | UnaryOp::Abs | UnaryOp::Square
+    ) {
+        return Ok(None);
+    }
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    // Exact int64 only: kind 'i', itemsize 8. Other widths/signedness (int32,
+    // uint*, etc.) have their own wrap range and stay on the fallback.
+    let dtype = x.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "i"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<i64>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "int64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        match op {
+            UnaryOp::Negative => unary_map_i64(input, output, |v| v.wrapping_neg()),
+            UnaryOp::Positive => unary_map_i64(input, output, |v| v),
+            UnaryOp::Abs => unary_map_i64(input, output, |v| v.wrapping_abs()),
+            UnaryOp::Square => unary_map_i64(input, output, |v| v.wrapping_mul(v)),
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((flat, shape)))
+}
+
 // Wrap zerocopy_f64_unary_flat with the reshape / 0-d scalar handling shared by
 // every native unary handler, returning the finished output array (or None to
 // fall through to the slower extract path). Lets single-op handlers
@@ -17990,6 +18065,17 @@ fn native_unary_elementwise(
     // cold extract Vec entirely (see zerocopy_f64_unary_flat). Bit-identical to
     // the direct output path below; all other inputs fall through unchanged.
     if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+        if shape.is_empty() {
+            return Ok(output.bind(py).get_item(())?.unbind());
+        }
+        return Ok(output);
+    }
+    // int64 zero-copy fast path (negative/positive/abs/square). Without it int64
+    // input ran the cold extract Vec and then fell straight back to numpy below,
+    // ~180-200x slower than numpy for a discarded result.
+    if let Some((flat, shape)) = zerocopy_i64_unary_flat(py, &numpy, x, op)? {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
         if shape.is_empty() {
