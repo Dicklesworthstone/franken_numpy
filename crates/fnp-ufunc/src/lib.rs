@@ -12585,8 +12585,15 @@ impl UFuncArray {
                 "roll: shift and axis must have same length".to_string(),
             ));
         }
-        let mut current = self.clone();
-        for (&s, &a) in shifts.iter().zip(axes.iter()) {
+        // Roll the first (axis, shift) straight from self rather than cloning the
+        // whole input to seed the loop. Bit-identical (each roll is read-only and
+        // builds a new array; same sequence of rolls).
+        let mut pairs = shifts.iter().zip(axes.iter());
+        let Some((&s0, &a0)) = pairs.next() else {
+            return Ok(self.clone());
+        };
+        let mut current = self.roll(s0, Some(a0))?;
+        for (&s, &a) in pairs {
             current = current.roll(s, Some(a))?;
         }
         Ok(current)
@@ -12651,8 +12658,14 @@ impl UFuncArray {
     ///
     /// Applies flip sequentially along each specified axis.
     pub fn flip_axes(&self, axes: &[isize]) -> Result<Self, UFuncError> {
-        let mut current = self.clone();
-        for &ax in axes {
+        // Flip the first axis straight from self rather than cloning to seed the
+        // loop. Bit-identical (each flip is read-only; same sequence of flips).
+        let mut axes_iter = axes.iter();
+        let Some(&first) = axes_iter.next() else {
+            return Ok(self.clone());
+        };
+        let mut current = self.flip(Some(first))?;
+        for &ax in axes_iter {
             current = current.flip(Some(ax))?;
         }
         Ok(current)
@@ -15701,8 +15714,10 @@ impl UFuncArray {
         }
         norm_axes.sort_unstable();
         norm_axes.reverse();
-        let mut result = self.clone();
-        for ax in norm_axes {
+        let mut axes_iter = norm_axes.into_iter();
+        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let mut result = self.any(Some(first as isize))?;
+        for ax in axes_iter {
             result = result.any(Some(ax as isize))?;
         }
         Ok(result)
@@ -15723,8 +15738,10 @@ impl UFuncArray {
         }
         norm_axes.sort_unstable();
         norm_axes.reverse();
-        let mut result = self.clone();
-        for ax in norm_axes {
+        let mut axes_iter = norm_axes.into_iter();
+        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let mut result = self.all(Some(first as isize))?;
+        for ax in axes_iter {
             result = result.all(Some(ax as isize))?;
         }
         Ok(result)
