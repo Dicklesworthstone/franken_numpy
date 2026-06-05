@@ -19884,6 +19884,69 @@ fn triu(py: Python<'_>, m: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     triangular_impl(py, m, k, /*upper=*/ true, "triu")
 }
 
+// Zero-copy np.triu / np.tril for a 2-D C-contiguous float64 ndarray: returns a
+// copy with the elements outside the kept triangle zeroed. triu keeps j >= i+k,
+// tril keeps j <= i+k. Each row's kept entries form a contiguous range, so this
+// allocates numpy.zeros((rows, cols)) and copies that run from the input per row,
+// with no intermediate Rust Vec of the full matrix (bead lglck). Kept values are
+// copied verbatim, so it is bit-identical to numpy incl. -0.0/inf/nan with a
+// +0.0 fill. Returns Ok(None) — caller falls through — for a non-2-D array or any
+// non-f64 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_triangular(
+    py: Python<'_>,
+    m: &Bound<'_, PyAny>,
+    k: i64,
+    upper: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !m.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, m) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(m) else {
+        return Ok(None);
+    };
+    let shape = in_buffer.shape();
+    if shape.len() != 2 {
+        return Ok(None);
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("zeros", ((rows, cols),), Some(&kwargs))?;
+    if rows > 0 && cols > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for i in 0..rows {
+            // Per row, the kept j range is contiguous; clamp the diagonal bound
+            // i+k into [0, cols].
+            let diag = i as i64 + k;
+            let (j_start, j_end) = if upper {
+                // keep j >= i+k
+                let start = diag.clamp(0, cols as i64) as usize;
+                (start, cols)
+            } else {
+                // keep j <= i+k  (i.e. j < i+k+1)
+                let end = (diag + 1).clamp(0, cols as i64) as usize;
+                (0, end)
+            };
+            let base = i * cols;
+            for j in j_start..j_end {
+                output[base + j].set(input[base + j].get());
+            }
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 fn triangular_impl(
     py: Python<'_>,
     m: Py<PyAny>,
@@ -19896,6 +19959,12 @@ fn triangular_impl(
     let m_for_fallback = m.clone_ref(py);
     let fallback =
         || -> PyResult<Py<PyAny>> { Ok(numpy_fn.call1((m_for_fallback.bind(py), k))?.unbind()) };
+    // Zero-copy per-row triangle copy for 2-D f64 ndarrays; skips the cold
+    // extract + full n*n build Vecs. Bit-identical; N-D and other dtypes fall
+    // through to the general path.
+    if let Some(result) = try_zerocopy_f64_triangular(py, m.bind(py), k, upper)? {
+        return Ok(result);
+    }
     let array = match extract_precise_numeric_array(py, m.bind(py), numpy_name) {
         Ok(array) => array,
         Err(_) => return fallback(),

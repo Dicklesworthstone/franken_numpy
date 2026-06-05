@@ -402,3 +402,34 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// Locks the zero-copy 2-D triu/tril fast path (`try_zerocopy_f64_triangular`,
+/// copying the kept triangle per row into a zeros matrix) to bit-exact parity
+/// with numpy. The kept entries are copied verbatim, so parity must hold at the
+/// IEEE-754 bit level (signed zero, nan, inf) with a +0.0 fill. Compares the
+/// sha256 of raw output bytes across square and rectangular shapes and
+/// positive/negative k for both triu and tril.
+#[test]
+fn triu_tril_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for r, c in [(100, 100), (500, 800), (800, 500)]:
+    a = rng.standard_normal((r, c))
+    for k in [0, 3, -3]:
+        chunks.append(np.asarray(mod.triu(a, k)).tobytes())
+        chunks.append(np.asarray(mod.tril(a, k)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy triu/tril must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
