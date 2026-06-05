@@ -337,3 +337,277 @@ print(np.array_equal(result_left, expected_left) and np.array_equal(result_right
     assert_eq!(result.trim(), "True", "shift with zero should match numpy");
     Ok(())
 }
+
+#[test]
+fn bitwise_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let binary_funcs = [
+        "bitwise_and",
+        "bitwise_or",
+        "bitwise_xor",
+        "left_shift",
+        "right_shift",
+    ];
+    for func in binary_funcs {
+        let script = fnp_script(format!(
+            r#"
+x = np.int64(12)
+y = np.int64(5)
+fnp_result = fnp.{func}(x, y)
+np_result = np.{func}(x, y)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        ));
+        let result = numpy_oracle(&script)?;
+        assert!(
+            result.trim().starts_with("True"),
+            "{func} scalar return type should match numpy: {result}"
+        );
+    }
+
+    let script = fnp_script(
+        r#"
+x = np.int64(12)
+fnp_result = fnp.invert(x)
+np_result = np.invert(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "invert scalar return type should match numpy: {result}"
+    );
+
+    Ok(())
+}
+
+#[test]
+fn bitwise_negative_numbers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1, -2, -128, -256], dtype=np.int64)
+y = np.array([1, 2, 127, 255], dtype=np.int64)
+result_and = fnp.bitwise_and(x, y)
+result_or = fnp.bitwise_or(x, y)
+result_xor = fnp.bitwise_xor(x, y)
+expected_and = np.bitwise_and(x, y)
+expected_or = np.bitwise_or(x, y)
+expected_xor = np.bitwise_xor(x, y)
+print(np.array_equal(result_and, expected_and) and np.array_equal(result_or, expected_or) and np.array_equal(result_xor, expected_xor))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise negative numbers should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn shift_negative_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1, -2, -128, -256], dtype=np.int64)
+result_right = fnp.right_shift(x, 1)
+expected_right = np.right_shift(x, 1)
+print(np.array_equal(result_right, expected_right))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "right shift negative values should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn bitwise_uint8_dtype() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([255, 128, 64, 32, 16], dtype=np.uint8)
+y = np.array([1, 2, 4, 8, 16], dtype=np.uint8)
+result_and = fnp.bitwise_and(x, y)
+result_or = fnp.bitwise_or(x, y)
+expected_and = np.bitwise_and(x, y)
+expected_or = np.bitwise_or(x, y)
+print(np.array_equal(result_and, expected_and) and np.array_equal(result_or, expected_or))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise uint8 dtype should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn invert_different_dtypes() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+tests_pass = True
+for dtype in [np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64]:
+    x = np.array([0, 1, -1 if np.issubdtype(dtype, np.signedinteger) else 255, 127], dtype=dtype)
+    result = fnp.invert(x)
+    expected = np.invert(x)
+    tests_pass = tests_pass and np.array_equal(result, expected)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "invert different dtypes should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn bitwise_empty_arrays() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([], dtype=np.int64)
+y = np.array([], dtype=np.int64)
+tests_pass = True
+for func_name in ['bitwise_and', 'bitwise_or', 'bitwise_xor']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x, y)
+    np_result = np_func(x, y)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+    tests_pass = tests_pass and (fnp_result.shape == np_result.shape)
+fnp_inv = fnp.invert(x)
+np_inv = np.invert(x)
+tests_pass = tests_pass and np.array_equal(fnp_inv, np_inv)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise empty arrays should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn bitwise_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0b1100], dtype=np.int64)
+y = np.array([0b1010], dtype=np.int64)
+tests_pass = True
+for func_name in ['bitwise_and', 'bitwise_or', 'bitwise_xor']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x, y)
+    np_result = np_func(x, y)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise single element should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn bitwise_all_zeros() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0, 0, 0, 0], dtype=np.int64)
+y = np.array([0, 0, 0, 0], dtype=np.int64)
+tests_pass = True
+for func_name in ['bitwise_and', 'bitwise_or', 'bitwise_xor']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x, y)
+    np_result = np_func(x, y)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+fnp_inv = fnp.invert(x)
+np_inv = np.invert(x)
+tests_pass = tests_pass and np.array_equal(fnp_inv, np_inv)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "bitwise all zeros should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn bitwise_all_ones() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1, -1, -1, -1], dtype=np.int64)
+y = np.array([-1, -1, -1, -1], dtype=np.int64)
+tests_pass = True
+for func_name in ['bitwise_and', 'bitwise_or', 'bitwise_xor']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x, y)
+    np_result = np_func(x, y)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+fnp_inv = fnp.invert(x)
+np_inv = np.invert(x)
+tests_pass = tests_pass and np.array_equal(fnp_inv, np_inv)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "bitwise all ones should match numpy");
+    Ok(())
+}
+
+#[test]
+fn shift_large_amounts() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1, 2, 3, 4], dtype=np.int64)
+result_left = fnp.left_shift(x, 30)
+result_right = fnp.right_shift(x, 30)
+expected_left = np.left_shift(x, 30)
+expected_right = np.right_shift(x, 30)
+tests_pass = np.array_equal(result_left, expected_left) and np.array_equal(result_right, expected_right)
+
+x2 = np.array([1 << 50, 1 << 55, 1 << 60], dtype=np.int64)
+result_right2 = fnp.right_shift(x2, 40)
+expected_right2 = np.right_shift(x2, 40)
+tests_pass = tests_pass and np.array_equal(result_right2, expected_right2)
+
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "shift large amounts should match numpy"
+    );
+    Ok(())
+}

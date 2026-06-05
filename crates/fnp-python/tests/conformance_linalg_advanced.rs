@@ -450,3 +450,234 @@ print(np.allclose(fnp_pow, A, rtol=1e-10))
     assert_eq!(result.trim(), "True", "matrix_power(A, 1) should equal A");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Complex matrix tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn pinv_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j], [5+2j, 6]], dtype=np.complex128)
+fnp_pinv = fnp.pinv(a)
+np_pinv = np.linalg.pinv(a)
+print(np.allclose(fnp_pinv, np_pinv))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "pinv complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn tensorinv_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Create a tensor that can be inverted: shape (2,3,6) with ind=2 means 2*3=6
+a = np.arange(36, dtype=np.complex128).reshape(2, 3, 6) + 1j
+# Make it more invertible by adding scaled identity-like structure
+for i in range(6):
+    a.flat[i * 7] += 10
+fnp_result = fnp.tensorinv(a, ind=2)
+np_result = np.linalg.tensorinv(a, ind=2)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tensorinv complex should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn solve_triangular_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import scipy.linalg
+a = np.array([[2+1j, 0, 0], [1, 3-1j, 0], [2, 1, 4+1j]], dtype=np.complex128)
+b = np.array([1+1j, 2-1j, 3], dtype=np.complex128)
+fnp_result = fnp.solve_triangular(a, b, lower=True)
+sp_result = scipy.linalg.solve_triangular(a, b, lower=True)
+print(np.allclose(fnp_result, sp_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "solve_triangular complex should match scipy"
+    );
+    Ok(())
+}
+
+#[test]
+fn eigvals_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+fnp_vals = fnp.eigvals(a)
+np_vals = np.linalg.eigvals(a)
+# Eigenvalues may be in different order, so compare sorted
+fnp_sorted = np.sort_complex(fnp_vals)
+np_sorted = np.sort_complex(np_vals)
+print(np.allclose(fnp_sorted, np_sorted))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "eigvals complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn svd_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j], [5+2j, 6]], dtype=np.complex128)
+fnp_u, fnp_s, fnp_vh = fnp.svd(a)
+np_u, np_s, np_vh = np.linalg.svd(a)
+# Singular values should match
+print(np.allclose(fnp_s, np_s))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "svd complex singular values should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn slogdet_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+fnp_sign, fnp_logdet = fnp.slogdet(a)
+np_sign, np_logdet = np.linalg.slogdet(a)
+print(np.allclose(fnp_logdet, np_logdet))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "slogdet complex logdet should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn svd_empty_rows() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([]).reshape(0, 3)
+fnp_u, fnp_s, fnp_vh = fnp.svd(a)
+np_u, np_s, np_vh = np.linalg.svd(a)
+# Shapes should match
+shape_ok = fnp_u.shape == np_u.shape and fnp_s.shape == np_s.shape and fnp_vh.shape == np_vh.shape
+print(shape_ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "svd empty rows shapes should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn pinv_empty() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([]).reshape(0, 3)
+fnp_result = fnp.pinv(a)
+np_result = np.linalg.pinv(a)
+print(fnp_result.shape == np_result.shape and np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "pinv empty should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .expect("python3 should be available");
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("LinAlgError") {
+            "LinAlgError".to_string()
+        } else if stderr.contains("ValueError") {
+            "ValueError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn matrix_power_non_square_raises_linalgerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(6).reshape(2, 3).astype(float)
+fnp.linalg.matrix_power(a, 2)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(6).reshape(2, 3).astype(float)
+np.linalg.matrix_power(a, 2)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "matrix_power on non-square should raise same error as numpy"
+    );
+}
+
+#[test]
+fn eigvals_non_square_raises_linalgerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(6).reshape(2, 3).astype(float)
+fnp.linalg.eigvals(a)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(6).reshape(2, 3).astype(float)
+np.linalg.eigvals(a)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "eigvals on non-square should raise same error as numpy"
+    );
+}

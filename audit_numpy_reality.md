@@ -1,8 +1,8 @@
-# fnp-* reality-check — numpy.__all__ coverage — 2026-05-13
+# fnp-* reality-check — numpy.__all__ coverage — 2026-05-13 (touched 2026-05-16)
 
-Comparing the Python-facing surface exposed by `fnp_python` against `numpy.__all__` (NumPy 2.x). Refreshed after the May 2026 parity wave closed the original gap. **This is now a steady-state baseline plus regression-protection note, not a gap list.**
+Comparing the Python-facing surface exposed by `fnp_python` against `numpy.__all__` (NumPy 2.x). Refreshed after the May 2026 parity wave closed the original gap; lock-in is structural via the `fnp_python_covers_full_numpy_all` conformance test, which iterates `numpy.__all__` and fails CI if any name regresses. **This is now a steady-state baseline plus regression-protection note, not a gap list.**
 
-## Vision (from README.md)
+## Vision (from README.md § The Solution, item 1)
 
 > "Absolute behavioral compatibility with legacy NumPy. Not a subset, not 'inspired by.' The full API, edge cases and all."
 
@@ -13,7 +13,8 @@ The measuring stick is `numpy.__all__` — the 499 names NumPy publishes as its 
 - `numpy.__all__` names: **499**
 - `numpy.__all__` ∩ `fnp_python`: **499** (**100.0%** of numpy's top-level surface is reachable as `fnp_python.<name>`)
 - `numpy.__all__` \ `fnp_python` (gap): **0** (0%)
-- Names in `fnp_python` that are NOT in `numpy.__all__`: a small set of internal helpers and flat-namespace aliases (linalg_*, ma_*, etc.) used by conformance tests; not user-facing surface.
+- Names in `fnp_python` that are NOT in `numpy.__all__`: ~130 internal helpers and flat-namespace aliases (`linalg_*`, `ma_*`, etc.) used by conformance tests; not user-facing surface. The live count is reported by the API coverage gate (`exports / covered / excluded / missing`) — at the 2026-05-13 snapshot: `exports=633`, `covered=599`, `excluded=34`, `missing=0`.
+- Underlying Rust surface (orthogonal to the Python surface): **1,575 `pub fn` declarations** across the library code of all 10 crates (verified 2026-05-16 via `find crates/*/src -name '*.rs' -not -path '*/bin/*' -exec grep -hE '^\s*pub fn ' {} + | wc -l`). An earlier scope here (`rg -c 'pub fn ' crates/*/src/lib.rs`) reported "~1,470" but that only walks each crate's `lib.rs` and skips 17 sibling `.rs` files in `crates/fnp-conformance/src/` (diagnostic_oracle, workflow_scenarios, contract_schema, ...) plus `crates/fnp-random/src/ziggurat.rs`. The Python surface is a curated re-exposure of this Rust surface plus identity-equal numpy fallbacks for the remaining `numpy.__all__` names.
 
 ## Coverage progression
 
@@ -56,18 +57,20 @@ This audit measures Python-surface parity. It does not measure:
 ## Reproduction
 
 ```bash
+# Build the cdylib (respects $CARGO_TARGET_DIR; otherwise defaults to target/):
+cargo build -p fnp-python --release --features python-extension
+
 python3 - <<'PY'
-import importlib.util, os
+import importlib.util, glob, os
 import numpy as np
-candidates = []
-for d in ('/data/projects/.cargo-target-fnp-pinkdesert-verify/debug/deps',
-          '/data/projects/.cargo-target-fnp-cc-array-api/debug/deps'):
-    if not os.path.isdir(d):
-        continue
-    for f in os.listdir(d):
-        if f.startswith('libfnp_python') and f.endswith('.so'):
-            candidates.append(os.path.join(d, f))
-candidates.sort()
+target = os.environ.get('CARGO_TARGET_DIR', 'target')
+# Match the cdylib across platforms (.so on Linux, .dylib on macOS, .pyd on Windows).
+candidates = sorted(
+    glob.glob(f'{target}/release/deps/libfnp_python*.so')
+    + glob.glob(f'{target}/release/deps/libfnp_python*.dylib')
+    + glob.glob(f'{target}/release/fnp_python.pyd')
+)
+assert candidates, f'No fnp_python cdylib found under {target}/release/; build first.'
 spec = importlib.util.spec_from_file_location('fnp_python', candidates[-1])
 fnp = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fnp)
@@ -82,4 +85,4 @@ PY
 ## Notes
 
 - The lock-in conformance test runs against the *live* numpy version on the build host, so the parity guarantee holds as numpy evolves. New names that numpy adds to `__all__` will fail the test until they are explicitly added to the re-export block in `crates/fnp-python/src/lib.rs`.
-- Prior version of this document (2026-04-22) recorded 43.3% coverage and proposed a "close the gap" multi-session program. That program is now complete; the bead trail is in `.beads/issues.jsonl` (search for `franken_numpy-vek3z`, `ghsx4`, `bntjh`, `tmg0c`, `4t0ql`, `xdxvn`, `r1xmi`, `cp8xw`, `t3eb4`, `dm9bn`).
+- Prior version of this document (2026-04-22) recorded 43.3% coverage and proposed a "close the gap" multi-session program. That program is now complete; the bead trail is in `.beads/issues.jsonl` (search for `franken_numpy-vek3z`, `ghsx4`, `bntjh`, `tmg0c`, `4t0ql`, `xdxvn`, `r1xmi`, `cp8xw`, `t3eb4`, `dm9bn`, `0xpje`).

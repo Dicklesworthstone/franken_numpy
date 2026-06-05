@@ -11,11 +11,21 @@ PARALLELISM="${FNP_RAPTORQ_PARALLELISM:-1}"
 
 cd "$ROOT_DIR"
 
+run_cargo() {
+  if command -v rch >/dev/null 2>&1; then
+    echo "[raptorq-gate] executor=rch"
+    rch exec -- cargo "$@"
+  else
+    echo "[raptorq-gate] executor=cargo"
+    cargo "$@"
+  fi
+}
+
 echo "[raptorq-gate] root=$ROOT_DIR"
 echo "[raptorq-gate] reliability_report=$REPORT_PATH"
 echo "[raptorq-gate] retries=$RETRIES flake_budget=$FLAKE_BUDGET coverage_floor=$COVERAGE_FLOOR parallelism=$PARALLELISM"
 
-rch exec -- cargo run -p fnp-conformance --bin run_raptorq_gate -- \
+run_cargo run -p fnp-conformance --bin run_raptorq_gate -- \
   --report-path "$REPORT_PATH" \
   --retries "$RETRIES" \
   --flake-budget "$FLAKE_BUDGET" \

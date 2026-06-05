@@ -280,3 +280,100 @@ print(np.array_equal(ravel_result, reshape_result))
     assert_eq!(result.trim(), "True", "ravel should equal reshape(-1)");
     Ok(())
 }
+
+#[test]
+fn reshape_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+fnp_result = fnp.reshape(a, (2, 2))
+np_result = np.reshape(a, (2, 2))
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "reshape complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn ravel_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2-1j], [3+2j, 4-2j]], dtype=np.complex128)
+fnp_result = fnp.ravel(a)
+np_result = np.ravel(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ravel complex should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .expect("python3 should be available");
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("ValueError") {
+            "ValueError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn reshape_incompatible_size_raises_valueerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(12)
+fnp.reshape(a, (5, 5))
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(12)
+np.reshape(a, (5, 5))
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "reshape with incompatible size should raise same error as numpy"
+    );
+}
+
+#[test]
+fn reshape_multiple_unknowns_raises_valueerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(12)
+fnp.reshape(a, (-1, -1))
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(12)
+np.reshape(a, (-1, -1))
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "reshape with multiple -1 should raise same error as numpy"
+    );
+}

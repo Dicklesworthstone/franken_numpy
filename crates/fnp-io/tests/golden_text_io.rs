@@ -193,12 +193,18 @@ fn golden_genfromtxt_basic() {
 
 #[test]
 fn golden_genfromtxt_with_missing_nan() {
-    let input = "1 2 3\n4  6\n";
-    let result = genfromtxt(input, ' ', '#', 0, f64::NAN).unwrap();
-    assert!(result.values.len() >= 3);
+    let input = "1,2,3\n4,,6\n";
+    let result = genfromtxt(input, ',', '#', 0, f64::NAN).unwrap();
+    assert_eq!(result.nrows, 2, "should have 2 rows");
+    assert_eq!(result.ncols, 3, "should have 3 columns");
     assert!(
         approx_eq(result.values[0], 1.0),
         "first element should be 1.0"
+    );
+    assert!(result.values[4].is_nan(), "missing element should be NaN");
+    assert!(
+        approx_eq(result.values[5], 6.0),
+        "last element should be 6.0"
     );
 }
 

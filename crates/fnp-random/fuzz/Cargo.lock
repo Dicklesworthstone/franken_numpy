@@ -55,6 +55,7 @@ name = "fnp-random"
 version = "0.1.0"
 dependencies = [
  "fnp-ndarray",
+ "getrandom",
 ]
 
 [[package]]

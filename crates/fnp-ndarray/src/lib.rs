@@ -538,6 +538,8 @@ impl NdLayout {
     }
 }
 
+const EXACT_OVERLAP_ELEMENT_LIMIT: usize = 200_000;
+
 fn detect_internal_overlap(
     shape: &[usize],
     strides: &[isize],
@@ -557,6 +559,62 @@ fn detect_internal_overlap(
     }
 
     let item_size = isize::try_from(item_size).map_err(|_| ShapeError::Overflow)?;
+    let element_count = element_count(shape)?;
+    if element_count <= EXACT_OVERLAP_ELEMENT_LIMIT {
+        return detect_internal_overlap_exact(shape, strides, item_size, element_count);
+    }
+
+    detect_internal_overlap_conservative(shape, strides, item_size)
+}
+
+fn detect_internal_overlap_exact(
+    shape: &[usize],
+    strides: &[isize],
+    item_size: isize,
+    element_count: usize,
+) -> Result<bool, ShapeError> {
+    let mut offsets = Vec::with_capacity(element_count);
+    let mut indices = vec![0usize; shape.len()];
+
+    for linear_index in 0..element_count {
+        let mut offset = 0isize;
+        for (&index, &stride) in indices.iter().zip(strides) {
+            let index = isize::try_from(index).map_err(|_| ShapeError::Overflow)?;
+            let contribution = index.checked_mul(stride).ok_or(ShapeError::Overflow)?;
+            offset = offset
+                .checked_add(contribution)
+                .ok_or(ShapeError::Overflow)?;
+        }
+        offsets.push(offset);
+
+        if linear_index + 1 == element_count {
+            break;
+        }
+
+        for axis in (0..indices.len()).rev() {
+            indices[axis] += 1;
+            if indices[axis] < shape[axis] {
+                break;
+            }
+            indices[axis] = 0;
+        }
+    }
+
+    offsets.sort_unstable();
+    for pair in offsets.windows(2) {
+        let current_end = pair[0].checked_add(item_size).ok_or(ShapeError::Overflow)?;
+        if pair[1] < current_end {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn detect_internal_overlap_conservative(
+    shape: &[usize],
+    strides: &[isize],
+    item_size: isize,
+) -> Result<bool, ShapeError> {
     let mut axes = Vec::new();
     for (&dim, &stride) in shape.iter().zip(strides) {
         if dim <= 1 {
@@ -1100,6 +1158,16 @@ mod tests {
             .expect("overlapping span still fits in base storage");
         assert!(view.has_internal_overlap());
         assert!(!view.is_writeable());
+    }
+
+    #[test]
+    fn as_strided_noncanonical_distinct_offsets_stays_writeable() {
+        let base = NdLayout::contiguous(vec![16], 8, MemoryOrder::C).expect("layout");
+        let view = base
+            .as_strided(vec![3, 3], vec![16, 24])
+            .expect("non-overlapping noncanonical stride span fits in base storage");
+        assert!(!view.has_internal_overlap());
+        assert!(view.is_writeable());
     }
 
     #[test]

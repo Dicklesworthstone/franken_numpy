@@ -296,3 +296,20 @@ print(np.allclose(q, qe, rtol=1e-10) and np.allclose(r, re, rtol=1e-10))
     );
     Ok(())
 }
+
+#[test]
+fn divmod_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = "import numpy as np; x = np.float64(7.0); y = np.float64(3.0); q, r = np.divmod(x, y); print(type(q).__name__, type(r).__name__, q, r)";
+    let numpy_result = numpy_oracle(script)?;
+
+    let rust_script = fnp_script("x = np.float64(7.0); y = np.float64(3.0); q, r = fnp.divmod(x, y); print(type(q).__name__, type(r).__name__, q, r)".into());
+    let rust_result = numpy_oracle(&rust_script)?;
+
+    assert_eq!(
+        numpy_result.trim(),
+        rust_result.trim(),
+        "divmod scalar return type mismatch\nnumpy: {numpy_result}\nfnp: {rust_result}"
+    );
+
+    Ok(())
+}

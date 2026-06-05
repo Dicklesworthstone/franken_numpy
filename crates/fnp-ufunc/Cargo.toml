@@ -1,20 +1,48 @@
 [package]
 name = "fnp-ufunc"
-version = "0.1.0"
-edition = "2024"
-license-file = "../../LICENSE"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Elementwise and reduction operations: arithmetic, transcendentals, comparisons, ufuncs, gufuncs."
 
 [dependencies]
+# fnp-* path deps: this crate sits at the top of the engine layering.
+# - fnp-dtype: DType variants + promotion table (used by every ufunc)
+# - fnp-ndarray: SCE for shape/stride/broadcast (every reduction + view op)
+# - fnp-linalg: bridge for ops that delegate to linalg (matmul fast paths, etc.)
+# - fnp-runtime: RuntimeMode + DecisionAction (consulted by the float-error
+#   machine and the hardened-mode validators)
 fnp-dtype = { path = "../fnp-dtype", version = "0.1.0" }
 fnp-ndarray = { path = "../fnp-ndarray", version = "0.1.0" }
 fnp-linalg = { path = "../fnp-linalg", version = "0.1.0" }
 fnp-runtime = { path = "../fnp-runtime", version = "0.1.0" }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+# rayon: data parallelism for compute-bound kernels (register-tiled GEMM). Output
+# row bands are independent, so parallelism keeps results bit-for-bit identical.
+rayon = { workspace = true }
+# serde / serde_json: oracle fixture I/O for the differential harness +
+# gufunc signature parsing diagnostics + RNG witness serialization.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
 
 [dev-dependencies]
-criterion = "0.5"
+criterion.workspace = true
+proptest.workspace = true
+# sha2: deterministic golden-output digests for bitwise matmul non-regression tests.
+sha2 = "0.11.0"
 
 [[bench]]
 name = "elementwise"
+harness = false
+
+[[bench]]
+name = "transcendental"
+harness = false
+
+[[bench]]
+name = "contraction"
 harness = false

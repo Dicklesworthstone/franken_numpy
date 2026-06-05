@@ -13,10 +13,13 @@
 //! Finding: fnp-linalg (10,120 LOC) had ZERO benchmarks despite containing
 //! performance-critical numerical algorithms.
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
-    cholesky_nxn, det_nxn, eigvalsh_nxn, inv_nxn, matrix_norm_frobenius, qr_nxn, solve_nxn, svd_nxn,
+    batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, complex_matmul, det_nxn, eigvalsh_nxn,
+    inv_nxn, matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn, solve_nxn, svd_mxn_full,
+    svd_nxn,
 };
+use std::hint::black_box;
 
 fn generate_spd_matrix(n: usize) -> Vec<f64> {
     let mut a = vec![0.0; n * n];
@@ -128,7 +131,7 @@ fn bench_cholesky(c: &mut Criterion) {
 fn bench_qr(c: &mut Criterion) {
     let mut group = c.benchmark_group("qr_nxn");
 
-    for n in [16, 32, 64, 128] {
+    for n in [16, 32, 64, 128, 256, 512] {
         let a = generate_random_matrix(n, 123);
 
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
@@ -145,7 +148,7 @@ fn bench_qr(c: &mut Criterion) {
 fn bench_svd(c: &mut Criterion) {
     let mut group = c.benchmark_group("svd_nxn");
 
-    for n in [16, 32, 64, 128] {
+    for n in [16, 32, 64, 128, 256, 512] {
         let a = generate_random_matrix(n, 456);
 
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
@@ -159,10 +162,27 @@ fn bench_svd(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_svd_full(c: &mut Criterion) {
+    let mut group = c.benchmark_group("svd_mxn_full");
+
+    for n in [128usize, 256, 512] {
+        let a = generate_random_matrix(n, 456);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = svd_mxn_full(black_box(&a), black_box(n), black_box(n));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_eigvalsh(c: &mut Criterion) {
     let mut group = c.benchmark_group("eigvalsh_nxn");
 
-    for n in [16, 32, 64, 128] {
+    for n in [16, 32, 64, 128, 256, 512] {
         let a = generate_spd_matrix(n);
 
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
@@ -193,16 +213,185 @@ fn bench_norm_frobenius(c: &mut Criterion) {
     group.finish();
 }
 
+// Stacked-matrix ("batched") workloads: NumPy-style leading batch dims. These
+// loop over many independent matrices, the embarrassingly-parallel hot path
+// exercised by np.linalg.{inv,eigvalsh,cholesky} on (..., n, n) arrays.
+
+fn generate_batch_spd(batch: usize, n: usize) -> (Vec<f64>, Vec<usize>) {
+    let mat_size = n * n;
+    let mut data = Vec::with_capacity(batch * mat_size);
+    for b in 0..batch {
+        // Per-lane diagonal perturbation keeps every matrix distinct so the
+        // benchmark measures real work rather than a single cached result.
+        let bump = (b % 7) as f64 * 0.25;
+        for i in 0..n {
+            for j in 0..n {
+                data.push(if i == j {
+                    (n + 1) as f64 + bump
+                } else {
+                    1.0 / ((i as f64 - j as f64).abs() + 1.0)
+                });
+            }
+        }
+    }
+    (data, vec![batch, n, n])
+}
+
+fn generate_batch_invertible(batch: usize, n: usize) -> (Vec<f64>, Vec<usize>) {
+    let mat_size = n * n;
+    let mut data = Vec::with_capacity(batch * mat_size);
+    for b in 0..batch {
+        let bump = (b % 5) as f64 * 0.5;
+        for i in 0..n {
+            for j in 0..n {
+                data.push(if i == j {
+                    (n * 2) as f64 + bump
+                } else {
+                    ((i + j) % 5) as f64 * 0.1
+                });
+            }
+        }
+    }
+    (data, vec![batch, n, n])
+}
+
+fn bench_batch_inv(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_inv");
+
+    // Compute-bound per-lane sizes (n >= 128): O(n^3) work dominates fixed
+    // per-call overhead, the regime where lane parallelism pays.
+    for (batch, n) in [(64usize, 128usize), (16, 256)] {
+        let (data, shape) = generate_batch_invertible(batch, n);
+        let id = format!("{batch}x{n}x{n}");
+        group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {
+            bench.iter(|| {
+                let result = batch_inv(black_box(&data), black_box(shape));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_batch_eigvalsh(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_eigvalsh");
+
+    for (batch, n) in [(64usize, 128usize), (16, 256)] {
+        let (data, shape) = generate_batch_spd(batch, n);
+        let id = format!("{batch}x{n}x{n}");
+        group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {
+            bench.iter(|| {
+                let result = batch_eigvalsh(black_box(&data), black_box(shape));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_batch_cholesky(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_cholesky");
+
+    for (batch, n) in [(64usize, 128usize), (16, 256)] {
+        let (data, shape) = generate_batch_spd(batch, n);
+        let id = format!("{batch}x{n}x{n}");
+        group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {
+            bench.iter(|| {
+                let result = batch_cholesky(black_box(&data), black_box(shape));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_complex_matmul(c: &mut Criterion) {
+    let mut group = c.benchmark_group("complex_matmul");
+
+    // Interleaved complex n*n*n GEMM (each operand is 2*n*n reals); all dims >=
+    // the parallel threshold so the rayon row-partition path runs.
+    let gen_interleaved = |len: usize, seed: u64| -> Vec<f64> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+            })
+            .collect()
+    };
+    for n in [128usize, 256, 512] {
+        let a = gen_interleaved(2 * n * n, 0xCAFE_F00D_1234_5678);
+        let b = gen_interleaved(2 * n * n, 0xDEAD_BEEF_9876_5432);
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = complex_matmul(black_box(&a), black_box(&b), n, n, n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_multi_dot(c: &mut Criterion) {
+    let mut group = c.benchmark_group("multi_dot");
+
+    // Two-matrix multi_dot dispatches straight to the rectangular GEMM
+    // (mat_mul_rect). Square n*n*n inputs keep all three dims >= the parallel
+    // threshold so the rayon row-partition path runs.
+    for n in [128usize, 256, 512] {
+        let a = generate_random_matrix(n, 0x1234_5678_9ABC_DEF0);
+        let b = generate_random_matrix(n, 0x0FED_CBA9_8765_4321);
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = multi_dot(black_box(&[(a.as_slice(), n, n), (b.as_slice(), n, n)]));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_matrix_power(c: &mut Criterion) {
+    let mut group = c.benchmark_group("matrix_power_nxn");
+
+    // matrix_power(A, 3) performs three full n*n*n GEMMs via the internal
+    // mat_mul_flat kernel — the compute-bound regime (n >= 128) where
+    // intra-matrix row parallelism dominates the per-call dispatch cost.
+    for n in [128usize, 256, 512, 1024] {
+        let a = generate_random_matrix(n, 0x9E37_79B9_7F4A_7C15);
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = matrix_power_nxn(black_box(&a), black_box(n), black_box(3));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_complex_matmul,
+    bench_multi_dot,
+    bench_matrix_power,
     bench_solve,
     bench_det,
     bench_inv,
     bench_cholesky,
     bench_qr,
     bench_svd,
+    bench_svd_full,
     bench_eigvalsh,
     bench_norm_frobenius,
+    bench_batch_inv,
+    bench_batch_eigvalsh,
+    bench_batch_cholesky,
 );
 
 criterion_main!(benches);

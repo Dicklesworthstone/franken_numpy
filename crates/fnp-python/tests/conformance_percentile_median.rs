@@ -316,3 +316,162 @@ print(np.allclose(ptp_val, manual))
     assert_eq!(result.trim(), "True", "ptp should equal max - min");
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge case tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn percentile_boundary_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 3, 4, 5])
+p0 = fnp.percentile(a, 0)
+p100 = fnp.percentile(a, 100)
+np_p0 = np.percentile(a, 0)
+np_p100 = np.percentile(a, 100)
+print(np.allclose(p0, np_p0) and np.allclose(p100, np_p100))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "percentile 0/100 should match numpy");
+    Ok(())
+}
+
+#[test]
+fn quantile_boundary_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 3, 4, 5])
+q0 = fnp.quantile(a, 0.0)
+q1 = fnp.quantile(a, 1.0)
+np_q0 = np.quantile(a, 0.0)
+np_q1 = np.quantile(a, 1.0)
+print(np.allclose(q0, np_q0) and np.allclose(q1, np_q1))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "quantile 0/1 should match numpy");
+    Ok(())
+}
+
+#[test]
+fn median_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([42.0])
+result = fnp.median(a)
+expected = np.median(a)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "median single element should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn percentile_nan_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, np.nan, 3.0, 4.0, 5.0])
+result = fnp.percentile(a, 50)
+expected = np.percentile(a, 50)
+# Both should return nan
+print(np.isnan(result) == np.isnan(expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "percentile nan handling should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn median_nan_handling() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, np.nan, 3.0])
+result = fnp.median(a)
+expected = np.median(a)
+# Both should return nan
+print(np.isnan(result) == np.isnan(expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "median nan handling should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn ptp_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([42.0])
+result = fnp.ptp(a)
+expected = np.ptp(a)
+# ptp of single element should be 0
+print(np.allclose(result, expected) and result == 0.0)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ptp single element should be 0");
+    Ok(())
+}
+
+#[test]
+fn ptp_nan_propagation() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, np.nan, 3.0])
+result = fnp.ptp(a)
+expected = np.ptp(a)
+# Both should return nan
+print(np.isnan(result) == np.isnan(expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ptp nan propagation should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn percentile_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+fnp_result = fnp.percentile(a, 50)
+np_result = np.percentile(a, 50)
+print(type(fnp_result).__name__ == type(np_result).__name__)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim() == "True",
+        "percentile scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}

@@ -6,16 +6,31 @@ fn main() {
 
     // maxwell, halfnormal, lomax, levy
     let mut g = Generator::from_pcg64_dxsm(seed).expect(seed_msg);
-    println!("maxwell(1): {:?}", g.maxwell(1.0, 5));
+    println!(
+        "maxwell(1): {:?}",
+        g.maxwell(1.0, 5)
+            .expect("dump_expected: maxwell with scale=1")
+    );
 
     let mut g = Generator::from_pcg64_dxsm(seed).expect(seed_msg);
-    println!("halfnormal(1): {:?}", g.halfnormal(1.0, 5));
+    println!(
+        "halfnormal(1): {:?}",
+        g.halfnormal(1.0, 5)
+            .expect("dump_expected: halfnormal with sigma=1")
+    );
 
     let mut g = Generator::from_pcg64_dxsm(seed).expect(seed_msg);
-    println!("lomax(3): {:?}", g.lomax(3.0, 5));
+    println!(
+        "lomax(3): {:?}",
+        g.lomax(3.0, 5).expect("dump_expected: lomax with c=3")
+    );
 
     let mut g = Generator::from_pcg64_dxsm(seed).expect(seed_msg);
-    println!("levy(0,1): {:?}", g.levy(0.0, 1.0, 5));
+    println!(
+        "levy(0,1): {:?}",
+        g.levy(0.0, 1.0, 5)
+            .expect("dump_expected: levy with loc=0, c=1")
+    );
 
     // advanced
     let mut g = Generator::from_pcg64_dxsm(seed).expect(seed_msg);

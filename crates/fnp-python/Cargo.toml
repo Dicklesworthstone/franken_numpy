@@ -3,6 +3,12 @@ name = "fnp-python"
 version.workspace = true
 edition.workspace = true
 license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "PyO3 module exposing the full numpy.__all__ surface for drop-in fnp_python use."
 
 [lib]
 name = "fnp_python"
@@ -13,7 +19,19 @@ default = []
 python-extension = ["pyo3/extension-module"]
 
 [dependencies]
-pyo3 = { version = "0.28.3", features = ["auto-initialize"] }
+# pyo3: PyO3 binding macros + Python interpreter integration. Version pinned at
+# workspace level (0.28.3, auto-initialize). The `extension-module` feature flag
+# (gated by this crate's `python-extension` feature) switches to cdylib mode.
+pyo3 = { workspace = true }
+# fnp-* path deps: this crate is the PyO3 surface for the entire workspace.
+# Every fnp_python.<name> Python binding routes to one of these crates:
+# - fnp-dtype: numpy dtype objects + scalar types
+# - fnp-iter: nditer / flatiter / ndindex Python wrappers
+# - fnp-ndarray: shape/stride/broadcast utility bindings
+# - fnp-ufunc: the bulk of numpy.<func> bindings (350+ wrappers)
+# - fnp-linalg: numpy.linalg.* bindings (solve, svd, eig, ...)
+# - fnp-random: numpy.random.* bindings (Generator, BitGenerators, distributions)
+# - fnp-io: numpy.load / numpy.save / numpy.savez / loadtxt / savetxt bindings
 fnp-dtype = { path = "../fnp-dtype" }
 fnp-iter = { path = "../fnp-iter" }
 fnp-ndarray = { path = "../fnp-ndarray" }
@@ -21,3 +39,10 @@ fnp-ufunc = { path = "../fnp-ufunc" }
 fnp-linalg = { path = "../fnp-linalg" }
 fnp-random = { path = "../fnp-random" }
 fnp-io = { path = "../fnp-io" }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "criterion_python_surface"
+harness = false

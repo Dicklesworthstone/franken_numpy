@@ -349,3 +349,198 @@ fn mean_nan_handling_matches_numpy() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[test]
+fn mean_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+x = np.float64(5.0)
+fnp_result = fnp.mean(x)
+np_result = np.mean(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "mean scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn mean_complex() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+z = np.array([1+2j, 3+4j, 5+6j], dtype=np.complex128)
+fnp_result = fnp.mean(z)
+np_result = np.mean(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "mean complex should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .expect("python3 should be available");
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("AxisError") || stderr.contains("axis") {
+            "AxisError".to_string()
+        } else if stderr.contains("ValueError") {
+            "ValueError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn mean_axis_out_of_bounds_raises_axiserror() {
+    let fnp_err = classify_error(&fnp_mean_script(
+        r#"
+a = fnp.arange(12).reshape(3, 4)
+fnp.mean(a, axis=5)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(12).reshape(3, 4)
+np.mean(a, axis=5)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "mean with out-of-bounds axis should raise same error as numpy"
+    );
+}
+
+#[test]
+fn mean_with_out_parameter() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+a = np.array([[1.0, 2.0], [3.0, 4.0]])
+out = np.empty((2,), dtype=np.float64)
+fnp_result = fnp.mean(a, axis=0, out=out)
+np_out = np.empty((2,), dtype=np.float64)
+np_result = np.mean(a, axis=0, out=np_out)
+print(np.allclose(fnp_result, np_result) and np.allclose(out, np_out))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "mean with out parameter should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn mean_signed_zero_parity() -> Result<(), String> {
+    // Test signed-zero behavior for mean reduction
+    // Mean of signed zeros: IEEE 754 sum rules apply, then divide
+    let script = fnp_mean_script(
+        r#"
+# Signed-zero mean semantics
+tests = [
+    ([0.0, 0.0], False),      # mean([0.0, 0.0]) = 0.0 (positive)
+    ([-0.0, -0.0], True),     # mean([-0.0, -0.0]) = -0.0 (negative)
+    ([0.0, -0.0], False),     # mean([0.0, -0.0]) = 0.0 (IEEE 754 sum rule)
+]
+all_pass = True
+for values, expected_signbit in tests:
+    arr = np.array(values)
+    fnp_result = fnp.mean(arr)
+    np_result = np.mean(arr)
+    if np.signbit(fnp_result) != np.signbit(np_result):
+        print(f"FAIL: mean({values}) fnp signbit={np.signbit(fnp_result)} np signbit={np.signbit(np_result)}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "mean signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn mean_inf_handling_matches_numpy() -> Result<(), String> {
+    // Test inf behavior for mean
+    let script = fnp_mean_script(
+        r#"
+inf_cases = [
+    "[1.0, np.inf, 3.0]",
+    "[np.inf, np.inf]",
+    "[-np.inf, np.inf]",  # Should produce NaN
+    "[-np.inf, -np.inf]",
+]
+all_pass = True
+for arr_str in inf_cases:
+    arr = eval("np.array(" + arr_str + ")")
+    fnp_result = fnp.mean(arr)
+    np_result = np.mean(arr)
+    if np.isnan(fnp_result) and np.isnan(np_result):
+        pass  # Both NaN is OK
+    elif np.isinf(fnp_result) and np.isinf(np_result):
+        if np.sign(fnp_result) != np.sign(np_result):
+            print(f"FAIL: mean({arr_str}) inf sign mismatch")
+            all_pass = False
+    elif not np.isclose(fnp_result, np_result):
+        print(f"FAIL: mean({arr_str}) mismatch")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "mean inf handling should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn mean_empty_array_returns_nan() -> Result<(), String> {
+    let script = fnp_mean_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+empty = np.array([])
+fnp_result = fnp.mean(empty)
+np_result = np.mean(empty)
+print(np.isnan(fnp_result) and np.isnan(np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "mean of empty array should return nan"
+    );
+    Ok(())
+}

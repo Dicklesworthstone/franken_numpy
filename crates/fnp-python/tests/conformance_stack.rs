@@ -414,3 +414,125 @@ print(np.array_equal(hstack_result, hstack_expected) and np.array_equal(column_s
     );
     Ok(())
 }
+
+#[test]
+fn stack_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j], dtype=np.complex128)
+b = np.array([3+2j, 4-2j], dtype=np.complex128)
+fnp_result = fnp.stack([a, b])
+np_result = np.stack([a, b])
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "stack complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn hstack_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j], dtype=np.complex128)
+b = np.array([3+2j, 4-2j], dtype=np.complex128)
+fnp_result = fnp.hstack([a, b])
+np_result = np.hstack([a, b])
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "hstack complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn vstack_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1+1j, 2-1j], dtype=np.complex128)
+b = np.array([3+2j, 4-2j], dtype=np.complex128)
+fnp_result = fnp.vstack([a, b])
+np_result = np.vstack([a, b])
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "vstack complex should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .expect("python3 should be available");
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("ValueError") {
+            "ValueError".to_string()
+        } else if stderr.contains("AxisError") {
+            "AxisError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn stack_shape_mismatch_raises_valueerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(6).reshape(2, 3)
+b = fnp.arange(8).reshape(2, 4)
+fnp.stack([a, b])
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(6).reshape(2, 3)
+b = np.arange(8).reshape(2, 4)
+np.stack([a, b])
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "stack with shape mismatch should raise same error as numpy"
+    );
+}
+
+#[test]
+fn hstack_shape_mismatch_raises_valueerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(6).reshape(2, 3)
+b = fnp.arange(9).reshape(3, 3)
+fnp.hstack([a, b])
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(6).reshape(2, 3)
+b = np.arange(9).reshape(3, 3)
+np.hstack([a, b])
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "hstack with incompatible first dimensions should raise same error as numpy"
+    );
+}

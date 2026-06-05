@@ -23,6 +23,7 @@
 #![forbid(unsafe_code)]
 
 use core::fmt;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashSet};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::sync::Arc;
@@ -157,30 +158,70 @@ impl IOSupportedDType {
     pub fn decode(descr: &str) -> Result<Self, IOError> {
         match descr {
             "|b1" => Ok(Self::Bool),
+            "=b1" => Ok(Self::Bool),
+            "<b1" => Ok(Self::Bool),
+            ">b1" => Ok(Self::Bool),
             "|i1" => Ok(Self::I8),
+            "=i1" => Ok(Self::I8),
+            "<i1" => Ok(Self::I8),
+            ">i1" => Ok(Self::I8),
             "<i2" => Ok(Self::I16),
             ">i2" => Ok(Self::I16Be),
+            "=i2" => Ok(Self::native_endian(Self::I16, Self::I16Be)),
+            "|i2" => Ok(Self::native_endian(Self::I16, Self::I16Be)),
             "<i4" => Ok(Self::I32),
             ">i4" => Ok(Self::I32Be),
+            "=i4" => Ok(Self::native_endian(Self::I32, Self::I32Be)),
+            "|i4" => Ok(Self::native_endian(Self::I32, Self::I32Be)),
             "<i8" => Ok(Self::I64),
             ">i8" => Ok(Self::I64Be),
+            "=i8" => Ok(Self::native_endian(Self::I64, Self::I64Be)),
+            "|i8" => Ok(Self::native_endian(Self::I64, Self::I64Be)),
             "|u1" => Ok(Self::U8),
+            "=u1" => Ok(Self::U8),
+            "<u1" => Ok(Self::U8),
+            ">u1" => Ok(Self::U8),
             "<u2" => Ok(Self::U16),
             ">u2" => Ok(Self::U16Be),
+            "=u2" => Ok(Self::native_endian(Self::U16, Self::U16Be)),
+            "|u2" => Ok(Self::native_endian(Self::U16, Self::U16Be)),
             "<u4" => Ok(Self::U32),
             ">u4" => Ok(Self::U32Be),
+            "=u4" => Ok(Self::native_endian(Self::U32, Self::U32Be)),
+            "|u4" => Ok(Self::native_endian(Self::U32, Self::U32Be)),
             "<u8" => Ok(Self::U64),
             ">u8" => Ok(Self::U64Be),
+            "=u8" => Ok(Self::native_endian(Self::U64, Self::U64Be)),
+            "|u8" => Ok(Self::native_endian(Self::U64, Self::U64Be)),
             "<f4" => Ok(Self::F32),
             ">f4" => Ok(Self::F32Be),
+            "=f4" => Ok(Self::native_endian(Self::F32, Self::F32Be)),
+            "|f4" => Ok(Self::native_endian(Self::F32, Self::F32Be)),
             "<f8" => Ok(Self::F64),
             ">f8" => Ok(Self::F64Be),
+            "=f8" => Ok(Self::native_endian(Self::F64, Self::F64Be)),
+            "|f8" => Ok(Self::native_endian(Self::F64, Self::F64Be)),
             "<c8" => Ok(Self::Complex64),
             ">c8" => Ok(Self::Complex64Be),
+            "=c8" => Ok(Self::native_endian(Self::Complex64, Self::Complex64Be)),
+            "|c8" => Ok(Self::native_endian(Self::Complex64, Self::Complex64Be)),
             "<c16" => Ok(Self::Complex128),
             ">c16" => Ok(Self::Complex128Be),
+            "=c16" => Ok(Self::native_endian(Self::Complex128, Self::Complex128Be)),
+            "|c16" => Ok(Self::native_endian(Self::Complex128, Self::Complex128Be)),
             "|O" => Ok(Self::Object),
+            "=O" => Ok(Self::Object),
+            "<O" => Ok(Self::Object),
+            ">O" => Ok(Self::Object),
             _ => Self::decode_variable_width(descr),
+        }
+    }
+
+    fn native_endian(little: Self, big: Self) -> Self {
+        if cfg!(target_endian = "little") {
+            little
+        } else {
+            big
         }
     }
 
@@ -201,8 +242,18 @@ impl IOSupportedDType {
         }
         match (endian, kind) {
             (b'|', b'S') => Ok(Self::Bytes(width)),
+            (b'=', b'S') => Ok(Self::Bytes(width)),
+            (b'<', b'S') | (b'>', b'S') => Ok(Self::Bytes(width)),
             (b'<', b'U') => Ok(Self::Unicode(width)),
             (b'>', b'U') => Ok(Self::UnicodeBe(width)),
+            (b'=', b'U') => Ok(Self::native_endian(
+                Self::Unicode(width),
+                Self::UnicodeBe(width),
+            )),
+            (b'|', b'U') => Ok(Self::native_endian(
+                Self::Unicode(width),
+                Self::UnicodeBe(width),
+            )),
             _ => Err(IOError::DTypeDescriptorInvalid),
         }
     }
@@ -900,13 +951,11 @@ pub fn write_npy_bytes(
     write_npy_bytes_with_version(header, payload, (1, 0), allow_pickle)
 }
 
-pub fn write_npy_bytes_with_version(
+fn validate_npy_write_payload(
     header: &NpyHeader,
     payload: &[u8],
-    version: (u8, u8),
     allow_pickle: bool,
-) -> Result<Vec<u8>, IOError> {
-    validate_npy_version(version)?;
+) -> Result<(), IOError> {
     enforce_pickle_policy(header.descr, allow_pickle)?;
     if header.descr == IOSupportedDType::Object {
         validate_object_write_payload(&header.shape, payload)?;
@@ -935,6 +984,17 @@ pub fn write_npy_bytes_with_version(
             .unwrap_or(expected_count);
         let _ = validate_write_contract(&header.shape, value_count, header.descr)?;
     }
+    Ok(())
+}
+
+pub fn write_npy_bytes_with_version(
+    header: &NpyHeader,
+    payload: &[u8],
+    version: (u8, u8),
+    allow_pickle: bool,
+) -> Result<Vec<u8>, IOError> {
+    validate_npy_version(version)?;
+    validate_npy_write_payload(header, payload, allow_pickle)?;
 
     let header_bytes = encode_npy_header_bytes(header, version)?;
     let mut encoded = Vec::with_capacity(
@@ -1230,6 +1290,188 @@ pub fn write_npz_bytes(entries: &[(&str, &NpyHeader, &[u8])]) -> Result<Vec<u8>,
     write_npz_bytes_with_compression(entries, NpzCompression::Store)
 }
 
+fn npz_member_file_name_len(name: &str) -> Option<usize> {
+    if name.ends_with(".npy") {
+        Some(name.len())
+    } else {
+        name.len().checked_add(4)
+    }
+}
+
+fn decimal_digits_usize(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn shape_tuple_encoded_len(shape: &[usize]) -> Option<usize> {
+    match shape {
+        [] => Some(2),
+        [single] => decimal_digits_usize(*single).checked_add(3),
+        _ => {
+            let mut len = 2usize;
+            for (index, dim) in shape.iter().copied().enumerate() {
+                if index > 0 {
+                    len = len.checked_add(2)?;
+                }
+                len = len.checked_add(decimal_digits_usize(dim))?;
+            }
+            Some(len)
+        }
+    }
+}
+
+fn header_dict_encoded_len_for_capacity(header: &NpyHeader) -> Option<usize> {
+    "{'descr': '"
+        .len()
+        .checked_add(header.descr.descr().len())?
+        .checked_add("', 'fortran_order': ".len())?
+        .checked_add(if header.fortran_order {
+            "True".len()
+        } else {
+            "False".len()
+        })?
+        .checked_add(", 'shape': ".len())?
+        .checked_add(shape_tuple_encoded_len(&header.shape)?)?
+        .checked_add(", }".len())
+}
+
+fn npy_v1_encoded_len_for_capacity(header: &NpyHeader, payload_len: usize) -> Option<usize> {
+    let length_field_size = npy_length_field_size((1, 0)).ok()?;
+    let prefix_len = NPY_MAGIC_PREFIX
+        .len()
+        .checked_add(2)?
+        .checked_add(length_field_size)?;
+    let dictionary_len = header_dict_encoded_len_for_capacity(header)?;
+    let base_header_len = dictionary_len.checked_add(1)?;
+    let padding = (NPY_ARRAY_ALIGN
+        - ((prefix_len.checked_add(base_header_len)?) % NPY_ARRAY_ALIGN))
+        % NPY_ARRAY_ALIGN;
+    prefix_len
+        .checked_add(base_header_len.checked_add(padding)?)?
+        .checked_add(payload_len)
+}
+
+fn npz_central_directory_capacity(entries: &[(&str, &NpyHeader, &[u8])]) -> Option<usize> {
+    let mut capacity = 0usize;
+    for &(name, _, _) in entries {
+        capacity = capacity
+            .checked_add(46)?
+            .checked_add(npz_member_file_name_len(name)?)?;
+    }
+    Some(capacity)
+}
+
+fn npz_store_archive_capacity(entries: &[(&str, &NpyHeader, &[u8])]) -> Option<usize> {
+    let mut capacity = 22usize;
+    for &(name, header, payload) in entries {
+        let name_len = npz_member_file_name_len(name)?;
+        capacity = capacity
+            .checked_add(30)?
+            .checked_add(name_len)?
+            .checked_add(npy_v1_encoded_len_for_capacity(header, payload.len())?)?
+            .checked_add(46)?
+            .checked_add(name_len)?;
+    }
+    Some(capacity)
+}
+
+struct NpzStorePayload<'a> {
+    preamble: Vec<u8>,
+    header: Vec<u8>,
+    payload: &'a [u8],
+    len: usize,
+    crc: u32,
+}
+
+impl NpzStorePayload<'_> {
+    fn append_to(&self, output: &mut Vec<u8>) {
+        output.extend_from_slice(&self.preamble);
+        output.extend_from_slice(&self.header);
+        output.extend_from_slice(self.payload);
+    }
+}
+
+enum NpzWritableEntry<'a> {
+    Store(NpzStorePayload<'a>),
+    Deflate {
+        data: Vec<u8>,
+        uncompressed_len: usize,
+        crc: u32,
+    },
+}
+
+impl NpzWritableEntry<'_> {
+    fn compression_method(&self) -> u16 {
+        match self {
+            Self::Store(_) => 0,
+            Self::Deflate { .. } => 8,
+        }
+    }
+
+    fn compressed_len(&self) -> usize {
+        match self {
+            Self::Store(payload) => payload.len,
+            Self::Deflate { data, .. } => data.len(),
+        }
+    }
+
+    fn uncompressed_len(&self) -> usize {
+        match self {
+            Self::Store(payload) => payload.len,
+            Self::Deflate {
+                uncompressed_len, ..
+            } => *uncompressed_len,
+        }
+    }
+
+    fn crc(&self) -> u32 {
+        match self {
+            Self::Store(payload) => payload.crc,
+            Self::Deflate { crc, .. } => *crc,
+        }
+    }
+
+    fn append_to(&self, output: &mut Vec<u8>) {
+        match self {
+            Self::Store(payload) => payload.append_to(output),
+            Self::Deflate { data, .. } => output.extend_from_slice(data),
+        }
+    }
+}
+
+fn npz_store_payload_parts<'a>(
+    header: &NpyHeader,
+    payload: &'a [u8],
+) -> Result<NpzStorePayload<'a>, IOError> {
+    validate_npy_version((1, 0))?;
+    validate_npy_write_payload(header, payload, false)?;
+
+    let header_bytes = encode_npy_header_bytes(header, (1, 0))?;
+    let mut preamble =
+        Vec::with_capacity(NPY_MAGIC_PREFIX.len() + 2 + npy_length_field_size((1, 0))?);
+    write_npy_preamble(&mut preamble, (1, 0), header_bytes.len())?;
+    let len = preamble
+        .len()
+        .checked_add(header_bytes.len())
+        .and_then(|len| len.checked_add(payload.len()))
+        .ok_or(IOError::NpzArchiveContractViolation(
+            "npz: entry payload exceeds 4GB zip limit",
+        ))?;
+    let crc = crc32_ieee_three(&preamble, &header_bytes, payload);
+
+    Ok(NpzStorePayload {
+        preamble,
+        header: header_bytes,
+        payload,
+        len,
+        crc,
+    })
+}
+
 /// Write multiple named arrays into an NPZ archive with optional compression.
 ///
 /// Supports ZIP STORE (method 0) and DEFLATE (method 8).
@@ -1248,12 +1490,42 @@ pub fn write_npz_bytes_with_compression(
         ));
     }
 
-    let mut buf: Vec<u8> = Vec::new();
-    let mut central_directory: Vec<u8> = Vec::new();
+    let buf_capacity = match compression {
+        NpzCompression::Store => npz_store_archive_capacity(entries).unwrap_or(0),
+        NpzCompression::Deflate => 0,
+    };
+    let mut buf: Vec<u8> = Vec::with_capacity(buf_capacity);
+    let mut central_directory: Vec<u8> =
+        Vec::with_capacity(npz_central_directory_capacity(entries).unwrap_or(0));
     let mut entry_count: u16 = 0;
 
     for &(name, header, payload) in entries {
-        let npy_data = write_npy_bytes(header, payload, false)?;
+        let entry_payload = match compression {
+            NpzCompression::Store => {
+                NpzWritableEntry::Store(npz_store_payload_parts(header, payload)?)
+            }
+            NpzCompression::Deflate => {
+                let npy_data = write_npy_bytes(header, payload, false)?;
+                let crc = crc32_ieee(&npy_data);
+                let uncompressed_len = npy_data.len();
+                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+                encoder.write_all(&npy_data).map_err(|_| {
+                    IOError::NpzArchiveContractViolation(
+                        "npz: failed to deflate-compress entry payload",
+                    )
+                })?;
+                let data = encoder.finish().map_err(|_| {
+                    IOError::NpzArchiveContractViolation(
+                        "npz: failed to finalize deflate-compressed entry payload",
+                    )
+                })?;
+                NpzWritableEntry::Deflate {
+                    data,
+                    uncompressed_len,
+                    crc,
+                }
+            }
+        };
         let file_name = if name.ends_with(".npy") {
             name.to_string()
         } else {
@@ -1267,31 +1539,12 @@ pub fn write_npz_bytes_with_compression(
         let local_offset = u32::try_from(buf.len()).map_err(|_| {
             IOError::NpzArchiveContractViolation("npz: file offset exceeds 4GB limits")
         })?;
-        let crc = crc32_ieee(&npy_data);
-        let encoded_data = match compression {
-            NpzCompression::Store => npy_data.clone(),
-            NpzCompression::Deflate => {
-                let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
-                encoder.write_all(&npy_data).map_err(|_| {
-                    IOError::NpzArchiveContractViolation(
-                        "npz: failed to deflate-compress entry payload",
-                    )
-                })?;
-                encoder.finish().map_err(|_| {
-                    IOError::NpzArchiveContractViolation(
-                        "npz: failed to finalize deflate-compressed entry payload",
-                    )
-                })?
-            }
-        };
-        let compression_method = match compression {
-            NpzCompression::Store => 0_u16,
-            NpzCompression::Deflate => 8_u16,
-        };
-        let compressed_size = u32::try_from(encoded_data.len()).map_err(|_| {
+        let crc = entry_payload.crc();
+        let compression_method = entry_payload.compression_method();
+        let compressed_size = u32::try_from(entry_payload.compressed_len()).map_err(|_| {
             IOError::NpzArchiveContractViolation("npz: entry payload exceeds 4GB zip limit")
         })?;
-        let uncompressed_size = u32::try_from(npy_data.len()).map_err(|_| {
+        let uncompressed_size = u32::try_from(entry_payload.uncompressed_len()).map_err(|_| {
             IOError::NpzArchiveContractViolation("npz: entry payload exceeds 4GB zip limit")
         })?;
 
@@ -1308,7 +1561,7 @@ pub fn write_npz_bytes_with_compression(
         buf.extend_from_slice(&fname_len.to_le_bytes()); // filename len
         buf.extend_from_slice(&0_u16.to_le_bytes()); // extra field len
         buf.extend_from_slice(fname_bytes);
-        buf.extend_from_slice(&encoded_data);
+        entry_payload.append_to(&mut buf);
 
         // Central directory entry (46 bytes + filename)
         central_directory.extend_from_slice(&[0x50, 0x4B, 0x01, 0x02]); // signature
@@ -1785,14 +2038,14 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
         validate_npz_archive_budget(entry_count, total_uncompressed_bytes, 0)?;
 
         let stored_entry_bytes = &data[data_start..data_end];
-        let npy_bytes = match compression {
+        let npy_bytes: Cow<'_, [u8]> = match compression {
             0 => {
                 if compressed_size != uncompressed_size {
                     return Err(IOError::NpzArchiveContractViolation(
                         "npz: STORE entry has inconsistent compressed/uncompressed sizes",
                     ));
                 }
-                stored_entry_bytes.to_vec()
+                Cow::Borrowed(stored_entry_bytes)
             }
             8 => {
                 // Decode exactly uncompressed_size bytes and ensure the stream ends there.
@@ -1819,7 +2072,7 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
                         ));
                     }
                 }
-                decoded
+                Cow::Owned(decoded)
             }
             _ => {
                 return Err(IOError::NpzArchiveContractViolation(
@@ -1832,13 +2085,13 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
                 "npz: decoded entry length does not match declared uncompressed size",
             ));
         }
-        if crc32_ieee(&npy_bytes) != crc {
+        if crc32_ieee(npy_bytes.as_ref()) != crc {
             return Err(IOError::NpzArchiveContractViolation(
                 "npz: decoded entry CRC-32 does not match central directory",
             ));
         }
 
-        let array = read_npy_bytes(&npy_bytes, allow_pickle)?;
+        let array = read_npy_bytes(npy_bytes.as_ref(), allow_pickle)?;
 
         // Strip .npy suffix from name for user convenience
         let clean_name = file_name
@@ -1865,6 +2118,16 @@ pub fn read_npz_bytes(data: &[u8], allow_pickle: bool) -> Result<Vec<NpzEntry>, 
 /// IEEE 802.3 CRC-32 (used by ZIP format).
 /// Uses a table-based implementation for performance.
 fn crc32_ieee(data: &[u8]) -> u32 {
+    !crc32_ieee_update(0xFFFF_FFFF, data)
+}
+
+fn crc32_ieee_three(first: &[u8], second: &[u8], third: &[u8]) -> u32 {
+    let crc = crc32_ieee_update(0xFFFF_FFFF, first);
+    let crc = crc32_ieee_update(crc, second);
+    !crc32_ieee_update(crc, third)
+}
+
+fn crc32_ieee_update(mut crc: u32, data: &[u8]) -> u32 {
     const TABLE: [u32; 256] = {
         let mut table = [0u32; 256];
         let mut i = 0;
@@ -1885,11 +2148,10 @@ fn crc32_ieee(data: &[u8]) -> u32 {
         table
     };
 
-    let mut crc: u32 = 0xFFFF_FFFF;
     for &byte in data {
         crc = TABLE[(crc as u8 ^ byte) as usize] ^ (crc >> 8);
     }
-    !crc
+    crc
 }
 
 // ── loadtxt / savetxt ────────
@@ -1935,7 +2197,7 @@ impl Default for GenFromTxtConfig<'_> {
 /// Each line is a row; columns are separated by `delimiter`.
 /// Lines starting with `comments` char are skipped.
 /// `skiprows` lines are skipped from the start.
-/// `max_rows` limits the number of rows read (0 = no limit).
+/// `max_rows` limits the number of rows read; use `usize::MAX` for no limit.
 pub fn loadtxt(
     text: &str,
     delimiter: char,
@@ -1967,13 +2229,128 @@ pub fn loadtxt_usecols(
         if trimmed.is_empty() || trimmed.starts_with(comments) {
             continue;
         }
-        if max_rows > 0 && nrows >= max_rows {
+        if nrows >= max_rows {
             break;
         }
         let row_vals = if let Some(cols) = usecols {
             parse_loadtxt_row_usecols(trimmed, delimiter, cols)?
         } else {
             parse_loadtxt_row(trimmed, delimiter)?
+        };
+
+        match ncols {
+            None => ncols = Some(row_vals.len()),
+            Some(expected) if row_vals.len() != expected => {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "loadtxt: inconsistent number of columns",
+                ));
+            }
+            _ => {}
+        }
+        if values.len() + row_vals.len() > MAX_TEXT_ELEMENTS {
+            return Err(IOError::ReadPayloadIncomplete(
+                "loadtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+            ));
+        }
+        values.extend(row_vals);
+        nrows += 1;
+    }
+    Ok(TextArrayData {
+        values,
+        nrows,
+        ncols: ncols.unwrap_or(0),
+    })
+}
+
+/// Load data from text with NumPy-style signed column selection.
+/// Negative columns are resolved relative to each row's width, so `-1` selects the
+/// last column and mixed selections such as `[-1, 0]` preserve request order.
+pub fn loadtxt_usecols_signed(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    skiprows: usize,
+    max_rows: usize,
+    usecols: Option<&[isize]>,
+) -> Result<TextArrayData, IOError> {
+    let mut values = Vec::new();
+    let mut ncols: Option<usize> = None;
+    let mut nrows = 0usize;
+    for (line_idx, line) in text.lines().enumerate() {
+        if line_idx < skiprows {
+            continue;
+        }
+        let trimmed = strip_text_comment(line, comments).trim();
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
+        if nrows >= max_rows {
+            break;
+        }
+        let row_vals = if let Some(cols) = usecols {
+            parse_loadtxt_row_usecols_signed(trimmed, delimiter, cols)?
+        } else {
+            parse_loadtxt_row(trimmed, delimiter)?
+        };
+
+        match ncols {
+            None => ncols = Some(row_vals.len()),
+            Some(expected) if row_vals.len() != expected => {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "loadtxt: inconsistent number of columns",
+                ));
+            }
+            _ => {}
+        }
+        if values.len() + row_vals.len() > MAX_TEXT_ELEMENTS {
+            return Err(IOError::ReadPayloadIncomplete(
+                "loadtxt: text exceeds MAX_TEXT_ELEMENTS budget",
+            ));
+        }
+        values.extend(row_vals);
+        nrows += 1;
+    }
+    Ok(TextArrayData {
+        values,
+        nrows,
+        ncols: ncols.unwrap_or(0),
+    })
+}
+
+/// Load data from text with NumPy-style quote handling.
+/// When `quotechar` is set, delimiter and comment characters inside quoted
+/// fields are treated as literal data and doubled quote characters escape one quote.
+pub fn loadtxt_quotechar(
+    text: &str,
+    delimiter: char,
+    comments: char,
+    skiprows: usize,
+    max_rows: usize,
+    usecols: Option<&[usize]>,
+    quotechar: Option<char>,
+) -> Result<TextArrayData, IOError> {
+    if quotechar.is_none() {
+        return loadtxt_usecols(text, delimiter, comments, skiprows, max_rows, usecols);
+    }
+
+    let mut values = Vec::new();
+    let mut ncols: Option<usize> = None;
+    let mut nrows = 0usize;
+    for (line_idx, line) in text.lines().enumerate() {
+        if line_idx < skiprows {
+            continue;
+        }
+        let trimmed = strip_text_comment_quote(line, comments, quotechar).trim();
+        if trimmed.is_empty() || trimmed.starts_with(comments) {
+            continue;
+        }
+        if nrows >= max_rows {
+            break;
+        }
+        let row_vals = if let Some(cols) = usecols {
+            parse_loadtxt_row_usecols_quote(trimmed, delimiter, cols, quotechar)?
+        } else {
+            parse_loadtxt_row_quote(trimmed, delimiter, quotechar)?
         };
 
         match ncols {
@@ -2078,6 +2455,176 @@ fn parse_loadtxt_row_usecols(
     Ok(selected)
 }
 
+fn split_loadtxt_fields_quote(
+    trimmed: &str,
+    delimiter: char,
+    quotechar: Option<char>,
+) -> Result<Vec<String>, IOError> {
+    let Some(quote) = quotechar else {
+        return Ok(split_loadtxt_fields(trimmed, delimiter)
+            .into_iter()
+            .map(str::to_string)
+            .collect());
+    };
+
+    let mut fields = Vec::new();
+    let mut current = String::new();
+    let mut in_quote = false;
+    let mut field_started = false;
+    let mut chars = trimmed.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == quote {
+            if in_quote {
+                if chars.peek().copied() == Some(quote) {
+                    let _ = chars.next();
+                    current.push(quote);
+                    field_started = true;
+                } else {
+                    in_quote = false;
+                    field_started = true;
+                }
+            } else {
+                in_quote = true;
+                field_started = true;
+            }
+            continue;
+        }
+
+        let is_separator = if delimiter == ' ' {
+            ch.is_whitespace()
+        } else {
+            ch == delimiter
+        };
+        if !in_quote && is_separator {
+            if delimiter == ' ' {
+                if field_started || !current.is_empty() {
+                    fields.push(current.trim().to_string());
+                    current.clear();
+                    field_started = false;
+                }
+            } else {
+                fields.push(current.trim().to_string());
+                current.clear();
+                field_started = false;
+            }
+        } else {
+            current.push(ch);
+            field_started = true;
+        }
+    }
+
+    if in_quote {
+        return Err(IOError::ReadPayloadIncomplete(
+            "loadtxt: unterminated quoted field",
+        ));
+    }
+    if delimiter != ' ' || field_started || !current.trim().is_empty() {
+        fields.push(current.trim().to_string());
+    }
+
+    Ok(fields)
+}
+
+fn parse_loadtxt_row_quote(
+    trimmed: &str,
+    delimiter: char,
+    quotechar: Option<char>,
+) -> Result<Vec<f64>, IOError> {
+    split_loadtxt_fields_quote(trimmed, delimiter, quotechar)?
+        .into_iter()
+        .map(|field| {
+            field
+                .parse::<f64>()
+                .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))
+        })
+        .collect()
+}
+
+fn parse_loadtxt_row_usecols_quote(
+    trimmed: &str,
+    delimiter: char,
+    cols: &[usize],
+    quotechar: Option<char>,
+) -> Result<Vec<f64>, IOError> {
+    if cols.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let fields = split_loadtxt_fields_quote(trimmed, delimiter, quotechar)?;
+    let mut selected = Vec::with_capacity(cols.len());
+    for &col in cols {
+        let field = fields.get(col).ok_or(IOError::ReadPayloadIncomplete(
+            "loadtxt: usecols index out of bounds",
+        ))?;
+        let value = field
+            .parse::<f64>()
+            .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
+        selected.push(value);
+    }
+    Ok(selected)
+}
+
+fn split_loadtxt_fields(trimmed: &str, delimiter: char) -> Vec<&str> {
+    if delimiter == ' ' {
+        trimmed.split_whitespace().collect()
+    } else {
+        trimmed.split(delimiter).collect()
+    }
+}
+
+fn resolve_signed_usecol(col: isize, row_width: usize) -> Result<usize, IOError> {
+    let idx = if col < 0 {
+        let offset = col
+            .checked_neg()
+            .and_then(|v| usize::try_from(v).ok())
+            .ok_or(IOError::ReadPayloadIncomplete(
+                "loadtxt: usecols index out of bounds",
+            ))?;
+        if offset == 0 || offset > row_width {
+            return Err(IOError::ReadPayloadIncomplete(
+                "loadtxt: usecols index out of bounds",
+            ));
+        }
+        row_width - offset
+    } else {
+        usize::try_from(col)
+            .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: usecols index out of bounds"))?
+    };
+
+    if idx >= row_width {
+        return Err(IOError::ReadPayloadIncomplete(
+            "loadtxt: usecols index out of bounds",
+        ));
+    }
+
+    Ok(idx)
+}
+
+fn parse_loadtxt_row_usecols_signed(
+    trimmed: &str,
+    delimiter: char,
+    cols: &[isize],
+) -> Result<Vec<f64>, IOError> {
+    if cols.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let fields = split_loadtxt_fields(trimmed, delimiter);
+    let mut selected = Vec::with_capacity(cols.len());
+
+    for &col in cols {
+        let idx = resolve_signed_usecol(col, fields.len())?;
+        let value = fields[idx]
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| IOError::ReadPayloadIncomplete("loadtxt: parse error in row"))?;
+        selected.push(value);
+    }
+
+    Ok(selected)
+}
+
 /// Extended `np.loadtxt` with `unpack` parameter.
 ///
 /// When `unpack` is true, the returned data is transposed so that columns become
@@ -2111,6 +2658,7 @@ pub fn loadtxt_unpack(
 #[derive(Debug, Clone)]
 pub struct SaveTxtConfig<'a> {
     pub delimiter: &'a str,
+    pub newline: &'a str,
     pub fmt: &'a str,
     pub header: &'a str,
     pub footer: &'a str,
@@ -2121,10 +2669,11 @@ impl Default for SaveTxtConfig<'_> {
     fn default() -> Self {
         Self {
             delimiter: " ",
-            fmt: "%g",
+            newline: "\n",
+            fmt: "%.18e",
             header: "",
             footer: "",
-            comments: "#",
+            comments: "# ",
         }
     }
 }
@@ -2132,32 +2681,869 @@ impl Default for SaveTxtConfig<'_> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SaveTxtFormat {
     Default,
-    Int,
-    Exp(usize),
-    Fixed(usize),
+    Int {
+        precision: Option<usize>,
+        width: Option<usize>,
+        padding: SaveTxtPadding,
+        alignment: SaveTxtAlignment,
+        sign: SaveTxtSign,
+    },
+    UnsupportedFloat,
+    Exp {
+        precision: usize,
+        uppercase: bool,
+        width: Option<usize>,
+        padding: SaveTxtPadding,
+        alignment: SaveTxtAlignment,
+        sign: SaveTxtSign,
+        alternate: bool,
+    },
+    Fixed {
+        precision: usize,
+        uppercase: bool,
+        width: Option<usize>,
+        padding: SaveTxtPadding,
+        alignment: SaveTxtAlignment,
+        sign: SaveTxtSign,
+        alternate: bool,
+    },
+    String {
+        precision: Option<usize>,
+        width: Option<usize>,
+        alignment: SaveTxtAlignment,
+    },
+    Repr {
+        precision: Option<usize>,
+        width: Option<usize>,
+        alignment: SaveTxtAlignment,
+    },
+    General {
+        precision: usize,
+        uppercase: bool,
+        width: Option<usize>,
+        padding: SaveTxtPadding,
+        alignment: SaveTxtAlignment,
+        sign: SaveTxtSign,
+        alternate: bool,
+    },
 }
 
-fn parse_savetxt_format(fmt: &str) -> SaveTxtFormat {
-    match fmt {
-        "%d" | "%i" => SaveTxtFormat::Int,
-        "%e" => SaveTxtFormat::Exp(6),
-        "%f" => SaveTxtFormat::Fixed(6),
-        _ => {
-            if let Some(prec) = parse_savetxt_precision(fmt, 'e') {
-                SaveTxtFormat::Exp(prec)
-            } else if let Some(prec) = parse_savetxt_precision(fmt, 'f') {
-                SaveTxtFormat::Fixed(prec)
-            } else {
-                SaveTxtFormat::Default
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveTxtPadding {
+    Space,
+    Zero,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveTxtAlignment {
+    Right,
+    Left,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SaveTxtSign {
+    Default,
+    Plus,
+    Space,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ParsedSaveTxtFormat {
+    Scalar(ParsedSaveTxtScalarFormat),
+    Row(Vec<SaveTxtRowPart>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedSaveTxtScalarFormat {
+    prefix: String,
+    format: SaveTxtFormat,
+    suffix: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SaveTxtRowPart {
+    Literal(String),
+    Conversion(SaveTxtFormat),
+}
+
+fn parse_savetxt_format(fmt: &str) -> Result<ParsedSaveTxtFormat, IOError> {
+    if fmt.contains("%%") {
+        return Err(IOError::WriteContractViolation(
+            "fmt has wrong number of % formats",
+        ));
+    }
+
+    let parts = parse_savetxt_format_parts(fmt).ok_or(IOError::WriteContractViolation(
+        "unsupported format character",
+    ))?;
+
+    let conversion_count = parts
+        .iter()
+        .filter(|part| matches!(part, SaveTxtRowPart::Conversion(_)))
+        .count();
+    if conversion_count == 0 {
+        return Err(IOError::WriteContractViolation(
+            "fmt has wrong number of % formats",
+        ));
+    }
+    if conversion_count > 1 {
+        return Ok(ParsedSaveTxtFormat::Row(parts));
+    }
+
+    let mut prefix = String::new();
+    let mut format = SaveTxtFormat::Default;
+    let mut suffix = String::new();
+    let mut seen_conversion = false;
+    for part in parts {
+        match part {
+            SaveTxtRowPart::Literal(text) if seen_conversion => suffix.push_str(&text),
+            SaveTxtRowPart::Literal(text) => prefix.push_str(&text),
+            SaveTxtRowPart::Conversion(parsed) => {
+                format = parsed;
+                seen_conversion = true;
             }
         }
     }
+    Ok(ParsedSaveTxtFormat::Scalar(ParsedSaveTxtScalarFormat {
+        prefix,
+        format,
+        suffix,
+    }))
 }
 
-fn parse_savetxt_precision(fmt: &str, spec: char) -> Option<usize> {
-    let fmt = fmt.strip_prefix("%.")?;
-    let digits = fmt.strip_suffix(spec)?;
-    digits.parse::<usize>().ok()
+fn parse_savetxt_format_parts(fmt: &str) -> Option<Vec<SaveTxtRowPart>> {
+    let mut parts = Vec::new();
+    let mut literal_start = 0usize;
+    let mut cursor = 0usize;
+    while cursor < fmt.len() {
+        let tail = fmt.get(cursor..)?;
+        let Some(relative_start) = tail.find('%') else {
+            break;
+        };
+        let start = cursor + relative_start;
+        if fmt
+            .get(start + 1..)
+            .is_some_and(|tail| tail.starts_with('%'))
+        {
+            if literal_start < start {
+                parts.push(SaveTxtRowPart::Literal(
+                    fmt.get(literal_start..start)?.to_string(),
+                ));
+            }
+            parts.push(SaveTxtRowPart::Literal("%".to_string()));
+            cursor = start + 2;
+            literal_start = cursor;
+            continue;
+        }
+
+        let (end, spec) = parse_savetxt_format_spec_at(fmt, start)?;
+        if literal_start < start {
+            parts.push(SaveTxtRowPart::Literal(
+                fmt.get(literal_start..start)?.to_string(),
+            ));
+        }
+        parts.push(SaveTxtRowPart::Conversion(savetxt_format_from_spec(spec)));
+        cursor = end;
+        literal_start = end;
+    }
+
+    if literal_start < fmt.len() {
+        parts.push(SaveTxtRowPart::Literal(
+            fmt.get(literal_start..)?.to_string(),
+        ));
+    }
+    Some(parts)
+}
+
+fn savetxt_format_from_spec(spec: SaveTxtFormatSpec) -> SaveTxtFormat {
+    match spec.specifier {
+        'd' | 'i' | 'u' => SaveTxtFormat::Int {
+            precision: spec.precision,
+            width: spec.width,
+            padding: spec.padding,
+            alignment: spec.alignment,
+            sign: spec.sign,
+        },
+        'x' | 'X' | 'o' | 'c' => SaveTxtFormat::UnsupportedFloat,
+        'e' => SaveTxtFormat::Exp {
+            precision: spec.precision.unwrap_or(6),
+            uppercase: false,
+            width: spec.width,
+            padding: spec.padding,
+            alignment: spec.alignment,
+            sign: spec.sign,
+            alternate: spec.alternate,
+        },
+        'E' => SaveTxtFormat::Exp {
+            precision: spec.precision.unwrap_or(6),
+            uppercase: true,
+            width: spec.width,
+            padding: spec.padding,
+            alignment: spec.alignment,
+            sign: spec.sign,
+            alternate: spec.alternate,
+        },
+        'f' => SaveTxtFormat::Fixed {
+            precision: spec.precision.unwrap_or(6),
+            uppercase: false,
+            width: spec.width,
+            padding: spec.padding,
+            alignment: spec.alignment,
+            sign: spec.sign,
+            alternate: spec.alternate,
+        },
+        'F' => SaveTxtFormat::Fixed {
+            precision: spec.precision.unwrap_or(6),
+            uppercase: true,
+            width: spec.width,
+            padding: spec.padding,
+            alignment: spec.alignment,
+            sign: spec.sign,
+            alternate: spec.alternate,
+        },
+        's' => SaveTxtFormat::String {
+            precision: spec.precision,
+            width: spec.width,
+            alignment: spec.alignment,
+        },
+        'a' | 'r' => SaveTxtFormat::Repr {
+            precision: spec.precision,
+            width: spec.width,
+            alignment: spec.alignment,
+        },
+        'g' => SaveTxtFormat::General {
+            precision: spec.precision.unwrap_or(6),
+            uppercase: false,
+            width: spec.width,
+            padding: spec.padding,
+            alignment: spec.alignment,
+            sign: spec.sign,
+            alternate: spec.alternate,
+        },
+        'G' => SaveTxtFormat::General {
+            precision: spec.precision.unwrap_or(6),
+            uppercase: true,
+            width: spec.width,
+            padding: spec.padding,
+            alignment: spec.alignment,
+            sign: spec.sign,
+            alternate: spec.alternate,
+        },
+        _ => SaveTxtFormat::Default,
+    }
+}
+
+fn parse_savetxt_format_spec_at(fmt: &str, start: usize) -> Option<(usize, SaveTxtFormatSpec)> {
+    if !fmt.get(start..)?.starts_with('%') {
+        return None;
+    }
+    let tail_start = start + 1;
+    let tail = fmt.get(tail_start..)?;
+    for (offset, specifier) in tail.char_indices() {
+        if !matches!(
+            specifier,
+            'd' | 'i'
+                | 'u'
+                | 'x'
+                | 'X'
+                | 'o'
+                | 'c'
+                | 'e'
+                | 'E'
+                | 'f'
+                | 'F'
+                | 'g'
+                | 'G'
+                | 's'
+                | 'a'
+                | 'r'
+        ) {
+            continue;
+        }
+        let end = tail_start + offset + specifier.len_utf8();
+        let candidate = fmt.get(start..end)?;
+        if let Some(spec) = parse_savetxt_format_spec(candidate) {
+            return Some((end, spec));
+        }
+        return None;
+    }
+    None
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SaveTxtFormatSpec {
+    width: Option<usize>,
+    precision: Option<usize>,
+    specifier: char,
+    padding: SaveTxtPadding,
+    alignment: SaveTxtAlignment,
+    sign: SaveTxtSign,
+    alternate: bool,
+}
+
+fn parse_savetxt_format_spec(fmt: &str) -> Option<SaveTxtFormatSpec> {
+    let rest = fmt.strip_prefix('%')?;
+    let specifier = rest.chars().last()?;
+    if !matches!(
+        specifier,
+        'd' | 'i'
+            | 'u'
+            | 'x'
+            | 'X'
+            | 'o'
+            | 'c'
+            | 'e'
+            | 'E'
+            | 'f'
+            | 'F'
+            | 'g'
+            | 'G'
+            | 's'
+            | 'a'
+            | 'r'
+    ) {
+        return None;
+    }
+
+    let specifier_start = rest.len().checked_sub(specifier.len_utf8())?;
+    let body = rest.get(..specifier_start)?;
+    let mut sign = SaveTxtSign::Default;
+    let mut alignment = SaveTxtAlignment::Right;
+    let mut alternate = false;
+    let mut zero_padding = false;
+    let mut body = body;
+    loop {
+        if let Some(rest) = body.strip_prefix('+') {
+            sign = SaveTxtSign::Plus;
+            body = rest;
+        } else if let Some(rest) = body.strip_prefix(' ') {
+            if sign == SaveTxtSign::Default {
+                sign = SaveTxtSign::Space;
+            }
+            body = rest;
+        } else if let Some(rest) = body.strip_prefix('-') {
+            alignment = SaveTxtAlignment::Left;
+            body = rest;
+        } else if let Some(rest) = body.strip_prefix('#') {
+            alternate = true;
+            body = rest;
+        } else if let Some(rest) = body.strip_prefix('0') {
+            zero_padding = true;
+            body = rest;
+        } else {
+            break;
+        }
+    }
+    for marker in ['h', 'l', 'L'] {
+        if let Some(rest) = body.strip_suffix(marker) {
+            body = rest;
+            break;
+        }
+    }
+    let (width_text, precision) = if let Some((width_text, precision_text)) = body.split_once('.') {
+        if precision_text.is_empty() || !precision_text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        (width_text, Some(precision_text.parse::<usize>().ok()?))
+    } else {
+        (body, None)
+    };
+
+    let padding = if alignment == SaveTxtAlignment::Right && zero_padding {
+        SaveTxtPadding::Zero
+    } else {
+        SaveTxtPadding::Space
+    };
+
+    let width = if width_text.is_empty() {
+        None
+    } else {
+        if !width_text.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        Some(width_text.parse::<usize>().ok()?)
+    };
+
+    Some(SaveTxtFormatSpec {
+        width,
+        precision,
+        specifier,
+        padding,
+        alignment,
+        sign,
+        alternate,
+    })
+}
+
+fn push_savetxt_left_padding(output: &mut String, count: usize) {
+    for _ in 0..count {
+        output.push(' ');
+    }
+}
+
+fn push_savetxt_zero_padding(output: &mut String, count: usize) {
+    for _ in 0..count {
+        output.push('0');
+    }
+}
+
+fn apply_savetxt_sign(cell: &mut String, sign: SaveTxtSign) {
+    if cell.starts_with('-') {
+        return;
+    }
+    match sign {
+        SaveTxtSign::Default => {}
+        SaveTxtSign::Plus => cell.insert(0, '+'),
+        SaveTxtSign::Space => cell.insert(0, ' '),
+    }
+}
+
+fn write_savetxt_with_width(
+    output: &mut String,
+    width: Option<usize>,
+    padding: SaveTxtPadding,
+    alignment: SaveTxtAlignment,
+    sign: SaveTxtSign,
+    writer: impl FnOnce(&mut String) -> Result<(), IOError>,
+) -> Result<(), IOError> {
+    if let Some(width) = width {
+        let mut cell = String::new();
+        writer(&mut cell)?;
+        apply_savetxt_sign(&mut cell, sign);
+        let pad = width.saturating_sub(cell.len());
+        match (alignment, padding) {
+            (SaveTxtAlignment::Left, _) => {
+                output.push_str(&cell);
+                push_savetxt_left_padding(output, pad);
+            }
+            (SaveTxtAlignment::Right, SaveTxtPadding::Space) => {
+                push_savetxt_left_padding(output, pad);
+                output.push_str(&cell);
+            }
+            (SaveTxtAlignment::Right, SaveTxtPadding::Zero) => {
+                if let Some(unsigned) = cell.strip_prefix('-') {
+                    output.push('-');
+                    push_savetxt_zero_padding(output, pad);
+                    output.push_str(unsigned);
+                } else if let Some(unsigned) = cell.strip_prefix('+') {
+                    output.push('+');
+                    push_savetxt_zero_padding(output, pad);
+                    output.push_str(unsigned);
+                } else if let Some(unsigned) = cell.strip_prefix(' ') {
+                    output.push(' ');
+                    push_savetxt_zero_padding(output, pad);
+                    output.push_str(unsigned);
+                } else {
+                    push_savetxt_zero_padding(output, pad);
+                    output.push_str(&cell);
+                }
+            }
+        }
+        Ok(())
+    } else {
+        let start = output.len();
+        writer(output)?;
+        if sign != SaveTxtSign::Default {
+            let mut cell = output.split_off(start);
+            apply_savetxt_sign(&mut cell, sign);
+            output.push_str(&cell);
+        }
+        Ok(())
+    }
+}
+
+fn write_savetxt_int(output: &mut String, v: f64, precision: Option<usize>) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    if v.is_nan() {
+        return Err(IOError::WriteContractViolation(
+            "cannot convert float NaN to integer",
+        ));
+    }
+    if v.is_infinite() {
+        return Err(IOError::WriteContractViolation(
+            "cannot convert float infinity to integer",
+        ));
+    }
+    let truncated = v.trunc();
+    let is_zero = truncated.to_bits() & 0x7fff_ffff_ffff_ffff == 0;
+    let negative = truncated.is_sign_negative() && !is_zero;
+    let magnitude = if is_zero {
+        0.0
+    } else if negative {
+        -truncated
+    } else {
+        truncated
+    };
+    let mut digits = String::new();
+    write!(&mut digits, "{magnitude:.0}")
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+
+    if negative {
+        output.push('-');
+    }
+    if let Some(precision) = precision {
+        push_savetxt_zero_padding(output, precision.saturating_sub(digits.len()));
+    }
+    output
+        .write_str(&digits)
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))
+}
+
+fn write_savetxt_fixed(
+    output: &mut String,
+    v: f64,
+    precision: usize,
+    uppercase: bool,
+    alternate: bool,
+) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    if v.is_nan() {
+        output.push_str(if uppercase { "NAN" } else { "nan" });
+        return Ok(());
+    }
+    if v.is_infinite() {
+        if v.is_sign_negative() {
+            output.push_str(if uppercase { "-INF" } else { "-inf" });
+        } else {
+            output.push_str(if uppercase { "INF" } else { "inf" });
+        }
+        return Ok(());
+    }
+
+    write!(output, "{v:.precision$}")
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+    if alternate && precision == 0 {
+        output.push('.');
+    }
+    Ok(())
+}
+
+fn numpy_float_string(v: f64) -> Result<String, IOError> {
+    use std::fmt::Write as _;
+
+    if v.is_nan() {
+        return Ok("nan".to_string());
+    }
+    if v.is_infinite() {
+        return Ok(if v.is_sign_negative() {
+            "-inf".to_string()
+        } else {
+            "inf".to_string()
+        });
+    }
+
+    let raw = format!("{v:?}");
+    let Some(marker) = raw.find('e').or_else(|| raw.find('E')) else {
+        return Ok(raw);
+    };
+    let mantissa = raw
+        .get(..marker)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+    let exponent = raw
+        .get(marker + 1..)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?
+        .parse::<i32>()
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+
+    let mut normalized = String::new();
+    normalized.push_str(mantissa);
+    normalized.push('e');
+    if exponent < 0 {
+        write!(&mut normalized, "-{:02}", exponent.abs())
+    } else {
+        write!(&mut normalized, "+{exponent:02}")
+    }
+    .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+    Ok(normalized)
+}
+
+fn write_savetxt_string(
+    output: &mut String,
+    v: f64,
+    precision: Option<usize>,
+) -> Result<(), IOError> {
+    let mut text = numpy_float_string(v)?;
+    if let Some(precision) = precision {
+        text.truncate(precision.min(text.len()));
+    }
+    output.push_str(&text);
+    Ok(())
+}
+
+fn write_savetxt_repr(
+    output: &mut String,
+    v: f64,
+    precision: Option<usize>,
+) -> Result<(), IOError> {
+    let mut text = format!("np.float64({})", numpy_float_string(v)?);
+    if let Some(precision) = precision {
+        text.truncate(precision.min(text.len()));
+    }
+    output.push_str(&text);
+    Ok(())
+}
+
+fn trim_savetxt_general_fraction(text: &mut String) {
+    if !text.contains('.') {
+        return;
+    }
+    while text.ends_with('0') {
+        text.pop();
+    }
+    if text.ends_with('.') {
+        text.pop();
+    }
+}
+
+fn ensure_savetxt_decimal_point(text: &mut String) {
+    if !text.contains('.') {
+        text.push('.');
+    }
+}
+
+fn push_savetxt_normalized_exponent(
+    output: &mut String,
+    exponent: i32,
+    uppercase: bool,
+) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    output.push(if uppercase { 'E' } else { 'e' });
+    if exponent < 0 {
+        write!(output, "-{:02}", exponent.abs())
+    } else {
+        write!(output, "+{exponent:02}")
+    }
+    .map_err(|_| IOError::WriteContractViolation("formatting failed"))
+}
+
+fn write_savetxt_general(
+    output: &mut String,
+    v: f64,
+    precision: usize,
+    uppercase: bool,
+    alternate: bool,
+) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    let precision = precision.max(1);
+    if v.is_nan() {
+        output.push_str(if uppercase { "NAN" } else { "nan" });
+        return Ok(());
+    }
+    if v.is_infinite() {
+        if v.is_sign_negative() {
+            output.push_str(if uppercase { "-INF" } else { "-inf" });
+        } else {
+            output.push_str(if uppercase { "INF" } else { "inf" });
+        }
+        return Ok(());
+    }
+    if v.to_bits() & 0x7fff_ffff_ffff_ffff == 0 {
+        if v.is_sign_negative() {
+            output.push_str("-0");
+        } else {
+            output.push('0');
+        }
+        if alternate {
+            output.push('.');
+            for _ in 1..precision {
+                output.push('0');
+            }
+        }
+        return Ok(());
+    }
+
+    let scientific_digits = precision.saturating_sub(1);
+    let mut scientific = String::new();
+    write!(&mut scientific, "{v:.scientific_digits$e}")
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+    let marker = scientific
+        .rfind('e')
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+    let exponent = scientific
+        .get(marker + 1..)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?
+        .parse::<i32>()
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+
+    if exponent < -4 || exponent >= precision as i32 {
+        let mut mantissa = scientific
+            .get(..marker)
+            .ok_or(IOError::WriteContractViolation("formatting failed"))?
+            .to_string();
+        if alternate {
+            ensure_savetxt_decimal_point(&mut mantissa);
+        } else {
+            trim_savetxt_general_fraction(&mut mantissa);
+        }
+        output.push_str(&mantissa);
+        push_savetxt_normalized_exponent(output, exponent, uppercase)
+    } else {
+        let fixed_digits = (precision as i32 - 1 - exponent).max(0) as usize;
+        let mut fixed = String::new();
+        write!(&mut fixed, "{v:.fixed_digits$}")
+            .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+        if alternate {
+            ensure_savetxt_decimal_point(&mut fixed);
+        } else {
+            trim_savetxt_general_fraction(&mut fixed);
+        }
+        output.push_str(&fixed);
+        Ok(())
+    }
+}
+
+fn write_savetxt_exp(
+    output: &mut String,
+    v: f64,
+    prec: usize,
+    uppercase: bool,
+    alternate: bool,
+) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    if v.is_nan() {
+        output.push_str(if uppercase { "NAN" } else { "nan" });
+        return Ok(());
+    }
+    if v.is_infinite() {
+        if v.is_sign_negative() {
+            output.push_str(if uppercase { "-INF" } else { "-inf" });
+        } else {
+            output.push_str(if uppercase { "INF" } else { "inf" });
+        }
+        return Ok(());
+    }
+
+    let start = output.len();
+    write!(output, "{v:.prec$e}")
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+    let tail = output
+        .get(start..)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+    let exponent_marker = tail
+        .rfind('e')
+        .map(|idx| start + idx)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+    let exponent_text = output
+        .get(exponent_marker + 1..)
+        .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+    let exponent = exponent_text
+        .parse::<i32>()
+        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
+
+    output.truncate(exponent_marker);
+    if alternate {
+        let mantissa = output
+            .get(start..)
+            .ok_or(IOError::WriteContractViolation("formatting failed"))?;
+        if !mantissa.contains('.') {
+            output.push('.');
+        }
+    }
+    output.push(if uppercase { 'E' } else { 'e' });
+    if exponent < 0 {
+        write!(output, "-{:02}", exponent.abs())
+    } else {
+        write!(output, "+{exponent:02}")
+    }
+    .map_err(|_| IOError::WriteContractViolation("formatting failed"))
+}
+
+fn push_savetxt_comment_block(output: &mut String, text: &str, comments: &str, newline: &str) {
+    output.push_str(comments);
+    let mut lines = text.split('\n');
+    if let Some(first) = lines.next() {
+        output.push_str(first);
+    }
+    for line in lines {
+        output.push('\n');
+        output.push_str(comments);
+        output.push_str(line);
+    }
+    output.push_str(newline);
+}
+
+fn write_savetxt_value(output: &mut String, format: SaveTxtFormat, v: f64) -> Result<(), IOError> {
+    use std::fmt::Write as _;
+
+    match format {
+        SaveTxtFormat::Exp {
+            precision,
+            uppercase,
+            width,
+            padding,
+            alignment,
+            sign,
+            alternate,
+        } => write_savetxt_with_width(output, width, padding, alignment, sign, |cell| {
+            write_savetxt_exp(cell, v, precision, uppercase, alternate)
+        }),
+        SaveTxtFormat::Fixed {
+            precision,
+            uppercase,
+            width,
+            padding,
+            alignment,
+            sign,
+            alternate,
+        } => write_savetxt_with_width(output, width, padding, alignment, sign, |cell| {
+            write_savetxt_fixed(cell, v, precision, uppercase, alternate)
+        }),
+        SaveTxtFormat::Int {
+            precision,
+            width,
+            padding,
+            alignment,
+            sign,
+        } => write_savetxt_with_width(output, width, padding, alignment, sign, |cell| {
+            write_savetxt_int(cell, v, precision)
+        }),
+        SaveTxtFormat::UnsupportedFloat => Err(IOError::WriteContractViolation(
+            "mismatch between array dtype and format specifier",
+        )),
+        SaveTxtFormat::String {
+            precision,
+            width,
+            alignment,
+        } => write_savetxt_with_width(
+            output,
+            width,
+            SaveTxtPadding::Space,
+            alignment,
+            SaveTxtSign::Default,
+            |cell| write_savetxt_string(cell, v, precision),
+        ),
+        SaveTxtFormat::Repr {
+            precision,
+            width,
+            alignment,
+        } => write_savetxt_with_width(
+            output,
+            width,
+            SaveTxtPadding::Space,
+            alignment,
+            SaveTxtSign::Default,
+            |cell| write_savetxt_repr(cell, v, precision),
+        ),
+        SaveTxtFormat::General {
+            precision,
+            uppercase,
+            width,
+            padding,
+            alignment,
+            sign,
+            alternate,
+        } => write_savetxt_with_width(output, width, padding, alignment, sign, |cell| {
+            write_savetxt_general(cell, v, precision, uppercase, alternate)
+        }),
+        SaveTxtFormat::Default => {
+            write!(output, "{v}").map_err(|_| IOError::WriteContractViolation("formatting failed"))
+        }
+    }
 }
 
 /// Save data to a text string (np.savetxt equivalent).
@@ -2173,48 +3559,55 @@ pub fn savetxt(
             "savetxt: values length != nrows * ncols",
         ));
     }
-    let fmt = parse_savetxt_format(config.fmt);
+    let fmt = parse_savetxt_format(config.fmt)?;
     // Pre-allocate approximately (15 chars per float + delimiter) * total
     let mut output = String::with_capacity(values.len() * 16);
     if !config.header.is_empty() {
-        output.push_str(config.comments);
-        output.push(' ');
-        output.push_str(config.header);
-        output.push('\n');
+        push_savetxt_comment_block(&mut output, config.header, config.comments, config.newline);
     }
-    use std::fmt::Write;
-    for r in 0..nrows {
-        for c in 0..ncols {
-            if c > 0 {
-                output.push_str(config.delimiter);
+    match &fmt {
+        ParsedSaveTxtFormat::Scalar(fmt) => {
+            for r in 0..nrows {
+                for c in 0..ncols {
+                    if c > 0 {
+                        output.push_str(config.delimiter);
+                    }
+                    let v = values[r * ncols + c];
+                    output.push_str(&fmt.prefix);
+                    write_savetxt_value(&mut output, fmt.format, v)?;
+                    output.push_str(&fmt.suffix);
+                }
+                output.push_str(config.newline);
             }
-            let v = values[r * ncols + c];
-            match fmt {
-                SaveTxtFormat::Exp(prec) => {
-                    write!(output, "{v:.prec$e}")
-                        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
-                }
-                SaveTxtFormat::Fixed(prec) => {
-                    write!(output, "{v:.prec$}")
-                        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
-                }
-                SaveTxtFormat::Int => {
-                    write!(output, "{}", v as i64)
-                        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
-                }
-                SaveTxtFormat::Default => {
-                    write!(output, "{v}")
-                        .map_err(|_| IOError::WriteContractViolation("formatting failed"))?;
-                }
-            };
         }
-        output.push('\n');
+        ParsedSaveTxtFormat::Row(parts) => {
+            let conversion_count = parts
+                .iter()
+                .filter(|part| matches!(part, SaveTxtRowPart::Conversion(_)))
+                .count();
+            if conversion_count != ncols {
+                return Err(IOError::WriteContractViolation(
+                    "fmt has wrong number of % formats",
+                ));
+            }
+            for r in 0..nrows {
+                let mut col = 0usize;
+                for part in parts {
+                    match part {
+                        SaveTxtRowPart::Literal(text) => output.push_str(text),
+                        SaveTxtRowPart::Conversion(format) => {
+                            let v = values[r * ncols + col];
+                            write_savetxt_value(&mut output, *format, v)?;
+                            col += 1;
+                        }
+                    }
+                }
+                output.push_str(config.newline);
+            }
+        }
     }
     if !config.footer.is_empty() {
-        output.push_str(config.comments);
-        output.push(' ');
-        output.push_str(config.footer);
-        output.push('\n');
+        push_savetxt_comment_block(&mut output, config.footer, config.comments, config.newline);
     }
     Ok(output)
 }
@@ -2266,10 +3659,9 @@ pub fn genfromtxt(
                 values.extend(row_vals);
             }
             Some(expected) if current_ncols != expected => {
-                // Pad or truncate to match
-                let mut padded = row_vals;
-                padded.resize(expected, filling_values);
-                values.extend(padded);
+                return Err(IOError::ReadPayloadIncomplete(
+                    "genfromtxt: inconsistent number of columns",
+                ));
             }
             Some(_) => {
                 values.extend(row_vals);
@@ -2292,6 +3684,11 @@ pub fn genfromtxt_full(
     if config.max_rows == 0 {
         return Err(IOError::ReadPayloadIncomplete(
             "'max_rows' must be at least 1.",
+        ));
+    }
+    if config.skip_footer > 0 && config.max_rows != usize::MAX {
+        return Err(IOError::ReadPayloadIncomplete(
+            "The keywords 'skip_footer' and 'max_rows' can not be specified at the same time.",
         ));
     }
 
@@ -2334,18 +3731,30 @@ pub fn genfromtxt_full(
                 .collect()
         };
 
-        // Apply usecols filter
-        let row_vals = if let Some(cols) = config.usecols {
-            cols.iter()
-                .map(|&c| {
-                    if c < row_vals.len() {
-                        row_vals[c]
-                    } else {
-                        config.filling_values
-                    }
-                })
-                .collect()
+        let raw_ncols = row_vals.len();
+
+        // Apply usecols filter. NumPy permits row-width drift when the
+        // selected columns are still present, but fails if a selected column is
+        // missing from an offending row.
+        let row_vals: Vec<f64> = if let Some(cols) = config.usecols {
+            let mut selected = Vec::with_capacity(cols.len());
+            for &c in cols {
+                if c >= raw_ncols {
+                    return Err(IOError::ReadPayloadIncomplete(
+                        "genfromtxt: usecols index out of bounds",
+                    ));
+                }
+                selected.push(row_vals[c]);
+            }
+            selected
         } else {
+            if let Some(expected) = ncols
+                && raw_ncols != expected
+            {
+                return Err(IOError::ReadPayloadIncomplete(
+                    "genfromtxt: inconsistent number of columns",
+                ));
+            }
             row_vals
         };
 
@@ -2363,11 +3772,6 @@ pub fn genfromtxt_full(
                 ncols = Some(current_ncols);
                 values.extend(row_vals);
             }
-            Some(expected) if current_ncols != expected => {
-                let mut padded = row_vals;
-                padded.resize(expected, config.filling_values);
-                values.extend(padded);
-            }
             Some(_) => {
                 values.extend(row_vals);
             }
@@ -2383,6 +3787,32 @@ pub fn genfromtxt_full(
 
 fn strip_text_comment(line: &str, comments: char) -> &str {
     line.split_once(comments).map_or(line, |(prefix, _)| prefix)
+}
+
+fn strip_text_comment_quote(line: &str, comments: char, quotechar: Option<char>) -> &str {
+    let Some(quote) = quotechar else {
+        return strip_text_comment(line, comments);
+    };
+
+    let mut in_quote = false;
+    let mut chars = line.char_indices().peekable();
+    while let Some((idx, ch)) = chars.next() {
+        if ch == quote {
+            if in_quote {
+                if chars.peek().map(|(_, next)| *next) == Some(quote) {
+                    let _ = chars.next();
+                } else {
+                    in_quote = false;
+                }
+            } else {
+                in_quote = true;
+            }
+        } else if ch == comments && !in_quote {
+            return &line[..idx];
+        }
+    }
+
+    line
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4255,6 +5685,7 @@ pub fn load_strings(data: &[u8]) -> Result<NpyLoadedStrings, IOError> {
 mod tests {
     use bytemuck::cast_slice;
     use flate2::{Compression, write::DeflateEncoder};
+    use sha2::{Digest, Sha256};
     use std::io::Write;
     use std::process::Command;
 
@@ -4267,15 +5698,16 @@ mod tests {
         classify_load_dispatch, crc32_ieee, encode_npy_header_bytes, enforce_pickle_policy,
         fromfile, fromfile_complex, fromfile_strings, fromfile_structured, fromfile_text,
         fromfile_text_with_budget, fromstring, genfromtxt, genfromtxt_full, load, load_auto,
-        load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_unpack,
-        loadtxt_usecols, memmap, memmap_npy, open_memmap, parse_structured_descr, read_npy_bytes,
-        read_npz_bytes, save, save_complex, save_strings, save_structured, savetxt, savez,
-        savez_compressed, synthesize_npz_member_names, tobytes, tofile, tofile_complex,
-        tofile_strings, tofile_structured, tofile_text, tostring, validate_descriptor_roundtrip,
-        validate_header_schema, validate_io_policy_metadata, validate_magic_version,
-        validate_memmap_contract, validate_npz_archive_budget, validate_read_payload,
-        validate_write_contract, write_npy_bytes, write_npy_bytes_with_version, write_npy_preamble,
-        write_npz_bytes, write_npz_bytes_with_compression,
+        load_complex, load_npz, load_strings, load_structured, loadtxt, loadtxt_quotechar,
+        loadtxt_unpack, loadtxt_usecols, loadtxt_usecols_signed, memmap, memmap_npy, open_memmap,
+        parse_structured_descr, read_npy_bytes, read_npz_bytes, save, save_complex, save_strings,
+        save_structured, savetxt, savez, savez_compressed, synthesize_npz_member_names, tobytes,
+        tofile, tofile_complex, tofile_strings, tofile_structured, tofile_text, tostring,
+        validate_descriptor_roundtrip, validate_header_schema, validate_io_policy_metadata,
+        validate_magic_version, validate_memmap_contract, validate_npz_archive_budget,
+        validate_read_payload, validate_write_contract, write_npy_bytes,
+        write_npy_bytes_with_version, write_npy_preamble, write_npz_bytes,
+        write_npz_bytes_with_compression,
     };
 
     fn packet009_artifacts() -> Vec<String> {
@@ -4522,6 +5954,154 @@ mm.flush()
 
         let err = IOSupportedDType::decode(">i3").expect_err("unsupported descriptor");
         assert_eq!(err.reason_code(), "io_dtype_descriptor_invalid");
+    }
+
+    #[test]
+    fn native_endian_descriptors_decode_like_numpy() {
+        let cases = [
+            ("=b1", IOSupportedDType::Bool),
+            ("=i1", IOSupportedDType::I8),
+            (
+                "=i2",
+                IOSupportedDType::native_endian(IOSupportedDType::I16, IOSupportedDType::I16Be),
+            ),
+            (
+                "=i4",
+                IOSupportedDType::native_endian(IOSupportedDType::I32, IOSupportedDType::I32Be),
+            ),
+            (
+                "=i8",
+                IOSupportedDType::native_endian(IOSupportedDType::I64, IOSupportedDType::I64Be),
+            ),
+            ("=u1", IOSupportedDType::U8),
+            (
+                "=u2",
+                IOSupportedDType::native_endian(IOSupportedDType::U16, IOSupportedDType::U16Be),
+            ),
+            (
+                "=u4",
+                IOSupportedDType::native_endian(IOSupportedDType::U32, IOSupportedDType::U32Be),
+            ),
+            (
+                "=u8",
+                IOSupportedDType::native_endian(IOSupportedDType::U64, IOSupportedDType::U64Be),
+            ),
+            (
+                "=f4",
+                IOSupportedDType::native_endian(IOSupportedDType::F32, IOSupportedDType::F32Be),
+            ),
+            (
+                "=f8",
+                IOSupportedDType::native_endian(IOSupportedDType::F64, IOSupportedDType::F64Be),
+            ),
+            (
+                "=c8",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Complex64,
+                    IOSupportedDType::Complex64Be,
+                ),
+            ),
+            (
+                "=c16",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Complex128,
+                    IOSupportedDType::Complex128Be,
+                ),
+            ),
+            ("=S3", IOSupportedDType::Bytes(3)),
+            (
+                "=U3",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Unicode(3),
+                    IOSupportedDType::UnicodeBe(3),
+                ),
+            ),
+            ("=O", IOSupportedDType::Object),
+        ];
+
+        for (descr, expected) in cases {
+            assert_eq!(IOSupportedDType::decode(descr).unwrap(), expected);
+        }
+
+        let header = validate_header_schema(&[2], false, "=f8", 128)
+            .expect("native-endian header descriptor");
+        assert_eq!(
+            header.descr,
+            IOSupportedDType::native_endian(IOSupportedDType::F64, IOSupportedDType::F64Be)
+        );
+    }
+
+    #[test]
+    fn byte_order_alias_descriptors_decode_like_numpy() {
+        let cases = [
+            ("<b1", IOSupportedDType::Bool),
+            (">b1", IOSupportedDType::Bool),
+            ("<i1", IOSupportedDType::I8),
+            (">i1", IOSupportedDType::I8),
+            (
+                "|i2",
+                IOSupportedDType::native_endian(IOSupportedDType::I16, IOSupportedDType::I16Be),
+            ),
+            (
+                "|i4",
+                IOSupportedDType::native_endian(IOSupportedDType::I32, IOSupportedDType::I32Be),
+            ),
+            (
+                "|i8",
+                IOSupportedDType::native_endian(IOSupportedDType::I64, IOSupportedDType::I64Be),
+            ),
+            ("<u1", IOSupportedDType::U8),
+            (">u1", IOSupportedDType::U8),
+            (
+                "|u2",
+                IOSupportedDType::native_endian(IOSupportedDType::U16, IOSupportedDType::U16Be),
+            ),
+            (
+                "|u4",
+                IOSupportedDType::native_endian(IOSupportedDType::U32, IOSupportedDType::U32Be),
+            ),
+            (
+                "|u8",
+                IOSupportedDType::native_endian(IOSupportedDType::U64, IOSupportedDType::U64Be),
+            ),
+            (
+                "|f4",
+                IOSupportedDType::native_endian(IOSupportedDType::F32, IOSupportedDType::F32Be),
+            ),
+            (
+                "|f8",
+                IOSupportedDType::native_endian(IOSupportedDType::F64, IOSupportedDType::F64Be),
+            ),
+            (
+                "|c8",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Complex64,
+                    IOSupportedDType::Complex64Be,
+                ),
+            ),
+            (
+                "|c16",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Complex128,
+                    IOSupportedDType::Complex128Be,
+                ),
+            ),
+            ("<S3", IOSupportedDType::Bytes(3)),
+            (">S3", IOSupportedDType::Bytes(3)),
+            (
+                "|U3",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Unicode(3),
+                    IOSupportedDType::UnicodeBe(3),
+                ),
+            ),
+            ("<O", IOSupportedDType::Object),
+            (">O", IOSupportedDType::Object),
+        ];
+
+        for (descr, expected) in cases {
+            assert_eq!(IOSupportedDType::decode(descr).unwrap(), expected);
+        }
     }
 
     #[test]
@@ -4997,7 +6577,7 @@ mm.flush()
     #[test]
     fn loadtxt_basic() {
         let text = "1.0 2.0 3.0\n4.0 5.0 6.0\n";
-        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        let result = loadtxt(text, ' ', '#', 0, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 3);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -5006,7 +6586,7 @@ mm.flush()
     #[test]
     fn loadtxt_space_delimiter_accepts_mixed_whitespace() {
         let text = "1 2\t3\n4\t5 6\n";
-        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        let result = loadtxt(text, ' ', '#', 0, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 3);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
@@ -5015,7 +6595,7 @@ mm.flush()
     #[test]
     fn loadtxt_csv() {
         let text = "1,2,3\n4,5,6";
-        let result = loadtxt(text, ',', '#', 0, 0).unwrap();
+        let result = loadtxt(text, ',', '#', 0, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 3);
     }
@@ -5023,7 +6603,7 @@ mm.flush()
     #[test]
     fn loadtxt_comments_and_skiprows() {
         let text = "# header\n# another comment\n1 2\n3 4\n";
-        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        let result = loadtxt(text, ' ', '#', 0, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
     }
@@ -5031,7 +6611,7 @@ mm.flush()
     #[test]
     fn loadtxt_strips_inline_comments() {
         let text = "1 2 # first row\n3 4#second row\n";
-        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        let result = loadtxt(text, ' ', '#', 0, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0]);
@@ -5040,7 +6620,7 @@ mm.flush()
     #[test]
     fn loadtxt_skiprows() {
         let text = "header line\n1 2\n3 4\n";
-        let result = loadtxt(text, ' ', '#', 1, 0).unwrap();
+        let result = loadtxt(text, ' ', '#', 1, usize::MAX).unwrap();
         assert_eq!(result.nrows, 2);
     }
 
@@ -5052,12 +6632,239 @@ mm.flush()
     }
 
     #[test]
+    fn loadtxt_max_rows_zero_matches_numpy_empty_result() {
+        let text = "1 2\n3 4\n5 6\n";
+        let result = loadtxt(text, ' ', '#', 0, 0).unwrap();
+        assert_eq!(result.nrows, 0);
+        assert_eq!(result.ncols, 0);
+        assert!(result.values.is_empty());
+    }
+
+    #[test]
     fn savetxt_basic() {
         let values = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
         let output = savetxt(&values, 2, 3, &SaveTxtConfig::default()).unwrap();
-        assert!(output.contains('1'));
-        assert!(output.contains('6'));
+        assert!(output.starts_with("1.000000000000000000e+00"));
+        assert!(output.contains("6.000000000000000000e+00"));
         assert_eq!(output.lines().count(), 2);
+    }
+
+    #[test]
+    fn savetxt_literal_prefix_format_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "value=%0.1f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "value=1.2\nvalue=-3.4\n");
+    }
+
+    #[test]
+    fn savetxt_literal_affix_format_preserves_width_and_sign_like_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "[%+06.1f]",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "[+001.2]\n[-003.4]\n");
+    }
+
+    #[test]
+    fn savetxt_string_format_matches_numpy_float_strings() {
+        let values = vec![1.0, -0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%s",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 5, 1, &cfg).unwrap();
+        assert_eq!(output, "1.0\n-0.0\nnan\ninf\n-inf\n");
+    }
+
+    #[test]
+    fn savetxt_string_format_normalizes_scientific_exponents_like_numpy() {
+        let values = vec![1e20, 1e-7];
+        let cfg = SaveTxtConfig {
+            fmt: "%s",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "1e+20\n1e-07\n");
+    }
+
+    #[test]
+    fn savetxt_string_format_width_and_precision_match_numpy() {
+        let values = vec![1.2, -3.4];
+        let width = SaveTxtConfig {
+            fmt: "%10s",
+            ..SaveTxtConfig::default()
+        };
+        let precision = SaveTxtConfig {
+            fmt: "%-10.3s",
+            ..SaveTxtConfig::default()
+        };
+        assert_eq!(
+            savetxt(&values, 2, 1, &width).unwrap(),
+            "       1.2\n      -3.4\n"
+        );
+        assert_eq!(
+            savetxt(&values, 2, 1, &precision).unwrap(),
+            "1.2       \n-3.       \n"
+        );
+    }
+
+    #[test]
+    fn savetxt_repr_format_matches_numpy_float_scalar_repr() {
+        let values = vec![1.0, 1e20, f64::NAN, f64::INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%r",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(
+            output,
+            "np.float64(1.0)\nnp.float64(1e+20)\nnp.float64(nan)\nnp.float64(inf)\n"
+        );
+    }
+
+    #[test]
+    fn savetxt_ascii_format_matches_repr_for_numeric_scalars() {
+        let values = vec![1.0, -0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%a",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "np.float64(1.0)\nnp.float64(-0.0)\n");
+    }
+
+    #[test]
+    fn savetxt_repr_format_width_and_precision_match_numpy() {
+        let values = vec![1.0];
+        let width = SaveTxtConfig {
+            fmt: "%20r",
+            ..SaveTxtConfig::default()
+        };
+        let precision = SaveTxtConfig {
+            fmt: "%-20.8r",
+            ..SaveTxtConfig::default()
+        };
+        assert_eq!(
+            savetxt(&values, 1, 1, &width).unwrap(),
+            "     np.float64(1.0)\n"
+        );
+        assert_eq!(
+            savetxt(&values, 1, 1, &precision).unwrap(),
+            "np.float            \n"
+        );
+    }
+
+    #[test]
+    fn savetxt_multi_conversion_row_format_matches_numpy() {
+        let values = vec![1.25, 2.5, -3.75, 4.0];
+        let cfg = SaveTxtConfig {
+            fmt: "x=%0.1f y=%0.2e",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 2, &cfg).unwrap();
+        assert_eq!(output, "x=1.2 y=2.50e+00\nx=-3.8 y=4.00e+00\n");
+    }
+
+    #[test]
+    fn savetxt_multi_conversion_preserves_literals_and_ignores_delimiter() {
+        let values = vec![1.25, 2.5, -3.75, 4.0];
+        let cfg = SaveTxtConfig {
+            delimiter: "|",
+            fmt: "(%6.2f|%+06.1f)",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 2, &cfg).unwrap();
+        assert_eq!(output, "(  1.25|+002.5)\n( -3.75|+004.0)\n");
+    }
+
+    #[test]
+    fn savetxt_multi_conversion_rejects_wrong_column_count() {
+        let values = vec![1.25, 2.5];
+        let cfg = SaveTxtConfig {
+            fmt: "%0.1f %0.2f %0.3f",
+            ..SaveTxtConfig::default()
+        };
+        assert!(savetxt(&values, 1, 2, &cfg).is_err());
+    }
+
+    #[test]
+    fn savetxt_rejects_integer_like_formats_for_float_arrays_like_numpy() {
+        let values = vec![1.0, 15.0, -2.0];
+        for fmt in ["%x", "%X", "%o", "%c"] {
+            let cfg = SaveTxtConfig {
+                fmt,
+                ..SaveTxtConfig::default()
+            };
+            assert!(savetxt(&values, 3, 1, &cfg).is_err());
+        }
+    }
+
+    #[test]
+    fn savetxt_multi_conversion_rejects_integer_like_float_mismatch() {
+        let values = vec![1.0, 15.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%0.1f %x",
+            ..SaveTxtConfig::default()
+        };
+        assert!(savetxt(&values, 1, 2, &cfg).is_err());
+    }
+
+    #[test]
+    fn savetxt_rejects_invalid_format_strings_like_numpy() {
+        let values = vec![1.0];
+        for fmt in ["abc", "%%", "%0.1f%%", "%q"] {
+            let cfg = SaveTxtConfig {
+                fmt,
+                ..SaveTxtConfig::default()
+            };
+            assert!(savetxt(&values, 1, 1, &cfg).is_err());
+        }
+    }
+
+    #[test]
+    fn savetxt_length_modifier_integer_formats_match_numpy() {
+        let values = vec![1.2, -3.4];
+        for fmt in ["%ld", "%li", "%lu", "%hd"] {
+            let cfg = SaveTxtConfig {
+                fmt,
+                ..SaveTxtConfig::default()
+            };
+            assert_eq!(savetxt(&values, 2, 1, &cfg).unwrap(), "1\n-3\n");
+        }
+    }
+
+    #[test]
+    fn savetxt_length_modifier_float_formats_match_numpy() {
+        let values = vec![1.2, -3.4];
+        let fixed = SaveTxtConfig {
+            fmt: "%5.2lf",
+            ..SaveTxtConfig::default()
+        };
+        let exp = SaveTxtConfig {
+            fmt: "%Le",
+            ..SaveTxtConfig::default()
+        };
+        assert_eq!(savetxt(&values, 2, 1, &fixed).unwrap(), " 1.20\n-3.40\n");
+        assert_eq!(
+            savetxt(&values, 2, 1, &exp).unwrap(),
+            "1.200000e+00\n-3.400000e+00\n"
+        );
+    }
+
+    #[test]
+    fn savetxt_rejects_doubled_length_modifier_like_numpy() {
+        let values = vec![1.2];
+        let cfg = SaveTxtConfig {
+            fmt: "%lld",
+            ..SaveTxtConfig::default()
+        };
+        assert!(savetxt(&values, 1, 1, &cfg).is_err());
     }
 
     #[test]
@@ -5069,13 +6876,475 @@ mm.flush()
         };
         let output = savetxt(&values, 1, 1, &cfg).unwrap();
         let line = output.trim();
+        assert_eq!(line, "1.500000000000000000e+00");
         let mut parts = line.split('e');
         let mantissa = parts.next().expect("mantissa");
         let exponent = parts.next().expect("exponent");
-        assert!(!exponent.is_empty());
+        assert_eq!(exponent, "+00");
         assert!(parts.next().is_none());
         let frac = mantissa.split('.').nth(1).unwrap_or("");
         assert_eq!(frac.len(), 18);
+    }
+
+    #[test]
+    fn savetxt_uppercase_exp_format_matches_numpy() {
+        let values = vec![1.23456, 1000.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%.2E",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 2, &cfg).unwrap();
+        assert_eq!(output, "1.23E+00 1.00E+03\n");
+    }
+
+    #[test]
+    fn savetxt_uppercase_exp_formats_nan_and_inf_like_numpy() {
+        let values = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%E",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 3, &cfg).unwrap();
+        assert_eq!(output, "NAN INF -INF\n");
+    }
+
+    #[test]
+    fn savetxt_fixed_format_formats_nan_and_inf_like_numpy() {
+        let values = vec![1.2, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%.2f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(output, "1.20\nnan\ninf\n-inf\n");
+    }
+
+    #[test]
+    fn savetxt_uppercase_fixed_format_matches_numpy() {
+        let values = vec![1.2, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%.2F",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(output, "1.20\nNAN\nINF\n-INF\n");
+    }
+
+    #[test]
+    fn savetxt_uppercase_fixed_alternate_precision_zero_matches_numpy() {
+        let values = vec![1.2, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let cfg = SaveTxtConfig {
+            fmt: "%#.0F",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(output, "1.\nNAN\nINF\n-INF\n");
+    }
+
+    #[test]
+    fn savetxt_general_format_matches_numpy_default_precision() {
+        let values = vec![
+            1.23456789,
+            123456789.0,
+            0.000123456789,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let cfg = SaveTxtConfig {
+            fmt: "%g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 6, &cfg).unwrap();
+        assert_eq!(output, "1.23457 1.23457e+08 0.000123457 nan inf -inf\n");
+    }
+
+    #[test]
+    fn savetxt_uppercase_general_format_matches_numpy_precision() {
+        let values = vec![
+            1.23456789,
+            123456789.0,
+            0.000123456789,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+        ];
+        let cfg = SaveTxtConfig {
+            fmt: "%.3G",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 6, &cfg).unwrap();
+        assert_eq!(output, "1.23 1.23E+08 0.000123 NAN INF -INF\n");
+    }
+
+    #[test]
+    fn savetxt_general_format_preserves_negative_zero_like_numpy() {
+        let values = vec![-0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "-0\n");
+    }
+
+    #[test]
+    fn savetxt_general_alternate_format_preserves_trailing_zeros_like_numpy() {
+        let values = vec![1.2, 12345.0, 0.0012, 0.0, -0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%#.3g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 5, 1, &cfg).unwrap();
+        assert_eq!(output, "1.20\n1.23e+04\n0.00120\n0.00\n-0.00\n");
+    }
+
+    #[test]
+    fn savetxt_general_alternate_format_width_matches_numpy() {
+        let values = vec![1.2, 12345.0, 0.0012, 0.0, -0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%#10.3g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 5, 1, &cfg).unwrap();
+        assert_eq!(
+            output,
+            "      1.20\n  1.23e+04\n   0.00120\n      0.00\n     -0.00\n"
+        );
+    }
+
+    #[test]
+    fn savetxt_general_alternate_precision_one_keeps_decimal_point_like_numpy() {
+        let values = vec![1.2, 12345.0, 0.0012, 0.0, -0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%#.1g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 5, 1, &cfg).unwrap();
+        assert_eq!(output, "1.\n1.e+04\n0.001\n0.\n-0.\n");
+    }
+
+    #[test]
+    fn savetxt_fixed_and_exp_alternate_precision_zero_keep_decimal_point_like_numpy() {
+        let values = vec![1.2, -3.4];
+        let fixed = SaveTxtConfig {
+            fmt: "%#.0f",
+            ..SaveTxtConfig::default()
+        };
+        let exp = SaveTxtConfig {
+            fmt: "%#.0e",
+            ..SaveTxtConfig::default()
+        };
+        assert_eq!(savetxt(&values, 2, 1, &fixed).unwrap(), "1.\n-3.\n");
+        assert_eq!(savetxt(&values, 2, 1, &exp).unwrap(), "1.e+00\n-3.e+00\n");
+    }
+
+    #[test]
+    fn savetxt_fixed_format_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%10.2f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "      1.20\n     -3.40\n");
+    }
+
+    #[test]
+    fn savetxt_exp_format_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%10.2e",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "  1.20e+00\n -3.40e+00\n");
+    }
+
+    #[test]
+    fn savetxt_general_format_width_matches_numpy() {
+        let values = vec![12345.0, 0.0012345];
+        let cfg = SaveTxtConfig {
+            fmt: "%10.3g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "  1.23e+04\n   0.00123\n");
+    }
+
+    #[test]
+    fn savetxt_integer_format_width_matches_numpy() {
+        let values = vec![1.9, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%10d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "         1\n        -3\n");
+    }
+
+    #[test]
+    fn savetxt_fixed_format_zero_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%010.2f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "0000001.20\n-000003.40\n");
+    }
+
+    #[test]
+    fn savetxt_exp_format_zero_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%010.2e",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "001.20e+00\n-03.40e+00\n");
+    }
+
+    #[test]
+    fn savetxt_general_format_zero_width_matches_numpy() {
+        let values = vec![12345.0, -0.0012345];
+        let cfg = SaveTxtConfig {
+            fmt: "%010.3g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "001.23e+04\n-000.00123\n");
+    }
+
+    #[test]
+    fn savetxt_integer_format_zero_width_matches_numpy() {
+        let values = vec![1.9, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%010d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "0000000001\n-000000003\n");
+    }
+
+    #[test]
+    fn savetxt_fixed_format_left_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%-10.2f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "1.20      \n-3.40     \n");
+    }
+
+    #[test]
+    fn savetxt_exp_format_left_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%-10.2e",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "1.20e+00  \n-3.40e+00 \n");
+    }
+
+    #[test]
+    fn savetxt_general_format_left_width_matches_numpy() {
+        let values = vec![12345.0, -0.0012345];
+        let cfg = SaveTxtConfig {
+            fmt: "%-10.3g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "1.23e+04  \n-0.00123  \n");
+    }
+
+    #[test]
+    fn savetxt_integer_format_left_width_matches_numpy() {
+        let values = vec![1.9, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%-10d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "1         \n-3        \n");
+    }
+
+    #[test]
+    fn savetxt_fixed_format_plus_sign_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%+10.2f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "     +1.20\n     -3.40\n");
+    }
+
+    #[test]
+    fn savetxt_fixed_format_space_sign_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "% 10.2f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "      1.20\n     -3.40\n");
+    }
+
+    #[test]
+    fn savetxt_fixed_format_plus_sign_zero_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%+010.2f",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "+000001.20\n-000003.40\n");
+    }
+
+    #[test]
+    fn savetxt_zero_flag_before_other_flags_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        for (fmt, expected) in [
+            ("%0+10.2f", "+000001.20\n-000003.40\n"),
+            ("%0 10.2f", " 000001.20\n-000003.40\n"),
+            ("%0#10.3g", "0000001.20\n-000003.40\n"),
+            ("%0-10.2f", "1.20      \n-3.40     \n"),
+        ] {
+            let cfg = SaveTxtConfig {
+                fmt,
+                ..SaveTxtConfig::default()
+            };
+            let output = savetxt(&values, 2, 1, &cfg).unwrap();
+            assert_eq!(output, expected);
+        }
+    }
+
+    #[test]
+    fn savetxt_exp_format_plus_sign_width_matches_numpy() {
+        let values = vec![1.2, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%+10.2e",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, " +1.20e+00\n -3.40e+00\n");
+    }
+
+    #[test]
+    fn savetxt_general_format_plus_sign_width_matches_numpy() {
+        let values = vec![12345.0, -0.0012345];
+        let cfg = SaveTxtConfig {
+            fmt: "%+10.3g",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, " +1.23e+04\n  -0.00123\n");
+    }
+
+    #[test]
+    fn savetxt_integer_format_plus_sign_width_matches_numpy() {
+        let values = vec![1.9, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%+10d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 1, &cfg).unwrap();
+        assert_eq!(output, "        +1\n        -3\n");
+    }
+
+    #[test]
+    fn savetxt_unsigned_integer_format_matches_numpy() {
+        let values = vec![1.9, -3.4, 0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%u",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 3, 1, &cfg).unwrap();
+        assert_eq!(output, "1\n-3\n0\n");
+    }
+
+    #[test]
+    fn savetxt_integer_precision_format_matches_numpy() {
+        let values = vec![0.0, -0.0, 1.9, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%.2d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(output, "00\n00\n01\n-03\n");
+    }
+
+    #[test]
+    fn savetxt_integer_precision_combines_with_width_and_zero_fill_like_numpy() {
+        let values = vec![0.0, -0.0, 1.9, -3.4];
+        let cfg = SaveTxtConfig {
+            fmt: "%05.2u",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 4, 1, &cfg).unwrap();
+        assert_eq!(output, "00000\n00000\n00001\n-0003\n");
+    }
+
+    #[test]
+    fn savetxt_integer_format_rejects_nan_like_numpy() {
+        let values = vec![f64::NAN];
+        let cfg = SaveTxtConfig {
+            fmt: "%d",
+            ..SaveTxtConfig::default()
+        };
+        let err = savetxt(&values, 1, 1, &cfg).unwrap_err();
+        assert_eq!(err.to_string(), "cannot convert float NaN to integer");
+    }
+
+    #[test]
+    fn savetxt_integer_format_rejects_infinities_like_numpy() {
+        let cfg = SaveTxtConfig {
+            fmt: "%i",
+            ..SaveTxtConfig::default()
+        };
+        for value in [f64::INFINITY, f64::NEG_INFINITY] {
+            let err = savetxt(&[value], 1, 1, &cfg).unwrap_err();
+            assert_eq!(err.to_string(), "cannot convert float infinity to integer");
+        }
+    }
+
+    #[test]
+    fn savetxt_integer_format_truncates_finite_fractional_values_like_numpy() {
+        let values = vec![1.9, -1.9];
+        let cfg = SaveTxtConfig {
+            fmt: "%d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 2, &cfg).unwrap();
+        assert_eq!(output, "1 -1\n");
+    }
+
+    #[test]
+    fn savetxt_integer_format_handles_large_finite_values_like_numpy() {
+        let values = vec![1e20, -1e20, 9.223_372_036_854_776e18];
+        let cfg = SaveTxtConfig {
+            fmt: "%d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 3, &cfg).unwrap();
+        assert_eq!(
+            output,
+            "100000000000000000000 -100000000000000000000 9223372036854775808\n"
+        );
+    }
+
+    #[test]
+    fn savetxt_integer_format_negative_zero_matches_numpy() {
+        let values = vec![-0.0];
+        let cfg = SaveTxtConfig {
+            fmt: "%d",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "0\n");
     }
 
     #[test]
@@ -5091,10 +7360,83 @@ mm.flush()
     }
 
     #[test]
+    fn savetxt_custom_comments_are_verbatim_like_numpy() {
+        let values = vec![1.0];
+        let cfg = SaveTxtConfig {
+            header: "h",
+            footer: "f",
+            comments: "#",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "#h\n1.000000000000000000e+00\n#f\n");
+    }
+
+    #[test]
+    fn savetxt_multiline_header_and_footer_prefix_each_line_like_numpy() {
+        let values = vec![1.0];
+        let cfg = SaveTxtConfig {
+            header: "h1\nh2",
+            footer: "f1\nf2",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "# h1\n# h2\n1.000000000000000000e+00\n# f1\n# f2\n");
+    }
+
+    #[test]
+    fn savetxt_multiline_header_and_footer_use_custom_comments_like_numpy() {
+        let values = vec![1.0];
+        let cfg = SaveTxtConfig {
+            header: "h1\nh2",
+            footer: "f1\nf2",
+            comments: "##",
+            newline: "|",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "##h1\n##h2|1.000000000000000000e+00|##f1\n##f2|");
+    }
+
+    #[test]
+    fn savetxt_custom_newline_matches_numpy() {
+        let values = vec![1.0, 2.0, 3.0, 4.0];
+        let cfg = SaveTxtConfig {
+            newline: "|",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 2, 2, &cfg).unwrap();
+        assert_eq!(
+            output,
+            "1.000000000000000000e+00 2.000000000000000000e+00|3.000000000000000000e+00 4.000000000000000000e+00|"
+        );
+    }
+
+    #[test]
+    fn savetxt_custom_newline_applies_to_header_and_footer() {
+        let values = vec![1.0];
+        let cfg = SaveTxtConfig {
+            header: "h",
+            footer: "f",
+            newline: "\r\n",
+            ..SaveTxtConfig::default()
+        };
+        let output = savetxt(&values, 1, 1, &cfg).unwrap();
+        assert_eq!(output, "# h\r\n1.000000000000000000e+00\r\n# f\r\n");
+    }
+
+    #[test]
+    fn savetxt_formats_nan_and_inf_like_numpy() {
+        let values = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let output = savetxt(&values, 1, 3, &SaveTxtConfig::default()).unwrap();
+        assert_eq!(output, "nan inf -inf\n");
+    }
+
+    #[test]
     fn savetxt_roundtrip() {
         let original = vec![1.5, 2.5, 3.5, 4.5];
         let text = savetxt(&original, 2, 2, &SaveTxtConfig::default()).unwrap();
-        let loaded = loadtxt(&text, ' ', '#', 0, 0).unwrap();
+        let loaded = loadtxt(&text, ' ', '#', 0, usize::MAX).unwrap();
         assert_eq!(loaded.nrows, 2);
         assert_eq!(loaded.ncols, 2);
         assert_eq!(loaded.values, original);
@@ -5109,6 +7451,17 @@ mm.flush()
         assert_eq!(result.values[0], 1.0);
         assert!(result.values[4].is_nan()); // missing value
         assert_eq!(result.values[5], 6.0);
+    }
+
+    #[test]
+    fn genfromtxt_rejects_inconsistent_columns_like_numpy() {
+        let text = "1 2 3\n4 5\n";
+        let err = genfromtxt(text, ' ', '#', 0, f64::NAN).unwrap_err();
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+        assert_eq!(
+            err.to_string(),
+            "genfromtxt: inconsistent number of columns"
+        );
     }
 
     #[test]
@@ -5177,6 +7530,39 @@ mm.flush()
     }
 
     #[test]
+    fn genfromtxt_full_usecols_allows_unselected_width_drift() {
+        let text = "1,2\n3\n";
+        let usecols = [0usize];
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            filling_values: 0.0,
+            usecols: Some(&usecols),
+            ..GenFromTxtConfig::default()
+        };
+        let result = genfromtxt_full(text, &config).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 1);
+        assert_eq!(result.values, vec![1.0, 3.0]);
+    }
+
+    #[test]
+    fn genfromtxt_full_rejects_missing_selected_usecol() {
+        let text = "1,2\n3\n";
+        let usecols = [1usize];
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            filling_values: 0.0,
+            usecols: Some(&usecols),
+            ..GenFromTxtConfig::default()
+        };
+        let err = genfromtxt_full(text, &config).unwrap_err();
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+        assert_eq!(err.to_string(), "genfromtxt: usecols index out of bounds");
+    }
+
+    #[test]
     fn genfromtxt_full_max_rows() {
         let text = "1,2\n3,4\n5,6\n7,8\n";
         let config = GenFromTxtConfig {
@@ -5204,6 +7590,25 @@ mm.flush()
         let err = genfromtxt_full(text, &config).unwrap_err();
         assert_eq!(err.reason_code(), "io_read_payload_incomplete");
         assert_eq!(err.to_string(), "'max_rows' must be at least 1.");
+    }
+
+    #[test]
+    fn genfromtxt_full_rejects_skip_footer_with_max_rows_like_numpy() {
+        let text = "1,2\n3,4\n5,6\n";
+        let config = GenFromTxtConfig {
+            delimiter: ',',
+            comments: '#',
+            filling_values: 0.0,
+            skip_footer: 1,
+            max_rows: 2,
+            ..GenFromTxtConfig::default()
+        };
+        let err = genfromtxt_full(text, &config).unwrap_err();
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+        assert_eq!(
+            err.to_string(),
+            "The keywords 'skip_footer' and 'max_rows' can not be specified at the same time."
+        );
     }
 
     #[test]
@@ -5341,7 +7746,7 @@ mm.flush()
     #[test]
     fn loadtxt_usecols_selects_columns() {
         let text = "1,2,3,4\n5,6,7,8\n";
-        let result = loadtxt_usecols(text, ',', '#', 0, 0, Some(&[0, 2])).unwrap();
+        let result = loadtxt_usecols(text, ',', '#', 0, usize::MAX, Some(&[0, 2])).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![1.0, 3.0, 5.0, 7.0]);
@@ -5350,7 +7755,7 @@ mm.flush()
     #[test]
     fn loadtxt_usecols_single_column() {
         let text = "10 20 30\n40 50 60\n";
-        let result = loadtxt_usecols(text, ' ', '#', 0, 0, Some(&[1])).unwrap();
+        let result = loadtxt_usecols(text, ' ', '#', 0, usize::MAX, Some(&[1])).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 1);
         assert_eq!(result.values, vec![20.0, 50.0]);
@@ -5359,7 +7764,7 @@ mm.flush()
     #[test]
     fn loadtxt_usecols_ignores_unselected_non_numeric_columns() {
         let text = "1,foo,3\n4,bar,6\n";
-        let result = loadtxt_usecols(text, ',', '#', 0, 0, Some(&[0, 2])).unwrap();
+        let result = loadtxt_usecols(text, ',', '#', 0, usize::MAX, Some(&[0, 2])).unwrap();
         assert_eq!(result.nrows, 2);
         assert_eq!(result.ncols, 2);
         assert_eq!(result.values, vec![1.0, 3.0, 4.0, 6.0]);
@@ -5368,15 +7773,114 @@ mm.flush()
     #[test]
     fn loadtxt_usecols_out_of_bounds() {
         let text = "1,2,3\n4,5,6\n";
-        let err =
-            loadtxt_usecols(text, ',', '#', 0, 0, Some(&[5])).expect_err("usecols out of bounds");
+        let err = loadtxt_usecols(text, ',', '#', 0, usize::MAX, Some(&[5]))
+            .expect_err("usecols out of bounds");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+    }
+
+    #[test]
+    fn loadtxt_signed_usecols_selects_negative_columns_like_numpy() {
+        let text = "1 2 3\n4 5 6\n";
+        let result = loadtxt_usecols_signed(text, ' ', '#', 0, usize::MAX, Some(&[-1])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 1);
+        assert_eq!(result.values, vec![3.0, 6.0]);
+    }
+
+    #[test]
+    fn loadtxt_signed_usecols_preserves_mixed_order_like_numpy() {
+        let text = "1 2 3\n4 5 6\n";
+        let result = loadtxt_usecols_signed(text, ' ', '#', 0, usize::MAX, Some(&[-1, 0])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![3.0, 1.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn loadtxt_signed_usecols_resolves_negative_indices_per_row_width() {
+        let text = "1 2\n3 4 5\n";
+        let result = loadtxt_usecols_signed(text, ' ', '#', 0, usize::MAX, Some(&[-1, 0])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![2.0, 1.0, 5.0, 3.0]);
+    }
+
+    #[test]
+    fn loadtxt_signed_usecols_ignores_unselected_nonnumeric_columns() {
+        let text = "1,skip,3\n4,nope,6\n";
+        let result = loadtxt_usecols_signed(text, ',', '#', 0, usize::MAX, Some(&[-1, 0])).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![3.0, 1.0, 6.0, 4.0]);
+    }
+
+    #[test]
+    fn loadtxt_signed_usecols_rejects_negative_out_of_bounds_like_numpy() {
+        let text = "1 2\n3 4 5\n";
+        let err = loadtxt_usecols_signed(text, ' ', '#', 0, usize::MAX, Some(&[-3]))
+            .expect_err("negative usecols out of bounds");
+        assert_eq!(err.reason_code(), "io_read_payload_incomplete");
+    }
+
+    #[test]
+    fn loadtxt_quotechar_parses_quoted_numeric_fields_like_numpy() {
+        let text = "\"1.5\",2.5\n\"3.5\",4.5\n";
+        let result = loadtxt_quotechar(text, ',', '#', 0, usize::MAX, None, Some('"')).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![1.5, 2.5, 3.5, 4.5]);
+    }
+
+    #[test]
+    fn loadtxt_quotechar_ignores_comment_after_quoted_value_like_numpy() {
+        let text = "\"1.5\"# trailing comment\n";
+        let result = loadtxt_quotechar(text, ' ', '#', 0, usize::MAX, None, Some('"')).unwrap();
+        assert_eq!(result.nrows, 1);
+        assert_eq!(result.ncols, 1);
+        assert_eq!(result.values, vec![1.5]);
+    }
+
+    #[test]
+    fn loadtxt_quotechar_supports_whitespace_delimiter_like_numpy() {
+        let text = "\"1.5\"       2.5\n";
+        let result = loadtxt_quotechar(text, ' ', '#', 0, usize::MAX, None, Some('"')).unwrap();
+        assert_eq!(result.nrows, 1);
+        assert_eq!(result.ncols, 2);
+        assert_eq!(result.values, vec![1.5, 2.5]);
+    }
+
+    #[test]
+    fn loadtxt_quotechar_usecols_ignores_quoted_unselected_text() {
+        let text = "\"alpha, #42\",10.0\n\"beta, #64\",20.0\n";
+        let result =
+            loadtxt_quotechar(text, ',', '#', 0, usize::MAX, Some(&[1]), Some('"')).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 1);
+        assert_eq!(result.values, vec![10.0, 20.0]);
+    }
+
+    #[test]
+    fn loadtxt_quotechar_treats_doubled_quotes_as_escaped_quotes() {
+        let text = "\"alpha \"\"#42\"\"\",10.0\n\"beta \"\"#64\"\"\",20.0\n";
+        let result =
+            loadtxt_quotechar(text, ',', '#', 0, usize::MAX, Some(&[1]), Some('"')).unwrap();
+        assert_eq!(result.nrows, 2);
+        assert_eq!(result.ncols, 1);
+        assert_eq!(result.values, vec![10.0, 20.0]);
+    }
+
+    #[test]
+    fn loadtxt_quotechar_rejects_unterminated_quote() {
+        let text = "\"1.5,2.5\n";
+        let err = loadtxt_quotechar(text, ',', '#', 0, usize::MAX, None, Some('"'))
+            .expect_err("unterminated quote");
         assert_eq!(err.reason_code(), "io_read_payload_incomplete");
     }
 
     #[test]
     fn loadtxt_usecols_none_loads_all() {
         let text = "1,2,3\n4,5,6\n";
-        let result = loadtxt_usecols(text, ',', '#', 0, 0, None).unwrap();
+        let result = loadtxt_usecols(text, ',', '#', 0, usize::MAX, None).unwrap();
         assert_eq!(result.ncols, 3);
         assert_eq!(result.values, vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
     }
@@ -5385,7 +7889,7 @@ mm.flush()
     fn loadtxt_unpack_basic() {
         // [[1,2,3],[4,5,6]] with unpack=true → [[1,4],[2,5],[3,6]]
         let text = "1,2,3\n4,5,6\n";
-        let result = loadtxt_unpack(text, ',', '#', 0, 0, None, true).unwrap();
+        let result = loadtxt_unpack(text, ',', '#', 0, usize::MAX, None, true).unwrap();
         // After transpose: nrows=3 (was ncols), ncols=2 (was nrows)
         assert_eq!(result.nrows, 3);
         assert_eq!(result.ncols, 2);
@@ -5395,8 +7899,8 @@ mm.flush()
     #[test]
     fn loadtxt_unpack_false_matches_default() {
         let text = "1,2,3\n4,5,6\n";
-        let default = loadtxt_usecols(text, ',', '#', 0, 0, None).unwrap();
-        let no_unpack = loadtxt_unpack(text, ',', '#', 0, 0, None, false).unwrap();
+        let default = loadtxt_usecols(text, ',', '#', 0, usize::MAX, None).unwrap();
+        let no_unpack = loadtxt_unpack(text, ',', '#', 0, usize::MAX, None, false).unwrap();
         assert_eq!(default.values, no_unpack.values);
     }
 
@@ -5671,6 +8175,144 @@ mm.flush()
         assert_eq!(entries[0].array.header.shape, vec![3]);
         assert_eq!(entries[0].array.header.descr, IOSupportedDType::F64);
         assert_eq!(entries[0].array.payload, payload.into());
+    }
+
+    #[test]
+    fn npz_store_writer_matches_independent_store_zip_builder() {
+        let header = NpyHeader {
+            shape: vec![2, 2],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let payload = [1.0_f64, -0.0, f64::INFINITY, -2.5]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect::<Vec<_>>();
+
+        let npy_data = write_npy_bytes(&header, &payload, false).expect("encode npy");
+        let expected = build_single_store_npz("arr.npy", &npy_data);
+        let actual = write_npz_bytes(&[("arr", &header, &payload)]).expect("write npz");
+
+        assert_eq!(actual, expected);
+        let golden_sha256 = Sha256::digest(&actual)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            golden_sha256,
+            "2112e8eb6aa3e6d2fcbdb7ccd75d21f99c162f38977fdcbed12d698f875523f0"
+        );
+    }
+
+    #[test]
+    fn npz_store_writer_multi_array_golden_sha256() {
+        let h_f64 = NpyHeader {
+            shape: vec![3],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let p_f64: Vec<u8> = [1.0_f64, -0.0, f64::INFINITY]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect();
+        let h_i32 = NpyHeader {
+            shape: vec![2, 2],
+            fortran_order: true,
+            descr: IOSupportedDType::I32,
+        };
+        let p_i32: Vec<u8> = [7_i32, -3, 0, i32::MAX]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        let h_bool = NpyHeader {
+            shape: vec![4],
+            fortran_order: false,
+            descr: IOSupportedDType::Bool,
+        };
+        let p_bool = [1_u8, 0, 1, 1];
+
+        let actual = write_npz_bytes(&[
+            ("alpha", &h_f64, &p_f64),
+            ("beta.npy", &h_i32, &p_i32),
+            ("gamma", &h_bool, &p_bool),
+        ])
+        .expect("write npz");
+        let golden_sha256 = Sha256::digest(&actual)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            golden_sha256,
+            "f7efcd0a5d267f63fdda6b8e1006aacf27309d93191fc71e97050d8adbc69788"
+        );
+
+        let entries = read_npz_bytes(&actual, false).expect("read npz");
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].name, "alpha");
+        assert_eq!(entries[0].array.payload, p_f64.into());
+        assert_eq!(entries[1].name, "beta");
+        assert_eq!(entries[1].array.payload, p_i32.into());
+        assert_eq!(entries[2].name, "gamma");
+        assert_eq!(entries[2].array.payload, p_bool.as_slice().into());
+    }
+
+    #[test]
+    fn npz_store_reader_multi_array_output_golden_sha256() {
+        let h_f64 = NpyHeader {
+            shape: vec![3],
+            fortran_order: false,
+            descr: IOSupportedDType::F64,
+        };
+        let p_f64: Vec<u8> = [1.0_f64, -0.0, f64::INFINITY]
+            .into_iter()
+            .flat_map(f64::to_le_bytes)
+            .collect();
+        let h_i32 = NpyHeader {
+            shape: vec![2, 2],
+            fortran_order: true,
+            descr: IOSupportedDType::I32,
+        };
+        let p_i32: Vec<u8> = [7_i32, -3, 0, i32::MAX]
+            .into_iter()
+            .flat_map(i32::to_le_bytes)
+            .collect();
+        let h_bool = NpyHeader {
+            shape: vec![4],
+            fortran_order: false,
+            descr: IOSupportedDType::Bool,
+        };
+        let p_bool = [1_u8, 0, 1, 1];
+
+        let npz = write_npz_bytes(&[
+            ("alpha", &h_f64, &p_f64),
+            ("beta.npy", &h_i32, &p_i32),
+            ("gamma", &h_bool, &p_bool),
+        ])
+        .expect("write npz");
+        let entries = read_npz_bytes(&npz, false).expect("read npz");
+
+        let mut digest = Sha256::new();
+        for entry in &entries {
+            digest.update(entry.name.as_bytes());
+            digest.update([0]);
+            digest.update(entry.array.header.descr.descr().as_bytes());
+            digest.update([0]);
+            digest.update([u8::from(entry.array.header.fortran_order)]);
+            for dim in &entry.array.header.shape {
+                digest.update(dim.to_le_bytes());
+            }
+            digest.update([0xff]);
+            digest.update(entry.array.payload.as_ref());
+        }
+        let golden_sha256 = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            golden_sha256,
+            "86c1d69d6a1d71433fe94a8c61aba81bac55b97d1e17d24249376897af578828"
+        );
     }
 
     #[test]
@@ -6836,6 +9478,51 @@ mm.flush()
         assert_eq!(npy.header.descr, IOSupportedDType::Unicode(3));
         let strings = fromfile_strings(&npy.payload, npy.header.descr, None).unwrap();
         assert_eq!(strings, vec!["abc", "xy"]);
+    }
+
+    #[test]
+    fn npy_headers_with_byte_order_alias_dtypes_parse() {
+        let cases = [
+            ("<b1", IOSupportedDType::Bool),
+            (">i1", IOSupportedDType::I8),
+            (
+                "|i4",
+                IOSupportedDType::native_endian(IOSupportedDType::I32, IOSupportedDType::I32Be),
+            ),
+            (
+                "|u8",
+                IOSupportedDType::native_endian(IOSupportedDType::U64, IOSupportedDType::U64Be),
+            ),
+            (
+                "|f8",
+                IOSupportedDType::native_endian(IOSupportedDType::F64, IOSupportedDType::F64Be),
+            ),
+            (
+                "|c16",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Complex128,
+                    IOSupportedDType::Complex128Be,
+                ),
+            ),
+            (">S3", IOSupportedDType::Bytes(3)),
+            (
+                "|U3",
+                IOSupportedDType::native_endian(
+                    IOSupportedDType::Unicode(3),
+                    IOSupportedDType::UnicodeBe(3),
+                ),
+            ),
+        ];
+
+        for (descr, expected) in cases {
+            let header = format!(
+                "{{'descr': '{descr}', 'fortran_order': False, 'shape': (0,), }}          "
+            );
+            let payload = make_manual_npy_payload(&header, &[]);
+            let npy = read_npy_bytes(&payload, false).unwrap();
+            assert_eq!(npy.header.descr, expected, "descriptor {descr}");
+            assert!(npy.payload.is_empty());
+        }
     }
 
     // ── Structured / Record Dtype NPY tests ──

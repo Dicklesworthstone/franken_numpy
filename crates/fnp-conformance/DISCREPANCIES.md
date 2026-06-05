@@ -119,6 +119,51 @@
 
 ---
 
+## DISC-010: minimum/maximum/fmin/fmax signed-zero tie selection
+
+- **Reference:** NumPy's `minimum(x1, x2)` / `maximum(x1, x2)` / `fmin(x1, x2)` / `fmax(x1, x2)` return x2 when values are equal
+- **Our impl:** Returns x1 when values are equal
+- **Impact:** Sign bit differs when comparing +0.0 vs -0.0:
+  - `minimum(-0.0, 0.0)`: fnp → -0.0, np → 0.0
+  - `maximum(-0.0, 0.0)`: fnp → -0.0, np → 0.0
+  - Same behavior for fmin/fmax
+- **Resolution:** WILL-FIX
+- **Reason:** This blocks parallel operation safety proofs in fnp-ufunc. The `ParallelOperationEligibility::UnsafeUntilProof` annotation on min/max-family operations requires deterministic signed-zero tie selection matching NumPy for partition replay stability.
+- **Tests affected:** `{minimum,maximum,fmin,fmax}_signed_zero_tie_selection_parity`, `{min,max}_signed_zero_tie_selection_parity` (#[ignore])
+- **Review date:** 2026-05-23
+- **Investigation:** The underlying Rust `f64::min`/`f64::max` may use different tie-breaking than NumPy's C implementation. Fix requires explicit sign-aware comparison when values are equal.
+
+---
+
+## DISC-011: inner product signed-zero accumulation
+
+- **Reference:** NumPy's `inner(a, b)` uses IEEE 754 accumulation where 0.0 + (-0.0) = 0.0
+- **Our impl:** Returns -0.0 for cases like `inner([-0.0, -0.0], [1.0, 1.0])`
+- **Impact:** Sign bit differs when inner product involves -0.0 values:
+  - `inner([-0.0, -0.0], [1.0, 1.0])`: fnp → -0.0, np → 0.0
+  - `inner([1.0, 1.0], [-0.0, -0.0])`: fnp → -0.0, np → 0.0
+- **Resolution:** WILL-FIX
+- **Reason:** This affects dot product operations and is related to accumulator initialization. NumPy initializes the accumulator to +0.0, and IEEE 754 specifies 0.0 + (-0.0) = 0.0. FnP's accumulation differs, likely due to accumulator initialization or reduction ordering.
+- **Tests affected:** `inner_signed_zero_parity`, `dot_signed_zero_parity`, `vdot_signed_zero_parity`, `matmul_signed_zero_parity`, `tensordot_signed_zero_parity` (#[ignore])
+- **Review date:** 2026-05-23
+- **Investigation:** Related to sum/cumsum signed-zero handling. Affects all accumulation-based operations: inner, dot, vdot, matmul, tensordot, and likely multi_dot.
+
+---
+
+## DISC-012: unsigned+signed integer dtype promotion
+
+- **Reference:** NumPy promotes uint8 + int8 to int16 (smallest signed type that can hold both ranges)
+- **Our impl:** Promotes uint8 + int8 to float64
+- **Impact:** dtype differs in mixed unsigned/signed integer arithmetic:
+  - `np.add(uint8, int8)`: fnp → float64, np → int16
+- **Resolution:** WILL-FIX
+- **Reason:** fnp-dtype's promotion rules are overly conservative, promoting to float64 instead of finding the minimal compatible integer type. NumPy uses the "result type" casting rule that finds the smallest integer type that can safely hold both operands.
+- **Tests affected:** `add_dtype_promotion_unsigned_signed` (#[ignore])
+- **Review date:** 2026-05-23
+- **Investigation:** Fix belongs in fnp-dtype crate's type promotion logic. The current implementation falls back to float64 for safety but should calculate the minimal integer type.
+
+---
+
 ## Adding New Divergences
 
 When documenting a new divergence:

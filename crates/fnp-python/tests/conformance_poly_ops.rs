@@ -2,13 +2,28 @@
 //!
 //! Tests polyval, polyder, polyint, polyfit, polyadd, polysub, polymul, polydiv.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
-        .args(["-c", script])
-        .output()
+    let mut child = Command::new("python3")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+    child
+        .stdin
+        .as_mut()
+        .ok_or_else(|| format!("python3 stdin should be available\nScript: {script}"))?
+        .write_all(script.as_bytes())
+        .map_err(|error| {
+            format!("failed to write NumPy oracle script: {error}\nScript: {script}")
+        })?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for NumPy oracle: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
@@ -465,6 +480,30 @@ print(np.allclose(y, y_pred))
         result.trim(),
         "True",
         "polyfit then polyval should recover y"
+    );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Scalar return type tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn polyval_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+p = np.array([1, 2, 3], dtype=np.float64)
+x = np.float64(2.0)
+fnp_result = fnp.polyval(p, x)
+np_result = np.polyval(p, x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "polyval scalar return type should match numpy: {result}"
     );
     Ok(())
 }

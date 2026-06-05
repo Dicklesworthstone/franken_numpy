@@ -486,3 +486,55 @@ print(len(nz_indices) == count)
     );
     Ok(())
 }
+
+#[test]
+fn searchsorted_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, 2, 3, 4, 5])
+v = np.float64(2.5)
+fnp_result = fnp.searchsorted(a, v)
+np_result = np.searchsorted(a, v)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "searchsorted scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sort_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([3+1j, 1-1j, 2+2j], dtype=np.complex128)
+fnp_result = fnp.sort(a)
+np_result = np.sort(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sort complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn argsort_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([3+1j, 1-1j, 2+2j], dtype=np.complex128)
+fnp_result = fnp.argsort(a)
+np_result = np.argsort(a)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argsort complex should match numpy");
+    Ok(())
+}

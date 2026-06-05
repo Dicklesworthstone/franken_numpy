@@ -48,6 +48,19 @@ fn np_int_2d<'py>(
     py.import("numpy")?.getattr("array")?.call1((rows,))
 }
 
+fn np_complex_1d<'py>(
+    py: Python<'py>,
+    values: &[(f64, f64)],
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let np = py.import("numpy")?;
+    let complex_list: Vec<_> = values
+        .iter()
+        .map(|(r, i)| pyo3::types::PyComplex::from_doubles(py, *r, *i))
+        .collect();
+    let arr = np.getattr("array")?.call1((complex_list,))?;
+    arr.call_method1("astype", (np.getattr("complex128")?,))
+}
+
 fn axis_kwargs<'py>(py: Python<'py>, axis: i64) -> PyResult<Option<pyo3::Bound<'py, PyDict>>> {
     let kw = PyDict::new(py);
     kw.set_item("axis", axis)?;
@@ -605,6 +618,93 @@ fn conformance_reductions_matrix() {
             CompareMode::Close,
             t,
             |py| PyTuple::new(py, [np_float_1d(py, vec![1.0, f64::NAN, 3.0])?]),
+            no_kwargs,
+        );
+
+        // ─── complex dtype tests (SHOULD) ──────────────────────────────
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-sum-complex",
+            "sum",
+            RequirementLevel::Should,
+            CompareMode::Close,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_complex_1d(py, &[(1.0, 1.0), (2.0, -1.0), (3.0, 2.0)])?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-prod-complex",
+            "prod",
+            RequirementLevel::Should,
+            CompareMode::Close,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_complex_1d(py, &[(1.0, 1.0), (2.0, -1.0), (0.5, 0.5)])?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-mean-complex",
+            "mean",
+            RequirementLevel::Should,
+            CompareMode::Close,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_complex_1d(py, &[(1.0, 1.0), (2.0, -1.0), (3.0, 2.0)])?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-cumsum-complex",
+            "cumsum",
+            RequirementLevel::Should,
+            CompareMode::Close,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_complex_1d(py, &[(1.0, 1.0), (2.0, -1.0), (3.0, 2.0)])?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "reductions-cumprod-complex",
+            "cumprod",
+            RequirementLevel::Should,
+            CompareMode::Close,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_complex_1d(py, &[(1.0, 1.0), (2.0, -1.0), (0.5, 0.5)])?],
+                )
+            },
             no_kwargs,
         );
 

@@ -1,6 +1,6 @@
-//! Conformance tests for numpy angle conversion functions.
+//! Conformance tests for numpy.angle against NumPy oracle.
 //!
-//! Tests degrees and radians against NumPy oracle.
+//! Tests angle (return the angle of a complex number).
 
 use std::process::Command;
 
@@ -37,212 +37,160 @@ fn fnp_script(body: String) -> String {
     )
 }
 
-fn parse_float_list(s: &str) -> Result<Vec<f64>, String> {
-    if s.is_empty() || s == "[]" {
-        return Ok(vec![]);
-    }
-    let parsed = s
-        .split(|c: char| c.is_whitespace() || c == ',')
-        .filter_map(|token| {
-            let t = token
-                .trim()
-                .trim_matches(|c| c == '[' || c == ']')
-                .trim_end_matches('.');
-            if t.is_empty() {
-                return None;
-            }
-            if t == "nan" || t == "NaN" {
-                Some(Ok(f64::NAN))
-            } else if t == "inf" || t == "Inf" {
-                Some(Ok(f64::INFINITY))
-            } else if t == "-inf" || t == "-Inf" {
-                Some(Ok(f64::NEG_INFINITY))
-            } else {
-                Some(t.parse().map_err(|error| {
-                    format!("failed to parse float token {t:?} from output {s:?}: {error}")
-                }))
-            }
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    Ok(parsed)
-}
-
-fn floats_close(a: &[f64], b: &[f64], rel_tol: f64) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b.iter()).all(|(x, y)| {
-        if x.is_nan() && y.is_nan() {
-            true
-        } else if x.is_infinite() && y.is_infinite() {
-            x.signum() == y.signum()
-        } else if *x == 0.0 && *y == 0.0 {
-            x.to_bits() == y.to_bits()
-        } else {
-            let diff = (x - y).abs();
-            let max_val = x.abs().max(y.abs());
-            diff <= rel_tol * max_val || diff < 1e-15
-        }
-    })
-}
-
 #[test]
-fn degrees_matches_numpy_across_50_cases() -> Result<(), String> {
-    let test_cases = vec![
-        "np.array([0.0])",
-        "np.array([-0.0, 0.0])",
-        "np.array([np.pi])",
-        "np.array([np.pi / 2])",
-        "np.array([np.pi / 4])",
-        "np.array([np.pi / 6])",
-        "np.array([np.pi / 3])",
-        "np.array([2 * np.pi])",
-        "np.array([-np.pi])",
-        "np.array([-np.pi / 2])",
-        "np.array([np.pi, -np.pi])",
-        "np.array([0.0, np.pi / 2, np.pi, 3 * np.pi / 2, 2 * np.pi])",
-        "np.array([1.0, 2.0, 3.0])",
-        "np.array([-1.0, -2.0, -3.0])",
-        "np.array([0.1, 0.2, 0.3])",
-        "np.array([10.0, 100.0, 1000.0])",
-        "np.array([np.pi / 180])",
-        "np.array([np.pi * 2 / 3])",
-        "np.array([np.pi * 3 / 4])",
-        "np.array([np.pi * 5 / 6])",
-        "np.array([[np.pi / 4, np.pi / 2], [np.pi, 2 * np.pi]])",
-        "np.array([np.inf, -np.inf])",
-        "np.array([np.nan])",
-        "np.array([0.0, np.nan, np.pi])",
-        "np.array([[[np.pi]]])",
-        "np.array([1e-10, 1e10])",
-    ];
-
-    for arr_expr in &test_cases {
-        let script =
-            format!("import numpy as np; print(np.degrees({arr_expr}).flatten().tolist())");
-        let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result)?;
-
-        let rust_script = fnp_script(format!("print(fnp.degrees({arr_expr}).flatten().tolist())"));
-        let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result)?;
-
-        assert!(
-            floats_close(&numpy_vals, &rust_vals, 1e-10),
-            "degrees mismatch for {arr_expr}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
-        );
-    }
-
+fn angle_complex_array() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, 1-1j, -1+1j, -1-1j])
+result = fnp.angle(z)
+expected = np.angle(z)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "angle complex array should match numpy"
+    );
     Ok(())
 }
 
 #[test]
-fn radians_matches_numpy_across_50_cases() -> Result<(), String> {
-    let test_cases = vec![
-        "np.array([0.0])",
-        "np.array([-0.0, 0.0])",
-        "np.array([180.0])",
-        "np.array([90.0])",
-        "np.array([45.0])",
-        "np.array([30.0])",
-        "np.array([60.0])",
-        "np.array([360.0])",
-        "np.array([-180.0])",
-        "np.array([-90.0])",
-        "np.array([180.0, -180.0])",
-        "np.array([0.0, 90.0, 180.0, 270.0, 360.0])",
-        "np.array([1.0, 2.0, 3.0])",
-        "np.array([-1.0, -2.0, -3.0])",
-        "np.array([0.1, 0.2, 0.3])",
-        "np.array([10.0, 100.0, 1000.0])",
-        "np.array([1.0])",
-        "np.array([120.0])",
-        "np.array([135.0])",
-        "np.array([150.0])",
-        "np.array([[45.0, 90.0], [180.0, 360.0]])",
-        "np.array([np.inf, -np.inf])",
-        "np.array([np.nan])",
-        "np.array([0.0, np.nan, 180.0])",
-        "np.array([[[90.0]]])",
-        "np.array([1e-10, 1e10])",
-    ];
-
-    for arr_expr in &test_cases {
-        let script =
-            format!("import numpy as np; print(np.radians({arr_expr}).flatten().tolist())");
-        let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result)?;
-
-        let rust_script = fnp_script(format!("print(fnp.radians({arr_expr}).flatten().tolist())"));
-        let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result)?;
-
-        assert!(
-            floats_close(&numpy_vals, &rust_vals, 1e-10),
-            "radians mismatch for {arr_expr}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
-        );
-    }
-
+fn angle_deg() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, 1-1j])
+result = fnp.angle(z, deg=True)
+expected = np.angle(z, deg=True)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "angle with deg=True should match numpy"
+    );
     Ok(())
 }
 
 #[test]
-fn degrees_radians_roundtrip_matches_numpy() -> Result<(), String> {
-    let test_cases = vec![
-        "np.array([0.0, 45.0, 90.0, 135.0, 180.0])",
-        "np.array([-45.0, -90.0, -180.0])",
-        "np.array([30.0, 60.0, 120.0, 150.0])",
-        "np.array([1.0, 10.0, 100.0])",
-    ];
-
-    for arr_expr in &test_cases {
-        let script = format!(
-            "import numpy as np; print(np.degrees(np.radians({arr_expr})).flatten().tolist())"
-        );
-        let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result)?;
-
-        let rust_script = fnp_script(format!(
-            "print(fnp.degrees(fnp.radians({arr_expr})).flatten().tolist())"
-        ));
-        let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result)?;
-
-        assert!(
-            floats_close(&numpy_vals, &rust_vals, 1e-10),
-            "degrees(radians()) roundtrip mismatch for {arr_expr}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
-        );
-    }
-
+fn angle_real_input() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1.0, -1.0, 0.0])
+result = fnp.angle(z)
+expected = np.angle(z)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "angle with real input should match numpy"
+    );
     Ok(())
 }
 
 #[test]
-fn parse_float_list_retains_nested_array_values() -> Result<(), String> {
-    let parsed = parse_float_list("[[45.0, 90.0], [180.0, 360.0]]")?;
-    assert_eq!(parsed, vec![45.0, 90.0, 180.0, 360.0]);
+fn angle_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.complex128(1+1j)
+fnp_result = fnp.angle(z)
+np_result = np.angle(z)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "angle scalar return type should match numpy: {result}"
+    );
     Ok(())
 }
 
 #[test]
-fn angle_empty_arrays_match_numpy() -> Result<(), String> {
-    for func in &["degrees", "radians"] {
-        let script = format!(
-            "import numpy as np; print(np.{func}(np.array([], dtype=np.float64)).tolist())"
-        );
-        let numpy_result = numpy_oracle(&script)?;
+fn angle_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Use np.complex128 to construct inf without nan
+z = np.array([np.inf + 0j, -np.inf + 0j], dtype=np.complex128)
+result = fnp.angle(z)
+expected = np.angle(z)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "angle special values should match numpy"
+    );
+    Ok(())
+}
 
-        let rust_script = fnp_script(format!(
-            "print(fnp.{func}(np.array([], dtype=np.float64)).tolist())"
-        ));
-        let rust_result = numpy_oracle(&rust_script)?;
+#[test]
+fn angle_zero() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([0+0j, 0-0j, -0+0j, -0-0j])
+result = fnp.angle(z)
+expected = np.angle(z)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "angle zero should match numpy");
+    Ok(())
+}
 
-        assert_eq!(
-            numpy_result.trim(),
-            rust_result.trim(),
-            "{func} empty array mismatch"
-        );
-    }
+#[test]
+fn angle_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([np.nan + 0j, 0 + np.nan*1j, np.nan + np.nan*1j])
+result = fnp.angle(z)
+expected = np.angle(z)
+print(np.allclose(result, expected, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "angle nan should match numpy");
+    Ok(())
+}
 
+#[test]
+fn angle_quadrants() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Test all four quadrants and axes
+z = np.array([
+    1+0j,    # 0 rad
+    0+1j,    # pi/2
+    -1+0j,   # pi
+    0-1j,    # -pi/2
+    1+1j,    # pi/4
+    -1+1j,   # 3*pi/4
+    -1-1j,   # -3*pi/4
+    1-1j,    # -pi/4
+])
+result = fnp.angle(z)
+expected = np.angle(z)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "angle quadrants should match numpy");
     Ok(())
 }

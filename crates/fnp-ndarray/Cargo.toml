@@ -1,13 +1,19 @@
 [package]
 name = "fnp-ndarray"
-version = "0.1.0"
-edition = "2024"
-license-file = "../../LICENSE"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Shape, stride, broadcast, and view-legality primitives for FrankenNumPy ndarray semantics."
 
 [dependencies]
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion.workspace = true
 
 [[bench]]
 name = "criterion_ndarray"

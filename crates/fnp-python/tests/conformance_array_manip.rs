@@ -52,6 +52,36 @@ fn np_array_3d_f<'py>(
     py.import("numpy")?.getattr("array")?.call1((cube,))
 }
 
+fn np_array_1d_complex<'py>(
+    py: Python<'py>,
+    values: &[(f64, f64)],
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let np = py.import("numpy")?;
+    let complex_list: Vec<_> = values
+        .iter()
+        .map(|(r, i)| pyo3::types::PyComplex::from_doubles(py, *r, *i))
+        .collect();
+    let arr = np.getattr("array")?.call1((complex_list,))?;
+    arr.call_method1("astype", (np.getattr("complex128")?,))
+}
+
+fn np_array_2d_complex<'py>(
+    py: Python<'py>,
+    rows: &[Vec<(f64, f64)>],
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let np = py.import("numpy")?;
+    let nested: Vec<Vec<_>> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|(r, i)| pyo3::types::PyComplex::from_doubles(py, *r, *i))
+                .collect()
+        })
+        .collect();
+    let arr = np.getattr("array")?.call1((nested,))?;
+    arr.call_method1("astype", (np.getattr("complex128")?,))
+}
+
 #[test]
 fn conformance_array_manip_matrix() {
     static TOTALS: Totals = Totals::new();
@@ -587,6 +617,119 @@ fn conformance_array_manip_matrix() {
                 let b = np_array_1d_f(py, vec![])?;
                 let lst = PyList::new(py, [a, b])?;
                 PyTuple::new(py, [lst.into_any()])
+            },
+            no_kwargs,
+        );
+
+        // ─── complex dtype tests (SHOULD) ──────────────────────────────
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "manip-reshape-complex",
+            "reshape",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_complex(
+                            py,
+                            &[
+                                (1.0, 1.0),
+                                (2.0, -1.0),
+                                (3.0, 2.0),
+                                (4.0, -2.0),
+                                (5.0, 1.0),
+                                (6.0, -1.0),
+                            ],
+                        )?
+                        .into_any(),
+                        PyTuple::new(py, [2_i64, 3])?.into_any(),
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "manip-transpose-complex",
+            "transpose",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_2d_complex(
+                        py,
+                        &[
+                            vec![(1.0, 1.0), (2.0, -1.0), (3.0, 2.0)],
+                            vec![(4.0, -2.0), (5.0, 1.0), (6.0, -1.0)],
+                        ],
+                    )?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "manip-concatenate-complex",
+            "concatenate",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                let a = np_array_1d_complex(py, &[(1.0, 1.0), (2.0, -1.0)])?;
+                let b = np_array_1d_complex(py, &[(3.0, 2.0), (4.0, -2.0)])?;
+                let lst = PyList::new(py, [a, b])?;
+                PyTuple::new(py, [lst.into_any()])
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "manip-tile-complex",
+            "tile",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_complex(py, &[(1.0, 1.0), (2.0, -1.0)])?.into_any(),
+                        2_i64.into_pyobject(py)?.into_any(),
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "manip-repeat-complex",
+            "repeat",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_complex(py, &[(1.0, 1.0), (2.0, -1.0)])?.into_any(),
+                        2_i64.into_pyobject(py)?.into_any(),
+                    ],
+                )
             },
             no_kwargs,
         );

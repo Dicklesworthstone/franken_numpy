@@ -296,3 +296,126 @@ fn any_empty_array_matches_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+#[test]
+fn any_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_any_script(
+        r#"
+x = np.float64(5.0)
+fnp_result = fnp.any(x)
+np_result = np.any(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "any scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn any_complex_dtype_matches_numpy() -> Result<(), String> {
+    let test_cases = vec![
+        // All nonzero complex
+        "[1+1j, 2-1j, 3+2j]",
+        "[0.5+0.5j, 1.5-1.5j]",
+        // Contains zero complex
+        "[1+1j, 0+0j, 3+2j]",
+        "[0+0j, 0+0j]",
+        // Single element
+        "[1+1j]",
+        "[0+0j]",
+        // One nonzero among zeros
+        "[0+0j, 0+0j, 1+1j]",
+    ];
+
+    for arr_str in &test_cases {
+        let script =
+            format!("import numpy as np; print(np.any(np.array({arr_str}, dtype=np.complex128)))");
+        let numpy_result = numpy_oracle(&script)?;
+        let numpy_val = parse_bool(&numpy_result);
+
+        let rust_script = fnp_any_script(format!(
+            "print(fnp.any(np.array({arr_str}, dtype=np.complex128)))"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+        let rust_val = parse_bool(&rust_result);
+
+        assert_eq!(
+            numpy_val, rust_val,
+            "any complex mismatch for {arr_str}\nnumpy: {numpy_val}\nrust: {rust_val}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn any_special_values_match_numpy() -> Result<(), String> {
+    let script = fnp_any_script(
+        r#"
+tests = []
+# NaN is truthy (nonzero)
+a = np.array([np.nan, 0.0, 0.0])
+tests.append(fnp.any(a) == np.any(a))
+
+# inf is truthy
+a = np.array([np.inf, 0.0])
+tests.append(fnp.any(a) == np.any(a))
+
+# -inf is truthy
+a = np.array([-np.inf, 0.0])
+tests.append(fnp.any(a) == np.any(a))
+
+# All zeros (falsy)
+a = np.array([0.0, 0.0, 0.0])
+tests.append(fnp.any(a) == np.any(a))
+
+# Mixed special values
+a = np.array([np.nan, np.inf, -np.inf])
+tests.append(fnp.any(a) == np.any(a))
+
+# Only nan
+a = np.array([np.nan])
+tests.append(fnp.any(a) == np.any(a))
+
+# Only inf
+a = np.array([np.inf])
+tests.append(fnp.any(a) == np.any(a))
+
+print(all(tests))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "any special values should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn any_negative_zero_matches_numpy() -> Result<(), String> {
+    let script = fnp_any_script(
+        r#"
+# -0.0 is falsy (zero) - array of all negative zeros should return False
+a = np.array([-0.0, -0.0])
+fnp_result = fnp.any(a)
+np_result = np.any(a)
+print(fnp_result == np_result and fnp_result == False)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "any negative zero should match numpy"
+    );
+    Ok(())
+}

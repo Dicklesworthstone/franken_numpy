@@ -402,3 +402,109 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+#[test]
+fn einsum_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.arange(9, dtype=np.float64).reshape(3, 3)
+fnp_result = fnp.einsum('ii', a)
+np_result = np.einsum('ii', a)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "einsum scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn einsum_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([[1+1j, 2], [3, 4-1j]], dtype=np.complex128)
+b = np.array([[1, 2+1j], [3-1j, 4]], dtype=np.complex128)
+fnp_result = fnp.einsum('ij,jk->ik', a, b)
+np_result = np.einsum('ij,jk->ik', a, b)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "einsum complex should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .expect("python3 should be available");
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("ValueError")
+            || stderr.contains("invalid")
+            || stderr.contains("subscript")
+        {
+            "ValueError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn einsum_invalid_subscript_raises_valueerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(6).reshape(2, 3)
+fnp.einsum('xyz', a)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(6).reshape(2, 3)
+np.einsum('xyz', a)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "einsum invalid subscript should raise same error as numpy"
+    );
+}
+
+#[test]
+fn einsum_dimension_mismatch_raises_valueerror() {
+    let fnp_err = classify_error(&fnp_script(
+        r#"
+a = fnp.arange(6).reshape(2, 3)
+b = fnp.arange(20).reshape(4, 5)
+fnp.einsum('ij,jk->ik', a, b)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(6).reshape(2, 3)
+b = np.arange(20).reshape(4, 5)
+np.einsum('ij,jk->ik', a, b)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "einsum dimension mismatch should raise same error as numpy"
+    );
+}

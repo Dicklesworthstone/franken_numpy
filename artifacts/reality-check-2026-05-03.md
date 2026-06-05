@@ -87,12 +87,12 @@ now accurate (slightly understated, which is the desired direction).
 
 ## Test Count Verification
 
-| Source | Claimed (2026-05-03) | Actual (2026-05-03) | Actual (2026-05-13 refresh) |
+| Source | Claimed (2026-05-03) | Actual (2026-05-03) | Actual (2026-05-16 refresh) |
 |--------|---------------------:|--------------------:|----------------------------:|
 | FEATURE_PARITY.md fnp-ufunc | 1,797 | — | — |
 | FEATURE_PARITY.md fnp-linalg | 235 | — | — |
 | FEATURE_PARITY.md fnp-io | 176 | — | — |
-| Workspace total `#[test]` runs | — | 5,047 | **6,391** (+27%) |
+| Workspace total `#[test]` runs | — | 5,047 | **6,392** (+27%) |
 | Files with tests | — | 134 | unchanged scan basis |
 
 The +1,344 test growth between the two audit dates tracks the parity wave

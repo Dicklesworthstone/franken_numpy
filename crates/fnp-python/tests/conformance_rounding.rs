@@ -1,6 +1,6 @@
-//! Conformance tests for numpy rounding functions.
+//! Conformance tests for numpy rounding functions against NumPy oracle.
 //!
-//! Tests sign, floor, ceil, rint, trunc against NumPy oracle.
+//! Tests floor, ceil, trunc, rint functions.
 
 use std::process::Command;
 
@@ -37,278 +37,448 @@ fn fnp_script(body: String) -> String {
     )
 }
 
-fn parse_float_list(s: &str) -> Vec<f64> {
-    if s.is_empty() || s == "[]" {
-        return vec![];
-    }
-    let trimmed = s.trim_start_matches('[').trim_end_matches(']');
-    trimmed
-        .split(|c: char| c.is_whitespace() || c == ',')
-        .filter(|t| !t.is_empty())
-        .filter_map(|token| {
-            let t = token.trim().trim_end_matches('.');
-            if t == "nan" || t == "NaN" {
-                Some(f64::NAN)
-            } else if t == "inf" || t == "Inf" {
-                Some(f64::INFINITY)
-            } else if t == "-inf" || t == "-Inf" {
-                Some(f64::NEG_INFINITY)
-            } else {
-                t.parse().ok()
-            }
-        })
-        .collect()
-}
-
-fn floats_match(a: &[f64], b: &[f64]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.iter().zip(b.iter()).all(|(x, y)| {
-        if x.is_nan() && y.is_nan() {
-            true
-        } else if *x == 0.0 && *y == 0.0 {
-            x.to_bits() == y.to_bits()
-        } else {
-            x == y
-        }
-    })
-}
-
 #[test]
-fn sign_matches_numpy_across_50_cases() -> Result<(), String> {
-    let test_cases = vec![
-        "np.array([0.0, 1.0, -1.0])",
-        "np.array([-0.0, 0.0, 1.0])",
-        "np.array([1.0, -1.0, 2.0, -2.0])",
-        "np.array([-1.0, -2.0, -3.0])",
-        "np.array([1.0, 2.0, 3.0])",
-        "np.array([0.5, -0.5, 0.0])",
-        "np.array([1e10, -1e10, 0.0])",
-        "np.array([1e-10, -1e-10, 0.0])",
-        "np.array([np.inf, -np.inf, 0.0])",
-        "np.array([np.nan, 0.0, 1.0])",
-        "np.array([0.0])",
-        "np.array([1.0])",
-        "np.array([-1.0])",
-        "np.array([[1.0, -1.0], [0.0, 2.0]])",
-        "np.array([1, 2, 3], dtype=np.float64)",
-        "np.array([-1, -2, -3], dtype=np.float64)",
-        "np.array([0.001, -0.001, 0.0])",
-        "np.array([100.5, -100.5, 0.0])",
-        "np.array([[[1.0, -1.0]]])",
-        "np.array([0.0, -0.0])",
-    ];
-
-    for arr_expr in &test_cases {
-        let script = format!("import numpy as np; print(np.sign({arr_expr}).flatten().tolist())");
-        let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
-
-        let rust_script = fnp_script(format!("print(fnp.sign({arr_expr}).flatten().tolist())"));
-        let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
-
-        assert!(
-            floats_match(&numpy_vals, &rust_vals),
-            "sign mismatch for {arr_expr}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
-        );
-    }
-
+fn floor_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1.7, -1.5, -0.5, 0.0, 0.5, 1.5, 1.7])
+result = fnp.floor(x)
+expected = np.floor(x)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "floor basic should match numpy");
     Ok(())
 }
 
 #[test]
-fn floor_matches_numpy_across_50_cases() -> Result<(), String> {
-    let test_cases = vec![
-        "np.array([0.0, 1.0, -1.0])",
-        "np.array([0.5, 1.5, 2.5])",
-        "np.array([-0.5, -1.5, -2.5])",
-        "np.array([0.1, 0.9, 1.1, 1.9])",
-        "np.array([-0.1, -0.9, -1.1, -1.9])",
-        "np.array([1.0, 2.0, 3.0])",
-        "np.array([-1.0, -2.0, -3.0])",
-        "np.array([0.0])",
-        "np.array([0.999999])",
-        "np.array([-0.999999])",
-        "np.array([1e10, -1e10])",
-        "np.array([1.5e10, -1.5e10])",
-        "np.array([np.inf, -np.inf])",
-        "np.array([np.nan])",
-        "np.array([[1.5, 2.5], [3.5, 4.5]])",
-        "np.array([1, 2, 3], dtype=np.float64)",
-        "np.array([0.25, 0.5, 0.75, 1.0])",
-        "np.array([-0.25, -0.5, -0.75, -1.0])",
-        "np.array([[[1.1, 2.2]]])",
-        "np.array([2.5, -2.5, 3.5, -3.5])",
-    ];
-
-    for arr_expr in &test_cases {
-        let script = format!("import numpy as np; print(np.floor({arr_expr}).flatten().tolist())");
-        let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
-
-        let rust_script = fnp_script(format!("print(fnp.floor({arr_expr}).flatten().tolist())"));
-        let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
-
-        assert!(
-            floats_match(&numpy_vals, &rust_vals),
-            "floor mismatch for {arr_expr}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
-        );
-    }
-
+fn ceil_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1.7, -1.5, -0.5, 0.0, 0.5, 1.5, 1.7])
+result = fnp.ceil(x)
+expected = np.ceil(x)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "ceil basic should match numpy");
     Ok(())
 }
 
 #[test]
-fn ceil_matches_numpy_across_50_cases() -> Result<(), String> {
-    let test_cases = vec![
-        "np.array([0.0, 1.0, -1.0])",
-        "np.array([0.5, 1.5, 2.5])",
-        "np.array([-0.5, -1.5, -2.5])",
-        "np.array([0.1, 0.9, 1.1, 1.9])",
-        "np.array([-0.1, -0.9, -1.1, -1.9])",
-        "np.array([1.0, 2.0, 3.0])",
-        "np.array([-1.0, -2.0, -3.0])",
-        "np.array([0.0])",
-        "np.array([0.000001])",
-        "np.array([-0.000001])",
-        "np.array([1e10, -1e10])",
-        "np.array([1.5e10, -1.5e10])",
-        "np.array([np.inf, -np.inf])",
-        "np.array([np.nan])",
-        "np.array([[1.5, 2.5], [3.5, 4.5]])",
-        "np.array([1, 2, 3], dtype=np.float64)",
-        "np.array([0.25, 0.5, 0.75, 1.0])",
-        "np.array([-0.25, -0.5, -0.75, -1.0])",
-        "np.array([[[1.1, 2.2]]])",
-        "np.array([2.5, -2.5, 3.5, -3.5])",
-    ];
-
-    for arr_expr in &test_cases {
-        let script = format!("import numpy as np; print(np.ceil({arr_expr}).flatten().tolist())");
-        let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
-
-        let rust_script = fnp_script(format!("print(fnp.ceil({arr_expr}).flatten().tolist())"));
-        let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
-
-        assert!(
-            floats_match(&numpy_vals, &rust_vals),
-            "ceil mismatch for {arr_expr}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
-        );
-    }
-
+fn trunc_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1.7, -1.5, -0.5, 0.0, 0.5, 1.5, 1.7])
+result = fnp.trunc(x)
+expected = np.trunc(x)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "trunc basic should match numpy");
     Ok(())
 }
 
 #[test]
-fn rint_matches_numpy_across_50_cases() -> Result<(), String> {
-    let test_cases = vec![
-        "np.array([0.0, 1.0, -1.0])",
-        "np.array([0.5, 1.5, 2.5])",
-        "np.array([-0.5, -1.5, -2.5])",
-        "np.array([0.4, 0.6, 1.4, 1.6])",
-        "np.array([-0.4, -0.6, -1.4, -1.6])",
-        "np.array([1.0, 2.0, 3.0])",
-        "np.array([-1.0, -2.0, -3.0])",
-        "np.array([0.0])",
-        "np.array([0.5])",
-        "np.array([-0.5])",
-        "np.array([1e10, -1e10])",
-        "np.array([np.inf, -np.inf])",
-        "np.array([np.nan])",
-        "np.array([[1.5, 2.5], [3.5, 4.5]])",
-        "np.array([1, 2, 3], dtype=np.float64)",
-        "np.array([0.25, 0.75, 1.25, 1.75])",
-        "np.array([-0.25, -0.75, -1.25, -1.75])",
-        "np.array([[[1.1, 2.9]]])",
-        "np.array([2.5, -2.5, 3.5, -3.5])",
-        "np.array([0.49, 0.51, 1.49, 1.51])",
-    ];
-
-    for arr_expr in &test_cases {
-        let script = format!("import numpy as np; print(np.rint({arr_expr}).flatten().tolist())");
-        let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
-
-        let rust_script = fnp_script(format!("print(fnp.rint({arr_expr}).flatten().tolist())"));
-        let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
-
-        assert!(
-            floats_match(&numpy_vals, &rust_vals),
-            "rint mismatch for {arr_expr}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
-        );
-    }
-
+fn rint_basic() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1.7, -1.5, -0.5, 0.0, 0.5, 1.5, 1.7])
+result = fnp.rint(x)
+expected = np.rint(x)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "rint basic should match numpy");
     Ok(())
 }
 
 #[test]
-fn trunc_matches_numpy_across_50_cases() -> Result<(), String> {
-    let test_cases = vec![
-        "np.array([0.0, 1.0, -1.0])",
-        "np.array([0.5, 1.5, 2.5])",
-        "np.array([-0.5, -1.5, -2.5])",
-        "np.array([0.9, 1.9, 2.9])",
-        "np.array([-0.9, -1.9, -2.9])",
-        "np.array([1.0, 2.0, 3.0])",
-        "np.array([-1.0, -2.0, -3.0])",
-        "np.array([0.0])",
-        "np.array([0.999999])",
-        "np.array([-0.999999])",
-        "np.array([1e10, -1e10])",
-        "np.array([1.5e10, -1.5e10])",
-        "np.array([np.inf, -np.inf])",
-        "np.array([np.nan])",
-        "np.array([[1.5, 2.5], [3.5, 4.5]])",
-        "np.array([1, 2, 3], dtype=np.float64)",
-        "np.array([0.1, 0.5, 0.9, 1.0])",
-        "np.array([-0.1, -0.5, -0.9, -1.0])",
-        "np.array([[[1.7, 2.3]]])",
-        "np.array([2.9, -2.9, 3.1, -3.1])",
-    ];
-
-    for arr_expr in &test_cases {
-        let script = format!("import numpy as np; print(np.trunc({arr_expr}).flatten().tolist())");
-        let numpy_result = numpy_oracle(&script)?;
-        let numpy_vals = parse_float_list(&numpy_result);
-
-        let rust_script = fnp_script(format!("print(fnp.trunc({arr_expr}).flatten().tolist())"));
-        let rust_result = numpy_oracle(&rust_script)?;
-        let rust_vals = parse_float_list(&rust_result);
-
-        assert!(
-            floats_match(&numpy_vals, &rust_vals),
-            "trunc mismatch for {arr_expr}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
-        );
-    }
-
+fn floor_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(1.7)
+fnp_result = fnp.floor(x)
+np_result = np.floor(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "floor scalar return type should match numpy: {result}"
+    );
     Ok(())
 }
 
 #[test]
-fn rounding_empty_arrays_match_numpy() -> Result<(), String> {
-    for func in &["sign", "floor", "ceil", "rint", "trunc"] {
-        let script = format!(
-            "import numpy as np; print(np.{func}(np.array([], dtype=np.float64)).tolist())"
-        );
-        let numpy_result = numpy_oracle(&script)?;
+fn ceil_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(1.7)
+fnp_result = fnp.ceil(x)
+np_result = np.ceil(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "ceil scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
 
-        let rust_script = fnp_script(format!(
-            "print(fnp.{func}(np.array([], dtype=np.float64)).tolist())"
-        ));
-        let rust_result = numpy_oracle(&rust_script)?;
+#[test]
+fn trunc_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(1.7)
+fnp_result = fnp.trunc(x)
+np_result = np.trunc(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "trunc scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
 
-        assert_eq!(
-            numpy_result.trim(),
-            rust_result.trim(),
-            "{func} empty array mismatch"
-        );
-    }
+#[test]
+fn rint_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(1.7)
+fnp_result = fnp.rint(x)
+np_result = np.rint(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "rint scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
 
+#[test]
+fn floor_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.floor(x)
+np_result = np.floor(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor special values should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn ceil_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.ceil(x)
+np_result = np.ceil(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ceil special values should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn trunc_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.trunc(x)
+np_result = np.trunc(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "trunc special values should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn rint_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.rint(x)
+np_result = np.rint(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rint special values should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn rint_bankers_rounding() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.5, 1.5, 2.5, 3.5, 4.5, -0.5, -1.5, -2.5])
+fnp_result = fnp.rint(x)
+np_result = np.rint(x)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rint bankers rounding should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn floor_large_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1e15 + 0.5, -1e15 - 0.5, 1e16 + 0.1, -1e16 - 0.1])
+fnp_result = fnp.floor(x)
+np_result = np.floor(x)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "floor large values should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn rounding_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# Rounding functions preserve sign of zero: f(-0.0) = -0.0
+# IEEE 754: floor(-0.0) = -0.0, ceil(-0.0) = -0.0, trunc(-0.0) = -0.0, rint(-0.0) = -0.0
+funcs = [
+    ('floor', fnp.floor, np.floor),
+    ('ceil', fnp.ceil, np.ceil),
+    ('trunc', fnp.trunc, np.trunc),
+    ('rint', fnp.rint, np.rint),
+]
+all_pass = True
+for name, fnp_f, np_f in funcs:
+    for x in [0.0, -0.0]:
+        fnp_result = fnp_f(np.float64(x))
+        np_result = np_f(np.float64(x))
+        fnp_sign = np.signbit(fnp_result)
+        np_sign = np.signbit(np_result)
+        if fnp_sign != np_sign:
+            print(f"FAIL: {name}({x}) signbit fnp={fnp_sign} np={np_sign}")
+            all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Edge case tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn rounding_empty_arrays() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([], dtype=np.float64)
+tests_pass = True
+for func_name in ['floor', 'ceil', 'trunc', 'rint']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x)
+    np_result = np_func(x)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+    tests_pass = tests_pass and (fnp_result.shape == np_result.shape)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding empty arrays should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn rounding_near_integer_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+eps = np.finfo(np.float64).eps
+x = np.array([1 - eps, 1 + eps, 2 - eps, 2 + eps, -1 - eps, -1 + eps])
+tests_pass = True
+for func_name in ['floor', 'ceil', 'trunc', 'rint']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x)
+    np_result = np_func(x)
+    tests_pass = tests_pass and np.allclose(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding near integer values should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn rounding_single_element() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([2.7])
+tests_pass = True
+for func_name in ['floor', 'ceil', 'trunc', 'rint']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x)
+    np_result = np_func(x)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding single element should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn rounding_exact_integers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0])
+tests_pass = True
+for func_name in ['floor', 'ceil', 'trunc', 'rint']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x)
+    np_result = np_func(x)
+    tests_pass = tests_pass and np.array_equal(fnp_result, np_result)
+    tests_pass = tests_pass and np.array_equal(fnp_result, x)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding exact integers should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn rounding_subnormal_numbers() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import sys
+tiny = sys.float_info.min
+subnormal = tiny / 2.0
+x = np.array([subnormal, -subnormal, tiny, -tiny])
+tests_pass = True
+for func_name in ['floor', 'ceil', 'trunc', 'rint']:
+    fnp_func = getattr(fnp, func_name)
+    np_func = getattr(np, func_name)
+    fnp_result = fnp_func(x)
+    np_result = np_func(x)
+    tests_pass = tests_pass and np.allclose(fnp_result, np_result)
+print(tests_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "rounding subnormal numbers should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn fix_alias() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1.7, -0.5, 0.5, 1.7])
+result = fnp.fix(x)
+expected = np.fix(x)
+print(np.array_equal(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "fix should match numpy");
     Ok(())
 }

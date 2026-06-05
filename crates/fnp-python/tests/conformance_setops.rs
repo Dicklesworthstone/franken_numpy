@@ -35,6 +35,19 @@ fn np_array_1d_f<'py>(
     py.import("numpy")?.getattr("array")?.call1((values,))
 }
 
+fn np_array_1d_complex<'py>(
+    py: Python<'py>,
+    values: Vec<(f64, f64)>,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let np = py.import("numpy")?;
+    let complex_list: Vec<_> = values
+        .iter()
+        .map(|(r, i)| pyo3::types::PyComplex::from_doubles(py, *r, *i))
+        .collect();
+    let arr = np.getattr("array")?.call1((complex_list,))?;
+    arr.call_method1("astype", (np.getattr("complex128")?,))
+}
+
 #[test]
 fn conformance_setops_matrix() {
     static TOTALS: Totals = Totals::new();
@@ -412,6 +425,108 @@ fn conformance_setops_matrix() {
             CompareMode::Strict,
             t,
             |py| PyTuple::new(py, [np_array_1d_i(py, vec![])?]),
+            no_kwargs,
+        );
+
+        // ─── complex dtype tests (SHOULD) ──────────────────────────────────
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "setops-intersect1d-complex",
+            "intersect1d",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_complex(py, vec![(1.0, 1.0), (2.0, -1.0), (3.0, 2.0)])?,
+                        np_array_1d_complex(py, vec![(2.0, -1.0), (4.0, 4.0), (3.0, 2.0)])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "setops-union1d-complex",
+            "union1d",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_complex(py, vec![(1.0, 1.0), (2.0, -1.0)])?,
+                        np_array_1d_complex(py, vec![(2.0, -1.0), (3.0, 2.0)])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "setops-setdiff1d-complex",
+            "setdiff1d",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_complex(py, vec![(1.0, 1.0), (2.0, -1.0), (3.0, 2.0)])?,
+                        np_array_1d_complex(py, vec![(2.0, -1.0)])?,
+                    ],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "setops-unique-complex",
+            "unique",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_array_1d_complex(
+                        py,
+                        vec![(1.0, 1.0), (2.0, -1.0), (1.0, 1.0), (3.0, 2.0)],
+                    )?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &module,
+            &numpy,
+            "setops-isin-complex",
+            "isin",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [
+                        np_array_1d_complex(py, vec![(1.0, 1.0), (2.0, -1.0), (3.0, 2.0)])?,
+                        np_array_1d_complex(py, vec![(2.0, -1.0), (4.0, 4.0)])?,
+                    ],
+                )
+            },
             no_kwargs,
         );
 

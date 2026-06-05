@@ -614,3 +614,332 @@ print(np.allclose(sqrt_result, power_result))
     assert_eq!(result.trim(), "True", "sqrt should equal power(x, 0.5)");
     Ok(())
 }
+
+#[test]
+fn exp_log_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let funcs = [
+        "exp", "exp2", "expm1", "log", "log2", "log10", "log1p", "sqrt", "square", "positive",
+        "negative", "absolute",
+    ];
+    for func in funcs {
+        let script = fnp_script(format!(
+            r#"
+x = np.float64(2.0)
+fnp_result = fnp.{func}(x)
+np_result = np.{func}(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        ));
+        let result = numpy_oracle(&script)?;
+        assert!(
+            result.trim().starts_with("True"),
+            "{func} scalar return type should match numpy: {result}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn power_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(2.0)
+y = np.float64(3.0)
+fnp_result = fnp.power(x, y)
+np_result = np.power(x, y)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "power scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Complex dtype tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn exp_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, 0+1j, -1+0j, 1j*np.pi], dtype=np.complex128)
+fnp_result = fnp.exp(z)
+np_result = np.exp(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "exp complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn log_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, -1+0j, 0+1j, 2+3j], dtype=np.complex128)
+fnp_result = fnp.log(z)
+np_result = np.log(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "log complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn sqrt_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, -1+0j, 0+1j, 4+0j, -4+0j], dtype=np.complex128)
+fnp_result = fnp.sqrt(z)
+np_result = np.sqrt(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sqrt complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn square_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, 2+3j, -1-1j, 0+2j], dtype=np.complex128)
+fnp_result = fnp.square(z)
+np_result = np.square(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "square complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn power_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z1 = np.array([2+1j, 1+1j, 3+0j], dtype=np.complex128)
+z2 = np.array([2+0j, 1+1j, 0.5+0j], dtype=np.complex128)
+fnp_result = fnp.power(z1, z2)
+np_result = np.power(z1, z2)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "power complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn log10_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([10+0j, 1+1j, 100+0j, -10+0j], dtype=np.complex128)
+fnp_result = fnp.log10(z)
+np_result = np.log10(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "log10 complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn log2_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([2+0j, 4+0j, 1+1j, -2+0j], dtype=np.complex128)
+fnp_result = fnp.log2(z)
+np_result = np.log2(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "log2 complex should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Special value tests (nan/inf/negative)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn exp_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, -np.inf, np.nan, 0.0, -0.0])
+fnp_result = fnp.exp(x)
+np_result = np.exp(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "exp special values should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn log_negative_returns_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1.0, -10.0, -100.0])
+fnp_result = fnp.log(x)
+np_result = np.log(x)
+print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "log of negative should return nan");
+    Ok(())
+}
+
+#[test]
+fn log_special_values() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([np.inf, 0.0, np.nan])
+fnp_result = fnp.log(x)
+np_result = np.log(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "log special values should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn power_zero_exponent() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([0.0, 1.0, 5.0, -3.0, np.inf, np.nan])
+fnp_result = fnp.power(x, 0)
+np_result = np.power(x, 0)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "x^0 should equal 1 for all x");
+    Ok(())
+}
+
+#[test]
+fn power_negative_base_fractional_exp() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([-1.0, -2.0, -4.0])
+fnp_result = fnp.power(x, 0.5)
+np_result = np.power(x, 0.5)
+print(np.all(np.isnan(fnp_result)) and np.all(np.isnan(np_result)))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "negative base with fractional exp should return nan"
+    );
+    Ok(())
+}
+
+#[test]
+fn exp_overflow() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.array([1000.0, 710.0])
+fnp_result = fnp.exp(x)
+np_result = np.exp(x)
+print(np.allclose(fnp_result, np_result, equal_nan=True))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "exp overflow should match numpy");
+    Ok(())
+}
+
+#[test]
+fn expm1_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# expm1 signed-zero: expm1(±0) = ±0
+tests = [0.0, -0.0]
+all_pass = True
+for x in tests:
+    fnp_result = fnp.expm1(np.float64(x))
+    np_result = np.expm1(np.float64(x))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: expm1({x}) signbit fnp={fnp_sign} np={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "expm1 signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn log1p_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+# log1p signed-zero: log1p(±0) = ±0
+tests = [0.0, -0.0]
+all_pass = True
+for x in tests:
+    fnp_result = fnp.log1p(np.float64(x))
+    np_result = np.log1p(np.float64(x))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: log1p({x}) signbit fnp={fnp_sign} np={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "log1p signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}

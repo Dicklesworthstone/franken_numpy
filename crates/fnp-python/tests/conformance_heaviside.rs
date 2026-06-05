@@ -413,3 +413,23 @@ fn heaviside_dtype_match_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+#[test]
+fn heaviside_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(1.0)
+h0 = np.float64(0.5)
+fnp_result = fnp.heaviside(x, h0)
+np_result = np.heaviside(x, h0)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "heaviside scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}

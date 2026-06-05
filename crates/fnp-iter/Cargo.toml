@@ -1,9 +1,27 @@
 [package]
 name = "fnp-iter"
-version = "0.1.0"
-edition = "2024"
-license-file = "../../LICENSE"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "NumPy-compatible iteration primitives: nditer, flatiter, ndindex, and stride-aware planners."
 
 [dependencies]
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.149"
+# serde / serde_json: serialization for `NditerPlan` / `NditerStep` snapshots
+# (used by the `nditer_python*` parity bridge to round-trip plan state into
+# Python for cross-engine comparison) plus diagnostic JSON output from
+# `validate_flatiter_read` / `validate_nditer_flags`.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+# Note: fnp-iter is the lone crate without a benches/ Criterion file.
+# Iteration plans (NditerPlan / NditerStep / FlatIterIndex / TransferSelectorInput)
+# are stride-only — they don't touch element values, so per-call latency is
+# dominated by allocation rather than arithmetic. Cross-engine NumPy parity for
+# iteration ergonomics is exercised by the `nditer_python*` integration tests
+# and `crates/fnp-iter/tests/metamorphic_iter.rs`. If iteration becomes a
+# hotspot, mirror the criterion_ndarray.rs structure to add benches/.

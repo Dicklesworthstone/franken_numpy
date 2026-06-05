@@ -347,3 +347,81 @@ fn max_amax_alias_matches_numpy() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[test]
+fn max_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_max_script(
+        r#"
+x = np.float64(5.0)
+fnp_result = fnp.max(x)
+np_result = np.max(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "max scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn max_signed_zero_tie_selection_parity() -> Result<(), String> {
+    // Tests signed-zero reduction behavior for parallel safety proofs
+    let script = fnp_max_script(
+        r#"
+# Array with mixed signed zeros - which one does max() return?
+x = np.array([0.0, -0.0, 0.0, -0.0])
+fnp_result = fnp.max(x)
+np_result = np.max(x)
+
+# Both values equal, but sign bit must match for parity
+values_match = (fnp_result == np_result)
+signs_match = (np.signbit(fnp_result) == np.signbit(np_result))
+print(f"fnp signbit: {np.signbit(fnp_result)}")
+print(f"np signbit:  {np.signbit(np_result)}")
+print(values_match and signs_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().ends_with("True"),
+        "max reduction signed-zero tie selection must match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn max_empty_array_raises_valueerror() -> Result<(), String> {
+    let script = fnp_max_script(
+        r#"
+empty = np.array([])
+fnp_raised = False
+np_raised = False
+try:
+    fnp.max(empty)
+except ValueError:
+    fnp_raised = True
+except Exception:
+    pass
+try:
+    np.max(empty)
+except ValueError:
+    np_raised = True
+except Exception:
+    pass
+print(fnp_raised == np_raised == True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "max of empty array should raise ValueError"
+    );
+    Ok(())
+}

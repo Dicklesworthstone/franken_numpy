@@ -379,3 +379,176 @@ fn prod_empty_array_matches_numpy() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[test]
+fn prod_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_prod_script(
+        r#"
+x = np.float64(5.0)
+fnp_result = fnp.prod(x)
+np_result = np.prod(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "prod scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn prod_complex() -> Result<(), String> {
+    let script = fnp_prod_script(
+        r#"
+z = np.array([1+1j, 2+0j, 0+1j], dtype=np.complex128)
+fnp_result = fnp.prod(z)
+np_result = np.prod(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "prod complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn prod_inf_handling_matches_numpy() -> Result<(), String> {
+    let inf_cases = [
+        "[1.0, np.inf, 3.0]",
+        "[np.inf, 2.0, 3.0]",
+        "[0.0, np.inf]",
+        "[np.inf, np.inf]",
+        "[-np.inf, np.inf]",
+    ];
+
+    for arr_str in &inf_cases {
+        let np_script = format!("import numpy as np; print(repr(np.prod(np.array({arr_str}))))");
+        let np_output = numpy_oracle(&np_script)?;
+
+        let fnp_script = fnp_prod_script(format!("print(repr(fnp.prod(np.array({arr_str}))))"));
+        let fnp_output = numpy_oracle(&fnp_script)?;
+
+        assert_eq!(
+            fnp_output.trim(),
+            np_output.trim(),
+            "prod inf mismatch for {arr_str}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn prod_with_out_parameter() -> Result<(), String> {
+    let script = fnp_prod_script(
+        r#"
+a = np.array([[1, 2], [3, 4]])
+out = np.empty((2,), dtype=np.int64)
+fnp_result = fnp.prod(a, axis=0, out=out)
+np_out = np.empty((2,), dtype=np.int64)
+np_result = np.prod(a, axis=0, out=np_out)
+print(np.array_equal(fnp_result, np_result) and np.array_equal(out, np_out))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "prod with out parameter should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn prod_with_where_parameter() -> Result<(), String> {
+    let script = fnp_prod_script(
+        r#"
+a = np.array([1, 2, 3, 4, 5])
+mask = np.array([True, False, True, False, True])
+fnp_result = fnp.prod(a, where=mask)
+np_result = np.prod(a, where=mask)
+print(fnp_result == np_result == 15)  # 1 * 3 * 5
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "prod with where parameter should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn prod_signed_zero_parity() -> Result<(), String> {
+    // Test signed-zero behavior for parallel operation safety proofs.
+    // Product of signed zeros follows XOR sign rule.
+    let script = fnp_prod_script(
+        r#"
+# Signed-zero product semantics
+# 0.0 * 0.0 = 0.0, -0.0 * 0.0 = -0.0, 0.0 * -0.0 = -0.0, -0.0 * -0.0 = 0.0
+tests = [
+    ([0.0, 1.0], False),      # 0.0 * 1.0 = 0.0 (positive)
+    ([-0.0, 1.0], True),      # -0.0 * 1.0 = -0.0 (negative)
+    ([0.0, -0.0], True),      # 0.0 * -0.0 = -0.0 (negative)
+    ([-0.0, -0.0], False),    # -0.0 * -0.0 = 0.0 (positive)
+    ([1.0, -0.0, 1.0], True), # Product with -0.0 in middle
+]
+all_pass = True
+for values, expected_signbit in tests:
+    arr = np.array(values)
+    fnp_result = fnp.prod(arr)
+    np_result = np.prod(arr)
+    if np.signbit(fnp_result) != np.signbit(np_result):
+        print(f"FAIL: prod({values}) fnp signbit={np.signbit(fnp_result)} np signbit={np.signbit(np_result)}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "prod signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn prod_overflow_underflow_parity() -> Result<(), String> {
+    // Test overflow/underflow edge cases
+    let script = fnp_prod_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+
+# Overflow case
+big = np.array([1e200, 1e200, 1e200])
+fnp_big = fnp.prod(big)
+np_big = np.prod(big)
+
+# Underflow case
+small = np.array([1e-200, 1e-200, 1e-200])
+fnp_small = fnp.prod(small)
+np_small = np.prod(small)
+
+big_match = (np.isinf(fnp_big) == np.isinf(np_big))
+small_match = ((fnp_small == 0.0) == (np_small == 0.0))
+print(big_match and small_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "prod overflow/underflow should match numpy: {result}"
+    );
+    Ok(())
+}

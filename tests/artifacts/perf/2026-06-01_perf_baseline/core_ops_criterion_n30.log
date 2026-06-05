@@ -1,0 +1,86 @@
+Gnuplot not found, using plotters backend
+Benchmarking core_ops/ufunc_add_broadcast/1024x1024_by_1024
+Benchmarking core_ops/ufunc_add_broadcast/1024x1024_by_1024: Warming up for 3.0000 s
+Benchmarking core_ops/ufunc_add_broadcast/1024x1024_by_1024: Collecting 30 samples in estimated 13.977 s (930 iterations)
+Benchmarking core_ops/ufunc_add_broadcast/1024x1024_by_1024: Analyzing
+core_ops/ufunc_add_broadcast/1024x1024_by_1024
+                        time:   [14.905 ms 15.061 ms 15.217 ms]
+                        change: [−2.3845% −0.5371% +1.1340%] (p = 0.54 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 30 measurements (3.33%)
+  1 (3.33%) high mild
+Benchmarking core_ops/reduce_sum_axis1_1024x1024
+Benchmarking core_ops/reduce_sum_axis1_1024x1024: Warming up for 3.0000 s
+Benchmarking core_ops/reduce_sum_axis1_1024x1024: Collecting 30 samples in estimated 8.1674 s (12k iterations)
+Benchmarking core_ops/reduce_sum_axis1_1024x1024: Analyzing
+core_ops/reduce_sum_axis1_1024x1024
+                        time:   [699.42 µs 699.57 µs 699.80 µs]
+                        change: [−0.9660% −0.2335% +0.4279%] (p = 0.47 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 30 measurements (13.33%)
+  1 (3.33%) low severe
+  1 (3.33%) low mild
+  2 (6.67%) high severe
+Benchmarking core_ops/matmul_256x256_by_256x256
+Benchmarking core_ops/matmul_256x256_by_256x256: Warming up for 3.0000 s
+Benchmarking core_ops/matmul_256x256_by_256x256: Collecting 30 samples in estimated 9.3003 s (3255 iterations)
+Benchmarking core_ops/matmul_256x256_by_256x256: Analyzing
+core_ops/matmul_256x256_by_256x256
+                        time:   [2.7754 ms 2.8254 ms 2.8969 ms]
+                        change: [−5.2209% −2.1931% +0.7988%] (p = 0.14 > 0.05)
+                        No change in performance detected.
+Found 7 outliers among 30 measurements (23.33%)
+  2 (6.67%) high mild
+  5 (16.67%) high severe
+Benchmarking core_ops/sort_quicksort_1m
+Benchmarking core_ops/sort_quicksort_1m: Warming up for 3.0000 s
+Benchmarking core_ops/sort_quicksort_1m: Collecting 30 samples in estimated 9.3298 s (1860 iterations)
+Benchmarking core_ops/sort_quicksort_1m: Analyzing
+core_ops/sort_quicksort_1m
+                        time:   [4.7952 ms 5.0918 ms 5.4111 ms]
+                        change: [−13.078% −7.4149% −1.3494%] (p = 0.01 < 0.05)
+                        Performance has improved.
+Found 3 outliers among 30 measurements (10.00%)
+  1 (3.33%) high mild
+  2 (6.67%) high severe
+Benchmarking core_ops/fft_65536
+Benchmarking core_ops/fft_65536: Warming up for 3.0000 s
+Benchmarking core_ops/fft_65536: Collecting 30 samples in estimated 8.1832 s (3255 iterations)
+Benchmarking core_ops/fft_65536: Analyzing
+core_ops/fft_65536      time:   [2.5075 ms 2.5120 ms 2.5198 ms]
+                        change: [+0.1270% +4.4739% +10.494%] (p = 0.26 > 0.05)
+                        No change in performance detected.
+Found 4 outliers among 30 measurements (13.33%)
+  4 (13.33%) high severe
+Benchmarking core_ops/astype_f64_to_i32/1024x1024
+Benchmarking core_ops/astype_f64_to_i32/1024x1024: Warming up for 3.0000 s
+Benchmarking core_ops/astype_f64_to_i32/1024x1024: Collecting 30 samples in estimated 8.0033 s (9765 iterations)
+Benchmarking core_ops/astype_f64_to_i32/1024x1024: Analyzing
+core_ops/astype_f64_to_i32/1024x1024
+                        time:   [812.05 µs 830.21 µs 856.71 µs]
+                        change: [+1.3715% +3.4661% +5.5991%] (p = 0.01 < 0.05)
+                        Performance has regressed.
+Found 3 outliers among 30 measurements (10.00%)
+  2 (6.67%) high mild
+  1 (3.33%) high severe
+Benchmarking core_ops/reshape_1024x1024_to_2048x512
+Benchmarking core_ops/reshape_1024x1024_to_2048x512: Warming up for 3.0000 s
+Benchmarking core_ops/reshape_1024x1024_to_2048x512: Collecting 30 samples in estimated 8.0637 s (43k iterations)
+Benchmarking core_ops/reshape_1024x1024_to_2048x512: Analyzing
+core_ops/reshape_1024x1024_to_2048x512
+                        time:   [189.48 µs 200.19 µs 212.98 µs]
+                        change: [+11.506% +15.953% +21.135%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 5 outliers among 30 measurements (16.67%)
+  5 (16.67%) high severe
+Benchmarking core_ops/io_npy_save_load_512x512_f64
+Benchmarking core_ops/io_npy_save_load_512x512_f64: Warming up for 3.0000 s
+Benchmarking core_ops/io_npy_save_load_512x512_f64: Collecting 30 samples in estimated 8.0109 s (65k iterations)
+Benchmarking core_ops/io_npy_save_load_512x512_f64: Analyzing
+core_ops/io_npy_save_load_512x512_f64
+                        time:   [123.26 µs 124.63 µs 125.99 µs]
+                        change: [−2.9226% −1.4159% +0.1514%] (p = 0.06 > 0.05)
+                        No change in performance detected.
+Found 5 outliers among 30 measurements (16.67%)
+  5 (16.67%) high severe
+

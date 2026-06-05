@@ -581,3 +581,51 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+#[test]
+fn comparison_logical_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let binary_funcs = [
+        "equal",
+        "not_equal",
+        "greater",
+        "greater_equal",
+        "less",
+        "less_equal",
+        "logical_and",
+        "logical_or",
+        "logical_xor",
+    ];
+    for func in binary_funcs {
+        let script = fnp_script(format!(
+            r#"
+x = np.float64(1.0)
+y = np.float64(2.0)
+fnp_result = fnp.{func}(x, y)
+np_result = np.{func}(x, y)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        ));
+        let result = numpy_oracle(&script)?;
+        assert!(
+            result.trim().starts_with("True"),
+            "{func} scalar return type should match numpy: {result}"
+        );
+    }
+
+    let script = fnp_script(
+        r#"
+x = np.bool_(True)
+fnp_result = fnp.logical_not(x)
+np_result = np.logical_not(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "logical_not scalar return type should match numpy: {result}"
+    );
+
+    Ok(())
+}

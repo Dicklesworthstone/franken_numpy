@@ -403,3 +403,20 @@ print(np.array_equal(select_result, where_result))
     );
     Ok(())
 }
+
+#[test]
+fn select_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condlist = [np.array([True, False]), np.array([False, True])]
+choicelist = [np.array([1+1j, 2+2j], dtype=np.complex128), np.array([3+3j, 4+4j], dtype=np.complex128)]
+fnp_result = fnp.select(condlist, choicelist)
+np_result = np.select(condlist, choicelist)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "select complex should match numpy");
+    Ok(())
+}

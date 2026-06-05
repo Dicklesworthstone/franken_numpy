@@ -9,8 +9,16 @@ Current policy: no fnp-python diagnostic mismatch is accepted as an intentional
 NumPy divergence. The table below lists active tracked parity debt discovered
 while building the diagnostic parity wave.
 
+**Active rows: 0** (as of 2026-05-22). The resolution notes below the table
+record beads that previously held entries; they remain for provenance.
+
 | ID | Disposition | Surface | Affected behavior | NumPy scope | Strict behavior | Hardened behavior | Follow-up | Evidence |
 |---|---|---|---|---|---|---|---|---|
+
+Resolved no-seed RNG note: `franken_numpy-iqo31` changed `SeedMaterial::None`
+and no-seed `default_rng()` from the fixed `DEFAULT_RNG_SEED` stream to a fresh
+`SeedSequence` initialized from OS entropy. Explicit seed material remains
+deterministic and bit-for-bit reproducible.
 
 Resolved warning-debt note: `franken_numpy-2f6l4` restored diagnostic coverage
 for divide/remainder/mod/fmod zero-divisor warnings, empty mean/var warnings,

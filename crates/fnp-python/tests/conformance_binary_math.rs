@@ -250,3 +250,26 @@ fn parse_float_list_rejects_unparseable_tokens() {
         .expect_err("malformed oracle output must fail the harness");
     assert!(error.contains("broken"), "unexpected parse error: {error}");
 }
+
+#[test]
+fn binary_math_scalar_return_type_matches_numpy() -> Result<(), String> {
+    for func in &["hypot", "copysign"] {
+        let script = format!(
+            "import numpy as np; x = np.float64(3.0); y = np.float64(4.0); r = np.{func}(x, y); print(type(r).__name__, r)"
+        );
+        let numpy_result = numpy_oracle(&script)?;
+
+        let rust_script = fnp_script(format!(
+            "x = np.float64(3.0); y = np.float64(4.0); r = fnp.{func}(x, y); print(type(r).__name__, r)"
+        ));
+        let rust_result = numpy_oracle(&rust_script)?;
+
+        assert_eq!(
+            numpy_result.trim(),
+            rust_result.trim(),
+            "{func} scalar return type mismatch\nnumpy: {numpy_result}\nfnp: {rust_result}"
+        );
+    }
+
+    Ok(())
+}

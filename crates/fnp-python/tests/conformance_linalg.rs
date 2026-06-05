@@ -33,6 +33,23 @@ fn np_3d<'py>(
     py.import("numpy")?.getattr("array")?.call1((cube,))
 }
 
+fn np_2d_complex<'py>(
+    py: Python<'py>,
+    rows: Vec<Vec<(f64, f64)>>,
+) -> PyResult<pyo3::Bound<'py, pyo3::types::PyAny>> {
+    let np = py.import("numpy")?;
+    let nested: Vec<Vec<_>> = rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|(r, i)| pyo3::types::PyComplex::from_doubles(py, *r, *i))
+                .collect()
+        })
+        .collect();
+    let arr = np.getattr("array")?.call1((nested,))?;
+    arr.call_method1("astype", (np.getattr("complex128")?,))
+}
+
 #[test]
 fn conformance_linalg_matrix() {
     static TOTALS: Totals = Totals::new();
@@ -402,6 +419,91 @@ fn conformance_linalg_matrix() {
             CompareMode::Close,
             t,
             |py| PyTuple::new(py, [np_2d(py, vec![vec![5.0]])?]),
+            no_kwargs,
+        );
+
+        // ─── complex dtype tests (SHOULD) ──────────────────────────────
+        run_case(
+            py,
+            &linalg,
+            &numpy_linalg,
+            "linalg-matrix_transpose-complex-2d",
+            "matrix_transpose",
+            RequirementLevel::Should,
+            CompareMode::Strict,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_2d_complex(
+                        py,
+                        vec![
+                            vec![(1.0, 1.0), (2.0, -1.0), (3.0, 2.0)],
+                            vec![(4.0, -2.0), (5.0, 1.0), (6.0, -1.0)],
+                        ],
+                    )?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &linalg,
+            &numpy_linalg,
+            "linalg-det-complex-2x2",
+            "det",
+            RequirementLevel::Should,
+            CompareMode::Close,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_2d_complex(
+                        py,
+                        vec![vec![(1.0, 1.0), (2.0, -1.0)], vec![(3.0, 2.0), (4.0, -2.0)]],
+                    )?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &linalg,
+            &numpy_linalg,
+            "linalg-norm-complex-2d",
+            "norm",
+            RequirementLevel::Should,
+            CompareMode::Close,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_2d_complex(
+                        py,
+                        vec![vec![(3.0, 0.0), (0.0, 4.0)], vec![(0.0, 0.0), (0.0, 0.0)]],
+                    )?],
+                )
+            },
+            no_kwargs,
+        );
+        run_case(
+            py,
+            &linalg,
+            &numpy_linalg,
+            "linalg-inv-complex-2x2",
+            "inv",
+            RequirementLevel::Should,
+            CompareMode::Close,
+            t,
+            |py| {
+                PyTuple::new(
+                    py,
+                    [np_2d_complex(
+                        py,
+                        vec![vec![(4.0, 0.0), (7.0, 1.0)], vec![(2.0, -1.0), (6.0, 0.0)]],
+                    )?],
+                )
+            },
             no_kwargs,
         );
 

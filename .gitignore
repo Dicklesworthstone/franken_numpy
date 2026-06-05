@@ -1,3 +1,7 @@
+# /target          — default cargo build output at workspace root
+# target_*/        — per-agent rch target dirs (e.g. target_rch_cloudy_<id>_<phase>); see other Franken* repos for examples
+# target-codex*/   — codex agent's target dirs (see lower in this file for the canonical entry)
+# **/*.rs.bk       — rustfmt backup leftovers
 /target
 target_*/
 **/*.rs.bk
@@ -132,6 +136,7 @@ nohup.out
 # Local agent runtime state — recurring untracked noise across rounds
 .claude/
 .rch-target/
+/.rch-target-*/
 # cargo-fuzz crash/minimization artifacts under any nested crate's fuzz dir
 **/fuzz/artifacts/
 # cargo-fuzz auto-generated hash-named corpus entries under any nested
@@ -142,3 +147,10 @@ nohup.out
 **/fuzz/corpus/*/[0-9a-f][0-9a-f]*
 # Source-directory backups left behind by agent renames (e.g. fuzz/src.bak/)
 **/*.bak/
+.env
+
+# Ephemeral agent/skill scratch (repo-janitor 2026-06-04)
+.skill-loop-progress.md
+.skill-loop-progress-*.md
+*.mcp.json
+.probe/

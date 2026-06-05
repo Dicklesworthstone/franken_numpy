@@ -1,8 +1,14 @@
 [package]
 name = "fnp-runtime"
-version = "0.1.0"
-edition = "2024"
-license-file = "../../LICENSE"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Dual-mode runtime: strict and hardened policy, evidence ledger, decision audit."
 
 [features]
 default = []
@@ -10,5 +16,13 @@ asupersync = ["dep:asupersync"]
 frankentui = ["dep:ftui"]
 
 [dependencies]
-asupersync = { version = "0.3.1", default-features = false, optional = true }
+# asupersync (optional, gated by `asupersync` feature): structured-async
+# runtime used by `fnp-conformance` for RaptorQ encoding pipelines, oracle
+# capture orchestration, and cancellation-safe long-running benchmark jobs.
+# Default-features=false set at workspace level (see /Cargo.toml comment).
+asupersync = { workspace = true, optional = true }
+# ftui (frankentui, optional, gated by `frankentui` feature): terminal-native
+# observability surface for parity-drift and performance-delta dashboards.
+# Default-features=false to avoid pulling the full TUI runtime when only the
+# typed capability snapshots are needed by the evidence-ledger types.
 ftui = { version = "0.3.1", default-features = false, optional = true }

@@ -1,5 +1,7 @@
 # PROPOSED_ARCHITECTURE
 
+> **Status note (2026-05-16):** This document is the early architecture plan written when the codebase was at the FNP-P2C-005 slice (Section 6 below still describes that snapshot). The plan's principles, layering, SCE contract, runtime mode matrix, and optimization governance remain accurate. The "Current implementation" line items in §6 are now severely understated — fnp-ufunc has grown from 4 elementwise ops + 1 reduction to 35 binary / 43 unary / 30+ reduction methods + FFT + einsum + masked / string / datetime arrays + polynomials. For the live per-crate inventory see README's "Workspace and Crate Map" section, and for the 100% numpy.__all__ surface achievement see `audit_numpy_reality.md`.
+
 ## 1. Architecture Principles
 
 1. Spec-first implementation from extraction packets.
@@ -12,6 +14,8 @@
 
 `array API -> shape/stride engine (SCE) -> dispatcher -> kernels -> IO`
 
+The `fnp-python` PyO3 bindings sit above this chain as the Python-facing surface, exposing the array API to NumPy callers without altering the canonical Rust layering below it.
+
 ## 3. Crate Map
 
 - `fnp-dtype`: dtype taxonomy, promotion table, cast policy primitives.
@@ -21,6 +25,7 @@
 - `fnp-linalg`: linear algebra adapters and scoped solver contracts.
 - `fnp-random`: deterministic RNG streams and state schemas.
 - `fnp-io`: npy/npz parser + writer with hardened boundary checks.
+- `fnp-python`: PyO3 bindings exposing 100% of `numpy.__all__` (499/499 names) with structural CI lock-in.
 - `fnp-conformance`: differential harness, adversarial policy harness, security-contract validator, oracle capture, benchmark + RaptorQ artifact tooling.
 - `fnp-runtime`: mode split, fail-closed wire decoding, explicit override-audit gate, decision/evidence ledger, policy gate orchestration.
 

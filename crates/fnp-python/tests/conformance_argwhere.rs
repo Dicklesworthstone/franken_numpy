@@ -322,3 +322,31 @@ fn argwhere_large_sparse_matches_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+#[test]
+fn argwhere_complex_dtype_matches_numpy() -> Result<(), String> {
+    let test_cases = vec![
+        "np.array([1+1j, 0+0j, 3+2j, 0+0j, 5-1j], dtype=np.complex128)",
+        "np.array([0+0j, 0+0j, 0+0j], dtype=np.complex128)",
+        "np.array([1+1j, 2-1j, 3+2j], dtype=np.complex128)",
+        "np.array([[0+0j, 1+1j], [2-1j, 0+0j]], dtype=np.complex128)",
+        "np.array([[1+1j, 0+0j], [0+0j, 2-1j]], dtype=np.complex128)",
+    ];
+
+    for arr_expr in &test_cases {
+        let script = format!("import numpy as np; print(np.argwhere({arr_expr}).tolist())");
+        let numpy_result = numpy_oracle(&script)?;
+        let numpy_vals = parse_nested_int_list(&numpy_result);
+
+        let rust_script = fnp_argwhere_script(format!("print(fnp.argwhere({arr_expr}).tolist())"));
+        let rust_result = numpy_oracle(&rust_script)?;
+        let rust_vals = parse_nested_int_list(&rust_result);
+
+        assert_eq!(
+            numpy_vals, rust_vals,
+            "argwhere complex mismatch for {arr_expr}\nnumpy: {numpy_vals:?}\nrust: {rust_vals:?}"
+        );
+    }
+
+    Ok(())
+}

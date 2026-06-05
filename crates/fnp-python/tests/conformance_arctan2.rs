@@ -371,3 +371,23 @@ print(fnp.arctan2(1.0, y).tolist())
 
     Ok(())
 }
+
+#[test]
+fn arctan2_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+y = np.float64(1.0)
+x = np.float64(2.0)
+fnp_result = fnp.arctan2(y, x)
+np_result = np.arctan2(y, x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "arctan2 scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}

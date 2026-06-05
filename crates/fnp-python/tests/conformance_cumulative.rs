@@ -302,3 +302,35 @@ print(np.array_equal(diff_cumsum, a[1:]))
     assert_eq!(result.trim(), "True", "diff(cumsum(a)) should equal a[1:]");
     Ok(())
 }
+
+#[test]
+fn cumsum_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, 2+2j, 3+3j], dtype=np.complex128)
+fnp_result = fnp.cumsum(z)
+np_result = np.cumsum(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cumsum complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn cumprod_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+z = np.array([1+1j, 2+0j, 0+1j], dtype=np.complex128)
+fnp_result = fnp.cumprod(z)
+np_result = np.cumprod(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "cumprod complex should match numpy");
+    Ok(())
+}

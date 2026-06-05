@@ -420,3 +420,43 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+#[test]
+fn partition_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([3+1j, 1-1j, 4+2j, 2-2j], dtype=np.complex128)
+fnp_result = fnp.partition(a, 2)
+np_result = np.partition(a, 2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "partition complex should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn argpartition_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([3+1j, 1-1j, 4+2j, 2-2j], dtype=np.complex128)
+fnp_result = fnp.argpartition(a, 2)
+np_result = np.argpartition(a, 2)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argpartition complex should match numpy"
+    );
+    Ok(())
+}

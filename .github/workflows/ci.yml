@@ -1,5 +1,8 @@
 name: CI Gate Topology
 
+# main is the canonical branch; master is a passive mirror (per AGENTS.md
+# RULE 0). CI runs on main only; the mirror push from main updates master
+# without re-triggering CI.
 on:
   push:
     branches: [main]
@@ -18,6 +21,7 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUSTFLAGS: "-D warnings"
+  RUST_TOOLCHAIN: nightly-2026-02-20
   PHASE2C_PACKETS: "FNP-P2C-001 FNP-P2C-002 FNP-P2C-003 FNP-P2C-004 FNP-P2C-005 FNP-P2C-006 FNP-P2C-007 FNP-P2C-008 FNP-P2C-009"
 
 jobs:
@@ -29,7 +33,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-02-20
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
@@ -45,7 +49,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-02-20
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
@@ -62,7 +66,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-02-20
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: actions/setup-python@v5
         with:
@@ -96,7 +100,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-02-20
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: bash scripts/e2e/run_security_policy_gate.sh
@@ -110,7 +114,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-02-20
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: bash scripts/e2e/run_test_contract_gate.sh
@@ -124,7 +128,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-02-20
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - env:
@@ -142,7 +146,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-02-20
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - env:
@@ -160,7 +164,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-02-20
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - run: >

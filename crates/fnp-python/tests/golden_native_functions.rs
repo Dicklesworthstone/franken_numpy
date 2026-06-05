@@ -105,22 +105,22 @@ fn golden_blackman_8() {
 #[test]
 fn golden_kaiser_8_beta14() {
     let result = UFuncArray::kaiser(8, 14.0);
-    // Golden values from our native implementation (uses bessel_i0 polynomial approx)
+    // Golden values from NumPy (np.kaiser(8, 14.0)); kaiser uses i0, which now
+    // matches NumPy's Cephes chbevl expansion to machine precision.
     let expected = [
         7.726866835270368e-06,
-        0.017964074282044187,
-        0.272_772_090_150_094_1,
-        0.8708037664339706,
-        0.8708037664339706,
-        0.272_772_090_150_094_1,
-        0.017964074282044187,
+        0.017964073497790785,
+        0.2727720681863426,
+        0.8708037315729595,
+        0.8708037315729595,
+        0.2727720681863426,
+        0.017964073497790785,
         7.726866835270368e-06,
     ];
-    // Kaiser uses bessel_i0 polynomial approximation - allow 1e-7 tolerance
     for (i, (&a, &e)) in result.values().iter().zip(expected.iter()).enumerate() {
         let diff = (a - e).abs();
         assert!(
-            diff < 1e-7,
+            diff < 1e-12,
             "kaiser(8,14)[{i}]: expected {e}, got {a}, diff {diff}"
         );
     }
@@ -134,19 +134,20 @@ fn golden_kaiser_8_beta14() {
 fn golden_i0_values() {
     let input = UFuncArray::new(vec![6], vec![0.0, 0.5, 1.0, 2.0, 5.0, 10.0], DType::F64).unwrap();
     let result = input.i0();
+    // Golden values from NumPy (np.i0); we now match its Cephes chbevl expansion.
     let expected = [
         1.0,                // i0(0) = 1 exactly
         1.0634833707413234, // i0(0.5)
-        1.2660658480342601, // i0(1) - our polynomial approx
-        2.2795853023360673, // i0(2)
+        1.2660658777520082, // i0(1)
+        2.279585302336067,  // i0(2)
         27.239871823604442, // i0(5)
-        2815.7166284662544, // i0(10)
+        2815.716628466254,  // i0(10)
     ];
     for (i, (&a, &e)) in result.values().iter().zip(expected.iter()).enumerate() {
         let diff = (a - e).abs();
         let rel_diff = diff / e.abs().max(1e-10);
         assert!(
-            rel_diff < 1e-6,
+            rel_diff < 1e-12,
             "i0[{i}]: expected {e}, got {a}, rel_diff {rel_diff}"
         );
     }

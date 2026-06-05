@@ -1,14 +1,27 @@
 [package]
 name = "fnp-random"
-version = "0.1.0"
-edition = "2024"
-license-file = "../../LICENSE"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "NumPy-parity RNG: PCG64DXSM, distributions, oracle-verified deterministic streams."
 
 [dependencies]
+# fnp-ndarray: shape/stride scaffolding for the `*_shaped` distribution
+# variants (standard_normal_shaped, permutation_shaped, etc.). The non-shaped
+# variants don't depend on ndarray, but the shaped variants need the SCE
+# contracts to build correctly-strided output arrays.
 fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }
+getrandom.workspace = true
 
 [dev-dependencies]
-criterion = "0.6"
+criterion.workspace = true
+# sha2: golden-output digest for bit-exact RNG stream preservation tests.
+sha2 = "0.11.0"
 
 [[bench]]
 name = "random_ops"

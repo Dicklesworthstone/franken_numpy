@@ -449,3 +449,198 @@ print(np.allclose(percentile, median))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// All-NaN array edge cases
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn nansum_all_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    a = np.array([np.nan, np.nan, np.nan])
+    result = fnp.nansum(a)
+    expected = np.nansum(a)
+    print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nansum all-nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nanmean_all_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    a = np.array([np.nan, np.nan, np.nan])
+    result = fnp.nanmean(a)
+    expected = np.nanmean(a)
+    print(np.isnan(result) and np.isnan(expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nanmean all-nan should return nan");
+    Ok(())
+}
+
+#[test]
+fn nanprod_all_nan() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    a = np.array([np.nan, np.nan, np.nan])
+    result = fnp.nanprod(a)
+    expected = np.nanprod(a)
+    print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nanprod all-nan should match numpy");
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Inf handling in nan-ignoring functions
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn nansum_with_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, np.nan, np.inf, 4])
+result = fnp.nansum(a)
+expected = np.nansum(a)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nansum with inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nanmean_with_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, np.nan, np.inf, 4])
+result = fnp.nanmean(a)
+expected = np.nanmean(a)
+print(np.allclose(result, expected))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nanmean with inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nanmax_with_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, np.nan, np.inf, 4])
+result = fnp.nanmax(a)
+expected = np.nanmax(a)
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nanmax with inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nanmin_with_neg_inf() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+a = np.array([1, np.nan, -np.inf, 4])
+result = fnp.nanmin(a)
+expected = np.nanmin(a)
+print(result == expected)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "nanmin with -inf should match numpy");
+    Ok(())
+}
+
+#[test]
+fn nansum_signed_zero_parity() -> Result<(), String> {
+    // Test signed-zero behavior for nansum (NaN-ignoring sum)
+    let script = fnp_script(
+        r#"
+# Signed-zero nansum semantics
+tests = [
+    ([0.0, 0.0, np.nan], False),      # nansum([0.0, 0.0, nan]) = 0.0 (positive)
+    ([-0.0, -0.0, np.nan], True),     # nansum([-0.0, -0.0, nan]) = -0.0 (negative)
+    ([0.0, -0.0, np.nan], False),     # nansum([0.0, -0.0, nan]) = 0.0 (IEEE 754)
+    ([np.nan, np.nan], False),        # nansum([nan, nan]) = 0.0 (default initial)
+]
+all_pass = True
+for values, expected_signbit in tests:
+    arr = np.array(values)
+    fnp_result = fnp.nansum(arr)
+    np_result = np.nansum(arr)
+    if np.signbit(fnp_result) != np.signbit(np_result):
+        print(f"FAIL: nansum({values}) fnp signbit={np.signbit(fnp_result)} np signbit={np.signbit(np_result)}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nansum signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn nanprod_signed_zero_parity() -> Result<(), String> {
+    // Test signed-zero behavior for nanprod (NaN-ignoring product)
+    let script = fnp_script(
+        r#"
+# Signed-zero nanprod semantics (XOR sign rule)
+tests = [
+    ([0.0, 1.0, np.nan], False),      # nanprod([0.0, 1.0, nan]) = 0.0 (positive)
+    ([-0.0, 1.0, np.nan], True),      # nanprod([-0.0, 1.0, nan]) = -0.0 (negative)
+    ([0.0, -0.0, np.nan], True),      # nanprod([0.0, -0.0, nan]) = -0.0 (XOR)
+    ([-0.0, -0.0, np.nan], False),    # nanprod([-0.0, -0.0, nan]) = 0.0 (XOR)
+]
+all_pass = True
+for values, expected_signbit in tests:
+    arr = np.array(values)
+    fnp_result = fnp.nanprod(arr)
+    np_result = np.nanprod(arr)
+    if np.signbit(fnp_result) != np.signbit(np_result):
+        print(f"FAIL: nanprod({values}) fnp signbit={np.signbit(fnp_result)} np signbit={np.signbit(np_result)}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nanprod signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}

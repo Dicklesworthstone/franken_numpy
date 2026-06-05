@@ -427,3 +427,77 @@ print(np.array_equal(extract_result, where_result))
     );
     Ok(())
 }
+
+#[test]
+fn extract_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+condition = np.array([True, False, True, False])
+arr = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+fnp_result = fnp.extract(condition, arr)
+np_result = np.extract(condition, arr)
+print(np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "extract complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn place_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+arr1 = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+arr2 = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+mask = np.array([True, False, True, False])
+vals = np.array([9+9j, 8+8j], dtype=np.complex128)
+fnp.place(arr1, mask, vals)
+np.place(arr2, mask, vals)
+print(np.array_equal(arr1, arr2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "place complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn putmask_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+arr1 = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+arr2 = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+mask = np.array([True, False, True, False])
+vals = np.array([9+9j, 8+8j], dtype=np.complex128)
+fnp.putmask(arr1, mask, vals)
+np.putmask(arr2, mask, vals)
+print(np.array_equal(arr1, arr2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "putmask complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn put_complex() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+arr1 = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+arr2 = np.array([1+1j, 2-1j, 3+2j, 4-2j], dtype=np.complex128)
+indices = [0, 2]
+vals = np.array([9+9j, 8+8j], dtype=np.complex128)
+fnp.put(arr1, indices, vals)
+np.put(arr2, indices, vals)
+print(np.array_equal(arr1, arr2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "put complex should match numpy");
+    Ok(())
+}

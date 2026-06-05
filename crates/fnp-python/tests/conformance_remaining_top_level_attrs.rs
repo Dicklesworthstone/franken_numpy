@@ -4,13 +4,31 @@
 //! typing (submodule), ctypeslib (submodule), test (PytestTester),
 //! getbufsize, nested_iters, from_dlpack.
 
-use std::process::Command;
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
-        .args(["-c", script])
-        .output()
+    let mut child = Command::new("python3")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| format!("python3 stdin pipe was unavailable\nScript: {script}"))?;
+        stdin
+            .write_all(script.as_bytes())
+            .map_err(|error| format!("failed to write python script: {error}\nScript: {script}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for python3: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
@@ -31,12 +49,22 @@ fn fnp_script(body: String) -> String {
     let module_literal = format!("{module_path:?}");
     format!(
         "import importlib.util\n\
+         import sys\n\
          import numpy as np\n\
          spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
          fnp = importlib.util.module_from_spec(spec)\n\
+         sys.modules[spec.name] = fnp\n\
          spec.loader.exec_module(fnp)\n\
          {body}"
     )
+}
+
+fn expect_equal(actual: &str, expected: &str, context: &str) -> Result<(), String> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("{context}; expected {expected:?}, got {actual:?}"))
+    }
 }
 
 #[test]
@@ -66,11 +94,13 @@ print(mismatches == [])
     );
     let result = numpy_oracle(&script)?;
     let last = result.lines().last().unwrap_or("").trim();
-    assert_eq!(
-        last, "True",
-        "all remaining top-level attributes must be identity-equal to numpy; got: {result}"
-    );
-    Ok(())
+    expect_equal(
+        last,
+        "True",
+        &format!(
+            "all remaining top-level attributes must be identity-equal to numpy; output: {result}"
+        ),
+    )
 }
 
 #[test]
@@ -87,12 +117,11 @@ print(np.array_equal(ours, theirs) and np.array_equal(ours, np.power(a, b)))
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.pow must match np.pow and np.power"
-    );
-    Ok(())
+        "fnp.pow must match np.pow and np.power",
+    )
 }
 
 #[test]
@@ -110,12 +139,11 @@ print(np.array_equal(packed_ours, packed_theirs) and
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.packbits/unpackbits must match numpy and round-trip"
-    );
-    Ok(())
+        "fnp.packbits/unpackbits must match numpy and round-trip",
+    )
 }
 
 #[test]
@@ -128,12 +156,11 @@ print(np.array_equal(ours, theirs))
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.fromfunction must match numpy"
-    );
-    Ok(())
+        "fnp.fromfunction must match numpy",
+    )
 }
 
 #[test]
@@ -150,12 +177,11 @@ print(ok)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.ndim/size/iterable must match numpy"
-    );
-    Ok(())
+        "fnp.ndim/size/iterable must match numpy",
+    )
 }
 
 #[test]
@@ -168,12 +194,11 @@ print(fnp.typecodes == np.typecodes and
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.typecodes and fnp.sctypeDict must match numpy"
-    );
-    Ok(())
+        "fnp.typecodes and fnp.sctypeDict must match numpy",
+    )
 }
 
 #[test]
@@ -184,12 +209,11 @@ print(fnp.getbufsize() == np.getbufsize())
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.getbufsize must match numpy"
-    );
-    Ok(())
+        "fnp.getbufsize must match numpy",
+    )
 }
 
 #[test]
@@ -204,12 +228,11 @@ print(ok)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.ScalarType must equal np.ScalarType"
-    );
-    Ok(())
+        "fnp.ScalarType must equal np.ScalarType",
+    )
 }
 
 #[test]
@@ -228,11 +251,51 @@ print(missing == [])
     );
     let result = numpy_oracle(&script)?;
     let last = result.lines().last().unwrap_or("").trim();
-    assert_eq!(
-        last, "True",
-        "every name in numpy.__all__ must be reachable via fnp_python; got: {result}"
+    expect_equal(
+        last,
+        "True",
+        &format!("every name in numpy.__all__ must be reachable via fnp_python; output: {result}"),
+    )
+}
+
+#[test]
+fn fnp_python_top_level_all_matches_numpy_verbatim() -> Result<(), String> {
+    // Emit four signals so a failure points at the actual divergence rather
+    // than just "False":
+    //   1. presence (`hasattr`)
+    //   2. verbatim list equality (order-sensitive, the canonical contract)
+    //   3. sorted set-equality (catches order-only drift vs. content drift)
+    //   4. symmetric-diff names (only printed when sets differ, so the
+    //      diagnostic shows up exactly when it's useful)
+    let script = fnp_script(
+        r#"
+print(hasattr(fnp, '__all__'))
+print(fnp.__all__ == np.__all__)
+print(sorted(fnp.__all__) == sorted(np.__all__))
+missing = sorted(set(np.__all__) - set(fnp.__all__))
+extra = sorted(set(fnp.__all__) - set(np.__all__))
+print(f"missing={missing} extra={extra}")
+"#
+        .into(),
     );
-    Ok(())
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    expect_equal(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        &format!("fnp_python must expose top-level __all__; output: {result}"),
+    )?;
+    let verbatim = lines.next().unwrap_or("").trim();
+    let sorted_eq = lines.next().unwrap_or("").trim();
+    let diff_line = lines.next().unwrap_or("").trim();
+    expect_equal(
+        verbatim,
+        "True",
+        &format!(
+            "fnp_python.__all__ must match numpy.__all__ verbatim (order-sensitive); \
+             sorted-equal={sorted_eq} {diff_line}; full output: {result}"
+        ),
+    )
 }
 
 #[test]
@@ -243,12 +306,11 @@ print(fnp.core is np.core and fnp.f2py is np.f2py)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.core / fnp.f2py must be identity-equal to numpy's"
-    );
-    Ok(())
+        "fnp.core / fnp.f2py must be identity-equal to numpy's",
+    )
 }
 
 #[test]
@@ -263,10 +325,9 @@ print(ok)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.__array_namespace_info__() must mirror np"
-    );
-    Ok(())
+        "fnp.__array_namespace_info__() must mirror np",
+    )
 }

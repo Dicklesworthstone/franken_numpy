@@ -8,10 +8,11 @@
 //!
 //! These operations are critical for data persistence workflows.
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_io::{
     IOSupportedDType, NpyHeader, read_npy_bytes, read_npz_bytes, write_npy_bytes, write_npz_bytes,
 };
+use std::hint::black_box;
 
 fn generate_f64_data(n: usize) -> Vec<u8> {
     let data: Vec<f64> = (0..n).map(|i| i as f64 * 0.1).collect();

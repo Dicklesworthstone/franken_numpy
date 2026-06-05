@@ -45,14 +45,23 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 
 ---
 
+## Current state (2026-05-16)
+
+- `fnp_python` covers **100% of `numpy.__all__`** (499/499 names) — see [`audit_numpy_reality.md`](audit_numpy_reality.md) for architecture + coverage progression.
+- Coverage is **structurally locked** by `fnp_python_covers_full_numpy_all` in `crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs`; this test fails CI if any name regresses.
+- Workspace runs 6,392 tests across 10 crates (see [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the per-crate breakdown). Underlying Rust surface: 1,575 `pub fn` declarations across `crates/*/src/**/*.rs`.
+- Bead tracker stands at ~1,417 closed beads as of 2026-05-19; live count via `br list --status=closed --limit 10000 --json | jq length`.
+- No real stubs/mocks/TODOs in production code — structurally enforced by `crates/fnp-conformance/tests/codebase_hygiene.rs` (8 #[test] functions fail CI on stub markers); per-site analysis in [`audit_numpy_mocks.md`](audit_numpy_mocks.md).
+- Active tracked divergences: 0 rows in [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md); `fnp-random` `SeedMaterial::None` now sources OS entropy for no-seed NumPy parity (closed by bead `franken_numpy-iqo31`).
+
 ## Toolchain: Rust & Cargo
 
 We only use **Cargo** in this project, NEVER any other package manager.
 
-- **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
+- **Edition:** Rust 2024 (nightly required — pinned to `nightly-2026-02-20` in `rust-toolchain.toml`; CI mirrors the same via `RUST_TOOLCHAIN` env var in `.github/workflows/ci.yml`)
 - **Dependency versions:** Explicit versions for stability
 - **Configuration:** Cargo.toml workspace with `workspace = true` pattern
-- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`). If narrow unsafe usage is unavoidable, isolate it behind audited interfaces and tests.
+- **Unsafe code:** Forbidden by default (`#![forbid(unsafe_code)]`) on 9 of 10 crates. `fnp-python` is the lone opt-out because PyO3 procedural macros may expand into unsafe as part of generating the cdylib entry point — but its source still contains zero hand-written `unsafe` blocks (verified by ripgrep). If narrow unsafe usage ever becomes unavoidable in any other crate, isolate it behind audited interfaces and tests.
 
 ### Key Dependencies
 
@@ -64,6 +73,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 | `serde_yaml_ng` | YAML parsing for security control maps and contracts |
 | `sha2` | Content hashing for artifact integrity |
 | `base64` | Encoding for artifact payloads |
+| `getrandom` | OS entropy for NumPy-compatible unseeded RNG constructors |
 
 ### Release Profile
 
@@ -120,7 +130,10 @@ We do not care about backwards compatibility—we're in early development with n
 # Check for compiler errors and warnings (workspace-wide)
 cargo check --workspace --all-targets
 
-# Check for clippy lints (pedantic + nursery are enabled)
+# Check for clippy lints — workspace uses rustc/clippy default lint set
+# (no clippy.toml or per-crate clippy::pedantic/nursery opt-ins; verified
+# via grep). The G1 CI gate runs the same command + treats every clippy
+# warning as a hard error via `-D warnings`.
 cargo clippy --workspace --all-targets -- -D warnings
 
 # Verify formatting
@@ -140,7 +153,7 @@ Every component crate includes inline `#[cfg(test)]` unit tests alongside the im
 - Edge cases (empty input, max values, boundary conditions)
 - Error conditions
 
-Cross-component integration tests live in crate-level `tests/` directories. The `fnp-conformance` crate contains the differential harness, adversarial policy harness, security-contract validator, oracle capture, and benchmark + RaptorQ artifact tooling.
+Cross-component integration tests live in crate-level `tests/` directories. The `fnp-conformance` crate contains the differential harness, adversarial policy harness, security-contract validator, oracle capture, and benchmark + RaptorQ artifact tooling. It also ships `tests/codebase_hygiene.rs` which uses `rg` (ripgrep) to enforce the no-stubs invariant — install `ripgrep` (`apt-get install ripgrep`, `brew install ripgrep`, or `cargo install ripgrep`) before running `cargo test -p fnp-conformance`, or the 8 hygiene tests will panic with "rg should be available".
 
 ### Unit Tests
 
@@ -159,6 +172,7 @@ cargo test -p fnp-ufunc
 cargo test -p fnp-linalg
 cargo test -p fnp-random
 cargo test -p fnp-io
+cargo test -p fnp-python
 cargo test -p fnp-conformance
 cargo test -p fnp-runtime
 
@@ -166,18 +180,21 @@ cargo test -p fnp-runtime
 cargo test --workspace --all-features
 ```
 
+Cost note: `fnp-ufunc` (2,191 tests, ~60k LOC) and `fnp-python` (2,127 tests) dominate workspace test time. When iterating on a focused change in another crate, prefer the targeted `-p` invocation. See [`FEATURE_PARITY.md`](FEATURE_PARITY.md) for the live per-crate test counts.
+
 ### Test Categories
 
 | Crate | Focus Areas |
 |-------|-------------|
 | `fnp-dtype` | Dtype taxonomy, promotion table determinism, cast policy primitives |
 | `fnp-ndarray` | Shape legality, stride calculus (C/F contiguous), reshape `-1` inference, broadcast contracts, alias-sensitive transitions |
-| `fnp-iter` | nditer-like traversal, overlap-safe iteration contracts |
-| `fnp-ufunc` | Broadcasted binary elementwise ops (add/sub/mul/div), reduction sum (axis/keepdims), shape/value/dtype differential checks |
-| `fnp-linalg` | Linear algebra adapters, scoped solver contracts |
-| `fnp-random` | Deterministic RNG streams, state schemas |
+| `fnp-iter` | Transfer-loop selector, overlap detection, `Nditer` / `NditerPlan` / `NditerStep` state machine with `iterindex` / `multi_index` / reset / seek / external-loop chunks, `nditer_python*` parity bridge against the live numpy nditer |
+| `fnp-ufunc` | 35 binary + 43 unary elementwise ops, 30+ reductions, FFT (Cooley-Tukey + Bluestein), einsum (`einsum`, `einsum_path`, `einsum_optimized`), masked / string / datetime arrays, polynomial families (power, Chebyshev, Legendre, Hermite, Laguerre), float error state machine, NaN-correct reductions |
+| `fnp-linalg` | ~100 public functions: 2×2 fast paths, NxN decompositions (QR, SVD, eig, eigh, Cholesky, LU), spectral methods (`expm`, `sqrtm`, `logm`, `funm`, `polar`, `schur`), least-squares, 14 batched ops, complex variants |
+| `fnp-random` | 5 production bit generators (PCG64, PCG64DXSM, MT19937, Philox, SFC64) + an internal `DeterministicRng` for tests, full `SeedSequence` / `SeedMaterial` hierarchy with spawn lineage, pickle payload round-trip, `RandomState` legacy wrapper, 40+ oracle-verified distributions with bit-exact PCG64DXSM parity vs NumPy |
 | `fnp-io` | npy/npz parser/writer, hardened boundary checks, adversarial input fuzzing |
 | `fnp-conformance` | Fixture-driven differential suites, oracle capture, adversarial/security policy harnesses, benchmark baselines, RaptorQ sidecar/scrub/decode proofs, workflow scenario gates |
+| `fnp-python` | PyO3 bindings exposing 100% of `numpy.__all__` (499/499 names) structurally locked by `fnp_python_covers_full_numpy_all`, plus 133 dedicated `conformance_*.rs` parity shards under `crates/fnp-python/tests/` |
 | `fnp-runtime` | Strict/hardened mode split, fail-closed wire decoding, override-audit gate, decision/evidence ledger |
 
 ### Conformance and Artifact Commands
@@ -192,6 +209,13 @@ cargo run -p fnp-conformance --bin validate_phase2c_packet -- --packet-id FNP-P2
 cargo run -p fnp-conformance --bin run_security_gate
 cargo run -p fnp-conformance --bin run_test_contract_gate
 cargo run -p fnp-conformance --bin run_workflow_scenario_gate
+cargo run -p fnp-conformance --bin run_divergence_ledger -- --fail-on-missing
+cargo run -p fnp-conformance --bin run_fnp_python_api_coverage -- --fail-on-missing
+cargo run -p fnp-conformance --bin run_diagnostic_oracle
+cargo run -p fnp-conformance --bin run_oracle_drift_matrix
+cargo run -p fnp-conformance --bin run_io_diagnostics
+cargo run -p fnp-conformance --bin validate_phase2c_stale_claims
+scripts/e2e/run_ci_gate_topology.sh        # runs all 8 gates G1-G8 in order + closing P2C-001..009 packet sweep
 scripts/e2e/run_performance_budget_gate.sh
 scripts/e2e/run_security_policy_gate.sh
 scripts/e2e/run_test_contract_gate.sh
@@ -251,17 +275,18 @@ Layering principles:
 
 ```
 franken_numpy/
-├── Cargo.toml                         # Workspace root
+├── Cargo.toml                         # Workspace root (10 crates)
 ├── crates/
 │   ├── fnp-dtype/                     # Dtype taxonomy, promotion table, cast policy primitives
 │   ├── fnp-ndarray/                   # Shape legality, stride calculus, reshape/broadcast contracts
-│   ├── fnp-iter/                      # nditer-like traversal, overlap-safe iteration contracts
-│   ├── fnp-ufunc/                     # Ufunc dispatch, broadcasting execution, reductions
-│   ├── fnp-linalg/                    # Linear algebra adapters, scoped solver contracts
-│   ├── fnp-random/                    # Deterministic RNG streams, state schemas
-│   ├── fnp-io/                        # npy/npz parser + writer with hardened boundary checks
-│   ├── fnp-conformance/               # Differential harness, adversarial harness, oracle capture, benchmarks, RaptorQ artifacts
-│   └── fnp-runtime/                   # Mode split, fail-closed decoding, override-audit gate, evidence ledger
+│   ├── fnp-iter/                      # Transfer semantics, overlap-safe iteration, Nditer state machine
+│   ├── fnp-ufunc/                     # 850+ array operations, reductions, einsum, masked arrays
+│   ├── fnp-linalg/                    # solve, eig, svd, qr, cholesky, lstsq, batched, complex
+│   ├── fnp-random/                    # 5 bit generators, distributions, PCG64DXSM bit-exact parity
+│   ├── fnp-io/                        # NPY/NPZ read/write, text I/O, DEFLATE, memmap
+│   ├── fnp-python/                    # PyO3 bindings, 100% numpy.__all__ surface
+│   ├── fnp-conformance/               # Oracle capture, differential / metamorphic / adversarial / RaptorQ
+│   └── fnp-runtime/                   # Strict/hardened mode, evidence ledger, decision engine
 ├── legacy_numpy_code/numpy/           # Behavioral oracle (upstream: github.com/numpy/numpy)
 ├── artifacts/                         # Contract schemas, security controls, logs
 ├── scripts/                           # E2E gate scripts
@@ -274,12 +299,11 @@ franken_numpy/
 - **Legacy behavioral oracle:** `/dp/franken_numpy/legacy_numpy_code/numpy` (upstream: `https://github.com/numpy/numpy`) provides ground-truth for differential conformance testing
 - **Conformance pipeline:** For each feature family: input fixtures, oracle capture, target execution, parity comparison report, durability sidecars + scrub + decode proof
 - **RaptorQ-everywhere durability:** Conformance fixture bundles, benchmark baseline bundles, migration manifests, reproducibility ledgers, and long-lived state snapshots all require repair-symbol sidecars, integrity scrub reports, and decode proof artifacts for each recovery event
-- **Security doctrine:** Harden parser/IO and shape-validation boundaries; prevent malformed shape and unsafe cast pathways. Fail-closed for unknown incompatible features. Adversarial fixture coverage and fuzz/property tests for high-risk parsers/state transitions. Deterministic audit logs for recoveries and policy overrides
+- **Security doctrine:** Harden parser/IO and shape-validation boundaries; prevent malformed shape and unsafe cast pathways. Fail-closed for unknown incompatible features. Adversarial fixture coverage and fuzz/property tests for high-risk parsers/state transitions (the live harness ships 7 fuzz crates / 27 targets / ~200 curated seeds — see [`docs/FUZZING.md`](docs/FUZZING.md)). Deterministic audit logs for recoveries and policy overrides
 - **Performance governance:** Measure op-family throughput, tail latency, and memory bandwidth efficiency; gate regressions for broadcast and reduction hotspots. Every optimization follows: baseline (p50/p95/p99 + memory), profile hotspot, implement one lever, prove behavior unchanged via conformance + invariant checks, re-baseline and emit delta artifact
 - **Correctness doctrine:** Maintain deterministic shape calculus, alias correctness, and dtype promotion table invariants. Required evidence for substantive changes: differential conformance report, invariant checklist update, benchmark delta report, risk-note update if threat or compatibility surface changed
-- **Parity debt, not feature cuts:** Current implementation is an in-progress parity wave. Remaining behavior gaps are parity debt to be closed, not accepted feature cuts
-- **asupersync for async (optional):** `fnp-runtime` has optional `asupersync` linkage for async orchestration of conformance capture and artifact pipelines, cancellation-safe long-running jobs, and structured telemetry channels
-- **frankentui for observability (optional):** `fnp-runtime` exposes optional `frankentui` feature linkage for terminal-native parity drift and performance delta dashboards
+- **Parity debt, not feature cuts:** Surface parity is locked at 100% of `numpy.__all__` (499/499, structurally enforced by `fnp_python_covers_full_numpy_all`). Remaining work is per-symbol behavioral parity (matching NumPy's edge-case semantics, dtype promotions, and error paths) — that is parity debt to be closed, not accepted feature cuts
+- **Feature flags (3 total across the workspace):** `fnp-python` has `python-extension` (PyO3 cdylib mode, default = off; enable with `cargo build -p fnp-python --features python-extension`); `fnp-runtime` has `asupersync` (async orchestration of conformance capture, artifact pipelines, cancellation-safe long-running jobs, structured telemetry; gates 5 `#[cfg(feature = "asupersync")]` blocks) and `frankentui` (terminal-native dashboards for parity drift and perf deltas). All three default to off. CI runs the default-features build; the `[features]` blocks in `fnp-python/Cargo.toml` and `fnp-runtime/Cargo.toml` are the authoritative source of truth.
 
 ### Runtime Mode Matrix
 

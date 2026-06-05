@@ -1,16 +1,31 @@
 [package]
 name = "fnp-io"
-version = "0.1.0"
-edition = "2024"
-license-file = "../../LICENSE"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "NumPy file format I/O: NPY/NPZ load and save, text I/O, with bounded resource consumption."
 
 [dependencies]
+# bytemuck: zerocopy reinterpretation between byte buffers and typed slices,
+# used in NPY/NPZ load+save for transmuting raw bytes into f64/i64/etc. without
+# allocation. Only Pod-derived types are eligible (see ArrayStorage in fnp-dtype).
 bytemuck = "1.25.0"
+# flate2: DEFLATE compression for NPZ archives (savez_compressed + load_npz).
+# Configured with the default backend; no native zlib system dependency.
 flate2 = "1.1.9"
 
 [dev-dependencies]
+# insta: snapshot testing for the NPY/NPZ binary writer and diagnostic-oracle
+# golden output (see crates/fnp-io/tests/npy_npz_diagnostic.rs).
 insta = "1.47.2"
-criterion = "0.5"
+criterion.workspace = true
+# sha2: deterministic golden-output digests for byte-for-byte IO writer tests.
+sha2 = "0.11.0"
 
 [[bench]]
 name = "criterion_io"

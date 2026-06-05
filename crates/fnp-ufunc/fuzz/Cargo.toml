@@ -37,3 +37,10 @@ path = "fuzz_targets/fuzz_datetime_unit_parse.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_einsum_subscripts"
+path = "fuzz_targets/fuzz_einsum_subscripts.rs"
+test = false
+doc = false
+bench = false

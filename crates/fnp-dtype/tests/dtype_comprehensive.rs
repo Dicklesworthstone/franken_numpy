@@ -19,6 +19,7 @@ use fnp_dtype::{DType, promote, promote_for_sum_reduction};
 #[test]
 fn parse_bool() {
     assert_eq!(DType::parse("bool"), Some(DType::Bool));
+    assert_eq!(DType::parse("bool_"), Some(DType::Bool));
 }
 
 #[test]
@@ -34,6 +35,10 @@ fn parse_signed_integers() {
     assert_eq!(DType::parse("int64"), Some(DType::I64));
     assert_eq!(DType::parse("i8"), Some(DType::I64));
     assert_eq!(DType::parse("i64"), Some(DType::I64));
+    assert_eq!(DType::parse("int"), Some(DType::I64));
+    assert_eq!(DType::parse("int_"), Some(DType::I64));
+    assert_eq!(DType::parse("long"), Some(DType::I64));
+    assert_eq!(DType::parse("longlong"), Some(DType::I64));
 }
 
 #[test]
@@ -49,6 +54,7 @@ fn parse_unsigned_integers() {
     assert_eq!(DType::parse("uint64"), Some(DType::U64));
     assert_eq!(DType::parse("u8"), Some(DType::U64));
     assert_eq!(DType::parse("u64"), Some(DType::U64));
+    assert_eq!(DType::parse("uint"), Some(DType::U64));
 }
 
 #[test]
@@ -60,22 +66,32 @@ fn parse_floats() {
     assert_eq!(DType::parse("float32"), Some(DType::F32));
     assert_eq!(DType::parse("f4"), Some(DType::F32));
     assert_eq!(DType::parse("f32"), Some(DType::F32));
+    assert_eq!(DType::parse("single"), Some(DType::F32));
     assert_eq!(DType::parse("float64"), Some(DType::F64));
     assert_eq!(DType::parse("f8"), Some(DType::F64));
     assert_eq!(DType::parse("f64"), Some(DType::F64));
+    assert_eq!(DType::parse("float"), Some(DType::F64));
+    assert_eq!(DType::parse("double"), Some(DType::F64));
 }
 
 #[test]
 fn parse_complex() {
     assert_eq!(DType::parse("complex64"), Some(DType::Complex64));
     assert_eq!(DType::parse("c8"), Some(DType::Complex64));
+    assert_eq!(DType::parse("csingle"), Some(DType::Complex64));
     assert_eq!(DType::parse("complex128"), Some(DType::Complex128));
     assert_eq!(DType::parse("c16"), Some(DType::Complex128));
+    assert_eq!(DType::parse("complex"), Some(DType::Complex128));
+    assert_eq!(DType::parse("cdouble"), Some(DType::Complex128));
 }
 
 #[test]
 fn parse_string_types() {
     assert_eq!(DType::parse("str"), Some(DType::Str));
+    assert_eq!(DType::parse("str_"), Some(DType::Str));
+    assert_eq!(DType::parse("unicode"), Some(DType::Str));
+    assert_eq!(DType::parse("bytes"), Some(DType::Str));
+    assert_eq!(DType::parse("bytes_"), Some(DType::Str));
     assert_eq!(DType::parse("U"), Some(DType::Str));
     assert_eq!(DType::parse("U10"), Some(DType::Str));
     assert_eq!(DType::parse("U256"), Some(DType::Str));

@@ -6,13 +6,31 @@
 //! and that a representative call from each submodule produces numpy-equal
 //! output.
 
-use std::process::Command;
+use std::{
+    io::Write,
+    process::{Command, Stdio},
+};
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
-        .args(["-c", script])
-        .output()
+    let mut child = Command::new("python3")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| format!("python3 stdin pipe was unavailable\nScript: {script}"))?;
+        stdin
+            .write_all(script.as_bytes())
+            .map_err(|error| format!("failed to write python script: {error}\nScript: {script}"))?;
+    }
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to wait for python3: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
@@ -33,12 +51,22 @@ fn fnp_script(body: String) -> String {
     let module_literal = format!("{module_path:?}");
     format!(
         "import importlib.util\n\
+         import sys\n\
          import numpy as np\n\
          spec = importlib.util.spec_from_file_location('fnp_python', {module_literal})\n\
          fnp = importlib.util.module_from_spec(spec)\n\
+         sys.modules[spec.name] = fnp\n\
          spec.loader.exec_module(fnp)\n\
          {body}"
     )
+}
+
+fn expect_equal(actual: &str, expected: &str, context: &str) -> Result<(), String> {
+    if actual == expected {
+        Ok(())
+    } else {
+        Err(format!("{context}; expected {expected:?}, got {actual:?}"))
+    }
 }
 
 #[test]
@@ -59,11 +87,13 @@ print(all(checks.values()))
     );
     let result = numpy_oracle(&script)?;
     let last = result.lines().last().unwrap_or("").trim();
-    assert_eq!(
-        last, "True",
-        "all re-exported submodules must be identity-equal to their numpy peers; got: {result}"
-    );
-    Ok(())
+    expect_equal(
+        last,
+        "True",
+        &format!(
+            "all re-exported submodules must be identity-equal to their numpy peers; output: {result}"
+        ),
+    )
 }
 
 #[test]
@@ -77,12 +107,11 @@ print(ok)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.char.lower/upper must match numpy"
-    );
-    Ok(())
+        "fnp.char.lower/upper must match numpy",
+    )
 }
 
 #[test]
@@ -97,12 +126,11 @@ print(ok)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.char.add/multiply must match numpy"
-    );
-    Ok(())
+        "fnp.char.add/multiply must match numpy",
+    )
 }
 
 #[test]
@@ -117,12 +145,11 @@ print(ours.dtype == theirs.dtype and np.array_equal(ours, theirs))
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.rec.fromarrays must match numpy"
-    );
-    Ok(())
+        "fnp.rec.fromarrays must match numpy",
+    )
 }
 
 #[test]
@@ -137,12 +164,11 @@ print(ours.dtype == theirs.dtype and np.array_equal(ours, theirs))
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.rec.fromrecords must match numpy"
-    );
-    Ok(())
+        "fnp.rec.fromrecords must match numpy",
+    )
 }
 
 #[test]
@@ -156,12 +182,11 @@ print(ours == theirs and type(ours).__name__ == type(theirs).__name__)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.emath.sqrt(-x) must return complex like numpy"
-    );
-    Ok(())
+        "fnp.emath.sqrt(-x) must return complex like numpy",
+    )
 }
 
 #[test]
@@ -177,12 +202,11 @@ print(ours_log_neg == theirs_log_neg and ours_arccos == theirs_arccos)
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.emath.log(neg) / arccos(>1) must match numpy"
-    );
-    Ok(())
+        "fnp.emath.log(neg) / arccos(>1) must match numpy",
+    )
 }
 
 #[test]
@@ -196,10 +220,9 @@ print(type(ours).__name__ == type(theirs).__name__ and np.array_equal(ours, thei
 "#
         .into(),
     );
-    assert_eq!(
+    expect_equal(
         numpy_oracle(&script)?.trim(),
         "True",
-        "fnp.matrixlib.asmatrix must match numpy"
-    );
-    Ok(())
+        "fnp.matrixlib.asmatrix must match numpy",
+    )
 }

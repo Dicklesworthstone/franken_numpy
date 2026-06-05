@@ -331,3 +331,79 @@ fn conformance_random_matrix() {
         pct(should_pass, should_total),
     );
 }
+
+#[test]
+fn multinomial_rejects_empty_pvals() {
+    with_fnp_and_numpy(|_py, module, numpy| {
+        let our_rng = module.getattr("random")?.call_method0("default_rng")?;
+        let np_rng = numpy.getattr("random")?.call_method0("default_rng")?;
+        let pvals: Vec<f64> = vec![];
+        let our_err = our_rng
+            .call_method1("multinomial", (10_u64, pvals.clone()))
+            .is_err();
+        let np_err = np_rng.call_method1("multinomial", (10_u64, pvals)).is_err();
+        assert!(our_err && np_err, "Both should reject empty pvals");
+        Ok(())
+    });
+}
+
+#[test]
+fn multinomial_rejects_nan_pvals() {
+    with_fnp_and_numpy(|_py, module, numpy| {
+        let our_rng = module.getattr("random")?.call_method0("default_rng")?;
+        let np_rng = numpy.getattr("random")?.call_method0("default_rng")?;
+        let pvals = vec![f64::NAN, 0.5];
+        let our_err = our_rng
+            .call_method1("multinomial", (10_u64, pvals.clone()))
+            .is_err();
+        let np_err = np_rng.call_method1("multinomial", (10_u64, pvals)).is_err();
+        assert!(our_err && np_err, "Both should reject NaN pvals");
+        Ok(())
+    });
+}
+
+#[test]
+fn multinomial_rejects_negative_pvals() {
+    with_fnp_and_numpy(|_py, module, numpy| {
+        let our_rng = module.getattr("random")?.call_method0("default_rng")?;
+        let np_rng = numpy.getattr("random")?.call_method0("default_rng")?;
+        let pvals = vec![-0.1, 0.5];
+        let our_err = our_rng
+            .call_method1("multinomial", (10_u64, pvals.clone()))
+            .is_err();
+        let np_err = np_rng.call_method1("multinomial", (10_u64, pvals)).is_err();
+        assert!(our_err && np_err, "Both should reject negative pvals");
+        Ok(())
+    });
+}
+
+#[test]
+fn multinomial_rejects_pval_greater_than_one() {
+    with_fnp_and_numpy(|_py, module, numpy| {
+        let our_rng = module.getattr("random")?.call_method0("default_rng")?;
+        let np_rng = numpy.getattr("random")?.call_method0("default_rng")?;
+        let pvals = vec![1.5, 0.3];
+        let our_err = our_rng
+            .call_method1("multinomial", (10_u64, pvals.clone()))
+            .is_err();
+        let np_err = np_rng.call_method1("multinomial", (10_u64, pvals)).is_err();
+        assert!(our_err && np_err, "Both should reject pval > 1");
+        Ok(())
+    });
+}
+
+#[test]
+fn multinomial_rejects_sum_pvals_minus_last_gt_one() {
+    with_fnp_and_numpy(|_py, module, numpy| {
+        let our_rng = module.getattr("random")?.call_method0("default_rng")?;
+        let np_rng = numpy.getattr("random")?.call_method0("default_rng")?;
+        // sum([:-1]) = 0.7 + 0.5 = 1.2 > 1.0
+        let pvals = vec![0.7, 0.5, 0.1];
+        let our_err = our_rng
+            .call_method1("multinomial", (10_u64, pvals.clone()))
+            .is_err();
+        let np_err = np_rng.call_method1("multinomial", (10_u64, pvals)).is_err();
+        assert!(our_err && np_err, "Both should reject sum(pvals[:-1]) > 1");
+        Ok(())
+    });
+}

@@ -293,3 +293,90 @@ fn argmin_first_occurrence_matches_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+#[test]
+fn argmin_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_argmin_script(
+        r#"
+x = np.float64(5.0)
+fnp_result = fnp.argmin(x)
+np_result = np.argmin(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "argmin scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn argmin_complex() -> Result<(), String> {
+    let script = fnp_argmin_script(
+        r#"
+a = np.array([3+1j, 1-1j, 2+2j], dtype=np.complex128)
+fnp_result = fnp.argmin(a)
+np_result = np.argmin(a)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argmin complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn argmin_with_nan() -> Result<(), String> {
+    let script = fnp_argmin_script(
+        r#"
+a = np.array([1.0, np.nan, 3.0])
+fnp_result = fnp.argmin(a)
+np_result = np.argmin(a)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argmin nan handling should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn argmin_empty_array_raises_valueerror() -> Result<(), String> {
+    let script = fnp_argmin_script(
+        r#"
+empty = np.array([])
+fnp_raised = False
+np_raised = False
+try:
+    fnp.argmin(empty)
+except ValueError:
+    fnp_raised = True
+except Exception:
+    pass
+try:
+    np.argmin(empty)
+except ValueError:
+    np_raised = True
+except Exception:
+    pass
+print(fnp_raised == np_raised == True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argmin of empty array should raise ValueError"
+    );
+    Ok(())
+}

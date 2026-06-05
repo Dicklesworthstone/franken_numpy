@@ -8,11 +8,12 @@
 //! - contiguous_strides: compute C-order strides
 //! - NdLayout operations: as_strided, broadcast_to, is_contiguous
 
-use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_ndarray::{
     MemoryOrder, NdLayout, broadcast_shape, broadcast_shapes, broadcast_strides, can_broadcast,
     contiguous_strides, element_count,
 };
+use std::hint::black_box;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // can_broadcast benchmarks

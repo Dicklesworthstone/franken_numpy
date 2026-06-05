@@ -27,6 +27,7 @@ mod ziggurat;
 const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 const MIX_CONST1: u64 = 0xBF58_476D_1CE4_E5B9;
 const MIX_CONST2: u64 = 0x94D0_49BB_1331_11EB;
+const BETA_TINY_THRESHOLD: f64 = 3e-103;
 
 fn wrap_angle_to_pi(angle: f64) -> f64 {
     (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
@@ -276,6 +277,9 @@ pub const BIT_GENERATOR_STATE_SCHEMA_VERSION: u32 = 1;
 /// Maximum trials for direct binomial sampling (before switching to approximation).
 /// Set to i64::MAX to match the u64-to-i64 boundary in NumPy's implementation.
 const MAX_BINOMIAL_DIRECT_TRIALS: u64 = i64::MAX as u64;
+/// Maximum Poisson lambda accepted by NumPy's Generator before int64 overflow risk.
+/// NumPy computes this as `float(np.iinfo(int64).max) - 10 * sqrt(float(np.iinfo(int64).max))`.
+const POISSON_LAM_MAX: f64 = 9.223_372_006_484_771e18;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RandomRuntimeMode {
@@ -361,6 +365,16 @@ impl std::error::Error for RngConstructorError {}
 pub enum RandomError {
     InvalidUpperBound,
     InvalidParameter,
+    ScaleNegative,
+    ShapeNegative,
+    AlphaNonPositive,
+    BetaNonPositive,
+    DfNonPositive,
+    POutOfRange,
+    NNonPositive,
+    HighMinusLowNegative,
+    MeanNonPositive,
+    LamNonPositive,
 }
 
 impl RandomError {
@@ -368,7 +382,17 @@ impl RandomError {
     pub const fn reason_code(self) -> &'static str {
         match self {
             Self::InvalidUpperBound => "random_upper_bound_rejected",
-            Self::InvalidParameter => "random_invalid_parameter",
+            Self::InvalidParameter
+            | Self::ScaleNegative
+            | Self::ShapeNegative
+            | Self::AlphaNonPositive
+            | Self::BetaNonPositive
+            | Self::DfNonPositive
+            | Self::POutOfRange
+            | Self::NNonPositive
+            | Self::HighMinusLowNegative
+            | Self::MeanNonPositive
+            | Self::LamNonPositive => "random_invalid_parameter",
         }
     }
 }
@@ -381,6 +405,16 @@ impl std::fmt::Display for RandomError {
                 f,
                 "parameter is out of valid bounds (e.g. negative variance or invalid probability)"
             ),
+            Self::ScaleNegative => write!(f, "scale < 0"),
+            Self::ShapeNegative => write!(f, "shape < 0"),
+            Self::AlphaNonPositive => write!(f, "a <= 0"),
+            Self::BetaNonPositive => write!(f, "b <= 0"),
+            Self::DfNonPositive => write!(f, "df <= 0"),
+            Self::POutOfRange => write!(f, "p < 0, p > 1 or p is NaN"),
+            Self::NNonPositive => write!(f, "n <= 0"),
+            Self::HighMinusLowNegative => write!(f, "high - low < 0"),
+            Self::MeanNonPositive => write!(f, "mean <= 0"),
+            Self::LamNonPositive => write!(f, "lam < 0"),
         }
     }
 }
@@ -1985,6 +2019,155 @@ impl RngBackend {
     }
 }
 
+trait ZigguratRngCore {
+    fn ziggurat_next_u64(&mut self) -> u64;
+    fn ziggurat_next_f64(&mut self) -> f64;
+}
+
+macro_rules! impl_ziggurat_rng_core {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl ZigguratRngCore for $ty {
+                #[inline(always)]
+                fn ziggurat_next_u64(&mut self) -> u64 {
+                    self.next_u64()
+                }
+
+                #[inline(always)]
+                fn ziggurat_next_f64(&mut self) -> f64 {
+                    self.next_f64()
+                }
+            }
+        )+
+    };
+}
+
+impl_ziggurat_rng_core!(
+    DeterministicRng,
+    Pcg64Rng,
+    Pcg64DxsmRng,
+    Mt19937Rng,
+    PhiloxRng,
+    Sfc64Rng,
+);
+
+impl ZigguratRngCore for RngBackend {
+    #[inline(always)]
+    fn ziggurat_next_u64(&mut self) -> u64 {
+        self.next_u64()
+    }
+
+    #[inline(always)]
+    fn ziggurat_next_f64(&mut self) -> f64 {
+        self.next_f64()
+    }
+}
+
+#[inline]
+fn random_f64_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
+    (0..size).map(|_| rng.ziggurat_next_f64()).collect()
+}
+
+#[inline]
+fn uniform_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    low: f64,
+    range: f64,
+    size: usize,
+) -> Vec<f64> {
+    (0..size)
+        .map(|_| low + rng.ziggurat_next_f64() * range)
+        .collect()
+}
+
+#[inline]
+fn standard_normal_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
+    (0..size)
+        .map(|_| sample_ziggurat_normal_core(rng))
+        .collect()
+}
+
+#[inline]
+fn normal_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    (0..size)
+        .map(|_| loc + scale * sample_ziggurat_normal_core(rng))
+        .collect()
+}
+
+#[inline]
+fn exponential_from_core<R: ZigguratRngCore>(rng: &mut R, scale: f64, size: usize) -> Vec<f64> {
+    (0..size)
+        .map(|_| scale * sample_ziggurat_exponential_core(rng))
+        .collect()
+}
+
+#[inline(always)]
+fn sample_ziggurat_normal_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) -> f64 {
+    use crate::ziggurat::{
+        ZIGGURAT_NOR_F, ZIGGURAT_NOR_INV_R, ZIGGURAT_NOR_K, ZIGGURAT_NOR_R, ZIGGURAT_NOR_W,
+    };
+    loop {
+        let mut r = rng.ziggurat_next_u64();
+        let idx = (r & 0xFF) as usize;
+        r >>= 8;
+        let sign = r & 0x1;
+        let rabs = (r >> 1) & 0x000F_FFFF_FFFF_FFFF;
+        let x_abs = rabs as f64 * ZIGGURAT_NOR_W[idx];
+        let x = f64::from_bits(x_abs.to_bits() | (sign << 63));
+        if rabs < ZIGGURAT_NOR_K[idx] {
+            return x;
+        }
+        if idx == 0 {
+            loop {
+                let xx = -ZIGGURAT_NOR_INV_R * (-rng.ziggurat_next_f64()).ln_1p();
+                let yy = -(-rng.ziggurat_next_f64()).ln_1p();
+                if yy + yy > xx * xx {
+                    return if (rabs >> 8) & 0x1 != 0 {
+                        -(ZIGGURAT_NOR_R + xx)
+                    } else {
+                        ZIGGURAT_NOR_R + xx
+                    };
+                }
+            }
+        } else {
+            let f_idx = ZIGGURAT_NOR_F[idx];
+            let f_prev = ZIGGURAT_NOR_F[idx - 1];
+            if (f_prev - f_idx) * rng.ziggurat_next_f64() + f_idx < (-0.5 * x * x).exp() {
+                return x;
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn sample_ziggurat_exponential_core<R: ZigguratRngCore + ?Sized>(rng: &mut R) -> f64 {
+    use crate::ziggurat::{ZIGGURAT_EXP_F, ZIGGURAT_EXP_K, ZIGGURAT_EXP_R, ZIGGURAT_EXP_W};
+
+    loop {
+        let mut ri = rng.ziggurat_next_u64();
+        ri >>= 3;
+        let idx = (ri & 0xFF) as usize;
+        ri >>= 8;
+        let x = ri as f64 * ZIGGURAT_EXP_W[idx];
+        if ri < ZIGGURAT_EXP_K[idx] {
+            return x;
+        }
+        if idx == 0 {
+            return ZIGGURAT_EXP_R - (-rng.ziggurat_next_f64()).ln_1p();
+        }
+        let f_idx = ZIGGURAT_EXP_F[idx];
+        let f_prev = ZIGGURAT_EXP_F[idx - 1];
+        if (f_prev - f_idx) * rng.ziggurat_next_f64() + f_idx < (-x).exp() {
+            return x;
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BitGenerator {
     kind: BitGeneratorKind,
@@ -1994,41 +2177,38 @@ pub struct BitGenerator {
 impl BitGenerator {
     pub fn new(kind: BitGeneratorKind, seed: SeedMaterial) -> Result<Self, BitGeneratorError> {
         let rng = match seed {
-            SeedMaterial::None => match kind {
-                BitGeneratorKind::Pcg64 => {
-                    RngBackend::Pcg64(Pcg64Rng::from_u64_seed(DEFAULT_RNG_SEED).map_err(|_| {
-                        BitGeneratorError::InitFailed("PCG64 initialization failed")
-                    })?)
+            SeedMaterial::None => {
+                let seed_sequence = seed_sequence_from_os_entropy().map_err(|_| {
+                    BitGeneratorError::InitFailed("OS entropy unavailable for unseeded generator")
+                })?;
+                match kind {
+                    BitGeneratorKind::Pcg64 => {
+                        RngBackend::Pcg64(Pcg64Rng::from_seed_sequence(&seed_sequence).map_err(
+                            |_| BitGeneratorError::InitFailed("PCG64 initialization failed"),
+                        )?)
+                    }
+                    BitGeneratorKind::Pcg64Dxsm => RngBackend::Pcg64Dxsm(
+                        Pcg64DxsmRng::from_seed_sequence(&seed_sequence).map_err(|_| {
+                            BitGeneratorError::InitFailed("PCG64DXSM initialization failed")
+                        })?,
+                    ),
+                    BitGeneratorKind::Mt19937 => RngBackend::Mt19937(
+                        Mt19937Rng::from_seed_sequence(&seed_sequence).map_err(|_| {
+                            BitGeneratorError::InitFailed("MT19937 initialization failed")
+                        })?,
+                    ),
+                    BitGeneratorKind::Philox => {
+                        RngBackend::Philox(PhiloxRng::from_seed_sequence(&seed_sequence).map_err(
+                            |_| BitGeneratorError::InitFailed("Philox initialization failed"),
+                        )?)
+                    }
+                    BitGeneratorKind::Sfc64 => {
+                        RngBackend::Sfc64(Sfc64Rng::from_seed_sequence(&seed_sequence).map_err(
+                            |_| BitGeneratorError::InitFailed("SFC64 initialization failed"),
+                        )?)
+                    }
                 }
-                BitGeneratorKind::Pcg64Dxsm => {
-                    RngBackend::Pcg64Dxsm(Pcg64DxsmRng::from_u64_seed(DEFAULT_RNG_SEED).map_err(
-                        |_| BitGeneratorError::InitFailed("PCG64DXSM initialization failed"),
-                    )?)
-                }
-                BitGeneratorKind::Mt19937 => {
-                    RngBackend::Mt19937(Mt19937Rng::from_u32_seed(DEFAULT_RNG_SEED as u32))
-                }
-                BitGeneratorKind::Philox => {
-                    let ss = SeedSequence::new(&[
-                        DEFAULT_RNG_SEED as u32,
-                        (DEFAULT_RNG_SEED >> 32) as u32,
-                    ])
-                    .map_err(|_| BitGeneratorError::InitFailed("Philox initialization failed"))?;
-                    RngBackend::Philox(PhiloxRng::from_seed_sequence(&ss).map_err(|_| {
-                        BitGeneratorError::InitFailed("Philox initialization failed")
-                    })?)
-                }
-                BitGeneratorKind::Sfc64 => {
-                    let ss = SeedSequence::new(&[
-                        DEFAULT_RNG_SEED as u32,
-                        (DEFAULT_RNG_SEED >> 32) as u32,
-                    ])
-                    .map_err(|_| BitGeneratorError::InitFailed("SFC64 initialization failed"))?;
-                    RngBackend::Sfc64(Sfc64Rng::from_seed_sequence(&ss).map_err(|_| {
-                        BitGeneratorError::InitFailed("SFC64 initialization failed")
-                    })?)
-                }
-            },
+            }
             SeedMaterial::U64(s) => match kind {
                 BitGeneratorKind::Pcg64 => {
                     RngBackend::Pcg64(Pcg64Rng::from_u64_seed(s).map_err(|_| {
@@ -2517,8 +2697,8 @@ impl RandomState {
     }
 
     pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 {
-            return Err(RandomError::InvalidParameter);
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::ScaleNegative);
         }
         Ok(self
             .standard_normal(size)
@@ -2533,7 +2713,7 @@ impl RandomState {
         sigma: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if sigma < 0.0 {
+        if sigma < 0.0 || (sigma == 0.0 && sigma.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -2556,8 +2736,8 @@ impl RandomState {
     }
 
     pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 {
-            return Err(RandomError::InvalidParameter);
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::ScaleNegative);
         }
         Ok(self
             .standard_exponential(size)
@@ -2567,8 +2747,8 @@ impl RandomState {
     }
 
     pub fn standard_gamma(&mut self, shape: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if shape < 0.0 {
-            return Err(RandomError::InvalidParameter);
+        if shape < 0.0 || (shape == 0.0 && shape.is_sign_negative()) {
+            return Err(RandomError::ShapeNegative);
         }
         Ok((0..size)
             .map(|_| self.legacy_standard_gamma(shape))
@@ -2576,8 +2756,11 @@ impl RandomState {
     }
 
     pub fn gamma(&mut self, shape: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if shape < 0.0 || scale < 0.0 {
-            return Err(RandomError::InvalidParameter);
+        if shape < 0.0 || (shape == 0.0 && shape.is_sign_negative()) {
+            return Err(RandomError::ShapeNegative);
+        }
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::ScaleNegative);
         }
         Ok((0..size)
             .map(|_| scale * self.legacy_standard_gamma(shape))
@@ -2585,8 +2768,47 @@ impl RandomState {
     }
 
     pub fn beta(&mut self, a: f64, b: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if a <= 0.0 || b <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+        if a <= 0.0 {
+            return Err(RandomError::AlphaNonPositive);
+        }
+        if b <= 0.0 {
+            return Err(RandomError::BetaNonPositive);
+        }
+        if a < BETA_TINY_THRESHOLD && b < BETA_TINY_THRESHOLD {
+            return Ok((0..size)
+                .map(|_| {
+                    if (a + b) * self.next_f64() < a {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect());
+        }
+        if a <= 1.0 && b <= 1.0 {
+            return Ok((0..size)
+                .map(|_| {
+                    loop {
+                        let u = self.next_f64();
+                        let v = self.next_f64();
+                        let x = u.powf(1.0 / a);
+                        let y = v.powf(1.0 / b);
+                        let x_plus_y = x + y;
+                        if x_plus_y <= 1.0 && u + v > 0.0 {
+                            if x > 0.0 && y > 0.0 {
+                                return x / x_plus_y;
+                            }
+                            let log_x = u.ln() / a;
+                            let log_y = v.ln() / b;
+                            let delta = log_x - log_y;
+                            if delta > 0.0 {
+                                return (-(-delta).exp().ln_1p()).exp();
+                            }
+                            return (delta - delta.exp().ln_1p()).exp();
+                        }
+                    }
+                })
+                .collect());
         }
         Ok((0..size)
             .map(|_| {
@@ -3306,7 +3528,19 @@ impl Generator {
     /// Mimics `rng.random(size)`.
     #[must_use]
     pub fn random(&mut self, size: usize) -> Vec<f64> {
-        (0..size).map(|_| self.next_f64()).collect()
+        if size == 0 {
+            return Vec::new();
+        }
+
+        self.u32_buf_ready = false;
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => random_f64_from_core(rng, size),
+            RngBackend::Pcg64(rng) => random_f64_from_core(rng, size),
+            RngBackend::Pcg64Dxsm(rng) => random_f64_from_core(rng, size),
+            RngBackend::Mt19937(rng) => random_f64_from_core(rng, size),
+            RngBackend::Philox(rng) => random_f64_from_core(rng, size),
+            RngBackend::Sfc64(rng) => random_f64_from_core(rng, size),
+        }
     }
 
     /// Generate an array of uniform random `float32` values in `[0.0, 1.0)`.
@@ -3350,10 +3584,22 @@ impl Generator {
             return Err(RandomError::InvalidParameter);
         }
         if high < low {
-            return Err(RandomError::InvalidParameter);
+            return Err(RandomError::HighMinusLowNegative);
         }
         let range = high - low;
-        Ok((0..size).map(|_| low + self.next_f64() * range).collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => uniform_from_core(rng, low, range, size),
+            RngBackend::Pcg64(rng) => uniform_from_core(rng, low, range, size),
+            RngBackend::Pcg64Dxsm(rng) => uniform_from_core(rng, low, range, size),
+            RngBackend::Mt19937(rng) => uniform_from_core(rng, low, range, size),
+            RngBackend::Philox(rng) => uniform_from_core(rng, low, range, size),
+            RngBackend::Sfc64(rng) => uniform_from_core(rng, low, range, size),
+        })
     }
 
     /// Generate uniform random floats with NumPy `size` metadata preserved.
@@ -3383,10 +3629,32 @@ impl Generator {
         let off = low as u64;
         // rng is the inclusive upper bound relative to off
         let rng = (high as u64).wrapping_sub(low as u64) - 1;
+        if rng == 0 {
+            return Ok(vec![low; size]);
+        }
         let mut result = Vec::with_capacity(size);
-        for _ in 0..size {
-            let val = (off.wrapping_add(self.numpy_bounded_uint64(rng))) as i64;
-            result.push(val);
+        if rng <= 0xFFFF_FFFE {
+            #[expect(clippy::cast_possible_truncation)]
+            let rng32 = rng as u32;
+            let rng_excl = u64::from(rng32) + 1;
+            let threshold = (u32::MAX - rng32) % (rng32 + 1);
+            for _ in 0..size {
+                let mut m = u64::from(self.next_uint32()) * rng_excl;
+                let mut leftover = m as u32;
+                if u64::from(leftover) < rng_excl {
+                    while leftover < threshold {
+                        m = u64::from(self.next_uint32()) * rng_excl;
+                        leftover = m as u32;
+                    }
+                }
+                let val = (off.wrapping_add(m >> 32)) as i64;
+                result.push(val);
+            }
+        } else {
+            for _ in 0..size {
+                let val = (off.wrapping_add(self.numpy_bounded_uint64(rng))) as i64;
+                result.push(val);
+            }
         }
         Ok(result)
     }
@@ -3454,7 +3722,19 @@ impl Generator {
     /// Mimics `rng.standard_normal(size)`.
     #[must_use]
     pub fn standard_normal(&mut self, size: usize) -> Vec<f64> {
-        (0..size).map(|_| self.sample_ziggurat_normal()).collect()
+        if size == 0 {
+            return Vec::new();
+        }
+
+        self.u32_buf_ready = false;
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Pcg64(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Pcg64Dxsm(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Mt19937(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Philox(rng) => standard_normal_from_core(rng, size),
+            RngBackend::Sfc64(rng) => standard_normal_from_core(rng, size),
+        }
     }
 
     /// Generate standard normal samples with NumPy `size` metadata preserved.
@@ -3473,14 +3753,22 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn normal(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 || scale.is_nan() {
-            return Err(RandomError::InvalidParameter);
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::ScaleNegative);
         }
-        Ok(self
-            .standard_normal(size)
-            .into_iter()
-            .map(|z| loc + scale * z)
-            .collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => normal_from_core(rng, loc, scale, size),
+            RngBackend::Pcg64(rng) => normal_from_core(rng, loc, scale, size),
+            RngBackend::Pcg64Dxsm(rng) => normal_from_core(rng, loc, scale, size),
+            RngBackend::Mt19937(rng) => normal_from_core(rng, loc, scale, size),
+            RngBackend::Philox(rng) => normal_from_core(rng, loc, scale, size),
+            RngBackend::Sfc64(rng) => normal_from_core(rng, loc, scale, size),
+        })
     }
 
     /// Generate normal samples with NumPy `size` metadata preserved.
@@ -3501,12 +3789,22 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn exponential(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 || scale.is_nan() {
-            return Err(RandomError::InvalidParameter);
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::ScaleNegative);
         }
-        Ok((0..size)
-            .map(|_| scale * self.sample_ziggurat_exponential())
-            .collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => exponential_from_core(rng, scale, size),
+            RngBackend::Pcg64(rng) => exponential_from_core(rng, scale, size),
+            RngBackend::Pcg64Dxsm(rng) => exponential_from_core(rng, scale, size),
+            RngBackend::Mt19937(rng) => exponential_from_core(rng, scale, size),
+            RngBackend::Philox(rng) => exponential_from_core(rng, scale, size),
+            RngBackend::Sfc64(rng) => exponential_from_core(rng, scale, size),
+        })
     }
 
     /// Generate standard exponential samples (scale=1).
@@ -3535,8 +3833,11 @@ impl Generator {
         shape_param: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if shape_param <= 0.0 {
+        if shape_param < 0.0 || (shape_param == 0.0 && shape_param.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
+        }
+        if shape_param == 0.0 {
+            return Ok(vec![0.0; size]);
         }
         Ok((0..size).map(|_| self.sample_gamma(shape_param)).collect())
     }
@@ -3574,7 +3875,7 @@ impl Generator {
     /// Uses NumPy's exact algorithms: multiplicative method for lam < 10,
     /// PTRS (Hörmann 1993) for lam >= 10.
     pub fn poisson(&mut self, lam: f64, size: usize) -> Result<Vec<u64>, RandomError> {
-        if !lam.is_finite() || lam < 0.0 {
+        if !(0.0..=POISSON_LAM_MAX).contains(&lam) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size).map(|_| self.sample_poisson_single(lam)).collect())
@@ -4004,10 +4305,12 @@ impl Generator {
         if !replace && size > n {
             return Err(RandomError::InvalidUpperBound);
         }
+        // NumPy accepts probability sums within sqrt(float64 epsilon).
+        let sum_tolerance = f64::EPSILON.sqrt();
         // Validate probabilities are non-negative and sum to ~1.0
         let sum: f64 = p.iter().sum();
         if !sum.is_finite()
-            || (sum - 1.0).abs() > 1e-8
+            || (sum - 1.0).abs() > sum_tolerance
             || p.iter().any(|&v| !v.is_finite() || v < 0.0)
         {
             return Err(RandomError::InvalidUpperBound);
@@ -4136,11 +4439,17 @@ impl Generator {
         scale: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if shape_param <= 0.0 || shape_param.is_nan() {
+        if shape_param < 0.0 || (shape_param == 0.0 && shape_param.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        if scale <= 0.0 || scale.is_nan() {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
+        }
+        if shape_param == 0.0 {
+            if scale.is_nan() || scale.is_infinite() {
+                return Ok(vec![f64::NAN; size]);
+            }
+            return Ok(vec![0.0; size]);
         }
         Ok((0..size)
             .map(|_| self.sample_gamma(shape_param) * scale)
@@ -4154,6 +4463,11 @@ impl Generator {
         }
         if shape_param == 0.0 {
             return 0.0;
+        }
+        if !shape_param.is_finite() {
+            let _ = self.sample_standard_normal_single();
+            let _ = self.next_f64();
+            return shape_param;
         }
         if shape_param < 1.0 {
             // NumPy's exact algorithm for shape < 1 from distributions.c:
@@ -4204,73 +4518,60 @@ impl Generator {
     /// Bit layout from a single u64: bits 0..7 = rectangle index,
     /// bit 8 = sign, bits 9..60 = rectangle position (rabs, 52 bits).
     fn sample_ziggurat_normal(&mut self) -> f64 {
-        use crate::ziggurat::*;
-        loop {
-            let mut r = self.next_u64();
-            let idx = (r & 0xFF) as usize;
-            r >>= 8;
-            let sign = r & 0x1;
-            let rabs = (r >> 1) & 0x000F_FFFF_FFFF_FFFF;
-            let mut x = rabs as f64 * ZIGGURAT_NOR_W[idx];
-            if (sign & 0x1) != 0 {
-                x = -x;
-            }
-            if rabs < ZIGGURAT_NOR_K[idx] {
-                return x;
-            }
-            if idx == 0 {
-                // Tail: Marsaglia's method using log1p(-U) to avoid log(0)
-                loop {
-                    let xx = -ZIGGURAT_NOR_INV_R * (-self.next_f64()).ln_1p();
-                    let yy = -(-self.next_f64()).ln_1p();
-                    if yy + yy > xx * xx {
-                        return if (rabs >> 8) & 0x1 != 0 {
-                            -(ZIGGURAT_NOR_R + xx)
-                        } else {
-                            ZIGGURAT_NOR_R + xx
-                        };
-                    }
-                }
-            } else {
-                let f_idx = ZIGGURAT_NOR_F[idx];
-                let f_prev = ZIGGURAT_NOR_F[idx - 1];
-                if (f_prev - f_idx) * self.next_f64() + f_idx < (-0.5 * x * x).exp() {
-                    return x;
-                }
-            }
-        }
+        self.u32_buf_ready = false;
+        sample_ziggurat_normal_core(&mut self.bit_generator.rng)
     }
 
     /// Ziggurat method for standard exponential, matching NumPy's
     /// `random_standard_exponential` in distributions.c exactly.
     fn sample_ziggurat_exponential(&mut self) -> f64 {
-        use crate::ziggurat::*;
-        loop {
-            let mut ri = self.next_u64();
-            ri >>= 3;
-            let idx = (ri & 0xFF) as usize;
-            ri >>= 8;
-            let x = ri as f64 * ZIGGURAT_EXP_W[idx];
-            if ri < ZIGGURAT_EXP_K[idx] {
-                return x;
-            }
-            // Tail: use log1p(-U) to avoid log(0), matching NumPy GH-13361
-            if idx == 0 {
-                return ZIGGURAT_EXP_R - (-self.next_f64()).ln_1p();
-            }
-            // Wedge test: (F[idx-1] - F[idx]) * U + F[idx] < exp(-x)
-            let f_idx = ZIGGURAT_EXP_F[idx];
-            let f_prev = ZIGGURAT_EXP_F[idx - 1];
-            if (f_prev - f_idx) * self.next_f64() + f_idx < (-x).exp() {
-                return x;
-            }
-        }
+        self.u32_buf_ready = false;
+        sample_ziggurat_exponential_core(&mut self.bit_generator.rng)
     }
 
     /// Beta distribution via gamma sampling.
     pub fn beta(&mut self, a: f64, b: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if a <= 0.0 || b <= 0.0 {
-            return Err(RandomError::InvalidParameter);
+        if a <= 0.0 {
+            return Err(RandomError::AlphaNonPositive);
+        }
+        if b <= 0.0 {
+            return Err(RandomError::BetaNonPositive);
+        }
+        if a < BETA_TINY_THRESHOLD && b < BETA_TINY_THRESHOLD {
+            return Ok((0..size)
+                .map(|_| {
+                    if (a + b) * self.next_f64() < a {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect());
+        }
+        if a <= 1.0 && b <= 1.0 {
+            return Ok((0..size)
+                .map(|_| {
+                    loop {
+                        let u = self.next_f64();
+                        let v = self.next_f64();
+                        let x = u.powf(1.0 / a);
+                        let y = v.powf(1.0 / b);
+                        let x_plus_y = x + y;
+                        if x_plus_y <= 1.0 && u + v > 0.0 {
+                            if x > 0.0 && y > 0.0 {
+                                return x / x_plus_y;
+                            }
+                            let log_x = u.ln() / a;
+                            let log_y = v.ln() / b;
+                            let delta = log_x - log_y;
+                            if delta > 0.0 {
+                                return (-(-delta).exp().ln_1p()).exp();
+                            }
+                            return (delta - delta.exp().ln_1p()).exp();
+                        }
+                    }
+                })
+                .collect());
         }
         Ok((0..size)
             .map(|_| {
@@ -4293,7 +4594,12 @@ impl Generator {
             return Err(RandomError::InvalidParameter);
         }
         if p == 1.0 {
-            return Ok(vec![1; size]);
+            return Ok((0..size)
+                .map(|_| {
+                    let _ = self.next_f64();
+                    1
+                })
+                .collect());
         }
         Ok((0..size)
             .map(|_| {
@@ -4330,7 +4636,7 @@ impl Generator {
         sigma: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if sigma < 0.0 || sigma.is_nan() {
+        if sigma < 0.0 || (sigma == 0.0 && sigma.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -4344,6 +4650,9 @@ impl Generator {
     /// Chi-squared distribution with df degrees of freedom.
     pub fn chisquare(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
         // Chi-squared is gamma(df/2, 2)
+        if df <= 0.0 {
+            return Err(RandomError::InvalidParameter);
+        }
         self.gamma(df / 2.0, 2.0, size)
     }
 
@@ -4369,9 +4678,6 @@ impl Generator {
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
         if left > mode || mode > right || left >= right {
-            return Err(RandomError::InvalidParameter);
-        }
-        if !left.is_finite() || !mode.is_finite() || !right.is_finite() {
             return Err(RandomError::InvalidParameter);
         }
         let base = right - left;
@@ -4415,7 +4721,10 @@ impl Generator {
         if loc.len() != loc_count || scale.len() != scale_count {
             return Err(RandomError::InvalidParameter);
         }
-        if scale.iter().any(|&value| value < 0.0 || value.is_nan()) {
+        if scale
+            .iter()
+            .any(|&value| value < 0.0 || (value == 0.0 && value.is_sign_negative()))
+        {
             return Err(RandomError::InvalidParameter);
         }
 
@@ -4456,7 +4765,7 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn gumbel(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 || scale.is_nan() {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -4473,8 +4782,11 @@ impl Generator {
 
     /// Weibull distribution (matching NumPy: uses standard_exponential).
     pub fn weibull(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if a <= 0.0 {
+        if a < 0.0 || (a == 0.0 && a.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
+        }
+        if a == 0.0 {
+            return Ok(vec![0.0; size]);
         }
         Ok((0..size)
             .map(|_| self.sample_ziggurat_exponential().powf(1.0 / a))
@@ -4518,7 +4830,7 @@ impl Generator {
     /// Dirichlet distribution (np.random.dirichlet).
     /// Returns `size` samples, each a vector of length `alpha.len()`.
     pub fn dirichlet(&mut self, alpha: &[f64], size: usize) -> Result<Vec<Vec<f64>>, RandomError> {
-        if alpha.iter().any(|&a| a.is_nan() || a < 0.0) {
+        if alpha.iter().any(|&a| a < 0.0) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -4570,7 +4882,7 @@ impl Generator {
         p: f64,
         size: usize,
     ) -> Result<Vec<u64>, RandomError> {
-        if n <= 0.0 || n.is_nan() || p.is_nan() || p <= 0.0 || p > 1.0 {
+        if !n.is_finite() || n <= 0.0 || p.is_nan() || p <= 0.0 || p > 1.0 {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -4705,14 +5017,18 @@ impl Generator {
     }
 
     /// Student's t-distribution with `df` degrees of freedom.
-    pub fn standard_t(&mut self, df: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    /// Returns `Err(InvalidParameter)` if `df <= 0` (including -0.0).
+    pub fn standard_t(&mut self, df: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if df <= 0.0 || df.is_sign_negative() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let z = self.sample_standard_normal_single();
                 let chi2 = self.sample_gamma(df / 2.0) * 2.0;
                 z / (chi2 / df).sqrt()
             })
-            .collect()
+            .collect())
     }
 
     /// Non-central chi-squared distribution (scipy.stats.ncx2).
@@ -4726,23 +5042,29 @@ impl Generator {
         nonc: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if df <= 0.0 || nonc < 0.0 {
+        if df <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
-            .map(|_| {
-                if df > 1.0 {
-                    // X ~ chi²(df-1) + (Z + sqrt(nonc))²
-                    let chi2_part = self.sample_gamma((df - 1.0) / 2.0) * 2.0;
-                    let z = self.sample_standard_normal_single() + nonc.sqrt();
-                    chi2_part + z * z
-                } else {
-                    // df <= 1.0: use Poisson mixture
-                    let i = self.sample_poisson_single(nonc / 2.0);
-                    self.sample_gamma(df / 2.0 + i as f64) * 2.0
-                }
-            })
+            .map(|_| self.sample_noncentral_chisquare(df, nonc))
             .collect())
+    }
+
+    fn sample_noncentral_chisquare(&mut self, df: f64, nonc: f64) -> f64 {
+        if nonc.is_nan() {
+            return f64::NAN;
+        }
+        if nonc == 0.0 {
+            return self.sample_gamma(df / 2.0) * 2.0;
+        }
+        if df > 1.0 {
+            let chi2_part = self.sample_gamma((df - 1.0) / 2.0) * 2.0;
+            let z = self.sample_standard_normal_single() + nonc.sqrt();
+            chi2_part + z * z
+        } else {
+            let i = self.sample_poisson_single(nonc / 2.0);
+            self.sample_gamma(df / 2.0 + i as f64) * 2.0
+        }
     }
 
     /// Non-central F-distribution (scipy.stats.ncf).
@@ -4756,21 +5078,12 @@ impl Generator {
         nonc: f64,
         size: usize,
     ) -> Result<Vec<f64>, RandomError> {
-        if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 {
+        if dfnum <= 0.0 || dfden <= 0.0 || nonc < 0.0 || (nonc == 0.0 && nonc.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
             .map(|_| {
-                let nc_chi2 = {
-                    if dfnum > 1.0 {
-                        let chi2_part = self.sample_gamma((dfnum - 1.0) / 2.0) * 2.0;
-                        let z = self.sample_standard_normal_single() + nonc.sqrt();
-                        chi2_part + z * z
-                    } else {
-                        let i = self.sample_poisson_single(nonc / 2.0);
-                        self.sample_gamma(dfnum / 2.0 + i as f64) * 2.0
-                    }
-                };
+                let nc_chi2 = self.sample_noncentral_chisquare(dfnum, nonc);
                 let chi2 = self.sample_gamma(dfden / 2.0) * 2.0;
                 (nc_chi2 / dfnum) / (chi2 / dfden)
             })
@@ -4781,7 +5094,7 @@ impl Generator {
     ///
     /// NumPy requires `a > 0`.
     pub fn power(&mut self, a: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if a <= 0.0 || a.is_nan() {
+        if a <= 0.0 {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -4793,7 +5106,7 @@ impl Generator {
     ///
     /// NumPy requires `kappa >= 0`.
     pub fn vonmises(&mut self, mu: f64, kappa: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if kappa < 0.0 {
+        if kappa < 0.0 || (kappa == 0.0 && kappa.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         if kappa.is_nan() {
@@ -4836,7 +5149,7 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn rayleigh(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 || scale.is_nan() {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -4856,7 +5169,7 @@ impl Generator {
 
     /// Logistic distribution via inverse-CDF.
     pub fn logistic(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        if scale < 0.0 {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
         Ok((0..size)
@@ -5061,8 +5374,12 @@ impl Generator {
     }
 
     /// Wald (inverse Gaussian) distribution (matching NumPy's algorithm).
-    pub fn wald(&mut self, mean: f64, scale: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    /// Returns `Err(InvalidParameter)` if `mean <= 0` or `scale <= 0` (including -0.0).
+    pub fn wald(&mut self, mean: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if mean <= 0.0 || mean.is_sign_negative() || scale <= 0.0 || scale.is_sign_negative() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let y = self.sample_ziggurat_normal();
                 let y = mean * y * y;
@@ -5075,12 +5392,20 @@ impl Generator {
                     mean * mean / x
                 }
             })
-            .collect()
+            .collect())
     }
 
     /// Logarithmic (log-series) distribution (matching NumPy's algorithm).
     pub fn logseries(&mut self, p: f64, size: usize) -> Result<Vec<u64>, RandomError> {
-        if p <= 0.0 || p >= 1.0 {
+        if p == 0.0 {
+            return Ok((0..size)
+                .map(|_| {
+                    let _ = self.next_f64();
+                    1
+                })
+                .collect());
+        }
+        if !(0.0..1.0).contains(&p) {
             return Err(RandomError::InvalidParameter);
         }
         let r = (-p).ln_1p(); // log1p(-p) = ln(1 - p)
@@ -5114,15 +5439,22 @@ impl Generator {
     /// PDF: sqrt(2/pi) * x^2 * exp(-x^2 / (2*scale^2)) / scale^3
     /// Generated via: scale * sqrt(chi2(3)) = scale * sqrt(X1^2 + X2^2 + X3^2)
     /// where X1, X2, X3 are independent standard normals.
-    pub fn maxwell(&mut self, scale: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    /// Maxwell distribution with the given `scale`.
+    /// Returns `Err(InvalidParameter)` if `scale < 0` (including `-0.0`),
+    /// matching `scipy.stats.maxwell`, which treats `scale` as non-negative
+    /// (`scale == 0` collapses to a point mass at 0).
+    pub fn maxwell(&mut self, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let x1 = self.sample_standard_normal_single();
                 let x2 = self.sample_standard_normal_single();
                 let x3 = self.sample_standard_normal_single();
                 scale * (x1 * x1 + x2 * x2 + x3 * x3).sqrt()
             })
-            .collect()
+            .collect())
     }
 
     /// Multivariate hypergeometric distribution.
@@ -5253,10 +5585,18 @@ impl Generator {
 
     /// Half-normal distribution: |X| where X ~ N(0, sigma^2).
     /// Equivalent to the folded normal with mean 0.
-    pub fn halfnormal(&mut self, sigma: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    /// Half-normal distribution with the given `sigma` (scale).
+    /// Returns `Err(InvalidParameter)` if `sigma < 0` (including `-0.0`).
+    /// Without this guard a negative `sigma` is silently swallowed by the
+    /// `.abs()` and produces the same samples as `|sigma|`; `scipy.stats.halfnorm`
+    /// rejects negative scale.
+    pub fn halfnormal(&mut self, sigma: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if sigma < 0.0 || (sigma == 0.0 && sigma.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| (self.sample_standard_normal_single() * sigma).abs())
-            .collect()
+            .collect())
     }
 
     /// Truncated normal distribution on `[low, high]` using rejection sampling.
@@ -5285,20 +5625,32 @@ impl Generator {
     /// Lomax (Pareto Type II) distribution with shape `c` and scale 1.
     /// If X ~ Pareto(c), then X - 1 ~ Lomax(c).
     /// PDF: c / (1 + x)^(c+1) for x >= 0.
-    pub fn lomax(&mut self, c: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    pub fn lomax(&mut self, c: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        // `c` is a strictly-positive shape parameter; `c <= 0` makes the inverse
+        // CDF degenerate (`(1-u)^(-1/c)` blows up). `scipy.stats.lomax` rejects
+        // `c <= 0`. (`c <= 0.0` already catches `-0.0`.)
+        if c <= 0.0 || c.is_sign_negative() {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let u = self.next_f64();
                 (1.0 - u).powf(-1.0 / c) - 1.0
             })
-            .collect()
+            .collect())
     }
 
     /// Levy distribution with location `loc` and scale `c`.
     /// Uses the inverse CDF method: X = loc + c / (Phi^{-1}(1-U/2))^2
     /// where Phi^{-1} is the standard normal quantile.
-    pub fn levy(&mut self, loc: f64, c: f64, size: usize) -> Vec<f64> {
-        (0..size)
+    /// Lévy distribution with location `loc` and scale `c`.
+    /// Returns `Err(InvalidParameter)` if `c < 0` (including `-0.0`); `scipy.stats.levy`
+    /// treats the scale as non-negative (`c == 0` collapses to a point mass at `loc`).
+    pub fn levy(&mut self, loc: f64, c: f64, size: usize) -> Result<Vec<f64>, RandomError> {
+        if c < 0.0 || (c == 0.0 && c.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        Ok((0..size)
             .map(|_| {
                 let z = self.sample_standard_normal_single().abs();
                 if z < 1e-15 {
@@ -5307,7 +5659,7 @@ impl Generator {
                     loc + c / (z * z)
                 }
             })
-            .collect()
+            .collect())
     }
 }
 
@@ -5347,11 +5699,38 @@ fn seed_material_to_u64(words: &[u32]) -> u64 {
     mixed
 }
 
+fn seed_sequence_from_os_entropy() -> Result<SeedSequence, SeedSequenceError> {
+    let words = os_entropy_u32_words(DEFAULT_SEED_SEQUENCE_POOL_SIZE)?;
+    SeedSequence::new(&words)
+}
+
+fn os_entropy_u32_words(words: usize) -> Result<Vec<u32>, SeedSequenceError> {
+    let byte_len = words
+        .checked_mul(std::mem::size_of::<u32>())
+        .ok_or(SeedSequenceError::GenerateStateContractViolation)?;
+    let mut bytes = vec![0_u8; byte_len];
+    getrandom::fill(&mut bytes).map_err(|_| SeedSequenceError::GenerateStateContractViolation)?;
+
+    Ok(bytes
+        .chunks_exact(std::mem::size_of::<u32>())
+        .map(|chunk| {
+            let mut word = [0_u8; std::mem::size_of::<u32>()];
+            word.copy_from_slice(chunk);
+            u32::from_ne_bytes(word)
+        })
+        .collect())
+}
+
 fn deterministic_rng_from_seed_material(
     seed: SeedMaterial,
 ) -> Result<DeterministicRng, RngConstructorError> {
     match seed {
-        SeedMaterial::None => Ok(DeterministicRng::new(DEFAULT_RNG_SEED)),
+        SeedMaterial::None => {
+            let seed_sequence = seed_sequence_from_os_entropy()
+                .map_err(|_| RngConstructorError::SeedMetadataInvalid)?;
+            rng_from_seed_sequence(&seed_sequence)
+                .map_err(|_| RngConstructorError::SeedMetadataInvalid)
+        }
         SeedMaterial::U64(value) => Ok(DeterministicRng::new(value)),
         SeedMaterial::U32Words(words) => {
             if words.is_empty() {
@@ -5471,14 +5850,17 @@ impl RandomLogRecord {
 mod tests {
     use std::process::Command;
 
+    use sha2::{Digest, Sha256};
+
     use super::{
         BIT_GENERATOR_STATE_SCHEMA_VERSION, BitGenerator, BitGeneratorError, BitGeneratorKind,
         BitGeneratorState, DEFAULT_RNG_SEED, DeterministicRng, Generator, GeneratorPicklePayload,
         MAX_RNG_JUMP_OPERATIONS, MAX_SEED_SEQUENCE_CHILDREN, MAX_SEED_SEQUENCE_WORDS, Mt19937,
-        Mt19937Rng, Pcg64, Pcg64DxsmRng, Pcg64Rng, Philox, RANDOM_PACKET_REASON_CODES,
-        RNG_CORE_REASON_CODES, RandomError, RandomLogRecord, RandomPolicyError, RandomRuntimeMode,
-        RandomState, SeedMaterial, SeedSequence, SeedSequenceError, SeedSequenceSnapshot, Sfc64,
-        default_rng, generator_from_seed_sequence, validate_rng_policy_metadata,
+        Mt19937Rng, POISSON_LAM_MAX, Pcg64, Pcg64DxsmRng, Pcg64Rng, Philox,
+        RANDOM_PACKET_REASON_CODES, RNG_CORE_REASON_CODES, RandomError, RandomLogRecord,
+        RandomPolicyError, RandomRuntimeMode, RandomState, SeedMaterial, SeedSequence,
+        SeedSequenceError, SeedSequenceSnapshot, Sfc64, default_rng, generator_from_seed_sequence,
+        validate_rng_policy_metadata,
     };
 
     fn packet007_artifacts() -> Vec<String> {
@@ -6165,11 +6547,26 @@ for child in rng.spawn(n_children):
 
     #[test]
     fn default_rng_constructor_normalizes_seed_material() {
-        let mut from_none = default_rng(SeedMaterial::None).expect("default constructor");
+        let first_unseeded = default_rng(SeedMaterial::None)
+            .expect("first unseeded default constructor")
+            .state();
+        let second_unseeded = default_rng(SeedMaterial::None)
+            .expect("second unseeded default constructor")
+            .state();
+        assert_ne!(
+            first_unseeded, second_unseeded,
+            "unseeded default_rng must source fresh OS entropy"
+        );
+
         let mut from_default_seed =
             default_rng(SeedMaterial::U64(DEFAULT_RNG_SEED)).expect("explicit default seed");
+        let mut from_default_seed_again =
+            default_rng(SeedMaterial::U64(DEFAULT_RNG_SEED)).expect("explicit default seed");
         for _ in 0..64 {
-            assert_eq!(from_none.next_u64(), from_default_seed.next_u64());
+            assert_eq!(
+                from_default_seed.next_u64(),
+                from_default_seed_again.next_u64()
+            );
         }
 
         let words = vec![0x1234_5678, 0x90AB_CDEF, 0x4444_9999];
@@ -6365,6 +6762,23 @@ for child in rng.spawn(n_children):
         );
         assert!(zero_shape.standard_gamma(-1.0, 1).is_err());
         assert!(zero_shape.gamma(1.0, -1.0, 1).is_err());
+    }
+
+    #[test]
+    fn random_state_legacy_negative_zero_parameters_match_numpy() {
+        let mut state = RandomState::new(SeedMaterial::U64(42)).expect("state");
+        assert_eq!(state.normal(0.0, -0.0, 1), Err(RandomError::ScaleNegative));
+        assert_eq!(
+            state.lognormal(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+        assert_eq!(state.exponential(-0.0, 1), Err(RandomError::ScaleNegative));
+        assert_eq!(
+            state.standard_gamma(-0.0, 1),
+            Err(RandomError::ShapeNegative)
+        );
+        assert_eq!(state.gamma(-0.0, 1.0, 1), Err(RandomError::ShapeNegative));
+        assert_eq!(state.gamma(1.0, -0.0, 1), Err(RandomError::ScaleNegative));
     }
 
     #[test]
@@ -6578,7 +6992,7 @@ for child in rng.spawn(n_children):
         let mut invalid = RandomState::new(SeedMaterial::U64(42)).expect("invalid");
         assert_eq!(
             invalid.beta(0.0, 1.0, 1),
-            Err(RandomError::InvalidParameter)
+            Err(RandomError::AlphaNonPositive)
         );
         let after: Vec<u64> = (0..3).map(|_| invalid.random_interval(9)).collect();
         assert_eq!(after, vec![6, 3, 7]);
@@ -6592,6 +7006,60 @@ for child in rng.spawn(n_children):
         assert!(nan_b.beta(1.0, f64::NAN, 1).expect("nan_b")[0].is_nan());
         let after: Vec<u64> = (0..3).map(|_| nan_b.random_interval(9)).collect();
         assert_eq!(after, vec![7, 4, 3]);
+    }
+
+    #[test]
+    fn random_state_legacy_beta_tiny_shapes_use_numpy_bernoulli_branch() {
+        let a = 1e-120;
+        let b = 2e-120;
+        let mut expected_rng = RandomState::new(SeedMaterial::U64(42)).expect("expected");
+        let expected: Vec<f64> = (0..8)
+            .map(|_| {
+                if (a + b) * expected_rng.next_f64() < a {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let expected_after: Vec<u64> = (0..5).map(|_| expected_rng.random_interval(9)).collect();
+
+        let mut rng = RandomState::new(SeedMaterial::U64(42)).expect("actual");
+        let actual = rng.beta(a, b, 8).expect("tiny beta");
+        let actual_after: Vec<u64> = (0..5).map(|_| rng.random_interval(9)).collect();
+
+        assert_eq!(actual, expected);
+        assert!(actual.iter().all(|&value| value == 0.0 || value == 1.0));
+        assert_eq!(actual_after, expected_after);
+    }
+
+    #[test]
+    fn random_state_legacy_beta_johnk_small_shapes_match_numpy_oracle() {
+        let mut rng = RandomState::new(SeedMaterial::U64(12345)).expect("rng");
+        let values = rng.beta(0.5, 0.75, 10).expect("beta johnk");
+        let expected = [
+            0.219_143_446_991_956_87,
+            0.391_455_611_433_897_8,
+            0.001_392_874_726_238_171_3,
+            0.135_249_976_513_749_2,
+            0.493_972_440_786_974_55,
+            0.227_339_571_562_641_28,
+            0.868_309_558_791_001_6,
+            0.000_969_146_594_151_747_9,
+            0.991_280_379_770_157_1,
+            0.362_709_863_835_021_74,
+        ];
+        assert_f64_seq("random_state_beta_johnk", &values, &expected);
+
+        let after: Vec<f64> = (0..5).map(|_| rng.next_f64()).collect();
+        let expected_after = [
+            0.596_366_010_419_380_5,
+            0.051_957_545_102_533_59,
+            0.895_089_528_053_921_2,
+            0.728_266_180_327_117_3,
+            0.818_350_011_389_914_5,
+        ];
+        assert_f64_seq("random_state_beta_johnk_after", &after, &expected_after);
     }
 
     #[test]
@@ -8382,14 +8850,14 @@ for child in rng.spawn(n_children):
         let mut scalar_rng = test_generator();
         let scalar = scalar_rng.random_shaped(None).unwrap();
         assert!(scalar.is_scalar());
-        assert_eq!(scalar.shape(), &[]);
+        assert!(scalar.shape().is_empty());
         assert_eq!(scalar.len(), 1);
         assert!(scalar.scalar_value().is_some());
 
         let mut zero_dim_rng = test_generator();
         let zero_dim = zero_dim_rng.random_shaped(Some(&[])).unwrap();
         assert!(!zero_dim.is_scalar());
-        assert_eq!(zero_dim.shape(), &[]);
+        assert!(zero_dim.shape().is_empty());
         assert_eq!(zero_dim.len(), 1);
         assert_eq!(scalar.values(), zero_dim.values());
     }
@@ -8490,6 +8958,42 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn integers_small_range_batch_preserves_scalar_stream_and_digest() -> Result<(), RandomError> {
+        let size = 1024;
+        let low = 0i64;
+        let high = 100i64;
+        let off = low as u64;
+        let relative_bound = (high as u64).wrapping_sub(low as u64) - 1;
+
+        let mut batch_rng = test_generator();
+        let batch = batch_rng.integers(low, high, size)?;
+
+        let mut scalar_rng = test_generator();
+        let scalar: Vec<i64> = (0..size)
+            .map(|_| (off.wrapping_add(scalar_rng.numpy_bounded_uint64(relative_bound))) as i64)
+            .collect();
+
+        assert_eq!(batch, scalar);
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "41fda33a9fcbbefeff9cf1756cfe9e78bb00813c9c8718a782e8d119bc20eee7"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn standard_normal_basic_stats() {
         let mut rng = test_generator();
         let vals = rng.standard_normal(10000);
@@ -8497,6 +9001,205 @@ for child in rng.spawn(n_children):
         let mean: f64 = vals.iter().sum::<f64>() / vals.len() as f64;
         // Mean should be close to 0 with 10000 samples
         assert!(mean.abs() < 0.1, "mean was {mean}");
+    }
+
+    #[test]
+    fn random_specialized_backend_preserves_scalar_stream_and_digest() {
+        let size = 1024;
+        let mut batch_rng = test_generator();
+        let mut scalar_rng = test_generator();
+
+        assert_eq!(
+            batch_rng.next_f32().to_bits(),
+            scalar_rng.next_f32().to_bits()
+        );
+
+        let batch = batch_rng.random(size);
+        let scalar: Vec<f64> = (0..size).map(|_| scalar_rng.next_f64()).collect();
+
+        for (index, (actual, expected)) in batch.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "random bit pattern changed at index {index}"
+            );
+        }
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "412084c3862b80c4d4a6623d9f55553b9b78f2f711798fa5b0d2a379a5a01777"
+        );
+    }
+
+    #[test]
+    fn uniform_specialized_backend_preserves_scalar_stream_and_digest() {
+        let size = 1024;
+        let low = -3.5;
+        let high = 7.25;
+        let range = high - low;
+        let mut batch_rng = test_generator();
+        let mut scalar_rng = test_generator();
+
+        assert_eq!(
+            batch_rng.next_f32().to_bits(),
+            scalar_rng.next_f32().to_bits()
+        );
+
+        let batch = batch_rng.uniform(low, high, size).unwrap();
+        let scalar: Vec<f64> = (0..size)
+            .map(|_| low + scalar_rng.next_f64() * range)
+            .collect();
+
+        for (index, (actual, expected)) in batch.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "uniform bit pattern changed at index {index}"
+            );
+        }
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "9910a06cf85554039f5efa501e18e9ccb27270a3ebd2adfa93eeddc3cd503d61"
+        );
+    }
+
+    #[test]
+    fn exponential_specialized_backend_preserves_scalar_stream_and_digest() {
+        let size = 1024;
+        let scale = 2.5;
+        let mut batch_rng = test_generator();
+        let mut scalar_rng = test_generator();
+
+        assert_eq!(
+            batch_rng.next_f32().to_bits(),
+            scalar_rng.next_f32().to_bits()
+        );
+
+        let batch = batch_rng.exponential(scale, size).unwrap();
+        let scalar: Vec<f64> = (0..size)
+            .map(|_| scale * scalar_rng.sample_ziggurat_exponential())
+            .collect();
+
+        for (index, (actual, expected)) in batch.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "exponential bit pattern changed at index {index}"
+            );
+        }
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "60c18746a30dc8bf7d9ed944f6ffc21e36a9d381921a652afa07b35c871e09f3"
+        );
+    }
+
+    #[test]
+    fn standard_normal_specialized_backend_preserves_stream_and_digest() {
+        let size = 1024;
+        let mut batch_rng = test_generator();
+        let batch = batch_rng.standard_normal(size);
+
+        let mut scalar_rng = test_generator();
+        let scalar: Vec<f64> = (0..size)
+            .map(|_| scalar_rng.sample_ziggurat_normal())
+            .collect();
+
+        for (index, (actual, expected)) in batch.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "standard_normal bit pattern changed at index {index}"
+            );
+        }
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "406ce26ec3aeefada7e2250f16d24a89361c1da2041c6775599be394008e7e5f"
+        );
+    }
+
+    #[test]
+    fn normal_specialized_backend_preserves_scalar_stream_and_digest() {
+        let size = 1024;
+        let loc = 5.0;
+        let scale = 2.0;
+        let mut batch_rng = test_generator();
+        let batch = batch_rng.normal(loc, scale, size).unwrap();
+
+        let mut scalar_rng = test_generator();
+        let scalar: Vec<f64> = (0..size)
+            .map(|_| loc + scale * scalar_rng.sample_ziggurat_normal())
+            .collect();
+
+        for (index, (actual, expected)) in batch.iter().zip(&scalar).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "normal bit pattern changed at index {index}"
+            );
+        }
+        assert_eq!(batch_rng.random(8), scalar_rng.random(8));
+
+        let mut digest = Sha256::new();
+        for value in &batch {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            use std::fmt::Write as _;
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "611fd0b80d38e8a8efcc7bf3e5f390c745f73ce62b6efd5b349e63ae68bc7bbe"
+        );
     }
 
     #[test]
@@ -8508,11 +9211,40 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn normal_scale_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.normal(2.0, 0.0, 3).unwrap(), vec![2.0; 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.normal(0.0, -0.0, 1),
+            Err(RandomError::ScaleNegative)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.normal(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
     fn exponential_positive() {
         let mut rng = test_generator();
         let vals = rng.exponential(1.0, 100).unwrap();
         assert_eq!(vals.len(), 100);
         assert!(vals.iter().all(|&v| v > 0.0));
+    }
+
+    #[test]
+    fn exponential_scale_edge_cases_match_numpy() {
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.exponential(-0.0, 1),
+            Err(RandomError::ScaleNegative)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.exponential(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
     }
 
     #[test]
@@ -8572,6 +9304,18 @@ for child in rng.spawn(n_children):
         );
         assert_eq!(
             rng.poisson(f64::NEG_INFINITY, 1),
+            Err(RandomError::InvalidParameter)
+        );
+    }
+
+    #[test]
+    fn poisson_rejects_lambda_above_numpy_ceiling() {
+        let mut allowed = test_generator();
+        assert!(allowed.poisson(POISSON_LAM_MAX, 0).unwrap().is_empty());
+
+        let mut too_large = test_generator();
+        assert_eq!(
+            too_large.poisson(i64::MAX as f64, 0),
             Err(RandomError::InvalidParameter)
         );
     }
@@ -8737,6 +9481,67 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn gamma_parameter_edge_cases_match_numpy() {
+        let mut zero_shape = test_generator();
+        assert_eq!(zero_shape.gamma(0.0, 1.0, 3).unwrap(), vec![0.0; 3]);
+
+        let mut zero_scale = test_generator();
+        assert_eq!(zero_scale.gamma(1.0, 0.0, 3).unwrap(), vec![0.0; 3]);
+
+        let mut negative_zero_shape = test_generator();
+        assert_eq!(
+            negative_zero_shape.gamma(-0.0, 1.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut negative_zero_scale = test_generator();
+        assert_eq!(
+            negative_zero_scale.gamma(1.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan_shape = test_generator();
+        let nan_shape_values = nan_shape.gamma(f64::NAN, 1.0, 3).unwrap();
+        assert!(nan_shape_values.iter().all(|value| value.is_nan()));
+
+        let mut nan_scale = test_generator();
+        let nan_scale_values = nan_scale.gamma(1.0, f64::NAN, 3).unwrap();
+        assert!(nan_scale_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite_shape = test_generator();
+        assert_eq!(
+            infinite_shape.gamma(f64::INFINITY, 1.0, 3).unwrap(),
+            vec![f64::INFINITY; 3]
+        );
+
+        let mut infinite_scale = test_generator();
+        assert_eq!(
+            infinite_scale.gamma(1.0, f64::INFINITY, 3).unwrap(),
+            vec![f64::INFINITY; 3]
+        );
+
+        let mut zero_shape_infinite_scale = test_generator();
+        let zero_shape_infinite_scale_values = zero_shape_infinite_scale
+            .gamma(0.0, f64::INFINITY, 3)
+            .unwrap();
+        assert!(
+            zero_shape_infinite_scale_values
+                .iter()
+                .all(|value| value.is_nan())
+        );
+
+        let mut infinite_shape_zero_scale = test_generator();
+        let infinite_shape_zero_scale_values = infinite_shape_zero_scale
+            .gamma(f64::INFINITY, 0.0, 3)
+            .unwrap();
+        assert!(
+            infinite_shape_zero_scale_values
+                .iter()
+                .all(|value| value.is_nan())
+        );
+    }
+
+    #[test]
     fn beta_basic() {
         let mut rng = test_generator();
         let samples = rng.beta(2.0, 5.0, 1000).unwrap();
@@ -8745,6 +9550,68 @@ for child in rng.spawn(n_children):
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
         // E[Beta(a,b)] = a/(a+b) = 2/7 ≈ 0.286
         assert!((mean - 2.0 / 7.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn beta_nonfinite_parameter_edge_cases_match_numpy() {
+        let mut invalid_a = test_generator();
+        assert_eq!(
+            invalid_a.beta(-0.0, 1.0, 1),
+            Err(RandomError::AlphaNonPositive)
+        );
+
+        let mut invalid_b = test_generator();
+        assert_eq!(
+            invalid_b.beta(1.0, -0.0, 1),
+            Err(RandomError::BetaNonPositive)
+        );
+
+        let mut nan_a = test_generator();
+        let nan_a_values = nan_a.beta(f64::NAN, 1.0, 3).unwrap();
+        assert!(nan_a_values.iter().all(|value| value.is_nan()));
+
+        let mut nan_b = test_generator();
+        let nan_b_values = nan_b.beta(1.0, f64::NAN, 3).unwrap();
+        assert!(nan_b_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite_a = test_generator();
+        let infinite_a_values = infinite_a.beta(f64::INFINITY, 1.0, 3).unwrap();
+        assert!(infinite_a_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite_b = test_generator();
+        assert_eq!(
+            infinite_b.beta(1.0, f64::INFINITY, 3).unwrap(),
+            vec![0.0; 3]
+        );
+
+        let mut both_infinite = test_generator();
+        let both_infinite_values = both_infinite.beta(f64::INFINITY, f64::INFINITY, 3).unwrap();
+        assert!(both_infinite_values.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
+    fn beta_tiny_shapes_use_numpy_bernoulli_branch() {
+        let a = 1e-120;
+        let b = 2e-120;
+        let mut expected_rng = test_generator();
+        let expected: Vec<f64> = (0..8)
+            .map(|_| {
+                if (a + b) * expected_rng.next_f64() < a {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let expected_after: Vec<u64> = (0..5).map(|_| expected_rng.random_interval(9)).collect();
+
+        let mut rng = test_generator();
+        let actual = rng.beta(a, b, 8).unwrap();
+        let actual_after: Vec<u64> = (0..5).map(|_| rng.random_interval(9)).collect();
+
+        assert_eq!(actual, expected);
+        assert!(actual.iter().all(|&value| value == 0.0 || value == 1.0));
+        assert_eq!(actual_after, expected_after);
     }
 
     #[test]
@@ -8773,12 +9640,50 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn lognormal_sigma_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.lognormal(0.5, 0.0, 3).unwrap(), vec![0.5_f64.exp(); 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.lognormal(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.lognormal(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
     fn chisquare_basic() {
         let mut rng = test_generator();
         let samples = rng.chisquare(3.0, 1000).unwrap();
         assert!(samples.iter().all(|&v| v > 0.0));
         let mean: f64 = samples.iter().sum::<f64>() / 1000.0;
         assert!((mean - 3.0).abs() < 0.5); // E[chi2(df)] = df
+    }
+
+    #[test]
+    fn chisquare_parameter_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.chisquare(0.0, 1), Err(RandomError::InvalidParameter));
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.chisquare(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.chisquare(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite = test_generator();
+        assert_eq!(
+            infinite.chisquare(f64::INFINITY, 3).unwrap(),
+            vec![f64::INFINITY; 3]
+        );
     }
 
     #[test]
@@ -8812,6 +9717,41 @@ for child in rng.spawn(n_children):
             "triangular_left_equals_right_after",
             &after,
             &expected_after,
+        );
+    }
+
+    #[test]
+    fn triangular_nonfinite_parameter_edge_cases_match_numpy() {
+        let mut nan_left = test_generator();
+        let nan_left_values = nan_left.triangular(f64::NAN, 0.5, 1.0, 3).unwrap();
+        assert!(nan_left_values.iter().all(|value| value.is_nan()));
+
+        let mut nan_mode = test_generator();
+        let nan_mode_values = nan_mode.triangular(0.0, f64::NAN, 1.0, 3).unwrap();
+        assert!(nan_mode_values.iter().all(|value| value.is_nan()));
+
+        let mut nan_right = test_generator();
+        let nan_right_values = nan_right.triangular(0.0, 0.5, f64::NAN, 3).unwrap();
+        assert!(nan_right_values.iter().all(|value| value.is_nan()));
+
+        let mut negative_infinite_left = test_generator();
+        assert_eq!(
+            negative_infinite_left
+                .triangular(f64::NEG_INFINITY, 0.0, 1.0, 3)
+                .unwrap(),
+            vec![f64::NEG_INFINITY; 3]
+        );
+
+        let mut infinite_right = test_generator();
+        let infinite_right_values = infinite_right
+            .triangular(0.0, 0.5, f64::INFINITY, 3)
+            .unwrap();
+        assert!(infinite_right_values.iter().all(|value| value.is_nan()));
+
+        let mut invalid_infinite_mode = test_generator();
+        assert_eq!(
+            invalid_infinite_mode.triangular(0.0, f64::INFINITY, 1.0, 1),
+            Err(RandomError::InvalidParameter)
         );
     }
 
@@ -8867,6 +9807,22 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn laplace_scale_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.laplace(2.0, 0.0, 3).unwrap(), vec![2.0; 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.laplace(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.laplace(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
     fn gumbel_basic() {
         let mut rng = test_generator();
         let samples = rng.gumbel(0.0, 1.0, 100).unwrap();
@@ -8874,10 +9830,45 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn gumbel_scale_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.gumbel(2.0, 0.0, 3).unwrap(), vec![2.0; 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.gumbel(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.gumbel(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
     fn weibull_basic() {
         let mut rng = test_generator();
         let samples = rng.weibull(1.5, 1000).unwrap();
         assert!(samples.iter().all(|&v| v >= 0.0));
+    }
+
+    #[test]
+    fn weibull_shape_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.weibull(0.0, 4).unwrap(), vec![0.0; 4]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.weibull(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.weibull(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite = test_generator();
+        assert_eq!(infinite.weibull(f64::INFINITY, 3).unwrap(), vec![1.0; 3]);
     }
 
     // ── multivariate distribution tests ────────
@@ -8943,6 +9934,17 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn dirichlet_nan_alpha_returns_nan_rows_like_numpy() {
+        let mut rng = test_generator();
+        let samples = rng.dirichlet(&[f64::NAN, 1.0], 3).unwrap();
+        assert_eq!(samples.len(), 3);
+        for sample in samples {
+            assert_eq!(sample.len(), 2);
+            assert!(sample.iter().all(|value| value.is_nan()));
+        }
+    }
+
+    #[test]
     fn multivariate_normal_diag_basic() {
         let mut rng = test_generator();
         let samples = rng
@@ -8965,6 +9967,15 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn negative_binomial_infinite_n_rejected_like_numpy() {
+        let mut rng = test_generator();
+        assert_eq!(
+            rng.negative_binomial(f64::INFINITY, 0.5, 1),
+            Err(RandomError::InvalidParameter)
+        );
+    }
+
+    #[test]
     fn f_distribution_positive_and_reasonable_mean() {
         let mut rng = test_generator();
         let samples = rng.f_distribution(5.0, 10.0, 5000).unwrap();
@@ -8975,11 +9986,66 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn f_distribution_nonfinite_df_edge_cases_match_numpy() {
+        let mut zero_dfnum = test_generator();
+        assert_eq!(
+            zero_dfnum.f_distribution(0.0, 2.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut zero_dfden = test_generator();
+        assert_eq!(
+            zero_dfden.f_distribution(2.0, 0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut negative_zero_dfnum = test_generator();
+        assert_eq!(
+            negative_zero_dfnum.f_distribution(-0.0, 2.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut negative_zero_dfden = test_generator();
+        assert_eq!(
+            negative_zero_dfden.f_distribution(2.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan_dfnum = test_generator();
+        let nan_dfnum_values = nan_dfnum.f_distribution(f64::NAN, 2.0, 3).unwrap();
+        assert!(nan_dfnum_values.iter().all(|value| value.is_nan()));
+
+        let mut nan_dfden = test_generator();
+        let nan_dfden_values = nan_dfden.f_distribution(2.0, f64::NAN, 3).unwrap();
+        assert!(nan_dfden_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite_dfnum = test_generator();
+        let infinite_dfnum_values = infinite_dfnum
+            .f_distribution(f64::INFINITY, 2.0, 3)
+            .unwrap();
+        assert!(infinite_dfnum_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite_dfden = test_generator();
+        let infinite_dfden_values = infinite_dfden
+            .f_distribution(2.0, f64::INFINITY, 3)
+            .unwrap();
+        assert!(infinite_dfden_values.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
     fn standard_t_symmetric_around_zero() {
         let mut rng = test_generator();
-        let samples = rng.standard_t(10.0, 5000);
+        let samples = rng.standard_t(10.0, 5000).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
         assert!(mean.abs() < 0.15, "t mean={mean}");
+    }
+
+    #[test]
+    fn standard_t_rejects_nonpositive_df() {
+        let mut rng = test_generator();
+        assert!(rng.standard_t(0.0, 1).is_err(), "df=0 should fail");
+        assert!(rng.standard_t(-1.0, 1).is_err(), "df<0 should fail");
+        assert!(rng.standard_t(-0.0, 1).is_err(), "df=-0.0 should fail");
     }
 
     #[test]
@@ -8987,6 +10053,25 @@ for child in rng.spawn(n_children):
         let mut rng = test_generator();
         let samples = rng.power(2.0, 1000).unwrap();
         assert!(samples.iter().all(|&v| (0.0..1.0).contains(&v)));
+    }
+
+    #[test]
+    fn power_shape_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.power(0.0, 1), Err(RandomError::InvalidParameter));
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.power(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.power(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite = test_generator();
+        assert_eq!(infinite.power(f64::INFINITY, 3).unwrap(), vec![1.0; 3]);
     }
 
     #[test]
@@ -9010,6 +10095,15 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn vonmises_rejects_negative_zero_kappa_like_numpy() {
+        let mut rng = test_generator();
+        assert_eq!(
+            rng.vonmises(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+    }
+
+    #[test]
     fn rayleigh_positive_and_expected_mean() {
         let mut rng = test_generator();
         let scale = 2.0;
@@ -9020,6 +10114,31 @@ for child in rng.spawn(n_children):
         assert!(
             (mean - expected).abs() < 0.2,
             "rayleigh mean={mean}, expected={expected}"
+        );
+    }
+
+    #[test]
+    fn rayleigh_scale_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.rayleigh(0.0, 4).unwrap(), vec![0.0; 4]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.rayleigh(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.rayleigh(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite = test_generator();
+        assert!(
+            infinite
+                .rayleigh(f64::INFINITY, 3)
+                .unwrap()
+                .iter()
+                .all(|value| value.is_infinite() && value.is_sign_positive())
         );
     }
 
@@ -9037,6 +10156,22 @@ for child in rng.spawn(n_children):
         let samples = rng.logistic(loc, 1.0, 5000).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / 5000.0;
         assert!((mean - loc).abs() < 0.2, "logistic mean={mean}");
+    }
+
+    #[test]
+    fn logistic_scale_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.logistic(2.0, 0.0, 3).unwrap(), vec![2.0; 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.logistic(0.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.logistic(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
     }
 
     #[test]
@@ -9096,12 +10231,23 @@ for child in rng.spawn(n_children):
     fn wald_positive_and_expected_mean() {
         let mut rng = test_generator();
         let mu = 2.0;
-        let samples = rng.wald(mu, 5.0, 5000);
+        let samples = rng.wald(mu, 5.0, 5000).unwrap();
         for &s in &samples {
             assert!(s > 0.0, "wald values must be positive");
         }
         let mean = samples.iter().sum::<f64>() / 5000.0;
         assert!((mean - mu).abs() < 0.3, "wald mean={mean}, expected ~{mu}");
+    }
+
+    #[test]
+    fn wald_rejects_invalid_mean_and_scale() {
+        let mut rng = test_generator();
+        assert!(rng.wald(0.0, 1.0, 1).is_err(), "mean=0 should fail");
+        assert!(rng.wald(-1.0, 1.0, 1).is_err(), "mean<0 should fail");
+        assert!(rng.wald(-0.0, 1.0, 1).is_err(), "mean=-0.0 should fail");
+        assert!(rng.wald(1.0, 0.0, 1).is_err(), "scale=0 should fail");
+        assert!(rng.wald(1.0, -1.0, 1).is_err(), "scale<0 should fail");
+        assert!(rng.wald(1.0, -0.0, 1).is_err(), "scale=-0.0 should fail");
     }
 
     #[test]
@@ -9117,6 +10263,29 @@ for child in rng.spawn(n_children):
             count_one > 1000,
             "logseries(p=0.5) should produce many 1s, got {count_one}"
         );
+    }
+
+    #[test]
+    fn logseries_probability_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.logseries(0.0, 4).unwrap(), vec![1; 4]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(negative_zero.logseries(-0.0, 4).unwrap(), vec![1; 4]);
+
+        let mut nan = test_generator();
+        assert_eq!(
+            nan.logseries(f64::NAN, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        for invalid in [-0.5, 1.0, f64::INFINITY] {
+            let mut rng = test_generator();
+            assert_eq!(
+                rng.logseries(invalid, 1),
+                Err(RandomError::InvalidParameter)
+            );
+        }
     }
 
     #[test]
@@ -9167,11 +10336,65 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn noncentral_chisquare_rejects_negative_zero_nonc_like_numpy() {
+        let mut rng = test_generator();
+        assert_eq!(
+            rng.noncentral_chisquare(5.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+    }
+
+    #[test]
+    fn noncentral_chisquare_nan_nonc_matches_numpy() {
+        let mut rng = test_generator();
+        let samples = rng.noncentral_chisquare(0.5, f64::NAN, 3).unwrap();
+        assert!(samples.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
+    fn noncentral_chisquare_zero_nonc_matches_central_stream() {
+        let mut central = test_generator();
+        let expected = central.chisquare(5.0, 8).unwrap();
+
+        let mut noncentral = test_generator();
+        let actual = noncentral.noncentral_chisquare(5.0, 0.0, 8).unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn noncentral_f_positive_values() {
         let mut rng = test_generator();
         let samples = rng.noncentral_f(5.0, 10.0, 1.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&v| v > 0.0));
+    }
+
+    #[test]
+    fn noncentral_f_rejects_negative_zero_nonc_like_numpy() {
+        let mut rng = test_generator();
+        assert_eq!(
+            rng.noncentral_f(5.0, 10.0, -0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+    }
+
+    #[test]
+    fn noncentral_f_nan_nonc_matches_numpy() {
+        let mut rng = test_generator();
+        let samples = rng.noncentral_f(0.5, 2.0, f64::NAN, 3).unwrap();
+        assert!(samples.iter().all(|value| value.is_nan()));
+    }
+
+    #[test]
+    fn noncentral_f_zero_nonc_matches_central_stream() {
+        let mut central = test_generator();
+        let expected = central.f(5.0, 10.0, 8).unwrap();
+
+        let mut noncentral = test_generator();
+        let actual = noncentral.noncentral_f(5.0, 10.0, 0.0, 8).unwrap();
+
+        assert_eq!(actual, expected);
     }
 
     #[test]
@@ -9214,6 +10437,28 @@ for child in rng.spawn(n_children):
         assert!(
             (mean - shape_param).abs() < 0.3,
             "standard_gamma mean={mean}, expected ~{shape_param}"
+        );
+    }
+
+    #[test]
+    fn standard_gamma_shape_edge_cases_match_numpy() {
+        let mut zero = test_generator();
+        assert_eq!(zero.standard_gamma(0.0, 3).unwrap(), vec![0.0; 3]);
+
+        let mut negative_zero = test_generator();
+        assert_eq!(
+            negative_zero.standard_gamma(-0.0, 1),
+            Err(RandomError::InvalidParameter)
+        );
+
+        let mut nan = test_generator();
+        let nan_values = nan.standard_gamma(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+
+        let mut infinite = test_generator();
+        assert_eq!(
+            infinite.standard_gamma(f64::INFINITY, 3).unwrap(),
+            vec![f64::INFINITY; 3]
         );
     }
 
@@ -9328,6 +10573,23 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn choice_weighted_uses_numpy_probability_sum_tolerance() {
+        let mut rng = test_generator();
+        let a = [1.0, 2.0];
+        let just_inside_numpy_tolerance = [0.5, 0.5 + 1.4e-8];
+        assert!(
+            rng.choice_weighted(&a, 2, true, &just_inside_numpy_tolerance)
+                .is_ok()
+        );
+
+        let just_outside_numpy_tolerance = [0.5, 0.5 + 1.5e-8];
+        assert!(
+            rng.choice_weighted(&a, 2, true, &just_outside_numpy_tolerance)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn choice_weighted_no_replace_rejects_request_larger_than_positive_support() {
         let mut rng = test_generator();
         let a = [1.0, 2.0, 3.0];
@@ -9345,7 +10607,7 @@ for child in rng.spawn(n_children):
     #[test]
     fn maxwell_all_positive() {
         let mut rng = test_generator();
-        let samples = rng.maxwell(1.0, 1000);
+        let samples = rng.maxwell(1.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         for &v in &samples {
             assert!(v >= 0.0, "Maxwell samples must be non-negative, got {v}");
@@ -9357,7 +10619,7 @@ for child in rng.spawn(n_children):
         // E[X] = 2 * scale * sqrt(2/pi) ≈ 1.5958 * scale for scale=1
         let mut rng = test_generator();
         let n = 50_000;
-        let samples = rng.maxwell(1.0, n);
+        let samples = rng.maxwell(1.0, n).unwrap();
         let mean: f64 = samples.iter().sum::<f64>() / n as f64;
         let expected = 2.0 * (2.0 / std::f64::consts::PI).sqrt();
         assert!(
@@ -9370,8 +10632,8 @@ for child in rng.spawn(n_children):
     fn maxwell_scale_parameter() {
         let mut rng1 = test_generator();
         let mut rng2 = test_generator();
-        let samples1 = rng1.maxwell(1.0, 1000);
-        let samples2 = rng2.maxwell(3.0, 1000);
+        let samples1 = rng1.maxwell(1.0, 1000).unwrap();
+        let samples2 = rng2.maxwell(3.0, 1000).unwrap();
         let mean1: f64 = samples1.iter().sum::<f64>() / 1000.0;
         let mean2: f64 = samples2.iter().sum::<f64>() / 1000.0;
         // Mean should scale linearly with scale parameter
@@ -9465,7 +10727,7 @@ for child in rng.spawn(n_children):
     #[test]
     fn halfnormal_all_nonnegative() {
         let mut rng = test_generator();
-        let samples = rng.halfnormal(2.0, 1000);
+        let samples = rng.halfnormal(2.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&x| x >= 0.0));
     }
@@ -9481,7 +10743,7 @@ for child in rng.spawn(n_children):
     #[test]
     fn lomax_all_nonnegative() {
         let mut rng = test_generator();
-        let samples = rng.lomax(2.0, 1000);
+        let samples = rng.lomax(2.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&x| x >= 0.0));
     }
@@ -9490,9 +10752,30 @@ for child in rng.spawn(n_children):
     fn levy_all_at_least_loc() {
         let mut rng = test_generator();
         let loc = 1.0;
-        let samples = rng.levy(loc, 2.0, 1000);
+        let samples = rng.levy(loc, 2.0, 1000).unwrap();
         assert_eq!(samples.len(), 1000);
         assert!(samples.iter().all(|&x| x >= loc));
+    }
+
+    #[test]
+    fn scipy_extra_distributions_reject_invalid_scale() {
+        let mut rng = test_generator();
+        // Negative scale/shape must error (scipy.stats rejects these); -0.0 too.
+        assert!(rng.maxwell(-1.0, 4).is_err());
+        assert!(rng.maxwell(-0.0, 4).is_err());
+        assert!(rng.halfnormal(-1.0, 4).is_err());
+        assert!(rng.halfnormal(-0.0, 4).is_err());
+        assert!(rng.levy(0.0, -1.0, 4).is_err());
+        assert!(rng.levy(0.0, -0.0, 4).is_err());
+        // lomax shape c must be strictly positive.
+        assert!(rng.lomax(-1.0, 4).is_err());
+        assert!(rng.lomax(0.0, 4).is_err());
+        assert!(rng.lomax(-0.0, 4).is_err());
+
+        // Boundary: scale == +0.0 is a valid point mass for maxwell/halfnormal/levy.
+        assert_eq!(rng.maxwell(0.0, 3).unwrap(), vec![0.0, 0.0, 0.0]);
+        assert_eq!(rng.halfnormal(0.0, 3).unwrap(), vec![0.0, 0.0, 0.0]);
+        assert_eq!(rng.levy(5.0, 0.0, 3).unwrap(), vec![5.0, 5.0, 5.0]);
     }
 
     #[test]
@@ -10697,6 +11980,15 @@ for child in rng.spawn(n_children):
         let vals = g.geometric(1.0, 10).expect("p=1 should succeed");
         let expected: Vec<u64> = vec![1; 10];
         assert_u64_seq("geometric_p_one", &vals, &expected);
+        let expected_after = [
+            0.378_851_142_176_928_95,
+            0.403_840_457_250_061_8,
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+            0.104_783_541_327_853_84,
+        ];
+        let after = g.random(5);
+        assert_f64_seq("geometric_p_one_after", &after, &expected_after);
     }
 
     #[test]
@@ -10719,6 +12011,29 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_standard_gamma_nonfinite_shape_advances_stream() {
+        let expected_after = [
+            0.888_337_197_310_043_6,
+            0.303_319_245_352_569_4,
+            0.440_032_955_585_861_1,
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+        ];
+
+        let mut nan_shape = oracle_gen();
+        let nan_values = nan_shape.standard_gamma(f64::NAN, 3).unwrap();
+        assert!(nan_values.iter().all(|value| value.is_nan()));
+        let nan_after = nan_shape.random(5);
+        assert_f64_seq("standard_gamma_nan_after", &nan_after, &expected_after);
+
+        let mut infinite_shape = oracle_gen();
+        let infinite_values = infinite_shape.standard_gamma(f64::INFINITY, 3).unwrap();
+        assert!(infinite_values.iter().all(|value| *value == f64::INFINITY));
+        let infinite_after = infinite_shape.random(5);
+        assert_f64_seq("standard_gamma_inf_after", &infinite_after, &expected_after);
+    }
+
+    #[test]
     fn oracle_gamma() {
         let mut g = oracle_gen();
         let vals = g.gamma(2.0, 3.0, 10).unwrap();
@@ -10735,6 +12050,104 @@ for child in rng.spawn(n_children):
             4.908686593272669,
         ];
         assert_f64_seq("gamma", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_gamma_special_scale_nonzero_shape_advances_stream() {
+        let expected_after = [
+            0.888_337_197_310_043_6,
+            0.303_319_245_352_569_4,
+            0.440_032_955_585_861_1,
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+        ];
+
+        let mut zero_scale = oracle_gen();
+        assert_eq!(zero_scale.gamma(2.0, 0.0, 3).unwrap(), vec![0.0; 3]);
+        let zero_scale_after = zero_scale.random(5);
+        assert_f64_seq("gamma_zero_scale_after", &zero_scale_after, &expected_after);
+
+        let mut nan_scale = oracle_gen();
+        let nan_scale_values = nan_scale.gamma(2.0, f64::NAN, 3).unwrap();
+        assert!(nan_scale_values.iter().all(|value| value.is_nan()));
+        let nan_scale_after = nan_scale.random(5);
+        assert_f64_seq("gamma_nan_scale_after", &nan_scale_after, &expected_after);
+
+        let mut infinite_scale = oracle_gen();
+        let infinite_scale_values = infinite_scale.gamma(2.0, f64::INFINITY, 3).unwrap();
+        assert!(
+            infinite_scale_values
+                .iter()
+                .all(|value| *value == f64::INFINITY)
+        );
+        let infinite_scale_after = infinite_scale.random(5);
+        assert_f64_seq(
+            "gamma_infinite_scale_after",
+            &infinite_scale_after,
+            &expected_after,
+        );
+
+        let mut nan_shape_zero_scale = oracle_gen();
+        let nan_shape_values = nan_shape_zero_scale.gamma(f64::NAN, 0.0, 3).unwrap();
+        assert!(nan_shape_values.iter().all(|value| value.is_nan()));
+        let nan_shape_after = nan_shape_zero_scale.random(5);
+        assert_f64_seq(
+            "gamma_nan_shape_zero_scale_after",
+            &nan_shape_after,
+            &expected_after,
+        );
+
+        let mut infinite_shape_zero_scale = oracle_gen();
+        let infinite_shape_values = infinite_shape_zero_scale
+            .gamma(f64::INFINITY, 0.0, 3)
+            .unwrap();
+        assert!(infinite_shape_values.iter().all(|value| value.is_nan()));
+        let infinite_shape_after = infinite_shape_zero_scale.random(5);
+        assert_f64_seq(
+            "gamma_infinite_shape_zero_scale_after",
+            &infinite_shape_after,
+            &expected_after,
+        );
+    }
+
+    #[test]
+    fn oracle_gamma_zero_shape_does_not_advance_stream() {
+        let expected_after = [
+            0.932_081_690_319_876_3,
+            0.337_505_601_117_676_8,
+            0.216_981_970_195_010_64,
+            0.352_706_249_766_546_2,
+            0.550_105_102_114_212_7,
+        ];
+
+        let mut finite_scale = oracle_gen();
+        assert_eq!(finite_scale.gamma(0.0, 2.0, 3).unwrap(), vec![0.0; 3]);
+        let finite_scale_after = finite_scale.random(5);
+        assert_f64_seq(
+            "gamma_zero_shape_finite_scale_after",
+            &finite_scale_after,
+            &expected_after,
+        );
+
+        let mut nan_scale = oracle_gen();
+        let nan_scale_values = nan_scale.gamma(0.0, f64::NAN, 3).unwrap();
+        assert!(nan_scale_values.iter().all(|value| value.is_nan()));
+        let nan_scale_after = nan_scale.random(5);
+        assert_f64_seq(
+            "gamma_zero_shape_nan_scale_after",
+            &nan_scale_after,
+            &expected_after,
+        );
+
+        let mut infinite_scale = oracle_gen();
+        let infinite_scale_values = infinite_scale.gamma(0.0, f64::INFINITY, 3).unwrap();
+        assert!(infinite_scale_values.iter().all(|value| value.is_nan()));
+        let infinite_scale_after = infinite_scale.random(5);
+        assert_f64_seq(
+            "gamma_zero_shape_infinite_scale_after",
+            &infinite_scale_after,
+            &expected_after,
+        );
     }
 
     #[test]
@@ -10776,9 +12189,89 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_beta_johnk_small_shapes() {
+        let mut g = oracle_gen();
+        let vals = g.beta(0.5, 0.75, 10).unwrap();
+        let expected = [
+            0.158_906_203_786_056_74,
+            0.794_753_143_344_044_1,
+            0.459_937_337_503_706_25,
+            0.324_702_640_390_538_4,
+            0.978_683_595_230_560_7,
+            0.012_558_725_779_741_31,
+            0.232_973_517_119_089_92,
+            0.725_962_313_205_795_1,
+            0.064_895_666_879_578_36,
+            0.818_384_242_150_740_6,
+        ];
+        assert_f64_seq("beta_johnk", &vals, &expected);
+
+        let after = g.random(5);
+        let expected_after = [
+            0.424_873_506_439_447_66,
+            0.291_075_112_090_811_05,
+            0.124_041_679_968_191_04,
+            0.469_282_645_343_592_54,
+            0.725_100_797_231_033_2,
+        ];
+        assert_f64_seq("beta_johnk_after", &after, &expected_after);
+    }
+
+    #[test]
+    fn oracle_beta_nonfinite_parameters_advance_stream() {
+        let expected_after_one_nonfinite = [
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+            0.403_840_457_250_061_8,
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+        ];
+        let expected_after_two_nonfinite = [
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+            0.104_783_541_327_853_84,
+            0.895_599_581_743_493_9,
+            0.363_015_960_789_184_4,
+        ];
+
+        for (label, a, b, expected_after) in [
+            (
+                "beta_inf_one",
+                f64::INFINITY,
+                1.0,
+                &expected_after_one_nonfinite,
+            ),
+            (
+                "beta_one_inf",
+                1.0,
+                f64::INFINITY,
+                &expected_after_one_nonfinite,
+            ),
+            ("beta_nan_one", f64::NAN, 1.0, &expected_after_one_nonfinite),
+            ("beta_one_nan", 1.0, f64::NAN, &expected_after_one_nonfinite),
+            (
+                "beta_inf_inf",
+                f64::INFINITY,
+                f64::INFINITY,
+                &expected_after_two_nonfinite,
+            ),
+        ] {
+            let mut g = oracle_gen();
+            let values = g.beta(a, b, 3).unwrap();
+            if label == "beta_one_inf" {
+                assert_eq!(values, vec![0.0; 3]);
+            } else {
+                assert!(values.iter().all(|value| value.is_nan()));
+            }
+            let after = g.random(5);
+            assert_f64_seq(label, &after, expected_after);
+        }
+    }
+
+    #[test]
     fn oracle_wald() {
         let mut g = oracle_gen();
-        let vals = g.wald(3.0, 2.0, 10);
+        let vals = g.wald(3.0, 2.0, 10).unwrap();
         let expected = [
             1.3817490656886038,
             0.5946945995263678,
@@ -10800,6 +12293,37 @@ for child in rng.spawn(n_children):
         let vals = g.logseries(0.6, 10).unwrap();
         let expected: Vec<u64> = vec![1, 1, 2, 1, 1, 2, 1, 2, 2, 1];
         assert_u64_seq("logseries", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_logseries_zero_probability_advances_stream() {
+        let expected_after = [
+            0.883_167_405_273_299_6,
+            0.888_337_197_310_043_6,
+            0.303_319_245_352_569_4,
+            0.440_032_955_585_861_1,
+            0.329_258_442_888_161_75,
+        ];
+
+        let mut zero = oracle_gen();
+        let zero_values = zero.logseries(0.0, 5).unwrap();
+        assert_u64_seq("logseries_zero_values", &zero_values, &[1, 1, 1, 1, 1]);
+        let zero_after = zero.random(5);
+        assert_f64_seq("logseries_zero_after", &zero_after, &expected_after);
+
+        let mut negative_zero = oracle_gen();
+        let negative_zero_values = negative_zero.logseries(-0.0, 5).unwrap();
+        assert_u64_seq(
+            "logseries_negative_zero_values",
+            &negative_zero_values,
+            &[1, 1, 1, 1, 1],
+        );
+        let negative_zero_after = negative_zero.random(5);
+        assert_f64_seq(
+            "logseries_negative_zero_after",
+            &negative_zero_after,
+            &expected_after,
+        );
     }
 
     #[test]
@@ -10855,9 +12379,73 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_f_nonfinite_parameters_advance_stream() {
+        let expected_after_nonfinite_numerator = [
+            0.104_783_541_327_853_84,
+            0.895_599_581_743_493_9,
+            0.363_015_960_789_184_4,
+            0.534_584_586_050_490_3,
+            0.878_004_336_796_319_5,
+        ];
+        let expected_after_nonfinite_denominator = [
+            0.363_015_960_789_184_4,
+            0.534_584_586_050_490_3,
+            0.878_004_336_796_319_5,
+            0.998_261_192_952_979_1,
+            0.669_159_567_435_787_9,
+        ];
+        let expected_after_two_nonfinite = [
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+            0.104_783_541_327_853_84,
+            0.895_599_581_743_493_9,
+            0.363_015_960_789_184_4,
+        ];
+
+        for (label, dfnum, dfden, expected_after) in [
+            (
+                "f_inf_one",
+                f64::INFINITY,
+                1.0,
+                &expected_after_nonfinite_numerator,
+            ),
+            (
+                "f_one_inf",
+                1.0,
+                f64::INFINITY,
+                &expected_after_nonfinite_denominator,
+            ),
+            (
+                "f_inf_inf",
+                f64::INFINITY,
+                f64::INFINITY,
+                &expected_after_two_nonfinite,
+            ),
+            (
+                "f_nan_one",
+                f64::NAN,
+                1.0,
+                &expected_after_nonfinite_numerator,
+            ),
+            (
+                "f_one_nan",
+                1.0,
+                f64::NAN,
+                &expected_after_nonfinite_denominator,
+            ),
+        ] {
+            let mut g = oracle_gen();
+            let values = g.f(dfnum, dfden, 3).unwrap();
+            assert!(values.iter().all(|value| value.is_nan()));
+            let after = g.random(5);
+            assert_f64_seq(label, &after, expected_after);
+        }
+    }
+
+    #[test]
     fn oracle_standard_t() {
         let mut g = oracle_gen();
-        let vals = g.standard_t(5.0, 10);
+        let vals = g.standard_t(5.0, 10).unwrap();
         let expected = [
             0.5008333204796186,
             0.8312637071182254,
@@ -11276,6 +12864,63 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn oracle_noncentral_chisquare_nan_df_stream_parity() {
+        let expected_after_central = [
+            0.888_337_197_310_043_6,
+            0.303_319_245_352_569_4,
+            0.440_032_955_585_861_1,
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+        ];
+        let expected_after_mixture = [
+            0.378_851_142_176_928_95,
+            0.403_840_457_250_061_8,
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+            0.104_783_541_327_853_84,
+        ];
+        let expected_after_no_consume = [
+            0.932_081_690_319_876_3,
+            0.337_505_601_117_676_8,
+            0.216_981_970_195_010_64,
+            0.352_706_249_766_546_2,
+            0.550_105_102_114_212_7,
+        ];
+
+        let mut central = oracle_gen();
+        let central_values = central.noncentral_chisquare(f64::NAN, 0.0, 3).unwrap();
+        assert!(central_values.iter().all(|value| value.is_nan()));
+        let central_after = central.random(5);
+        assert_f64_seq(
+            "noncentral_chisquare_nan_df_zero_nonc_after",
+            &central_after,
+            &expected_after_central,
+        );
+
+        let mut mixture = oracle_gen();
+        let mixture_values = mixture.noncentral_chisquare(f64::NAN, 1.0, 3).unwrap();
+        assert!(mixture_values.iter().all(|value| value.is_nan()));
+        let mixture_after = mixture.random(5);
+        assert_f64_seq(
+            "noncentral_chisquare_nan_df_finite_nonc_after",
+            &mixture_after,
+            &expected_after_mixture,
+        );
+
+        let mut nan_nonc = oracle_gen();
+        let nan_nonc_values = nan_nonc
+            .noncentral_chisquare(f64::NAN, f64::NAN, 3)
+            .unwrap();
+        assert!(nan_nonc_values.iter().all(|value| value.is_nan()));
+        let nan_nonc_after = nan_nonc.random(5);
+        assert_f64_seq(
+            "noncentral_chisquare_nan_nonc_after",
+            &nan_nonc_after,
+            &expected_after_no_consume,
+        );
+    }
+
+    #[test]
     fn oracle_noncentral_f() {
         let mut g = oracle_gen();
         let vals = g.noncentral_f(5.0, 10.0, 1.0, 10).unwrap();
@@ -11292,6 +12937,61 @@ for child in rng.spawn(n_children):
             0.39845145064667553,
         ];
         assert_f64_seq("noncentral_f", &vals, &expected);
+    }
+
+    #[test]
+    fn oracle_noncentral_f_nan_parameter_stream_parity() {
+        let expected_after_dfnum_nan = [
+            0.878_004_336_796_319_5,
+            0.998_261_192_952_979_1,
+            0.669_159_567_435_787_9,
+            0.263_612_925_268_924_77,
+            0.693_094_675_047_929_1,
+        ];
+        let expected_after_dfden_nan = [
+            0.534_584_586_050_490_3,
+            0.878_004_336_796_319_5,
+            0.998_261_192_952_979_1,
+            0.669_159_567_435_787_9,
+            0.263_612_925_268_924_77,
+        ];
+        let expected_after_nonc_nan = [
+            0.888_337_197_310_043_6,
+            0.303_319_245_352_569_4,
+            0.440_032_955_585_861_1,
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+        ];
+
+        let mut dfnum_nan = oracle_gen();
+        let dfnum_nan_values = dfnum_nan.noncentral_f(f64::NAN, 5.0, 1.0, 3).unwrap();
+        assert!(dfnum_nan_values.iter().all(|value| value.is_nan()));
+        let dfnum_nan_after = dfnum_nan.random(5);
+        assert_f64_seq(
+            "noncentral_f_dfnum_nan_after",
+            &dfnum_nan_after,
+            &expected_after_dfnum_nan,
+        );
+
+        let mut dfden_nan = oracle_gen();
+        let dfden_nan_values = dfden_nan.noncentral_f(2.0, f64::NAN, 1.0, 3).unwrap();
+        assert!(dfden_nan_values.iter().all(|value| value.is_nan()));
+        let dfden_nan_after = dfden_nan.random(5);
+        assert_f64_seq(
+            "noncentral_f_dfden_nan_after",
+            &dfden_nan_after,
+            &expected_after_dfden_nan,
+        );
+
+        let mut nonc_nan = oracle_gen();
+        let nonc_nan_values = nonc_nan.noncentral_f(2.0, 5.0, f64::NAN, 3).unwrap();
+        assert!(nonc_nan_values.iter().all(|value| value.is_nan()));
+        let nonc_nan_after = nonc_nan.random(5);
+        assert_f64_seq(
+            "noncentral_f_nonc_nan_after",
+            &nonc_nan_after,
+            &expected_after_nonc_nan,
+        );
     }
 
     #[test]
@@ -11413,6 +13113,73 @@ for child in rng.spawn(n_children):
                     (g_val - e_val).abs()
                 );
             }
+        }
+    }
+
+    #[test]
+    fn oracle_dirichlet_nonfinite_alpha_advances_stream() {
+        let expected_after_one_nonfinite = [
+            0.329_258_442_888_161_75,
+            0.378_851_142_176_928_95,
+            0.403_840_457_250_061_8,
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+        ];
+        let expected_after_two_nonfinite = [
+            0.875_134_742_819_467_2,
+            0.046_415_830_518_762_3,
+            0.104_783_541_327_853_84,
+            0.895_599_581_743_493_9,
+            0.363_015_960_789_184_4,
+        ];
+
+        for (label, alpha, expected_after) in [
+            (
+                "dirichlet_nan_one",
+                [f64::NAN, 1.0],
+                &expected_after_one_nonfinite,
+            ),
+            (
+                "dirichlet_one_nan",
+                [1.0, f64::NAN],
+                &expected_after_one_nonfinite,
+            ),
+            (
+                "dirichlet_inf_one",
+                [f64::INFINITY, 1.0],
+                &expected_after_one_nonfinite,
+            ),
+            (
+                "dirichlet_one_inf",
+                [1.0, f64::INFINITY],
+                &expected_after_one_nonfinite,
+            ),
+            (
+                "dirichlet_nan_inf",
+                [f64::NAN, f64::INFINITY],
+                &expected_after_two_nonfinite,
+            ),
+        ] {
+            let mut g = oracle_gen();
+            let rows = g.dirichlet(&alpha, 3).unwrap();
+            for row in &rows {
+                match label {
+                    "dirichlet_inf_one" => {
+                        assert!(row[0].is_nan(), "{label}: first value should be NaN");
+                        assert_eq!(row[1], 0.0, "{label}: second value should be zero");
+                    }
+                    "dirichlet_one_inf" => {
+                        assert_eq!(row[0], 0.0, "{label}: first value should be zero");
+                        assert!(row[1].is_nan(), "{label}: second value should be NaN");
+                    }
+                    _ => assert!(
+                        row.iter().all(|value| value.is_nan()),
+                        "{label}: row should be all NaN, got {row:?}"
+                    ),
+                }
+            }
+            let after = g.random(5);
+            assert_f64_seq(label, &after, expected_after);
         }
     }
 

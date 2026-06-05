@@ -1,14 +1,25 @@
 [package]
 name = "fnp-dtype"
-version = "0.1.0"
-edition = "2024"
-license-file = "../../LICENSE"
+version.workspace = true
+edition.workspace = true
+license-file.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "NumPy dtype model: scalar types, casting rules, promotion table, and parser for FrankenNumPy."
 
 [dependencies]
+# half: f16 (binary16) and bf16 scalar support for the DType::F16 variant
+# and its storage/cast/promotion paths. Provides IEEE-754-compliant fp16
+# arithmetic that Rust's std library doesn't ship.
 half = "2.7.1"
 
 [dev-dependencies]
-criterion = "0.6"
+criterion.workspace = true
+# sha2: golden-output digest pinning to_f64_vec's bit-exact conversion.
+sha2 = "0.11.0"
 
 [[bench]]
 name = "dtype_ops"

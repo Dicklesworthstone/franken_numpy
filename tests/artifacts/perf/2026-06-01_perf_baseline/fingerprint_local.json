@@ -1,0 +1,46 @@
+{
+  "run_id": "1780356387_473012",
+  "captured_at_utc": "2026-06-01T23:26:27Z",
+  "git_sha": "da63bed5060e84e0943e2cb039c56146a34d333a",
+  "git_dirty": true,
+  "hardware": {
+    "cpu_model": "AMD Ryzen Threadripper PRO 5975WX 32-Cores",
+    "cpu_cores_per_socket": 32,
+    "cpu_sockets": 1,
+    "cpu_threads_total": 64,
+    "cpu_mhz_reported": "",
+    "ram_total": "226261624 kB",
+    "swap_total": "75497460 kB"
+  },
+  "storage": {
+    "device": "/dev/mapper/ubuntu--vg-ubuntu--lv",
+    "model": "unknown",
+    "mount_point": "/data/projects/franken_numpy",
+    "filesystem": "ext4",
+    "mount_options": "rw,relatime"
+  },
+  "os": {
+    "distribution": "Ubuntu 25.10",
+    "kernel": "6.17.0-29-generic"
+  },
+  "toolchain": {
+    "rustc": "rustc 1.97.0-nightly (c935696dd 2026-04-29)",
+    "go": "go version go1.24.4 linux/amd64",
+    "node": "v24.14.0",
+    "python": "Python 3.13.7",
+    "clang": "",
+    "gcc": "gcc (Ubuntu 15.2.0-4ubuntu4) 15.2.0"
+  },
+  "build_profile": {
+    "name": "release-perf"
+  },
+  "tuning_applied": {
+    "governor": "powersave",
+    "no_turbo": "n/a",
+    "smt_active": "1",
+    "perf_event_paranoid": "1",
+    "kptr_restrict": "0",
+    "nmi_watchdog": "1",
+    "thp": "madvise"
+  }
+}

@@ -1,0 +1,2 @@
+matmul_256x256 golden_fnv1a=0x123d67735e6af719  median_ms=5.6343
+out[0]=16588249  out[65535]=16359590

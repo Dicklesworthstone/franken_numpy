@@ -293,3 +293,107 @@ fn argmax_first_occurrence_matches_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+#[test]
+fn argmax_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+x = np.float64(5.0)
+fnp_result = fnp.argmax(x)
+np_result = np.argmax(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "argmax scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn argmax_complex() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+a = np.array([1+1j, 3-1j, 2+2j], dtype=np.complex128)
+fnp_result = fnp.argmax(a)
+np_result = np.argmax(a)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argmax complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn argmax_with_nan() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+# NaN handling - numpy returns index of NaN as "max"
+a = np.array([1.0, np.nan, 3.0])
+fnp_result = fnp.argmax(a)
+np_result = np.argmax(a)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argmax nan handling should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn argmax_all_nan() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+a = np.array([np.nan, np.nan, np.nan])
+fnp_result = fnp.argmax(a)
+np_result = np.argmax(a)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "argmax all-nan should match numpy");
+    Ok(())
+}
+
+#[test]
+fn argmax_empty_array_raises_valueerror() -> Result<(), String> {
+    let script = fnp_argmax_script(
+        r#"
+empty = np.array([])
+fnp_raised = False
+np_raised = False
+try:
+    fnp.argmax(empty)
+except ValueError:
+    fnp_raised = True
+except Exception:
+    pass
+try:
+    np.argmax(empty)
+except ValueError:
+    np_raised = True
+except Exception:
+    pass
+print(fnp_raised == np_raised == True)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "argmax of empty array should raise ValueError"
+    );
+    Ok(())
+}

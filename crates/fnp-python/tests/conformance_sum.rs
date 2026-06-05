@@ -402,3 +402,433 @@ fn sum_empty_array_matches_numpy() -> Result<(), String> {
     }
     Ok(())
 }
+
+#[test]
+fn sum_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+x = np.float64(5.0)
+fnp_result = fnp.sum(x)
+np_result = np.sum(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "sum scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_complex() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+z = np.array([1+2j, 3+4j, 5+6j], dtype=np.complex128)
+fnp_result = fnp.sum(z)
+np_result = np.sum(z)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "sum complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn sum_complex_axis() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+z = np.array([[1+1j, 2+2j], [3+3j, 4+4j]], dtype=np.complex128)
+fnp_result = fnp.sum(z, axis=0)
+np_result = np.sum(z, axis=0)
+print(np.allclose(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum complex axis=0 should match numpy"
+    );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Error behavior tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+fn classify_error(script: &str) -> String {
+    let output = std::process::Command::new("python3")
+        .args(["-c", script])
+        .output()
+        .expect("python3 should be available");
+    if output.status.success() {
+        "ok".to_string()
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("AxisError") || stderr.contains("axis") {
+            "AxisError".to_string()
+        } else if stderr.contains("ValueError") {
+            "ValueError".to_string()
+        } else {
+            format!("other: {}", stderr.lines().last().unwrap_or(""))
+        }
+    }
+}
+
+#[test]
+fn sum_axis_out_of_bounds_raises_axiserror() {
+    let fnp_err = classify_error(&fnp_sum_script(
+        r#"
+a = fnp.arange(12).reshape(3, 4)
+fnp.sum(a, axis=5)
+"#
+        .into(),
+    ));
+    let np_err = classify_error(
+        r#"
+import numpy as np
+a = np.arange(12).reshape(3, 4)
+np.sum(a, axis=5)
+"#,
+    );
+    assert_eq!(
+        fnp_err, np_err,
+        "sum with out-of-bounds axis should raise same error as numpy"
+    );
+}
+
+#[test]
+fn sum_inf_handling_matches_numpy() -> Result<(), String> {
+    let inf_cases = [
+        "[1.0, np.inf, 3.0]",
+        "[np.inf, 2.0, 3.0]",
+        "[-np.inf, np.inf]",
+        "[np.inf, np.inf]",
+        "[-np.inf, -np.inf]",
+    ];
+
+    for arr_str in &inf_cases {
+        let np_script = format!("import numpy as np; print(repr(np.sum(np.array({arr_str}))))");
+        let np_output = numpy_oracle(&np_script)?;
+
+        let fnp_script = fnp_sum_script(format!("print(repr(fnp.sum(np.array({arr_str}))))"));
+        let fnp_output = numpy_oracle(&fnp_script)?;
+
+        assert_eq!(
+            fnp_output.trim(),
+            np_output.trim(),
+            "sum inf mismatch for {arr_str}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn sum_with_out_parameter() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([[1, 2], [3, 4]])
+out = np.empty((2,), dtype=np.int64)
+fnp_result = fnp.sum(a, axis=0, out=out)
+np_out = np.empty((2,), dtype=np.int64)
+np_result = np.sum(a, axis=0, out=np_out)
+# Check both result and that out was modified
+print(np.array_equal(fnp_result, np_result) and np.array_equal(out, np_out))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum with out parameter should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_with_where_parameter() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([1, 2, 3, 4, 5])
+mask = np.array([True, False, True, False, True])
+fnp_result = fnp.sum(a, where=mask)
+np_result = np.sum(a, where=mask)
+print(fnp_result == np_result == 9)  # 1 + 3 + 5
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum with where parameter should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_with_initial_parameter() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([1, 2, 3, 4, 5])
+fnp_result = fnp.sum(a, initial=10)
+np_result = np.sum(a, initial=10)
+print(fnp_result == np_result == 25)  # 10 + 1+2+3+4+5
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum with initial parameter should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_signed_zero_parity() -> Result<(), String> {
+    // Test signed-zero behavior for parallel operation safety proofs.
+    // IEEE 754: 0.0 + 0.0 = 0.0, -0.0 + -0.0 = -0.0, 0.0 + -0.0 = 0.0
+    let script = fnp_sum_script(
+        r#"
+# Signed-zero sum semantics
+tests = [
+    ([0.0, 0.0], False),      # 0.0 + 0.0 = 0.0 (positive)
+    ([-0.0, -0.0], True),     # -0.0 + -0.0 = -0.0 (negative)
+    ([0.0, -0.0], False),     # 0.0 + -0.0 = 0.0 (positive - IEEE 754 rule)
+    ([-0.0, 0.0], False),     # -0.0 + 0.0 = 0.0 (positive)
+    ([-0.0, -0.0, -0.0], True), # Multiple -0.0 sum
+]
+all_pass = True
+for values, expected_signbit in tests:
+    arr = np.array(values)
+    fnp_result = fnp.sum(arr)
+    np_result = np.sum(arr)
+    if np.signbit(fnp_result) != np.signbit(np_result):
+        print(f"FAIL: sum({values}) fnp signbit={np.signbit(fnp_result)} np signbit={np.signbit(np_result)}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_accumulation_stability() -> Result<(), String> {
+    // Test that sum accumulation order matches NumPy
+    let script = fnp_sum_script(
+        r#"
+# Large values that could suffer from accumulation order issues
+a = np.array([1e16, 1.0, -1e16])
+fnp_result = fnp.sum(a)
+np_result = np.sum(a)
+
+# Also test with axis reduction
+b = np.array([[1e16, 1.0], [-1e16, 2.0]])
+fnp_axis = fnp.sum(b, axis=0)
+np_axis = np.sum(b, axis=0)
+
+axis_match = np.allclose(fnp_axis, np_axis)
+scalar_match = np.isclose(fnp_result, np_result) or (fnp_result == np_result)
+print(scalar_match and axis_match)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum accumulation stability should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_negative_axis() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([[1, 2, 3], [4, 5, 6]])
+fnp_result_m1 = fnp.sum(a, axis=-1)
+np_result_m1 = np.sum(a, axis=-1)
+fnp_result_m2 = fnp.sum(a, axis=-2)
+np_result_m2 = np.sum(a, axis=-2)
+print(np.array_equal(fnp_result_m1, np_result_m1) and np.array_equal(fnp_result_m2, np_result_m2))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum with negative axis should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_tuple_axis() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.arange(24).reshape(2, 3, 4)
+fnp_result_02 = fnp.sum(a, axis=(0, 2))
+np_result_02 = np.sum(a, axis=(0, 2))
+fnp_result_12 = fnp.sum(a, axis=(1, 2))
+np_result_12 = np.sum(a, axis=(1, 2))
+print(
+    fnp_result_02.shape == np_result_02.shape,
+    fnp_result_12.shape == np_result_12.shape,
+    np.array_equal(fnp_result_02, np_result_02),
+    np.array_equal(fnp_result_12, np_result_12)
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True True True True"),
+        "sum with tuple axis should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_axis_none_flatten() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([[1, 2, 3], [4, 5, 6]])
+fnp_result = fnp.sum(a, axis=None)
+np_result = np.sum(a, axis=None)
+print(fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum with axis=None should flatten and match numpy"
+    );
+    Ok(())
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// dtype parameter tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn sum_dtype_parameter_int_to_float() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([1, 2, 3], dtype=np.int32)
+fnp_result = fnp.sum(a, dtype=np.float64)
+np_result = np.sum(a, dtype=np.float64)
+print(fnp_result.dtype == np_result.dtype, fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True True"),
+        "sum with dtype=float64 should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_dtype_parameter_int_to_int64() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([1, 2, 3], dtype=np.int32)
+fnp_result = fnp.sum(a, dtype=np.int64)
+np_result = np.sum(a, dtype=np.int64)
+print(fnp_result.dtype == np_result.dtype, fnp_result == np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True True"),
+        "sum with dtype=int64 should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_dtype_parameter_with_axis() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+a = np.array([[1, 2], [3, 4]], dtype=np.int32)
+fnp_result = fnp.sum(a, axis=0, dtype=np.float64)
+np_result = np.sum(a, axis=0, dtype=np.float64)
+print(fnp_result.dtype == np_result.dtype, np.array_equal(fnp_result, np_result))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True True"),
+        "sum with axis and dtype should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_large_values_overflow_matches_numpy() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+# Test overflow to inf behavior
+large = np.finfo(np.float64).max / 2
+a = np.array([large, large, large], dtype=np.float64)
+fnp_result = fnp.sum(a)
+np_result = np.sum(a)
+both_inf = np.isinf(fnp_result) and np.isinf(np_result)
+same_sign = fnp_result > 0 and np_result > 0
+print(both_inf and same_sign)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum large value overflow should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn sum_subnormal_values_matches_numpy() -> Result<(), String> {
+    let script = fnp_sum_script(
+        r#"
+tiny = np.finfo(np.float64).tiny
+subnormal = tiny / 2.0
+a = np.array([subnormal, subnormal, subnormal], dtype=np.float64)
+fnp_result = fnp.sum(a)
+np_result = np.sum(a)
+print(np.allclose(fnp_result, np_result, rtol=1e-10))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sum subnormal values should match numpy"
+    );
+    Ok(())
+}

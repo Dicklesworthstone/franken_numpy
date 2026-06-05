@@ -36,3 +36,17 @@ path = "fuzz_targets/fuzz_qr_mxn.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_svd_mxn"
+path = "fuzz_targets/fuzz_svd_mxn.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_inv_nxn"
+path = "fuzz_targets/fuzz_inv_nxn.rs"
+test = false
+doc = false
+bench = false

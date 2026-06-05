@@ -4,8 +4,11 @@ All notable changes to FrankenNumPy are documented in this file.
 
 FrankenNumPy is a memory-safe, clean-room Rust reimplementation of NumPy. The
 workspace version is `0.1.0` (pre-release). There are no tagged releases or
-GitHub Releases yet; every entry below maps to a date range on the `main` branch.
-Representative commits link to
+GitHub Releases yet, although the May 2026 "Workspace metadata + crates.io
+publish-readiness" wave (see section below) completed the metadata side of
+publishing — what remains for a tag is the explicit decision to publish.
+Every entry below maps to a date range on the `main` branch. Representative
+commits link to
 `https://github.com/Dicklesworthstone/franken_numpy/commit/<hash>`.
 
 The sections below are organized by **capability area** rather than diff order,
@@ -13,7 +16,32 @@ so that readers can quickly find what changed in the subsystem they care about.
 
 ---
 
-## [Unreleased] — development head (2026-02-13 through 2026-05-13)
+## [Unreleased] — development head (2026-02-13 through 2026-05-19)
+
+### Documentation precision waves (May 17-19, 2026)
+
+Following the surface-parity close-out (2026-05-13) and the headline 2026-05-16
+documentation refresh, three further days of small-bead docs-precision sweeps
+shipped: 2026-05-17 (~93 beads) discovered `tests/codebase_hygiene.rs` (8-test
+structural enforcement for no-stubs), cataloged the per-crate `metamorphic_*.rs`
+(8 files) and `golden_*.rs` (9 files) suites, added 7 per-fuzz `rust-toolchain.toml`
+files mirroring the workspace pin, and surfaced `run_divergence_ledger` +
+`run_fnp_python_api_coverage` + the diagnostic-oracle bin family in AGENTS.md;
+2026-05-18 surfaced the `fnp-python/tests/common/mod.rs` 28KB shared harness
+(RequirementLevel + comparison modes + XFAIL), documented `fuzz_regression*.rs`
+as the third leg of the fuzz workflow, and added `e2e_workflow.rs` as the
+multi-function-pipeline test layer; 2026-05-19 refreshed live counts (closed
+beads 1,337 → 1,417). No code behavior changed in these waves — they're
+documentation precision, structural enforcement surfacing, and minor script
+portability fixes (`scripts/e2e/run_raptorq_gate.sh` gained an `rch`-fallback
+wrapper for parity with the 4 sibling gate scripts).
+
+**Headline milestone (2026-05-13):** `fnp-python` now covers **100% of
+`numpy.__all__`** (499/499 names), structurally locked by the
+`fnp_python_covers_full_numpy_all` conformance test in
+`crates/fnp-python/tests/conformance_remaining_top_level_attrs.rs` so
+any regression fails CI. See `audit_numpy_reality.md` for the 43.3% →
+100% progression.
 
 `main` branch, no formal release tags yet. After 2026-03-21 the entries
 below summarize work by capability area rather than by date range,
@@ -69,6 +97,171 @@ the structured-dtype + recfunctions oracle corpus expansion, and an
 agent-readable validation recipe selector. See `docs/DIVERGENCES.md`
 and `crates/fnp-conformance/src/divergence_ledger.rs`.
 
+### Fuzz infrastructure expansion (May 2026)
+
+The fuzz harness grew from 4 crates to **7** and from mostly-unseeded
+targets to **~200 curated edge-case seeds across 27 fuzz targets** (see
+[`docs/FUZZING.md`](docs/FUZZING.md) for the live inventory). All fuzz
+crates live under `crates/fnp-*/fuzz` and are excluded from the main
+workspace so normal `cargo` invocations don't pull in `libfuzzer-sys`.
+Representative seeding beads:
+
+  - `62oir` — new `fnp-random/fuzz` (Pcg64Rng/Pcg64DxsmRng seed entropy,
+    SeedSequence::new) and `fnp-linalg/fuzz` (cholesky_nxn, det_nxn,
+    qr_mxn for arbitrary f64 matrices up to 16-32 dim).
+  - `aaq0g` — 32 curated seeds for the new fuzz crates: u64-seed edge
+    cases (0/1/u64::MAX/alt-bits), SeedSequence entropy variants,
+    SPD Hilbert matrix, singular matrix, NaN/±Inf, subnormal,
+    rectangular m×n QR shapes.
+  - `s46p2` — 45 seeds for existing byte-driven fnp-dtype/fnp-io
+    targets (fuzz_dtype_parse, fuzz_min_scalar_type, fuzz_fromstring,
+    fuzz_loadtxt) covering dtype strings (i4/<f8/V16/U10/datetime64
+    units), f64 specials, text-parsing edge cases.
+  - `8fftx` — 19 Arbitrary-format seeds for fnp-dtype Arbitrary-derive
+    targets (fuzz_can_cast, fuzz_result_type) covering same-kind
+    upcasts, narrowing, complex drop, datetime/timedelta aliasing.
+  - `cv45i` — 31 seeds for fnp-ufunc string parsers
+    (fuzz_parse_gufunc_signature, fuzz_datetime_unit_parse) covering
+    matmul/dot/outer/scalar-vector + every canonical datetime64 unit.
+  - `i8ipt` — 15 seeds for fnp-ndarray fuzz_broadcast_shape and
+    fuzz_fix_unknown_dim covering identity/scalar/3D/zero-dim cases
+    and -1-placeholder reshape edge cases.
+  - `y3dhc` — 46 NPY/NPZ binary seeds for fnp-io binary parsers
+    (fuzz_npy, fuzz_npz, fuzz_load_auto, fuzz_header) generated via
+    numpy.save / numpy.savez / numpy.savez_compressed plus
+    handcrafted malformed inputs (truncated magic, future version,
+    corrupt ZIP EOCD).
+  - `diqz3` — 11 seeds for fnp-iter/fuzz_ndindex covering empty/1D-8D
+    shape boundaries and the 100k-cap edge.
+  - `m5y8s` — 15 seeds for fnp-ufunc/fuzz_parse_fixed_signature
+    covering signature shapes (unary/binary/multi-output, all dtype
+    letters) and adversarial cases (no arrow, double arrow, unicode).
+
+The seed corpora are committed under each `fuzz/corpus/<target>/seed_*`
+per the existing .gitignore exemption.
+
+### Workspace metadata + crates.io publish-readiness (May 2026)
+
+13-bead consolidation wave that prepared the workspace for a future
+crates.io publish:
+
+  - `j65bv` — 9 of 10 crates now inherit `version` / `edition` /
+    `license-file` from `[workspace.package]` (the tenth, fnp-python,
+    already did).
+  - `dqoz0` — every crate has a per-crate `description` field.
+  - `7k1h3` — `[workspace.package]` gained `repository`, `homepage`,
+    `readme`, `keywords`, `categories`.
+  - `gto3b` — each crate wires the 5 new fields via `.workspace = true`.
+  - `dcjb7` + `voj6z` — criterion versions reduced from 3 (0.5/0.6/0.8.2)
+    to 1 (0.6), plus the `criterion::black_box` → `std::hint::black_box`
+    deprecation cleanup. -144 lines from Cargo.lock as the criterion-plot
+    chain dropped out.
+  - `0ovft` / `fowyr` / `ndzpa` — `serde_json`, `serde`, and `criterion`
+    promoted to `[workspace.dependencies]`; each crate references via
+    `.workspace = true`.
+  - `ekzhv` — Cargo.toml profile comment moved back to its rightful home
+    after the workspace.dependencies block was inserted.
+  - `ihevd` — `rust-toolchain.toml` pinned to `nightly-2026-02-20` to
+    match the CI workflow exactly.
+  - `62b26` — `release-perf` profile drops redundant `opt-level=3` and
+    `strip=false` (already implied by `inherits=release`).
+  - `ypb8t` — `ci.yml` consolidates 8 hard-coded `nightly-2026-02-20`
+    toolchain values to a single `env.RUST_TOOLCHAIN` variable.
+  - `lmhu7` — `AGENTS.md` gains a "Current state (2026-05-16)" section
+    pointing at audit_numpy_reality / FEATURE_PARITY / audit_numpy_mocks.
+  - `nvtyj` / `8mcj6` — `docs/FUZZING.md` onboarding doc and
+    headline-count refresh (7 fuzz crates / 27 targets / ~200 curated
+    seed files); linked from README.
+
+### Diagnostic parity and divergence ledger (April–May 2026)
+
+Epic `33vtd` shipped a structured diagnostic-oracle pipeline so that
+every warning, exception, and printed message we emit can be compared
+against the live NumPy reference. Notable pieces:
+
+  - **Diagnostic oracle schema + harness** under
+    `crates/fnp-conformance/src/diagnostic_oracle.rs` and the
+    `run_diagnostic_oracle` binary, with shards for dtype/shape, IO
+    parsers, and fnp-python warnings/exceptions.
+  - **Cross-version drift matrix** that captures the same fixture set
+    against multiple NumPy versions to detect upstream behavior shifts
+    (`run_oracle_drift_matrix`).
+  - **Divergence ledger** at [`docs/DIVERGENCES.md`](docs/DIVERGENCES.md)
+    plus a machine-readable checker
+    (`cargo run -p fnp-conformance --bin run_divergence_ledger --
+    --fail-on-missing`). A diagnostic case can only be marked
+    `intentional_divergence` if it references a row in the ledger;
+    otherwise the gate fails closed. Active rows: **1** (as of
+    2026-05-16) — `franken_numpy-ucc2o` records that `fnp-random`'s
+    `SeedMaterial::None` / no-seed `default_rng()` uses a fixed
+    deterministic seed (`DEFAULT_RNG_SEED = 0xC0DE_CAFE_F00D_BAAD`)
+    rather than OS entropy, pending a decision on adding `getrandom`
+    as the crate's first external dependency.
+  - **Structured-dtype + recfunctions oracle corpus** expanded so
+    structured-dtype edge cases (record arrays, mixed-endian fields,
+    inner shapes) now get per-warning, per-exception, per-field
+    parity coverage.
+  - **Validation recipe selector** (`run_validation_recipe_selector`)
+    routes a fixture/case through the correct gate composition,
+    making agent-driven diagnostic checks one command away.
+
+### Documentation correctness polish wave (May 2026)
+
+A multi-day documentation polish push that started 2026-05-16 and
+is still landing. Per-day verified counts (via
+`grep -oE '"closed_at":"2026-05-1[678]T[^"]*"' .beads/issues.jsonl
+| wc -l`): **92** on 2026-05-16 (the spike the README's Project
+Timeline calls out), **93** on 2026-05-17, **5+** on 2026-05-18.
+Cumulative as of the 2026-05-18 snapshot: ~190 beads, still
+landing. Touched README.md, AGENTS.md, FEATURE_PARITY.md,
+audit_numpy_reality.md, audit_numpy_mocks.md, docs/DIVERGENCES.md,
+docs/FUZZING.md, PROPOSED_ARCHITECTURE.md and this CHANGELOG. The
+wave was aimed at removing claims that had drifted past the
+implementation, and at adding precision where prose was vague.
+Representative entries (from the 2026-05-16 spike — later days
+follow the same pattern):
+
+  - README hero subtitle now states **concrete numbers** (6,392 tests,
+    100% of `numpy.__all__`, zero unsafe blocks) instead of "extensive
+    conformance coverage" (`h0n92`); MIT license badge clarified to
+    MIT+Rider (`obyab`); Rust pin badge now names `nightly-2026-02-20`
+    explicitly (`75nl6`).
+  - **All 5 production bit generators** enumerated in the README
+    `Random` row (`2gah9`); the "None (random)" RNG claim corrected to
+    reflect the fixed deterministic default seed (`81e5e`); the
+    "zero-dep" claim refined to "no external crates.io deps, intra-
+    workspace fnp-ndarray only" (`vtt6c`).
+  - **All 18 FFT entry points** (including hfft/ihfft/rfft2/rfftn/
+    irfft2/irfftn) enumerated in both the README API Surface row
+    (`s4t0g`) and FEATURE_PARITY (`ng0nc`); convolve modes
+    full/same/valid documented (`g2bra`); correlate2d/convolve2d
+    symmetry made explicit (`biwgf`).
+  - README **Threat Model** restored the missing
+    `linalg_policy_unknown_metadata` row (12 claimed vs 11 listed →
+    12/12) (`7e9ol`); README API Surface now catalogs **all 12 PyO3
+    classes** registered by `fnp-python` (`5dfb6`); README Repository
+    Layout and AGENTS.md Repository Layout both restored the missing
+    `fnp-python` crate row (`0zk2h`, `be5p9`, `rcno9`).
+  - README Installation gained a "For Python access" subsection with
+    cdylib build hint tightened for Linux / macOS / Windows file
+    extensions (`bndjp`, `mnbz7`).
+  - AGENTS.md gained a "Current state (2026-05-16)" section that
+    surfaces the live divergence count and links the audit documents
+    (`lmhu7`, `yf0yl`), plus a testing cost hint so contributors know
+    `fnp-ufunc`/`fnp-python` dominate workspace test time (`saivr`).
+  - `audit_numpy_reality.md` pinned its vision quote to the exact
+    README anchor (`0yllc`) and surfaced the CI lock-in mechanism in
+    its headline tagline (`5hvay`); `audit_numpy_mocks.md` clarified
+    that the 115-unwrap row is fixture-only, not production crates
+    (`8iikg`), added the `println!`/`eprintln!`/`dbg!` matrix row
+    (`jr0hg`), and named all 10 crates explicitly (`mf2v3`).
+  - [`docs/adr/ADR-001-parity-pivot.md`](docs/adr/ADR-001-parity-pivot.md)
+    captures the 2026-04-10 proposal to pivot from parity grinding to
+    Phase 3 (FFI / BLAS / threading); a 2026-05-16 status update
+    notes that the parity track the ADR considered pivoting *away
+    from* has since reached 100% `numpy.__all__` coverage, so the
+    empirical case has materially changed.
+
 ### Pre-2026-03-21 details preserved below
 
 The dated capability sections below are unchanged; they cover the
@@ -78,7 +271,7 @@ The dated capability sections below are unchanged; they cover the
 
 ### Array Operations (`fnp-ufunc`)
 
-The ufunc crate is the largest subsystem (~30,000 lines, 1,249 tests). It grew
+The ufunc crate is the largest subsystem (~60,000 lines, 2,191 tests). It grew
 from a stub on day one to 35 binary operations, 42 unary operations, and 22+
 reductions.
 
@@ -243,8 +436,10 @@ methods, batch operations, and complex number support.
 
 ### Random Number Generation (`fnp-random`)
 
-Bit-exact parity with NumPy across 40 oracle-verified distributions, three bit
-generators, and the full `SeedSequence` hierarchy.
+Bit-exact parity with NumPy across 40+ oracle-verified distributions,
+**five production bit generators** (PCG64, PCG64DXSM, MT19937, Philox,
+SFC64) plus an internal `DeterministicRng` for tests, and the full
+`SeedSequence` hierarchy.
 
 #### Bit Generators
 
@@ -264,6 +459,15 @@ generators, and the full `SeedSequence` hierarchy.
   and deserialization (2026-03-21).
   [ee17681](https://github.com/Dicklesworthstone/franken_numpy/commit/ee1768141ce11f8a23228e4a351efef539a04503),
   [509055b](https://github.com/Dicklesworthstone/franken_numpy/commit/509055b1ed331590db3c21ab86ca7344a6dd42ce)
+- Add SFC64 small-fast-counting bit generator with NumPy-parity output
+  and `SeedSequence` seeding, completing the production bit-generator
+  set to 5 (PCG64, PCG64DXSM, MT19937, Philox, SFC64). Landed in the
+  same commit as the Philox addition above (2026-03-21). The set is
+  enumerated under `pub enum BitGeneratorKind` in `crates/fnp-random/src/lib.rs`.
+  Pickle state-restore for Philox/SFC64 hardened to require all state
+  entries present (2026-03-25).
+  [ee17681](https://github.com/Dicklesworthstone/franken_numpy/commit/ee1768141ce11f8a23228e4a351efef539a04503),
+  [2d358b2](https://github.com/Dicklesworthstone/franken_numpy/commit/2d358b2de785c7a1e1f90f61bfe47157f6e16cbf)
 - Add RNG state serialization (`get_state` / `set_state`) and harden `.npy`
   header parsing against allocation bombs.
   [9894042](https://github.com/Dicklesworthstone/franken_numpy/commit/989404292d75fc5c103eb0f1ae08b99488c84b94)

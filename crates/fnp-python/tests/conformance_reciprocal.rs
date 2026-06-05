@@ -207,3 +207,55 @@ print(np.allclose(result, expected))
     );
     Ok(())
 }
+
+#[test]
+fn reciprocal_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(2.0)
+fnp_result = fnp.reciprocal(x)
+np_result = np.reciprocal(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "reciprocal scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn reciprocal_signed_zero_parity() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import warnings
+warnings.filterwarnings('ignore')
+# reciprocal signed-zero parity
+# 1/0.0 = +inf, 1/(-0.0) = -inf
+tests = [0.0, -0.0]
+all_pass = True
+for x in tests:
+    fnp_result = fnp.reciprocal(np.float64(x))
+    np_result = np.reciprocal(np.float64(x))
+    fnp_sign = np.signbit(fnp_result)
+    np_sign = np.signbit(np_result)
+    if fnp_sign != np_sign:
+        print(f"FAIL: reciprocal({x})")
+        print(f"  fnp result={fnp_result} signbit={fnp_sign}")
+        print(f"  np result={np_result} signbit={np_sign}")
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "reciprocal signed-zero parity should match numpy: {result}"
+    );
+    Ok(())
+}

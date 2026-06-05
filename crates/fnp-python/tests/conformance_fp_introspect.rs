@@ -405,3 +405,62 @@ fn ldexp_integer_mantissa_matches_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+#[test]
+fn spacing_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(1.0)
+fnp_result = fnp.spacing(x)
+np_result = np.spacing(x)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "spacing scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn nextafter_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x1 = np.float64(1.0)
+x2 = np.float64(2.0)
+fnp_result = fnp.nextafter(x1, x2)
+np_result = np.nextafter(x1, x2)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "nextafter scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
+fn ldexp_scalar_return_type_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+x = np.float64(1.5)
+exp = np.int32(3)
+fnp_result = fnp.ldexp(x, exp)
+np_result = np.ldexp(x, exp)
+print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_result)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert!(
+        result.trim().starts_with("True"),
+        "ldexp scalar return type should match numpy: {result}"
+    );
+    Ok(())
+}
