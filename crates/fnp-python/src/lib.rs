@@ -7154,6 +7154,57 @@ fn f64_ndarray_contains_zero(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<b
     Ok(false)
 }
 
+// Zero-copy clip for exact C-contiguous float64 ndarrays with scalar bounds.
+// numpy's clip is min(max(x, lo), hi) with NaN propagating; the two comparisons
+// below reproduce that bit-for-bit (NaN fails both `<`/`>` so it passes through;
+// lo > hi clamps to hi, matching numpy). For an f64 input array with real scalar
+// bounds the result_type promotion is always a no-op, so the caller's promotion
+// guard is satisfied by construction. Reads the input buffer and writes the
+// output buffer with no intermediate Rust Vec (bead lglck). Returns Ok(None) for
+// any non-f64 / non-contiguous / non-ndarray input (caller falls through).
+fn try_zerocopy_f64_clip(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    lo: f64,
+    hi: f64,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            let v = cell.get();
+            let t = if v < lo { lo } else { v };
+            slot.set(if t > hi { hi } else { t });
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -9421,6 +9472,13 @@ fn clip(
     let Ok(max_val) = a_max.bind(py).extract::<f64>() else {
         return fallback();
     };
+
+    // Zero-copy clamp for exact f64 C-contiguous ndarrays: promotion is a no-op
+    // for f64 input + real scalar bounds, so this is bit-identical to the
+    // native array.clip below while skipping the cold extract/build Vecs.
+    if let Some(out) = try_zerocopy_f64_clip(py, a.bind(py), min_val, max_val)? {
+        return Ok(out);
+    }
 
     let array = match extract_precise_numeric_array(py, a.bind(py), "clip(a)") {
         Ok(array) => array,
