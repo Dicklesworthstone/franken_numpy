@@ -16025,7 +16025,14 @@ fn native_unary_logical_not_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
-        let x = extract_numeric_array(py, &args.get_item(0)?, "logical_not(x)")?;
+        let arg = args.get_item(0)?;
+        // logical_not(x) on a float array is the predicate `x == 0`; take the
+        // zero-copy bool buffer path for exact f64 C-contiguous ndarrays
+        // (bit-identical to ufunc_logical_not). Other inputs fall through.
+        if let Some(out) = try_zerocopy_f64_predicate(py, &arg, |v| v == 0.0)? {
+            return Ok(out);
+        }
+        let x = extract_numeric_array(py, &arg, "logical_not(x)")?;
         let result = ufunc_logical_not(&x).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
