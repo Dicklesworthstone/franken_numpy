@@ -8222,6 +8222,87 @@ fn try_zerocopy_f64_diff1d(
     Ok(Some(flat.unbind()))
 }
 
+// Zero-copy np.diff(n=1) along an explicit axis of a multi-dim C-contiguous
+// float64 ndarray (the case the 1-D diff helper leaves alone). Decomposing the
+// layout into outer * axis_len * inner groups, numpy's per-axis first difference
+// is out(o, a, i) = in(o, a+1, i) - in(o, a, i) for a in [0, axis_len-1); the
+// output's axis dimension shrinks by one. This writes each per-lane difference
+// straight into a numpy.empty buffer (then reshaped) with no intermediate Rust
+// Vec, dropping the cold extract/build Vecs (bead lglck). The subtraction is the
+// same op numpy performs in the same order, so it is bit-identical (nan/inf
+// propagate). Returns Ok(None) — caller falls through — for n != 1, a 0-d array,
+// an empty or out-of-range axis, or any non-f64 / non-contiguous / non-ndarray
+// input.
+fn try_zerocopy_f64_diff_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+    axis: i64,
+) -> PyResult<Option<Py<PyAny>>> {
+    if n != 1 {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let ndim = shape.len() as i64;
+    if ndim == 0 {
+        return Ok(None);
+    }
+    let norm_axis = if axis < 0 { axis + ndim } else { axis };
+    if norm_axis < 0 || norm_axis >= ndim {
+        return Ok(None);
+    }
+    let ax = norm_axis as usize;
+    let axis_len = shape[ax];
+    if axis_len == 0 {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let outer: usize = shape[..ax].iter().product();
+    let inner: usize = shape[ax + 1..].iter().product();
+    let out_axis_len = axis_len - 1;
+    let mut out_shape = shape.clone();
+    out_shape[ax] = out_axis_len;
+    let total_out = outer * out_axis_len * inner;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (total_out,), Some(&kwargs))?;
+    if total_out > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let in_lane = axis_len * inner;
+        let out_lane = out_axis_len * inner;
+        for o in 0..outer {
+            let ibase = o * in_lane;
+            let obase = o * out_lane;
+            for a_out in 0..out_axis_len {
+                let dst = obase + a_out * inner;
+                let cur = ibase + a_out * inner;
+                let nxt = ibase + (a_out + 1) * inner;
+                for i in 0..inner {
+                    output[dst + i].set(input[nxt + i].get() - input[cur + i].get());
+                }
+            }
+        }
+    }
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy consecutive differences (np.ediff1d, no to_begin/to_end) for a
 // C-contiguous float64 ndarray of any shape. numpy.ediff1d flattens its input
 // in C order and returns out[i] = flat[i+1] - flat[i], length total_elems-1
@@ -12581,6 +12662,12 @@ fn diff(
     // the cold extract/build Vecs. Bit-identical; everything else (n>1, multi-
     // dim, other axes) falls through to the general a.diff path below.
     if let Some(out) = try_zerocopy_f64_diff1d(py, a.bind(py), n, axis)? {
+        return Ok(out);
+    }
+    // Zero-copy first difference along an explicit axis of a multi-dim f64
+    // ndarray; same per-lane decomposition. Bit-identical; n>1 and non-f64 inputs
+    // fall through to the general a.diff path below.
+    if let Some(out) = try_zerocopy_f64_diff_axis(py, a.bind(py), n, axis)? {
         return Ok(out);
     }
     let a = match extract_precise_numeric_array(py, a.bind(py), "diff(a)") {
