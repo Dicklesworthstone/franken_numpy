@@ -18759,13 +18759,66 @@ fn native_binary_right_shift_or_passthrough(
     }
 }
 
+// Zero-copy bitwise invert (~x) for exact int64 / bool C-contiguous ndarrays.
+// int64: `!v` (two's-complement bitwise NOT, vectorizes). bool: numpy invert of
+// a boolean is the same flip as logical_not (True->False), i.e. `v == 0` — so it
+// reuses the bool logical_not byte path. Both bit-identical to ufunc_invert.
+// Without this, int64/bool input paid the cold extract Vec + rebuild (~214x
+// slower than numpy). Returns None for other dtypes / layouts / non-ndarray.
+fn try_zerocopy_invert(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = x.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind == "b" {
+        // ~bool == logical_not(bool): nonzero->False, zero->True.
+        return try_zerocopy_bool_logical_not(py, x);
+    }
+    if kind != "i" || dtype.getattr("itemsize")?.extract::<usize>()? != 8 {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<i64>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "int64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        unary_map_i64(input, output, |v| !v);
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 fn native_unary_invert_or_passthrough(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
-        let x = extract_numeric_array(py, &args.get_item(0)?, "invert(x)")?;
+        let arg = args.get_item(0)?;
+        if let Some(out) = try_zerocopy_invert(py, &arg)? {
+            return Ok(out);
+        }
+        let x = extract_numeric_array(py, &arg, "invert(x)")?;
         let result = ufunc_invert(&x).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
