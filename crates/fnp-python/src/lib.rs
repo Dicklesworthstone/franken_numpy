@@ -4425,7 +4425,12 @@ fn extract_condition_mask(
     // conditions (int/float truthiness) keep the general `!= 0` path.
     let numpy = py.import("numpy")?;
     let array = numpy.call_method1("asarray", (value,))?;
-    if array.getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b" {
+    if array
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        == "b"
+    {
         let flat = array.call_method1("reshape", (-1,))?;
         return numpy_bool_to_vec(py, &flat);
     }
@@ -24644,8 +24649,7 @@ fn trace(
         if n1 == 0
             && n2 == 1
             && let Ok(diag_view) = a_bound.call_method1("diagonal", (offset,))
-            && let Ok(diag_array) =
-                extract_precise_numeric_array(py, &diag_view, "trace(diagonal)")
+            && let Ok(diag_array) = extract_precise_numeric_array(py, &diag_view, "trace(diagonal)")
         {
             let sum: f64 = diag_array.values().iter().sum();
             let result = UFuncArray::scalar(sum, diag_array.dtype());
@@ -29551,7 +29555,8 @@ mod tests {
                 "dimension above the {cap} cap should stay on numpy fallback"
             );
             // And the cap boundary itself is eligible under the raised crossover.
-            let at_cap_a = UFuncArray::new(vec![cap, 320], vec![1.0; cap * 320], DType::F64).unwrap();
+            let at_cap_a =
+                UFuncArray::new(vec![cap, 320], vec![1.0; cap * 320], DType::F64).unwrap();
             assert!(
                 python_native_gemm_f64_2d_eligible(&at_cap_a, &too_large_b),
                 "dimension at the {cap} cap should take the native gate"
