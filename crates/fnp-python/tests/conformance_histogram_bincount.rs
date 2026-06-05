@@ -600,3 +600,36 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+/// Locks the zero-copy bincount fast path (`try_zerocopy_bincount`, the 1-D
+/// non-negative int64 no-weights case that tallies the buffer directly into an
+/// int64 output) to bit-exact parity with numpy, including the int64 result
+/// dtype and the minlength-driven output length. Compares the sha256 of raw
+/// output bytes across sparse and dense ranges and explicit minlength.
+#[test]
+fn bincount_zerocopy_int64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [1000, 100003]:
+    x = rng.integers(0, 500, n)
+    out = np.asarray(mod.bincount(x))
+    chunks.append(bytes([1 if out.dtype == np.int64 else 0]))
+    chunks.append(out.tobytes())
+    chunks.append(np.asarray(mod.bincount(x, minlength=1000)).tobytes())
+chunks.append(np.asarray(mod.bincount(np.array([0, 5, 5, 2, 9, 0], dtype=np.int64))).tobytes())
+chunks.append(np.asarray(mod.bincount(np.array([], dtype=np.int64), minlength=10)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy bincount must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

@@ -9785,6 +9785,71 @@ fn digitize(py: Python<'_>, x: Py<PyAny>, bins: Py<PyAny>, right: bool) -> PyRes
     build_numpy_scalar_or_array(py, &result)
 }
 
+// Zero-copy np.bincount for the common case: a 1-D non-negative int64 ndarray
+// with no weights. Reads the int64 buffer directly and tallies counts into a
+// numpy.zeros(length, int64) output (length = max(max(x)+1, minlength)), with no
+// int->f64->int round-trip and no intermediate Rust Vec, dropping the cold
+// extract/build Vecs (bead lglck). Counts are exact integers, so it is
+// bit-identical to numpy. A negative element returns Ok(None) so the general path
+// reproduces numpy's exact ValueError. Returns Ok(None) — caller falls through —
+// for weights, a non-int64 dtype, a multi-dim array, or any non-contiguous /
+// non-ndarray input.
+fn try_zerocopy_bincount(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    minlength: i64,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = x.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "i"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<i64>::get(x) else {
+        return Ok(None);
+    };
+    if buffer.shape().len() != 1 {
+        return Ok(None);
+    }
+    let Some(input) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // Single pass to validate non-negativity and find the max (an out-of-range
+    // negative value is deferred to the general path so numpy raises its ValueError).
+    let mut max_val: i64 = -1;
+    for cell in input.iter() {
+        let value = cell.get();
+        if value < 0 {
+            return Ok(None);
+        }
+        if value > max_val {
+            max_val = value;
+        }
+    }
+    let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "int64")?;
+    let out = numpy.call_method("zeros", (length,), Some(&kwargs))?;
+    if length > 0 && !input.is_empty() {
+        let Ok(out_buffer) = PyBuffer::<i64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for cell in input.iter() {
+            let slot = &output[cell.get() as usize];
+            slot.set(slot.get() + 1);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (x, weights=None, minlength=0))]
 fn bincount(
@@ -9813,6 +9878,15 @@ fn bincount(
              according to the rule 'safe'"
         )));
     }
+    // Zero-copy int64 tally for the common no-weights case; skips the int->f64
+    // round-trip and the cold extract/build Vecs. Bit-identical; weighted,
+    // non-int64, multi-dim, or negative inputs fall through to the general path.
+    if weights.as_ref().is_none_or(|w| w.bind(py).is_none())
+        && let Some(out) = try_zerocopy_bincount(py, x.bind(py), minlength)?
+    {
+        return Ok(out);
+    }
+
     let x = extract_numeric_array(py, x.bind(py), "bincount(x)")?;
     let weights = weights
         .map(|w| extract_numeric_array(py, w.bind(py), "bincount(weights)"))
