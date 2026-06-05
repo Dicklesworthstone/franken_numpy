@@ -7681,6 +7681,88 @@ fn try_zerocopy_f64_compress(
     Ok(Some(flat.unbind()))
 }
 
+// Zero-copy np.take(a, indices, axis=None, mode="raise") for a float64 a ndarray
+// and an int64 indices ndarray: numpy flattens a and gathers a.flat[idx] for each
+// index (with numpy's negative-index wraparound idx += n), returning a result of
+// the indices' shape. A first pass validates every index against [-n, n); if any
+// is out of range this returns Ok(None) so the caller's general path reproduces
+// numpy's exact IndexError. Otherwise a second pass gathers the values into a
+// numpy.empty(indices.size) buffer (then reshaped), with no intermediate Rust
+// Vec, dropping the cold extract/build Vecs (bead lglck). Values are copied
+// verbatim, so the result is bit-identical incl. nan/inf/signed zeros. Returns
+// Ok(None) — caller falls through — for a per-axis take, a non-"raise" mode, a
+// non-int64 index array, or any non-f64 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_take(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    indices: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    mode: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    if axis.is_some() || mode != "raise" {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !indices.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    // indices must be a signed 64-bit integer ndarray (numpy's default index
+    // width on 64-bit); other widths/kinds keep the general path.
+    {
+        let dtype = indices.getattr("dtype")?;
+        if dtype.getattr("kind")?.extract::<String>()? != "i"
+            || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+        {
+            return Ok(None);
+        }
+    }
+    let (Ok(a_buffer), Ok(idx_buffer)) =
+        (PyBuffer::<f64>::get(a), PyBuffer::<i64>::get(indices))
+    else {
+        return Ok(None);
+    };
+    let (Some(a_in), Some(idx_in)) = (a_buffer.as_slice(py), idx_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    let n = a_in.len() as i64;
+    let out_shape: Vec<usize> = idx_buffer.shape().to_vec();
+    let count = idx_in.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (count,), Some(&kwargs))?;
+    if count > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // Fused validate-and-gather in one pass over the index stream (no
+        // intermediate index Vec). numpy's negative-index wraparound is idx += n;
+        // an out-of-range index bails to the general path — the partially written
+        // output buffer is simply dropped (take has no side effects) and numpy
+        // reproduces the exact IndexError. take never reorders within a lane, so
+        // gathering verbatim is bit-identical.
+        for (slot, idx_cell) in output.iter().zip(idx_in.iter()) {
+            let mut idx = idx_cell.get();
+            if idx < 0 {
+                idx += n;
+            }
+            if idx < 0 || idx >= n {
+                return Ok(None);
+            }
+            slot.set(a_in[idx as usize].get());
+        }
+    }
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if out_shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
 // ndarray. Output[i] = a[i+1] - a[i], length len-1 (empty for len 0 or 1, which
 // matches numpy). Reads the input buffer and writes the (len-1)-length output
@@ -9348,6 +9430,12 @@ fn take(
 
     if mode != "raise" {
         return fallback();
+    }
+    // Zero-copy flat gather for the common case (axis=None, mode="raise", f64 a +
+    // int64 indices); skips the cold extract/build Vecs. Bit-identical; per-axis
+    // takes, other index widths, and out-of-range indices fall through.
+    if let Some(out) = try_zerocopy_f64_take(py, a.bind(py), indices.bind(py), axis, mode)? {
+        return Ok(out);
     }
     let a = extract_numeric_array(py, a.bind(py), "take(a)")?;
     let (indices_shape, flat_indices) =

@@ -405,3 +405,37 @@ print(np.array_equal(fnp_arr, np_arr) and np_arr.tolist() == [0, 9, 8, 3, 4])
     );
     Ok(())
 }
+
+/// Locks the zero-copy flat-gather fast path for `numpy.take` (axis=None,
+/// mode="raise", `try_zerocopy_f64_take`) to bit-exact parity. take copies the
+/// gathered values verbatim, so parity must hold at the IEEE-754 bit level
+/// (signed zero, nan, inf). Compares sha256 of raw output bytes across negative
+/// (wraparound) indices, multi-D index arrays (output takes the index shape), and
+/// extreme values — the f64-array + int64-index zero-copy path.
+#[test]
+fn take_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [1000, 100003]:
+    x = rng.standard_normal(n)
+    idx = rng.integers(-n, n, size=n // 3)
+    chunks.append(np.asarray(mod.take(x, idx)).tobytes())
+x = rng.standard_normal(1000)
+chunks.append(np.asarray(mod.take(x, rng.integers(0, 1000, size=(5, 7)))).tobytes())
+xe = np.array([0.0, -0.0, np.inf, -np.inf, np.nan], dtype=np.float64)
+chunks.append(np.asarray(mod.take(xe, np.array([4, 3, 2, 1, 0, -1, -5]))).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp").into()))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy take must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
