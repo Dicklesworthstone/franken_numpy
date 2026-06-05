@@ -25407,11 +25407,11 @@ fn try_zerocopy_f64_kron1d(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for i in 0..n {
-            let ai = a_in[i].get();
+        for (i, ai_cell) in a_in.iter().enumerate() {
+            let ai = ai_cell.get();
             let row = i * m;
-            for j in 0..m {
-                output[row + j].set(ai * b_in[j].get());
+            for (j, bj_cell) in b_in.iter().enumerate() {
+                output[row + j].set(ai * bj_cell.get());
             }
         }
     }
@@ -25568,11 +25568,11 @@ fn try_zerocopy_f64_outer(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for i in 0..n {
-            let ai = a_in[i].get();
+        for (i, ai_cell) in a_in.iter().enumerate() {
+            let ai = ai_cell.get();
             let row = i * m;
-            for j in 0..m {
-                output[row + j].set(ai * b_in[j].get());
+            for (j, bj_cell) in b_in.iter().enumerate() {
+                output[row + j].set(ai * bj_cell.get());
             }
         }
     }
@@ -26738,6 +26738,115 @@ fn sum(
     Ok(sum_fn.call((a.bind(py),), Some(&kw))?.unbind())
 }
 
+// Zero-copy np.prod reduction for a C-contiguous float64 ndarray (no out/dtype/
+// initial/where). numpy.prod multiplies SEQUENTIALLY (unlike the pairwise add of
+// np.sum), so a straight left-to-right product is bit-identical. Using the
+// outer * axis * inner decomposition, out(o, i) = product over a of in(o, a, i),
+// accumulated in axis order; axis=None reduces the whole flat buffer. The result
+// is written into a numpy.empty output (no per-input extract Vec, no reduce-build
+// Vec). The product starts from 1.0 (the empty-axis identity, matching numpy) and
+// 1.0 * x == x bit-exactly, so signed zeros / inf / nan propagate exactly.
+// Returns Ok(None) — caller falls through — for a tuple axis, an out-of-range
+// axis, a 0-d array, or any non-f64 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_prod(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let ndim = shape.len();
+
+    // Resolve the reduction into outer * axis_len * inner and the output shape.
+    let (outer, axis_len, inner, out_shape): (usize, usize, usize, Vec<usize>) = match axis {
+        None => {
+            let total = input.len();
+            let out_shape = if keepdims { vec![1; ndim] } else { Vec::new() };
+            (1, total, 1, out_shape)
+        }
+        Some(ax) => {
+            let ndim_i = ndim as isize;
+            let norm = if ax < 0 { ax + ndim_i } else { ax };
+            if norm < 0 || norm >= ndim_i {
+                return Ok(None);
+            }
+            let axu = norm as usize;
+            let outer: usize = shape[..axu].iter().product();
+            let inner: usize = shape[axu + 1..].iter().product();
+            let mut out_shape = shape.clone();
+            if keepdims {
+                out_shape[axu] = 1;
+            } else {
+                out_shape.remove(axu);
+            }
+            (outer, shape[axu], inner, out_shape)
+        }
+    };
+
+    let out_elems = outer * inner;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (out_elems,), Some(&kwargs))?;
+    if out_elems > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        if inner == 1 {
+            // Each outer lane is contiguous: accumulate the product in a register.
+            for (o, slot) in output.iter().enumerate() {
+                let base = o * axis_len;
+                let mut acc = 1.0_f64;
+                for a in 0..axis_len {
+                    acc *= input[base + a].get();
+                }
+                slot.set(acc);
+            }
+        } else {
+            // inner > 1: multiply slab by slab so the access stays sequential.
+            for slot in output.iter() {
+                slot.set(1.0);
+            }
+            let lane = axis_len * inner;
+            for o in 0..outer {
+                let obase = o * inner;
+                let ibase = o * lane;
+                for a in 0..axis_len {
+                    let in_a = ibase + a * inner;
+                    for i in 0..inner {
+                        let slot = &output[obase + i];
+                        slot.set(slot.get() * input[in_a + i].get());
+                    }
+                }
+            }
+        }
+    }
+    if out_shape.is_empty() {
+        // Scalar result: reshape to 0-d and unwrap to a numpy scalar.
+        let zerod = flat.call_method1("reshape", (PyTuple::empty(py),))?;
+        return Ok(Some(zerod.get_item(())?.unbind()));
+    }
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
@@ -26809,6 +26918,13 @@ fn prod(
             }
         }
     };
+
+    // Zero-copy sequential product reduction for C-contiguous f64 ndarrays; skips
+    // the cold extract + reduce-build Vecs. numpy.prod multiplies sequentially, so
+    // this is bit-identical. Tuple axes and other dtypes fall through.
+    if let Some(out) = try_zerocopy_f64_prod(py, a.bind(py), axis_val, keepdims)? {
+        return Ok(out);
+    }
 
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "prod(a)") {

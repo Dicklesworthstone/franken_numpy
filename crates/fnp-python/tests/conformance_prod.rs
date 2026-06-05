@@ -552,3 +552,36 @@ print(big_match and small_match)
     );
     Ok(())
 }
+
+/// Locks the zero-copy sequential product reduction (`try_zerocopy_f64_prod`) to
+/// bit-exact parity with numpy. numpy.prod multiplies sequentially, so a
+/// left-to-right product matches at the IEEE-754 bit level. Compares the sha256
+/// of raw output bytes across every axis of 2-D and 3-D inputs, the full
+/// reduction, and signed-zero/inf/nan extremes.
+#[test]
+fn prod_reduction_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for shp in [(100, 50), (5, 5, 5)]:
+    x = rng.standard_normal(shp) * 1.0005
+    for axis in range(len(shp)):
+        chunks.append(np.asarray(mod.prod(x, axis=axis)).tobytes())
+    chunks.append(np.asarray(mod.prod(x)).tobytes())
+xe = np.array([[-0.0, 2.0, np.inf], [3.0, -0.0, np.nan]], dtype=np.float64)
+chunks.append(np.asarray(mod.prod(xe, axis=0)).tobytes())
+chunks.append(np.asarray(mod.prod(xe, axis=1)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_prod_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy prod reduction must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
