@@ -2408,14 +2408,6 @@ fn svd_bidiag_qr_full(
         return Err(LinAlgError::SvdNonConvergence);
     }
 
-    // Transpose the accumulated rotations back into U (row-major).
-    let mut u = vec![0.0; m * m];
-    for i in 0..m {
-        for j in 0..m {
-            u[j * m + i] = u_t[i * m + j];
-        }
-    }
-
     // Make all singular values non-negative
     for j in 0..n {
         if d[j] < 0.0 {
@@ -2432,12 +2424,23 @@ fn svd_bidiag_qr_full(
 
     let sigmas: Vec<f64> = order.iter().take(k).map(|&i| d[i]).collect();
 
-    let u_old = u.clone();
-    let vt_old = vt.clone();
+    // Transpose the accumulated rotations directly into sorted U columns.
+    // This preserves the same stable singular-value ordering as the former
+    // transpose-then-clone reorder, while avoiding an extra m*m clone/copy.
+    let mut u = vec![0.0; m * m];
     for (new_idx, &old_idx) in order.iter().enumerate() {
         for row in 0..m {
-            u[row * m + new_idx] = u_old[row * m + old_idx];
+            u[row * m + new_idx] = u_t[old_idx * m + row];
         }
+    }
+    for col in n..m {
+        for row in 0..m {
+            u[row * m + col] = u_t[col * m + row];
+        }
+    }
+
+    let vt_old = vt.clone();
+    for (new_idx, &old_idx) in order.iter().enumerate() {
         for col in 0..n {
             vt[new_idx * n + col] = vt_old[old_idx * n + col];
         }
@@ -11485,6 +11488,39 @@ mod tests {
         assert_eq!(
             digest, "4a06f40391aae9cc82d3cb1a711624a8b08e85878d44e9279ae77758fc1c4c9f",
             "full SVD output bit pattern must remain fixed: {digest}"
+        );
+    }
+
+    #[test]
+    fn svd_full_tall_output_matches_clean_head_digest() {
+        let m = 32usize;
+        let n = 24usize;
+        let mut state = 0x51D1_5EED_C0FF_EE11u64;
+        let a: Vec<f64> = (0..(m * n))
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+            })
+            .collect();
+
+        let (u, s, vt) = svd_mxn_full(&a, m, n).expect("tall full svd");
+        let mut hasher = Sha256::new();
+        for part in [&u[..], &s[..], &vt[..]] {
+            hasher.update(part.len().to_le_bytes());
+            for value in part {
+                hasher.update(value.to_bits().to_le_bytes());
+            }
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "498a91ab1c9f10d9572305acad1516997cc3e29dffbc21fe83c6b04585e870e4",
+            "tall full SVD output bit pattern must remain fixed: {digest}"
         );
     }
 
