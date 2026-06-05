@@ -330,3 +330,38 @@ fn flatnonzero_complex_dtype_matches_numpy() -> Result<(), String> {
 
     Ok(())
 }
+
+/// Locks the zero-copy flatnonzero fast path (`try_zerocopy_flatnonzero`) for
+/// bool and float64 ndarrays to bit-exact parity with numpy, including the int64
+/// index dtype. The scan emits exact flat indices, and for float64 it must
+/// exclude both +0.0 and -0.0 while including NaN (NaN != 0.0). Compares the
+/// sha256 of the raw output bytes against the NumPy oracle across bool masks,
+/// float64 arrays with special values, and multi-D (flattened) inputs.
+#[test]
+fn flatnonzero_zerocopy_bool_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [1000, 100003]:
+    x = rng.standard_normal(n)
+    out = np.asarray(mod.flatnonzero(x > 0.1))
+    chunks.append(bytes([1 if out.dtype == np.int64 else 0]))
+    chunks.append(out.tobytes())
+special = np.array([0.0, -0.0, 1.0, np.nan, 0.0, -2.0, np.inf, -np.inf], dtype=np.float64)
+chunks.append(np.asarray(mod.flatnonzero(special)).tobytes())
+chunks.append(np.asarray(mod.flatnonzero(rng.standard_normal((30, 40)) > 0)).tobytes())
+chunks.append(np.asarray(mod.flatnonzero(np.round(rng.standard_normal(5000) * 2))).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_flatnonzero_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy flatnonzero must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

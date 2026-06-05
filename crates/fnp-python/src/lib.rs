@@ -10009,8 +10009,100 @@ fn nonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     Ok(numpy.getattr("nonzero")?.call1((a.bind(py),))?.unbind())
 }
 
+// Zero-copy np.flatnonzero for a C-contiguous bool or float64 ndarray: returns
+// the int64 flat indices where the (ravelled) input is nonzero. numpy.flatnonzero
+// == nonzero(ravel(a))[0]; for bool that is every True byte, for float64 every
+// value != 0.0 (which excludes +-0.0 and includes NaN, since NaN != 0.0). Two
+// passes over the buffer — count the hits, then write their indices into a
+// numpy.empty(count, int64) buffer — with no intermediate Rust Vec and no
+// bool->f64->f64-index->int64 round-trip, dropping the cold extract/build Vecs
+// (bead lglck). Indices are exact, so it is bit-identical to numpy. The bool
+// buffer's '?' format is rejected by PyBuffer::<u8>, so it is viewed as uint8
+// first. Returns Ok(None) — caller falls through — for any other dtype or a
+// non-contiguous / non-ndarray input.
+fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+
+    // Allocate the int64 output of the given length and return its writable slice
+    // along with the object. (count is computed by each typed branch first so the
+    // monomorphized fill loop below has no dynamic dispatch.)
+    let make_output = |py: Python<'_>, count: usize| -> PyResult<Py<PyAny>> {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "int64")?;
+        Ok(numpy.call_method("empty", (count,), Some(&kwargs))?.unbind())
+    };
+
+    match kind.as_str() {
+        "b" => {
+            let a_u8: Bound<'_, PyAny> = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+            let Ok(buffer) = PyBuffer::<u8>::get(&a_u8) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            let count = input.iter().filter(|cell| cell.get() != 0).count();
+            let out = make_output(py, count)?;
+            if count > 0 {
+                let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
+                    return Ok(None);
+                };
+                let Some(output) = out_buffer.as_mut_slice(py) else {
+                    return Ok(None);
+                };
+                let mut w = 0usize;
+                for (i, cell) in input.iter().enumerate() {
+                    if cell.get() != 0 {
+                        output[w].set(i as i64);
+                        w += 1;
+                    }
+                }
+            }
+            Ok(Some(out))
+        }
+        "f" if numpy_dtype_is_f64(py, a) => {
+            let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            let count = input.iter().filter(|cell| cell.get() != 0.0).count();
+            let out = make_output(py, count)?;
+            if count > 0 {
+                let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
+                    return Ok(None);
+                };
+                let Some(output) = out_buffer.as_mut_slice(py) else {
+                    return Ok(None);
+                };
+                let mut w = 0usize;
+                for (i, cell) in input.iter().enumerate() {
+                    if cell.get() != 0.0 {
+                        output[w].set(i as i64);
+                        w += 1;
+                    }
+                }
+            }
+            Ok(Some(out))
+        }
+        _ => Ok(None),
+    }
+}
+
 #[pyfunction]
 fn flatnonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Zero-copy index scan for C-contiguous bool / f64 ndarrays (the common case,
+    // e.g. flatnonzero(x > 0)); skips the bool->f64->int64 round-trip. Bit-
+    // identical; other dtypes fall through to the general path below.
+    if let Some(out) = try_zerocopy_flatnonzero(py, a.bind(py))? {
+        return Ok(out);
+    }
     let a_for_fallback = a.clone_ref(py);
     let a = match extract_numeric_array(py, a.bind(py), "flatnonzero(a)") {
         Ok(array) => array,
