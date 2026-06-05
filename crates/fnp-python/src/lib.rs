@@ -7826,6 +7826,66 @@ fn try_zerocopy_f64_putmask(
     Ok(true)
 }
 
+// Zero-copy np.cumsum for the flatten form: a C-contiguous float64 ndarray with
+// axis=None (numpy flattens and returns a 1-D cumulative sum) or a 1-D array with
+// axis in {0, -1}. The running sum is strictly sequential — out[i] = out[i-1] +
+// in[i] — exactly numpy's left-to-right accumulation, so it is bit-identical
+// (no reordering, which would perturb the non-associative f64 adds). The first
+// element is copied verbatim (out[0] = in[0]) rather than 0.0 + in[0] so a
+// leading -0.0 keeps its sign. Reads the input buffer and writes the output
+// buffer with no intermediate Rust Vec, dropping the cold extract/build Vecs
+// (bead lglck). Returns Ok(None) — caller falls through — for a per-axis cumsum
+// on a multi-dim array or any non-f64 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_cumsum(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    // Accept only the flatten-equivalent cumsum: axis=None (any ndim) or a 1-D
+    // array with axis in {0, -1}. A per-axis cumsum on a multi-dim array sums
+    // along one axis only and is left to the general path.
+    let ndim = in_buffer.shape().len();
+    let flatten_ok = match axis {
+        None => true,
+        Some(ax) => ndim == 1 && (ax == 0 || ax == -1),
+    };
+    if !flatten_ok {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // Copy the first element verbatim (preserves a leading -0.0), then carry
+        // the running sum forward exactly as numpy does.
+        let mut acc = input[0].get();
+        output[0].set(acc);
+        for i in 1..n {
+            acc += input[i].get();
+            output[i].set(acc);
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
 // ndarray. Output[i] = a[i+1] - a[i], length len-1 (empty for len 0 or 1, which
 // matches numpy). Reads the input buffer and writes the (len-1)-length output
@@ -25890,6 +25950,13 @@ fn cumsum(
             }
         }
     };
+
+    // Zero-copy flatten cumsum for C-contiguous f64 ndarrays (axis=None any ndim,
+    // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical
+    // (strictly sequential accumulation); per-axis multi-dim cumsums fall through.
+    if let Some(result) = try_zerocopy_f64_cumsum(py, a.bind(py), axis_val)? {
+        return Ok(result);
+    }
 
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "cumsum(a)") {
