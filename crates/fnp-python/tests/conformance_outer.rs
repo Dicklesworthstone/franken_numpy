@@ -238,3 +238,31 @@ print(all_pass)
     );
     Ok(())
 }
+
+/// Locks the zero-copy rank-1 product fast path (`try_zerocopy_f64_outer`) to
+/// bit-exact parity with numpy. outer writes a[i]*b[j] verbatim, so parity must
+/// hold at the IEEE-754 bit level (signed zero, nan, inf). Compares the sha256 of
+/// raw output bytes across rectangular shapes and extreme values.
+#[test]
+fn outer_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for n, m in [(500, 500), (100, 1000), (777, 333)]:
+    chunks.append(np.asarray(mod.outer(rng.standard_normal(n), rng.standard_normal(m))).tobytes())
+xe = np.array([0.0, -0.0, np.inf, -np.inf, np.nan, 1e308], dtype=np.float64)
+chunks.append(np.asarray(mod.outer(xe, np.array([1.0, -0.0, np.inf, 0.0, -2.0], dtype=np.float64))).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy outer must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

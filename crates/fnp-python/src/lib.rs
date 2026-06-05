@@ -25037,6 +25037,61 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     Ok(output)
 }
 
+// Zero-copy np.outer(a, b) for C-contiguous float64 ndarrays: numpy ravels both
+// operands and returns the rank-1 product out[i, j] = a.flat[i] * b.flat[j] with
+// shape (a.size, b.size). This writes that product straight into a
+// numpy.empty(n*m) buffer (reshaped) with no intermediate Rust Vec of the full
+// n*m result, dropping the cold extract/build Vecs (bead lglck). The row scalar
+// a[i] is hoisted and each row writes b sequentially, so the access is
+// cache-friendly. Each output is exactly a[i]*b[j] in the same order numpy uses,
+// so it is bit-identical (incl. nan/inf/signed zeros). Returns Ok(None) — caller
+// falls through — for any non-f64 / non-contiguous / non-ndarray operand.
+fn try_zerocopy_f64_outer(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type)
+        || !b.is_exact_instance(&ndarray_type)
+        || !numpy_dtype_is_f64(py, a)
+        || !numpy_dtype_is_f64(py, b)
+    {
+        return Ok(None);
+    }
+    let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
+        return Ok(None);
+    };
+    let (Some(a_in), Some(b_in)) = (a_buffer.as_slice(py), b_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    let n = a_in.len();
+    let m = b_in.len();
+    let total = n * m;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for i in 0..n {
+            let ai = a_in[i].get();
+            let row = i * m;
+            for j in 0..m {
+                output[row + j].set(ai * b_in[j].get());
+            }
+        }
+    }
+    let output_shape = PyTuple::new(py, [n, m])?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b, out=None))]
 fn outer(
@@ -25059,6 +25114,13 @@ fn outer(
 
     if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
         return fallback();
+    }
+
+    // Zero-copy rank-1 product for C-contiguous f64 ndarrays (the common case);
+    // skips the cold extract + full n*m build Vecs. Bit-identical; other dtypes
+    // and non-contiguous inputs fall through to the general path.
+    if let Some(result) = try_zerocopy_f64_outer(py, a.bind(py), b.bind(py))? {
+        return Ok(result);
     }
 
     let a = match extract_precise_numeric_array(py, a.bind(py), "outer(a)") {
