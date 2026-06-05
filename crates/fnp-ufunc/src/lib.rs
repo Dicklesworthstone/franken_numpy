@@ -34329,12 +34329,19 @@ pub fn frexp(x: &UFuncArray) -> Result<(UFuncArray, UFuncArray), UFuncError> {
             let biased_exp = ((bits >> 52) & 0x7FF) as i64;
             let frac_bits = bits & 0x000F_FFFF_FFFF_FFFF;
             if biased_exp == 0 {
-                // Subnormal: normalize first
-                let normalized = v.abs();
-                let log2 = normalized.log2().floor() as i64;
-                let exp = log2 + 1;
-                let m = v / (2.0_f64).powi(exp as i32);
-                mantissas.push(m);
+                // Subnormal: scale up into the normal range by 2^54 (exact, no
+                // underflow) before decomposing, then subtract 54 from the
+                // exponent. The old `v / 2^exp` underflowed to 0.0 (-> inf) for
+                // exp <= -1023, e.g. the minimum subnormal 5e-324 where numpy
+                // returns (0.5, -1073). Scaling a subnormal by 2^54 always lands
+                // in the normal range, so the decomposition below is exact.
+                let scaled_bits = (v * f64::from_bits(0x4350_0000_0000_0000)).to_bits();
+                let scaled_biased = ((scaled_bits >> 52) & 0x7FF) as i64;
+                let scaled_frac = scaled_bits & 0x000F_FFFF_FFFF_FFFF;
+                let exp = scaled_biased - 1023 + 1 - 54;
+                let m_bits = (1022_u64 << 52) | scaled_frac;
+                let m = f64::from_bits(m_bits);
+                mantissas.push(if sign == 1 { -m } else { m });
                 exponents.push(exp as f64);
             } else {
                 let exp = biased_exp - 1023 + 1;
@@ -58894,6 +58901,49 @@ print(json.dumps(payload))
         assert!(m.values()[0] >= 0.5 && m.values()[0] < 1.0);
         let reconstructed = m.values()[0] * (2.0_f64).powi(e.values()[0] as i32);
         assert!((reconstructed - 1e300).abs() / 1e300 < 1e-10);
+    }
+
+    #[test]
+    fn frexp_minimum_subnormal_matches_numpy() {
+        // The old `v / 2^exp` decomposition underflowed 2^exp to 0.0 for
+        // exp <= -1023, returning inf for the smallest subnormals. Pin the exact
+        // numpy results (mantissa bit-for-bit, integer exponent) at the extremes.
+        // anchors: (input_bits, expected_mantissa_bits, expected_exponent)
+        let anchors: [(u64, u64, f64); 5] = [
+            (0x0000_0000_0000_0001, 0x3fe0_0000_0000_0000, -1073.0), // min subnormal 5e-324
+            (0x0000_0000_0000_0002, 0x3fe0_0000_0000_0000, -1072.0), // 2x min
+            (0x0008_0000_0000_0000, 0x3fe0_0000_0000_0000, -1022.0), // mid subnormal
+            (0x000f_ffff_ffff_ffff, 0x3fef_ffff_ffff_fffe, -1022.0), // largest subnormal
+            (0x0010_0000_0000_0000, 0x3fe0_0000_0000_0000, -1021.0), // min normal
+        ];
+        for (in_bits, m_bits, exp) in anchors {
+            let v = f64::from_bits(in_bits);
+            let arr = UFuncArray::new(vec![1], vec![v], DType::F64).unwrap();
+            let (m, e) = frexp(&arr).unwrap();
+            assert_eq!(
+                m.values()[0].to_bits(),
+                m_bits,
+                "mantissa mismatch for 0x{in_bits:016x}"
+            );
+            assert_eq!(e.values()[0], exp, "exponent mismatch for 0x{in_bits:016x}");
+            // and the negative twin
+            let arrn = UFuncArray::new(vec![1], vec![-v], DType::F64).unwrap();
+            let (mn, en) = frexp(&arrn).unwrap();
+            assert_eq!(mn.values()[0].to_bits(), m_bits ^ (1 << 63));
+            assert_eq!(en.values()[0], exp);
+        }
+        // Invariant over a sweep of subnormals: |m| in [0.5, 1.0), no inf/nan.
+        for shift in 0..52 {
+            let v = f64::from_bits(1u64 << shift);
+            let arr = UFuncArray::new(vec![1], vec![v], DType::F64).unwrap();
+            let (m, _) = frexp(&arr).unwrap();
+            let mant = m.values()[0];
+            assert!(
+                mant.is_finite() && (0.5..1.0).contains(&mant.abs()),
+                "mantissa out of range for 0x{:016x}: {mant}",
+                1u64 << shift
+            );
+        }
     }
 
     // ── ldexp tests ──────────────────────────────────────────────────────
