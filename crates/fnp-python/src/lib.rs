@@ -6846,6 +6846,8 @@ fn zerocopy_f64_unary_flat<'py>(
             | UnaryOp::Floor
             | UnaryOp::Ceil
             | UnaryOp::Trunc
+            | UnaryOp::Sign
+            | UnaryOp::Square
     ) {
         return Ok(None);
     }
@@ -10443,6 +10445,9 @@ fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // own error rather than our generic numeric-only TypeError.
     if !matches!(dtype_kind.as_str(), "b" | "i" | "u" | "f") {
         return Ok(numpy.getattr("sign")?.call1((arr,))?.unbind());
+    }
+    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Sign)? {
+        return Ok(out);
     }
     let x = extract_numeric_array(py, x.bind(py), "sign(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Sign))
