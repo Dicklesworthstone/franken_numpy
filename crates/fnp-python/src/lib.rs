@@ -6807,6 +6807,86 @@ fn numpy_array_from_direct_f64_unary<'py>(
     Ok(Some(output))
 }
 
+// Fully zero-copy fast path for f64 unary ops. When `x` is exactly a
+// C-contiguous `float64` `numpy.ndarray`, read its values straight from the
+// buffer-protocol view and write `op.apply` into a fresh output buffer —
+// allocating NO intermediate Rust `Vec`. The default glibc allocator `munmap`s
+// every >128 KiB block on free, so the input copy the extract path makes is
+// freshly `mmap`ed cold memory whose first-touch page faults dominate the
+// native-unary boundary cost (profiled: ~16k minor faults / 4M-elem call vs
+// numpy's ~600; ~6x wall-clock). Reading the existing numpy buffer in place and
+// writing only the (numpy-pooled, warm) output buffer removes both the
+// allocation and its faults.
+//
+// Returns the flat output array plus the source shape so the caller reuses its
+// existing reshape / 0-d scalar handling. Returns `Ok(None)` — fall through to
+// the `extract_precise_numeric_array` path, leaving all other inputs unchanged —
+// for anything that is not an exact `float64` C-contiguous `ndarray`, for ops
+// outside the copy-equivalent set proven by `direct_f64_unary_output_supported`,
+// or for `sqrt` of a finite-negative value (which must record a NumPy invalid
+// event on the existing path). Output is bit-identical to that path: the same
+// `op.apply` runs on the same f64 bits, only the input source differs.
+fn zerocopy_f64_unary_flat<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    x: &Bound<'py, PyAny>,
+    op: UnaryOp,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    // Only the ops the in-place direct output path already proves copy-equivalent.
+    if !matches!(
+        op,
+        UnaryOp::Abs
+            | UnaryOp::Fabs
+            | UnaryOp::Negative
+            | UnaryOp::Positive
+            | UnaryOp::Rint
+            | UnaryOp::Sqrt
+    ) {
+        return Ok(None);
+    }
+    // Exact ndarray type only — subclasses (matrix, masked array) must keep
+    // numpy's subclass-preserving semantics via the fallback.
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    // A float64 buffer view; wrong dtype (format mismatch) or non-C-contiguous
+    // layout (`as_slice` returns None) falls through unchanged.
+    let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // sqrt of a finite-negative must record the NumPy invalid event on the
+    // UFuncArray path; defer those identically to the direct output path.
+    if matches!(op, UnaryOp::Sqrt)
+        && input.iter().any(|cell| {
+            let value = cell.get();
+            value.is_finite() && value < 0.0
+        })
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            slot.set(op.apply(cell.get()));
+        }
+    }
+    Ok(Some((flat, shape)))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -15275,6 +15355,17 @@ fn native_unary_elementwise(
     let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
         Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind())
     };
+    // Zero-copy fast path: exact float64 C-contiguous ndarray inputs skip the
+    // cold extract Vec entirely (see zerocopy_f64_unary_flat). Bit-identical to
+    // the direct output path below; all other inputs fall through unchanged.
+    if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+        if shape.is_empty() {
+            return Ok(output.bind(py).get_item(())?.unbind());
+        }
+        return Ok(output);
+    }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
         return fallback(py);
     };
@@ -15317,6 +15408,18 @@ fn native_unary_promoting(
     let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
         Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind())
     };
+    // Zero-copy fast path: exact float64 C-contiguous ndarray inputs skip the
+    // cold extract Vec entirely (see zerocopy_f64_unary_flat). Integer inputs
+    // (which this promoting path widens to float) are not float64 ndarrays, so
+    // they correctly fall through unchanged.
+    if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+        if shape.is_empty() {
+            return Ok(output.bind(py).get_item(())?.unbind());
+        }
+        return Ok(output);
+    }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
         return fallback(py);
     };
