@@ -22354,14 +22354,12 @@ impl UFuncArray {
     pub fn in1d(&self, test_elements: &Self) -> Self {
         if self.dtype == DType::I64
             && test_elements.dtype == DType::I64
-            && let (Ok(Some(IntegerSidecar::I64(values))), Ok(Some(IntegerSidecar::I64(mut set)))) = (
+            && let (Ok(Some(IntegerSidecar::I64(values))), Ok(Some(IntegerSidecar::I64(set)))) = (
                 self.synthesized_integer_sidecar("in1d"),
                 test_elements.synthesized_integer_sidecar("in1d"),
             )
         {
-            set.sort_unstable();
-            set.dedup();
-            let values = in1d_membership_mask(&values, |v| set.binary_search(v).is_ok());
+            let values = i64_membership_mask(&values, &set);
             return Self {
                 shape: self.shape.clone(),
                 values,
@@ -22371,14 +22369,12 @@ impl UFuncArray {
         }
         if self.dtype == DType::U64
             && test_elements.dtype == DType::U64
-            && let (Ok(Some(IntegerSidecar::U64(values))), Ok(Some(IntegerSidecar::U64(mut set)))) = (
+            && let (Ok(Some(IntegerSidecar::U64(values))), Ok(Some(IntegerSidecar::U64(set)))) = (
                 self.synthesized_integer_sidecar("in1d"),
                 test_elements.synthesized_integer_sidecar("in1d"),
             )
         {
-            set.sort_unstable();
-            set.dedup();
-            let values = in1d_membership_mask(&values, |v| set.binary_search(v).is_ok());
+            let values = u64_membership_mask(&values, &set);
             return Self {
                 shape: self.shape.clone(),
                 values,
@@ -25950,6 +25946,64 @@ fn select_percentile_method(data: &mut [f64], fraction: f64, method: QuantileInt
 /// holds. Each element is an independent lookup, so an indexed parallel map is
 /// bit-identical to the serial one (order-preserving collect). Gated on size so
 /// small inputs avoid the rayon overhead.
+/// Membership cap: a direct-indexed boolean table is built only when the test
+/// set's value span fits this many slots (64 Mi bools = 64 MiB). Wider spans
+/// fall back to sorted binary search so memory stays bounded.
+const MEMBERSHIP_TABLE_MAX_SLOTS: u128 = 1 << 26;
+
+/// `in1d` membership mask for i64 with numpy's `kind='table'` strategy: when the
+/// test set spans a bounded integer range, a direct-indexed boolean lookup table
+/// turns each query into one branchless indexed load (O(n+m), cache-resident)
+/// instead of a branchy `binary_search` (O(n log m)). The boolean RESULT is
+/// identical to the sorted-set path regardless of which branch runs, so this is
+/// pure speed — membership of `v` is `min<=v<=max && table[v-min]`.
+fn i64_membership_mask(values: &[i64], test: &[i64]) -> Vec<f64> {
+    if test.is_empty() {
+        return vec![0.0; values.len()];
+    }
+    let min = *test.iter().min().unwrap();
+    let max = *test.iter().max().unwrap();
+    let span = (max as i128 - min as i128) as u128; // inclusive slot count = span + 1
+    let total = values.len() as u128 + test.len() as u128;
+    if span < MEMBERSHIP_TABLE_MAX_SLOTS && span <= total.saturating_mul(8) {
+        let mut table = vec![false; (span + 1) as usize];
+        for &t in test {
+            table[(t as i128 - min as i128) as usize] = true;
+        }
+        return in1d_membership_mask(values, |&v| {
+            v >= min && v <= max && table[(v as i128 - min as i128) as usize]
+        });
+    }
+    let mut set = test.to_vec();
+    set.sort_unstable();
+    set.dedup();
+    in1d_membership_mask(values, |v| set.binary_search(v).is_ok())
+}
+
+/// u64 counterpart of [`i64_membership_mask`].
+fn u64_membership_mask(values: &[u64], test: &[u64]) -> Vec<f64> {
+    if test.is_empty() {
+        return vec![0.0; values.len()];
+    }
+    let min = *test.iter().min().unwrap();
+    let max = *test.iter().max().unwrap();
+    let span = (max - min) as u128; // u64, max >= min so no underflow
+    let total = values.len() as u128 + test.len() as u128;
+    if span < MEMBERSHIP_TABLE_MAX_SLOTS && span <= total.saturating_mul(8) {
+        let mut table = vec![false; (span + 1) as usize];
+        for &t in test {
+            table[(t - min) as usize] = true;
+        }
+        return in1d_membership_mask(values, |&v| {
+            v >= min && v <= max && table[(v - min) as usize]
+        });
+    }
+    let mut set = test.to_vec();
+    set.sort_unstable();
+    set.dedup();
+    in1d_membership_mask(values, |v| set.binary_search(v).is_ok())
+}
+
 fn in1d_membership_mask<T: Sync>(values: &[T], contains: impl Fn(&T) -> bool + Sync) -> Vec<f64> {
     const IN1D_PARALLEL_MIN_ELEMS: usize = 1 << 15;
     if values.len() >= IN1D_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
@@ -47546,6 +47600,111 @@ print(json.dumps(payload))
         let result = ar1.in1d(&ar2);
         assert_eq!(result.values(), &[0.0, 1.0, 0.0, 1.0]);
         assert_eq!(result.dtype, DType::Bool);
+    }
+
+    #[test]
+    fn in1d_table_mask_matches_binary_search_reference_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The direct-indexed table path must yield the SAME boolean mask as the
+        // sorted binary-search reference for every value, across: in/out-of-range
+        // values, negatives, duplicate test entries, single-element sets, and the
+        // wide-span case that forces the binary-search fallback.
+        let reference = |values: &[i64], test: &[i64]| -> Vec<f64> {
+            let mut set = test.to_vec();
+            set.sort_unstable();
+            set.dedup();
+            values
+                .iter()
+                .map(|v| if set.binary_search(v).is_ok() { 1.0 } else { 0.0 })
+                .collect::<Vec<f64>>()
+        };
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut rng = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let test_sets: Vec<Vec<i64>> = vec![
+            vec![7],
+            vec![-5, -5, 3, 3, 100, 0],
+            (0..1000i64).map(|i| i * 7).collect(),
+            vec![i64::MIN, i64::MAX], // wide span -> fallback branch
+            vec![-1000, 1000],
+        ];
+        for test in &test_sets {
+            let values: Vec<i64> = (0..5000)
+                .map(|_| (rng() >> 33) as i64 % 9000 - 1000)
+                .collect();
+            let got_i = super::i64_membership_mask(&values, test);
+            let want = reference(&values, test);
+            assert_eq!(got_i, want, "i64 table vs binary mismatch test={test:?}");
+            // u64 path on the non-negative subset
+            if test.iter().all(|&t| t >= 0) {
+                let uv: Vec<u64> = values.iter().map(|&v| v.unsigned_abs()).collect();
+                let ut: Vec<u64> = test.iter().map(|&t| t as u64).collect();
+                let got_u = super::u64_membership_mask(&uv, &ut);
+                let want_u: Vec<f64> = {
+                    let mut s = ut.clone();
+                    s.sort_unstable();
+                    s.dedup();
+                    uv.iter()
+                        .map(|v| if s.binary_search(v).is_ok() { 1.0 } else { 0.0 })
+                        .collect()
+                };
+                assert_eq!(got_u, want_u, "u64 table vs binary mismatch");
+            }
+        }
+        // Golden digest pins the table-path output for a fixed configuration.
+        let values: Vec<i64> = (0..4096).map(|i| (i * 13 % 5000) - 1000).collect();
+        let test: Vec<i64> = (0..500i64).map(|i| i * 11 - 500).collect();
+        let mask = super::i64_membership_mask(&values, &test);
+        let mut h = Sha256::new();
+        for v in &mask {
+            h.update(v.to_bits().to_le_bytes());
+        }
+        let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "f9d17629aada70f412115d53e4a23c967998b09df642e77152c2fd323fb8398f"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B: table vs binary-search membership; run --release -- --ignored --nocapture (RAYON_NUM_THREADS=1 shows the ~6.5x per-query win unmasked by the 64-core bandwidth-bound parallel path)"]
+    fn in1d_table_vs_binary_ab_bench() {
+        use std::time::Instant;
+        let n = 2_000_000usize;
+        let values: Vec<i64> = (0..n)
+            .map(|i| {
+                let s = (i as u64)
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                (s >> 24) as i64 % 100_000
+            })
+            .collect();
+        let test: Vec<i64> = (0..1000i64).map(|i| i * 50).collect(); // span 49950
+        let iters = 30;
+        // NEW: table path (via i64_membership_mask)
+        let _ = super::i64_membership_mask(&values, &test);
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(super::i64_membership_mask(&values, &test));
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD: sorted binary search
+        let mut set = test.clone();
+        set.sort_unstable();
+        set.dedup();
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(super::in1d_membership_mask(&values, |v| set.binary_search(v).is_ok()));
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "IN1D new={new_ms:.2}ms old={old_ms:.2}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
     }
 
     #[test]
