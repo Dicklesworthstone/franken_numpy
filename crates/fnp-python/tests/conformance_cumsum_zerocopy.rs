@@ -74,3 +74,32 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// Locks the zero-copy per-axis cumsum fast path
+/// (`try_zerocopy_f64_cumulative_axis`, sum variant) to bit-exact parity. The
+/// per-axis running sum accumulates strictly along the axis (same order as
+/// numpy), so parity must hold at the IEEE-754 bit level. Compares the sha256 of
+/// raw output bytes across every axis of 2-D and 3-D inputs.
+#[test]
+fn cumsum_axis_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for shp in [(30, 40), (5, 5, 5), (100, 200)]:
+    x = rng.standard_normal(shp)
+    for axis in range(len(shp)):
+        chunks.append(np.asarray(mod.cumsum(x, axis=axis)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy per-axis cumsum must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

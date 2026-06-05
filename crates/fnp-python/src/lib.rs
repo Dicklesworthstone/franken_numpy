@@ -8115,6 +8115,110 @@ fn try_zerocopy_f64_cumprod(
     Ok(Some(flat.unbind()))
 }
 
+// Zero-copy np.cumsum / np.cumprod along an explicit axis of a multi-dim
+// C-contiguous float64 ndarray (the case the flatten cumulative helpers above
+// leave alone). Decomposing the layout into outer * axis_len * inner groups, the
+// cumulative result is out(o, a, i) = out(o, a-1, i) (+ or *) in(o, a, i), with
+// the first slab along the axis copied verbatim (so a leading -0.0 keeps its
+// sign). Accumulating slab-by-slab — out block `a` reads the just-written block
+// `a-1` and the input block `a`, both contiguous — keeps the access sequential
+// (cache-friendly even for axis 0, where a naive per-column scan would stride)
+// while preserving numpy's exact left-to-right order along the axis, so it is
+// bit-identical (non-associative f64 adds/muls are never reordered). Writes
+// straight into a numpy.empty buffer (reshaped), no intermediate Rust Vec (bead
+// lglck). `is_prod` selects product vs sum. Returns Ok(None) — caller falls
+// through — for a 0-d array, an empty or out-of-range axis, or any non-f64 /
+// non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_cumulative_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+    is_prod: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let ndim = shape.len() as isize;
+    if ndim == 0 {
+        return Ok(None);
+    }
+    let norm_axis = if axis < 0 { axis + ndim } else { axis };
+    if norm_axis < 0 || norm_axis >= ndim {
+        return Ok(None);
+    }
+    let ax = norm_axis as usize;
+    let axis_len = shape[ax];
+    if axis_len == 0 {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let total = input.len();
+    let outer: usize = shape[..ax].iter().product();
+    let inner: usize = shape[ax + 1..].iter().product();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let lane = axis_len * inner;
+        if inner == 1 {
+            // Last-axis case: each outer lane is a contiguous run, so carry the
+            // accumulator in a register (no read-back of the previous output cell)
+            // exactly like the 1-D flatten scan — much faster than slab-by-slab.
+            for o in 0..outer {
+                let obase = o * axis_len;
+                let mut acc = input[obase].get();
+                output[obase].set(acc);
+                for a_idx in 1..axis_len {
+                    let value = input[obase + a_idx].get();
+                    acc = if is_prod { acc * value } else { acc + value };
+                    output[obase + a_idx].set(acc);
+                }
+            }
+        } else {
+            // inner > 1: accumulate slab-by-slab so the access stays sequential and
+            // cache-friendly (a per-column register scan would stride by `inner`).
+            // out block a = (out block a-1) op (in block a).
+            for o in 0..outer {
+                let obase = o * lane;
+                // First slab along the axis is copied verbatim (preserves -0.0).
+                for i in 0..inner {
+                    output[obase + i].set(input[obase + i].get());
+                }
+                for a_idx in 1..axis_len {
+                    let cur = obase + a_idx * inner;
+                    let prev = obase + (a_idx - 1) * inner;
+                    for i in 0..inner {
+                        let carried = output[prev + i].get();
+                        let value = input[cur + i].get();
+                        output[cur + i].set(if is_prod {
+                            carried * value
+                        } else {
+                            carried + value
+                        });
+                    }
+                }
+            }
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy np.tile(a, reps) for the 1-D scalar-reps form: a C-contiguous float64
 // 1-D ndarray tiled `reps` times into a length-(n*reps) result. numpy.tile lays
 // the input down end to end, so each output block is a verbatim copy of the
@@ -26355,6 +26459,13 @@ fn cumsum(
     if let Some(result) = try_zerocopy_f64_cumsum(py, a.bind(py), axis_val)? {
         return Ok(result);
     }
+    // Zero-copy per-axis cumsum for multi-dim f64 ndarrays (explicit axis); slab-
+    // by-slab accumulation. Bit-identical; out-of-range axes fall through.
+    if let Some(ax) = axis_val
+        && let Some(result) = try_zerocopy_f64_cumulative_axis(py, a.bind(py), ax, false)?
+    {
+        return Ok(result);
+    }
 
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "cumsum(a)") {
@@ -26431,6 +26542,13 @@ fn cumprod(
     // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical
     // (strictly sequential accumulation); per-axis multi-dim cumprods fall through.
     if let Some(result) = try_zerocopy_f64_cumprod(py, a.bind(py), axis_val)? {
+        return Ok(result);
+    }
+    // Zero-copy per-axis cumprod for multi-dim f64 ndarrays (explicit axis); slab-
+    // by-slab accumulation. Bit-identical; out-of-range axes fall through.
+    if let Some(ax) = axis_val
+        && let Some(result) = try_zerocopy_f64_cumulative_axis(py, a.bind(py), ax, true)?
+    {
         return Ok(result);
     }
 
