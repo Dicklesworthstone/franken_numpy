@@ -13768,6 +13768,31 @@ fn vstack(
             Some(casting),
         );
     }
+    // Fast path: np.vstack of 2-D arrays is exactly np.concatenate(axis=0) (the
+    // atleast_2d promotion is a no-op when every input is already 2-D), so reuse
+    // the zero-copy axis-0 concatenate. Requires all inputs to be 2-D f64 ndarrays
+    // (1-D inputs would be promoted to rows, which is a different result).
+    if let Ok(numpy) = py.import("numpy")
+        && let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && let Ok(iter) = tup.bind(py).try_iter()
+    {
+        let items: PyResult<Vec<_>> = iter.collect();
+        if let Ok(items) = items
+            && !items.is_empty()
+            && items.iter().all(|item| {
+                item.is_exact_instance(&ndarray_type)
+                    && item
+                        .getattr("ndim")
+                        .and_then(|n| n.extract::<usize>())
+                        .map(|n| n == 2)
+                        .unwrap_or(false)
+                    && numpy_dtype_is_f64(py, item)
+            })
+            && let Some(out) = try_zerocopy_f64_concatenate_axis0(py, tup.bind(py), 0)?
+        {
+            return Ok(out);
+        }
+    }
     stack_helper_default(py, tup, StackHelperKind::Vertical)
 }
 

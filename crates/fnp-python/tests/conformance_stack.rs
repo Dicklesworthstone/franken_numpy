@@ -536,3 +536,31 @@ np.hstack([a, b])
         "hstack with incompatible first dimensions should raise same error as numpy"
     );
 }
+
+/// Locks the zero-copy 2-D vstack fast path (which routes through
+/// `try_zerocopy_f64_concatenate_axis0`) to bit-exact parity with numpy. Stacked
+/// rows are copied verbatim, so parity must hold at the IEEE-754 bit level.
+/// Compares the sha256 of raw output bytes for 2-D float64 inputs and extremes.
+#[test]
+fn vstack_2d_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+chunks.append(np.asarray(mod.vstack([rng.standard_normal((100, 50)), rng.standard_normal((200, 50))])).tobytes())
+chunks.append(np.asarray(mod.vstack([rng.standard_normal((30, 40)), rng.standard_normal((5, 40)), rng.standard_normal((17, 40))])).tobytes())
+xe = np.array([[0.0, -0.0, np.inf], [-np.inf, np.nan, 1e308]], dtype=np.float64)
+chunks.append(np.asarray(mod.vstack([xe, xe * 2])).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy 2-D vstack must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
