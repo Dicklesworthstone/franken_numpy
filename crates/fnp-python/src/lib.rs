@@ -7071,6 +7071,74 @@ fn try_zerocopy_f64_isclose(
     Ok(Some(output))
 }
 
+// Two-input f64-output counterpart of zerocopy_f64_unary_flat. When a and b are
+// exact same-shape C-contiguous float64 ndarrays, read both buffers and write
+// `op.apply(a[i], b[i])` straight into the output buffer — no intermediate Rust
+// Vec for either input or the output, removing the three cold allocations whose
+// first-touch page faults dominate these ops (bead lglck). `op.apply` is the
+// SAME BinaryOp kernel the extract path uses, so output is bit-identical by
+// construction. Returns Ok(None) — fall through to the extract path, all other
+// inputs unchanged — for non-float64, broadcasting/shape-mismatch, scalar, or
+// non-ndarray operands.
+fn zerocopy_f64_binary_flat<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    b: &Bound<'py, PyAny>,
+    op: BinaryOp,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.get_type().is(&ndarray_type) || !b.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
+        return Ok(None);
+    };
+    let (Some(a_in), Some(b_in)) = (a_buffer.as_slice(py), b_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    // No broadcasting: identical shapes only, so flat index i pairs a[i] with b[i].
+    if a_buffer.shape() != b_buffer.shape() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a_buffer.shape().to_vec();
+    let n = a_in.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+            slot.set(op.apply(a_cell.get(), b_cell.get()));
+        }
+    }
+    Ok(Some((flat, shape)))
+}
+
+// Wrap zerocopy_f64_binary_flat with the shared reshape / 0-d scalar handling.
+fn try_zerocopy_f64_binary(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    op: BinaryOp,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some((flat, shape)) = zerocopy_f64_binary_flat(py, &numpy, a, b, op)? else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -10740,6 +10808,9 @@ fn copysign(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>>
             .getattr("copysign")?
             .call1((x1.bind(py), x2.bind(py)))?
             .unbind());
+    }
+    if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Copysign)? {
+        return Ok(out);
     }
     let x1 = extract_numeric_array(py, x1.bind(py), "copysign(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "copysign(x2)")?;
