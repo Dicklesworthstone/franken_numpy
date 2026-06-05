@@ -532,3 +532,33 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "delete complex should match numpy");
     Ok(())
 }
+
+/// Locks the zero-copy axis-0 concatenate fast path
+/// (`try_zerocopy_f64_concatenate_axis0`) to bit-exact parity with numpy. The
+/// concatenated buffers are copied verbatim, so parity must hold at the IEEE-754
+/// bit level (signed zero, nan, inf). Compares the sha256 of raw output bytes
+/// across 1-D, 2-D, and 3-D axis-0 concatenations and extreme values.
+#[test]
+fn concatenate_axis0_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+chunks.append(np.asarray(mod.concatenate([rng.standard_normal(1000), rng.standard_normal(2000)])).tobytes())
+chunks.append(np.asarray(mod.concatenate([rng.standard_normal((100, 50)), rng.standard_normal((200, 50))], 0)).tobytes())
+chunks.append(np.asarray(mod.concatenate([rng.standard_normal((2, 3, 4)), rng.standard_normal((5, 3, 4))], 0)).tobytes())
+xe = np.array([0.0, -0.0, np.inf, -np.inf, np.nan], dtype=np.float64)
+chunks.append(np.asarray(mod.concatenate([xe, xe * 2], 0)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy axis-0 concatenate must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

@@ -11268,6 +11268,87 @@ fn delete(
         .unbind())
 }
 
+// Zero-copy np.concatenate(arrays, axis=0) for C-contiguous float64 ndarrays
+// sharing a trailing shape. Along axis 0 the C-contiguous layout means the result
+// is simply each array's flat buffer laid end to end, so this copies the buffers
+// sequentially into a numpy.empty output (reshaped to (sum_axis0, *trailing)) with
+// no per-input extract Vec and no intermediate concat Vec — three passes collapse
+// to one read + one write. Values are copied verbatim, so it is bit-identical to
+// numpy incl. nan/inf/signed zeros. Returns Ok(None) — caller falls through — for
+// a non-axis-0 concatenation, a 0-d / mismatched-trailing-shape / non-f64 /
+// non-contiguous / non-ndarray operand, or a non-iterable sequence.
+fn try_zerocopy_f64_concatenate_axis0(
+    py: Python<'_>,
+    arrays_seq: &Bound<'_, PyAny>,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let Ok(iter) = arrays_seq.try_iter() else {
+        return Ok(None);
+    };
+    let items: Vec<Bound<'_, PyAny>> = iter.collect::<PyResult<Vec<_>>>()?;
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let mut buffers: Vec<PyBuffer<f64>> = Vec::with_capacity(items.len());
+    let mut trailing: Option<Vec<usize>> = None;
+    let mut total_axis0 = 0usize;
+    let mut total_elems = 0usize;
+    for item in &items {
+        if !item.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, item) {
+            return Ok(None);
+        }
+        let Ok(buffer) = PyBuffer::<f64>::get(item) else {
+            return Ok(None);
+        };
+        let shape = buffer.shape().to_vec();
+        if shape.is_empty() {
+            return Ok(None);
+        }
+        let ndim = shape.len() as isize;
+        let norm_axis = if axis < 0 { axis + ndim } else { axis };
+        if norm_axis != 0 {
+            return Ok(None);
+        }
+        let tail = shape[1..].to_vec();
+        match &trailing {
+            None => trailing = Some(tail),
+            Some(existing) if *existing != tail => return Ok(None),
+            _ => {}
+        }
+        total_axis0 += shape[0];
+        total_elems += buffer.item_count();
+        buffers.push(buffer);
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (total_elems,), Some(&kwargs))?;
+    if total_elems > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let mut w = 0usize;
+        for buffer in &buffers {
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            for cell in slice {
+                output[w].set(cell.get());
+                w += 1;
+            }
+        }
+    }
+    let mut out_shape = vec![total_axis0];
+    out_shape.extend(trailing.unwrap_or_default());
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn concatenate(
@@ -11302,6 +11383,13 @@ fn concatenate(
     } else {
         0
     };
+
+    // Zero-copy axis-0 concatenation for C-contiguous f64 ndarrays (the common
+    // case); collapses the per-input extract + concat build + copy-back into a
+    // single buffer copy. Bit-identical; other axes and dtypes fall through.
+    if let Some(out) = try_zerocopy_f64_concatenate_axis0(py, &arrays_seq, axis)? {
+        return Ok(out);
+    }
 
     let arrays = match extract_numeric_array_sequence(py, &arrays_seq, "concatenate") {
         Ok(a) => a,
