@@ -6971,11 +6971,12 @@ fn try_zerocopy_f64_unary(
 // that is not an exact float64 C-contiguous ndarray. Bit-identical to numpy:
 // the Rust IEEE predicate matches numpy on every value incl. ±0.0 and ±nan
 // sign bits.
-fn zerocopy_f64_predicate_flat<'py>(
+#[inline]
+fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
-    pred: fn(f64) -> bool,
+    pred: F,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
     let ndarray_type = numpy.getattr("ndarray")?;
     if !x.get_type().is(&ndarray_type) {
@@ -7008,10 +7009,10 @@ fn zerocopy_f64_predicate_flat<'py>(
 }
 
 // Wrap zerocopy_f64_predicate_flat with the shared reshape / 0-d scalar handling.
-fn try_zerocopy_f64_predicate(
+fn try_zerocopy_f64_predicate<F: Fn(f64) -> bool>(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
-    pred: fn(f64) -> bool,
+    pred: F,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
     let Some((flat, shape)) = zerocopy_f64_predicate_flat(py, &numpy, x, pred)? else {
