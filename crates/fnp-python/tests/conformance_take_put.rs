@@ -430,8 +430,11 @@ chunks.append(np.asarray(mod.take(xe, np.array([4, 3, 2, 1, 0, -1, -5]))).tobyte
 print(hashlib.sha256(b''.join(chunks)).hexdigest())
 "#;
 
-    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp").into()))?;
-    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
 
     assert_eq!(
         fnp_hash, numpy_hash,

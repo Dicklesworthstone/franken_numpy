@@ -7138,6 +7138,94 @@ fn try_zerocopy_f64_binary(
     Ok(Some(output))
 }
 
+fn ndarray_has_native_f64_dtype(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let dtype = value.getattr("dtype")?;
+    let dtype_kind: String = dtype.getattr("kind")?.extract()?;
+    let dtype_itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+    let is_native: bool = dtype.getattr("isnative")?.extract()?;
+    Ok(matches!(dtype_kind.as_str(), "f") && dtype_itemsize == 8 && is_native)
+}
+
+fn ndarray_has_native_i32_dtype(value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let dtype = value.getattr("dtype")?;
+    let dtype_kind: String = dtype.getattr("kind")?.extract()?;
+    let dtype_itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+    let is_native: bool = dtype.getattr("isnative")?.extract()?;
+    Ok(matches!(dtype_kind.as_str(), "i") && dtype_itemsize == 4 && is_native)
+}
+
+// Zero-copy np.ldexp for the profiled native-boundary shape: exact C-contiguous
+// float64 mantissas and exact same-shape native int32 exponents. The element
+// formula is identical to the existing Rust path (`x * 2.0.powf(exp as f64)`),
+// but reads both NumPy buffers directly and writes the result buffer directly.
+// NaN payload-sensitive inputs and overflow/underflow flag cases fall through to
+// the existing path, preserving error-state handling and all non-profiled
+// dtype/broadcast/subclass/stride behavior.
+fn try_zerocopy_f64_i32_ldexp(
+    py: Python<'_>,
+    x1: &Bound<'_, PyAny>,
+    x2: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x1.is_exact_instance(&ndarray_type) || !x2.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if !ndarray_has_native_f64_dtype(x1)? || !ndarray_has_native_i32_dtype(x2)? {
+        return Ok(None);
+    }
+    let (Ok(x1_buffer), Ok(x2_buffer)) = (PyBuffer::<f64>::get(x1), PyBuffer::<i32>::get(x2))
+    else {
+        return Ok(None);
+    };
+    if x1_buffer.shape() != x2_buffer.shape() {
+        return Ok(None);
+    }
+    let (Some(mantissas), Some(exponents)) = (x1_buffer.as_slice(py), x2_buffer.as_slice(py))
+    else {
+        return Ok(None);
+    };
+
+    let shape = x1_buffer.shape().to_vec();
+    let n = mantissas.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for ((slot, mantissa_cell), exponent_cell) in
+            output.iter().zip(mantissas.iter()).zip(exponents.iter())
+        {
+            let mantissa = mantissa_cell.get();
+            if mantissa.is_nan() {
+                return Ok(None);
+            }
+            let result = mantissa * 2.0_f64.powf(f64::from(exponent_cell.get()));
+            let mantissa_magnitude_bits = mantissa.to_bits() & 0x7fff_ffff_ffff_ffff;
+            let result_magnitude_bits = result.to_bits() & 0x7fff_ffff_ffff_ffff;
+            if mantissa.is_finite()
+                && ((result.is_infinite() && !mantissa.is_infinite())
+                    || (mantissa_magnitude_bits != 0 && result_magnitude_bits == 0))
+            {
+                return Ok(None);
+            }
+            slot.set(result);
+        }
+    }
+
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // True iff `x` is a buffer-readable float64 array containing a zero (±0.0).
 // Used to gate the fmod zero-copy: numpy emits an "invalid value encountered
 // in fmod" warning (and nan) for a zero divisor, which the existing extract
@@ -7578,7 +7666,12 @@ fn try_zerocopy_f64_extract(
     if !arr.is_exact_instance(&ndarray_type) || !condition.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    if condition.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+    if condition
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        != "b"
+    {
         return Ok(None);
     }
     let cond_u8 = condition.call_method1("view", (numpy.getattr("uint8")?,))?;
@@ -7641,7 +7734,12 @@ fn try_zerocopy_f64_compress(
     if !a.is_exact_instance(&ndarray_type) || !condition.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    if condition.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+    if condition
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        != "b"
+    {
         return Ok(None);
     }
     let cond_u8 = condition.call_method1("view", (numpy.getattr("uint8")?,))?;
@@ -7717,8 +7815,7 @@ fn try_zerocopy_f64_take(
             return Ok(None);
         }
     }
-    let (Ok(a_buffer), Ok(idx_buffer)) =
-        (PyBuffer::<f64>::get(a), PyBuffer::<i64>::get(indices))
+    let (Ok(a_buffer), Ok(idx_buffer)) = (PyBuffer::<f64>::get(a), PyBuffer::<i64>::get(indices))
     else {
         return Ok(None);
     };
@@ -7788,7 +7885,11 @@ fn try_zerocopy_f64_putmask(
     {
         return Ok(false);
     }
-    if mask.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b"
+    if mask
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        != "b"
         || !numpy_dtype_is_f64(py, a)
         || !numpy_dtype_is_f64(py, values)
     {
@@ -11776,6 +11877,9 @@ fn hypot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn ldexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_i32_ldexp(py, x1.bind(py), x2.bind(py))? {
+        return Ok(out);
+    }
     let x1 = extract_numeric_array(py, x1.bind(py), "ldexp(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "ldexp(x2)")?;
     if matches!(x2.dtype(), DType::F16 | DType::F32 | DType::F64) {
@@ -72454,6 +72558,86 @@ mod tests {
             assert_eq!(
                 digest,
                 "413a7351006db6bb6dd374f1df9e7b6f85d2436b88c9c0e22d89969e6469ec93"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ldexp_f64_i32_boundary_matches_numpy_golden_sha256() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let ldexp_fn = module.getattr("ldexp")?;
+            let numpy_ldexp = numpy.getattr("ldexp")?;
+
+            let mut proof_bytes = Vec::new();
+            let fast_cases = vec![
+                (
+                    numeric_array(
+                        py,
+                        vec![
+                            vec![-0.0_f64, 0.0, 0.5, -1.5],
+                            vec![1.25, -2.0, f64::INFINITY, f64::NEG_INFINITY],
+                        ],
+                        "float64",
+                    ),
+                    numeric_array(py, vec![vec![1_i64, 2, -1, 3], vec![0, -2, 4, -4]], "int32"),
+                ),
+                (
+                    numeric_array(py, Vec::<f64>::new(), "float64"),
+                    numeric_array(py, Vec::<i64>::new(), "int32"),
+                ),
+            ];
+
+            for (x1, x2) in fast_cases {
+                let out = ldexp_fn.call1((x1.clone(), x2.clone()))?;
+                let expected = numpy_ldexp.call1((x1, x2))?;
+                assert_array_matches_numpy(&out, &expected)?;
+                assert_eq!(
+                    out.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    expected.call_method0("tobytes")?.extract::<Vec<u8>>()?
+                );
+                let flags = out.getattr("flags")?;
+                assert!(flags.get_item("C_CONTIGUOUS")?.extract::<bool>()?);
+                assert!(flags.get_item("WRITEABLE")?.extract::<bool>()?);
+                append_numpy_array_bytes(py, &out, &mut proof_bytes)?;
+            }
+
+            let int64_x1 = numeric_array(py, vec![0.5_f64, -1.5, -0.0], "float64");
+            let int64_x2 = numeric_array(py, vec![2_i64, -1, 3], "int64");
+            assert_array_matches_numpy(
+                &ldexp_fn.call1((int64_x1.clone(), int64_x2.clone()))?,
+                &numpy_ldexp.call1((int64_x1, int64_x2))?,
+            )?;
+
+            let nan_x1 = numeric_array(py, vec![1.0_f64, f64::NAN, -0.0], "float64");
+            let nan_x2 = numeric_array(py, vec![1_i64, 2, 3], "int32");
+            assert_array_matches_numpy(
+                &ldexp_fn.call1((nan_x1.clone(), nan_x2.clone()))?,
+                &numpy_ldexp.call1((nan_x1, nan_x2))?,
+            )?;
+
+            let transposed_x1 =
+                numeric_array(py, vec![vec![0.5_f64, 1.0], vec![-2.0, -0.0]], "float64")
+                    .call_method0("transpose")?;
+            let transposed_x2 = numeric_array(py, vec![vec![1_i64, 2], vec![3, 4]], "int32")
+                .call_method0("transpose")?;
+            assert_array_matches_numpy(
+                &ldexp_fn.call1((transposed_x1.clone(), transposed_x2.clone()))?,
+                &numpy_ldexp.call1((transposed_x1, transposed_x2))?,
+            )?;
+
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest,
+                "32177e72d3993dda264f60b434d002d1bc405805a58d83aa1ec640c886d4aa48"
             );
 
             Ok(())
