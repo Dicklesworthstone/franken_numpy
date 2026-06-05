@@ -673,3 +673,34 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// Locks the zero-copy ediff1d fast path with to_begin/to_end
+/// (`try_zerocopy_f64_ediff1d`) to bit-exact parity with numpy. The prepended /
+/// appended values are cast to float64 and copied verbatim, and the middle is the
+/// consecutive differences, so parity must hold at the IEEE-754 bit level. Covers
+/// scalar and array to_begin/to_end and extreme values.
+#[test]
+fn ediff1d_to_begin_end_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [1000, 100003]:
+    x = rng.standard_normal(n) * 1e6
+    chunks.append(np.asarray(mod.ediff1d(x, to_begin=5.5, to_end=-3.5)).tobytes())
+    chunks.append(np.asarray(mod.ediff1d(x, to_begin=np.array([1., 2., 3.]))).tobytes())
+xe = np.array([0.0, -0.0, np.inf, -np.inf, np.nan, 1.0], dtype=np.float64)
+chunks.append(np.asarray(mod.ediff1d(xe, to_begin=np.inf, to_end=np.nan)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy ediff1d with to_begin/to_end must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

@@ -8485,9 +8485,6 @@ fn try_zerocopy_f64_ediff1d(
     to_begin: Option<&Py<PyAny>>,
     to_end: Option<&Py<PyAny>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if to_begin.is_some() || to_end.is_some() {
-        return Ok(None);
-    }
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !ary.is_exact_instance(&ndarray_type) {
@@ -8499,19 +8496,64 @@ fn try_zerocopy_f64_ediff1d(
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let n_out = input.len().saturating_sub(1);
+    let n_diff = input.len().saturating_sub(1);
+
+    // Materialize an optional to_begin/to_end as a flat Vec<f64>, matching
+    // numpy.ediff1d's flatten + cast-to-result-dtype (f64 here). These arrays are
+    // small (usually a scalar), so a tiny Vec is cheap — the n-1 diffs stay
+    // zero-copy. Returns Ok(None) on an uncastable dtype (complex / object /
+    // string) so the caller falls through to the general path.
+    let materialize = |value: Option<&Py<PyAny>>| -> PyResult<Option<Vec<f64>>> {
+        let Some(value) = value else {
+            return Ok(Some(Vec::new()));
+        };
+        let arr = numpy.call_method1("asarray", (value.bind(py),))?;
+        let kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+        if !matches!(kind.as_str(), "b" | "i" | "u" | "f") {
+            return Ok(None);
+        }
+        let flat = arr
+            .call_method1("astype", ("float64",))?
+            .call_method0("ravel")?;
+        let Ok(buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(slice) = buffer.as_slice(py) else {
+            return Ok(None);
+        };
+        Ok(Some(slice.iter().map(|cell| cell.get()).collect()))
+    };
+
+    let Some(begin) = materialize(to_begin)? else {
+        return Ok(None);
+    };
+    let Some(end) = materialize(to_end)? else {
+        return Ok(None);
+    };
+
+    let total = begin.len() + n_diff + end.len();
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
-    let flat = numpy.call_method("empty", (n_out,), Some(&kwargs))?;
-    if n_out > 0 {
+    let flat = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (i, slot) in output.iter().enumerate() {
-            slot.set(input[i + 1].get() - input[i].get());
+        let mut w = 0usize;
+        for value in &begin {
+            output[w].set(*value);
+            w += 1;
+        }
+        for i in 0..n_diff {
+            output[w].set(input[i + 1].get() - input[i].get());
+            w += 1;
+        }
+        for value in &end {
+            output[w].set(*value);
+            w += 1;
         }
     }
     Ok(Some(flat.unbind()))
@@ -29417,9 +29459,10 @@ fn ediff1d(
             .unbind())
     };
 
-    // Zero-copy consecutive differences for C-contiguous f64 ndarrays with no
-    // to_begin/to_end (the common case); skips the cold extract/ravel/build Vecs.
-    // Bit-identical; anything else falls through to the general path below.
+    // Zero-copy consecutive differences for C-contiguous f64 ndarrays, with
+    // optional to_begin/to_end prepended/appended (cast to f64); skips the cold
+    // extract/ravel/build Vecs. Bit-identical; uncastable to_begin/to_end dtypes
+    // and non-f64 / non-contiguous inputs fall through to the general path below.
     if let Some(out) =
         try_zerocopy_f64_ediff1d(py, ary.bind(py), to_begin.as_ref(), to_end.as_ref())?
     {
