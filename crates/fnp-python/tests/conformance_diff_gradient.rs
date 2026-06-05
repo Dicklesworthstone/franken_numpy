@@ -599,3 +599,48 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// Locks the zero-copy consecutive-difference fast path
+/// (`try_zerocopy_f64_ediff1d`) to bit-exact parity with numpy. Compares raw
+/// IEEE-754 uint64 bytes (catching signed-zero / nan-payload / last-bit drift)
+/// across multi-dimensional inputs (numpy.ediff1d flattens in C order), extreme
+/// values, and lengths 0/1 (empty output) — all of which take the zero-copy
+/// path. to_begin/to_end and non-contiguous inputs fall through to the general
+/// path and are covered by the float-tolerance tests above.
+#[test]
+fn ediff1d_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+rng = np.random.default_rng(20260605)
+chunks = []
+for shp in [(0,), (1,), (2,), (17,), (1000,), (3, 4), (5, 5, 5), (100003,)]:
+    x = rng.standard_normal(shp) * 1e7
+    chunks.append(fnp.ediff1d(x).tobytes())
+x = np.array([0.0, -0.0, 1e308, -1e308, np.inf, -np.inf, np.nan, 1.0, -1.0], dtype=np.float64)
+chunks.append(fnp.ediff1d(x).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#
+        .into(),
+    );
+    let fnp_hash = numpy_oracle(&script)?;
+
+    let numpy_script = r#"
+import numpy as np, hashlib
+rng = np.random.default_rng(20260605)
+chunks = []
+for shp in [(0,), (1,), (2,), (17,), (1000,), (3, 4), (5, 5, 5), (100003,)]:
+    x = rng.standard_normal(shp) * 1e7
+    chunks.append(np.ediff1d(x).tobytes())
+x = np.array([0.0, -0.0, 1e308, -1e308, np.inf, -np.inf, np.nan, 1.0, -1.0], dtype=np.float64)
+chunks.append(np.ediff1d(x).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+    let numpy_hash = numpy_oracle(numpy_script)?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy ediff1d must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

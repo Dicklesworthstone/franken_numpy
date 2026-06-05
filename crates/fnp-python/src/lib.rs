@@ -7387,6 +7387,53 @@ fn try_zerocopy_f64_diff1d(
     Ok(Some(flat.unbind()))
 }
 
+// Zero-copy consecutive differences (np.ediff1d, no to_begin/to_end) for a
+// C-contiguous float64 ndarray of any shape. numpy.ediff1d flattens its input
+// in C order and returns out[i] = flat[i+1] - flat[i], length total_elems-1
+// (empty for 0 or 1 elements). PyBuffer::as_slice only yields Some for a
+// C-contiguous buffer, so iterating the flat slice reproduces numpy's flatten
+// order exactly for any ndim; the per-element subtraction is bit-identical
+// (nan/inf propagate). Drops the cold extract/ravel/build Vecs (bead lglck).
+// Returns Ok(None) when to_begin/to_end are present, or for any non-f64 /
+// non-contiguous / non-ndarray input (caller falls through to the general path).
+fn try_zerocopy_f64_ediff1d(
+    py: Python<'_>,
+    ary: &Bound<'_, PyAny>,
+    to_begin: Option<&Py<PyAny>>,
+    to_end: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if to_begin.is_some() || to_end.is_some() {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !ary.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(ary) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n_out = input.len().saturating_sub(1);
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n_out,), Some(&kwargs))?;
+    if n_out > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (i, slot) in output.iter().enumerate() {
+            slot.set(input[i + 1].get() - input[i].get());
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -27592,6 +27639,15 @@ fn ediff1d(
             .call((ary_ref.bind(py),), Some(&kwargs))?
             .unbind())
     };
+
+    // Zero-copy consecutive differences for C-contiguous f64 ndarrays with no
+    // to_begin/to_end (the common case); skips the cold extract/ravel/build Vecs.
+    // Bit-identical; anything else falls through to the general path below.
+    if let Some(out) =
+        try_zerocopy_f64_ediff1d(py, ary.bind(py), to_begin.as_ref(), to_end.as_ref())?
+    {
+        return Ok(out);
+    }
 
     let array = match extract_precise_numeric_array(py, ary.bind(py), "ediff1d(ary)") {
         Ok(array) => array,
