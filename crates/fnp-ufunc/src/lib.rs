@@ -8609,13 +8609,14 @@ impl UFuncArray {
         norm_axes.sort_unstable();
         norm_axes.reverse();
 
-        let mut result = self.clone();
-        for ax in norm_axes {
-            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
-                axis: ax as isize,
-                ndim: self.shape.len(),
-            })?;
-            result = result.reduce_sum(Some(ax_isize), keepdims)?;
+        // Reduce the first axis straight from `self` rather than cloning the whole
+        // input to seed the loop — the seed clone was read once and discarded.
+        // Bit-identical (reductions are read-only; same axes in the same order).
+        let mut axes_iter = norm_axes.into_iter();
+        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let mut result = self.reduce_sum(Some(first as isize), keepdims)?;
+        for ax in axes_iter {
+            result = result.reduce_sum(Some(ax as isize), keepdims)?;
         }
         Ok(result)
     }
@@ -8636,13 +8637,11 @@ impl UFuncArray {
         norm_axes.sort_unstable();
         norm_axes.reverse();
 
-        let mut result = self.clone();
-        for ax in norm_axes {
-            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
-                axis: ax as isize,
-                ndim: self.shape.len(),
-            })?;
-            result = result.reduce_prod(Some(ax_isize), keepdims)?;
+        let mut axes_iter = norm_axes.into_iter();
+        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let mut result = self.reduce_prod(Some(first as isize), keepdims)?;
+        for ax in axes_iter {
+            result = result.reduce_prod(Some(ax as isize), keepdims)?;
         }
         Ok(result)
     }
@@ -8663,13 +8662,11 @@ impl UFuncArray {
         norm_axes.sort_unstable();
         norm_axes.reverse();
 
-        let mut result = self.clone();
-        for ax in norm_axes {
-            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
-                axis: ax as isize,
-                ndim: self.shape.len(),
-            })?;
-            result = result.reduce_min(Some(ax_isize), keepdims)?;
+        let mut axes_iter = norm_axes.into_iter();
+        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let mut result = self.reduce_min(Some(first as isize), keepdims)?;
+        for ax in axes_iter {
+            result = result.reduce_min(Some(ax as isize), keepdims)?;
         }
         Ok(result)
     }
@@ -8690,13 +8687,11 @@ impl UFuncArray {
         norm_axes.sort_unstable();
         norm_axes.reverse();
 
-        let mut result = self.clone();
-        for ax in norm_axes {
-            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
-                axis: ax as isize,
-                ndim: self.shape.len(),
-            })?;
-            result = result.reduce_max(Some(ax_isize), keepdims)?;
+        let mut axes_iter = norm_axes.into_iter();
+        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let mut result = self.reduce_max(Some(first as isize), keepdims)?;
+        for ax in axes_iter {
+            result = result.reduce_max(Some(ax as isize), keepdims)?;
         }
         Ok(result)
     }
@@ -8717,13 +8712,11 @@ impl UFuncArray {
         norm_axes.sort_unstable();
         norm_axes.reverse();
 
-        let mut result = self.clone();
-        for ax in norm_axes {
-            let ax_isize = isize::try_from(ax).map_err(|_| UFuncError::AxisOutOfBounds {
-                axis: ax as isize,
-                ndim: self.shape.len(),
-            })?;
-            result = result.reduce_mean(Some(ax_isize), keepdims)?;
+        let mut axes_iter = norm_axes.into_iter();
+        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let mut result = self.reduce_mean(Some(first as isize), keepdims)?;
+        for ax in axes_iter {
+            result = result.reduce_mean(Some(ax as isize), keepdims)?;
         }
         Ok(result)
     }
