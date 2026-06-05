@@ -13148,8 +13148,101 @@ fn logaddexp2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny
     build_numpy_scalar_or_array(py, &result)
 }
 
+// Per-element frexp == numpy: x = m * 2^e with |m| in [0.5, 1.0); zero preserves
+// its sign with e=0; nan/inf pass through with e=0. Subnormals are normalized by
+// scaling up by 2^54 (exact) and subtracting 54 from the exponent — this avoids
+// the `v / 2^exp` underflow-to-0.0 (=> inf) that the older decomposition hit on
+// the minimum subnormal 5e-324, where numpy returns (0.5, -1073).
+#[inline(always)]
+fn frexp_one(v: f64) -> (f64, i32) {
+    if v == 0.0 {
+        return (v, 0); // preserves the sign of zero
+    }
+    if v.is_nan() {
+        return (f64::from_bits(v.to_bits() | (1_u64 << 51)), 0);
+    }
+    if v.is_infinite() {
+        return (v, 0);
+    }
+    let mut bits = v.to_bits();
+    let mut extra = 0i32;
+    let mut biased = ((bits >> 52) & 0x7FF) as i32;
+    if biased == 0 {
+        // Subnormal: scale into the normal range (2.0^54 is exact, no underflow).
+        let scaled = v * f64::from_bits(0x4350_0000_0000_0000);
+        bits = scaled.to_bits();
+        biased = ((bits >> 52) & 0x7FF) as i32;
+        extra = -54;
+    }
+    // Replace the biased-exponent field with 1022 so |m| lands in [0.5, 1.0),
+    // keeping sign + fraction; the removed power of two becomes the exponent.
+    let m_bits = (bits & !0x7FF0_0000_0000_0000) | (1022_u64 << 52);
+    (f64::from_bits(m_bits), biased - 1022 + extra)
+}
+
+// Zero-copy frexp for an exact f64 C-contiguous ndarray: read the input buffer
+// and write the mantissa (float64) and exponent (int32, the dtype numpy
+// exposes) into two fresh buffers — no cold extract Vec, no per-element I32
+// re-collect. Bit-identical to the ufunc_frexp path. Returns None for 0-d
+// (scalar tuple unwrap stays on the slow path) and any non-f64 / non-ndarray.
+fn try_zerocopy_f64_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !x.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    if x.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "f"
+        || !numpy_dtype_is_f64(py, x)
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let n = input.len();
+    let mkw = PyDict::new(py);
+    mkw.set_item("dtype", "float64")?;
+    let mantissa = numpy.call_method("empty", (n,), Some(&mkw))?;
+    let ekw = PyDict::new(py);
+    ekw.set_item("dtype", "int32")?;
+    let exponent = numpy.call_method("empty", (n,), Some(&ekw))?;
+    if n > 0 {
+        let (Ok(m_buf), Ok(e_buf)) = (
+            PyBuffer::<f64>::get(&mantissa),
+            PyBuffer::<i32>::get(&exponent),
+        ) else {
+            return Ok(None);
+        };
+        let (Some(m_out), Some(e_out)) = (m_buf.as_mut_slice(py), e_buf.as_mut_slice(py)) else {
+            return Ok(None);
+        };
+        for ((m_slot, e_slot), cell) in m_out.iter().zip(e_out.iter()).zip(input.iter()) {
+            let (m, e) = frexp_one(cell.get());
+            m_slot.set(m);
+            e_slot.set(e);
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let mantissa = mantissa.call_method1("reshape", (&output_shape,))?;
+    let exponent = exponent.call_method1("reshape", (&output_shape,))?;
+    Ok(Some(
+        PyTuple::new(py, [&mantissa, &exponent])?
+            .into_any()
+            .unbind(),
+    ))
+}
+
 #[pyfunction]
 fn frexp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_frexp(py, x.bind(py))? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x.bind(py), "frexp(x)")?;
     let is_scalar = x.shape().is_empty();
     let (mantissas, exponents) = ufunc_frexp(&x).map_err(map_ufunc_error)?;
