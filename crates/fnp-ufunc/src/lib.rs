@@ -28208,17 +28208,38 @@ fn cumulate_axis(
         return Ok(out);
     }
 
-    for outer_idx in 0..outer {
-        let base = outer_idx * axis_len * inner;
-        for inner_idx in 0..inner {
-            let mut acc = identity;
-            let mut offset = base + inner_idx;
-            for _ in 0..axis_len {
-                acc = fold(acc, values[offset]);
-                out[offset] = acc;
-                offset += inner;
+    // Non-last-axis scan. The old form scanned each column with stride `inner`
+    // (`offset += inner`), which thrashes cache and runs serially. Instead walk
+    // each outer block row-by-row: row 0 is `fold(identity, v)`, and every
+    // subsequent row is the CONTIGUOUS vector fold of the previous OUTPUT row with
+    // the current input row. Per column the fold still runs over the axis in
+    // ascending order, so the result is bit-for-bit identical — but each row op is
+    // a unit-stride, auto-vectorizable pass, and independent outer blocks run in
+    // parallel.
+    let block = axis_len * inner;
+    let process_block = |(out_block, in_block): (&mut [f64], &[f64])| {
+        for c in 0..inner {
+            out_block[c] = fold(identity, in_block[c]);
+        }
+        for a in 1..axis_len {
+            let (done, todo) = out_block.split_at_mut(a * inner);
+            let prev_row = &done[(a - 1) * inner..a * inner];
+            let curr_row = &mut todo[..inner];
+            let in_row = &in_block[a * inner..a * inner + inner];
+            for c in 0..inner {
+                curr_row[c] = fold(prev_row[c], in_row[c]);
             }
         }
+    };
+    const CUM_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+    if outer >= 2 && total >= CUM_AXIS_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(block)
+            .zip(values.par_chunks(block))
+            .for_each(process_block);
+    } else {
+        out.chunks_mut(block)
+            .zip(values.chunks(block))
+            .for_each(process_block);
     }
 
     Ok(out)
@@ -40739,6 +40760,116 @@ print(json.dumps(payload))
         let out = arr.cumsum(Some(1)).expect("cumsum axis=1");
         assert_eq!(out.shape(), &[2, 3]);
         assert_eq!(out.values(), &[1.0, 3.0, 6.0, 4.0, 9.0, 15.0]);
+    }
+
+    #[test]
+    fn cumulate_axis_rowwise_matches_strided_reference_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The row-wise contiguous cumulate must be BIT-IDENTICAL to the old
+        // stride-`inner` column scan for both add (cumsum) and mul (cumprod),
+        // across a non-last axis (axis=0 on 2-D) and a middle axis (axis=1 on 3-D,
+        // inner>1 and outer>1), including signed values that exercise FP order.
+        fn strided_reference(
+            values: &[f64],
+            shape: &[usize],
+            axis: usize,
+            identity: f64,
+            fold: impl Fn(f64, f64) -> f64,
+        ) -> Vec<f64> {
+            let total: usize = shape.iter().product();
+            let mut out = vec![0.0f64; total];
+            let axis_len = shape[axis];
+            let inner: usize = shape[axis + 1..].iter().product();
+            let outer: usize = shape[..axis].iter().product();
+            for o in 0..outer {
+                let base = o * axis_len * inner;
+                for ii in 0..inner {
+                    let mut acc = identity;
+                    let mut off = base + ii;
+                    for _ in 0..axis_len {
+                        acc = fold(acc, values[off]);
+                        out[off] = acc;
+                        off += inner;
+                    }
+                }
+            }
+            out
+        }
+        let cases: &[(Vec<usize>, usize)] = &[
+            (vec![64, 48], 0),
+            (vec![5, 7, 9], 1),
+            (vec![9, 5, 7], 0),
+            (vec![3, 4, 5, 6], 2),
+        ];
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            ((seed >> 11) as f64 / (1u64 << 53) as f64) * 4.0 - 2.0
+        };
+        let mut digest = Sha256::new();
+        for (shape, axis) in cases {
+            let n: usize = shape.iter().product();
+            let data: Vec<f64> = (0..n).map(|_| next()).collect();
+            let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            // cumsum (add)
+            let got_sum = arr.cumsum(Some(*axis as isize)).unwrap();
+            let want_sum = strided_reference(&data, shape, *axis, 0.0, |a, b| a + b);
+            for (g, w) in got_sum.values().iter().zip(want_sum.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "cumsum {shape:?} ax={axis}");
+            }
+            // cumprod (mul)
+            let got_prod = arr.cumprod(Some(*axis as isize)).unwrap();
+            let want_prod = strided_reference(&data, shape, *axis, 1.0, |a, b| a * b);
+            for (g, w) in got_prod.values().iter().zip(want_prod.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "cumprod {shape:?} ax={axis}");
+            }
+            for v in got_sum.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+        }
+        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "707fb35e03a7d2a2267dfa243e5f891af1b511b0eb96468734ff52a7b692bcbd"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B: row-wise vs strided cumsum(axis=0); run --release -- --ignored --nocapture"]
+    fn cumsum_axis0_rowwise_ab_bench() {
+        use std::time::Instant;
+        let n = 2048usize;
+        let data: Vec<f64> = (0..n * n).map(|i| ((i % 101) as f64) * 0.01 - 0.5).collect();
+        let arr = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+        let iters = 10;
+        let _ = arr.cumsum(Some(0)).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(arr.cumsum(Some(0)).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD strided column scan.
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut out = vec![0.0f64; n * n];
+            for c in 0..n {
+                let mut acc = 0.0;
+                let mut off = c;
+                for _ in 0..n {
+                    acc += data[off];
+                    out[off] = acc;
+                    off += n;
+                }
+            }
+            std::hint::black_box(&out);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "CUMSUM_AX0 new={new_ms:.2}ms old={old_ms:.2}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
     }
 
     #[test]
