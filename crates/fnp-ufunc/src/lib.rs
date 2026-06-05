@@ -13390,12 +13390,24 @@ impl UFuncArray {
                 other.values.len()
             )));
         }
-        let sum: f64 = self
-            .values
-            .iter()
-            .zip(&other.values)
-            .map(|(a, b)| a * b)
-            .sum();
+        let mut sum = 0.0;
+        let mut i = 0;
+        let len = self.values.len();
+        while i + 8 <= len {
+            sum += self.values[i] * other.values[i];
+            sum += self.values[i + 1] * other.values[i + 1];
+            sum += self.values[i + 2] * other.values[i + 2];
+            sum += self.values[i + 3] * other.values[i + 3];
+            sum += self.values[i + 4] * other.values[i + 4];
+            sum += self.values[i + 5] * other.values[i + 5];
+            sum += self.values[i + 6] * other.values[i + 6];
+            sum += self.values[i + 7] * other.values[i + 7];
+            i += 8;
+        }
+        while i < len {
+            sum += self.values[i] * other.values[i];
+            i += 1;
+        }
         let dtype = promote(self.dtype, other.dtype);
         Ok(Self::scalar(sum, dtype))
     }
@@ -51092,6 +51104,85 @@ print(json.dumps(payload))
         let b = UFuncArray::new(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0], DType::F64).unwrap();
         let r = a.vdot(&b).unwrap();
         assert_eq!(r.values(), &[70.0]); // 1*5+2*6+3*7+4*8=70
+    }
+
+    #[test]
+    fn vdot_unrolled_loop_preserves_sequential_bits_and_golden_sha256() {
+        let len = 4097;
+        let a_values: Vec<f64> = (0..len)
+            .map(|i| {
+                let base = (i as f64 + 1.0) / 97.0;
+                if i % 3 == 0 { -base } else { base }
+            })
+            .collect();
+        let b_values: Vec<f64> = (0..len)
+            .map(|i| {
+                let base = ((i * 17 % 211) as f64 - 105.0) / 53.0;
+                if i % 5 == 0 { -base } else { base }
+            })
+            .collect();
+
+        let mut expected = 0.0;
+        for i in 0..len {
+            expected += a_values[i] * b_values[i];
+        }
+
+        let a = UFuncArray::new(vec![len], a_values, DType::F64).unwrap();
+        let b = UFuncArray::new(vec![len], b_values, DType::F64).unwrap();
+        let result = a.vdot(&b).unwrap();
+        assert_eq!(result.values()[0].to_bits(), expected.to_bits());
+
+        let mut hasher = Sha256::new();
+        hasher.update(result.values()[0].to_bits().to_le_bytes());
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest,
+            "9d2754708892adfb99ddb0002f66c2be2a1806366997dee279ed3e281a562c81"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B: unrolled vdot vs old iterator path; run --release -- --ignored --nocapture"]
+    fn vdot_unrolled_loop_ab_bench() {
+        use std::time::Instant;
+
+        let len = 1_600_000;
+        let a_values: Vec<f64> = (0..len).map(|i| (i as f64) * 0.25 - 11.0).collect();
+        let b_values: Vec<f64> = (0..len).map(|i| (i as f64) * 0.125 + 3.0).collect();
+        let a = UFuncArray::new(vec![len], a_values.clone(), DType::F64).unwrap();
+        let b = UFuncArray::new(vec![len], b_values.clone(), DType::F64).unwrap();
+
+        let old_iterator_sum = || {
+            a_values
+                .iter()
+                .zip(&b_values)
+                .map(|(left, right)| left * right)
+                .sum::<f64>()
+        };
+        let expected = old_iterator_sum();
+        let got = a.vdot(&b).unwrap();
+        assert_eq!(got.values()[0].to_bits(), expected.to_bits());
+
+        let iters = 20;
+        let start = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.vdot(&b).unwrap());
+        }
+        let new_ms = start.elapsed().as_secs_f64() * 1_000.0 / iters as f64;
+
+        let start = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(old_iterator_sum());
+        }
+        let old_ms = start.elapsed().as_secs_f64() * 1_000.0 / iters as f64;
+        println!(
+            "VDOT_CORE len={len} new={new_ms:.3}ms old={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
     }
 
     #[test]
