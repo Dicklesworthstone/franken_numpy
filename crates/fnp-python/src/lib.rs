@@ -23193,6 +23193,46 @@ fn mintypecode(
         .unbind())
 }
 
+// Zero-copy float64 np.eye(n, m, k): an n x m matrix of zeros with ones on the
+// k-th diagonal. Allocates numpy.zeros((n, m)) and writes 1.0 onto the at most
+// min(n, m) diagonal positions directly, with no intermediate Rust Vec of the
+// full n*m result (bead lglck). The output is exactly identity-on-diagonal, so it
+// is bit-identical to numpy (1.0 ones, +0.0 fill). The diagonal element (i, i+k)
+// is valid for max(0,-k) <= i < min(n, m-k).
+fn build_f64_eye(py: Python<'_>, n: usize, m: usize, k: i64) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("zeros", ((n, m),), Some(&kwargs))?;
+    if n > 0 && m > 0 {
+        let i_start = if k < 0 { (-k) as usize } else { 0 };
+        let i_end = if k >= 0 {
+            let mk = m as i64 - k;
+            if mk <= 0 { 0 } else { n.min(mk as usize) }
+        } else {
+            n.min(m + (-k) as usize)
+        };
+        if i_start < i_end {
+            let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+                // Fall back to a per-element set through Python if the buffer is
+                // unexpectedly unavailable (keeps the result correct).
+                for i in i_start..i_end {
+                    let j = (i as i64 + k) as usize;
+                    out.call_method1("__setitem__", ((i, j), 1.0_f64))?;
+                }
+                return Ok(out.unbind());
+            };
+            if let Some(output) = out_buffer.as_mut_slice(py) {
+                for i in i_start..i_end {
+                    let j = (i as i64 + k) as usize;
+                    output[i * m + j].set(1.0);
+                }
+            }
+        }
+    }
+    Ok(out.unbind())
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn eye(
@@ -23337,6 +23377,15 @@ fn eye(
             | DType::F64
     ) {
         return fallback();
+    }
+
+    // Zero-copy float64 identity: write the diagonal into numpy.zeros directly,
+    // skipping the full n*m UFuncArray build. Bit-identical; other dtypes keep the
+    // native build below.
+    if dtype == DType::F64 {
+        let nn = n as usize;
+        let mm = m.map(|value| value as usize).unwrap_or(nn);
+        return build_f64_eye(py, nn, mm, k);
     }
 
     let result = match UFuncArray::eye(n as usize, m.map(|value| value as usize), k, dtype) {

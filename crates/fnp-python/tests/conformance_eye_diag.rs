@@ -471,3 +471,29 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// Locks the zero-copy float64 `np.eye` fast path (`build_f64_eye`, writing 1.0
+/// onto the k-th diagonal of a zeros matrix) to bit-exact parity with numpy.
+/// Compares the sha256 of raw output bytes across square and rectangular shapes,
+/// positive/negative k, and an out-of-bounds k (all zeros).
+#[test]
+fn eye_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+chunks = []
+for n, m, k in [(100, 100, 0), (50, 80, 3), (80, 50, -3), (200, 200, 0), (64, 64, 7), (64, 64, -7), (10, 10, 50)]:
+    chunks.append(np.asarray(mod.eye(n, m, k)).tobytes())
+chunks.append(np.asarray(mod.eye(500)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy eye must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
