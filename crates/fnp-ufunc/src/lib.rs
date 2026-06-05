@@ -12602,24 +12602,61 @@ impl UFuncArray {
                 } else {
                     (axis_len - (shift.unsigned_abs() % axis_len)) % axis_len
                 };
+                if s == 0 {
+                    return Ok(self.clone());
+                }
+                // Rolling axis `ax` by `s` rotates the `axis_len` rows (each a
+                // contiguous `inner`-element run) within every outer block: in row k
+                // goes to out row (k+s)%axis_len. That is exactly two contiguous
+                // block copies per outer block (out[s..] = in[..axis_len-s],
+                // out[..s] = in[axis_len-s..]) instead of the old per-element strided
+                // scatter + full source-index Vec. Bit-identical (same out[dst]=in[src]
+                // mapping), and outer blocks are independent so they run in parallel.
+                let block = axis_len * inner;
+                let split = (axis_len - s) * inner;
+                let s_off = s * inner;
                 let mut values = vec![0.0f64; self.values.len()];
-                let mut source_indices = vec![0usize; self.values.len()];
-                for o in 0..outer {
-                    for k in 0..axis_len {
-                        let dst_k = (k + s) % axis_len;
-                        for i in 0..inner {
-                            let src_idx = o * axis_len * inner + k * inner + i;
-                            let dst_idx = o * axis_len * inner + dst_k * inner + i;
-                            values[dst_idx] = self.values[src_idx];
-                            source_indices[dst_idx] = src_idx;
+                let rotate = |(out_block, in_block): (&mut [f64], &[f64])| {
+                    out_block[s_off..block].copy_from_slice(&in_block[0..split]);
+                    out_block[0..s_off].copy_from_slice(&in_block[split..block]);
+                };
+                const ROLL_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+                if outer >= 2
+                    && self.values.len() >= ROLL_AXIS_PARALLEL_MIN_ELEMS
+                    && rayon::current_num_threads() >= 2
+                {
+                    values
+                        .par_chunks_mut(block)
+                        .zip(self.values.par_chunks(block))
+                        .for_each(rotate);
+                } else {
+                    values
+                        .chunks_mut(block)
+                        .zip(self.values.chunks(block))
+                        .for_each(rotate);
+                }
+                // Reindex an integer sidecar (rare for roll) via the same mapping;
+                // the common float case skips the source-index Vec entirely.
+                let integer_sidecar = if self.integer_sidecar.is_some() {
+                    let mut source_indices = vec![0usize; self.values.len()];
+                    for o in 0..outer {
+                        let base = o * block;
+                        for k in 0..axis_len {
+                            let dst_k = (k + s) % axis_len;
+                            for i in 0..inner {
+                                source_indices[base + dst_k * inner + i] = base + k * inner + i;
+                            }
                         }
                     }
-                }
+                    self.reindexed_integer_sidecar(&source_indices)
+                } else {
+                    None
+                };
                 Ok(Self {
                     shape: self.shape.clone(),
                     values,
                     dtype: self.dtype,
-                    integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                    integer_sidecar,
                 })
             }
         }
@@ -45106,6 +45143,49 @@ print(json.dumps(payload))
             UFuncArray::new(vec![3, 2], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let rolled = arr.roll(1, Some(0)).unwrap();
         assert_eq!(rolled.values(), &[5.0, 6.0, 1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn roll_axis_block_rotate_matches_strided_reference() {
+        // The block-rotate roll(axis) must be BIT-IDENTICAL to the old per-element
+        // strided scatter, across last-axis (inner=1) and middle-axis (inner>1),
+        // positive/negative/wrapping shifts, on multi-row blocks (>= parallel gate).
+        fn strided_ref(values: &[f64], shape: &[usize], ax: usize, shift: isize) -> Vec<f64> {
+            let inner: usize = shape[ax + 1..].iter().product();
+            let outer: usize = shape[..ax].iter().product();
+            let axis_len = shape[ax];
+            let s = if shift >= 0 {
+                (shift as usize) % axis_len
+            } else {
+                (axis_len - (shift.unsigned_abs() % axis_len)) % axis_len
+            };
+            let mut out = vec![0.0f64; values.len()];
+            for o in 0..outer {
+                for k in 0..axis_len {
+                    let dk = (k + s) % axis_len;
+                    for i in 0..inner {
+                        out[o * axis_len * inner + dk * inner + i] =
+                            values[o * axis_len * inner + k * inner + i];
+                    }
+                }
+            }
+            out
+        }
+        let cases: &[(Vec<usize>, usize)] = &[
+            (vec![300, 300], 1), // last-axis, big enough for the parallel gate
+            (vec![300, 300], 0), // non-last axis (inner=300)
+            (vec![40, 30, 20], 1),
+        ];
+        for (shape, ax) in cases {
+            let n: usize = shape.iter().product();
+            let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 7.0).collect();
+            let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            for &shift in &[1isize, 7, -3, shape[*ax] as isize, -(shape[*ax] as isize) - 5] {
+                let got = arr.roll(shift, Some(*ax as isize)).unwrap();
+                let want = strided_ref(&data, shape, *ax, shift);
+                assert_eq!(got.values(), want.as_slice(), "shape {shape:?} ax={ax} shift={shift}");
+            }
+        }
     }
 
     #[test]
