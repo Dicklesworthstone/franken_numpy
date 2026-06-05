@@ -41,5 +41,36 @@ fn bench_sqrt_input_extraction(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_sqrt_input_extraction);
+fn bench_ediff1d_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_ediff1d_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let input = numpy
+            .call_method1(
+                "linspace",
+                (-1_000_000.0_f64, 1_000_000.0_f64, 2_000_000_usize),
+            )
+            .expect("2M f64 input");
+        let ediff1d = module.getattr("ediff1d").expect("fnp_python.ediff1d");
+
+        group.bench_function("ediff1d_f64_2m", |bench| {
+            bench.iter(|| {
+                let result = ediff1d.call1((&input,)).expect("ediff1d benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_sqrt_input_extraction, bench_ediff1d_boundary);
 criterion_main!(benches);

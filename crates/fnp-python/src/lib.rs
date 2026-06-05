@@ -15950,10 +15950,10 @@ fn fmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     }
     // Zero-copy fast path for same-shape f64 ndarrays with no zero divisor
     // (zero divisors must defer to numpy for the "invalid value" warning).
-    if !f64_ndarray_contains_zero(py, x2.bind(py))? {
-        if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Fmod)? {
-            return Ok(out);
-        }
+    if !f64_ndarray_contains_zero(py, x2.bind(py))?
+        && let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Fmod)?
+    {
+        return Ok(out);
     }
     let x1_array = extract_numeric_array(py, x1.bind(py), "fmod(x1)")?;
     let x2_array = extract_numeric_array(py, x2.bind(py), "fmod(x2)")?;
@@ -26903,10 +26903,10 @@ fn around(
     // decimals==0 is plain round-half-even (Rint); take the zero-copy buffer
     // path for exact f64 C-contiguous ndarrays (bit-identical to the
     // elementwise(Rint) branch below). Other inputs fall through unchanged.
-    if decimals == 0 {
-        if let Some(result) = try_zerocopy_f64_unary(py, a.bind(py), UnaryOp::Rint)? {
-            return Ok(result);
-        }
+    if decimals == 0
+        && let Some(result) = try_zerocopy_f64_unary(py, a.bind(py), UnaryOp::Rint)?
+    {
+        return Ok(result);
     }
 
     let array = match extract_precise_numeric_array(py, a.bind(py), "around(a)") {
@@ -71586,6 +71586,58 @@ mod tests {
             assert_eq!(
                 digest,
                 "9e20a5121109bdd745658f9ef7a012ebef48727b19fd92f89e3b5441cd7f5c23"
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn ediff1d_f64_boundary_matches_numpy_golden_sha256() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array_fn = numpy.getattr("array")?;
+            let ediff1d_fn = module.getattr("ediff1d")?;
+            let numpy_ediff1d = numpy.getattr("ediff1d")?;
+
+            let mut proof_bytes = Vec::new();
+            let cases = [
+                array_fn.call1((vec![-0.0_f64, 0.0, 1.5, -2.0, 8.0],))?,
+                array_fn.call1((Vec::<f64>::new(),))?,
+                array_fn.call1((vec![-0.0_f64],))?,
+                array_fn.call1((vec![
+                    vec![-0.0_f64, 0.0, 2.5],
+                    vec![-4.0, -4.0, f64::INFINITY],
+                ],))?,
+            ];
+
+            for input in cases {
+                let out = ediff1d_fn.call1((input.clone(),))?;
+                let expected = numpy_ediff1d.call1((input,))?;
+                assert_array_matches_numpy(&out, &expected)?;
+                assert_eq!(
+                    out.call_method0("tobytes")?.extract::<Vec<u8>>()?,
+                    expected.call_method0("tobytes")?.extract::<Vec<u8>>()?
+                );
+                append_numpy_array_bytes(py, &out, &mut proof_bytes)?;
+            }
+
+            let nan_case = array_fn.call1((vec![1.0_f64, f64::NAN, 3.0],))?;
+            assert_array_matches_numpy(
+                &ediff1d_fn.call1((nan_case.clone(),))?,
+                &numpy_ediff1d.call1((nan_case,))?,
+            )?;
+
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest,
+                "413a7351006db6bb6dd374f1df9e7b6f85d2436b88c9c0e22d89969e6469ec93"
             );
 
             Ok(())
