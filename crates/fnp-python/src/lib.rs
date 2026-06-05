@@ -10827,6 +10827,9 @@ fn nextafter(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
             .call1((x1.bind(py), x2.bind(py)))?
             .unbind());
     }
+    if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Nextafter)? {
+        return Ok(out);
+    }
     let x1 = extract_numeric_array(py, x1.bind(py), "nextafter(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "nextafter(x2)")?;
     let result = ufunc_nextafter(&x1, &x2).map_err(map_ufunc_error)?;
@@ -10841,6 +10844,9 @@ fn hypot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .getattr("hypot")?
             .call1((x1.bind(py), x2.bind(py)))?
             .unbind());
+    }
+    if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Hypot)? {
+        return Ok(out);
     }
     let x1 = extract_numeric_array(py, x1.bind(py), "hypot(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "hypot(x2)")?;
@@ -15538,6 +15544,9 @@ fn heaviside(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
             .getattr("heaviside")?
             .call1((x1.bind(py), x2.bind(py)))?
             .unbind());
+    }
+    if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Heaviside)? {
+        return Ok(out);
     }
     let x1 = extract_numeric_array(py, x1.bind(py), "heaviside(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "heaviside(x2)")?;
