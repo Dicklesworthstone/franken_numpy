@@ -22813,6 +22813,46 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let fallback =
         || -> PyResult<Py<PyAny>> { Ok(inner_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
 
+    // np.inner contracts the shared LAST axis: out = a @ b^T flattens to the GEMM
+    // (m x k) @ (k x n) with m = prod(a.shape[:-1]), k = a.shape[-1],
+    // n = prod(b.shape[:-1]). Our native kernel only beats numpy's BLAS inside the
+    // SAME profiled sweet spot np.matmul/dot/tensordot gate on (flops >=
+    // PY_NATIVE_GEMM_MIN_FLOPS, every flattened dim <= PY_NATIVE_GEMM_MAX_DIM).
+    // Below the flop floor the native path was 6-8x slower than numpy (per-call
+    // overhead on small contractions); above the dim cap numpy's BLAS wins. Read
+    // the shapes straight off the ndarrays and delegate the non-competitive
+    // contractions to numpy.inner before paying for any Rust-side extraction —
+    // the native GEMM is kept only in the window where it is faster than numpy.
+    if let (Ok(a_shape), Ok(b_shape)) = (
+        a.bind(py)
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>()),
+        b.bind(py)
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>()),
+    ) {
+        if !a_shape.is_empty()
+            && !b_shape.is_empty()
+            && a_shape[a_shape.len() - 1] == b_shape[b_shape.len() - 1]
+        {
+            let k = a_shape[a_shape.len() - 1];
+            let (Ok(m), Ok(n)) = (
+                element_count(&a_shape[..a_shape.len() - 1]),
+                element_count(&b_shape[..b_shape.len() - 1]),
+            ) else {
+                return fallback();
+            };
+            let in_native_window = m.saturating_mul(k).saturating_mul(n)
+                >= PY_NATIVE_GEMM_MIN_FLOPS
+                && m <= PY_NATIVE_GEMM_MAX_DIM
+                && k <= PY_NATIVE_GEMM_MAX_DIM
+                && n <= PY_NATIVE_GEMM_MAX_DIM;
+            if !in_native_window {
+                return fallback();
+            }
+        }
+    }
+
     let a = match extract_precise_numeric_array(py, a.bind(py), "inner(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -29102,13 +29142,14 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere, bincount, ceil, choose, compress,
-        copysign, count_nonzero, degrees, diag, diag_indices, diag_indices_from, diagflat,
-        diagonal, digitize, extract, extract_numeric_array, extract_precise_numeric_array,
-        fill_diagonal, flatnonzero, flip, fliplr, flipud, floor, fnp_python, frexp, hypot, indices,
-        interp, isfinite, isinf, isnan, isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2,
-        meshgrid, modf, nan_to_num, nextafter, place, put, put_along_axis, putmask,
-        python_native_gemm_f64_2d, python_native_gemm_f64_2d_eligible,
+        PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere, bincount,
+        build_numpy_array_from_ufunc, ceil, choose, compress, copysign, count_nonzero, degrees,
+        diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
+        extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero, flip,
+        fliplr, flipud, floor, fnp_python, frexp, hypot, indices, interp, isfinite, isinf, isnan,
+        isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf, nan_to_num,
+        nextafter, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
+        python_native_gemm_f64_2d_eligible,
         python_native_gemm_f64_2d_metadata_gate, radians, ravel_multi_index, required_dict_item,
         rfftfreq, rint, searchsorted, select, sign, signbit, sinc, solve_triangular, spacing, take,
         take_along_axis, tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices,
@@ -29124,6 +29165,7 @@ mod tests {
         PyTuple, PyTypeMethods,
     };
     use pyo3::{Py, PyResult, Python};
+    use std::time::Instant;
 
     static PY_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -29349,6 +29391,26 @@ mod tests {
         out.extend_from_slice(&contiguous.call_method0("tobytes")?.extract::<Vec<u8>>()?);
         out.push(0xff);
         Ok(())
+    }
+
+    fn native_inner_without_python_gate(
+        py: Python<'_>,
+        a: &Bound<'_, PyAny>,
+        b: &Bound<'_, PyAny>,
+    ) -> PyResult<Py<PyAny>> {
+        let a = extract_precise_numeric_array(py, a, "inner(a)")?;
+        let b = extract_precise_numeric_array(py, b, "inner(b)")?;
+        let result = a.inner(&b).map_err(super::map_ufunc_error)?;
+        let output = build_numpy_array_from_ufunc(py, &result)?;
+        if result.shape().is_empty() {
+            return Ok(output.bind(py).get_item(())?.unbind());
+        }
+        Ok(output)
+    }
+
+    fn median_ms(samples: &mut [f64]) -> f64 {
+        samples.sort_by(|a, b| a.partial_cmp(b).expect("timing sample should be finite"));
+        samples[samples.len() / 2]
     }
 
     fn repr_string(value: &pyo3::Bound<'_, pyo3::types::PyAny>) -> String {
@@ -49241,6 +49303,128 @@ mod tests {
                 "outer out= diverged"
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn inner_native_gemm_gate_keeps_numpy_parity_across_sizes() {
+        // The GEMM sweet-spot gate delegates small/large inner contractions to
+        // numpy and keeps the native kernel only in the profiled window. Verify
+        // parity vs numpy on BOTH sides: n=64 (below flop floor -> delegate),
+        // n=384 (inside the native window), n=1100 (above the dim cap -> delegate).
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_inner_gate")?;
+            fnp_python(&module)?;
+            let inner_fn = module.getattr("inner")?;
+            let numpy = py.import("numpy")?;
+            let numpy_inner = numpy.getattr("inner")?;
+            let allclose = numpy.getattr("allclose")?;
+            let rng = numpy
+                .getattr("random")?
+                .getattr("default_rng")?
+                .call1((0_i64,))?;
+            let mut proof_bytes = Vec::new();
+            for n in [64_i64, 384, 1100] {
+                let a = rng
+                    .call_method1("standard_normal", ((n, n),))?
+                    .call_method1("astype", ("float64",))?;
+                let b = rng
+                    .call_method1("standard_normal", ((n, n),))?
+                    .call_method1("astype", ("float64",))?;
+                let got = inner_fn.call1((a.clone(), b.clone()))?;
+                let want = numpy_inner.call1((a.clone(), b.clone()))?;
+                assert!(
+                    allclose
+                        .call(
+                            (&got, &want),
+                            Some(&{
+                                let kw = PyDict::new(py);
+                                kw.set_item("rtol", 1e-9)?;
+                                kw.set_item("atol", 1e-9)?;
+                                kw
+                            })
+                        )?
+                        .extract::<bool>()?,
+                    "inner gate diverged from numpy at n={n}"
+                );
+                append_numpy_array_bytes(py, &got, &mut proof_bytes)?;
+            }
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest,
+                "33d7a135b6d066697b5a96793a873d8df07b90f788b4ecc2261b9452acd0ec82"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    #[ignore = "perf proof: compares gated np.inner against the pre-gate native path"]
+    fn inner_native_gemm_gate_ab_bench() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_inner_gate_ab")?;
+            fnp_python(&module)?;
+            let inner_fn = module.getattr("inner")?;
+            let numpy = py.import("numpy")?;
+            let allclose = numpy.getattr("allclose")?;
+            let rng = numpy
+                .getattr("random")?
+                .getattr("default_rng")?
+                .call1((0_i64,))?;
+            let n = 240_i64;
+            let a = rng
+                .call_method1("standard_normal", ((n, n),))?
+                .call_method1("astype", ("float64",))?;
+            let b = rng
+                .call_method1("standard_normal", ((n, n),))?
+                .call_method1("astype", ("float64",))?;
+
+            let gated = inner_fn.call1((a.clone(), b.clone()))?;
+            let old_native = native_inner_without_python_gate(py, &a, &b)?;
+            assert!(
+                allclose
+                    .call(
+                        (&gated, old_native.bind(py)),
+                        Some(&{
+                            let kw = PyDict::new(py);
+                            kw.set_item("rtol", 1e-9)?;
+                            kw.set_item("atol", 1e-9)?;
+                            kw
+                        })
+                    )?
+                    .extract::<bool>()?,
+                "gated inner diverged from the pre-gate native path"
+            );
+
+            let mut gated_samples = Vec::with_capacity(5);
+            let mut old_native_samples = Vec::with_capacity(5);
+            for _ in 0..5 {
+                let start = Instant::now();
+                std::hint::black_box(inner_fn.call1((a.clone(), b.clone()))?);
+                gated_samples.push(start.elapsed().as_secs_f64() * 1_000.0);
+
+                let start = Instant::now();
+                std::hint::black_box(native_inner_without_python_gate(py, &a, &b)?);
+                old_native_samples.push(start.elapsed().as_secs_f64() * 1_000.0);
+            }
+
+            let gated_ms = median_ms(&mut gated_samples);
+            let old_native_ms = median_ms(&mut old_native_samples);
+            let speedup = old_native_ms / gated_ms;
+            println!(
+                "INNER_GATE n={n} gated={gated_ms:.3}ms old_native={old_native_ms:.3}ms speedup={speedup:.2}x"
+            );
+            assert!(
+                speedup >= 2.0,
+                "inner gate speedup {speedup:.2}x failed Score>=2 perf floor"
+            );
             Ok(())
         });
     }
