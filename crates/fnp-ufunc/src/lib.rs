@@ -2408,9 +2408,8 @@ fn validate_fixed_binary_signature(
     Ok(())
 }
 
-/// Sidecar for preserving exact integer values that exceed f64 representability
-/// (i.e., |value| > 2^53). Only populated when constructing from `ArrayStorage`
-/// with large integer values. Arithmetic operations clear the sidecar since
+/// Sidecar for preserving exact integer values when the f64 payload is only a
+/// bridge representation. Arithmetic operations clear the sidecar since
 /// computed results go through the f64 path.
 #[derive(Debug, Clone, PartialEq)]
 pub enum IntegerSidecar {
@@ -5917,8 +5916,7 @@ impl UFuncArray {
         &self.values
     }
 
-    /// Returns `true` if this array has a lossless integer sidecar that
-    /// preserves exact i64/u64 values exceeding f64 representability.
+    /// Returns `true` if this array has a lossless integer sidecar.
     #[inline]
     #[must_use]
     pub fn has_integer_sidecar(&self) -> bool {
@@ -24971,19 +24969,24 @@ impl UFuncArray {
 
     /// Return indices of non-zero elements in the flattened array (np.flatnonzero).
     pub fn flatnonzero(&self) -> Self {
-        let indices: Vec<f64> = self
+        // Carry exact int64 positions so the Python bridge can export through
+        // its direct sidecar path instead of cloning/scanning/casting through
+        // generic to_storage. Values stay as f64 positions for existing Rust
+        // callers; shape, dtype, and ascending C-order positions are unchanged.
+        let sidecar: Vec<i64> = self
             .values
             .iter()
             .enumerate()
             .filter(|&(_, v)| *v != 0.0)
-            .map(|(i, _)| i as f64)
+            .map(|(i, _)| i as i64)
             .collect();
-        let n = indices.len();
+        let n = sidecar.len();
+        let values: Vec<f64> = sidecar.iter().map(|&i| i as f64).collect();
         Self {
             shape: vec![n],
-            values: indices,
+            values,
             dtype: DType::I64,
-            integer_sidecar: None,
+            integer_sidecar: Some(IntegerSidecar::I64(sidecar)),
         }
     }
 
@@ -40872,7 +40875,11 @@ print(json.dumps(payload))
                 digest.update(v.to_bits().to_le_bytes());
             }
         }
-        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(
             hex,
             "707fb35e03a7d2a2267dfa243e5f891af1b511b0eb96468734ff52a7b692bcbd"
@@ -40884,7 +40891,13 @@ print(json.dumps(payload))
         // Integer cumsum/cumprod along non-last axes use the same row-wise rewrite;
         // verify i64 and u64 (add and mul) match the old stride-`inner` column scan
         // exactly via the exact integer sidecar round-trip.
-        fn strided_i64(values: &[i64], shape: &[usize], axis: usize, id: i64, f: impl Fn(i64, i64) -> i64) -> Vec<i64> {
+        fn strided_i64(
+            values: &[i64],
+            shape: &[usize],
+            axis: usize,
+            id: i64,
+            f: impl Fn(i64, i64) -> i64,
+        ) -> Vec<i64> {
             let total: usize = shape.iter().product();
             let mut out = vec![0i64; total];
             let axis_len = shape[axis];
@@ -40909,27 +40922,48 @@ print(json.dumps(payload))
             let n: usize = shape.iter().product();
             let data: Vec<i64> = (0..n as i64).map(|i| (i % 13) - 6).collect();
             // i64 cumsum
-            let arr = UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(data.clone())).unwrap();
+            let arr =
+                UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(data.clone())).unwrap();
             let got = arr.cumsum(Some(*axis as isize)).unwrap();
             let want = strided_i64(&data, shape, *axis, 0, i64::wrapping_add);
-            assert_eq!(got.to_storage().unwrap(), ArrayStorage::I64(want), "i64 cumsum {shape:?} ax={axis}");
+            assert_eq!(
+                got.to_storage().unwrap(),
+                ArrayStorage::I64(want),
+                "i64 cumsum {shape:?} ax={axis}"
+            );
             // i64 cumprod (small values to stay exact)
             let pdata: Vec<i64> = (0..n as i64).map(|i| (i % 3) - 1).collect();
-            let parr = UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(pdata.clone())).unwrap();
+            let parr =
+                UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(pdata.clone())).unwrap();
             let pgot = parr.cumprod(Some(*axis as isize)).unwrap();
             let pwant = strided_i64(&pdata, shape, *axis, 1, i64::wrapping_mul);
-            assert_eq!(pgot.to_storage().unwrap(), ArrayStorage::I64(pwant), "i64 cumprod {shape:?} ax={axis}");
+            assert_eq!(
+                pgot.to_storage().unwrap(),
+                ArrayStorage::I64(pwant),
+                "i64 cumprod {shape:?} ax={axis}"
+            );
             // u64 cumsum
             let udata: Vec<u64> = (0..n as u64).map(|i| i % 17).collect();
-            let uarr = UFuncArray::from_storage(shape.clone(), ArrayStorage::U64(udata.clone())).unwrap();
+            let uarr =
+                UFuncArray::from_storage(shape.clone(), ArrayStorage::U64(udata.clone())).unwrap();
             let ugot = uarr.cumsum(Some(*axis as isize)).unwrap();
             let uwant: Vec<i64> = {
-                let mut s = strided_i64(&udata.iter().map(|&v| v as i64).collect::<Vec<_>>(), shape, *axis, 0, i64::wrapping_add);
+                let mut s = strided_i64(
+                    &udata.iter().map(|&v| v as i64).collect::<Vec<_>>(),
+                    shape,
+                    *axis,
+                    0,
+                    i64::wrapping_add,
+                );
                 s.iter_mut().for_each(|_| {});
                 s
             };
             let uwant_u64: Vec<u64> = uwant.iter().map(|&v| v as u64).collect();
-            assert_eq!(ugot.to_storage().unwrap(), ArrayStorage::U64(uwant_u64), "u64 cumsum {shape:?} ax={axis}");
+            assert_eq!(
+                ugot.to_storage().unwrap(),
+                ArrayStorage::U64(uwant_u64),
+                "u64 cumsum {shape:?} ax={axis}"
+            );
         }
     }
 
@@ -40938,7 +40972,9 @@ print(json.dumps(payload))
     fn cumsum_axis0_rowwise_ab_bench() {
         use std::time::Instant;
         let n = 2048usize;
-        let data: Vec<f64> = (0..n * n).map(|i| ((i % 101) as f64) * 0.01 - 0.5).collect();
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| ((i % 101) as f64) * 0.01 - 0.5)
+            .collect();
         let arr = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
         let iters = 10;
         let _ = arr.cumsum(Some(0)).unwrap();
@@ -44801,7 +44837,11 @@ print(json.dumps(payload))
             let arr = UFuncArray::new(shape.clone(), values.clone(), DType::F64).unwrap();
             let got = arr.tile(reps).unwrap();
             let (ref_shape, ref_vals) = reference(shape, &values, reps);
-            assert_eq!(got.shape(), ref_shape.as_slice(), "shape {shape:?} reps {reps:?}");
+            assert_eq!(
+                got.shape(),
+                ref_shape.as_slice(),
+                "shape {shape:?} reps {reps:?}"
+            );
             assert_eq!(
                 got.values(),
                 ref_vals.as_slice(),
@@ -44809,8 +44849,8 @@ print(json.dumps(payload))
             );
         }
         // Integer-sidecar reindex parity: exact i64 values must follow the tile.
-        let iarr = UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![10, 20, 30, 40]))
-            .unwrap();
+        let iarr =
+            UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![10, 20, 30, 40])).unwrap();
         let it = iarr.tile(&[2, 2]).unwrap();
         assert_eq!(
             it.to_storage().unwrap(),
@@ -44819,7 +44859,9 @@ print(json.dumps(payload))
             ])
         );
         // Golden digest over a deterministic 3-D tile.
-        let values: Vec<f64> = (0..(4 * 3 * 5)).map(|i| ((i * 7 % 19) as f64) - 9.0).collect();
+        let values: Vec<f64> = (0..(4 * 3 * 5))
+            .map(|i| ((i * 7 % 19) as f64) - 9.0)
+            .collect();
         let arr = UFuncArray::new(vec![4, 3, 5], values, DType::F64).unwrap();
         let r = arr.tile(&[2, 1, 3]).unwrap();
         let mut h = Sha256::new();
@@ -47672,7 +47714,9 @@ print(json.dumps(payload))
     fn ptp_axis_parallel_ab_bench() {
         use std::time::Instant;
         let n = 2048usize;
-        let data: Vec<f64> = (0..n * n).map(|i| ((i % 101) as f64) * 0.01 - 0.5).collect();
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| ((i % 101) as f64) * 0.01 - 0.5)
+            .collect();
         let a = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
         let iters = 20;
         let _ = a.ptp(Some(1)).unwrap();
@@ -48110,7 +48154,13 @@ print(json.dumps(payload))
             set.dedup();
             values
                 .iter()
-                .map(|v| if set.binary_search(v).is_ok() { 1.0 } else { 0.0 })
+                .map(|v| {
+                    if set.binary_search(v).is_ok() {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
                 .collect::<Vec<f64>>()
         };
         let mut seed = 0x1234_5678_9abc_def0u64;
@@ -48193,7 +48243,9 @@ print(json.dumps(payload))
         set.dedup();
         let t1 = Instant::now();
         for _ in 0..iters {
-            std::hint::black_box(super::in1d_membership_mask(&values, |v| set.binary_search(v).is_ok()));
+            std::hint::black_box(super::in1d_membership_mask(&values, |v| {
+                set.binary_search(v).is_ok()
+            }));
         }
         let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
         println!(
@@ -53696,6 +53748,87 @@ print(json.dumps(payload))
         assert_eq!(nz.shape(), &[2]);
         assert!((nz.values()[0] - 1.0).abs() < 1e-10);
         assert!((nz.values()[1] - 3.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn flatnonzero_sidecar_preserves_i64_storage_and_golden_sha256() {
+        let values: Vec<f64> = (0..257)
+            .map(|i| if i % 17 == 0 || i % 29 == 0 { 1.0 } else { 0.0 })
+            .collect();
+        let a = UFuncArray::new(vec![257], values, DType::F64).unwrap();
+        let nz = a.flatnonzero();
+
+        assert_eq!(nz.shape(), &[24]);
+        assert!(nz.has_integer_sidecar());
+        let ArrayStorage::I64(indices) = nz.to_storage().unwrap() else {
+            panic!("flatnonzero should export int64 storage");
+        };
+        assert_eq!(
+            indices,
+            vec![
+                0, 17, 29, 34, 51, 58, 68, 85, 87, 102, 116, 119, 136, 145, 153, 170, 174, 187,
+                203, 204, 221, 232, 238, 255
+            ]
+        );
+        let mut hasher = Sha256::new();
+        for index in &indices {
+            hasher.update(index.to_le_bytes());
+        }
+        let digest = hasher.finalize();
+        let mut digest_hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(&mut digest_hex, "{byte:02x}").expect("write digest hex");
+        }
+        assert_eq!(
+            digest_hex,
+            "986268093f27b36b0ff1219c2268038a005dc5361e97692983f1c343919762f4"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B: flatnonzero sidecar+to_storage vs old no-sidecar path; run --release -- --ignored --nocapture"]
+    fn flatnonzero_sidecar_to_storage_ab_bench() {
+        use std::time::Instant;
+
+        let n = 1_000_000usize;
+        let values: Vec<f64> = (0..n).map(|i| if i % 5 == 0 { 0.0 } else { 1.0 }).collect();
+        let a = UFuncArray::new(vec![n], values, DType::F64).unwrap();
+        let old_flatnonzero = |array: &UFuncArray| {
+            let indices: Vec<f64> = array
+                .values()
+                .iter()
+                .enumerate()
+                .filter(|&(_, v)| *v != 0.0)
+                .map(|(i, _)| i as f64)
+                .collect();
+            UFuncArray {
+                shape: vec![indices.len()],
+                values: indices,
+                dtype: DType::I64,
+                integer_sidecar: None,
+            }
+        };
+
+        let iters = 30;
+        let _ = a.flatnonzero().to_storage().unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.flatnonzero().to_storage().unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+        let _ = old_flatnonzero(&a).to_storage().unwrap();
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(old_flatnonzero(&a).to_storage().unwrap());
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+        println!(
+            "FLATNONZERO_STORAGE new={new_ms:.2}ms old={old_ms:.2}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
     }
 
     #[test]
