@@ -18836,11 +18836,7 @@ fn shl_np_i64(a: i64, b: i64) -> i64 {
 #[inline(always)]
 fn shr_np_i64(a: i64, b: i64) -> i64 {
     if !(0..64).contains(&b) {
-        if a < 0 {
-            -1
-        } else {
-            0
-        }
+        if a < 0 { -1 } else { 0 }
     } else {
         a.wrapping_shr(b as u32)
     }
@@ -18860,10 +18856,10 @@ fn is_exact_int64_ndarray(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<bool
 // int or a signed-integer numpy scalar/0-d. Rejects unsigned (kind 'u') so we
 // don't diverge from numpy's int64+uint64 -> float64 promotion, and floats.
 fn shift_scalar_i64(py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
-    if let Ok(dt) = b.getattr("dtype") {
-        if dt.getattr("kind")?.extract::<String>()? != "i" {
-            return Ok(None);
-        }
+    if let Ok(dt) = b.getattr("dtype")
+        && dt.getattr("kind")?.extract::<String>()? != "i"
+    {
+        return Ok(None);
     }
     let _ = py;
     Ok(b.extract::<i64>().ok())
@@ -18900,8 +18896,8 @@ fn try_zerocopy_i64_shift(
     let n = a_in.len();
 
     // Resolve b into either a same-shape int64 array buffer or a broadcast scalar.
-    let b_is_same_shape_array = is_exact_int64_ndarray(py, b)?
-        && b.getattr("shape")?.extract::<Vec<usize>>()? == shape;
+    let b_is_same_shape_array =
+        is_exact_int64_ndarray(py, b)? && b.getattr("shape")?.extract::<Vec<usize>>()? == shape;
 
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "int64")?;
