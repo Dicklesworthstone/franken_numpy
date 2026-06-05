@@ -4870,15 +4870,15 @@ fn copy_result_into_numpy_array(
     // intermediate NumPy array and calling np.copyto. Callers pass a same-shape
     // in-place result, so writing the f64 values into a writable, C-contiguous f64
     // buffer of the matching length is bit-identical to the copyto path.
-    if array.dtype() == DType::F64 && !array.has_integer_sidecar() {
-        if let Ok(buffer) = PyBuffer::<f64>::get(target)
-            && !buffer.readonly()
-            && buffer.is_c_contiguous()
-            && buffer.item_count() == array.values().len()
-        {
-            buffer.copy_from_slice(py, array.values())?;
-            return Ok(());
-        }
+    if array.dtype() == DType::F64
+        && !array.has_integer_sidecar()
+        && let Ok(buffer) = PyBuffer::<f64>::get(target)
+        && !buffer.readonly()
+        && buffer.is_c_contiguous()
+        && buffer.item_count() == array.values().len()
+    {
+        buffer.copy_from_slice(py, array.values())?;
+        return Ok(());
     }
     let numpy = py.import("numpy")?;
     let updated = build_numpy_array_from_ufunc(py, array)?;
@@ -22378,22 +22378,20 @@ fn tensordot(
         b.bind(py)
             .getattr("shape")
             .and_then(|s| s.extract::<Vec<usize>>()),
-    ) {
-        if axes <= a_shape.len() && axes <= b_shape.len() {
-            let an = a_shape.len();
-            let contract: usize = a_shape[an - axes..].iter().product();
-            let m: usize = a_shape[..an - axes].iter().product();
-            let n: usize = b_shape[axes..].iter().product();
-            let in_native_window = m
-                .saturating_mul(contract)
-                .saturating_mul(n)
-                >= PY_NATIVE_GEMM_MIN_FLOPS
-                && m <= PY_NATIVE_GEMM_MAX_DIM
-                && contract <= PY_NATIVE_GEMM_MAX_DIM
-                && n <= PY_NATIVE_GEMM_MAX_DIM;
-            if !in_native_window {
-                return fallback();
-            }
+    ) && axes <= a_shape.len()
+        && axes <= b_shape.len()
+    {
+        let an = a_shape.len();
+        let contract: usize = a_shape[an - axes..].iter().product();
+        let m: usize = a_shape[..an - axes].iter().product();
+        let n: usize = b_shape[axes..].iter().product();
+        let in_native_window = m.saturating_mul(contract).saturating_mul(n)
+            >= PY_NATIVE_GEMM_MIN_FLOPS
+            && m <= PY_NATIVE_GEMM_MAX_DIM
+            && contract <= PY_NATIVE_GEMM_MAX_DIM
+            && n <= PY_NATIVE_GEMM_MAX_DIM;
+        if !in_native_window {
+            return fallback();
         }
     }
 
@@ -22899,26 +22897,23 @@ fn inner(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
         b.bind(py)
             .getattr("shape")
             .and_then(|s| s.extract::<Vec<usize>>()),
-    ) {
-        if !a_shape.is_empty()
-            && !b_shape.is_empty()
-            && a_shape[a_shape.len() - 1] == b_shape[b_shape.len() - 1]
-        {
-            let k = a_shape[a_shape.len() - 1];
-            let (Ok(m), Ok(n)) = (
-                element_count(&a_shape[..a_shape.len() - 1]),
-                element_count(&b_shape[..b_shape.len() - 1]),
-            ) else {
-                return fallback();
-            };
-            let in_native_window = m.saturating_mul(k).saturating_mul(n)
-                >= PY_NATIVE_GEMM_MIN_FLOPS
-                && m <= PY_NATIVE_GEMM_MAX_DIM
-                && k <= PY_NATIVE_GEMM_MAX_DIM
-                && n <= PY_NATIVE_GEMM_MAX_DIM;
-            if !in_native_window {
-                return fallback();
-            }
+    ) && !a_shape.is_empty()
+        && !b_shape.is_empty()
+        && a_shape[a_shape.len() - 1] == b_shape[b_shape.len() - 1]
+    {
+        let k = a_shape[a_shape.len() - 1];
+        let (Ok(m), Ok(n)) = (
+            element_count(&a_shape[..a_shape.len() - 1]),
+            element_count(&b_shape[..b_shape.len() - 1]),
+        ) else {
+            return fallback();
+        };
+        let in_native_window = m.saturating_mul(k).saturating_mul(n) >= PY_NATIVE_GEMM_MIN_FLOPS
+            && m <= PY_NATIVE_GEMM_MAX_DIM
+            && k <= PY_NATIVE_GEMM_MAX_DIM
+            && n <= PY_NATIVE_GEMM_MAX_DIM;
+        if !in_native_window {
+            return fallback();
         }
     }
 
@@ -29218,11 +29213,11 @@ mod tests {
         fliplr, flipud, floor, fnp_python, frexp, hypot, indices, interp, isfinite, isinf, isnan,
         isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf, nan_to_num,
         nextafter, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
-        python_native_gemm_f64_2d_eligible,
-        python_native_gemm_f64_2d_metadata_gate, radians, ravel_multi_index, required_dict_item,
-        rfftfreq, rint, searchsorted, select, sign, signbit, sinc, solve_triangular, spacing, take,
-        take_along_axis, tensorinv, tensorsolve, trapezoid, trapz, tri, tril_indices,
-        tril_indices_from, triu_indices, triu_indices_from, trunc, unravel_index, where_py,
+        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate, radians,
+        ravel_multi_index, required_dict_item, rfftfreq, rint, searchsorted, select, sign, signbit,
+        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
+        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
+        unravel_index, where_py,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -51092,7 +51087,10 @@ mod tests {
             let numpy = py.import("numpy")?;
             let numpy_tensordot = numpy.getattr("tensordot")?;
             let allclose = numpy.getattr("allclose")?;
-            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((0_i64,))?;
+            let rng = numpy
+                .getattr("random")?
+                .getattr("default_rng")?
+                .call1((0_i64,))?;
             for n in [64_i64, 384, 1100] {
                 let a = rng
                     .call_method1("standard_normal", ((n, n),))?
