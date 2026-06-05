@@ -6826,6 +6826,23 @@ fn numpy_array_from_direct_f64_unary<'py>(
 // or for `sqrt` of a finite-negative value (which must record a NumPy invalid
 // event on the existing path). Output is bit-identical to that path: the same
 // `op.apply` runs on the same f64 bits, only the input source differs.
+// Monomorphic per-element map over the buffer-protocol cells. With `f` inlined
+// to one concrete f64 intrinsic, LLVM autovectorizes the load/op/store loop
+// (roundpd / sqrtpd / andpd / ...) — which the per-element `UnaryOp::apply`
+// match dispatch in the old loop blocked, leaving every f64 unary 5-13x behind
+// numpy despite the zero-copy buffers. `f` runs the exact same f64 op as the
+// matching `UnaryOp::apply` arm, so the output is bit-identical.
+#[inline(always)]
+fn unary_map_f64<F: Fn(f64) -> f64>(
+    input: &[pyo3::buffer::ReadOnlyCell<f64>],
+    output: &[std::cell::Cell<f64>],
+    f: F,
+) {
+    for (slot, cell) in output.iter().zip(input.iter()) {
+        slot.set(f(cell.get()));
+    }
+}
+
 fn zerocopy_f64_unary_flat<'py>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
@@ -6890,8 +6907,32 @@ fn zerocopy_f64_unary_flat<'py>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(op.apply(cell.get()));
+        // Dispatch on `op` ONCE, then run a monomorphic (autovectorizable) loop.
+        // Each arm calls `UnaryOp::<lit>.apply`, whose `self` is a compile-time
+        // constant, so the inner match folds away to the single concrete f64 op
+        // — provably identical to the old `op.apply(..)` body, only vectorized.
+        match op {
+            UnaryOp::Abs => unary_map_f64(input, output, |x| UnaryOp::Abs.apply(x)),
+            UnaryOp::Fabs => unary_map_f64(input, output, |x| UnaryOp::Fabs.apply(x)),
+            UnaryOp::Negative => unary_map_f64(input, output, |x| UnaryOp::Negative.apply(x)),
+            UnaryOp::Positive => unary_map_f64(input, output, |x| UnaryOp::Positive.apply(x)),
+            UnaryOp::Rint => unary_map_f64(input, output, |x| UnaryOp::Rint.apply(x)),
+            UnaryOp::Sqrt => unary_map_f64(input, output, |x| UnaryOp::Sqrt.apply(x)),
+            UnaryOp::Floor => unary_map_f64(input, output, |x| UnaryOp::Floor.apply(x)),
+            UnaryOp::Ceil => unary_map_f64(input, output, |x| UnaryOp::Ceil.apply(x)),
+            UnaryOp::Trunc => unary_map_f64(input, output, |x| UnaryOp::Trunc.apply(x)),
+            UnaryOp::Sign => unary_map_f64(input, output, |x| UnaryOp::Sign.apply(x)),
+            UnaryOp::Square => unary_map_f64(input, output, |x| UnaryOp::Square.apply(x)),
+            UnaryOp::Reciprocal => unary_map_f64(input, output, |x| UnaryOp::Reciprocal.apply(x)),
+            UnaryOp::Degrees => unary_map_f64(input, output, |x| UnaryOp::Degrees.apply(x)),
+            UnaryOp::Radians => unary_map_f64(input, output, |x| UnaryOp::Radians.apply(x)),
+            // The guard at the top of this fn restricts `op` to the arms above;
+            // anything else would have returned None, but keep a correct default.
+            other => {
+                for (slot, cell) in output.iter().zip(input.iter()) {
+                    slot.set(other.apply(cell.get()));
+                }
+            }
         }
     }
     Ok(Some((flat, shape)))
