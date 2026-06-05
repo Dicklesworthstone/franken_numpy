@@ -6754,6 +6754,59 @@ fn numpy_array_from_slice<'py, T: pyo3::buffer::Element + Copy>(
     Ok(array)
 }
 
+fn direct_f64_unary_output_supported(array: &UFuncArray, op: UnaryOp) -> bool {
+    if array.dtype() != DType::F64 || array.has_integer_sidecar() {
+        return false;
+    }
+
+    match op {
+        UnaryOp::Abs | UnaryOp::Fabs | UnaryOp::Negative | UnaryOp::Positive | UnaryOp::Rint => {
+            true
+        }
+        // `sqrt` records NumPy-style invalid events for finite negative inputs.
+        // Keep those cases on the existing UFuncArray path; non-negative inputs
+        // are copy-equivalent because no error state is produced.
+        UnaryOp::Sqrt => !array
+            .values()
+            .iter()
+            .any(|value| value.is_finite() && *value < 0.0),
+        _ => false,
+    }
+}
+
+fn numpy_array_from_direct_f64_unary<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    array: &UFuncArray,
+    op: UnaryOp,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    if !direct_f64_unary_output_supported(array, op) {
+        return Ok(None);
+    }
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let output = numpy.call_method("empty", (array.values().len(),), Some(&kwargs))?;
+    if array.values().is_empty() {
+        return Ok(Some(output));
+    }
+
+    let Ok(buffer) = PyBuffer::<f64>::get(&output) else {
+        return Ok(None);
+    };
+    let Some(slots) = buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if slots.len() != array.values().len() {
+        return Ok(None);
+    }
+
+    for (slot, &value) in slots.iter().zip(array.values()) {
+        slot.set(op.apply(value));
+    }
+    Ok(Some(output))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -15231,6 +15284,14 @@ fn native_unary_elementwise(
     {
         return fallback(py);
     }
+    if let Some(flat) = numpy_array_from_direct_f64_unary(py, &numpy, &native, op)? {
+        let output_shape = PyTuple::new(py, native.shape().iter().copied())?;
+        let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+        if native.shape().is_empty() {
+            return Ok(output.bind(py).get_item(())?.unbind());
+        }
+        return Ok(output);
+    }
     let result = native.elementwise_unary(op);
     if !dtype_supported_by_numpy_export_bridge(result.dtype()) {
         return fallback(py);
@@ -15265,6 +15326,14 @@ fn native_unary_promoting(
         || native.dtype().is_integer()
     {
         return fallback(py);
+    }
+    if let Some(flat) = numpy_array_from_direct_f64_unary(py, &numpy, &native, op)? {
+        let output_shape = PyTuple::new(py, native.shape().iter().copied())?;
+        let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+        if native.shape().is_empty() {
+            return Ok(output.bind(py).get_item(())?.unbind());
+        }
+        return Ok(output);
     }
     let result = native.elementwise_unary(op);
     if !dtype_supported_by_numpy_export_bridge(result.dtype()) {
@@ -70614,6 +70683,119 @@ mod tests {
                 &sqrt_fn.call1((transposed.clone(),))?,
                 &numpy_sqrt.call1((transposed.clone(),))?,
             )?;
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn native_unary_f64_boundary_outputs_match_numpy_golden_sha256() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let nextafter = numpy.getattr("nextafter")?;
+            let tiny = nextafter.call1((0.0_f64, 1.0_f64))?.extract::<f64>()?;
+
+            let sqrt_input = numeric_array(
+                py,
+                vec![-0.0, 0.0, 1.0, 4.0, f64::INFINITY, tiny, 1.0e-300, 144.0],
+                "float64",
+            )
+            .call_method1("reshape", ((2_i64, 4_i64),))?;
+            let abs_input = numeric_array(
+                py,
+                vec![
+                    -0.0,
+                    -1.5,
+                    0.0,
+                    1.5,
+                    f64::NEG_INFINITY,
+                    f64::INFINITY,
+                    -tiny,
+                    -1.0e-300,
+                ],
+                "float64",
+            )
+            .call_method1("reshape", ((2_i64, 4_i64),))?;
+
+            let mut proof_bytes = Vec::new();
+            for (name, input) in [
+                ("sqrt", sqrt_input),
+                ("absolute", abs_input.clone()),
+                ("fabs", abs_input),
+                (
+                    "negative",
+                    numeric_array(
+                        py,
+                        vec![
+                            -0.0,
+                            0.0,
+                            1.25,
+                            -3.5,
+                            f64::INFINITY,
+                            f64::NEG_INFINITY,
+                            tiny,
+                            -1.0e-300,
+                        ],
+                        "float64",
+                    )
+                    .call_method1("reshape", ((2_i64, 4_i64),))?,
+                ),
+                (
+                    "positive",
+                    numeric_array(
+                        py,
+                        vec![
+                            -0.0,
+                            0.0,
+                            1.25,
+                            -3.5,
+                            f64::INFINITY,
+                            f64::NEG_INFINITY,
+                            tiny,
+                            -1.0e-300,
+                        ],
+                        "float64",
+                    )
+                    .call_method1("reshape", ((2_i64, 4_i64),))?,
+                ),
+                (
+                    "rint",
+                    numeric_array(
+                        py,
+                        vec![-2.5, -1.5, -0.5, -0.0, 0.0, 0.5, 1.5, 2.5],
+                        "float64",
+                    )
+                    .call_method1("reshape", ((2_i64, 4_i64),))?,
+                ),
+            ] {
+                let out = module.getattr(name)?.call1((input.clone(),))?;
+                let expected = numpy.getattr(name)?.call1((input,))?;
+                assert_array_matches_numpy(&out, &expected)?;
+                let flags = out.getattr("flags")?;
+                assert!(flags.get_item("C_CONTIGUOUS")?.extract::<bool>()?);
+                assert!(flags.get_item("WRITEABLE")?.extract::<bool>()?);
+                append_numpy_array_bytes(py, &out, &mut proof_bytes)?;
+            }
+
+            let sqrt_fn = module.getattr("sqrt")?;
+            let numpy_sqrt = numpy.getattr("sqrt")?;
+            let negative_sqrt_input = numeric_array(py, vec![-1.0, -0.0, 0.0, 4.0], "float64");
+            let negative_sqrt_out = sqrt_fn.call1((negative_sqrt_input.clone(),))?;
+            let negative_sqrt_expected = numpy_sqrt.call1((negative_sqrt_input,))?;
+            assert_array_matches_numpy(&negative_sqrt_out, &negative_sqrt_expected)?;
+            append_numpy_array_bytes(py, &negative_sqrt_out, &mut proof_bytes)?;
+
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest,
+                "9e20a5121109bdd745658f9ef7a012ebef48727b19fd92f89e3b5441cd7f5c23"
+            );
 
             Ok(())
         });
