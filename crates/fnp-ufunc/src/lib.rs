@@ -22063,7 +22063,7 @@ impl UFuncArray {
             values.truncate(non_nan);
             values.par_sort_unstable_by(f64::total_cmp);
             Self::dedup_sorted_float_set_values(&mut values);
-            if values.iter().any(|value| *value == 0.0)
+            if values.contains(&0.0)
                 && let Some(first_zero) = self.values.iter().copied().find(|value| *value == 0.0)
             {
                 for value in values.iter_mut() {
@@ -45337,10 +45337,20 @@ print(json.dumps(payload))
             let n: usize = shape.iter().product();
             let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 7.0).collect();
             let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
-            for &shift in &[1isize, 7, -3, shape[*ax] as isize, -(shape[*ax] as isize) - 5] {
+            for &shift in &[
+                1isize,
+                7,
+                -3,
+                shape[*ax] as isize,
+                -(shape[*ax] as isize) - 5,
+            ] {
                 let got = arr.roll(shift, Some(*ax as isize)).unwrap();
                 let want = strided_ref(&data, shape, *ax, shift);
-                assert_eq!(got.values(), want.as_slice(), "shape {shape:?} ax={ax} shift={shift}");
+                assert_eq!(
+                    got.values(),
+                    want.as_slice(),
+                    "shape {shape:?} ax={ax} shift={shift}"
+                );
             }
         }
     }

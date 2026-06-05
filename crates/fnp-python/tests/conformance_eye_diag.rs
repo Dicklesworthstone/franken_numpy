@@ -463,7 +463,10 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
 "#;
 
     let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
-    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
 
     assert_eq!(
         fnp_hash, numpy_hash,
@@ -489,7 +492,10 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
 "#;
 
     let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
-    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
 
     assert_eq!(
         fnp_hash, numpy_hash,

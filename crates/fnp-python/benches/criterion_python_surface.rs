@@ -162,11 +162,60 @@ fn bench_ldexp_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_concat_hstack_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_concat_hstack_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let left = numpy
+            .call_method1("linspace", (-1.0_f64, 1.0_f64, 1024_usize * 512_usize))
+            .expect("left f64 input")
+            .call_method1("reshape", ((1024_usize, 512_usize),))
+            .expect("left 2-D input");
+        let right = numpy
+            .call_method1("linspace", (2.0_f64, 3.0_f64, 1024_usize * 256_usize))
+            .expect("right f64 input")
+            .call_method1("reshape", ((1024_usize, 256_usize),))
+            .expect("right 2-D input");
+        let arrays = PyTuple::new(py, [&left, &right]).expect("array tuple");
+        let concatenate = module
+            .getattr("concatenate")
+            .expect("fnp_python.concatenate");
+        let hstack = module.getattr("hstack").expect("fnp_python.hstack");
+
+        group.bench_function("concatenate_axis1_f64_1024x512_256", |bench| {
+            bench.iter(|| {
+                let result = concatenate
+                    .call1((&arrays, 1_i64))
+                    .expect("concatenate axis=1 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("hstack_2d_f64_1024x512_256", |bench| {
+            bench.iter(|| {
+                let result = hstack.call1((&arrays,)).expect("hstack benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sqrt_input_extraction,
     bench_ediff1d_boundary,
     bench_select_boundary,
-    bench_ldexp_boundary
+    bench_ldexp_boundary,
+    bench_concat_hstack_boundary
 );
 criterion_main!(benches);
