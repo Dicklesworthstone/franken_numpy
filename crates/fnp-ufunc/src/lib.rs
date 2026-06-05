@@ -28250,7 +28250,7 @@ fn cumulate_axis_i64(
     shape: &[usize],
     axis: usize,
     identity: i64,
-    fold: impl Fn(i64, i64) -> i64,
+    fold: impl Fn(i64, i64) -> i64 + Sync,
 ) -> Result<Vec<i64>, UFuncError> {
     debug_assert!(axis < shape.len());
     let total = element_count(shape).map_err(UFuncError::Shape)?;
@@ -28264,17 +28264,33 @@ fn cumulate_axis_i64(
     let inner: usize = fnp_ndarray::element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?;
     let outer: usize = fnp_ndarray::element_count(&shape[..axis]).map_err(UFuncError::Shape)?;
 
-    for outer_idx in 0..outer {
-        let base = outer_idx * axis_len * inner;
-        for inner_idx in 0..inner {
-            let mut acc = identity;
-            let mut offset = base + inner_idx;
-            for _ in 0..axis_len {
-                acc = fold(acc, values[offset]);
-                out[offset] = acc;
-                offset += inner;
+    // Row-wise contiguous accumulation (see `cumulate_axis`): unit-stride,
+    // vectorizable per-row folds instead of a stride-`inner` column walk, parallel
+    // across independent outer blocks. Bit-identical per-column ascending order.
+    let block = axis_len * inner;
+    let process_block = |(out_block, in_block): (&mut [i64], &[i64])| {
+        for c in 0..inner {
+            out_block[c] = fold(identity, in_block[c]);
+        }
+        for a in 1..axis_len {
+            let (done, todo) = out_block.split_at_mut(a * inner);
+            let prev_row = &done[(a - 1) * inner..a * inner];
+            let curr_row = &mut todo[..inner];
+            let in_row = &in_block[a * inner..a * inner + inner];
+            for c in 0..inner {
+                curr_row[c] = fold(prev_row[c], in_row[c]);
             }
         }
+    };
+    const CUM_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+    if outer >= 2 && total >= CUM_AXIS_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(block)
+            .zip(values.par_chunks(block))
+            .for_each(process_block);
+    } else {
+        out.chunks_mut(block)
+            .zip(values.chunks(block))
+            .for_each(process_block);
     }
 
     Ok(out)
@@ -28285,7 +28301,7 @@ fn cumulate_axis_u64(
     shape: &[usize],
     axis: usize,
     identity: u64,
-    fold: impl Fn(u64, u64) -> u64,
+    fold: impl Fn(u64, u64) -> u64 + Sync,
 ) -> Result<Vec<u64>, UFuncError> {
     debug_assert!(axis < shape.len());
     let total = element_count(shape).map_err(UFuncError::Shape)?;
@@ -28299,17 +28315,33 @@ fn cumulate_axis_u64(
     let inner: usize = fnp_ndarray::element_count(&shape[axis + 1..]).map_err(UFuncError::Shape)?;
     let outer: usize = fnp_ndarray::element_count(&shape[..axis]).map_err(UFuncError::Shape)?;
 
-    for outer_idx in 0..outer {
-        let base = outer_idx * axis_len * inner;
-        for inner_idx in 0..inner {
-            let mut acc = identity;
-            let mut offset = base + inner_idx;
-            for _ in 0..axis_len {
-                acc = fold(acc, values[offset]);
-                out[offset] = acc;
-                offset += inner;
+    // Row-wise contiguous accumulation (see `cumulate_axis`): unit-stride,
+    // vectorizable per-row folds instead of a stride-`inner` column walk, parallel
+    // across independent outer blocks. Bit-identical per-column ascending order.
+    let block = axis_len * inner;
+    let process_block = |(out_block, in_block): (&mut [u64], &[u64])| {
+        for c in 0..inner {
+            out_block[c] = fold(identity, in_block[c]);
+        }
+        for a in 1..axis_len {
+            let (done, todo) = out_block.split_at_mut(a * inner);
+            let prev_row = &done[(a - 1) * inner..a * inner];
+            let curr_row = &mut todo[..inner];
+            let in_row = &in_block[a * inner..a * inner + inner];
+            for c in 0..inner {
+                curr_row[c] = fold(prev_row[c], in_row[c]);
             }
         }
+    };
+    const CUM_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+    if outer >= 2 && total >= CUM_AXIS_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(block)
+            .zip(values.par_chunks(block))
+            .for_each(process_block);
+    } else {
+        out.chunks_mut(block)
+            .zip(values.chunks(block))
+            .for_each(process_block);
     }
 
     Ok(out)
@@ -40834,6 +40866,60 @@ print(json.dumps(payload))
             hex,
             "707fb35e03a7d2a2267dfa243e5f891af1b511b0eb96468734ff52a7b692bcbd"
         );
+    }
+
+    #[test]
+    fn cumulate_axis_int_rowwise_matches_strided_reference() {
+        // Integer cumsum/cumprod along non-last axes use the same row-wise rewrite;
+        // verify i64 and u64 (add and mul) match the old stride-`inner` column scan
+        // exactly via the exact integer sidecar round-trip.
+        fn strided_i64(values: &[i64], shape: &[usize], axis: usize, id: i64, f: impl Fn(i64, i64) -> i64) -> Vec<i64> {
+            let total: usize = shape.iter().product();
+            let mut out = vec![0i64; total];
+            let axis_len = shape[axis];
+            let inner: usize = shape[axis + 1..].iter().product();
+            let outer: usize = shape[..axis].iter().product();
+            for o in 0..outer {
+                let base = o * axis_len * inner;
+                for ii in 0..inner {
+                    let mut acc = id;
+                    let mut off = base + ii;
+                    for _ in 0..axis_len {
+                        acc = f(acc, values[off]);
+                        out[off] = acc;
+                        off += inner;
+                    }
+                }
+            }
+            out
+        }
+        let cases: &[(Vec<usize>, usize)] = &[(vec![40, 30], 0), (vec![5, 6, 7], 1)];
+        for (shape, axis) in cases {
+            let n: usize = shape.iter().product();
+            let data: Vec<i64> = (0..n as i64).map(|i| (i % 13) - 6).collect();
+            // i64 cumsum
+            let arr = UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(data.clone())).unwrap();
+            let got = arr.cumsum(Some(*axis as isize)).unwrap();
+            let want = strided_i64(&data, shape, *axis, 0, i64::wrapping_add);
+            assert_eq!(got.to_storage().unwrap(), ArrayStorage::I64(want), "i64 cumsum {shape:?} ax={axis}");
+            // i64 cumprod (small values to stay exact)
+            let pdata: Vec<i64> = (0..n as i64).map(|i| (i % 3) - 1).collect();
+            let parr = UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(pdata.clone())).unwrap();
+            let pgot = parr.cumprod(Some(*axis as isize)).unwrap();
+            let pwant = strided_i64(&pdata, shape, *axis, 1, i64::wrapping_mul);
+            assert_eq!(pgot.to_storage().unwrap(), ArrayStorage::I64(pwant), "i64 cumprod {shape:?} ax={axis}");
+            // u64 cumsum
+            let udata: Vec<u64> = (0..n as u64).map(|i| i % 17).collect();
+            let uarr = UFuncArray::from_storage(shape.clone(), ArrayStorage::U64(udata.clone())).unwrap();
+            let ugot = uarr.cumsum(Some(*axis as isize)).unwrap();
+            let uwant: Vec<i64> = {
+                let mut s = strided_i64(&udata.iter().map(|&v| v as i64).collect::<Vec<_>>(), shape, *axis, 0, i64::wrapping_add);
+                s.iter_mut().for_each(|_| {});
+                s
+            };
+            let uwant_u64: Vec<u64> = uwant.iter().map(|&v| v as u64).collect();
+            assert_eq!(ugot.to_storage().unwrap(), ArrayStorage::U64(uwant_u64), "u64 cumsum {shape:?} ax={axis}");
+        }
     }
 
     #[test]
