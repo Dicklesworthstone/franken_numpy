@@ -18606,6 +18606,56 @@ fn native_binary_logical_xor_or_passthrough(
     }
 }
 
+// Zero-copy logical_not for an exact bool C-contiguous ndarray: read the byte
+// buffer and write `byte == 0` into a fresh uint8 buffer returned as bool.
+// numpy logical_not maps nonzero->False(0), zero->True(1) — exactly `v == 0`,
+// order-independent and bit-identical to ufunc_logical_not. Without this, bool
+// input paid the cold extract Vec + rebuild (~750x slower than numpy). Returns
+// None for any non-bool / non-C-contiguous / non-ndarray input.
+fn try_zerocopy_bool_logical_not(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if x.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = x.getattr("shape")?.extract()?;
+    let a_u8 = x.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let Ok(in_buffer) = PyBuffer::<u8>::get(&a_u8) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let bytes = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            slot.set(u8::from(cell.get() == 0));
+        }
+    }
+    let flat = bytes.call_method1("view", (numpy.getattr("bool_")?,))?;
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 fn native_unary_logical_not_or_passthrough(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -18617,6 +18667,10 @@ fn native_unary_logical_not_or_passthrough(
         // zero-copy bool buffer path for exact f64 C-contiguous ndarrays
         // (bit-identical to ufunc_logical_not). Other inputs fall through.
         if let Some(out) = try_zerocopy_f64_predicate(py, &arg, |v| v == 0.0)? {
+            return Ok(out);
+        }
+        // Same for an exact bool ndarray: logical_not is byte == 0.
+        if let Some(out) = try_zerocopy_bool_logical_not(py, &arg)? {
             return Ok(out);
         }
         let x = extract_numeric_array(py, &arg, "logical_not(x)")?;
