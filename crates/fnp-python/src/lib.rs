@@ -6832,7 +6832,9 @@ fn zerocopy_f64_unary_flat<'py>(
     x: &Bound<'py, PyAny>,
     op: UnaryOp,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
-    // Only the ops the in-place direct output path already proves copy-equivalent.
+    // Only copy-equivalent f64-preserving maps: these record no NumPy error
+    // events and return float64 for float64 input, so reading the input buffer
+    // and writing op.apply is bit-identical to the extract/elementwise path.
     if !matches!(
         op,
         UnaryOp::Abs
@@ -6841,6 +6843,9 @@ fn zerocopy_f64_unary_flat<'py>(
             | UnaryOp::Positive
             | UnaryOp::Rint
             | UnaryOp::Sqrt
+            | UnaryOp::Floor
+            | UnaryOp::Ceil
+            | UnaryOp::Trunc
     ) {
         return Ok(None);
     }
@@ -6885,6 +6890,27 @@ fn zerocopy_f64_unary_flat<'py>(
         }
     }
     Ok(Some((flat, shape)))
+}
+
+// Wrap zerocopy_f64_unary_flat with the reshape / 0-d scalar handling shared by
+// every native unary handler, returning the finished output array (or None to
+// fall through to the slower extract path). Lets single-op handlers
+// (floor/ceil/trunc/rint/...) opt into the zero-copy buffer path in one line.
+fn try_zerocopy_f64_unary(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    op: UnaryOp,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
 }
 
 fn build_numpy_array_from_storage(
@@ -10431,6 +10457,9 @@ fn floor(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         return Ok(numpy.getattr("floor")?.call1((x.bind(py),))?.unbind());
     }
+    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Floor)? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x.bind(py), "floor(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Floor))
 }
@@ -10443,6 +10472,9 @@ fn ceil(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         return Ok(numpy.getattr("ceil")?.call1((x.bind(py),))?.unbind());
     }
+    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Ceil)? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x.bind(py), "ceil(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Ceil))
 }
@@ -10454,6 +10486,9 @@ fn trunc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if !numpy_dtype_is_f64(py, x.bind(py)) {
         let numpy = py.import("numpy")?;
         return Ok(numpy.getattr("trunc")?.call1((x.bind(py),))?.unbind());
+    }
+    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Trunc)? {
+        return Ok(out);
     }
     let x = extract_numeric_array(py, x.bind(py), "trunc(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Trunc))
@@ -10468,6 +10503,9 @@ fn rint(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if !numpy_dtype_is_f64(py, x.bind(py)) {
         let numpy = py.import("numpy")?;
         return Ok(numpy.getattr("rint")?.call1((x.bind(py),))?.unbind());
+    }
+    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Rint)? {
+        return Ok(out);
     }
     let x = extract_numeric_array(py, x.bind(py), "rint(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Rint))
