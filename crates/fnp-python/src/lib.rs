@@ -18312,6 +18312,14 @@ fn true_divide(
         {
             return core_numpy_passthrough(py, "true_divide", args, kwargs);
         }
+        // Zero-copy fast path for same-shape f64 ndarrays with no zero divisor
+        // (zero divisors defer to numpy for the divide-by-zero RuntimeWarning).
+        if !f64_ndarray_contains_zero(py, &args.get_item(1)?)?
+            && let Some(out) =
+                try_zerocopy_f64_binary(py, &args.get_item(0)?, &args.get_item(1)?, BinaryOp::Div)?
+        {
+            return Ok(out);
+        }
         let x1 = match extract_numeric_array(py, &args.get_item(0)?, "true_divide(x1)") {
             Ok(arr) => arr,
             Err(_) => return core_numpy_passthrough(py, "true_divide", args, kwargs),
