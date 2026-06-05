@@ -369,3 +369,36 @@ print(np.array_equal(arr1, arr2))
     );
     Ok(())
 }
+
+/// Locks the zero-copy in-place fill_diagonal fast path
+/// (`try_zerocopy_f64_fill_diagonal`, writing a scalar onto the 2-D diagonal of
+/// a float64 matrix) to bit-exact parity with numpy. The diagonal is written
+/// verbatim, so parity must hold at the IEEE-754 bit level (signed zero, nan,
+/// inf). Compares the sha256 of the mutated matrices' raw bytes across square and
+/// rectangular shapes.
+#[test]
+fn fill_diagonal_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for r, c in [(100, 100), (500, 800), (800, 500), (1000, 1000)]:
+    a = rng.standard_normal((r, c))
+    mod.fill_diagonal(a, 3.5)
+    chunks.append(np.asarray(a).tobytes())
+a = rng.standard_normal((5, 5))
+mod.fill_diagonal(a, -0.0)
+chunks.append(np.asarray(a).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy fill_diagonal must be bit-identical to numpy (sha256 of mutated bytes)"
+    );
+    Ok(())
+}

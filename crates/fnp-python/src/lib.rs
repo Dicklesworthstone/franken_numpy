@@ -25801,6 +25801,56 @@ fn diagonal(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+// Zero-copy in-place np.fill_diagonal(a, val) for a 2-D float64 ndarray with a
+// scalar val. numpy writes a[i, i] = val for i in 0..min(rows, cols), i.e. the
+// flat positions i*(cols+1). This writes those at most min(rows, cols) entries
+// straight into a's own buffer via as_mut_slice — no extract of the whole matrix
+// and no full copy-back (the general path round-trips the entire n*n array),
+// dropping the cold boundary-tax Vecs (bead lglck). The value is copied verbatim,
+// so the mutation is bit-identical incl. -0.0/inf/nan. Returns Ok(false) — caller
+// falls through — for a non-scalar val, a non-2-D array, a wrapping tall matrix
+// (wrap && rows > cols, which fills extra wrapped entries), a read-only array, or
+// any non-f64 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_fill_diagonal(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    val: &Bound<'_, PyAny>,
+    wrap: bool,
+) -> PyResult<bool> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, a) {
+        return Ok(false);
+    }
+    // Only a scalar float val keeps the fast path (array vals cycle along the
+    // diagonal and are deferred to the general path).
+    let Ok(fill) = val.extract::<f64>() else {
+        return Ok(false);
+    };
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(false);
+    };
+    let shape = buffer.shape();
+    if shape.len() != 2 {
+        return Ok(false);
+    }
+    let rows = shape[0];
+    let cols = shape[1];
+    // A wrapping tall matrix fills additional wrapped diagonal entries; defer.
+    if wrap && rows > cols {
+        return Ok(false);
+    }
+    let count = rows.min(cols);
+    let step = cols + 1;
+    let Some(output) = buffer.as_mut_slice(py) else {
+        return Ok(false);
+    };
+    for i in 0..count {
+        output[i * step].set(fill);
+    }
+    Ok(true)
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, val, wrap=false))]
 fn fill_diagonal(py: Python<'_>, a: Py<PyAny>, val: Py<PyAny>, wrap: bool) -> PyResult<Py<PyAny>> {
@@ -25816,6 +25866,14 @@ fn fill_diagonal(py: Python<'_>, a: Py<PyAny>, val: Py<PyAny>, wrap: bool) -> Py
         numpy
             .getattr("fill_diagonal")?
             .call((a, val.bind(py)), Some(&kwargs))?;
+        return Ok(py.None());
+    }
+
+    // Zero-copy in-place write for the common case (2-D f64 matrix + scalar val);
+    // touches only the diagonal slots of a's own buffer, skipping the full-matrix
+    // extract and copy-back. Bit-identical; array vals, non-2-D, wrapping tall
+    // matrices, and other dtypes fall through.
+    if try_zerocopy_f64_fill_diagonal(py, a, val.bind(py), wrap)? {
         return Ok(py.None());
     }
 
