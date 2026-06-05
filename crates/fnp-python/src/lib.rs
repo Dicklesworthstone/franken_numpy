@@ -7557,6 +7557,66 @@ fn try_zerocopy_f64_roll(
     Ok(Some(output))
 }
 
+// Zero-copy np.extract(condition, arr) for a bool condition ndarray and a float64
+// arr ndarray of the same flattened length: returns the 1-D run of arr values at
+// the positions where condition is True (numpy.extract == take(ravel(arr),
+// nonzero(ravel(condition)))). Two passes over the buffers — count the selected
+// elements, then gather them into a numpy.empty(count) output — with no
+// intermediate Rust Vec, dropping the cold extract/build Vecs (bead lglck). The
+// gathered values are copied verbatim, so the result is bit-identical incl.
+// nan/inf/signed zeros. The bool buffer's '?' format is rejected by
+// PyBuffer::<u8>, so condition is viewed as uint8 first. Returns Ok(None) —
+// caller falls through — for a non-bool condition, a length mismatch, or any
+// non-f64 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_extract(
+    py: Python<'_>,
+    condition: &Bound<'_, PyAny>,
+    arr: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !arr.is_exact_instance(&ndarray_type) || !condition.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if condition.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+        return Ok(None);
+    }
+    let cond_u8 = condition.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let (Ok(cond_buffer), Ok(arr_buffer)) =
+        (PyBuffer::<u8>::get(&cond_u8), PyBuffer::<f64>::get(arr))
+    else {
+        return Ok(None);
+    };
+    let (Some(cond_in), Some(arr_in)) = (cond_buffer.as_slice(py), arr_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    // numpy.extract flattens both operands; require equal total length so the
+    // flat index aligns (shorter/longer conditions are left to the general path).
+    if cond_in.len() != arr_in.len() {
+        return Ok(None);
+    }
+    let count = cond_in.iter().filter(|cell| cell.get() != 0).count();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (count,), Some(&kwargs))?;
+    if count > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let mut w = 0usize;
+        for (cond_cell, arr_cell) in cond_in.iter().zip(arr_in.iter()) {
+            if cond_cell.get() != 0 {
+                output[w].set(arr_cell.get());
+                w += 1;
+            }
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
 // ndarray. Output[i] = a[i+1] - a[i], length len-1 (empty for len 0 or 1, which
 // matches numpy). Reads the input buffer and writes the (len-1)-length output
@@ -11558,6 +11618,12 @@ fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<
     // canonicalizes narrow ints/floats, so defer non-canonical widths to NumPy.
     if !numpy_dtype_native_roundtrip_preserves(py, arr.bind(py)) {
         return fallback();
+    }
+    // Zero-copy gather for the common case (bool condition + f64 arr of equal
+    // flattened length); skips the cold extract/build Vecs. Bit-identical;
+    // non-bool conditions, length mismatches, and other dtypes fall through.
+    if let Some(out) = try_zerocopy_f64_extract(py, condition.bind(py), arr.bind(py))? {
+        return Ok(out);
     }
     let condition = match extract_numeric_array(py, condition.bind(py), "extract(condition)") {
         Ok(condition) => condition,

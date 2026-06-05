@@ -501,3 +501,34 @@ print(np.array_equal(arr1, arr2))
     assert_eq!(result.trim(), "True", "put complex should match numpy");
     Ok(())
 }
+
+/// Locks the zero-copy gather fast path for `numpy.extract` (`try_zerocopy_f64_extract`)
+/// to bit-exact parity. extract copies selected values verbatim, so parity must
+/// hold at the IEEE-754 bit level (signed zero, nan, inf). Compares sha256 of raw
+/// output bytes across half/all/none masks, multi-D (flattened) inputs, and
+/// extreme values — all of which take the bool-condition + f64-arr zero-copy path.
+#[test]
+fn extract_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for shp in [(1000,), (30, 40), (100003,)]:
+    x = rng.standard_normal(shp)
+    chunks.append(np.asarray(mod.extract(x > 0.1, x)).tobytes())
+    chunks.append(np.asarray(mod.extract(x > 9e9, x)).tobytes())
+xe = np.array([0.0, -0.0, np.inf, -np.inf, np.nan], dtype=np.float64)
+chunks.append(np.asarray(mod.extract(np.array([True, True, False, True, True]), xe)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy extract must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
