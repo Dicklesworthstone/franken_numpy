@@ -7471,6 +7471,83 @@ fn try_zerocopy_f64_select(
     Ok(Some(output))
 }
 
+// Zero-copy np.roll for the flatten form: a C-contiguous float64 ndarray rolled
+// by a scalar shift with axis=None (numpy flattens, rolls, and reshapes back) or
+// a 1-D array with axis in {0, -1} (equivalent to the flatten case). Every value
+// is moved verbatim, so it is bit-identical (incl. nan/inf/signed zeros). With
+// s = shift mod n, numpy's result is x[n-s..] ++ x[..n-s]; this writes those two
+// runs straight into the output buffer with no intermediate Rust Vec, dropping
+// the cold extract/build Vecs (bead lglck). Returns Ok(None) — caller falls
+// through — for a per-axis roll on a multi-dim array, a tuple shift/axis, a
+// non-int shift, or any non-f64 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_roll(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    shift: &Bound<'_, PyAny>,
+    axis: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(shift_scalar) = shift.extract::<i64>() else {
+        return Ok(None);
+    };
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    // Accept only the flatten-equivalent roll: axis=None (any ndim) or a 1-D
+    // array with axis in {0, -1}. A per-axis roll on a multi-dim array moves
+    // elements differently and is left to the general path.
+    let ndim = in_buffer.shape().len();
+    let flatten_ok = match axis {
+        None => true,
+        Some(value) => {
+            let bound = value.bind(py);
+            if bound.is_none() {
+                true
+            } else if let Ok(axis_int) = bound.extract::<i64>() {
+                ndim == 1 && (axis_int == 0 || axis_int == -1)
+            } else {
+                return Ok(None);
+            }
+        }
+    };
+    if !flatten_ok {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = input.len();
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        // Normalize the shift into [0, n); result[i] = input[(i - shift) mod n],
+        // i.e. result = input[n-s..] ++ input[..n-s].
+        let s = (((shift_scalar % n as i64) + n as i64) % n as i64) as usize;
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let split = n - s;
+        for i in 0..s {
+            output[i].set(input[split + i].get());
+        }
+        for i in 0..split {
+            output[s + i].set(input[i].get());
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
 // ndarray. Output[i] = a[i+1] - a[i], length len-1 (empty for len 0 or 1, which
 // matches numpy). Reads the input buffer and writes the (len-1)-length output
@@ -11905,6 +11982,13 @@ fn roll(
             )?
             .unbind())
     };
+
+    // Zero-copy flatten roll for C-contiguous f64 ndarrays (axis=None any ndim,
+    // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical;
+    // per-axis multi-dim rolls and tuple shifts fall through to the general path.
+    if let Some(out) = try_zerocopy_f64_roll(py, a.bind(py), shift.bind(py), axis.as_ref())? {
+        return Ok(out);
+    }
 
     let array = match extract_precise_numeric_array(py, a.bind(py), "roll(a)") {
         Ok(array) => array,

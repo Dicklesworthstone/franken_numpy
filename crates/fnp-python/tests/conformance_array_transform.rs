@@ -404,3 +404,39 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "rot90 complex should match numpy");
     Ok(())
 }
+
+/// Locks the zero-copy flatten-roll fast path (`try_zerocopy_f64_roll`) to
+/// bit-exact parity with numpy. roll moves values verbatim, so parity must hold
+/// at the IEEE-754 bit level (signed zero, nan payloads, inf). Compares the
+/// sha256 of raw output bytes across shifts that exceed/equal/negate the length,
+/// 1-D and multi-D (axis=None flatten) inputs, and extreme values — all of which
+/// take the zero-copy path.
+#[test]
+fn roll_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [1000, 100003]:
+    x = rng.standard_normal(n)
+    for s in [1, -1, 7, n + 5, -999]:
+        chunks.append(np.asarray(mod.roll(x, s)).tobytes())
+for shp in [(3, 4), (5, 5, 5)]:
+    x = rng.standard_normal(shp)
+    for s in [1, -7, 123]:
+        chunks.append(np.asarray(mod.roll(x, s)).tobytes())
+xe = np.array([0.0, -0.0, np.inf, -np.inf, np.nan], dtype=np.float64)
+chunks.append(np.asarray(mod.roll(xe, 2)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy roll must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
