@@ -636,3 +636,37 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "unique complex should match numpy");
     Ok(())
 }
+
+/// Locks the fast plain-`numpy.unique` path (the float64 no-index/inverse/counts
+/// branch that reuses the parallel total_cmp sort + adjacent dedup) to bit-exact
+/// parity with numpy. unique returns sorted distinct values verbatim, so parity
+/// must hold at the IEEE-754 bit level. The inputs deliberately avoid arrays that
+/// mix +0.0 and -0.0: which signed zero numpy keeps there is governed by its
+/// unstable introsort (impl-defined, like the fmin/fmax position-dependence), and
+/// our path preserves the prior fnp behavior rather than that unstable choice.
+#[test]
+fn unique_plain_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+# standard_normal never yields an exact +-0.0, so these are deterministic.
+for n in [1000, 100003, 500000]:
+    chunks.append(np.asarray(mod.unique(rng.standard_normal(n))).tobytes())
+    chunks.append(np.asarray(mod.unique(np.round(rng.standard_normal(n) * 4) + 0.5)).tobytes())
+chunks.append(np.asarray(mod.unique(np.array([np.inf, -np.inf, 1.0, -1.0, 1.0, np.nan, 2.0, np.nan], dtype=np.float64))).tobytes())
+chunks.append(np.asarray(mod.unique(np.array([-0.0, 1.0, 2.0, -0.0, 3.0], dtype=np.float64))).tobytes())
+chunks.append(np.asarray(mod.unique(np.full(5000, 2.5, dtype=np.float64))).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp").to_string()))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "fast plain unique must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

@@ -22048,6 +22048,54 @@ impl UFuncArray {
                 }
             }
         }
+        // Fast path: a plain unique (no index/inverse/counts requested) only needs
+        // the sorted distinct values. Reuse the parallel total_cmp sort + adjacent
+        // dedup that `sort` uses instead of building (value, original_index) pairs
+        // and running a serial stable comparator sort — the latter dominated this
+        // path (~8x slower than NumPy on float64). NaNs collapse to a single
+        // trailing NaN (the first one in the input, preserving its payload), and
+        // the kept signed zero is restored to NumPy's first-in-original-order
+        // choice (total_cmp dedup would otherwise always keep -0.0).
+        if !return_index && !return_inverse && !return_counts {
+            let mut values = self.values.clone();
+            let non_nan = partition_nan_tail(&mut values);
+            let had_nan = non_nan < values.len();
+            values.truncate(non_nan);
+            values.par_sort_unstable_by(f64::total_cmp);
+            Self::dedup_sorted_float_set_values(&mut values);
+            if values.iter().any(|value| *value == 0.0)
+                && let Some(first_zero) = self.values.iter().copied().find(|value| *value == 0.0)
+            {
+                for value in values.iter_mut() {
+                    if *value == 0.0 {
+                        *value = first_zero;
+                        break;
+                    }
+                }
+            }
+            if had_nan {
+                let first_nan = self
+                    .values
+                    .iter()
+                    .copied()
+                    .find(|value| value.is_nan())
+                    .unwrap_or(f64::NAN);
+                values.push(first_nan);
+            }
+            let nu = values.len();
+            return (
+                Self {
+                    shape: vec![nu],
+                    values,
+                    dtype: self.dtype,
+                    integer_sidecar: None,
+                },
+                None,
+                None,
+                None,
+            );
+        }
+
         let flat = &self.values;
         // Build (value, original_index) pairs, sort by value.
         let mut indexed: Vec<(f64, usize)> = flat
