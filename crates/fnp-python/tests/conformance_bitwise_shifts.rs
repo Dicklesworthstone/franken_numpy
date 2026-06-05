@@ -127,6 +127,65 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+#[test]
+fn int64_shift_zerocopy_bit_exact_golden_sha256() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+
+def call(module, name, a, b):
+    if module is np and name == "bitwise_left_shift":
+        return np.left_shift(a, b)
+    if module is np and name == "bitwise_right_shift":
+        return np.right_shift(a, b)
+    return getattr(module, name)(a, b)
+
+ops = ["left_shift", "right_shift", "bitwise_left_shift", "bitwise_right_shift"]
+base = np.array([-(2**62), -257, -8, -1, 0, 1, 7, 255, 2**62 - 1], dtype=np.int64)
+shifts = np.array([-2, -1, 0, 1, 7, 63, 64, 65, 3], dtype=np.int64)
+mat = np.arange(-60, 60, dtype=np.int64).reshape(10, 12)
+mat_shifts = (np.arange(120, dtype=np.int64).reshape(10, 12) % 70) - 3
+chunks = []
+for name in ops:
+    for a, b in [
+        (base, np.int64(-1)),
+        (base, np.int64(0)),
+        (base, np.int64(1)),
+        (base, np.int64(63)),
+        (base, np.int64(64)),
+        (base, np.int64(65)),
+        (base, 3),
+        (base, shifts),
+        (mat, mat_shifts),
+    ]:
+        got = np.asarray(call(mod, name, a, b))
+        expected = np.asarray(call(np, name, a, b))
+        assert got.dtype == expected.dtype, (name, got.dtype, expected.dtype)
+        assert got.shape == expected.shape, (name, got.shape, expected.shape)
+        assert got.tobytes() == expected.tobytes(), (name, a, b, got, expected)
+        chunks.append(str(got.dtype).encode())
+        chunks.append(str(got.shape).encode())
+        chunks.append(got.tobytes())
+print(hashlib.sha256(b"".join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy int64 shifts must be bit-identical to numpy"
+    );
+    assert_eq!(
+        fnp_hash, "9a91043b1d91535deadb96ba5072446f43ceec53d7d8226be845a2a5ac51cf5d",
+        "golden sha256 of int64 shift dtype/shape/raw-output bytes"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // bitwise_count
 // ─────────────────────────────────────────────────────────────────────────────

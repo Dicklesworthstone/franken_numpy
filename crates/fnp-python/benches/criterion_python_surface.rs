@@ -162,6 +162,69 @@ fn bench_ldexp_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_shift_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_shift_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let a = numpy
+            .call_method1("arange", (1_000_000_i64,))
+            .expect("1M int64 input")
+            .call_method1("astype", ("int64",))
+            .expect("int64 input dtype");
+        let shifts = numpy
+            .call_method1("arange", (1_000_000_i64,))
+            .expect("1M int64 shifts")
+            .call_method1("astype", ("int64",))
+            .expect("int64 shift dtype")
+            .call_method1("__mod__", (70_i64,))
+            .expect("bounded shifts")
+            .call_method1("__sub__", (3_i64,))
+            .expect("signed shifts");
+        let fnp_left_shift = module.getattr("left_shift").expect("fnp_python.left_shift");
+        let fnp_right_shift = module
+            .getattr("right_shift")
+            .expect("fnp_python.right_shift");
+        let numpy_left_shift = numpy.getattr("left_shift").expect("numpy.left_shift");
+
+        group.bench_function("left_shift_i64_scalar_1m", |bench| {
+            bench.iter(|| {
+                let result = fnp_left_shift
+                    .call1((&a, 7_i64))
+                    .expect("left_shift scalar benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("right_shift_i64_array_1m", |bench| {
+            bench.iter(|| {
+                let result = fnp_right_shift
+                    .call1((&a, &shifts))
+                    .expect("right_shift array benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_left_shift_i64_scalar_1m", |bench| {
+            bench.iter(|| {
+                let result = numpy_left_shift
+                    .call1((&a, 7_i64))
+                    .expect("numpy left_shift scalar benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_concat_hstack_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_concat_hstack_boundary");
     group.sample_size(10);
@@ -280,6 +343,7 @@ criterion_group!(
     bench_ediff1d_boundary,
     bench_select_boundary,
     bench_ldexp_boundary,
+    bench_shift_boundary,
     bench_concat_hstack_boundary,
     bench_char_ascii_boundary
 );
