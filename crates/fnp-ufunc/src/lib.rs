@@ -21477,8 +21477,18 @@ impl UFuncArray {
                     if values.is_empty() {
                         return Err(UFuncError::EmptyReduction { op: "ptp" });
                     }
-                    let min = *values.iter().min().unwrap_or(&0);
-                    let max = *values.iter().max().unwrap_or(&0);
+                    // One traversal for both min and max instead of two iter passes.
+                    let mut it = values.iter();
+                    let &first = it.next().unwrap();
+                    let (mut min, mut max) = (first, first);
+                    for &v in it {
+                        if v < min {
+                            min = v;
+                        }
+                        if v > max {
+                            max = v;
+                        }
+                    }
                     let ptp = apply_binary_op_i64(BinaryOp::Sub, max, min);
                     return Ok(Self {
                         shape: Vec::new(),
@@ -21494,8 +21504,18 @@ impl UFuncArray {
                     if values.is_empty() {
                         return Err(UFuncError::EmptyReduction { op: "ptp" });
                     }
-                    let min = *values.iter().min().unwrap_or(&0);
-                    let max = *values.iter().max().unwrap_or(&0);
+                    // One traversal for both min and max instead of two iter passes.
+                    let mut it = values.iter();
+                    let &first = it.next().unwrap();
+                    let (mut min, mut max) = (first, first);
+                    for &v in it {
+                        if v < min {
+                            min = v;
+                        }
+                        if v > max {
+                            max = v;
+                        }
+                    }
                     let ptp = apply_binary_op_u64(BinaryOp::Sub, max, min);
                     return Ok(Self {
                         shape: Vec::new(),
@@ -21527,6 +21547,47 @@ impl UFuncArray {
                 let ax_idx = normalize_axis(ax, self.shape.len())?;
                 if self.shape[ax_idx] == 0 {
                     return Err(UFuncError::EmptyReduction { op: "ptp" });
+                }
+                // Float fast path: compute per-lane min AND max in ONE traversal of
+                // the data instead of two full reductions (reduce_max + reduce_min).
+                // The `if mn < v { mn } else { v }` / `if mx > v { mx } else { v }`
+                // forms reproduce nan_min/nan_max's keep-2nd-when-equal semantics
+                // exactly (preserving signed-zero order parity); a separate NaN flag
+                // does NumPy's NaN propagation. Integer arrays keep the sidecar-aware
+                // two-reduction path below.
+                if self.integer_sidecar.is_none() {
+                    let out_shape = reduced_shape(&self.shape, ax_idx, false);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    let axis_len = self.shape[ax_idx];
+                    let inner: usize = self.shape[ax_idx + 1..].iter().copied().product();
+                    let outer: usize = self.shape[..ax_idx].iter().copied().product();
+                    let mut out = vec![0.0f64; out_count];
+                    let mut of = 0usize;
+                    for o in 0..outer {
+                        let base = o * axis_len * inner;
+                        for i in 0..inner {
+                            let mut off = base + i;
+                            let first = self.values[off];
+                            let (mut mn, mut mx) = (first, first);
+                            let mut any_nan = first.is_nan();
+                            off += inner;
+                            for _ in 1..axis_len {
+                                let v = self.values[off];
+                                any_nan |= v.is_nan();
+                                mn = if mn < v { mn } else { v };
+                                mx = if mx > v { mx } else { v };
+                                off += inner;
+                            }
+                            out[of] = if any_nan { f64::NAN } else { mx - mn };
+                            of += 1;
+                        }
+                    }
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: out,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
                 }
                 let mx = self.reduce_max(Some(ax), false)?;
                 let mn = self.reduce_min(Some(ax), false)?;
@@ -47027,6 +47088,77 @@ print(json.dumps(payload))
         let r = a.ptp(Some(0)).unwrap();
         assert_eq!(r.shape(), &[2]);
         assert_eq!(r.values(), &[2.0, 3.0]);
+    }
+
+    #[test]
+    fn ptp_axis_single_pass_matches_two_reduction_reference() {
+        // Lock: the fused single-traversal float ptp(axis) must be BIT-IDENTICAL to
+        // the old `reduce_max(axis) - reduce_min(axis)` path it replaced, including
+        // signed-zero tie order and NaN propagation. nan_max/nan_min keep the LATER
+        // element on equality, so signed zeros are order-sensitive — exactly what the
+        // `if mx > v {mx} else {v}` / `if mn < v {mn} else {v}` forms reproduce.
+        let cases: &[(Vec<usize>, Vec<f64>)] = &[
+            // signed zeros + duplicates in both orders along each axis
+            (
+                vec![2, 4],
+                vec![0.0, -0.0, -0.0, 0.0, 1.5, 1.5, -3.0, 2.0],
+            ),
+            // NaN scattered through lanes
+            (
+                vec![3, 3],
+                vec![1.0, f64::NAN, 3.0, -0.0, 0.0, 2.0, f64::NAN, -1.0, 4.0],
+            ),
+            // 3-D so inner/outer strides are both > 1
+            (
+                vec![2, 2, 3],
+                vec![
+                    5.0, -2.0, 0.0, -0.0, 5.0, 5.0, 1.0, 1.0, 1.0, f64::NAN, 2.0, -7.0,
+                ],
+            ),
+        ];
+        let bits = |v: f64| v.to_bits();
+        for (shape, data) in cases {
+            let a = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            for ax in 0..shape.len() {
+                let fast = a.ptp(Some(ax as isize)).unwrap();
+                // Reference = the literal pre-optimization algorithm.
+                let mx = a.reduce_max(Some(ax as isize), false).unwrap();
+                let mn = a.reduce_min(Some(ax as isize), false).unwrap();
+                let reference = mx.elementwise_binary(&mn, BinaryOp::Sub).unwrap();
+                assert_eq!(fast.shape(), reference.shape(), "shape ax={ax}");
+                for (f, r) in fast.values().iter().zip(reference.values().iter()) {
+                    if f.is_nan() || r.is_nan() {
+                        assert!(f.is_nan() && r.is_nan(), "NaN parity ax={ax}: {f} vs {r}");
+                    } else {
+                        assert_eq!(bits(*f), bits(*r), "bit parity ax={ax}: {f} vs {r}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ptp_axis_single_pass_golden_sha256() {
+        // Golden digest over a deterministic ptp(axis=1) result — pins the byte-exact
+        // output so any future refactor of the fused float path is caught immediately.
+        let mut data = Vec::with_capacity(8 * 16);
+        for i in 0..(8 * 16) {
+            // mildly irregular but fully deterministic values, with a couple of
+            // exact-duplicate / signed-zero rows seeded in.
+            let x = ((i * 7 + 3) % 23) as f64 - 11.0;
+            data.push(if i % 19 == 0 { -0.0 } else { x / 4.0 });
+        }
+        let a = UFuncArray::new(vec![8, 16], data, DType::F64).unwrap();
+        let r = a.ptp(Some(1)).unwrap();
+        let mut digest = Sha256::new();
+        for v in r.values() {
+            digest.update(v.to_bits().to_le_bytes());
+        }
+        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "f4505b761f428ed283ec6eeba4662f410dfec583ac2c4356d26a0d4237c78901"
+        );
     }
 
     #[test]
