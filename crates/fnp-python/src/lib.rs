@@ -10476,6 +10476,122 @@ fn take(
     Ok(output)
 }
 
+// Zero-copy np.count_nonzero for a C-contiguous bool or float64 ndarray. Counting
+// is order-independent, so it is trivially bit-identical to numpy (exact integer
+// counts). For axis=None it returns a Python int (the total count); for an integer
+// axis it returns an int64 array of per-lane counts via the outer*axis*inner
+// decomposition. The count fold (cnt += (x != 0) as i64) is branchless. For
+// float64, x != 0.0 excludes +-0.0 and includes NaN (NaN != 0.0), matching numpy.
+// The bool buffer's '?' format is rejected by PyBuffer::<u8>, so it is viewed as
+// uint8 first. Returns Ok(None) — caller falls through — for keepdims, a tuple /
+// out-of-range axis, a 0-d array, or any other dtype / non-contiguous / non-ndarray
+// input.
+fn try_zerocopy_count_nonzero(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if keepdims {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    // The ndarray shape (one entry per element) is correct for both bool and f64.
+    let shape: Vec<usize> = a.getattr("shape")?.extract::<Vec<usize>>()?;
+    // Count directly from the typed buffer via a monomorphized nonzero predicate
+    // (no intermediate flags Vec). For float64, x != 0.0 excludes +-0.0 and
+    // includes NaN, matching numpy.
+    match kind.as_str() {
+        "b" => {
+            let a_u8: Bound<'_, PyAny> = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+            let Ok(buffer) = PyBuffer::<u8>::get(&a_u8) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            finish_count_nonzero(py, &numpy, input.len(), &shape, axis, |i| input[i].get() != 0)
+        }
+        "f" if numpy_dtype_is_f64(py, a) => {
+            let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            finish_count_nonzero(py, &numpy, input.len(), &shape, axis, |i| input[i].get() != 0.0)
+        }
+        _ => Ok(None),
+    }
+}
+
+fn finish_count_nonzero<F: Fn(usize) -> bool>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    n: usize,
+    shape: &[usize],
+    axis: Option<isize>,
+    is_nonzero: F,
+) -> PyResult<Option<Py<PyAny>>> {
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    match axis {
+        None => {
+            // numpy.count_nonzero(axis=None) returns a numpy.int64 scalar, not a
+            // Python int, so wrap the count to match the return type exactly.
+            let count = (0..n).filter(|&i| is_nonzero(i)).count();
+            let scalar = numpy.getattr("int64")?.call1((count as i64,))?;
+            Ok(Some(scalar.unbind()))
+        }
+        Some(ax) => {
+            let ndim = shape.len() as isize;
+            let norm = if ax < 0 { ax + ndim } else { ax };
+            if norm < 0 || norm >= ndim {
+                return Ok(None);
+            }
+            let axu = norm as usize;
+            let outer: usize = shape[..axu].iter().product();
+            let axis_len = shape[axu];
+            let inner: usize = shape[axu + 1..].iter().product();
+            let mut out_shape = shape.to_vec();
+            out_shape.remove(axu);
+            let out_elems = outer * inner;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "int64")?;
+            let flat = numpy.call_method("empty", (out_elems,), Some(&kwargs))?;
+            if out_elems > 0 {
+                let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
+                    return Ok(None);
+                };
+                let Some(output) = out_buffer.as_mut_slice(py) else {
+                    return Ok(None);
+                };
+                let lane = axis_len * inner;
+                for o in 0..outer {
+                    let obase = o * inner;
+                    let ibase = o * lane;
+                    for i in 0..inner {
+                        let mut cnt = 0i64;
+                        for a in 0..axis_len {
+                            cnt += i64::from(is_nonzero(ibase + a * inner + i));
+                        }
+                        output[obase + i].set(cnt);
+                    }
+                }
+            }
+            let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+            let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+            Ok(Some(output))
+        }
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, keepdims=false))]
 fn count_nonzero(
@@ -10500,6 +10616,35 @@ fn count_nonzero(
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
             .unbind())
     };
+
+    // Zero-copy count for C-contiguous bool / f64 ndarrays (axis=None or a single
+    // integer axis, no keepdims); skips the cold extract Vec. Counting is
+    // order-independent, so bit-identical. Other dtypes / tuple axes / keepdims
+    // fall through.
+    {
+        let axis_simple: Option<isize> = match axis.as_ref() {
+            None => None,
+            Some(axis_obj) => {
+                let bound = axis_obj.bind(py);
+                if bound.is_none() {
+                    None
+                } else if bound.cast::<PyBool>().is_ok() || is_numpy_bool_scalar(py, bound) {
+                    // a bool axis is not a valid integer axis; let the path below handle it.
+                    return fallback();
+                } else if let Ok(i) = bound.extract::<isize>() {
+                    Some(i)
+                } else {
+                    // tuple or other: skip the fast path.
+                    isize::MIN.into()
+                }
+            }
+        };
+        if axis_simple != Some(isize::MIN)
+            && let Some(out) = try_zerocopy_count_nonzero(py, a.bind(py), axis_simple, keepdims)?
+        {
+            return Ok(out);
+        }
+    }
 
     let a_array = match extract_numeric_array(py, a.bind(py), "count_nonzero(a)") {
         Ok(array) => array,
