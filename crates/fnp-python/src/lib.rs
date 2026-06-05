@@ -7205,6 +7205,66 @@ fn try_zerocopy_f64_clip(
     Ok(Some(output))
 }
 
+// Zero-copy nan_to_num for exact C-contiguous float64 ndarrays. numpy replaces
+// NaN -> nan_rep, +inf -> posinf_rep, -inf -> neginf_rep, and leaves every
+// finite value (including signed zeros) untouched — reproduced bit-for-bit
+// below. For an f64 input the default posinf/neginf are f64::MAX / f64::MIN
+// (== numpy finfo(float64).max / -max), which the caller passes in. Reads the
+// input buffer and writes the output buffer with no intermediate Rust Vec
+// (bead lglck). Returns Ok(None) for any non-f64 / non-contiguous / non-ndarray
+// input (caller falls through to the dtype-aware extract path).
+fn try_zerocopy_f64_nan_to_num(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    nan_rep: f64,
+    posinf_rep: f64,
+    neginf_rep: f64,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            let v = cell.get();
+            let replaced = if v.is_nan() {
+                nan_rep
+            } else if v == f64::INFINITY {
+                posinf_rep
+            } else if v == f64::NEG_INFINITY {
+                neginf_rep
+            } else {
+                v
+            };
+            slot.set(replaced);
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -11021,6 +11081,18 @@ fn nan_to_num(
     posinf: Option<f64>,
     neginf: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
+    // Zero-copy fast path for exact f64 ndarrays: their default posinf/neginf
+    // are f64::MAX / f64::MIN (the dtype-aware defaults the slow path computes
+    // for F64), so this is bit-identical while skipping the cold extract/build.
+    if let Some(out) = try_zerocopy_f64_nan_to_num(
+        py,
+        x.bind(py),
+        nan,
+        posinf.unwrap_or(f64::MAX),
+        neginf.unwrap_or(f64::MIN),
+    )? {
+        return Ok(out);
+    }
     let x = extract_precise_numeric_array(py, x.bind(py), "nan_to_num(x)")?;
     let (default_posinf, default_neginf) = x.nan_to_num_default_inf_replacements();
     let result = x.nan_to_num(
