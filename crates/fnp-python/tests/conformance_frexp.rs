@@ -96,6 +96,65 @@ print(mant_match and exp_match)
 }
 
 #[test]
+fn frexp_f64_zerocopy_bit_exact_golden_sha256() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+import warnings
+
+cases = []
+base = np.array([
+    -0.0,
+    0.0,
+    1.0,
+    -2.5,
+    8.0,
+    np.inf,
+    -np.inf,
+    np.finfo(np.float64).tiny,
+    np.finfo(np.float64).tiny / 2,
+    np.nextafter(0.0, 1.0),
+], dtype=np.float64)
+custom_nan = np.array([
+    0x7ff8000000000001,
+    0x7ff0000000000001,
+    0xfff8000000000002,
+], dtype=np.uint64).view(np.float64)
+cases.append(base)
+cases.append(custom_nan)
+cases.append(np.linspace(-1024.0, 1024.0, 64, dtype=np.float64).reshape(8, 8))
+cases.append(np.array([], dtype=np.float64))
+
+chunks = []
+with warnings.catch_warnings():
+    warnings.simplefilter("ignore")
+    for x in cases:
+        fnp_m, fnp_e = fnp.frexp(x)
+        np_m, np_e = np.frexp(x)
+        for got, expected in [(fnp_m, np_m), (fnp_e, np_e)]:
+            got = np.ascontiguousarray(got)
+            expected = np.ascontiguousarray(expected)
+            assert got.dtype == expected.dtype, (got.dtype, expected.dtype)
+            assert got.shape == expected.shape, (got.shape, expected.shape)
+            assert got.tobytes() == expected.tobytes(), (got, expected)
+            chunks.append(str(got.dtype).encode())
+            chunks.append(str(got.shape).encode())
+            chunks.append(got.tobytes())
+
+print(hashlib.sha256(b"".join(chunks)).hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "26994a6d71efb33eb3b046511ba6e3b631a3a4cc2feb1435e46035f8c6f5885f",
+        "frexp mantissa/exponent dtype/shape/raw bytes should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn frexp_scalar_return_type_matches_numpy() -> Result<(), String> {
     let script = fnp_script(
         r#"

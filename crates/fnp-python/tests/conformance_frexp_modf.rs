@@ -168,6 +168,60 @@ fn frexp_empty_array_matches_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn frexp_f64_zerocopy_bit_exact_golden_sha256() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+
+cases = [
+    np.array([], dtype=np.float64),
+    np.array([-0.0, 0.0, 1.0, -2.5, 8.0, -16.0], dtype=np.float64),
+    np.array(
+        [
+            [np.inf, -np.inf, np.nan],
+            [np.finfo(np.float64).tiny, np.finfo(np.float64).tiny / 2.0, -1.0e-308],
+        ],
+        dtype=np.float64,
+    ),
+    np.linspace(-1.0e6, 1.0e6, 257, dtype=np.float64).reshape(257, 1),
+]
+
+h = hashlib.sha256()
+for x in cases:
+    got_m, got_e = mod.frexp(x)
+    expected_m, expected_e = np.frexp(x)
+    for got, expected in [(got_m, expected_m), (got_e, expected_e)]:
+        assert got.dtype == expected.dtype, (got.dtype, expected.dtype)
+        assert got.shape == expected.shape, (got.shape, expected.shape)
+        assert got.flags["C_CONTIGUOUS"]
+        assert got.flags["WRITEABLE"]
+        assert got.tobytes() == expected.tobytes(), (got, expected)
+        h.update(str(got.dtype).encode())
+        h.update(str(got.shape).encode())
+        h.update(got.tobytes())
+
+print(h.hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "fnp.frexp f64 array outputs must be bit-identical to numpy"
+    );
+    assert_eq!(
+        fnp_hash, "1af900613e40fc30184fe39d712e8c1f561975f9bd6c85d4825b7db68e8dc3d5",
+        "golden sha256 of frexp mantissa/exponent dtype/shape/raw-output bytes"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn modf_empty_array_matches_numpy() -> Result<(), String> {
     let script = "import numpy as np; f, i = np.modf(np.array([], dtype=np.float64)); print(f.tolist(), i.tolist())";
     let numpy_result = numpy_oracle(script)?;
