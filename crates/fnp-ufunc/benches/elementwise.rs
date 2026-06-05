@@ -1,5 +1,5 @@
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use fnp_dtype::DType;
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use fnp_dtype::{ArrayStorage, DType};
 use fnp_ufunc::{UFuncArray, add, divide, multiply, subtract};
 use std::hint::black_box;
 
@@ -78,12 +78,30 @@ fn bench_chained_ops(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_from_storage_f64_move(c: &mut Criterion) {
+    let mut group = c.benchmark_group("from_storage_f64_move");
+    for size in [100_000, 1_000_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        let template: Vec<f64> = (0..*size).map(|i| (i as f64) * 0.25).collect();
+        let shape = vec![*size];
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter_batched(
+                || ArrayStorage::F64(template.clone()),
+                |storage| UFuncArray::from_storage(black_box(shape.clone()), black_box(storage)),
+                BatchSize::LargeInput,
+            )
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
     bench_subtract,
     bench_multiply,
     bench_divide,
-    bench_chained_ops
+    bench_chained_ops,
+    bench_from_storage_f64_move
 );
 criterion_main!(benches);

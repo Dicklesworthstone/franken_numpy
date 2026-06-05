@@ -4803,7 +4803,8 @@ impl UFuncArray {
         if actual != expected {
             return Err(UFuncError::InvalidInputLength { expected, actual });
         }
-        ensure_bridge_dtype_supported(storage.dtype(), "from_storage")?;
+        let dtype = storage.dtype();
+        ensure_bridge_dtype_supported(dtype, "from_storage")?;
 
         // For I64/U64 with values exceeding f64 exact range, preserve the
         // originals in a sidecar so `to_storage()` can round-trip losslessly.
@@ -4819,10 +4820,15 @@ impl UFuncArray {
             _ => None,
         };
 
+        let values = match storage {
+            ArrayStorage::F64(values) => values,
+            storage => storage.to_f64_vec(),
+        };
+
         Ok(Self {
             shape,
-            values: storage.to_f64_vec(),
-            dtype: storage.dtype(),
+            values,
+            dtype,
             integer_sidecar,
         })
     }
@@ -37389,6 +37395,47 @@ print(json.dumps(payload))
         let actual_bits: Vec<u64> = arr.values().iter().map(|value| value.to_bits()).collect();
         assert_eq!(actual_bits, expected_bits);
         assert!(!arr.has_integer_sidecar());
+    }
+
+    #[test]
+    fn from_storage_f64_move_fast_path_preserves_bits_and_golden_sha256() {
+        let values = vec![
+            0.0,
+            -0.0,
+            f64::from_bits(0x7ff8_0000_0000_0001),
+            f64::INFINITY,
+        ];
+        let expected_bits: Vec<u64> = values.iter().map(|value| value.to_bits()).collect();
+
+        let arr = UFuncArray::from_storage(vec![4], ArrayStorage::F64(values))
+            .expect("F64 storage should construct without lossy conversion");
+
+        assert_eq!(arr.dtype(), DType::F64);
+        assert_eq!(arr.shape(), &[4]);
+        let actual_bits: Vec<u64> = arr.values().iter().map(|value| value.to_bits()).collect();
+        assert_eq!(actual_bits, expected_bits);
+        assert!(!arr.has_integer_sidecar());
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"shape");
+        for dim in arr.shape() {
+            hasher.update((*dim as u64).to_le_bytes());
+        }
+        hasher.update(b"dtype");
+        hasher.update(arr.dtype().name().as_bytes());
+        hasher.update(b"bits");
+        for value in arr.values() {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let digest_bytes = hasher.finalize();
+        let mut digest = String::with_capacity(digest_bytes.len() * 2);
+        for byte in digest_bytes {
+            write!(&mut digest, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        assert_eq!(
+            digest, "80684e24891b6df79eeaf732e591da9e5fa8e7b0d1a74f5998b57bc27e066496",
+            "from_storage F64 move fast path golden bit pattern changed"
+        );
     }
 
     #[test]
