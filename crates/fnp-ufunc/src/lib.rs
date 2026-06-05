@@ -552,6 +552,16 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
     }
 }
 
+#[inline]
+#[must_use]
+fn numpy_sign_f64(x: f64) -> f64 {
+    if x.is_nan() {
+        f64::NAN
+    } else {
+        f64::from(i32::from(x > 0.0) - i32::from(x < 0.0))
+    }
+}
+
 pub const UFUNC_PACKET_REASON_CODES: [&str; 19] = [
     "ufunc_shape_contract_violation",
     "ufunc_invalid_input_length",
@@ -1186,17 +1196,7 @@ impl UnaryOp {
         match self {
             Self::Abs => x.abs(),
             Self::Negative => -x,
-            Self::Sign => {
-                if x.is_nan() {
-                    f64::NAN
-                } else if x > 0.0 {
-                    1.0
-                } else if x < 0.0 {
-                    -1.0
-                } else {
-                    0.0
-                }
-            }
+            Self::Sign => numpy_sign_f64(x),
             Self::Sqrt => x.sqrt(),
             Self::Square => x * x,
             Self::Exp => x.exp(),
@@ -7684,6 +7684,14 @@ impl UFuncArray {
         } else {
             self.dtype
         };
+        if op == UnaryOp::Sign {
+            let values = self
+                .values
+                .iter()
+                .map(|&value| numpy_sign_f64(value))
+                .collect();
+            return Self::from_values_with_dtype(self.shape.clone(), values, dtype);
+        }
 
         // Compute-bound transcendental ops over a large array parallelize across
         // the rayon pool. Output is filled in element order across in-order chunks
@@ -39896,6 +39904,60 @@ print(json.dumps(payload))
         assert!(out.values()[3].is_nan());
         assert_eq!(out.values()[4], 0.0);
         assert!(!out.values()[4].is_sign_negative());
+    }
+
+    #[test]
+    fn unary_sign_branchless_matches_numpy_edge_bits_and_golden_sha256() {
+        let arr = UFuncArray::new(
+            vec![7],
+            vec![
+                -3.0,
+                0.0,
+                4.0,
+                f64::NAN,
+                -0.0,
+                f64::NEG_INFINITY,
+                f64::INFINITY,
+            ],
+            DType::F64,
+        )
+        .expect("arr");
+
+        let out = arr.elementwise_unary(UnaryOp::Sign);
+        let actual_bits: Vec<u64> = out.values().iter().map(|value| value.to_bits()).collect();
+        assert_eq!(
+            actual_bits,
+            vec![
+                (-1.0_f64).to_bits(),
+                0.0_f64.to_bits(),
+                1.0_f64.to_bits(),
+                f64::NAN.to_bits(),
+                0.0_f64.to_bits(),
+                (-1.0_f64).to_bits(),
+                1.0_f64.to_bits(),
+            ]
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(b"shape");
+        for dim in out.shape() {
+            hasher.update((*dim as u64).to_le_bytes());
+        }
+        hasher.update(b"dtype");
+        hasher.update(out.dtype().name().as_bytes());
+        hasher.update(b"bits");
+        for value in out.values() {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let digest_bytes = hasher.finalize();
+        let mut digest = String::with_capacity(digest_bytes.len() * 2);
+        for byte in digest_bytes {
+            write!(&mut digest, "{byte:02x}").expect("writing to String cannot fail");
+        }
+        assert_eq!(
+            digest, "f3eae2c1ce147ea83ccad296d72ded59277489795c9f0d39452a605fba0c405e",
+            "sign edge-case golden bit pattern changed"
+        );
     }
 
     #[test]

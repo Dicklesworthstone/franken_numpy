@@ -1,10 +1,26 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_dtype::{ArrayStorage, DType};
-use fnp_ufunc::{UFuncArray, add, divide, multiply, subtract};
+use fnp_ufunc::{UFuncArray, UnaryOp, add, divide, multiply, subtract};
 use std::hint::black_box;
 
 fn make_array(n: usize) -> UFuncArray {
     let values: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 + 1.0).collect();
+    UFuncArray::new(vec![n], values, DType::F64).unwrap()
+}
+
+fn make_sign_array(n: usize) -> UFuncArray {
+    let values: Vec<f64> = (0..n)
+        .map(|i| match i % 8 {
+            0 => -((i as f64) + 1.0),
+            1 => (i as f64) + 1.0,
+            2 => -0.0,
+            3 => 0.0,
+            4 => f64::NAN,
+            5 => -f64::INFINITY,
+            6 => f64::INFINITY,
+            _ => (i as f64) - 3.0,
+        })
+        .collect();
     UFuncArray::new(vec![n], values, DType::F64).unwrap()
 }
 
@@ -95,6 +111,18 @@ fn bench_from_storage_f64_move(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_sign(c: &mut Criterion) {
+    let mut group = c.benchmark_group("elementwise_sign");
+    for size in [100_000, 1_000_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        let a = make_sign_array(*size);
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter(|| black_box(&a).elementwise_unary(UnaryOp::Sign))
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -102,6 +130,7 @@ criterion_group!(
     bench_multiply,
     bench_divide,
     bench_chained_ops,
-    bench_from_storage_f64_move
+    bench_from_storage_f64_move,
+    bench_sign
 );
 criterion_main!(benches);
