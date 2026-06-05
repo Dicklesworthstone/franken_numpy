@@ -319,11 +319,26 @@ fn main() {
         let g = |ms: f64| 2.0 * (n as f64).powi(3) / (ms * 1e-3) / 1e9;
         let (t48, h48) = time(m, n, iters, |c| gemm_packed_g::<4, 8>(&a, &b, m, k, n, c));
         let variants: [(&str, (f64, u64)); 5] = [
-            ("6x8 ", time(m, n, iters, |c| gemm_packed_g::<6, 8>(&a, &b, m, k, n, c))),
-            ("8x8 ", time(m, n, iters, |c| gemm_packed_g::<8, 8>(&a, &b, m, k, n, c))),
-            ("8x4 ", time(m, n, iters, |c| gemm_packed_g::<8, 4>(&a, &b, m, k, n, c))),
-            ("6x16", time(m, n, iters, |c| gemm_packed_g::<6, 16>(&a, &b, m, k, n, c))),
-            ("4x16", time(m, n, iters, |c| gemm_packed_g::<4, 16>(&a, &b, m, k, n, c))),
+            (
+                "6x8 ",
+                time(m, n, iters, |c| gemm_packed_g::<6, 8>(&a, &b, m, k, n, c)),
+            ),
+            (
+                "8x8 ",
+                time(m, n, iters, |c| gemm_packed_g::<8, 8>(&a, &b, m, k, n, c)),
+            ),
+            (
+                "8x4 ",
+                time(m, n, iters, |c| gemm_packed_g::<8, 4>(&a, &b, m, k, n, c)),
+            ),
+            (
+                "6x16",
+                time(m, n, iters, |c| gemm_packed_g::<6, 16>(&a, &b, m, k, n, c)),
+            ),
+            (
+                "4x16",
+                time(m, n, iters, |c| gemm_packed_g::<4, 16>(&a, &b, m, k, n, c)),
+            ),
         ];
         println!("n={n:5}  4x8(base) {t48:8.2}ms {:6.1}GF", g(t48));
         for (name, (t, h)) in variants {

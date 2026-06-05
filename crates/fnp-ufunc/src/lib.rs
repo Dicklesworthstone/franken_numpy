@@ -8613,7 +8613,9 @@ impl UFuncArray {
         // input to seed the loop — the seed clone was read once and discarded.
         // Bit-identical (reductions are read-only; same axes in the same order).
         let mut axes_iter = norm_axes.into_iter();
-        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let first = axes_iter
+            .next()
+            .expect("non-empty axes yield at least one axis");
         let mut result = self.reduce_sum(Some(first as isize), keepdims)?;
         for ax in axes_iter {
             result = result.reduce_sum(Some(ax as isize), keepdims)?;
@@ -8638,7 +8640,9 @@ impl UFuncArray {
         norm_axes.reverse();
 
         let mut axes_iter = norm_axes.into_iter();
-        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let first = axes_iter
+            .next()
+            .expect("non-empty axes yield at least one axis");
         let mut result = self.reduce_prod(Some(first as isize), keepdims)?;
         for ax in axes_iter {
             result = result.reduce_prod(Some(ax as isize), keepdims)?;
@@ -8663,7 +8667,9 @@ impl UFuncArray {
         norm_axes.reverse();
 
         let mut axes_iter = norm_axes.into_iter();
-        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let first = axes_iter
+            .next()
+            .expect("non-empty axes yield at least one axis");
         let mut result = self.reduce_min(Some(first as isize), keepdims)?;
         for ax in axes_iter {
             result = result.reduce_min(Some(ax as isize), keepdims)?;
@@ -8688,7 +8694,9 @@ impl UFuncArray {
         norm_axes.reverse();
 
         let mut axes_iter = norm_axes.into_iter();
-        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let first = axes_iter
+            .next()
+            .expect("non-empty axes yield at least one axis");
         let mut result = self.reduce_max(Some(first as isize), keepdims)?;
         for ax in axes_iter {
             result = result.reduce_max(Some(ax as isize), keepdims)?;
@@ -8713,7 +8721,9 @@ impl UFuncArray {
         norm_axes.reverse();
 
         let mut axes_iter = norm_axes.into_iter();
-        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let first = axes_iter
+            .next()
+            .expect("non-empty axes yield at least one axis");
         let mut result = self.reduce_mean(Some(first as isize), keepdims)?;
         for ax in axes_iter {
             result = result.reduce_mean(Some(ax as isize), keepdims)?;
@@ -12993,18 +13003,18 @@ impl UFuncArray {
         // cell is the single product a[i]*b[j] written once). The serial path keeps
         // the push form to avoid zero-initialising the buffer it would overwrite.
         const OUTER_PARALLEL_MIN_ELEMS: usize = 1 << 15;
-        if m >= 2 && n >= 1 && m * n >= OUTER_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2
+        if m >= 2
+            && n >= 1
+            && m * n >= OUTER_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
         {
             let mut values = vec![0.0f64; m * n];
-            values
-                .par_chunks_mut(n)
-                .enumerate()
-                .for_each(|(i, row)| {
-                    let ai = a[i];
-                    for (slot, &bj) in row.iter_mut().zip(b.iter()) {
-                        *slot = ai * bj;
-                    }
-                });
+            values.par_chunks_mut(n).enumerate().for_each(|(i, row)| {
+                let ai = a[i];
+                for (slot, &bj) in row.iter_mut().zip(b.iter()) {
+                    *slot = ai * bj;
+                }
+            });
             return Ok(Self {
                 shape: vec![m, n],
                 values,
@@ -15715,7 +15725,9 @@ impl UFuncArray {
         norm_axes.sort_unstable();
         norm_axes.reverse();
         let mut axes_iter = norm_axes.into_iter();
-        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let first = axes_iter
+            .next()
+            .expect("non-empty axes yield at least one axis");
         let mut result = self.any(Some(first as isize))?;
         for ax in axes_iter {
             result = result.any(Some(ax as isize))?;
@@ -15739,7 +15751,9 @@ impl UFuncArray {
         norm_axes.sort_unstable();
         norm_axes.reverse();
         let mut axes_iter = norm_axes.into_iter();
-        let first = axes_iter.next().expect("non-empty axes yield at least one axis");
+        let first = axes_iter
+            .next()
+            .expect("non-empty axes yield at least one axis");
         let mut result = self.all(Some(first as isize))?;
         for ax in axes_iter {
             result = result.all(Some(ax as isize))?;
@@ -17924,7 +17938,10 @@ impl UFuncArray {
                 && nvars.saturating_mul(nvars).saturating_mul(nobs) >= COV_PARALLEL_MIN_FLOPS
                 && rayon::current_num_threads() >= 2
             {
-                cov_values.par_chunks_mut(nvars).enumerate().for_each(fill_row);
+                cov_values
+                    .par_chunks_mut(nvars)
+                    .enumerate()
+                    .for_each(fill_row);
             } else {
                 cov_values.chunks_mut(nvars).enumerate().for_each(fill_row);
             }
@@ -22372,10 +22389,9 @@ impl UFuncArray {
         let mut set: Vec<f64> = test_elements.values.clone();
         set.sort_by(nan_last_cmp);
         Self::dedup_sorted_float_set_values(&mut set);
-        let values =
-            in1d_membership_mask(&self.values, |&v| {
-                !v.is_nan() && Self::float_membership_contains(&set, v)
-            });
+        let values = in1d_membership_mask(&self.values, |&v| {
+            !v.is_nan() && Self::float_membership_contains(&set, v)
+        });
         Self {
             shape: self.shape.clone(),
             values,
@@ -25850,6 +25866,7 @@ fn format_nd(
 }
 
 /// Linear interpolation for percentile on a sorted slice (NumPy default method).
+#[cfg(test)]
 fn interpolate_percentile(sorted: &[f64], fraction: f64) -> f64 {
     interpolate_percentile_method(sorted, fraction, QuantileInterp::Linear)
 }
@@ -36479,17 +36496,16 @@ mod tests {
         legfromroots, legint, legmul, legroots, legsub, legval, logaddexp, logaddexp2, ma_is_mask,
         ma_is_masked, ma_make_mask, ma_mask_or, ma_maximum_fill_value,
         ma_maximum_fill_value_for_dtype, ma_minimum_fill_value, ma_minimum_fill_value_for_dtype,
-        mediate_ufunc_runtime_policy, modf, nextafter, normalize_fixed_signature_keywords,
-        normalize_signature_keywords, pad_empty, pad_linear_ramp, pad_stat,
-        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
-        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
-        poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values,
-        matmul_accumulate_serial, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
-        scimath_arctanh, scimath_log,
-        scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_sqrt, seterr,
-        seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
-        unique_all, unique_counts, unique_inverse, unique_values, validate_override_payload_class,
-        where_nonzero,
+        matmul_accumulate_serial, mediate_ufunc_runtime_policy, modf, nextafter,
+        normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
+        pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
+        plan_binary_dispatch, plan_binary_dispatch_with_registry,
+        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
+        reduce_frompyfunc_values, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
+        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
+        scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
+        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
+        validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -39454,10 +39470,22 @@ print(json.dumps(payload))
         let bits = |v: &UFuncArray| v.values()[0].to_bits();
         let pz_nz = UFuncArray::new(vec![2], vec![0.0, -0.0], DType::F64).unwrap();
         let nz_pz = UFuncArray::new(vec![2], vec![-0.0, 0.0], DType::F64).unwrap();
-        assert_eq!(bits(&pz_nz.reduce_max(None, false).unwrap()), (-0.0f64).to_bits());
-        assert_eq!(bits(&nz_pz.reduce_max(None, false).unwrap()), (0.0f64).to_bits());
-        assert_eq!(bits(&pz_nz.reduce_min(None, false).unwrap()), (-0.0f64).to_bits());
-        assert_eq!(bits(&nz_pz.reduce_min(None, false).unwrap()), (0.0f64).to_bits());
+        assert_eq!(
+            bits(&pz_nz.reduce_max(None, false).unwrap()),
+            (-0.0f64).to_bits()
+        );
+        assert_eq!(
+            bits(&nz_pz.reduce_max(None, false).unwrap()),
+            (0.0f64).to_bits()
+        );
+        assert_eq!(
+            bits(&pz_nz.reduce_min(None, false).unwrap()),
+            (-0.0f64).to_bits()
+        );
+        assert_eq!(
+            bits(&nz_pz.reduce_min(None, false).unwrap()),
+            (0.0f64).to_bits()
+        );
     }
 
     #[test]
@@ -42203,10 +42231,13 @@ print(json.dumps(payload))
             let maxd = ref_out
                 .iter()
                 .zip(&qs_out)
-                .map(|(a, b)| (a.to_bits() ^ b.to_bits()))
+                .map(|(a, b)| a.to_bits() ^ b.to_bits())
                 .max()
                 .unwrap();
-            assert_eq!(maxd, 0, "quickselect diverged from sort (outer={outer}, L={axis_len})");
+            assert_eq!(
+                maxd, 0,
+                "quickselect diverged from sort (outer={outer}, L={axis_len})"
+            );
             println!(
                 "outer={outer:5} L={axis_len:6} sort={t_sort:8.3}ms quickselect={t_qs:8.3}ms speedup={:.2}x (bit-exact)",
                 t_sort / t_qs
@@ -42228,7 +42259,7 @@ print(json.dumps(payload))
                     let s = (i as u64)
                         .wrapping_mul(6364136223846793005)
                         .wrapping_add(1442695040888963407);
-                    if (s >> 8) % 8 == 0 {
+                    if (s >> 8).is_multiple_of(8) {
                         f64::NAN
                     } else {
                         ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
@@ -42274,7 +42305,10 @@ print(json.dumps(payload))
                 .map(|(a, b)| a.to_bits() ^ b.to_bits())
                 .max()
                 .unwrap();
-            assert_eq!(maxd, 0, "nan quickselect diverged from sort (outer={outer}, L={axis_len})");
+            assert_eq!(
+                maxd, 0,
+                "nan quickselect diverged from sort (outer={outer}, L={axis_len})"
+            );
             println!(
                 "nan outer={outer:5} L={axis_len:6} sort={t_sort:8.3}ms quickselect={t_qs:8.3}ms speedup={:.2}x (bit-exact)",
                 t_sort / t_qs
@@ -42314,7 +42348,10 @@ print(json.dumps(payload))
                     .fold(h, |h, &b| (h ^ b as u64).wrapping_mul(0x100000001b3))
             })
         };
-        for &(ash, bsh) in &[([256usize, 256usize], [8usize, 8usize]), ([64, 64], [16, 16])] {
+        for &(ash, bsh) in &[
+            ([256usize, 256usize], [8usize, 8usize]),
+            ([64, 64], [16, 16]),
+        ] {
             let a: Vec<f64> = (0..ash[0] * ash[1])
                 .map(|i| ((i as u64).wrapping_mul(2654435761) % 9973) as f64 / 7.0 - 300.0)
                 .collect();
@@ -42329,10 +42366,20 @@ print(json.dumps(payload))
             let t1 = Instant::now();
             let got = aa.kron(&bb).expect("kron");
             let t_fast = t1.elapsed().as_secs_f64() * 1e3;
-            assert_eq!(fnv(got.values()), fnv(&reference), "kron fast path golden mismatch");
+            assert_eq!(
+                fnv(got.values()),
+                fnv(&reference),
+                "kron fast path golden mismatch"
+            );
             println!(
                 "A=[{},{}] B=[{},{}] out={} odometer={t_ref:8.3}ms fast={t_fast:8.3}ms speedup={:.2}x golden=0x{:016x}",
-                ash[0], ash[1], bsh[0], bsh[1], reference.len(), t_ref / t_fast, fnv(&reference)
+                ash[0],
+                ash[1],
+                bsh[0],
+                bsh[1],
+                reference.len(),
+                t_ref / t_fast,
+                fnv(&reference)
             );
         }
     }
@@ -44553,7 +44600,10 @@ print(json.dumps(payload))
                     .map(|(a, b)| a.to_bits() ^ b.to_bits())
                     .max()
                     .unwrap();
-                assert_eq!(maxd, 0, "roll rotation diverged from scatter (len={len}, shift={shift})");
+                assert_eq!(
+                    maxd, 0,
+                    "roll rotation diverged from scatter (len={len}, shift={shift})"
+                );
                 println!(
                     "len={len:8} shift={shift:8} scatter={t_scatter:8.3}ms rotation={t_fast:8.3}ms speedup={:.2}x (bit-exact)",
                     t_scatter / t_fast
@@ -44827,7 +44877,14 @@ print(json.dumps(payload))
 
     // Inline copy of the PRE-packing matmul_accumulate_serial hot loop (stride-n
     // B read), kept only as the A/B reference for the packing speedup report.
-    fn matmul_serial_unpacked_ref(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
+    fn matmul_serial_unpacked_ref(
+        lhs: &[f64],
+        rhs: &[f64],
+        m: usize,
+        k: usize,
+        n: usize,
+        out: &mut [f64],
+    ) {
         let m_full = m - m % super::MATMUL_MR;
         let n_full = n - n % super::MATMUL_NR;
         let nc = {
@@ -44853,7 +44910,10 @@ print(json.dumps(payload))
                     }
                     for (ii, row) in acc.iter().enumerate() {
                         let base = (i0 + ii) * n + j0;
-                        for (slot, &v) in out[base..base + super::MATMUL_NR].iter_mut().zip(row.iter()) {
+                        for (slot, &v) in out[base..base + super::MATMUL_NR]
+                            .iter_mut()
+                            .zip(row.iter())
+                        {
                             *slot += v;
                         }
                     }
@@ -44891,7 +44951,9 @@ print(json.dumps(payload))
             let mut s = seed | 1;
             (0..n * n)
                 .map(|_| {
-                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
                 })
                 .collect()
@@ -44903,9 +44965,14 @@ print(json.dumps(payload))
             let mut times_old = Vec::new();
             let mut times_new = Vec::new();
             let (mut h_old, mut h_new) = (0u64, 0u64);
-            let hash = |v: &[f64]| v.iter().fold(0xcbf29ce484222325u64, |h, x| {
-                x.to_bits().to_le_bytes().iter().fold(h, |h, &byte| (h ^ byte as u64).wrapping_mul(0x100000001b3))
-            });
+            let hash = |v: &[f64]| {
+                v.iter().fold(0xcbf29ce484222325u64, |h, x| {
+                    x.to_bits()
+                        .to_le_bytes()
+                        .iter()
+                        .fold(h, |h, &byte| (h ^ byte as u64).wrapping_mul(0x100000001b3))
+                })
+            };
             for _ in 0..iters {
                 let mut c = vec![0.0f64; n * n];
                 let t = Instant::now();
@@ -45206,7 +45273,10 @@ print(json.dumps(payload))
                 .map(|(x, y)| x.to_bits() ^ y.to_bits())
                 .max()
                 .unwrap();
-            assert_eq!(maxd, 0, "parallel outer diverged from serial (m={m}, n={n})");
+            assert_eq!(
+                maxd, 0,
+                "parallel outer diverged from serial (m={m}, n={n})"
+            );
             println!(
                 "m={m:6} n={n:6} serial={t_serial:8.3}ms parallel={t_par:8.3}ms speedup={:.2}x (bit-exact)",
                 t_serial / t_par
@@ -45351,7 +45421,10 @@ print(json.dumps(payload))
                 .map(|(a, b)| a.to_bits() ^ b.to_bits())
                 .max()
                 .unwrap();
-            assert_eq!(maxd, 0, "parallel gather diverged from serial (src={src_len}, idx={n_idx})");
+            assert_eq!(
+                maxd, 0,
+                "parallel gather diverged from serial (src={src_len}, idx={n_idx})"
+            );
             println!(
                 "src={src_len:9} idx={n_idx:9} serial={t_serial:8.3}ms parallel={t_par:8.3}ms speedup={:.2}x (bit-exact)",
                 t_serial / t_par
@@ -45732,7 +45805,10 @@ print(json.dumps(payload))
                 .map(|(a, b)| a.to_bits() ^ b.to_bits())
                 .max()
                 .unwrap();
-            assert_eq!(maxd, 0, "diff n==1 fast path diverged from clone reference (len={len})");
+            assert_eq!(
+                maxd, 0,
+                "diff n==1 fast path diverged from clone reference (len={len})"
+            );
             println!(
                 "len={len:8} clone={t_clone:8.3}ms fast={t_fast:8.3}ms speedup={:.2}x (bit-exact)",
                 t_clone / t_fast
@@ -47099,10 +47175,7 @@ print(json.dumps(payload))
         // `if mx > v {mx} else {v}` / `if mn < v {mn} else {v}` forms reproduce.
         let cases: &[(Vec<usize>, Vec<f64>)] = &[
             // signed zeros + duplicates in both orders along each axis
-            (
-                vec![2, 4],
-                vec![0.0, -0.0, -0.0, 0.0, 1.5, 1.5, -3.0, 2.0],
-            ),
+            (vec![2, 4], vec![0.0, -0.0, -0.0, 0.0, 1.5, 1.5, -3.0, 2.0]),
             // NaN scattered through lanes
             (
                 vec![3, 3],
@@ -47112,7 +47185,18 @@ print(json.dumps(payload))
             (
                 vec![2, 2, 3],
                 vec![
-                    5.0, -2.0, 0.0, -0.0, 5.0, 5.0, 1.0, 1.0, 1.0, f64::NAN, 2.0, -7.0,
+                    5.0,
+                    -2.0,
+                    0.0,
+                    -0.0,
+                    5.0,
+                    5.0,
+                    1.0,
+                    1.0,
+                    1.0,
+                    f64::NAN,
+                    2.0,
+                    -7.0,
                 ],
             ),
         ];
@@ -47154,7 +47238,11 @@ print(json.dumps(payload))
         for v in r.values() {
             digest.update(v.to_bits().to_le_bytes());
         }
-        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(
             hex,
             "f4505b761f428ed283ec6eeba4662f410dfec583ac2c4356d26a0d4237c78901"
@@ -47494,7 +47582,10 @@ print(json.dumps(payload))
                 .map(|(a, b)| a.to_bits() ^ b.to_bits())
                 .max()
                 .unwrap();
-            assert_eq!(maxd, 0, "parallel membership mask diverged from serial (len={len})");
+            assert_eq!(
+                maxd, 0,
+                "parallel membership mask diverged from serial (len={len})"
+            );
             println!(
                 "len={len:8} serial={t_serial:8.3}ms parallel={t_par:8.3}ms speedup={:.2}x (bit-exact)",
                 t_serial / t_par
@@ -58163,13 +58254,17 @@ print(json.dumps(payload))
             let mut s = seed | 1;
             (0..nv * no)
                 .map(|_| {
-                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
                     ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
                 })
                 .collect()
         }
         fn means(v: &[f64], nv: usize, no: usize) -> Vec<f64> {
-            (0..nv).map(|r| v[r * no..r * no + no].iter().sum::<f64>() / no as f64).collect()
+            (0..nv)
+                .map(|r| v[r * no..r * no + no].iter().sum::<f64>() / no as f64)
+                .collect()
         }
         fn cov_naive(v: &[f64], nv: usize, no: usize) -> Vec<f64> {
             let m = means(v, nv, no);
@@ -58214,8 +58309,15 @@ print(json.dumps(payload))
             let v = rnd(nv, no, 7);
             let cn = cov_naive(&v, nv, no);
             let cg = cov_gemm(&v, nv, no);
-            let maxd = cn.iter().zip(&cg).map(|(a, b)| (a - b).abs()).fold(0.0f64, f64::max);
-            assert!(maxd == 0.0, "cov naive vs gemm not bit-exact: {maxd:e} (nv={nv})");
+            let maxd = cn
+                .iter()
+                .zip(&cg)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f64, f64::max);
+            assert!(
+                maxd == 0.0,
+                "cov naive vs gemm not bit-exact: {maxd:e} (nv={nv})"
+            );
             let it = 3;
             let (mut tn, mut tg) = (Vec::new(), Vec::new());
             for _ in 0..it {
@@ -58226,7 +58328,12 @@ print(json.dumps(payload))
                 std::hint::black_box(cov_gemm(&v, nv, no));
                 tg.push(t.elapsed().as_secs_f64() * 1e3);
             }
-            println!("nv={nv:5} naive={:8.2}ms gemm={:8.2}ms speedup={:.2}x", med(tn.clone()), med(tg.clone()), med(tn) / med(tg));
+            println!(
+                "nv={nv:5} naive={:8.2}ms gemm={:8.2}ms speedup={:.2}x",
+                med(tn.clone()),
+                med(tg.clone()),
+                med(tn) / med(tg)
+            );
         }
     }
 

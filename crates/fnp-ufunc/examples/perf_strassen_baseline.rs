@@ -15,7 +15,9 @@ fn build(dim: usize, seed: u64) -> UFuncArray {
     let mut s = seed;
     let values: Vec<f64> = (0..dim * dim)
         .map(|_| {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            s = s
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
             ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
         })
         .collect();
@@ -56,8 +58,6 @@ fn main() {
         }
         let ms = median(times);
         let gflops = 2.0 * (n as f64).powi(3) / (ms * 1e-3) / 1e9;
-        println!(
-            "n={n:5}  {ms:9.3} ms   {gflops:7.2} GFLOP/s   checksum=0x{checksum:016x}"
-        );
+        println!("n={n:5}  {ms:9.3} ms   {gflops:7.2} GFLOP/s   checksum=0x{checksum:016x}");
     }
 }
