@@ -439,3 +439,35 @@ print(np.array_equal(result, expected))
     );
     Ok(())
 }
+
+/// Locks the zero-copy diagflat fast path (`try_zerocopy_f64_diagflat`, writing v
+/// onto the k-th diagonal of a zeros matrix) to bit-exact parity with numpy. The
+/// diagonal values are copied verbatim, so parity must hold at the IEEE-754 bit
+/// level (signed zero, nan, inf) and the zero fill must be +0.0. Compares the
+/// sha256 of raw output bytes across positive and negative k and extreme values.
+#[test]
+fn diagflat_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [100, 1000]:
+    v = rng.standard_normal(n)
+    for k in [0, 3, -3]:
+        chunks.append(np.asarray(mod.diagflat(v, k)).tobytes())
+ve = np.array([0.0, -0.0, np.inf, -np.inf, np.nan], dtype=np.float64)
+chunks.append(np.asarray(mod.diagflat(ve, 1)).tobytes())
+chunks.append(np.asarray(mod.diagflat(ve, -2)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy diagflat must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

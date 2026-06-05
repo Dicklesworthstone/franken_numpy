@@ -25646,6 +25646,52 @@ fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     build_numpy_array_from_ufunc(py, &result)
 }
 
+// Zero-copy np.diagflat(v, k) for a C-contiguous float64 ndarray: numpy flattens
+// v (length n) and returns a square (n+|k|) matrix of zeros with v placed on the
+// k-th diagonal — out[i, i+k] = v[i] for k>=0, out[i+|k|, i] = v[i] for k<0. This
+// writes those n diagonal entries straight into a numpy.zeros((s, s)) buffer with
+// no intermediate Rust Vec of the full s*s result, dropping the cold extract/build
+// Vecs (bead lglck). Values are copied verbatim, so it is bit-identical to numpy
+// incl. -0.0/inf/nan. Returns Ok(None) — caller falls through — for any non-f64 /
+// non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_diagflat(
+    py: Python<'_>,
+    v: &Bound<'_, PyAny>,
+    k: i64,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !v.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, v) {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(v) else {
+        return Ok(None);
+    };
+    let Some(input) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = input.len();
+    let abs_k = k.unsigned_abs() as usize;
+    let s = n + abs_k;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("zeros", ((s, s),), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // Flat index of element (row, col) in the s*s C-contiguous output.
+        for (i, cell) in input.iter().enumerate() {
+            let (row, col) = if k >= 0 { (i, i + abs_k) } else { (i + abs_k, i) };
+            output[row * s + col].set(cell.get());
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (v, k=0))]
 fn diagflat(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
@@ -25654,6 +25700,11 @@ fn diagflat(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     if dtype_kind == "c" {
         return Ok(numpy.getattr("diagflat")?.call1((arr, k))?.unbind());
+    }
+    // Zero-copy diagonal write for C-contiguous f64 ndarrays; skips the cold
+    // extract + full s*s build Vecs. Bit-identical; other dtypes fall through.
+    if let Some(result) = try_zerocopy_f64_diagflat(py, v.bind(py), k)? {
+        return Ok(result);
     }
     let v = extract_precise_numeric_array(py, v.bind(py), "diagflat(v)")?;
     let result = v.diagflat(k);
