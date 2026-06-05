@@ -554,11 +554,49 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
 "#;
 
     let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
-    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
 
     assert_eq!(
         fnp_hash, numpy_hash,
         "zero-copy axis-0 concatenate must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}
+
+/// Locks the general (any-axis) zero-copy concatenate fast path
+/// (`try_zerocopy_f64_concatenate`) to bit-exact parity with numpy for non-zero
+/// axes. Covers 2-D axis-1, 3-D axis-1 and axis-2, and extreme values.
+#[test]
+fn concatenate_any_axis_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+chunks.append(np.asarray(mod.concatenate([rng.standard_normal((100, 50)), rng.standard_normal((100, 30))], 1)).tobytes())
+chunks.append(np.asarray(mod.concatenate([rng.standard_normal((2, 30, 4)), rng.standard_normal((2, 30, 6))], 2)).tobytes())
+chunks.append(np.asarray(mod.concatenate([rng.standard_normal((2, 30, 4)), rng.standard_normal((2, 5, 4))], 1)).tobytes())
+xe = np.array([[0.0, -0.0, np.inf], [-np.inf, np.nan, 1e308]], dtype=np.float64)
+chunks.append(np.asarray(mod.concatenate([xe, xe * 2], 1)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy any-axis concatenate must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    assert_eq!(
+        fnp_hash, "e3ed79c8bc8ae9a723fa04f0dcd23d47d37a81a4792420eb1c43ad6fb8d1746d",
+        "golden sha256 of any-axis concatenate raw output bytes"
     );
     Ok(())
 }

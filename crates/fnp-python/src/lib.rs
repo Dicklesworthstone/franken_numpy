@@ -8104,7 +8104,11 @@ fn try_zerocopy_f64_place(
     {
         return Ok(false);
     }
-    if mask.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b"
+    if mask
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        != "b"
         || !numpy_dtype_is_f64(py, arr)
         || !numpy_dtype_is_f64(py, vals)
     {
@@ -10224,7 +10228,9 @@ fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Op
     let make_output = |py: Python<'_>, count: usize| -> PyResult<Py<PyAny>> {
         let kwargs = PyDict::new(py);
         kwargs.set_item("dtype", "int64")?;
-        Ok(numpy.call_method("empty", (count,), Some(&kwargs))?.unbind())
+        Ok(numpy
+            .call_method("empty", (count,), Some(&kwargs))?
+            .unbind())
     };
 
     match kind.as_str() {
@@ -11277,7 +11283,19 @@ fn delete(
 // numpy incl. nan/inf/signed zeros. Returns Ok(None) — caller falls through — for
 // a non-axis-0 concatenation, a 0-d / mismatched-trailing-shape / non-f64 /
 // non-contiguous / non-ndarray operand, or a non-iterable sequence.
-fn try_zerocopy_f64_concatenate_axis0(
+// Zero-copy np.concatenate(arrays, axis) along any axis for C-contiguous float64
+// ndarrays that share every shape except the concat axis. Decomposing the layout
+// into outer * axis * inner groups (outer = product(shape[..axis]), inner =
+// product(shape[axis+1..])), each input contributes, per outer slab, a contiguous
+// run of axis_len*inner elements that lands at its column offset in the output —
+// so the concatenation is a set of contiguous block copies into a numpy.empty
+// output (reshaped), with no per-input extract Vec and no intermediate concat Vec.
+// For axis 0 (outer = 1) this is each buffer laid end to end; for the last axis
+// (inner = 1) it is per-row interleaving. Values are copied verbatim, so it is
+// bit-identical to numpy incl. nan/inf/signed zeros. Returns Ok(None) — caller
+// falls through — for a 0-d operand, a shape mismatch off the concat axis, an
+// out-of-range axis, or any non-f64 / non-contiguous / non-ndarray operand.
+fn try_zerocopy_f64_concatenate(
     py: Python<'_>,
     arrays_seq: &Bound<'_, PyAny>,
     axis: isize,
@@ -11292,9 +11310,7 @@ fn try_zerocopy_f64_concatenate_axis0(
         return Ok(None);
     }
     let mut buffers: Vec<PyBuffer<f64>> = Vec::with_capacity(items.len());
-    let mut trailing: Option<Vec<usize>> = None;
-    let mut total_axis0 = 0usize;
-    let mut total_elems = 0usize;
+    let mut shapes: Vec<Vec<usize>> = Vec::with_capacity(items.len());
     for item in &items {
         if !item.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, item) {
             return Ok(None);
@@ -11306,44 +11322,65 @@ fn try_zerocopy_f64_concatenate_axis0(
         if shape.is_empty() {
             return Ok(None);
         }
-        let ndim = shape.len() as isize;
-        let norm_axis = if axis < 0 { axis + ndim } else { axis };
-        if norm_axis != 0 {
-            return Ok(None);
-        }
-        let tail = shape[1..].to_vec();
-        match &trailing {
-            None => trailing = Some(tail),
-            Some(existing) if *existing != tail => return Ok(None),
-            _ => {}
-        }
-        total_axis0 += shape[0];
-        total_elems += buffer.item_count();
+        shapes.push(shape);
         buffers.push(buffer);
     }
+    let ndim = shapes[0].len();
+    let ndim_isize = ndim as isize;
+    let norm_axis = if axis < 0 { axis + ndim_isize } else { axis };
+    if norm_axis < 0 || norm_axis >= ndim_isize {
+        return Ok(None);
+    }
+    let ax = norm_axis as usize;
+    // Every input must share the same ndim and the same shape off the concat axis.
+    for shape in &shapes {
+        if shape.len() != ndim {
+            return Ok(None);
+        }
+        for (d, (&a, &b)) in shapes[0].iter().zip(shape.iter()).enumerate() {
+            if d != ax && a != b {
+                return Ok(None);
+            }
+        }
+    }
+    let outer: usize = shapes[0][..ax].iter().product();
+    let inner: usize = shapes[0][ax + 1..].iter().product();
+    let out_axis: usize = shapes.iter().map(|shape| shape[ax]).sum();
+    let total = outer * out_axis * inner;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
-    let flat = numpy.call_method("empty", (total_elems,), Some(&kwargs))?;
-    if total_elems > 0 {
+    let flat = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
             return Ok(None);
         };
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        let mut w = 0usize;
+        let mut slices = Vec::with_capacity(buffers.len());
         for buffer in &buffers {
             let Some(slice) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            for cell in slice {
-                output[w].set(cell.get());
-                w += 1;
+            slices.push(slice);
+        }
+        let out_slab = out_axis * inner;
+        for o in 0..outer {
+            let mut axis_off = 0usize;
+            for (k, slice) in slices.iter().enumerate() {
+                let alen = shapes[k][ax];
+                let block = alen * inner;
+                let in_base = o * block;
+                let out_base = o * out_slab + axis_off * inner;
+                for j in 0..block {
+                    output[out_base + j].set(slice[in_base + j].get());
+                }
+                axis_off += alen;
             }
         }
     }
-    let mut out_shape = vec![total_axis0];
-    out_shape.extend(trailing.unwrap_or_default());
+    let mut out_shape = shapes[0].clone();
+    out_shape[ax] = out_axis;
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
     Ok(Some(output))
@@ -11384,10 +11421,11 @@ fn concatenate(
         0
     };
 
-    // Zero-copy axis-0 concatenation for C-contiguous f64 ndarrays (the common
-    // case); collapses the per-input extract + concat build + copy-back into a
-    // single buffer copy. Bit-identical; other axes and dtypes fall through.
-    if let Some(out) = try_zerocopy_f64_concatenate_axis0(py, &arrays_seq, axis)? {
+    // Zero-copy concatenation along any axis for C-contiguous f64 ndarrays (the
+    // common case); collapses the per-input extract + concat build + copy-back
+    // into contiguous block copies. Bit-identical; other dtypes / shape mismatches
+    // fall through.
+    if let Some(out) = try_zerocopy_f64_concatenate(py, &arrays_seq, axis)? {
         return Ok(out);
     }
 
@@ -13264,8 +13302,7 @@ fn roll(
         let axis_bound = axis_obj.bind(py);
         if !axis_bound.is_none()
             && let Ok(axis_int) = axis_bound.extract::<i64>()
-            && let Some(out) =
-                try_zerocopy_f64_roll_axis(py, a.bind(py), shift_scalar, axis_int)?
+            && let Some(out) = try_zerocopy_f64_roll_axis(py, a.bind(py), shift_scalar, axis_int)?
         {
             return Ok(out);
         }
@@ -13274,8 +13311,7 @@ fn roll(
     // Zero-copy multi-axis roll for a tuple/list of shifts with matching axes on a
     // 2-D f64 array: a single-pass fused roll (one allocation) of the net per-axis
     // shift. Bit-identical; higher-dim, non-f64, or out-of-range axes fall through.
-    if let (Ok(shifts), Some(axis_obj)) =
-        (shift.bind(py).extract::<Vec<i64>>(), axis.as_ref())
+    if let (Ok(shifts), Some(axis_obj)) = (shift.bind(py).extract::<Vec<i64>>(), axis.as_ref())
         && let Ok(axes) = axis_obj.bind(py).extract::<Vec<i64>>()
         && !axes.is_empty()
         && axes.len() == shifts.len()
@@ -13788,7 +13824,7 @@ fn vstack(
                         .unwrap_or(false)
                     && numpy_dtype_is_f64(py, item)
             })
-            && let Some(out) = try_zerocopy_f64_concatenate_axis0(py, tup.bind(py), 0)?
+            && let Some(out) = try_zerocopy_f64_concatenate(py, tup.bind(py), 0)?
         {
             return Ok(out);
         }
@@ -13824,6 +13860,37 @@ fn hstack(
             dtype,
             Some(casting),
         );
+    }
+    // Fast path: np.hstack concatenates along axis 0 for 1-D inputs and axis 1 for
+    // ndim>=2 inputs. When all inputs are f64 ndarrays of the same dimensionality,
+    // reuse the zero-copy concatenate at the right axis. Mixed dims / other dtypes
+    // fall through (numpy applies its own promotion/validation).
+    if let Ok(numpy) = py.import("numpy")
+        && let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && let Ok(iter) = tup.bind(py).try_iter()
+        && let Ok(items) = iter.collect::<PyResult<Vec<_>>>()
+        && !items.is_empty()
+    {
+        let ndims: Option<Vec<usize>> = items
+            .iter()
+            .map(|item| {
+                if item.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, item) {
+                    item.getattr("ndim").ok()?.extract::<usize>().ok()
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if let Some(ndims) = ndims
+            && !ndims.is_empty()
+            && ndims.iter().all(|&n| n == ndims[0])
+            && ndims[0] >= 1
+        {
+            let concat_axis = if ndims[0] == 1 { 0 } else { 1 };
+            if let Some(out) = try_zerocopy_f64_concatenate(py, tup.bind(py), concat_axis)? {
+                return Ok(out);
+            }
+        }
     }
     stack_helper_default(py, tup, StackHelperKind::Horizontal)
 }
@@ -26045,7 +26112,11 @@ fn try_zerocopy_f64_diagflat(
         };
         // Flat index of element (row, col) in the s*s C-contiguous output.
         for (i, cell) in input.iter().enumerate() {
-            let (row, col) = if k >= 0 { (i, i + abs_k) } else { (i + abs_k, i) };
+            let (row, col) = if k >= 0 {
+                (i, i + abs_k)
+            } else {
+                (i + abs_k, i)
+            };
             output[row * s + col].set(cell.get());
         }
     }
