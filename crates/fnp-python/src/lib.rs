@@ -22289,6 +22289,40 @@ fn tensordot(
         None => 2usize,
     };
 
+    // Cheap metadata pre-gate (no extraction): tensordot(axes=k) flattens to the
+    // GEMM (m x contract) @ (contract x n). Our native matmul_accumulate only
+    // beats numpy's BLAS inside the SAME profiled sweet spot np.matmul/np.dot
+    // gate on (flops >= PY_NATIVE_GEMM_MIN_FLOPS, every flattened dim <=
+    // PY_NATIVE_GEMM_MAX_DIM). tensordot used to ALWAYS take the native path —
+    // up to ~16x slower than numpy below the flop floor / above the dim cap.
+    // Read the shapes straight off the ndarrays and delegate the non-competitive
+    // contractions to numpy.tensordot before paying for any Rust-side extraction.
+    if let (Ok(a_shape), Ok(b_shape)) = (
+        a.bind(py)
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>()),
+        b.bind(py)
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>()),
+    ) {
+        if axes <= a_shape.len() && axes <= b_shape.len() {
+            let an = a_shape.len();
+            let contract: usize = a_shape[an - axes..].iter().product();
+            let m: usize = a_shape[..an - axes].iter().product();
+            let n: usize = b_shape[axes..].iter().product();
+            let in_native_window = m
+                .saturating_mul(contract)
+                .saturating_mul(n)
+                >= PY_NATIVE_GEMM_MIN_FLOPS
+                && m <= PY_NATIVE_GEMM_MAX_DIM
+                && contract <= PY_NATIVE_GEMM_MAX_DIM
+                && n <= PY_NATIVE_GEMM_MAX_DIM;
+            if !in_native_window {
+                return fallback();
+            }
+        }
+    }
+
     let a = match extract_precise_numeric_array(py, a.bind(py), "tensordot(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -22302,6 +22336,33 @@ fn tensordot(
         || matches!(a.dtype(), DType::Complex64 | DType::Complex128)
         || matches!(b.dtype(), DType::Complex64 | DType::Complex128)
     {
+        return fallback();
+    }
+
+    // tensordot(axes=k) flattens to the GEMM (m x contract) @ (contract x n).
+    // Our native matmul_accumulate only beats numpy's BLAS inside the SAME
+    // profiled sweet spot that np.matmul/np.dot gate on (flops >=
+    // PY_NATIVE_GEMM_MIN_FLOPS and every flattened GEMM dim <=
+    // PY_NATIVE_GEMM_MAX_DIM). tensordot previously ALWAYS took the native
+    // path, so for contractions below that flop floor (or above the dim cap) it
+    // ran up to ~16x slower than numpy. Route those to numpy.tensordot — the
+    // result is numpy's own (the conformance reference is allclose), just far
+    // faster — and keep the native GEMM only where it actually wins.
+    let a_ndim = a.shape().len();
+    let b_ndim = b.shape().len();
+    if axes > a_ndim || axes > b_ndim {
+        return fallback();
+    }
+    let contract: usize = a.shape()[a_ndim - axes..].iter().product();
+    let m: usize = a.shape()[..a_ndim - axes].iter().product();
+    let n: usize = b.shape()[axes..].iter().product();
+    let native_competitive = a.dtype() == DType::F64
+        && b.dtype() == DType::F64
+        && m.saturating_mul(contract).saturating_mul(n) >= PY_NATIVE_GEMM_MIN_FLOPS
+        && m <= PY_NATIVE_GEMM_MAX_DIM
+        && contract <= PY_NATIVE_GEMM_MAX_DIM
+        && n <= PY_NATIVE_GEMM_MAX_DIM;
+    if !native_competitive {
         return fallback();
     }
 
@@ -50752,6 +50813,53 @@ mod tests {
                 "tensordot complex axes=1 diverged"
             );
 
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn tensordot_native_gemm_gate_keeps_numpy_parity_across_sizes() {
+        // The GEMM sweet-spot gate routes small/large contractions to numpy and
+        // keeps the native matmul_accumulate only in the profiled window. Verify
+        // parity vs numpy on BOTH sides of the gate: N=64 (below the flop floor
+        // -> delegate), N=384 (inside the native window), N=1100 (above the dim
+        // cap -> delegate). All must match numpy bit-for-bit-within-allclose.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_td_gate")?;
+            fnp_python(&module)?;
+            let tensordot_fn = module.getattr("tensordot")?;
+            let numpy = py.import("numpy")?;
+            let numpy_tensordot = numpy.getattr("tensordot")?;
+            let allclose = numpy.getattr("allclose")?;
+            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((0_i64,))?;
+            for n in [64_i64, 384, 1100] {
+                let a = rng
+                    .call_method1("standard_normal", ((n, n),))?
+                    .call_method1("astype", ("float64",))?;
+                let b = rng
+                    .call_method1("standard_normal", ((n, n),))?
+                    .call_method1("astype", ("float64",))?;
+                let one = 1_i64.into_pyobject(py)?.into_any();
+                let got = tensordot_fn.call1((a.clone(), b.clone(), one.clone()))?;
+                let want = numpy_tensordot.call1((a.clone(), b.clone(), one))?;
+                assert!(
+                    allclose
+                        .call(
+                            (&got, &want),
+                            Some(&{
+                                let kw = PyDict::new(py);
+                                kw.set_item("rtol", 1e-9)?;
+                                kw.set_item("atol", 1e-9)?;
+                                kw
+                            })
+                        )?
+                        .extract::<bool>()?,
+                    "tensordot gate diverged from numpy at n={n}"
+                );
+            }
             Ok(())
         });
     }
