@@ -6848,6 +6848,9 @@ fn zerocopy_f64_unary_flat<'py>(
             | UnaryOp::Trunc
             | UnaryOp::Sign
             | UnaryOp::Square
+            | UnaryOp::Reciprocal
+            | UnaryOp::Degrees
+            | UnaryOp::Radians
     ) {
         return Ok(None);
     }
@@ -10596,6 +10599,9 @@ fn rint(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn degrees(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Degrees)? {
+        return Ok(out);
+    }
     let x = extract_precise_numeric_array(py, x.bind(py), "degrees(x)")?;
     let x = match x.dtype() {
         DType::Bool => x.astype(DType::F16),
@@ -10614,6 +10620,9 @@ fn degrees(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn radians(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Radians)? {
+        return Ok(out);
+    }
     let x = extract_precise_numeric_array(py, x.bind(py), "radians(x)")?;
     let x = match x.dtype() {
         DType::Bool => x.astype(DType::F16),
