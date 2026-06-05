@@ -24936,6 +24936,61 @@ fn count_masked(py: Python<'_>, arr: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyRe
     Ok(output)
 }
 
+// Zero-copy np.kron(a, b) for two 1-D C-contiguous float64 ndarrays. For 1-D
+// inputs the Kronecker product is the flattened outer product:
+// out[i*m + j] = a[i] * b[j], length n*m. This writes that product straight into
+// a 1-D numpy.empty(n*m) buffer with no intermediate Rust Vec, dropping the cold
+// extract/build Vecs (bead lglck). Bit-identical (a[i]*b[j] in the same order,
+// incl. nan/inf/signed zeros). Returns Ok(None) — caller falls through — for any
+// non-1-D / non-f64 / non-contiguous / non-ndarray operand (the multi-dim
+// Kronecker product has a block structure handled by the general path).
+fn try_zerocopy_f64_kron1d(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type)
+        || !b.is_exact_instance(&ndarray_type)
+        || !numpy_dtype_is_f64(py, a)
+        || !numpy_dtype_is_f64(py, b)
+    {
+        return Ok(None);
+    }
+    let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
+        return Ok(None);
+    };
+    if a_buffer.shape().len() != 1 || b_buffer.shape().len() != 1 {
+        return Ok(None);
+    }
+    let (Some(a_in), Some(b_in)) = (a_buffer.as_slice(py), b_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    let n = a_in.len();
+    let m = b_in.len();
+    let total = n * m;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for i in 0..n {
+            let ai = a_in[i].get();
+            let row = i * m;
+            for j in 0..m {
+                output[row + j].set(ai * b_in[j].get());
+            }
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -24943,6 +24998,13 @@ fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let kron_fn = numpy.getattr("kron")?;
     let fallback =
         || -> PyResult<Py<PyAny>> { Ok(kron_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
+
+    // Zero-copy 1-D Kronecker product (= flattened outer) for C-contiguous f64
+    // ndarrays; skips the cold extract + full n*m build Vecs. Bit-identical;
+    // multi-dim inputs and other dtypes fall through to the general path.
+    if let Some(result) = try_zerocopy_f64_kron1d(py, a.bind(py), b.bind(py))? {
+        return Ok(result);
+    }
 
     let a = match extract_precise_numeric_array(py, a.bind(py), "kron(a)") {
         Ok(array) => array,
