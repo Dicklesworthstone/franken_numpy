@@ -2651,12 +2651,17 @@ pub fn matrix_norm_frobenius(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
             "matrix_norm: input must be n*n with n > 0",
         ));
     }
-    if a.iter().any(|v| !v.is_finite()) {
-        return Err(LinAlgError::NormDetRankPolicyViolation(
-            "matrix entries must be finite for norm",
-        ));
+
+    let mut sum = 0.0;
+    for &value in a {
+        if !value.is_finite() {
+            return Err(LinAlgError::NormDetRankPolicyViolation(
+                "matrix entries must be finite for norm",
+            ));
+        }
+        sum += value * value;
     }
-    Ok(a.iter().map(|v| v * v).sum::<f64>().sqrt())
+    Ok(sum.sqrt())
 }
 
 /// General NxN matrix norm (np.linalg.norm for matrices).
@@ -8761,6 +8766,65 @@ mod tests {
         let norm = matrix_norm_frobenius(&a, 2).expect("frobenius");
         let expected = (1.0 + 4.0 + 9.0 + 16.0_f64).sqrt();
         assert!(approx_equal(norm, expected, 1e-12));
+    }
+
+    fn matrix_norm_frobenius_two_pass_reference(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
+        if Some(a.len()) != n.checked_mul(n) || n == 0 {
+            return Err(LinAlgError::ShapeContractViolation(
+                "matrix_norm: input must be n*n with n > 0",
+            ));
+        }
+        if a.iter().any(|v| !v.is_finite()) {
+            return Err(LinAlgError::NormDetRankPolicyViolation(
+                "matrix entries must be finite for norm",
+            ));
+        }
+        Ok(a.iter().map(|v| v * v).sum::<f64>().sqrt())
+    }
+
+    #[test]
+    fn matrix_norm_fused_scan_preserves_reference_bits_and_sha256() -> Result<(), String> {
+        let n = 17;
+        let a: Vec<f64> = (0..n * n)
+            .map(|i| (((i * 37) % 101) as f64 - 50.0) / 8.0)
+            .collect();
+
+        let expected = matrix_norm_frobenius_two_pass_reference(&a, n)
+            .map_err(|err| format!("reference norm failed: {err}"))?;
+        let actual =
+            matrix_norm_frobenius(&a, n).map_err(|err| format!("fused norm failed: {err}"))?;
+        assert_eq!(
+            actual.to_bits(),
+            expected.to_bits(),
+            "fused norm must preserve the old finite-input summation bits"
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(actual.to_bits().to_le_bytes());
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "9aff026d01bf0d8d28edf16d190ff6a55feab83362d5d4de6f7c480bba9820ae",
+            "fused norm golden digest drifted"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn matrix_norm_frobenius_fused_scan_preserves_non_finite_rejection() {
+        for non_finite in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut a = [1.0, 2.0, 3.0, 4.0];
+            a[2] = non_finite;
+            assert!(matches!(
+                matrix_norm_frobenius(&a, 2),
+                Err(LinAlgError::NormDetRankPolicyViolation(
+                    "matrix entries must be finite for norm"
+                ))
+            ));
+        }
     }
 
     #[test]
