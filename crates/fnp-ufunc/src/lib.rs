@@ -21619,28 +21619,39 @@ impl UFuncArray {
                     let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                     let axis_len = self.shape[ax_idx];
                     let inner: usize = self.shape[ax_idx + 1..].iter().copied().product();
-                    let outer: usize = self.shape[..ax_idx].iter().copied().product();
-                    let mut out = vec![0.0f64; out_count];
-                    let mut of = 0usize;
-                    for o in 0..outer {
-                        let base = o * axis_len * inner;
-                        for i in 0..inner {
-                            let mut off = base + i;
-                            let first = self.values[off];
-                            let (mut mn, mut mx) = (first, first);
-                            let mut any_nan = first.is_nan();
+                    // Each output cell is an independent per-lane min/max scan, so
+                    // mapping over the flattened output index is bit-for-bit identical
+                    // to the serial o-major/i-minor loop (same per-lane ascending
+                    // scan, same signed-zero/NaN handling) and parallelizes across
+                    // the independent lanes. `of` decodes to lane (o, i) with stride
+                    // `inner` down the axis.
+                    let values = &self.values;
+                    let lane_ptp = |of: usize| -> f64 {
+                        let o = of / inner;
+                        let i = of % inner;
+                        let mut off = o * axis_len * inner + i;
+                        let first = values[off];
+                        let (mut mn, mut mx) = (first, first);
+                        let mut any_nan = first.is_nan();
+                        off += inner;
+                        for _ in 1..axis_len {
+                            let v = values[off];
+                            any_nan |= v.is_nan();
+                            mn = if mn < v { mn } else { v };
+                            mx = if mx > v { mx } else { v };
                             off += inner;
-                            for _ in 1..axis_len {
-                                let v = self.values[off];
-                                any_nan |= v.is_nan();
-                                mn = if mn < v { mn } else { v };
-                                mx = if mx > v { mx } else { v };
-                                off += inner;
-                            }
-                            out[of] = if any_nan { f64::NAN } else { mx - mn };
-                            of += 1;
                         }
-                    }
+                        if any_nan { f64::NAN } else { mx - mn }
+                    };
+                    const PTP_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                    let out: Vec<f64> = if out_count >= 2
+                        && self.values.len() >= PTP_AXIS_PARALLEL_MIN_ELEMS
+                        && rayon::current_num_threads() >= 2
+                    {
+                        (0..out_count).into_par_iter().map(lane_ptp).collect()
+                    } else {
+                        (0..out_count).map(lane_ptp).collect()
+                    };
                     return Ok(Self {
                         shape: out_shape,
                         values: out,
@@ -47599,6 +47610,109 @@ print(json.dumps(payload))
         let r = a.ptp(Some(0)).unwrap();
         assert_eq!(r.shape(), &[2]);
         assert_eq!(r.values(), &[2.0, 3.0]);
+    }
+
+    #[test]
+    fn ptp_axis_parallel_matches_serial_reference_bits() {
+        // The parallel per-lane ptp(axis) map must be BIT-IDENTICAL to the serial
+        // o-major/i-minor scan. Use a large enough array (256x256 = 65536 >= the
+        // parallel gate) with signed zeros / NaN seeded so order matters.
+        let (rows, cols) = (256usize, 256usize);
+        let mut data: Vec<f64> = (0..rows * cols)
+            .map(|i| ((i % 37) as f64) * 0.31 - 5.0)
+            .collect();
+        // seed signed zeros + a NaN lane to exercise order/propagation
+        data[0] = 0.0;
+        data[1] = -0.0;
+        data[cols] = -0.0;
+        data[cols + 1] = 0.0;
+        data[5 * cols + 7] = f64::NAN;
+        let a = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).unwrap();
+        for ax in [0isize, 1] {
+            let got = a.ptp(Some(ax)).unwrap();
+            // Serial reference (the pre-parallel loop).
+            let ax_idx = ax as usize;
+            let axis_len = a.shape()[ax_idx];
+            let inner: usize = a.shape()[ax_idx + 1..].iter().product();
+            let outer: usize = a.shape()[..ax_idx].iter().product();
+            let out_count = outer * inner;
+            let mut want = vec![0.0f64; out_count];
+            let mut of = 0usize;
+            for o in 0..outer {
+                let base = o * axis_len * inner;
+                for i in 0..inner {
+                    let mut off = base + i;
+                    let first = data[off];
+                    let (mut mn, mut mx) = (first, first);
+                    let mut any_nan = first.is_nan();
+                    off += inner;
+                    for _ in 1..axis_len {
+                        let v = data[off];
+                        any_nan |= v.is_nan();
+                        mn = if mn < v { mn } else { v };
+                        mx = if mx > v { mx } else { v };
+                        off += inner;
+                    }
+                    want[of] = if any_nan { f64::NAN } else { mx - mn };
+                    of += 1;
+                }
+            }
+            for (g, w) in got.values().iter().zip(want.iter()) {
+                if g.is_nan() || w.is_nan() {
+                    assert!(g.is_nan() && w.is_nan(), "NaN parity ax={ax}");
+                } else {
+                    assert_eq!(g.to_bits(), w.to_bits(), "bit parity ax={ax}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B: parallel vs serial ptp(axis=1); run --release -- --ignored --nocapture"]
+    fn ptp_axis_parallel_ab_bench() {
+        use std::time::Instant;
+        let n = 2048usize;
+        let data: Vec<f64> = (0..n * n).map(|i| ((i % 101) as f64) * 0.01 - 0.5).collect();
+        let a = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+        let iters = 20;
+        let _ = a.ptp(Some(1)).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.ptp(Some(1)).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD serial scan.
+        let inner = 1usize;
+        let axis_len = n;
+        let outer = n;
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut out = vec![0.0f64; outer * inner];
+            let mut of = 0usize;
+            for o in 0..outer {
+                let base = o * axis_len * inner;
+                for i in 0..inner {
+                    let mut off = base + i;
+                    let first = data[off];
+                    let (mut mn, mut mx) = (first, first);
+                    off += inner;
+                    for _ in 1..axis_len {
+                        let v = data[off];
+                        mn = if mn < v { mn } else { v };
+                        mx = if mx > v { mx } else { v };
+                        off += inner;
+                    }
+                    out[of] = mx - mn;
+                    of += 1;
+                }
+            }
+            std::hint::black_box(&out);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "PTP_AXIS new={new_ms:.2}ms old={old_ms:.2}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
     }
 
     #[test]
