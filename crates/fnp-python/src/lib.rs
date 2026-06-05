@@ -8004,6 +8004,69 @@ fn try_zerocopy_f64_putmask(
     Ok(true)
 }
 
+// Zero-copy in-place np.place(arr, mask, vals) for a writable float64 arr ndarray,
+// a bool mask of the identical shape, and a non-empty float64 vals ndarray.
+// numpy.place assigns the True positions in flat order, the k-th True taking
+// vals.flat[k % vals.size] — i.e. it cycles vals by the running count of True
+// values (unlike putmask, which cycles by flat position). This writes those
+// positions straight into arr's own buffer (no extract of arr/vals and no full
+// copy-back — only masked slots are touched), dropping the cold boundary-tax Vecs
+// (bead lglck). Values are copied verbatim, so the mutation is bit-identical incl.
+// -0.0/inf/nan. The bool mask's '?' format is rejected by PyBuffer::<u8>, so it is
+// viewed as uint8 first. Returns Ok(false) — caller falls through — for a shape
+// mismatch, an empty vals array (numpy raises), a read-only arr, or any non-f64 /
+// non-bool / non-contiguous / non-ndarray operand.
+fn try_zerocopy_f64_place(
+    py: Python<'_>,
+    arr: &Bound<'_, PyAny>,
+    mask: &Bound<'_, PyAny>,
+    vals: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !arr.is_exact_instance(&ndarray_type)
+        || !mask.is_exact_instance(&ndarray_type)
+        || !vals.is_exact_instance(&ndarray_type)
+    {
+        return Ok(false);
+    }
+    if mask.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b"
+        || !numpy_dtype_is_f64(py, arr)
+        || !numpy_dtype_is_f64(py, vals)
+    {
+        return Ok(false);
+    }
+    let mask_u8 = mask.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let (Ok(a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
+        PyBuffer::<f64>::get(arr),
+        PyBuffer::<u8>::get(&mask_u8),
+        PyBuffer::<f64>::get(vals),
+    ) else {
+        return Ok(false);
+    };
+    if a_buffer.shape() != mask_buffer.shape() {
+        return Ok(false);
+    }
+    let (Some(mask_in), Some(val_in)) = (mask_buffer.as_slice(py), val_buffer.as_slice(py)) else {
+        return Ok(false);
+    };
+    let v = val_in.len();
+    if v == 0 {
+        return Ok(false);
+    }
+    let Some(a_out) = a_buffer.as_mut_slice(py) else {
+        return Ok(false);
+    };
+    let mut k = 0usize;
+    for (i, slot) in a_out.iter().enumerate() {
+        if mask_in[i].get() != 0 {
+            slot.set(val_in[k % v].get());
+            k += 1;
+        }
+    }
+    Ok(true)
+}
+
 // Zero-copy np.cumsum for the flatten form: a C-contiguous float64 ndarray with
 // axis=None (numpy flattens and returns a 1-D cumulative sum) or a 1-D array with
 // axis in {0, -1}. The running sum is strictly sequential — out[i] = out[i-1] +
@@ -13524,6 +13587,14 @@ fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> Py
         numpy
             .getattr("place")?
             .call1((arr, mask.bind(py), vals.bind(py)))?;
+        return Ok(py.None());
+    }
+
+    // Zero-copy in-place write for the common case (f64 arr + bool mask of
+    // identical shape + non-empty f64 vals); touches only the masked slots of
+    // arr's own buffer, cycling vals by the running True count. Bit-identical;
+    // shape mismatch, empty vals, and other dtypes fall through.
+    if try_zerocopy_f64_place(py, arr, mask.bind(py), vals.bind(py))? {
         return Ok(py.None());
     }
 

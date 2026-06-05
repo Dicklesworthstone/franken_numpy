@@ -577,3 +577,43 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// Locks the zero-copy in-place fast path for `numpy.place` (`try_zerocopy_f64_place`)
+/// to bit-exact parity. place assigns the True positions in flat order, the k-th
+/// True taking vals[k % len(vals)] (cycling by True count, unlike putmask's
+/// flat-position cycling), copying vals verbatim — so parity must hold at the
+/// IEEE-754 bit level (signed zero, nan, inf). Compares sha256 of the mutated
+/// array's raw bytes against numpy across value cycling (len(vals) < #True) and
+/// extreme values.
+#[test]
+fn place_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [1000, 100003]:
+    base = rng.standard_normal(n)
+    m = base > 0.1
+    vals = rng.standard_normal(3)
+    a = base.copy()
+    mod.place(a, m, vals)
+    chunks.append(np.asarray(a).tobytes())
+base = np.array([1., 2., 3., 4., 5., 6., 7.], dtype=np.float64)
+m = np.array([True, False, True, True, False, True, True])
+vals = np.array([0.0, -0.0, np.inf, -np.inf, np.nan], dtype=np.float64)
+a = base.copy()
+mod.place(a, m, vals)
+chunks.append(np.asarray(a).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy place must be bit-identical to numpy (sha256 of mutated array bytes)"
+    );
+    Ok(())
+}
