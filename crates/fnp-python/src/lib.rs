@@ -25150,13 +25150,27 @@ fn einsum_native(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Option<Py<PyAny>>> {
     if let Some(kw) = kwargs {
-        // Only `optimize` is safe to honor natively (our kernel always picks an
-        // efficient contraction); out=/dtype=/order=/casting= go to numpy.
+        // Only `optimize` is acceptable here; out=/dtype=/order=/casting= go to numpy.
         for key in kw.keys() {
             let name: String = key.extract()?;
             if name != "optimize" {
                 return Ok(None);
             }
+        }
+        // Our native kernel does a single simultaneous multi-operand contraction
+        // and does NOT optimize the pairwise contraction PATH. For >=3 operands
+        // with `optimize` explicitly requested (True/'greedy'/'optimal'/a path
+        // list), numpy's path optimizer + BLAS is orders of magnitude faster
+        // (measured ~680x on 'ij,jk,kl->il'), so defer those to numpy. The default
+        // optimize=False keeps our native kernel (which beats numpy's naive
+        // default). The result is identical (same contraction, associativity
+        // within float tolerance).
+        if args.len() >= 4
+            && let Some(opt) = kw.get_item("optimize")?
+            && !opt.is_none()
+            && opt.is_truthy()?
+        {
+            return Ok(None);
         }
     }
     if args.len() < 2 {
