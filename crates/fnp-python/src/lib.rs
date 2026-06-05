@@ -7645,6 +7645,83 @@ fn try_zerocopy_f64_roll(
     Ok(Some(output))
 }
 
+// Zero-copy np.roll(a, shift, axis=ax) along a single explicit axis of a
+// C-contiguous float64 ndarray (the multi-dim case the flatten helper above
+// leaves alone). Decomposing the C-contiguous layout into outer * axis_len *
+// inner element groups, numpy's per-axis roll is out(o, a, i) = in(o, (a-s) mod
+// axis_len, i): each (outer, inner) lane has its axis_len entries rotated by s.
+// This copies the rotated inner-blocks straight into a numpy.empty buffer (then
+// reshaped) with no intermediate Rust Vec, dropping the cold extract/build Vecs
+// (bead lglck). Values are moved verbatim, so it is bit-identical incl.
+// nan/inf/signed zeros. Returns Ok(None) — caller falls through — for a 0-d
+// array, an out-of-range axis (numpy raises), or any non-f64 / non-contiguous /
+// non-ndarray input.
+fn try_zerocopy_f64_roll_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    shift_scalar: i64,
+    axis: i64,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let ndim = shape.len() as i64;
+    if ndim == 0 {
+        return Ok(None);
+    }
+    let norm_axis = if axis < 0 { axis + ndim } else { axis };
+    if norm_axis < 0 || norm_axis >= ndim {
+        // Out-of-range axis: let the general path reproduce numpy's AxisError.
+        return Ok(None);
+    }
+    let ax = norm_axis as usize;
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let total = input.len();
+    let axis_len = shape[ax];
+    let outer: usize = shape[..ax].iter().product();
+    let inner: usize = shape[ax + 1..].iter().product();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 && axis_len > 0 {
+        let s = (((shift_scalar % axis_len as i64) + axis_len as i64) % axis_len as i64) as usize;
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // Each outer lane (length axis_len*inner, contiguous in C order) is just a
+        // 1-D roll by s*inner positions: lane = in[lane_len - s*inner ..] ++
+        // in[.. lane_len - s*inner]. Two sequential block copies per lane — far
+        // faster than a strided per-element gather, and contiguous so it stays
+        // bit-identical.
+        let lane_len = axis_len * inner;
+        let head = s * inner; // number of leading output elements
+        let split = lane_len - head; // input prefix length that moves to the tail
+        for o in 0..outer {
+            let obase = o * lane_len;
+            for k in 0..head {
+                output[obase + k].set(input[obase + split + k].get());
+            }
+            for k in 0..split {
+                output[obase + head + k].set(input[obase + k].get());
+            }
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy np.extract(condition, arr) for a bool condition ndarray and a float64
 // arr ndarray of the same flattened length: returns the 1-D run of arr values at
 // the positions where condition is True (numpy.extract == take(ravel(arr),
@@ -12553,6 +12630,21 @@ fn roll(
     // per-axis multi-dim rolls and tuple shifts fall through to the general path.
     if let Some(out) = try_zerocopy_f64_roll(py, a.bind(py), shift.bind(py), axis.as_ref())? {
         return Ok(out);
+    }
+
+    // Zero-copy per-axis roll for C-contiguous f64 ndarrays with a scalar shift
+    // and an explicit integer axis (the multi-dim case the flatten path skips);
+    // block-copies the rotated inner-lanes. Bit-identical; tuple shifts/axes and
+    // out-of-range axes fall through to the general path.
+    if let (Ok(shift_scalar), Some(axis_obj)) = (shift.bind(py).extract::<i64>(), axis.as_ref()) {
+        let axis_bound = axis_obj.bind(py);
+        if !axis_bound.is_none()
+            && let Ok(axis_int) = axis_bound.extract::<i64>()
+            && let Some(out) =
+                try_zerocopy_f64_roll_axis(py, a.bind(py), shift_scalar, axis_int)?
+        {
+            return Ok(out);
+        }
     }
 
     let array = match extract_precise_numeric_array(py, a.bind(py), "roll(a)") {
