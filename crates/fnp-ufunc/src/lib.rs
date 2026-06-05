@@ -12396,22 +12396,64 @@ impl UFuncArray {
             return Err(UFuncError::Msg("tile: internal shape mismatch".to_string()));
         };
 
-        let src_strides = c_strides_elems(&padded_shape);
-        let out_strides = c_strides_elems(&out_shape);
-        let mut out_values = vec![0.0f64; out_count];
-        let mut source_indices = Vec::with_capacity(out_count);
+        if out_count == 0 {
+            return Ok(Self {
+                shape: out_shape,
+                values: Vec::new(),
+                dtype: self.dtype,
+                integer_sidecar: self.reindexed_integer_sidecar(&[]),
+            });
+        }
 
-        for (flat, out_val) in out_values.iter_mut().enumerate() {
-            let mut src_flat = 0;
-            let mut remainder = flat;
-            for d in 0..ndim {
-                let out_idx = remainder / out_strides[d];
-                remainder %= out_strides[d];
+        // The output's last axis is the source's contiguous last-axis run (length
+        // s_last, stride 1) repeated r_last times, and outer rows just select a
+        // source row by `index % source_dim`. So decode ONLY the outer rows
+        // (out_count / out_last of them) and fill each via copy_from_slice memcpy
+        // instead of recomputing an ndim divmod for every one of out_count
+        // elements and pushing an out_count-sized index Vec. Bit-identical: the
+        // gathered value at each position and the reindex order are unchanged.
+        let src_strides = c_strides_elems(&padded_shape);
+        let last = ndim - 1;
+        let s_last = padded_shape[last];
+        let r_last = padded_reps[last];
+        let out_last = s_last * r_last; // == out_shape[last], and > 0 here
+        let outer_out = out_count / out_last;
+        let out_outer_strides = c_strides_elems(&out_shape[..last]);
+
+        // Append rows in flat order into an uninitialised-capacity buffer:
+        // extend_from_slice writes each output element exactly ONCE (numpy-style),
+        // avoiding the zero-fill of a `vec![0.0; out_count]` we would immediately
+        // overwrite. orow ascends and each row contributes a contiguous block, so
+        // the appended order is the canonical row-major output order.
+        let mut out_values: Vec<f64> = Vec::with_capacity(out_count);
+        let need_idx = self.integer_sidecar.is_some();
+        let mut source_indices = if need_idx {
+            Vec::with_capacity(out_count)
+        } else {
+            Vec::new()
+        };
+
+        for orow in 0..outer_out {
+            // Map the output outer row to the start of its source last-axis run.
+            let mut src_flat = 0usize;
+            let mut remainder = orow;
+            for d in 0..last {
+                let out_idx = remainder / out_outer_strides[d];
+                remainder %= out_outer_strides[d];
                 let src_idx = out_idx % padded_shape[d];
                 src_flat += src_idx * src_strides[d];
             }
-            *out_val = src_values[src_flat];
-            source_indices.push(src_flat);
+            let src_row = &src_values[src_flat..src_flat + s_last];
+            for _ in 0..r_last {
+                out_values.extend_from_slice(src_row);
+            }
+            if need_idx {
+                for _ in 0..r_last {
+                    for j in 0..s_last {
+                        source_indices.push(src_flat + j);
+                    }
+                }
+            }
         }
         Ok(Self {
             shape: out_shape,
@@ -44474,6 +44516,128 @@ print(json.dumps(payload))
         assert_eq!(
             tiled.values(),
             &[1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0]
+        );
+    }
+
+    #[test]
+    fn tile_block_memcpy_matches_per_element_reference_and_golden() {
+        use sha2::{Digest, Sha256};
+        // Reference = the original per-output-element ndim-divmod gather. The
+        // block-memcpy rewrite must be byte-identical (values AND shape) across
+        // 1-D, multi-axis, rep-padding (more reps than dims), dim-padding (more
+        // dims than reps), unit reps, and an integer-sidecar (reindex) case.
+        fn reference(shape: &[usize], values: &[f64], reps: &[usize]) -> (Vec<usize>, Vec<f64>) {
+            let ndim = shape.len().max(reps.len());
+            let mut padded_shape = vec![1usize; ndim];
+            let offset = ndim - shape.len();
+            for (i, &s) in shape.iter().enumerate() {
+                padded_shape[offset + i] = s;
+            }
+            let mut padded_reps = vec![1usize; ndim];
+            let roff = ndim - reps.len();
+            for (i, &r) in reps.iter().enumerate() {
+                padded_reps[roff + i] = r;
+            }
+            let out_shape: Vec<usize> = padded_shape
+                .iter()
+                .zip(&padded_reps)
+                .map(|(&s, &r)| s * r)
+                .collect();
+            let out_count: usize = out_shape.iter().product();
+            let src_strides = super::c_strides_elems(&padded_shape);
+            let out_strides = super::c_strides_elems(&out_shape);
+            let mut out = vec![0.0f64; out_count];
+            for (flat, slot) in out.iter_mut().enumerate() {
+                let mut src_flat = 0;
+                let mut rem = flat;
+                for d in 0..ndim {
+                    let oi = rem / out_strides[d];
+                    rem %= out_strides[d];
+                    src_flat += (oi % padded_shape[d]) * src_strides[d];
+                }
+                *slot = values[src_flat];
+            }
+            (out_shape, out)
+        }
+        let cases: &[(Vec<usize>, Vec<usize>)] = &[
+            (vec![6], vec![3]),
+            (vec![2, 3], vec![2, 3]),
+            (vec![2, 3], vec![3]),       // fewer reps than dims
+            (vec![4], vec![2, 3]),       // more reps than dims (dim padding)
+            (vec![3, 1, 2], vec![2, 2]), // unit middle dim
+            (vec![5, 4], vec![1, 1]),    // identity tile
+        ];
+        for (shape, reps) in cases {
+            let n: usize = shape.iter().product();
+            let values: Vec<f64> = (0..n).map(|i| (i as f64) * 0.5 - 3.0).collect();
+            let arr = UFuncArray::new(shape.clone(), values.clone(), DType::F64).unwrap();
+            let got = arr.tile(reps).unwrap();
+            let (ref_shape, ref_vals) = reference(shape, &values, reps);
+            assert_eq!(got.shape(), ref_shape.as_slice(), "shape {shape:?} reps {reps:?}");
+            assert_eq!(
+                got.values(),
+                ref_vals.as_slice(),
+                "values {shape:?} reps {reps:?}"
+            );
+        }
+        // Integer-sidecar reindex parity: exact i64 values must follow the tile.
+        let iarr = UFuncArray::from_storage(vec![2, 2], ArrayStorage::I64(vec![10, 20, 30, 40]))
+            .unwrap();
+        let it = iarr.tile(&[2, 2]).unwrap();
+        assert_eq!(
+            it.to_storage().unwrap(),
+            ArrayStorage::I64(vec![
+                10, 20, 10, 20, 30, 40, 30, 40, 10, 20, 10, 20, 30, 40, 30, 40
+            ])
+        );
+        // Golden digest over a deterministic 3-D tile.
+        let values: Vec<f64> = (0..(4 * 3 * 5)).map(|i| ((i * 7 % 19) as f64) - 9.0).collect();
+        let arr = UFuncArray::new(vec![4, 3, 5], values, DType::F64).unwrap();
+        let r = arr.tile(&[2, 1, 3]).unwrap();
+        let mut h = Sha256::new();
+        for v in r.values() {
+            h.update(v.to_bits().to_le_bytes());
+        }
+        let hex: String = h.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex,
+            "be7b407c79d981cc004cd358483c7790cea4a12dc1bcc479f3eeb8ef67a48fe0"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B: block-memcpy tile vs per-element divmod; run --release -- --ignored --nocapture"]
+    fn tile_block_vs_perelement_ab_bench() {
+        use std::time::Instant;
+        let n = 2_000_000usize;
+        let values: Vec<f64> = (0..n).map(|i| (i as f64).sin()).collect();
+        let arr = UFuncArray::new(vec![n], values.clone(), DType::F64).unwrap();
+        let iters = 20;
+        let _ = arr.tile(&[3]).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(arr.tile(&[3]).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD per-element divmod gather.
+        let src_strides = super::c_strides_elems(&[n]);
+        let out_strides = super::c_strides_elems(&[n * 3]);
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut out = vec![0.0f64; n * 3];
+            let mut idx = Vec::with_capacity(n * 3);
+            for (flat, slot) in out.iter_mut().enumerate() {
+                let oi = flat / out_strides[0];
+                let src_flat = (oi % n) * src_strides[0];
+                *slot = values[src_flat];
+                idx.push(src_flat);
+            }
+            std::hint::black_box((&out, &idx));
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "TILE new={new_ms:.2}ms old={old_ms:.2}ms speedup={:.2}x",
+            old_ms / new_ms
         );
     }
 
