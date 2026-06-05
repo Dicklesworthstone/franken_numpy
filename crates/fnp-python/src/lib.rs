@@ -7139,6 +7139,21 @@ fn try_zerocopy_f64_binary(
     Ok(Some(output))
 }
 
+// True iff `x` is a buffer-readable float64 array containing a zero (±0.0).
+// Used to gate the fmod zero-copy: numpy emits an "invalid value encountered
+// in fmod" warning (and nan) for a zero divisor, which the existing extract
+// path preserves by deferring to numpy — so the fast path must skip those.
+// Returns false when the buffer can't be read (the zero-copy then returns None
+// and the caller falls through unchanged).
+fn f64_ndarray_contains_zero(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
+    if let Ok(buffer) = PyBuffer::<f64>::get(x)
+        && let Some(slice) = buffer.as_slice(py)
+    {
+        return Ok(slice.iter().any(|cell| cell.get() == 0.0));
+    }
+    Ok(false)
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -15615,6 +15630,13 @@ fn fmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .getattr("fmod")?
             .call1((x1.bind(py), x2.bind(py)))?
             .unbind());
+    }
+    // Zero-copy fast path for same-shape f64 ndarrays with no zero divisor
+    // (zero divisors must defer to numpy for the "invalid value" warning).
+    if !f64_ndarray_contains_zero(py, x2.bind(py))? {
+        if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Fmod)? {
+            return Ok(out);
+        }
     }
     let x1_array = extract_numeric_array(py, x1.bind(py), "fmod(x1)")?;
     let x2_array = extract_numeric_array(py, x2.bind(py), "fmod(x2)")?;
