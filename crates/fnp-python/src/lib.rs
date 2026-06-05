@@ -18729,14 +18729,146 @@ fn native_binary_bitwise_xor_or_passthrough(
     }
 }
 
+// numpy's int64 left/right shift, matching apply_binary_op_i64 (== numpy): out
+// of [0,64) yields 0 (left) or sign-fill (right); in range uses wrapping_shl /
+// arithmetic wrapping_shr.
+#[inline(always)]
+fn shl_np_i64(a: i64, b: i64) -> i64 {
+    if !(0..64).contains(&b) {
+        0
+    } else {
+        a.wrapping_shl(b as u32)
+    }
+}
+#[inline(always)]
+fn shr_np_i64(a: i64, b: i64) -> i64 {
+    if !(0..64).contains(&b) {
+        if a < 0 {
+            -1
+        } else {
+            0
+        }
+    } else {
+        a.wrapping_shr(b as u32)
+    }
+}
+
+fn is_exact_int64_ndarray(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let numpy = py.import("numpy")?;
+    if !x.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(false);
+    }
+    let dtype = x.getattr("dtype")?;
+    Ok(dtype.getattr("kind")?.extract::<String>()? == "i"
+        && dtype.getattr("itemsize")?.extract::<usize>()? == 8)
+}
+
+// A signed-integer shift amount usable as a broadcast scalar. Accepts a Python
+// int or a signed-integer numpy scalar/0-d. Rejects unsigned (kind 'u') so we
+// don't diverge from numpy's int64+uint64 -> float64 promotion, and floats.
+fn shift_scalar_i64(py: Python<'_>, b: &Bound<'_, PyAny>) -> PyResult<Option<i64>> {
+    if let Ok(dt) = b.getattr("dtype") {
+        if dt.getattr("kind")?.extract::<String>()? != "i" {
+            return Ok(None);
+        }
+    }
+    let _ = py;
+    Ok(b.extract::<i64>().ok())
+}
+
+// Zero-copy int64 shift (left/right). The generic elementwise_binary path runs
+// the f64-storage loop plus a separate integer-sidecar synthesis for shifts,
+// ~50-210x slower than numpy (bitwise_and/or/xor avoid it; shifts do not). Read
+// the int64 buffer(s) in place and write the wrapping shift via a monomorphic
+// inlined map. Handles `a` int64 ndarray with either a same-shape int64 `b`
+// array or a broadcast signed-int scalar `b`. Bit-identical to numpy /
+// apply_binary_op_i64 (verified incl. b>=64 and negative b). Returns None for
+// any other dtype / shape / operand kind.
+fn try_zerocopy_i64_shift(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    is_left: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !is_exact_int64_ndarray(py, a)? {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let Ok(a_buf) = PyBuffer::<i64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(a_in) = a_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a_buf.shape().to_vec();
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let n = a_in.len();
+
+    // Resolve b into either a same-shape int64 array buffer or a broadcast scalar.
+    let b_is_same_shape_array = is_exact_int64_ndarray(py, b)?
+        && b.getattr("shape")?.extract::<Vec<usize>>()? == shape;
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "int64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        if b_is_same_shape_array {
+            let Ok(b_buf) = PyBuffer::<i64>::get(b) else {
+                return Ok(None);
+            };
+            let Some(b_in) = b_buf.as_slice(py) else {
+                return Ok(None);
+            };
+            if is_left {
+                for ((slot, ac), bc) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+                    slot.set(shl_np_i64(ac.get(), bc.get()));
+                }
+            } else {
+                for ((slot, ac), bc) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+                    slot.set(shr_np_i64(ac.get(), bc.get()));
+                }
+            }
+        } else {
+            let Some(bval) = shift_scalar_i64(py, b)? else {
+                return Ok(None);
+            };
+            if is_left {
+                for (slot, ac) in output.iter().zip(a_in.iter()) {
+                    slot.set(shl_np_i64(ac.get(), bval));
+                }
+            } else {
+                for (slot, ac) in output.iter().zip(a_in.iter()) {
+                    slot.set(shr_np_i64(ac.get(), bval));
+                }
+            }
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 fn native_binary_left_shift_or_passthrough(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "left_shift(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "left_shift(x2)")?;
+        let a = args.get_item(0)?;
+        let b = args.get_item(1)?;
+        if let Some(out) = try_zerocopy_i64_shift(py, &a, &b, true)? {
+            return Ok(out);
+        }
+        let x1 = extract_numeric_array(py, &a, "left_shift(x1)")?;
+        let x2 = extract_numeric_array(py, &b, "left_shift(x2)")?;
         let result = ufunc_left_shift(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
@@ -18750,8 +18882,13 @@ fn native_binary_right_shift_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "right_shift(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "right_shift(x2)")?;
+        let a = args.get_item(0)?;
+        let b = args.get_item(1)?;
+        if let Some(out) = try_zerocopy_i64_shift(py, &a, &b, false)? {
+            return Ok(out);
+        }
+        let x1 = extract_numeric_array(py, &a, "right_shift(x1)")?;
+        let x2 = extract_numeric_array(py, &b, "right_shift(x2)")?;
         let result = ufunc_right_shift(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
