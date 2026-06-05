@@ -273,3 +273,34 @@ print(np.array_equal(fnp_result, np_result))
     assert_eq!(result.trim(), "True", "around complex should match numpy");
     Ok(())
 }
+
+/// Locks the zero-copy `numpy.around` fast path for decimals != 0
+/// (`try_zerocopy_f64_around`, computing (v*10^d).round_ties_even()/10^d) to
+/// bit-exact parity with numpy. Compares the sha256 of raw output bytes across
+/// positive and negative decimals, multi-D inputs, and exact-half / extreme
+/// values.
+#[test]
+fn around_decimals_zerocopy_f64_bit_exact_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+rng = np.random.default_rng(20260605)
+chunks = []
+for n in [1000, 100003]:
+    x = rng.standard_normal(n) * 100
+    for dec in [1, 2, 3, -1, -2]:
+        chunks.append(np.asarray(mod.around(x, dec)).tobytes())
+chunks.append(np.asarray(mod.around(rng.standard_normal((30, 40)) * 10, 2)).tobytes())
+chunks.append(np.asarray(mod.around(np.array([1.23456789, -9.87, 0.125, 2.5, -0.5, 1.5, -0.0, np.inf, -np.inf, np.nan], dtype=np.float64), 2)).tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp").to_string()))?;
+    let numpy_hash = numpy_oracle(&format!("import numpy as np\n{}", body.replace("MODULE", "np")))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "zero-copy around(decimals) must be bit-identical to numpy (sha256 of raw output bytes)"
+    );
+    Ok(())
+}

@@ -28166,6 +28166,54 @@ fn isfortran(
     core_numpy_passthrough(py, "isfortran", args, kwargs)
 }
 
+// Zero-copy np.around(a, decimals) for decimals != 0 on a C-contiguous float64
+// ndarray. Reproduces exactly the formula the general path uses —
+// (v * 10^decimals).round_ties_even() / 10^decimals — reading the input buffer
+// and writing the result buffer with no intermediate Rust Vec, dropping the cold
+// extract/build Vecs (bead lglck). Same per-element op in the same order, so it
+// is bit-identical to the existing native around path. Returns Ok(None) — caller
+// falls through — for any non-f64 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f64_around(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    decimals: i32,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let scale = 10_f64.powi(decimals);
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            slot.set((cell.get() * scale).round_ties_even() / scale);
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Rounding aliases (2).
 #[pyfunction]
 #[pyo3(signature = (a, decimals=0, out=None))]
@@ -28199,6 +28247,15 @@ fn around(
     // elementwise(Rint) branch below). Other inputs fall through unchanged.
     if decimals == 0
         && let Some(result) = try_zerocopy_f64_unary(py, a.bind(py), UnaryOp::Rint)?
+    {
+        return Ok(result);
+    }
+
+    // decimals != 0: zero-copy (v*10^d).round_ties_even()/10^d for f64 ndarrays
+    // (the common case); skips the cold extract/build Vecs. Bit-identical to the
+    // general native path below (same formula). Other inputs fall through.
+    if decimals != 0
+        && let Some(result) = try_zerocopy_f64_around(py, a.bind(py), decimals)?
     {
         return Ok(result);
     }
