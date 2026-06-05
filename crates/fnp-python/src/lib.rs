@@ -7763,6 +7763,69 @@ fn try_zerocopy_f64_take(
     Ok(Some(output))
 }
 
+// Zero-copy in-place np.putmask(a, mask, values) for a writable float64 a ndarray,
+// a bool mask of the identical shape, and a non-empty float64 values ndarray.
+// numpy sets a.flat[i] = values.flat[i % values.size] at every flat position i
+// where mask is True; this writes those positions straight into a's own buffer
+// (no extract of a/values and no full copy-back — only the masked slots are
+// touched), dropping the cold boundary-tax Vecs (bead lglck). Values are copied
+// verbatim, so the mutation is bit-identical incl. -0.0/inf/nan. The bool mask's
+// '?' format is rejected by PyBuffer::<u8>, so it is viewed as uint8 first.
+// Returns Ok(false) — caller falls through to the general path — for a shape
+// mismatch, an empty values array (numpy raises), a read-only a, or any non-f64 /
+// non-bool / non-contiguous / non-ndarray operand.
+fn try_zerocopy_f64_putmask(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    mask: &Bound<'_, PyAny>,
+    values: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type)
+        || !mask.is_exact_instance(&ndarray_type)
+        || !values.is_exact_instance(&ndarray_type)
+    {
+        return Ok(false);
+    }
+    if mask.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b"
+        || !numpy_dtype_is_f64(py, a)
+        || !numpy_dtype_is_f64(py, values)
+    {
+        return Ok(false);
+    }
+    let mask_u8 = mask.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let (Ok(a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
+        PyBuffer::<f64>::get(a),
+        PyBuffer::<u8>::get(&mask_u8),
+        PyBuffer::<f64>::get(values),
+    ) else {
+        return Ok(false);
+    };
+    // numpy.putmask requires a and mask to share a shape; require an exact match
+    // (no broadcasting) so the flat index aligns.
+    if a_buffer.shape() != mask_buffer.shape() {
+        return Ok(false);
+    }
+    let (Some(mask_in), Some(val_in)) = (mask_buffer.as_slice(py), val_buffer.as_slice(py)) else {
+        return Ok(false);
+    };
+    let v = val_in.len();
+    if v == 0 {
+        // numpy raises ValueError("Cannot insert from an empty object"); defer.
+        return Ok(false);
+    }
+    let Some(a_out) = a_buffer.as_mut_slice(py) else {
+        return Ok(false);
+    };
+    for (i, slot) in a_out.iter().enumerate() {
+        if mask_in[i].get() != 0 {
+            slot.set(val_in[i % v].get());
+        }
+    }
+    Ok(true)
+}
+
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
 // ndarray. Output[i] = a[i+1] - a[i], length len-1 (empty for len 0 or 1, which
 // matches numpy). Reads the input buffer and writes the (len-1)-length output
@@ -12936,6 +12999,14 @@ fn putmask(
         numpy
             .getattr("putmask")?
             .call1((a, mask.bind(py), values.bind(py)))?;
+        return Ok(py.None());
+    }
+
+    // Zero-copy in-place write for the common case (f64 a + bool mask of identical
+    // shape + non-empty f64 values); touches only the masked slots of a's own
+    // buffer, skipping the cold extract/copy-back. Bit-identical; shape mismatch,
+    // empty values, and other dtypes fall through.
+    if try_zerocopy_f64_putmask(py, a, mask.bind(py), values.bind(py))? {
         return Ok(py.None());
     }
 
