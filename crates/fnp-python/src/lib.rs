@@ -8730,6 +8730,97 @@ fn try_zerocopy_f64_compress(
     Ok(Some(flat.unbind()))
 }
 
+// Generic typed core for boolean-mask stream compaction (np.compress / np.extract
+// flat case). Counts the True positions in the first `cond.len()` elements (must
+// be <= arr length), then gathers arr[i] (read as `T`) where cond[i] into a fresh
+// `dtype_name` buffer — one typed element-move per kept element. (A byte-per-
+// element copy would not vectorize; whole-element typed moves stay near numpy.)
+// Returns the 1-D output (compress/extract are flat).
+fn compact_typed<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    cond: &Bound<'py, PyAny>,
+    arr_src: &Bound<'py, PyAny>,
+    dtype_name: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    let cond_u8 = cond.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let (Ok(cond_buffer), Ok(arr_buffer)) =
+        (PyBuffer::<u8>::get(&cond_u8), PyBuffer::<T>::get(arr_src))
+    else {
+        return Ok(None);
+    };
+    let (Some(cond_in), Some(arr_in)) = (cond_buffer.as_slice(py), arr_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    let m = cond_in.len();
+    if m > arr_in.len() {
+        return Ok(None);
+    }
+    let count = cond_in.iter().filter(|cell| cell.get() != 0).count();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (count,), Some(&kwargs))?;
+    if count > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // Branchless compaction: always store arr[i] at output[w], then advance w
+        // only when kept (the unkept store is overwritten by the next kept one).
+        // Avoids the ~50% branch-mispredict of `if cond { ...; w += 1 }`. The
+        // store is guarded so trailing-unkept writes (w == count) stay in bounds.
+        let mut w = 0usize;
+        for i in 0..m {
+            let v = arr_in[i].get();
+            if w < count {
+                output[w].set(v);
+            }
+            w += (cond_in[i].get() != 0) as usize;
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
+// Dispatch a typed compaction for int64/uint64/bool arrays (the dtypes the f64
+// compress/extract helpers leave to the cold extract path). bool gathers through
+// a uint8 view and returns bool. Returns None for other dtypes.
+fn try_zerocopy_int_compact(
+    py: Python<'_>,
+    cond: &Bound<'_, PyAny>,
+    arr: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !arr.is_exact_instance(&ndarray_type) || !cond.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if cond.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+        return Ok(None);
+    }
+    let a_dtype = arr.getattr("dtype")?;
+    let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize) {
+        ("i", 8) => compact_typed::<i64>(py, &numpy, cond, arr, "int64"),
+        ("u", 8) => compact_typed::<u64>(py, &numpy, cond, arr, "uint64"),
+        ("b", 1) => {
+            let arr_u8 = arr.call_method1("view", (numpy.getattr("uint8")?,))?;
+            match compact_typed::<u8>(py, &numpy, cond, &arr_u8, "uint8")? {
+                Some(flat_u8) => Ok(Some(
+                    flat_u8
+                        .bind(py)
+                        .call_method1("view", (numpy.getattr("bool_")?,))?
+                        .unbind(),
+                )),
+                None => Ok(None),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
 // Zero-copy np.take(a, indices, axis=None, mode="raise") for a float64 a ndarray
 // and an int64 indices ndarray: numpy flattens a and gathers a.flat[idx] for each
 // index (with numpy's negative-index wraparound idx += n), returning a result of
@@ -14467,6 +14558,13 @@ fn compress(
     if let Some(out) = try_zerocopy_f64_compress(py, condition.bind(py), a.bind(py), axis)? {
         return Ok(out);
     }
+    // Typed compaction for int64/uint64/bool (flat compress); skips the cold,
+    // for-wide-ints lossy extract Vec. Bit-identical (elements move verbatim).
+    if axis.is_none()
+        && let Some(out) = try_zerocopy_int_compact(py, condition.bind(py), a.bind(py))?
+    {
+        return Ok(out);
+    }
     let condition = match extract_condition_mask(py, condition.bind(py), "compress(condition)") {
         Ok(condition) => condition,
         Err(_) => return fallback(),
@@ -14502,6 +14600,11 @@ fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<
     // flattened length); skips the cold extract/build Vecs. Bit-identical;
     // non-bool conditions, length mismatches, and other dtypes fall through.
     if let Some(out) = try_zerocopy_f64_extract(py, condition.bind(py), arr.bind(py))? {
+        return Ok(out);
+    }
+    // Typed compaction for int64/uint64/bool (extract == compress over the raveled
+    // operands); skips the cold, for-wide-ints lossy extract Vec.
+    if let Some(out) = try_zerocopy_int_compact(py, condition.bind(py), arr.bind(py))? {
         return Ok(out);
     }
     let condition = match extract_numeric_array(py, condition.bind(py), "extract(condition)") {
