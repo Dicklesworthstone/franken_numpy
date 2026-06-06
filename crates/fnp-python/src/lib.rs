@@ -15307,23 +15307,39 @@ fn diff(
     let Ok(n) = usize::try_from(n) else {
         return fallback();
     };
-    // Zero-copy first difference for 1-D f64 ndarrays (the common case); skips
-    // the cold extract/build Vecs. Bit-identical; everything else (n>1, multi-
-    // dim, other axes) falls through to the general a.diff path below.
-    if let Some(out) = try_zerocopy_f64_diff1d(py, a.bind(py), n, axis)? {
-        return Ok(out);
-    }
-    // Zero-copy first difference along an explicit axis of a multi-dim f64
-    // ndarray; same per-lane decomposition. Bit-identical; n>1 and non-f64 inputs
-    // fall through to the general a.diff path below.
-    if let Some(out) = try_zerocopy_f64_diff_axis(py, a.bind(py), n, axis)? {
-        return Ok(out);
-    }
-    // Zero-copy first difference for integer ndarrays (all widths, any axis);
-    // wrapping subtraction, bit-identical to numpy. Skips the cold (and for wide
-    // ints lossy) f64 extract/build.
-    if let Some(out) = try_zerocopy_int_diff(py, a.bind(py), n, axis)? {
-        return Ok(out);
+    // Zero-copy diff via repeated first differences. numpy defines the n-th
+    // difference as the first difference applied n times, so each step reuses the
+    // n==1 zero-copy paths (1-D f64, per-axis f64, integer all-widths) on the
+    // prior result's buffer — covering higher-order diff (n>1) for every dtype the
+    // first-difference path supports. Bit-identical (each step is the same op
+    // numpy performs in the same order). If any step cannot take the zero-copy
+    // path (n==0, non-f64/int dtype, non-contiguous, empty axis), the whole thing
+    // falls through to the general extract path below with the original full n.
+    if n >= 1 {
+        let mut current: Py<PyAny> = a.clone_ref(py);
+        let mut all_ok = true;
+        for _ in 0..n {
+            let cur = current.bind(py);
+            let step = if let Some(out) = try_zerocopy_f64_diff1d(py, cur, 1, axis)? {
+                Some(out)
+            } else if let Some(out) = try_zerocopy_f64_diff_axis(py, cur, 1, axis)? {
+                Some(out)
+            } else if let Some(out) = try_zerocopy_int_diff(py, cur, 1, axis)? {
+                Some(out)
+            } else {
+                None
+            };
+            match step {
+                Some(out) => current = out,
+                None => {
+                    all_ok = false;
+                    break;
+                }
+            }
+        }
+        if all_ok {
+            return Ok(current);
+        }
     }
     let a = match extract_precise_numeric_array(py, a.bind(py), "diff(a)") {
         Ok(array) => array,
