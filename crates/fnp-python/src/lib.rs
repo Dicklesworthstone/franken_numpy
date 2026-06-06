@@ -7187,6 +7187,159 @@ fn zerocopy_i32_unary_flat<'py>(
     Ok(Some((flat, shape)))
 }
 
+// Monomorphic per-element map over a typed integer buffer; with `f` inlined this
+// autovectorizes per width.
+#[inline(always)]
+fn unary_map_int<T: pyo3::buffer::Element + Copy, F: Fn(T) -> T>(
+    input: &[pyo3::buffer::ReadOnlyCell<T>],
+    output: &[std::cell::Cell<T>],
+    f: F,
+) {
+    for (slot, cell) in output.iter().zip(input.iter()) {
+        slot.set(f(cell.get()));
+    }
+}
+
+// Generic typed core for the integer-width unary fast paths: read the `T` buffer
+// in place and write neg/abs/sqr (or identity for positive) into a fresh `T`
+// buffer of dtype `dtype_name`. Generic closures (not fn pointers) keep the loop
+// inlined and vectorizable. Bit-identical to numpy, whose integer ufuncs wrap
+// silently on two's-complement overflow in the input width.
+#[inline]
+fn zerocopy_int_unary_typed<'py, T, N, A, S>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    x: &Bound<'py, PyAny>,
+    op: UnaryOp,
+    dtype_name: &str,
+    neg: N,
+    abs_: A,
+    sqr: S,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
+where
+    T: pyo3::buffer::Element + Copy,
+    N: Fn(T) -> T,
+    A: Fn(T) -> T,
+    S: Fn(T) -> T,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        match op {
+            UnaryOp::Negative => unary_map_int(input, output, neg),
+            UnaryOp::Positive => unary_map_int(input, output, |v| v),
+            UnaryOp::Abs => unary_map_int(input, output, abs_),
+            UnaryOp::Square => unary_map_int(input, output, sqr),
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((flat, shape)))
+}
+
+// Zero-copy negative/positive/abs/square for the narrow signed and all unsigned
+// integer widths not covered by the i32/i64 fast paths (int8/int16, uint8/16/32/
+// 64). For unsigned, abs is identity (numpy). Each width extracted to an f64 Vec
+// and rebuilt otherwise — 170-850x slower than numpy — and the f64 round-trip
+// mis-wrapped square. Returns None for other dtypes / non-ndarray.
+fn zerocopy_narrow_int_unary_flat<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    x: &Bound<'py, PyAny>,
+    op: UnaryOp,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    if !matches!(
+        op,
+        UnaryOp::Negative | UnaryOp::Positive | UnaryOp::Abs | UnaryOp::Square
+    ) {
+        return Ok(None);
+    }
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = x.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize) {
+        ("i", 1) => zerocopy_int_unary_typed::<i8, _, _, _>(
+            py,
+            numpy,
+            x,
+            op,
+            "int8",
+            |v| v.wrapping_neg(),
+            |v| v.wrapping_abs(),
+            |v| v.wrapping_mul(v),
+        ),
+        ("i", 2) => zerocopy_int_unary_typed::<i16, _, _, _>(
+            py,
+            numpy,
+            x,
+            op,
+            "int16",
+            |v| v.wrapping_neg(),
+            |v| v.wrapping_abs(),
+            |v| v.wrapping_mul(v),
+        ),
+        ("u", 1) => zerocopy_int_unary_typed::<u8, _, _, _>(
+            py,
+            numpy,
+            x,
+            op,
+            "uint8",
+            |v| v.wrapping_neg(),
+            |v| v,
+            |v| v.wrapping_mul(v),
+        ),
+        ("u", 2) => zerocopy_int_unary_typed::<u16, _, _, _>(
+            py,
+            numpy,
+            x,
+            op,
+            "uint16",
+            |v| v.wrapping_neg(),
+            |v| v,
+            |v| v.wrapping_mul(v),
+        ),
+        ("u", 4) => zerocopy_int_unary_typed::<u32, _, _, _>(
+            py,
+            numpy,
+            x,
+            op,
+            "uint32",
+            |v| v.wrapping_neg(),
+            |v| v,
+            |v| v.wrapping_mul(v),
+        ),
+        ("u", 8) => zerocopy_int_unary_typed::<u64, _, _, _>(
+            py,
+            numpy,
+            x,
+            op,
+            "uint64",
+            |v| v.wrapping_neg(),
+            |v| v,
+            |v| v.wrapping_mul(v),
+        ),
+        _ => Ok(None),
+    }
+}
+
 // Wrap zerocopy_f64_unary_flat with the reshape / 0-d scalar handling shared by
 // every native unary handler, returning the finished output array (or None to
 // fall through to the slower extract path). Lets single-op handlers
@@ -18380,6 +18533,17 @@ fn native_unary_elementwise(
     // the f64 round-trip mis-wrapped square (saturating cast); this keeps int32
     // in int32 with wrapping ops, bit-identical to numpy.
     if let Some((flat, shape)) = zerocopy_i32_unary_flat(py, &numpy, x, op)? {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+        if shape.is_empty() {
+            return Ok(output.bind(py).get_item(())?.unbind());
+        }
+        return Ok(output);
+    }
+    // Narrow signed / all unsigned integer widths (int8/int16, uint8/16/32/64):
+    // same extract-then-discard cost as int64, plus the f64 round-trip mis-wraps
+    // square. Keeps each width native with wrapping ops, bit-identical to numpy.
+    if let Some((flat, shape)) = zerocopy_narrow_int_unary_flat(py, &numpy, x, op)? {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
         if shape.is_empty() {
