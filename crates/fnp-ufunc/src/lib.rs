@@ -1230,14 +1230,13 @@ impl UnaryOp {
                 } else if x == 0.0 {
                     f64::from_bits(1)
                 } else {
+                    // ULP toward away-from-zero (matches numpy): the gap to the
+                    // next representable magnitude. At f64::MAX the next bit
+                    // pattern is +inf, so the gap is inf — numpy returns
+                    // (-)inf for spacing(+-MAX), not the downward ULP.
                     let abs_x = x.abs();
-                    let spacing = if abs_x == f64::MAX {
-                        f64::MAX - f64::from_bits(f64::MAX.to_bits() - 1)
-                    } else {
-                        // ULP: distance to the next representable float
-                        let next = f64::from_bits(abs_x.to_bits() + 1);
-                        next - abs_x
-                    };
+                    let next = f64::from_bits(abs_x.to_bits() + 1);
+                    let spacing = next - abs_x;
                     if x.is_sign_negative() {
                         -spacing
                     } else {
@@ -34513,14 +34512,12 @@ pub fn spacing(x: &UFuncArray) -> Result<UFuncArray, UFuncError> {
                 // Smallest positive subnormal
                 f64::from_bits(1)
             } else {
+                // ULP toward away-from-zero (matches numpy): at f64::MAX the
+                // next bit pattern is +inf, so the gap is inf — numpy returns
+                // (-)inf for spacing(+-MAX), not the downward ULP.
                 let abs_v = v.abs();
-                let spacing = if abs_v == f64::MAX {
-                    f64::MAX - f64::from_bits(f64::MAX.to_bits() - 1)
-                } else {
-                    let bits = abs_v.to_bits();
-                    let next_bits = bits.wrapping_add(1);
-                    f64::from_bits(next_bits) - abs_v
-                };
+                let next_bits = abs_v.to_bits().wrapping_add(1);
+                let spacing = f64::from_bits(next_bits) - abs_v;
                 if v.is_sign_negative() {
                     -spacing
                 } else {
@@ -59232,6 +59229,21 @@ print(json.dumps(payload))
         let arr = UFuncArray::new(vec![1], vec![f64::NAN], DType::F64).unwrap();
         let result = spacing(&arr).unwrap();
         assert!(result.values()[0].is_nan());
+    }
+
+    #[test]
+    fn spacing_max_matches_numpy_inf() {
+        // numpy.spacing(+-MAX) is the gap toward +-inf, i.e. nextafter(MAX,inf)
+        // - MAX = inf. The old code special-cased MAX to the downward ULP
+        // (~1.996e292), diverging from numpy.
+        let arr = UFuncArray::new(vec![2], vec![f64::MAX, -f64::MAX], DType::F64).unwrap();
+        let result = spacing(&arr).unwrap();
+        assert_eq!(result.values()[0], f64::INFINITY);
+        assert_eq!(result.values()[1], f64::NEG_INFINITY);
+        // The largest finite below MAX still has a finite downward-from-next ULP.
+        let second = f64::from_bits(f64::MAX.to_bits() - 1);
+        let r2 = spacing(&UFuncArray::new(vec![1], vec![second], DType::F64).unwrap()).unwrap();
+        assert!(r2.values()[0].is_finite() && r2.values()[0] > 0.0);
     }
 
     // ── gcd / lcm tests ────────────────────────────────────────────────
