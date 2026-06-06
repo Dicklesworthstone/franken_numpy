@@ -8052,6 +8052,125 @@ fn try_zerocopy_f64_where(
     Ok(Some(output))
 }
 
+// Generic typed core for np.where(cond, x, y) element-wise select with no
+// broadcasting (cond bool + x/y same-shape same-dtype `T` ndarrays). The
+// per-element `if cond { x } else { y }` is a branchless integer blend (cmov), so
+// it autovectorizes. Requiring PyBuffer::<T> for both x and y enforces x.dtype ==
+// y.dtype == T, matching numpy's result_type(x, y) for the equal-dtype case.
+fn where_typed<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    cond_u8: &Bound<'py, PyAny>,
+    x: &Bound<'py, PyAny>,
+    y: &Bound<'py, PyAny>,
+    dtype_name: &str,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    let (Ok(cond_buffer), Ok(x_buffer), Ok(y_buffer)) = (
+        PyBuffer::<u8>::get(cond_u8),
+        PyBuffer::<T>::get(x),
+        PyBuffer::<T>::get(y),
+    ) else {
+        return Ok(None);
+    };
+    let (Some(cond_in), Some(x_in), Some(y_in)) = (
+        cond_buffer.as_slice(py),
+        x_buffer.as_slice(py),
+        y_buffer.as_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    if cond_buffer.shape() != x_buffer.shape() || x_buffer.shape() != y_buffer.shape() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = x_buffer.shape().to_vec();
+    let n = x_in.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (((slot, cond_cell), x_cell), y_cell) in output
+            .iter()
+            .zip(cond_in.iter())
+            .zip(x_in.iter())
+            .zip(y_in.iter())
+        {
+            slot.set(if cond_cell.get() != 0 {
+                x_cell.get()
+            } else {
+                y_cell.get()
+            });
+        }
+    }
+    Ok(Some((flat, shape)))
+}
+
+// Zero-copy np.where(cond, x, y) select for bool cond + same-shape same-dtype
+// int8/16/32/64, uint8/16/32/64, or bool x/y. The f64 helper above leaves these
+// to the cold extract path (~16x slower, lossy for wide ints). Returns None for
+// a non-bool cond, mismatched x/y dtypes (PyBuffer::<T> gates it), broadcasting,
+// or a non-ndarray operand.
+fn try_zerocopy_int_where(
+    py: Python<'_>,
+    condition: &Bound<'_, PyAny>,
+    x: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.is_exact_instance(&ndarray_type) || !y.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if condition
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        != "b"
+    {
+        return Ok(None);
+    }
+    let cond_u8 = condition.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let x_dtype = x.getattr("dtype")?;
+    let kind = x_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = x_dtype.getattr("itemsize")?.extract::<usize>()?;
+    let result = match (kind.as_str(), itemsize) {
+        ("i", 1) => where_typed::<i8>(py, &numpy, &cond_u8, x, y, "int8")?,
+        ("i", 2) => where_typed::<i16>(py, &numpy, &cond_u8, x, y, "int16")?,
+        ("i", 4) => where_typed::<i32>(py, &numpy, &cond_u8, x, y, "int32")?,
+        ("i", 8) => where_typed::<i64>(py, &numpy, &cond_u8, x, y, "int64")?,
+        ("u", 1) => where_typed::<u8>(py, &numpy, &cond_u8, x, y, "uint8")?,
+        ("u", 2) => where_typed::<u16>(py, &numpy, &cond_u8, x, y, "uint16")?,
+        ("u", 4) => where_typed::<u32>(py, &numpy, &cond_u8, x, y, "uint32")?,
+        ("u", 8) => where_typed::<u64>(py, &numpy, &cond_u8, x, y, "uint64")?,
+        ("b", 1) => {
+            let x_u8 = x.call_method1("view", (numpy.getattr("uint8")?,))?;
+            let y_u8 = y.call_method1("view", (numpy.getattr("uint8")?,))?;
+            match where_typed::<u8>(py, &numpy, &cond_u8, &x_u8, &y_u8, "uint8")? {
+                Some((flat_u8, shape)) => {
+                    let flat_bool = flat_u8.call_method1("view", (numpy.getattr("bool_")?,))?;
+                    Some((flat_bool, shape))
+                }
+                None => None,
+            }
+        }
+        _ => return Ok(None),
+    };
+    let Some((flat, shape)) = result else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Zero-copy np.select(condlist, choicelist, default) for the common all-float64
 // form: K bool-ndarray conditions and K float64-ndarray choices, all of one
 // identical shape, with a scalar default (numpy's default is 0). For each output
@@ -11489,6 +11608,11 @@ fn where_py(
         let x_arg = args.get_item(0)?;
         let y_arg = args.get_item(1)?;
         if let Some(out) = try_zerocopy_f64_where(py, condition_bound, &x_arg, &y_arg)? {
+            return Ok(out);
+        }
+        // Typed branchless select for int/bool x,y of equal dtype+shape; skips the
+        // cold, for-wide-ints lossy extract Vecs. Bit-identical (pure select).
+        if let Some(out) = try_zerocopy_int_where(py, condition_bound, &x_arg, &y_arg)? {
             return Ok(out);
         }
     }
