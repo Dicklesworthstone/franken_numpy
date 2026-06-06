@@ -8068,6 +8068,73 @@ fn try_zerocopy_f64_nan_to_num(
     Ok(Some(output))
 }
 
+// Zero-copy nan_to_num for exact C-contiguous float32 ndarrays — the float32 sibling
+// of try_zerocopy_f64_nan_to_num. numpy replaces NaN -> nan_rep, +inf -> posinf_rep,
+// -inf -> neginf_rep and leaves every finite value (incl. signed zeros) untouched,
+// all in float32. The replacement scalars are the python-float args cast to float32
+// exactly as numpy assigns them into the float32 array (a too-large posinf saturates
+// to inf, matching numpy's overflow-on-cast). The f64 helper gates on float64, so
+// float32 otherwise extracted to an f64 Vec (~9.6x slower). The caller passes the
+// f32 defaults (finfo(float32).max / -max == f32::MAX / f32::MIN). Returns None for
+// any non-float32 / non-contiguous / non-ndarray input.
+fn try_zerocopy_f32_nan_to_num(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    nan_rep: f32,
+    posinf_rep: f32,
+    neginf_rep: f32,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = x.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 4
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f32>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float32")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            let v = cell.get();
+            let replaced = if v.is_nan() {
+                nan_rep
+            } else if v == f32::INFINITY {
+                posinf_rep
+            } else if v == f32::NEG_INFINITY {
+                neginf_rep
+            } else {
+                v
+            };
+            slot.set(replaced);
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Zero-copy np.where(cond, x, y) for the common select form: a bool cond ndarray
 // with float64 x and y of the identical shape. out[i] = x[i] if cond[i] else
 // y[i] — a pure element-wise select (the chosen value is copied verbatim, so it
@@ -15231,6 +15298,17 @@ fn nan_to_num(
     // Integer ndarrays cannot hold NaN/inf, so nan_to_num is a layout-preserving
     // copy; skip the cold (and for wide ints lossy) f64 extract + rebuild.
     if let Some(out) = try_zerocopy_int_nan_to_num(py, x.bind(py))? {
+        return Ok(out);
+    }
+    // float32 ndarrays: replace NaN/+-inf in float32 with the args cast to float32
+    // (defaults finfo(float32).max / -max); skips the cold f64 round-trip.
+    if let Some(out) = try_zerocopy_f32_nan_to_num(
+        py,
+        x.bind(py),
+        nan as f32,
+        posinf.map(|p| p as f32).unwrap_or(f32::MAX),
+        neginf.map(|p| p as f32).unwrap_or(f32::MIN),
+    )? {
         return Ok(out);
     }
     let x = extract_precise_numeric_array(py, x.bind(py), "nan_to_num(x)")?;
