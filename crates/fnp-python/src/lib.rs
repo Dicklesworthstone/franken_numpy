@@ -13852,6 +13852,11 @@ fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f32_unary(py, x.bind(py), UnaryOp::Sign)? {
         return Ok(out);
     }
+    // Integer input keeps its dtype (signed -1/0/1, unsigned 0/1); the extract
+    // path widens to f64 and is lossy for wide ints.
+    if let Some(out) = try_zerocopy_int_sign(py, x.bind(py))? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x.bind(py), "sign(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Sign))
 }
@@ -28861,9 +28866,7 @@ fn prod(
     // Zero-copy integer prod (full reduction): wrapping product with numpy's
     // accumulator promotion (signed->int64, unsigned->uint64). Skips the cold,
     // for-wide-ints lossy extract Vec. keepdims/per-axis/non-integer fall through.
-    if !keepdims
-        && let Some(out) = try_zerocopy_int_prod(py, a.bind(py), axis_val)?
-    {
+    if !keepdims && let Some(out) = try_zerocopy_int_prod(py, a.bind(py), axis_val)? {
         return Ok(out);
     }
 
@@ -30899,6 +30902,88 @@ fn isnat(
     core_numpy_passthrough(py, "isnat", args, kwargs)
 }
 
+// Generic typed core for integer sign: write sign_fn(v) into a fresh same-dtype
+// buffer via the monomorphic unary_map_int (branchless -> autovectorizes).
+fn sign_typed<'py, T, F>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    dtype_name: &str,
+    sign_fn: F,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
+where
+    T: pyo3::buffer::Element + Copy,
+    F: Fn(T) -> T,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        unary_map_int(input, output, sign_fn);
+    }
+    Ok(Some((flat, shape)))
+}
+
+// Zero-copy integer np.sign for all widths. numpy's sign preserves the input
+// dtype: signed -> -1/0/1, unsigned -> 0/1 (unsigned is never negative). Branchless
+// (v>0) - (v<0). Otherwise these extracted to an f64 Vec (~80x slower, lossy for
+// wide ints). Returns None for non-integer / non-ndarray inputs.
+fn try_zerocopy_int_sign(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    let result = match (kind.as_str(), itemsize) {
+        ("i", 1) => {
+            sign_typed::<i8, _>(py, &numpy, a, "int8", |v| i8::from(v > 0) - i8::from(v < 0))?
+        }
+        ("i", 2) => {
+            sign_typed::<i16, _>(py, &numpy, a, "int16", |v| i16::from(v > 0) - i16::from(v < 0))?
+        }
+        ("i", 4) => {
+            sign_typed::<i32, _>(py, &numpy, a, "int32", |v| i32::from(v > 0) - i32::from(v < 0))?
+        }
+        ("i", 8) => sign_typed::<i64, _>(py, &numpy, a, "int64", |v| {
+            i64::from(v > 0) - i64::from(v < 0)
+        })?,
+        ("u", 1) => sign_typed::<u8, _>(py, &numpy, a, "uint8", |v| u8::from(v > 0))?,
+        ("u", 2) => sign_typed::<u16, _>(py, &numpy, a, "uint16", |v| u16::from(v > 0))?,
+        ("u", 4) => sign_typed::<u32, _>(py, &numpy, a, "uint32", |v| u32::from(v > 0))?,
+        ("u", 8) => sign_typed::<u64, _>(py, &numpy, a, "uint64", |v| u64::from(v > 0))?,
+        _ => return Ok(None),
+    };
+    let Some((flat, shape)) = result else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Generic typed core for the integer prod full reduction. numpy promotes the
 // product accumulator (signed -> int64, unsigned -> uint64) and wraps on
 // overflow; integer multiplication is associative mod 2^n so the (vectorizable)
@@ -30958,30 +31043,72 @@ fn try_zerocopy_int_prod(
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     match (kind.as_str(), itemsize) {
-        ("i", 1) => prod_typed::<i8, i64, _, _>(py, &numpy, a, "int64", 1, |v| v as i64, |x, y| {
-            x.wrapping_mul(y)
-        }),
-        ("i", 2) => prod_typed::<i16, i64, _, _>(py, &numpy, a, "int64", 1, |v| v as i64, |x, y| {
-            x.wrapping_mul(y)
-        }),
-        ("i", 4) => prod_typed::<i32, i64, _, _>(py, &numpy, a, "int64", 1, |v| v as i64, |x, y| {
-            x.wrapping_mul(y)
-        }),
+        ("i", 1) => prod_typed::<i8, i64, _, _>(
+            py,
+            &numpy,
+            a,
+            "int64",
+            1,
+            |v| v as i64,
+            |x, y| x.wrapping_mul(y),
+        ),
+        ("i", 2) => prod_typed::<i16, i64, _, _>(
+            py,
+            &numpy,
+            a,
+            "int64",
+            1,
+            |v| v as i64,
+            |x, y| x.wrapping_mul(y),
+        ),
+        ("i", 4) => prod_typed::<i32, i64, _, _>(
+            py,
+            &numpy,
+            a,
+            "int64",
+            1,
+            |v| v as i64,
+            |x, y| x.wrapping_mul(y),
+        ),
         ("i", 8) => {
             prod_typed::<i64, i64, _, _>(py, &numpy, a, "int64", 1, |v| v, |x, y| x.wrapping_mul(y))
         }
-        ("u", 1) => prod_typed::<u8, u64, _, _>(py, &numpy, a, "uint64", 1, |v| v as u64, |x, y| {
-            x.wrapping_mul(y)
-        }),
-        ("u", 2) => prod_typed::<u16, u64, _, _>(py, &numpy, a, "uint64", 1, |v| v as u64, |x, y| {
-            x.wrapping_mul(y)
-        }),
-        ("u", 4) => prod_typed::<u32, u64, _, _>(py, &numpy, a, "uint64", 1, |v| v as u64, |x, y| {
-            x.wrapping_mul(y)
-        }),
-        ("u", 8) => {
-            prod_typed::<u64, u64, _, _>(py, &numpy, a, "uint64", 1, |v| v, |x, y| x.wrapping_mul(y))
-        }
+        ("u", 1) => prod_typed::<u8, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            "uint64",
+            1,
+            |v| v as u64,
+            |x, y| x.wrapping_mul(y),
+        ),
+        ("u", 2) => prod_typed::<u16, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            "uint64",
+            1,
+            |v| v as u64,
+            |x, y| x.wrapping_mul(y),
+        ),
+        ("u", 4) => prod_typed::<u32, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            "uint64",
+            1,
+            |v| v as u64,
+            |x, y| x.wrapping_mul(y),
+        ),
+        ("u", 8) => prod_typed::<u64, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            "uint64",
+            1,
+            |v| v,
+            |x, y| x.wrapping_mul(y),
+        ),
         _ => Ok(None),
     }
 }
