@@ -6580,8 +6580,10 @@ pub fn complex_matvec(a: &[f64], x: &[f64], m: usize, n: usize) -> Vec<f64> {
 /// Minimum FLOP count (m·k·n) before the interleaved-complex GEMM fans out across
 /// row bands; below this the work is too small to amortize thread dispatch.
 const COMPLEX_MATMUL_PARALLEL_MIN_FLOPS: usize = 1 << 18;
+const COMPLEX_PACKED_NR: usize = 8;
+const COMPLEX_PACKED_MIN_FLOPS: usize = 1 << 23;
 
-fn complex_matmul_row_block4(
+fn complex_matmul_stream_row_block4(
     a: &[f64],
     b: &[f64],
     k: usize,
@@ -6639,25 +6641,151 @@ fn complex_matmul_row_block4(
     }
 }
 
+fn complex_matmul_packed_tile4(
+    a: &[f64],
+    bp: &[f64],
+    k: usize,
+    n: usize,
+    row_start: usize,
+    j0: usize,
+    c: &mut [f64],
+) {
+    let (c0, rest) = c.split_at_mut(2 * n);
+    let (c1, rest) = rest.split_at_mut(2 * n);
+    let (c2, c3) = rest.split_at_mut(2 * n);
+    let a0 = &a[2 * row_start * k..2 * row_start * k + 2 * k];
+    let a1 = &a[2 * (row_start + 1) * k..2 * (row_start + 1) * k + 2 * k];
+    let a2 = &a[2 * (row_start + 2) * k..2 * (row_start + 2) * k + 2 * k];
+    let a3 = &a[2 * (row_start + 3) * k..2 * (row_start + 3) * k + 2 * k];
+    let mut acc_r = [[0.0f64; COMPLEX_PACKED_NR]; MATMUL_ROW_BLOCK];
+    let mut acc_i = [[0.0f64; COMPLEX_PACKED_NR]; MATMUL_ROW_BLOCK];
+
+    for p in 0..k {
+        let brow = &bp[2 * p * COMPLEX_PACKED_NR..2 * (p + 1) * COMPLEX_PACKED_NR];
+        let (a0r, a0i) = (a0[2 * p], a0[2 * p + 1]);
+        let (a1r, a1i) = (a1[2 * p], a1[2 * p + 1]);
+        let (a2r, a2i) = (a2[2 * p], a2[2 * p + 1]);
+        let (a3r, a3i) = (a3[2 * p], a3[2 * p + 1]);
+        for j in 0..COMPLEX_PACKED_NR {
+            let (br, bi) = (brow[2 * j], brow[2 * j + 1]);
+            let (p0r, p0i) = cmul(a0r, a0i, br, bi);
+            let (p1r, p1i) = cmul(a1r, a1i, br, bi);
+            let (p2r, p2i) = cmul(a2r, a2i, br, bi);
+            let (p3r, p3i) = cmul(a3r, a3i, br, bi);
+            acc_r[0][j] += p0r;
+            acc_i[0][j] += p0i;
+            acc_r[1][j] += p1r;
+            acc_i[1][j] += p1i;
+            acc_r[2][j] += p2r;
+            acc_i[2][j] += p2i;
+            acc_r[3][j] += p3r;
+            acc_i[3][j] += p3i;
+        }
+    }
+
+    for j in 0..COMPLEX_PACKED_NR {
+        let dst = 2 * (j0 + j);
+        c0[dst] += acc_r[0][j];
+        c0[dst + 1] += acc_i[0][j];
+        c1[dst] += acc_r[1][j];
+        c1[dst + 1] += acc_i[1][j];
+        c2[dst] += acc_r[2][j];
+        c2[dst + 1] += acc_i[2][j];
+        c3[dst] += acc_r[3][j];
+        c3[dst + 1] += acc_i[3][j];
+    }
+}
+
+fn complex_matmul_band(a: &[f64], b: &[f64], k: usize, n: usize, row_start: usize, c: &mut [f64]) {
+    let rows = c.len() / (2 * n);
+    let row_full = rows - rows % MATMUL_ROW_BLOCK;
+    let n_full = n - n % COMPLEX_PACKED_NR;
+    let mut bp = vec![0.0f64; 2 * k * COMPLEX_PACKED_NR];
+
+    let mut j0 = 0;
+    while j0 < n_full {
+        for p in 0..k {
+            bp[2 * p * COMPLEX_PACKED_NR..2 * (p + 1) * COMPLEX_PACKED_NR]
+                .copy_from_slice(&b[2 * (p * n + j0)..2 * (p * n + j0 + COMPLEX_PACKED_NR)]);
+        }
+        let mut ii = 0;
+        while ii < row_full {
+            let c_block = &mut c[ii * 2 * n..(ii + MATMUL_ROW_BLOCK) * 2 * n];
+            complex_matmul_packed_tile4(a, &bp, k, n, row_start + ii, j0, c_block);
+            ii += MATMUL_ROW_BLOCK;
+        }
+        for ii in row_full..rows {
+            let i = row_start + ii;
+            let c_row = &mut c[ii * 2 * n..ii * 2 * n + 2 * n];
+            let a_row = &a[2 * i * k..2 * i * k + 2 * k];
+            for p in 0..k {
+                let (ar, ai) = (a_row[2 * p], a_row[2 * p + 1]);
+                let brow = &bp[2 * p * COMPLEX_PACKED_NR..2 * (p + 1) * COMPLEX_PACKED_NR];
+                for j in 0..COMPLEX_PACKED_NR {
+                    let (pr, pi) = cmul(ar, ai, brow[2 * j], brow[2 * j + 1]);
+                    let dst = 2 * (j0 + j);
+                    c_row[dst] += pr;
+                    c_row[dst + 1] += pi;
+                }
+            }
+        }
+        j0 += COMPLEX_PACKED_NR;
+    }
+
+    for ii in 0..rows {
+        let i = row_start + ii;
+        let c_row = &mut c[ii * 2 * n..ii * 2 * n + 2 * n];
+        let a_row = &a[2 * i * k..2 * i * k + 2 * k];
+        for p in 0..k {
+            let (ar, ai) = (a_row[2 * p], a_row[2 * p + 1]);
+            let b_row = &b[2 * p * n..2 * p * n + 2 * n];
+            for j in n_full..n {
+                let (pr, pi) = cmul(ar, ai, b_row[2 * j], b_row[2 * j + 1]);
+                c_row[2 * j] += pr;
+                c_row[2 * j + 1] += pi;
+            }
+        }
+    }
+}
+
 pub fn complex_matmul(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     let mut c = vec![0.0; 2 * m * n];
     if c.is_empty() {
         return c;
     }
 
-    // Four-row ikp microkernel: each streamed B row feeds four A rows before
-    // advancing, while every c[i,j] still accumulates p in 0..k ascending order
-    // through the same `cmul` operation as the serial reference. The tail path
-    // handles non-multiple-of-four row blocks with the same p-ascending sequence.
+    // Cache-banded four-row microkernel: each band packs B's complex column
+    // tiles once, then feeds several four-row A tiles before advancing. Every
+    // c[i,j] still accumulates p in 0..k ascending order through the same
+    // `cmul` operation as the serial reference; tails use the same p sequence.
     let flops = m.saturating_mul(k).saturating_mul(n);
-    if rayon::current_num_threads() >= 2 && flops >= COMPLEX_MATMUL_PARALLEL_MIN_FLOPS && m >= 8 {
+    let use_packed = flops >= COMPLEX_PACKED_MIN_FLOPS && n >= COMPLEX_PACKED_NR && m >= 4;
+    if use_packed
+        && rayon::current_num_threads() >= 2
+        && flops >= COMPLEX_MATMUL_PARALLEL_MIN_FLOPS
+        && m >= 8
+    {
+        let threads = rayon::current_num_threads();
+        let band_rows =
+            (m.div_ceil(threads * 2).div_ceil(MATMUL_ROW_BLOCK).max(2)) * MATMUL_ROW_BLOCK;
+        c.par_chunks_mut(band_rows * 2 * n)
+            .enumerate()
+            .for_each(|(block, c_block)| {
+                complex_matmul_band(a, b, k, n, block * band_rows, c_block);
+            });
+    } else if use_packed {
+        complex_matmul_band(a, b, k, n, 0, &mut c);
+    } else if rayon::current_num_threads() >= 2
+        && flops >= COMPLEX_MATMUL_PARALLEL_MIN_FLOPS
+        && m >= 8
+    {
         c.par_chunks_mut(MATMUL_ROW_BLOCK * 2 * n)
             .enumerate()
             .for_each(|(block, c_block)| {
-                complex_matmul_row_block4(a, b, k, n, block * MATMUL_ROW_BLOCK, c_block);
+                complex_matmul_stream_row_block4(a, b, k, n, block * MATMUL_ROW_BLOCK, c_block);
             });
     } else {
-        complex_matmul_row_block4(a, b, k, n, 0, &mut c);
+        complex_matmul_stream_row_block4(a, b, k, n, 0, &mut c);
     }
     c
 }
@@ -7083,6 +7211,75 @@ mod tests {
         assert_eq!(
             digest, "b2ce594b8b5b6da625364c07b32ac1a8c4bc09275b0291c425497ceb44ab2eb6",
             "complex_matmul parallel golden digest drifted"
+        );
+    }
+
+    #[test]
+    fn complex_matmul_packed_path_matches_serial_reference_and_golden_sha256() {
+        // Dimensions deliberately cross COMPLEX_PACKED_MIN_FLOPS and include
+        // multiple packed B panels, while keeping the serial reference bounded.
+        let (m, k, n) = (64usize, 256usize, 512usize);
+        let mut state: u64 = 0xF00D_BAAD_D15C_A11E;
+        let mut fill = |len: usize| -> Vec<f64> {
+            (0..len)
+                .map(|idx| {
+                    state = state
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    match idx % 17 {
+                        0 => 0.0,
+                        1 => -0.0,
+                        _ => ((state >> 33) as f64) / (u32::MAX as f64) - 0.5,
+                    }
+                })
+                .collect()
+        };
+        let a = fill(2 * m * k);
+        let b = fill(2 * k * n);
+
+        let mut serial_ref = vec![0.0_f64; 2 * m * n];
+        for i in 0..m {
+            for j in 0..n {
+                let mut sr = 0.0f64;
+                let mut si = 0.0f64;
+                for p in 0..k {
+                    let (ar, ai) = (a[2 * (i * k + p)], a[2 * (i * k + p) + 1]);
+                    let (br, bi) = (b[2 * (p * n + j)], b[2 * (p * n + j) + 1]);
+                    let (pr, pi) = cmul(ar, ai, br, bi);
+                    sr += pr;
+                    si += pi;
+                }
+                serial_ref[2 * (i * n + j)] = sr;
+                serial_ref[2 * (i * n + j) + 1] = si;
+            }
+        }
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("build local rayon pool");
+        let out = pool.install(|| complex_matmul(&a, &b, m, k, n));
+        assert_eq!(out.len(), serial_ref.len());
+        for (p, s) in out.iter().zip(&serial_ref) {
+            assert_eq!(
+                p.to_bits(),
+                s.to_bits(),
+                "complex_matmul packed path drifted"
+            );
+        }
+
+        let mut hasher = Sha256::new();
+        for v in &out {
+            hasher.update(v.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "71af9c98bd94b4c56cf5375e77c1d081316283aa448cfd47f615ec8f5c13d3f8",
+            "complex_matmul packed-path golden digest drifted: {digest}"
         );
     }
 
