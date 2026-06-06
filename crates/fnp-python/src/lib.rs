@@ -29809,6 +29809,156 @@ fn triu_indices_from(py: Python<'_>, arr: Py<PyAny>, k: i64) -> PyResult<Py<PyAn
     build_numpy_tuple_from_ufuncs(py, &[rows, cols])
 }
 
+// Generic per-axis in-place scatter core for put_along_axis — the inverse of
+// gather_along_typed, parameterized by a mover type T chosen by itemsize. Writes
+// arr[o, idx[o,l,inr], inr] = values[o,l,inr] over the outer*axis*inner
+// decomposition, straight into arr's own buffer through a uintN bit-view (so it
+// mutates arr in place and is value-agnostic across dtypes). ALL indices are
+// validated in range FIRST (negative wrap k += la); an out-of-range index returns
+// None with arr untouched, so the caller can defer to numpy for the exact
+// IndexError without a partial/double write. Duplicate indices in a lane resolve
+// last-write-wins, matching numpy's sequential scatter.
+fn scatter_along_typed<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    arr_u: &Bound<'py, PyAny>,
+    val_u: &Bound<'py, PyAny>,
+    idx_in: &[pyo3::buffer::ReadOnlyCell<i64>],
+    outer: usize,
+    la: usize,
+    li: usize,
+    inner: usize,
+) -> PyResult<Option<()>> {
+    let (Ok(arr_buf), Ok(val_buf)) = (PyBuffer::<T>::get(arr_u), PyBuffer::<T>::get(val_u)) else {
+        return Ok(None);
+    };
+    let Some(val_in) = val_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let la_i = la as i64;
+    // Validate every index BEFORE any write so an OOB leaves arr unmutated.
+    for o in 0..outer {
+        let obase = o * li * inner;
+        for l in 0..li {
+            let dbase = obase + l * inner;
+            for inr in 0..inner {
+                let mut k = idx_in[dbase + inr].get();
+                if k < 0 {
+                    k += la_i;
+                }
+                if k < 0 || k >= la_i {
+                    return Ok(None);
+                }
+            }
+        }
+    }
+    let Some(arr_out) = arr_buf.as_mut_slice(py) else {
+        return Ok(None); // read-only / non-contiguous → defer
+    };
+    for o in 0..outer {
+        let abase = o * la * inner;
+        let obase = o * li * inner;
+        for l in 0..li {
+            let dbase = obase + l * inner;
+            for inr in 0..inner {
+                let mut k = idx_in[dbase + inr].get();
+                if k < 0 {
+                    k += la_i;
+                }
+                arr_out[abase + (k as usize) * inner + inr].set(val_in[dbase + inr].get());
+            }
+        }
+    }
+    Ok(Some(()))
+}
+
+// Zero-copy in-place put_along_axis for an explicit axis: a per-axis typed scatter
+// (inverse of take_along_axis) that writes straight into arr's buffer via a uintN
+// bit-view chosen by itemsize, covering int/float/bool in one path. Skips the cold
+// extract + native scatter + full copy-back. Gated to: writable C-contiguous arr,
+// int64 indices, values an ndarray of arr's exact dtype and of the indices' shape
+// (broadcast/scalar values defer), equal ndim with every non-axis dim equal, and
+// itemsize 1/2/4/8. Bit-identical (elements copied verbatim). Returns None to defer.
+fn try_zerocopy_put_along_axis(
+    py: Python<'_>,
+    arr: &Bound<'_, PyAny>,
+    indices: &Bound<'_, PyAny>,
+    values: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<()>> {
+    let Some(axis) = axis else {
+        return Ok(None);
+    };
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !arr.is_exact_instance(&ndarray_type)
+        || !indices.is_exact_instance(&ndarray_type)
+        || !values.is_exact_instance(&ndarray_type)
+    {
+        return Ok(None);
+    }
+    let idx_dtype = indices.getattr("dtype")?;
+    if idx_dtype.getattr("kind")?.extract::<String>()? != "i"
+        || idx_dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let arr_dtype = arr.getattr("dtype")?;
+    let kind = arr_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = arr_dtype.getattr("itemsize")?.extract::<usize>()?;
+    if kind == "c" || !matches!(itemsize, 1 | 2 | 4 | 8) {
+        return Ok(None);
+    }
+    // values must be an ndarray of arr's exact dtype (so the uintN bit-view matches).
+    let val_dtype = values.getattr("dtype")?;
+    if val_dtype.getattr("kind")?.extract::<String>()? != kind
+        || val_dtype.getattr("itemsize")?.extract::<usize>()? != itemsize
+    {
+        return Ok(None);
+    }
+    let s_arr: Vec<usize> = arr.getattr("shape")?.extract()?;
+    let s_idx: Vec<usize> = indices.getattr("shape")?.extract()?;
+    let s_val: Vec<usize> = values.getattr("shape")?.extract()?;
+    let d = s_arr.len();
+    if d == 0 || s_idx.len() != d || s_val != s_idx {
+        return Ok(None); // values must match indices' shape exactly (no broadcast)
+    }
+    let ax = if axis < 0 { axis + d as isize } else { axis };
+    if ax < 0 || ax >= d as isize {
+        return Ok(None);
+    }
+    let ax = ax as usize;
+    for k in 0..d {
+        if k != ax && s_arr[k] != s_idx[k] {
+            return Ok(None);
+        }
+    }
+    let la = s_arr[ax];
+    let li = s_idx[ax];
+    let outer: usize = s_arr[..ax].iter().product();
+    let inner: usize = s_arr[ax + 1..].iter().product();
+    let Ok(idx_buf) = PyBuffer::<i64>::get(indices) else {
+        return Ok(None);
+    };
+    let Some(idx_in) = idx_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let mover_name = match itemsize {
+        1 => "uint8",
+        2 => "uint16",
+        4 => "uint32",
+        _ => "uint64",
+    };
+    let mover = numpy.getattr(mover_name)?;
+    let arr_u = arr.call_method1("view", (&mover,))?;
+    let val_u = values.call_method1("view", (&mover,))?;
+    match itemsize {
+        1 => scatter_along_typed::<u8>(py, &arr_u, &val_u, idx_in, outer, la, li, inner),
+        2 => scatter_along_typed::<u16>(py, &arr_u, &val_u, idx_in, outer, la, li, inner),
+        4 => scatter_along_typed::<u32>(py, &arr_u, &val_u, idx_in, outer, la, li, inner),
+        _ => scatter_along_typed::<u64>(py, &arr_u, &val_u, idx_in, outer, la, li, inner),
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (arr, indices, values, axis=Some(-1)))]
 fn put_along_axis(
@@ -29850,6 +30000,14 @@ fn put_along_axis(
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     if dtype_kind == "c" {
         return invoke_fallback();
+    }
+
+    // Zero-copy in-place typed scatter (explicit axis, equal non-axis dims, int64
+    // indices, same-dtype same-shape values); writes straight into arr's buffer and
+    // skips the cold extract + copy-back. Bit-identical; broadcast/scalar values,
+    // axis=None, OOB indices, and other layouts fall through.
+    if try_zerocopy_put_along_axis(py, arr, indices.bind(py), values.bind(py), axis)?.is_some() {
+        return Ok(py.None());
     }
 
     let original_shape = arr.getattr("shape")?.extract::<Vec<usize>>()?;
