@@ -9741,6 +9741,95 @@ fn try_zerocopy_int_cumsum_axis(
     Ok(Some(output))
 }
 
+// Zero-copy integer cumprod for the flatten case (axis=None any ndim, or 1-D with
+// axis 0/-1). The multiplicative sibling of try_zerocopy_int_cumsum: numpy promotes
+// the accumulator identically (signed -> int64, unsigned -> uint64) and the running
+// product wraps. cumprod is strictly sequential (out[i] = out[i-1] * in[i]) so the
+// wrapping_mul running product is bit-identical. Reuses the generic cumsum_typed
+// core with a multiply op. Otherwise these extracted to an f64 Vec (~30x slower,
+// and overflow-to-inf for wide products). Returns None for a non-integer dtype, an
+// explicit per-axis multi-dim cumprod, or a non-ndarray input.
+fn try_zerocopy_int_cumprod(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len();
+    let flatten_ok = match axis {
+        None => true,
+        Some(ax) => ndim == 1 && (ax == 0 || ax == -1),
+    };
+    if !flatten_ok {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    let mul_i64 = |x: i64, y: i64| x.wrapping_mul(y);
+    let mul_u64 = |x: u64, y: u64| x.wrapping_mul(y);
+    match (kind.as_str(), itemsize) {
+        ("i", 1) => cumsum_typed::<i8, i64, _, _>(py, &numpy, a, "int64", |v| v as i64, mul_i64),
+        ("i", 2) => cumsum_typed::<i16, i64, _, _>(py, &numpy, a, "int64", |v| v as i64, mul_i64),
+        ("i", 4) => cumsum_typed::<i32, i64, _, _>(py, &numpy, a, "int64", |v| v as i64, mul_i64),
+        ("i", 8) => cumsum_typed::<i64, i64, _, _>(py, &numpy, a, "int64", |v| v, mul_i64),
+        ("u", 1) => cumsum_typed::<u8, u64, _, _>(py, &numpy, a, "uint64", |v| v as u64, mul_u64),
+        ("u", 2) => cumsum_typed::<u16, u64, _, _>(py, &numpy, a, "uint64", |v| v as u64, mul_u64),
+        ("u", 4) => cumsum_typed::<u32, u64, _, _>(py, &numpy, a, "uint64", |v| v as u64, mul_u64),
+        ("u", 8) => cumsum_typed::<u64, u64, _, _>(py, &numpy, a, "uint64", |v| v, mul_u64),
+        _ => Ok(None),
+    }
+}
+
+// Zero-copy per-axis integer cumprod (explicit axis), all widths, multiplicative
+// sibling of try_zerocopy_int_cumsum_axis with the same accumulator promotion.
+// Reuses the generic cumsum_axis_typed core with a wrapping multiply. Returns None
+// for a non-integer dtype, a 0-d / out-of-range axis, or a non-ndarray input.
+fn try_zerocopy_int_cumprod_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    let mul_i64 = |x: i64, y: i64| x.wrapping_mul(y);
+    let mul_u64 = |x: u64, y: u64| x.wrapping_mul(y);
+    let result = match (kind.as_str(), itemsize) {
+        ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
+        ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
+        ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
+        ("i", 8) => cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, mul_i64)?,
+        ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, mul_u64)?,
+        ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, mul_u64)?,
+        ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, mul_u64)?,
+        ("u", 8) => cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, mul_u64)?,
+        _ => return Ok(None),
+    };
+    let Some((flat, shape)) = result else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy np.tile(a, reps) for the 1-D scalar-reps form: a C-contiguous float64
 // 1-D ndarray tiled `reps` times into a length-(n*reps) result. numpy.tile lays
 // the input down end to end, so each output block is a verbatim copy of the
@@ -30630,6 +30719,18 @@ fn cumprod(
     // by-slab accumulation. Bit-identical; out-of-range axes fall through.
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_f64_cumulative_axis(py, a.bind(py), ax, true)?
+    {
+        return Ok(result);
+    }
+    // Zero-copy integer cumprod: flatten (axis=None / 1-D) then per-axis multi-dim.
+    // numpy promotes the accumulator (signed -> int64, unsigned -> uint64) and wraps;
+    // strictly sequential so wrapping_mul is bit-identical. Also fixes the wide-int
+    // overflow-to-inf crash the f64-bridge extract path hit. Falls through otherwise.
+    if let Some(result) = try_zerocopy_int_cumprod(py, a.bind(py), axis_val)? {
+        return Ok(result);
+    }
+    if let Some(ax) = axis_val
+        && let Some(result) = try_zerocopy_int_cumprod_axis(py, a.bind(py), ax)?
     {
         return Ok(result);
     }
