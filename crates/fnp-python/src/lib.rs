@@ -9990,6 +9990,73 @@ fn try_zerocopy_int_cumprod_axis(
     Ok(Some(output))
 }
 
+// Zero-copy float32 cumprod (flatten: axis=None any ndim, or 1-D axis 0/-1). The
+// multiplicative sibling of try_zerocopy_f32_cumsum: numpy does NOT promote a
+// float32 cumprod (the accumulator stays float32) and accumulates left-to-right, so
+// the generic cumsum_typed core with T=A=f32 and a plain f32 multiply is
+// bit-identical (nan/inf and f32 overflow-to-inf propagate; verified 0 mismatch in
+// a numpy prototype). The f64 helper gates on float64, so float32 otherwise
+// extracted to an f64 Vec (~7.8x slower). Returns None for a non-float32 dtype, an
+// explicit per-axis multi-dim cumprod, or a non-ndarray input.
+fn try_zerocopy_f32_cumprod(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 4
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len();
+    let flatten_ok = match axis {
+        None => true,
+        Some(ax) => ndim == 1 && (ax == 0 || ax == -1),
+    };
+    if !flatten_ok {
+        return Ok(None);
+    }
+    cumsum_typed::<f32, f32, _, _>(py, &numpy, a, "float32", |v| v, |a, b| a * b)
+}
+
+// Zero-copy per-axis float32 cumprod (explicit axis); slab-by-slab f32 product via
+// the generic cumsum_axis_typed core (T=A=f32, plain f32 multiply). numpy keeps the
+// float32 accumulator and accumulates left-to-right, so it is bit-identical. The
+// flatten helper above only covers axis=None. Returns None for a non-float32 dtype,
+// a 0-d / out-of-range axis, or a non-ndarray input.
+fn try_zerocopy_f32_cumprod_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 4
+    {
+        return Ok(None);
+    }
+    let result =
+        cumsum_axis_typed::<f32, f32, _, _>(py, &numpy, a, axis, "float32", |v| v, |a, b| a * b)?;
+    let Some((flat, shape)) = result else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy np.tile(a, reps) for the 1-D scalar-reps form: a C-contiguous float64
 // 1-D ndarray tiled `reps` times into a length-(n*reps) result. numpy.tile lays
 // the input down end to end, so each output block is a verbatim copy of the
@@ -30985,6 +31052,17 @@ fn cumprod(
     }
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_int_cumprod_axis(py, a.bind(py), ax)?
+    {
+        return Ok(result);
+    }
+    // Zero-copy float32 cumprod: flatten (axis=None / 1-D) then per-axis multi-dim.
+    // numpy keeps the float32 accumulator (no promotion) and accumulates left-to-
+    // right, so the sequential f32 multiply is bit-identical. Falls through otherwise.
+    if let Some(result) = try_zerocopy_f32_cumprod(py, a.bind(py), axis_val)? {
+        return Ok(result);
+    }
+    if let Some(ax) = axis_val
+        && let Some(result) = try_zerocopy_f32_cumprod_axis(py, a.bind(py), ax)?
     {
         return Ok(result);
     }
