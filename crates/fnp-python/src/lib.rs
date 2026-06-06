@@ -14027,6 +14027,90 @@ fn normalize_trim_zeros_mode(trim: &str) -> PyResult<String> {
     }
 }
 
+// First and last+1 nonzero positions in a typed slice, or None if all-zero/empty.
+// position/rposition short-circuit, so dense arrays scan only the ends.
+fn nonzero_bounds<T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
+    input: &[pyo3::buffer::ReadOnlyCell<T>],
+    pred: F,
+) -> Option<(usize, usize)> {
+    let first = input.iter().position(|c| pred(c.get()))?;
+    let last = input.iter().rposition(|c| pred(c.get())).unwrap_or(first);
+    Some((first, last + 1))
+}
+
+// Zero-copy np.trim_zeros for 1-D C-contiguous int/float ndarrays. numpy returns a
+// VIEW filt[first:last+1] (the slice of non-trimmed elements); the native path
+// instead extracted to an f64 Vec and rebuilt a COPY (~3-7x slower, lossy for wide
+// ints, and not a view). Find the nonzero bounds — integers via a uintN bit-view by
+// itemsize (zero ⟺ all bits clear), floats by VALUE so -0.0 counts as zero (trimmed)
+// exactly like numpy — then return the matching slice view. trim='f'/'b' trim only
+// the leading/trailing run. All-zero or empty yields an empty slice. Returns None
+// (defer) for non-1-D, complex, or non-ndarray inputs.
+fn try_zerocopy_trim_zeros(
+    py: Python<'_>,
+    filt: &Bound<'_, PyAny>,
+    mode: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !filt.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = filt.getattr("shape")?.extract()?;
+    if shape.len() != 1 {
+        return Ok(None);
+    }
+    let n = shape[0];
+    let dtype = filt.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    macro_rules! bounds_uint {
+        ($view_dt:literal, $T:ty) => {{
+            let view = filt.call_method1("view", (numpy.getattr($view_dt)?,))?;
+            let Ok(buf) = PyBuffer::<$T>::get(&view) else {
+                return Ok(None);
+            };
+            let Some(s) = buf.as_slice(py) else {
+                return Ok(None);
+            };
+            nonzero_bounds(s, |v: $T| v != 0)
+        }};
+    }
+    let bounds = match (kind.as_str(), itemsize) {
+        ("b", _) | ("i" | "u", 1) => bounds_uint!("uint8", u8),
+        ("i" | "u", 2) => bounds_uint!("uint16", u16),
+        ("i" | "u", 4) => bounds_uint!("uint32", u32),
+        ("i" | "u", 8) => bounds_uint!("uint64", u64),
+        ("f", 8) => {
+            let Ok(buf) = PyBuffer::<f64>::get(filt) else {
+                return Ok(None);
+            };
+            let Some(s) = buf.as_slice(py) else {
+                return Ok(None);
+            };
+            nonzero_bounds(s, |v: f64| v != 0.0)
+        }
+        ("f", 4) => {
+            let Ok(buf) = PyBuffer::<f32>::get(filt) else {
+                return Ok(None);
+            };
+            let Some(s) = buf.as_slice(py) else {
+                return Ok(None);
+            };
+            nonzero_bounds(s, |v: f32| v != 0.0)
+        }
+        _ => return Ok(None),
+    };
+    let trim_f = mode.contains('f');
+    let trim_b = mode.contains('b');
+    let (lo, hi) = match bounds {
+        Some((first, last)) => (if trim_f { first } else { 0 }, if trim_b { last } else { n }),
+        None => (0usize, 0usize), // all-zero / empty → empty result
+    };
+    let slice = pyo3::types::PySlice::new(py, lo as isize, hi as isize, 1);
+    Ok(Some(filt.get_item(&slice)?.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (filt, trim="fb"))]
 fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>> {
@@ -14052,6 +14136,11 @@ fn trim_zeros(py: Python<'_>, filt: Py<PyAny>, trim: &str) -> PyResult<Py<PyAny>
         Ok(mode) => mode,
         Err(_) => return fallback(),
     };
+    // Zero-copy slice-view for 1-D int/float ndarrays; skips the cold extract + copy
+    // and returns a view like numpy. Other dtypes / shapes fall through.
+    if let Some(out) = try_zerocopy_trim_zeros(py, filt.bind(py), trim_mode.as_str())? {
+        return Ok(out);
+    }
     let array = match extract_numeric_array(py, filt.bind(py), "trim_zeros(filt)") {
         Ok(a) => a,
         Err(_) => return fallback(),
