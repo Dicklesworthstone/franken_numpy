@@ -7345,16 +7345,19 @@ fn try_zerocopy_f64_i32_ldexp(
                 return Ok(None);
             }
             let exponent = exponent_cell.get();
-            let result = scalbn_f64_normal_result(mantissa, exponent)
-                .unwrap_or_else(|| mantissa * 2.0_f64.powf(f64::from(exponent)));
-            let mantissa_magnitude_bits = mantissa.to_bits() & 0x7fff_ffff_ffff_ffff;
-            let result_magnitude_bits = result.to_bits() & 0x7fff_ffff_ffff_ffff;
-            if mantissa.is_finite()
-                && ((result.is_infinite() && !mantissa.is_infinite())
-                    || (mantissa_magnitude_bits != 0 && result_magnitude_bits == 0))
-            {
-                return Ok(None);
-            }
+            let Some(result) = scalbn_f64_normal_result(mantissa, exponent) else {
+                let result = mantissa * 2.0_f64.powf(f64::from(exponent));
+                let mantissa_magnitude_bits = mantissa.to_bits() & 0x7fff_ffff_ffff_ffff;
+                let result_magnitude_bits = result.to_bits() & 0x7fff_ffff_ffff_ffff;
+                if mantissa.is_finite()
+                    && ((result.is_infinite() && !mantissa.is_infinite())
+                        || (mantissa_magnitude_bits != 0 && result_magnitude_bits == 0))
+                {
+                    return Ok(None);
+                }
+                slot.set(result);
+                continue;
+            };
             slot.set(result);
         }
     }
