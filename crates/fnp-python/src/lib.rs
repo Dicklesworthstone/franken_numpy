@@ -8726,6 +8726,114 @@ fn try_zerocopy_f64_take(
     Ok(Some(output))
 }
 
+// Generic typed core for the flat gather (np.take, axis=None, mode="raise"):
+// one element-move per index (NOT a byte loop — a per-element itemsize-byte copy
+// does not vectorize and leaves the gather far behind numpy). Reads `src` as a
+// `T` buffer and the int64 index stream, validating each index (negative-
+// wraparound idx += n; out-of-range -> None so numpy reproduces the IndexError),
+// and gathers verbatim into a fresh `dtype_name` buffer. Returns the flat output
+// plus the indices' shape.
+fn take_typed<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    src: &Bound<'py, PyAny>,
+    indices: &Bound<'py, PyAny>,
+    dtype_name: &str,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    let (Ok(a_buffer), Ok(idx_buffer)) = (PyBuffer::<T>::get(src), PyBuffer::<i64>::get(indices))
+    else {
+        return Ok(None);
+    };
+    let (Some(a_in), Some(idx_in)) = (a_buffer.as_slice(py), idx_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    let n = a_in.len() as i64;
+    let out_shape: Vec<usize> = idx_buffer.shape().to_vec();
+    let count = idx_in.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (count,), Some(&kwargs))?;
+    if count > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, idx_cell) in output.iter().zip(idx_in.iter()) {
+            let mut idx = idx_cell.get();
+            if idx < 0 {
+                idx += n;
+            }
+            if idx < 0 || idx >= n {
+                return Ok(None);
+            }
+            slot.set(a_in[idx as usize].get());
+        }
+    }
+    Ok(Some((flat, out_shape)))
+}
+
+// Zero-copy flat gather for the non-f64 gated dtypes the f64 helper leaves to the
+// cold extract path: int64/uint64 (~39x slower, lossy for wide ints) and bool.
+// One element-move per index, bit-identical to numpy. Bool is gathered through a
+// uint8 view and returned as bool. Returns None for a non-int64 index array, a
+// per-axis take, or a non-ndarray operand.
+fn try_zerocopy_int_take(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    indices: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    mode: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    if axis.is_some() || mode != "raise" {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !indices.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    {
+        let dtype = indices.getattr("dtype")?;
+        if dtype.getattr("kind")?.extract::<String>()? != "i"
+            || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+        {
+            return Ok(None);
+        }
+    }
+    let a_dtype = a.getattr("dtype")?;
+    let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    let (flat, out_shape) = match (kind.as_str(), itemsize) {
+        ("i", 8) => match take_typed::<i64>(py, &numpy, a, indices, "int64")? {
+            Some(r) => r,
+            None => return Ok(None),
+        },
+        ("u", 8) => match take_typed::<u64>(py, &numpy, a, indices, "uint64")? {
+            Some(r) => r,
+            None => return Ok(None),
+        },
+        ("b", 1) => {
+            let a_u8 = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+            match take_typed::<u8>(py, &numpy, &a_u8, indices, "uint8")? {
+                Some((flat_u8, shape)) => {
+                    let flat_bool = flat_u8.call_method1("view", (numpy.getattr("bool_")?,))?;
+                    (flat_bool, shape)
+                }
+                None => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if out_shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Zero-copy in-place np.putmask(a, mask, values) for a writable float64 a ndarray,
 // a bool mask of the identical shape, and a non-empty float64 values ndarray.
 // numpy sets a.flat[i] = values.flat[i % values.size] at every flat position i
@@ -11429,6 +11537,12 @@ fn take(
     // int64 indices); skips the cold extract/build Vecs. Bit-identical; per-axis
     // takes, other index widths, and out-of-range indices fall through.
     if let Some(out) = try_zerocopy_f64_take(py, a.bind(py), indices.bind(py), axis, mode)? {
+        return Ok(out);
+    }
+    // Dtype-agnostic byte gather for the remaining gated dtypes (int64/uint64 ~39x
+    // slower via the extract Vec, plus bool); elements move verbatim so it is
+    // bit-identical. Out-of-range indices fall through so numpy raises IndexError.
+    if let Some(out) = try_zerocopy_int_take(py, a.bind(py), indices.bind(py), axis, mode)? {
         return Ok(out);
     }
     let a = extract_numeric_array(py, a.bind(py), "take(a)")?;
