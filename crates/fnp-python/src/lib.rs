@@ -10475,6 +10475,30 @@ fn try_zerocopy_int_ediff1d(
     }
 }
 
+// Zero-copy np.ediff1d (no to_begin/to_end) for float32 ndarrays. numpy flattens
+// the input in C order and returns out[i] = flat[i+1] - flat[i] in the same float32
+// dtype. The f64 helper gates on float64, so float32 otherwise extracted to an f64
+// Vec (~311x slower). Reuses the generic ediff1d_typed core with plain IEEE-754
+// single-precision subtraction x - y (bit-identical; nan/inf/-0.0 propagate exactly).
+// Returns None for a non-float32 dtype or a non-ndarray input.
+fn try_zerocopy_f32_ediff1d(
+    py: Python<'_>,
+    ary: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !ary.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = ary.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 4
+    {
+        return Ok(None);
+    }
+    ediff1d_typed::<f32, _>(py, &numpy, ary, "float32", |x, y| x - y)
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -33592,6 +33616,15 @@ fn ediff1d(
     if to_begin.is_none()
         && to_end.is_none()
         && let Some(out) = try_zerocopy_int_ediff1d(py, ary.bind(py))?
+    {
+        return Ok(out);
+    }
+
+    // Zero-copy float32 consecutive differences (no to_begin/to_end); plain f32
+    // subtraction, bit-identical to numpy. Skips the cold f64 extract Vec.
+    if to_begin.is_none()
+        && to_end.is_none()
+        && let Some(out) = try_zerocopy_f32_ediff1d(py, ary.bind(py))?
     {
         return Ok(out);
     }
