@@ -32809,6 +32809,88 @@ fn try_zerocopy_f64_around(
     Ok(Some(output))
 }
 
+// Zero-copy np.around/round for float32 ndarrays, any decimals. numpy rounds with
+// f = 10^|decimals| and, crucially, DIVIDES FIRST for negative decimals
+// (out = rint(a / f) * f) rather than multiplying by the unrepresentable 10^d:
+// for float32 the ~1e-7 error in float32(0.001) flips rint, so the naive
+// multiply-form the f64 helper can afford here diverges. The scale f is the
+// python-float 10^|decimals| cast to float32 exactly as numpy adopts it into the
+// array's float32 dtype. decimals==0 falls out as scale==1 (a plain rint). All
+// arithmetic in float32; nan/inf/-0.0 propagate. The f64 helper gates on float64,
+// so float32 otherwise extracted to an f64 Vec (~87x slower). Returns None for a
+// non-float32 dtype, a non-ndarray input, or a non-finite/zero scale (absurd
+// |decimals| — deferred to numpy).
+fn try_zerocopy_f32_around(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    decimals: i32,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 4
+    {
+        return Ok(None);
+    }
+    let neg = decimals < 0;
+    let scale = 10_f64.powi(if neg { -decimals } else { decimals }) as f32;
+    if !scale.is_finite() || scale == 0.0 {
+        // Absurd |decimals|: 10^|decimals| overflows/underflows float32, so the f32
+        // arithmetic below would not match numpy's own overflow result. Delegate
+        // this pathological case straight to numpy.around for exact parity.
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("decimals", decimals)?;
+        return Ok(Some(
+            numpy.getattr("around")?.call((a,), Some(&kwargs))?.unbind(),
+        ));
+    }
+    let Ok(in_buffer) = PyBuffer::<f32>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float32")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // Split by mode into three branchless loops (each autovectorizes). decimals==0
+        // is a plain round-half-even (scale==1), so skip the wasted *1/÷1 the scaled
+        // forms would otherwise do.
+        if decimals == 0 {
+            for (slot, cell) in output.iter().zip(input.iter()) {
+                slot.set(cell.get().round_ties_even());
+            }
+        } else if neg {
+            for (slot, cell) in output.iter().zip(input.iter()) {
+                slot.set((cell.get() / scale).round_ties_even() * scale);
+            }
+        } else {
+            for (slot, cell) in output.iter().zip(input.iter()) {
+                slot.set((cell.get() * scale).round_ties_even() / scale);
+            }
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // np.around/np.round of an integer ndarray.
 //
 // decimals >= 0 is the identity (rounding an integer to zero-or-more decimal
@@ -32895,6 +32977,12 @@ fn around(
 
     // Integer input with decimals >= 0 is the identity; return a fast copy.
     if let Some(result) = try_zerocopy_int_around(py, a.bind(py), decimals)? {
+        return Ok(result);
+    }
+
+    // float32 around (any decimals): numpy's divide-first-for-negative form in f32;
+    // skips the cold f64 round-trip. Bit-identical. Other inputs fall through.
+    if let Some(result) = try_zerocopy_f32_around(py, a.bind(py), decimals)? {
         return Ok(result);
     }
 
