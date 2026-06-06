@@ -7991,6 +7991,31 @@ fn try_zerocopy_int_clip(
 // input buffer and writes the output buffer with no intermediate Rust Vec
 // (bead lglck). Returns Ok(None) for any non-f64 / non-contiguous / non-ndarray
 // input (caller falls through to the dtype-aware extract path).
+// Zero-copy np.nan_to_num for integer ndarrays. Integers cannot be NaN or +-inf,
+// so numpy.nan_to_num (copy=True, the only mode this binding exposes) is a pure
+// dtype- and layout-preserving copy regardless of the nan/posinf/neginf args. The
+// extract path instead routes integers through an f64 Vec + rebuild (~155-296x
+// slower, lossy for wide ints). numpy materializes the copy with np.array(x,
+// copy=True, order='K'), so x.copy(order='K') is bit- and layout-identical. Returns
+// None for a non-integer dtype or a non-ndarray input.
+fn try_zerocopy_int_nan_to_num(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let kind = x.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("order", "K")?;
+    Ok(Some(x.call_method("copy", (), Some(&kwargs))?.unbind()))
+}
+
 fn try_zerocopy_f64_nan_to_num(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
@@ -15067,6 +15092,11 @@ fn nan_to_num(
         posinf.unwrap_or(f64::MAX),
         neginf.unwrap_or(f64::MIN),
     )? {
+        return Ok(out);
+    }
+    // Integer ndarrays cannot hold NaN/inf, so nan_to_num is a layout-preserving
+    // copy; skip the cold (and for wide ints lossy) f64 extract + rebuild.
+    if let Some(out) = try_zerocopy_int_nan_to_num(py, x.bind(py))? {
         return Ok(out);
     }
     let x = extract_precise_numeric_array(py, x.bind(py), "nan_to_num(x)")?;
