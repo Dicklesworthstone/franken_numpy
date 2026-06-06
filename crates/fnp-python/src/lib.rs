@@ -8267,6 +8267,96 @@ fn try_zerocopy_f64_roll(
     Ok(Some(output))
 }
 
+// Dtype-agnostic flatten roll (axis=None any ndim, or 1-D axis 0/-1) for any
+// numeric/bool/complex dtype the f64 helper above does not handle. np.roll moves
+// whole elements verbatim, so rolling the raw little-endian byte image by
+// shift*itemsize bytes is bit-identical for every dtype. The data is viewed as
+// 1-D uint8, the two contiguous runs are copied into a fresh uint8 buffer, then
+// viewed back to the input dtype and reshaped — no extract Vec (which for ints
+// is also lossy/crashes on wide values). Returns Ok(None) for a non-scalar
+// shift, a per-axis multi-dim roll, or a non-ndarray input.
+fn try_zerocopy_any_roll(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    shift: &Bound<'_, PyAny>,
+    axis: Option<&Py<PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(shift_scalar) = shift.extract::<i64>() else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len();
+    if ndim == 0 {
+        return Ok(None);
+    }
+    let flatten_ok = match axis {
+        None => true,
+        Some(value) => {
+            let bound = value.bind(py);
+            if bound.is_none() {
+                true
+            } else if let Ok(axis_int) = bound.extract::<i64>() {
+                ndim == 1 && (axis_int == 0 || axis_int == -1)
+            } else {
+                return Ok(None);
+            }
+        }
+    };
+    if !flatten_ok {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if itemsize == 0 {
+        return Ok(None);
+    }
+    let n: usize = shape.iter().product();
+    // 1-D uint8 view of the (C-order) data. reshape(-1) yields a contiguous view
+    // (or ravel copy) whose byte image matches numpy's flatten order.
+    let uint8 = numpy.getattr("uint8")?;
+    let Ok(flat_in) = a.call_method1("reshape", (-1i64,)) else {
+        return Ok(None);
+    };
+    let flat_in_u8 = flat_in.call_method1("view", (&uint8,))?;
+    let Ok(in_buffer) = PyBuffer::<u8>::get(&flat_in_u8) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let total_bytes = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let out_u8 = numpy.call_method("empty", (total_bytes,), Some(&kwargs))?;
+    if n > 0 {
+        let s = (((shift_scalar % n as i64) + n as i64) % n as i64) as usize;
+        let split_bytes = (n - s) * itemsize;
+        let s_bytes = s * itemsize;
+        let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // result = input[split..] ++ input[..split], in bytes.
+        for i in 0..s_bytes {
+            output[i].set(input[split_bytes + i].get());
+        }
+        for i in 0..split_bytes {
+            output[s_bytes + i].set(input[i].get());
+        }
+    }
+    let out_typed = out_u8.call_method1("view", (&dtype,))?;
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = out_typed.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy np.roll(a, shift, axis=ax) along a single explicit axis of a
 // C-contiguous float64 ndarray (the multi-dim case the flatten helper above
 // leaves alone). Decomposing the C-contiguous layout into outer * axis_len *
@@ -14446,6 +14536,14 @@ fn roll(
     // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical;
     // per-axis multi-dim rolls and tuple shifts fall through to the general path.
     if let Some(out) = try_zerocopy_f64_roll(py, a.bind(py), shift.bind(py), axis.as_ref())? {
+        return Ok(out);
+    }
+
+    // Dtype-agnostic flatten roll (byte rotation) for every other dtype — int
+    // (all widths), float32, complex, bool — covering the same axis=None / 1-D
+    // axis cases. Bit-identical (elements move verbatim) and skips the cold,
+    // for-ints-lossy extract Vec.
+    if let Some(out) = try_zerocopy_any_roll(py, a.bind(py), shift.bind(py), axis.as_ref())? {
         return Ok(out);
     }
 
