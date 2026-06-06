@@ -29910,6 +29910,149 @@ fn put_along_axis(
     Ok(py.None())
 }
 
+// Generic per-axis gather core for take_along_axis, parameterized by a mover type
+// T chosen by itemsize (u8/u16/u32/u64) — take_along_axis moves whole ELEMENTS
+// verbatim, so gathering the raw bits as an unsigned integer of the matching width
+// covers every dtype (int/float/bool/datetime) in one path. out[o,l,inr] =
+// arr[o, idx[o,l,inr], inr] over the outer*axis*inner decomposition. Negative
+// indices wrap (k += la, matching numpy's fancy-index semantics); an out-of-range
+// index returns None so the caller defers to numpy for the exact IndexError (the
+// half-filled fresh buffer is simply dropped). Returns the flat uintN output.
+fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    arr_u: &Bound<'py, PyAny>,
+    idx_in: &[pyo3::buffer::ReadOnlyCell<i64>],
+    out_dtype_name: &str,
+    outer: usize,
+    la: usize,
+    li: usize,
+    inner: usize,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Ok(arr_buf) = PyBuffer::<T>::get(arr_u) else {
+        return Ok(None);
+    };
+    let Some(arr_s) = arr_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let total_out = outer * li * inner;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", out_dtype_name)?;
+    let flat = numpy.call_method("empty", (total_out,), Some(&kwargs))?;
+    if total_out > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let la_i = la as i64;
+        for o in 0..outer {
+            let abase = o * la * inner;
+            let obase = o * li * inner;
+            for l in 0..li {
+                let dbase = obase + l * inner;
+                for inr in 0..inner {
+                    let mut k = idx_in[dbase + inr].get();
+                    if k < 0 {
+                        k += la_i;
+                    }
+                    if k < 0 || k >= la_i {
+                        return Ok(None); // OOB → defer to numpy for exact IndexError
+                    }
+                    output[dbase + inr].set(arr_s[abase + (k as usize) * inner + inr].get());
+                }
+            }
+        }
+    }
+    Ok(Some(flat))
+}
+
+// Zero-copy take_along_axis for an explicit axis: a per-axis typed gather that
+// skips the cold extract→f64 Vec→rebuild path (~8x slower, lossy for wide ints).
+// numpy moves whole elements, so the gather is done on a uintN bit-view chosen by
+// itemsize and viewed back to the original dtype — covering int/float/bool in one
+// path. Gated to: both ndarrays of equal ndim, every non-axis dim equal (no
+// broadcast — those defer), an int64 index array, a C-contiguous arr, and an
+// itemsize of 1/2/4/8 (complex128 and non-contiguous inputs defer). Bit-identical
+// (elements copied verbatim incl. nan/inf/signed zeros).
+fn try_zerocopy_take_along_axis(
+    py: Python<'_>,
+    arr: &Bound<'_, PyAny>,
+    indices: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(axis) = axis else {
+        return Ok(None);
+    };
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !arr.is_exact_instance(&ndarray_type) || !indices.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let idx_dtype = indices.getattr("dtype")?;
+    if idx_dtype.getattr("kind")?.extract::<String>()? != "i"
+        || idx_dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let arr_dtype = arr.getattr("dtype")?;
+    let kind = arr_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = arr_dtype.getattr("itemsize")?.extract::<usize>()?;
+    if kind == "c" || !matches!(itemsize, 1 | 2 | 4 | 8) {
+        return Ok(None);
+    }
+    let s_arr: Vec<usize> = arr.getattr("shape")?.extract()?;
+    let s_idx: Vec<usize> = indices.getattr("shape")?.extract()?;
+    let d = s_arr.len();
+    if d == 0 || s_idx.len() != d {
+        return Ok(None);
+    }
+    let ax = if axis < 0 { axis + d as isize } else { axis };
+    if ax < 0 || ax >= d as isize {
+        return Ok(None);
+    }
+    let ax = ax as usize;
+    for k in 0..d {
+        if k != ax && s_arr[k] != s_idx[k] {
+            return Ok(None); // broadcast on a non-axis dim → defer to numpy
+        }
+    }
+    let la = s_arr[ax];
+    let li = s_idx[ax];
+    let outer: usize = s_arr[..ax].iter().product();
+    let inner: usize = s_arr[ax + 1..].iter().product();
+    let Ok(idx_buf) = PyBuffer::<i64>::get(indices) else {
+        return Ok(None);
+    };
+    let Some(idx_in) = idx_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    // View arr's raw bits as the unsigned integer of matching width, gather, view back.
+    let (mover_name, orig_name): (&str, String) = (
+        match itemsize {
+            1 => "uint8",
+            2 => "uint16",
+            4 => "uint32",
+            _ => "uint64",
+        },
+        arr_dtype.getattr("name")?.extract::<String>()?,
+    );
+    let arr_u = arr.call_method1("view", (numpy.getattr(mover_name)?,))?;
+    let flat = match itemsize {
+        1 => gather_along_typed::<u8>(py, &numpy, &arr_u, idx_in, "uint8", outer, la, li, inner)?,
+        2 => gather_along_typed::<u16>(py, &numpy, &arr_u, idx_in, "uint16", outer, la, li, inner)?,
+        4 => gather_along_typed::<u32>(py, &numpy, &arr_u, idx_in, "uint32", outer, la, li, inner)?,
+        _ => gather_along_typed::<u64>(py, &numpy, &arr_u, idx_in, "uint64", outer, la, li, inner)?,
+    };
+    let Some(flat) = flat else {
+        return Ok(None);
+    };
+    let restored = flat.call_method1("view", (numpy.getattr(orig_name.as_str())?,))?;
+    let output_shape = PyTuple::new(py, s_idx.iter().copied())?;
+    Ok(Some(restored.call_method1("reshape", (&output_shape,))?.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (arr, indices, axis=Some(-1)))]
 fn take_along_axis(
@@ -29948,6 +30091,16 @@ fn take_along_axis(
         .extract::<String>()?;
     if dtype_kind == "c" {
         return fallback();
+    }
+
+    // Zero-copy per-axis typed gather (explicit axis, equal non-axis dims, int64
+    // indices); covers int/float/bool via a uintN bit-view. Skips the cold extract +
+    // rebuild. Bit-identical; broadcast, axis=None, OOB indices, and other layouts
+    // fall through.
+    if let Some(out) =
+        try_zerocopy_take_along_axis(py, arr.bind(py), indices.bind(py), axis)?
+    {
+        return Ok(out);
     }
 
     let arr = extract_numeric_array(py, arr.bind(py), "take_along_axis(arr)")?;
