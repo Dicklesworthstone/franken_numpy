@@ -15053,6 +15053,150 @@ fn select(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+// Generic zero-copy multi-way select out[i] = choices[a[i]][i] for one integer
+// dtype. numpy.choose with mode='raise' picks, at each flat position, the element
+// from the choice array named by the index a[i]. With all choices the same shape
+// as a (no broadcast) and the same dtype, this is a per-element gather across K
+// contiguous slices. Indices are validated in [0, K) BEFORE any write, so an
+// out-of-range index leaves us deferring to numpy.choose for the exact ValueError
+// (numpy's negative-index / OOB handling stays authoritative). Returns None to
+// fall through.
+fn choose_typed<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a64: &Bound<'py, PyAny>,
+    choices: &[Bound<'py, PyAny>],
+    dtype_name: &str,
+    out_shape: &[usize],
+) -> PyResult<Option<Py<PyAny>>> {
+    let Ok(a_buffer) = PyBuffer::<i64>::get(a64) else {
+        return Ok(None);
+    };
+    let Some(a_in) = a_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = a_in.len();
+    let k = choices.len() as i64;
+    // Hold each choice's buffer alive; collect read-only slices.
+    let mut buffers = Vec::with_capacity(choices.len());
+    for c in choices {
+        let Ok(buf) = PyBuffer::<T>::get(c) else {
+            return Ok(None);
+        };
+        if buf.item_count() != n {
+            return Ok(None);
+        }
+        buffers.push(buf);
+    }
+    let mut slices = Vec::with_capacity(buffers.len());
+    for buf in &buffers {
+        let Some(s) = buf.as_slice(py) else {
+            return Ok(None);
+        };
+        slices.push(s);
+    }
+    // Validate ALL indices first so an OOB defers to numpy (exact ValueError).
+    for c in a_in.iter() {
+        let idx = c.get();
+        if idx < 0 || idx >= k {
+            return Ok(None);
+        }
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (i, c) in a_in.iter().enumerate() {
+            let sel = c.get() as usize;
+            output[i].set(slices[sel][i].get());
+        }
+    }
+    let shape = PyTuple::new(py, out_shape.iter().copied())?;
+    Ok(Some(flat.call_method1("reshape", (&shape,))?.unbind()))
+}
+
+// Zero-copy integer np.choose for the dtypes the native path sends through the
+// cold extract f64-bridge (~7x slower, lossy for wide ints). Requires: 'raise'
+// mode; an integer index ndarray; choices a non-empty list/tuple of ndarrays all
+// sharing a's exact shape and one integer dtype (numpy result_type of matching
+// int dtypes is that dtype). Broadcasting, mismatched dtypes/shapes, scalar a,
+// bool, complex, and non-list choices fall through.
+fn try_zerocopy_int_choose(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    choices: &Bound<'_, PyAny>,
+    mode: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    if mode != "raise" {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let a_kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if a_kind != "i" && a_kind != "u" {
+        return Ok(None);
+    }
+    let a_shape = a.getattr("shape")?.extract::<Vec<usize>>()?;
+    if a_shape.is_empty() {
+        return Ok(None); // scalar index → numpy returns a scalar; defer
+    }
+    // Collect choices from a list or tuple of ndarrays.
+    let items: Vec<Bound<'_, PyAny>> = if let Ok(list) = choices.cast::<pyo3::types::PyList>() {
+        list.iter().collect()
+    } else if let Ok(tup) = choices.cast::<pyo3::types::PyTuple>() {
+        tup.iter().collect()
+    } else {
+        return Ok(None);
+    };
+    if items.is_empty() {
+        return Ok(None);
+    }
+    // All choices must be ndarrays of a's shape and one shared integer dtype.
+    let c0_dtype = items[0].getattr("dtype")?;
+    let kind = c0_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = c0_dtype.getattr("itemsize")?.extract::<usize>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    for c in &items {
+        if !c.is_exact_instance(&ndarray_type)
+            || c.getattr("shape")?.extract::<Vec<usize>>()? != a_shape
+        {
+            return Ok(None);
+        }
+        let d = c.getattr("dtype")?;
+        if d.getattr("kind")?.extract::<String>()? != kind
+            || d.getattr("itemsize")?.extract::<usize>()? != itemsize
+        {
+            return Ok(None);
+        }
+    }
+    // Normalize the index array to contiguous int64.
+    let kw = PyDict::new(py);
+    kw.set_item("dtype", "int64")?;
+    let a64 = numpy.getattr("ascontiguousarray")?.call((a,), Some(&kw))?;
+    match (kind.as_str(), itemsize) {
+        ("i", 8) => choose_typed::<i64>(py, &numpy, &a64, &items, "int64", &a_shape),
+        ("i", 4) => choose_typed::<i32>(py, &numpy, &a64, &items, "int32", &a_shape),
+        ("i", 2) => choose_typed::<i16>(py, &numpy, &a64, &items, "int16", &a_shape),
+        ("i", 1) => choose_typed::<i8>(py, &numpy, &a64, &items, "int8", &a_shape),
+        ("u", 8) => choose_typed::<u64>(py, &numpy, &a64, &items, "uint64", &a_shape),
+        ("u", 4) => choose_typed::<u32>(py, &numpy, &a64, &items, "uint32", &a_shape),
+        ("u", 2) => choose_typed::<u16>(py, &numpy, &a64, &items, "uint16", &a_shape),
+        ("u", 1) => choose_typed::<u8>(py, &numpy, &a64, &items, "uint8", &a_shape),
+        _ => Ok(None),
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, choices, mode="raise"))]
 fn choose(py: Python<'_>, a: Py<PyAny>, choices: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
@@ -15072,6 +15216,14 @@ fn choose(py: Python<'_>, a: Py<PyAny>, choices: Py<PyAny>, mode: &str) -> PyRes
                     .unbind());
             }
         }
+    }
+
+    // Zero-copy multi-way select for integer index + same-shape same-int-dtype
+    // ndarray choices (the common case); skips the cold extract + rebuild. Bit-
+    // identical; broadcasting, mismatched dtypes/shapes, OOB indices, scalar a,
+    // and other dtypes fall through.
+    if let Some(result) = try_zerocopy_int_choose(py, a.bind(py), choices_bound, mode)? {
+        return Ok(result);
     }
 
     let a = extract_integer_array(py, a.bind(py), "choose(a)")?;
