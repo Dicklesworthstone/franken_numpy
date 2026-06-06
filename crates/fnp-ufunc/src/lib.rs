@@ -6579,15 +6579,50 @@ impl UFuncArray {
                         for ((slot, &lhs), &rhs_val) in
                             out.iter_mut().zip(&self.values).zip(&rhs.values)
                         {
-                            let result = lhs / rhs_val;
-                            note_binary_float_errors(
-                                &mut float_error_flags,
-                                op,
-                                lhs,
-                                rhs_val,
-                                result,
-                            );
-                            *slot = result;
+                            *slot = lhs / rhs_val;
+                        }
+
+                        let mut has_zero_rhs = false;
+                        let mut has_infinite_result = false;
+                        let mut has_zero_result = false;
+                        let mut has_nan_result = false;
+                        for (&rhs_val, &result) in rhs.values.iter().zip(&out) {
+                            has_zero_rhs |= rhs_val == 0.0;
+                            has_infinite_result |= result.is_infinite();
+                            has_zero_result |= result == 0.0;
+                            has_nan_result |= result.is_nan();
+                        }
+
+                        if has_zero_rhs || has_infinite_result || has_zero_result || has_nan_result
+                        {
+                            for ((&lhs, &rhs_val), &result) in
+                                self.values.iter().zip(&rhs.values).zip(&out)
+                            {
+                                if lhs.is_finite() && rhs_val == 0.0 {
+                                    if lhs == 0.0 {
+                                        float_error_flags.note(FloatErrorKind::Invalid);
+                                    } else {
+                                        float_error_flags.note(FloatErrorKind::Divide);
+                                    }
+                                    continue;
+                                }
+
+                                if lhs.is_finite() && rhs_val.is_finite() {
+                                    if has_infinite_result && result.is_infinite() {
+                                        float_error_flags.note(FloatErrorKind::Over);
+                                    }
+                                    if has_zero_result
+                                        && lhs != 0.0
+                                        && rhs_val != 0.0
+                                        && result == 0.0
+                                    {
+                                        float_error_flags.note(FloatErrorKind::Under);
+                                    }
+                                    if has_nan_result && result.is_nan() {
+                                        float_error_flags.note(FloatErrorKind::Invalid);
+                                    }
+                                }
+                            }
                         }
                     }
                     _ => {
@@ -38003,6 +38038,78 @@ print(json.dumps(payload))
         assert_eq!(events[0].op, "multiply");
         assert_eq!(events[1].kind, FloatErrorKind::Under);
         assert_eq!(events[1].op, "multiply");
+    }
+
+    #[test]
+    fn divide_two_phase_error_scan_preserves_edge_bits_and_flags() {
+        let lhs = UFuncArray::new(
+            vec![8],
+            vec![
+                6.0,
+                1.0,
+                0.0,
+                f64::MAX,
+                f64::MIN_POSITIVE,
+                -0.0,
+                f64::INFINITY,
+                f64::NAN,
+            ],
+            DType::F64,
+        )
+        .expect("lhs");
+        let rhs = UFuncArray::new(
+            vec![8],
+            vec![
+                3.0,
+                0.0,
+                0.0,
+                f64::MIN_POSITIVE,
+                f64::MAX,
+                2.0,
+                f64::INFINITY,
+                1.0,
+            ],
+            DType::F64,
+        )
+        .expect("rhs");
+        take_float_error_events();
+
+        let out = {
+            let _guard = errstate(
+                None,
+                Some(FloatErrorMode::Warn),
+                Some(FloatErrorMode::Warn),
+                Some(FloatErrorMode::Warn),
+                Some(FloatErrorMode::Warn),
+            );
+            lhs.elementwise_binary(&rhs, BinaryOp::Div)
+                .expect("warn mode should not raise")
+        };
+
+        let mut digest = Sha256::new();
+        for value in out.values() {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest {
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "98b3e57f9801110845d29795a14bea549ca4f592f570d82c754c252d2991c624"
+        );
+
+        let events = take_float_error_events();
+        assert_eq!(events.len(), 4);
+        assert_eq!(events[0].kind, FloatErrorKind::Divide);
+        assert_eq!(events[0].op, "divide");
+        assert_eq!(events[1].kind, FloatErrorKind::Over);
+        assert_eq!(events[1].op, "divide");
+        assert_eq!(events[2].kind, FloatErrorKind::Under);
+        assert_eq!(events[2].op, "divide");
+        assert_eq!(events[3].kind, FloatErrorKind::Invalid);
+        assert_eq!(events[3].op, "divide");
     }
 
     #[test]
