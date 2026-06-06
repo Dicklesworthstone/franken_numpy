@@ -21387,6 +21387,172 @@ fn try_zerocopy_i64_shift(
     Ok(Some(output))
 }
 
+// Generic narrow-width integer shift (i8/i16/i32, u8/u16/u32/u64) — the i64 helper
+// above only covers int64. numpy's shift result keeps the operand dtype only when no
+// promotion occurs, so `a` and `b` (when `b` is an array) must share one int dtype of
+// matching shape; a scalar `b` is accepted only when result_type(a, b) == a.dtype (a
+// strong wider scalar like np.int64 would promote → defer). The per-width `op` closure
+// encodes numpy's exact out-of-range behavior (shl → 0; shr → 0 / -1 by sign) verified
+// against numpy. Otherwise these hit the f64-bridge (~390x slower, and left_shift of a
+// wide value CRASHES the bridge). Returns None to defer.
+fn shift_typed_nw<'py, T, F>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    b: &Bound<'py, PyAny>,
+    dtype_name: &str,
+    kind: &str,
+    itemsize: usize,
+    op: F,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy,
+    F: Fn(T, T) -> T,
+{
+    let Ok(a_buf) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    let Some(a_in) = a_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a_buf.shape().to_vec();
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let n = a_in.len();
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let b_is_arr = b.is_exact_instance(&ndarray_type) && {
+        let bd = b.getattr("dtype")?;
+        bd.getattr("kind")?.extract::<String>()? == kind
+            && bd.getattr("itemsize")?.extract::<usize>()? == itemsize
+            && b.getattr("shape")?.extract::<Vec<usize>>()? == shape
+    };
+    // Non-array b is a broadcast scalar; accept only when it does not promote.
+    let scalar: Option<T> = if b_is_arr {
+        None
+    } else {
+        // Only a non-promoting scalar count (result_type unchanged); the gate also
+        // guarantees the value fits T, so the asarray cast below is exact.
+        let rt = numpy.getattr("result_type")?.call1((a, b))?;
+        if !rt.eq(&a.getattr("dtype")?)? {
+            return Ok(None);
+        }
+        let kw = PyDict::new(py);
+        kw.set_item("dtype", dtype_name)?;
+        let b_arr0 = numpy.getattr("asarray")?.call((b,), Some(&kw))?;
+        // Only a true scalar (1 element) broadcasts here; a different-shape array is a
+        // real broadcast that must defer to numpy.
+        if b_arr0.getattr("size")?.extract::<usize>()? != 1 {
+            return Ok(None);
+        }
+        // reshape to 1-D so a 0-d scalar still yields a readable 1-element slice.
+        let b_arr = b_arr0.call_method1("reshape", ((1usize,),))?;
+        let Ok(b_buf) = PyBuffer::<T>::get(&b_arr) else {
+            return Ok(None);
+        };
+        let Some(b_one) = b_buf.as_slice(py) else {
+            return Ok(None);
+        };
+        if b_one.is_empty() {
+            return Ok(None);
+        }
+        Some(b_one[0].get())
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        if let Some(s) = scalar {
+            for (slot, ac) in output.iter().zip(a_in.iter()) {
+                slot.set(op(ac.get(), s));
+            }
+        } else {
+            let Ok(b_buf) = PyBuffer::<T>::get(b) else {
+                return Ok(None);
+            };
+            let Some(b_in) = b_buf.as_slice(py) else {
+                return Ok(None);
+            };
+            for ((slot, ac), bc) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+                slot.set(op(ac.get(), bc.get()));
+            }
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    Ok(Some(flat.call_method1("reshape", (&output_shape,))?.unbind()))
+}
+
+// Dispatch the narrow-width integer shift across i8/i16/i32 and u8/u16/u32/u64.
+// (int64 is handled by try_zerocopy_i64_shift.) Each closure replicates numpy's
+// out-of-range semantics exactly: left shift by a count outside [0, width) yields 0;
+// right shift yields 0 for unsigned, and 0 or -1 (by sign of a) for signed.
+fn try_zerocopy_narrow_shift(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    is_left: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize, is_left) {
+        ("i", 1, true) => shift_typed_nw::<i8, _>(py, &numpy, a, b, "int8", "i", 1, |a, b| {
+            if (0..8).contains(&b) { a.wrapping_shl(b as u32) } else { 0 }
+        }),
+        ("i", 1, false) => shift_typed_nw::<i8, _>(py, &numpy, a, b, "int8", "i", 1, |a, b| {
+            if (0..8).contains(&b) { a.wrapping_shr(b as u32) } else if a < 0 { -1 } else { 0 }
+        }),
+        ("i", 2, true) => shift_typed_nw::<i16, _>(py, &numpy, a, b, "int16", "i", 2, |a, b| {
+            if (0..16).contains(&b) { a.wrapping_shl(b as u32) } else { 0 }
+        }),
+        ("i", 2, false) => shift_typed_nw::<i16, _>(py, &numpy, a, b, "int16", "i", 2, |a, b| {
+            if (0..16).contains(&b) { a.wrapping_shr(b as u32) } else if a < 0 { -1 } else { 0 }
+        }),
+        ("i", 4, true) => shift_typed_nw::<i32, _>(py, &numpy, a, b, "int32", "i", 4, |a, b| {
+            if (0..32).contains(&b) { a.wrapping_shl(b as u32) } else { 0 }
+        }),
+        ("i", 4, false) => shift_typed_nw::<i32, _>(py, &numpy, a, b, "int32", "i", 4, |a, b| {
+            if (0..32).contains(&b) { a.wrapping_shr(b as u32) } else if a < 0 { -1 } else { 0 }
+        }),
+        ("u", 1, true) => shift_typed_nw::<u8, _>(py, &numpy, a, b, "uint8", "u", 1, |a, b| {
+            if b < 8 { a.wrapping_shl(b as u32) } else { 0 }
+        }),
+        ("u", 1, false) => shift_typed_nw::<u8, _>(py, &numpy, a, b, "uint8", "u", 1, |a, b| {
+            if b < 8 { a.wrapping_shr(b as u32) } else { 0 }
+        }),
+        ("u", 2, true) => shift_typed_nw::<u16, _>(py, &numpy, a, b, "uint16", "u", 2, |a, b| {
+            if b < 16 { a.wrapping_shl(b as u32) } else { 0 }
+        }),
+        ("u", 2, false) => shift_typed_nw::<u16, _>(py, &numpy, a, b, "uint16", "u", 2, |a, b| {
+            if b < 16 { a.wrapping_shr(b as u32) } else { 0 }
+        }),
+        ("u", 4, true) => shift_typed_nw::<u32, _>(py, &numpy, a, b, "uint32", "u", 4, |a, b| {
+            if b < 32 { a.wrapping_shl(b) } else { 0 }
+        }),
+        ("u", 4, false) => shift_typed_nw::<u32, _>(py, &numpy, a, b, "uint32", "u", 4, |a, b| {
+            if b < 32 { a.wrapping_shr(b) } else { 0 }
+        }),
+        ("u", 8, true) => shift_typed_nw::<u64, _>(py, &numpy, a, b, "uint64", "u", 8, |a, b| {
+            if b < 64 { a.wrapping_shl(b as u32) } else { 0 }
+        }),
+        ("u", 8, false) => shift_typed_nw::<u64, _>(py, &numpy, a, b, "uint64", "u", 8, |a, b| {
+            if b < 64 { a.wrapping_shr(b as u32) } else { 0 }
+        }),
+        _ => Ok(None),
+    }
+}
+
 fn native_binary_left_shift_or_passthrough(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -21396,6 +21562,9 @@ fn native_binary_left_shift_or_passthrough(
         let a = args.get_item(0)?;
         let b = args.get_item(1)?;
         if let Some(out) = try_zerocopy_i64_shift(py, &a, &b, true)? {
+            return Ok(out);
+        }
+        if let Some(out) = try_zerocopy_narrow_shift(py, &a, &b, true)? {
             return Ok(out);
         }
         let x1 = extract_numeric_array(py, &a, "left_shift(x1)")?;
@@ -21416,6 +21585,9 @@ fn native_binary_right_shift_or_passthrough(
         let a = args.get_item(0)?;
         let b = args.get_item(1)?;
         if let Some(out) = try_zerocopy_i64_shift(py, &a, &b, false)? {
+            return Ok(out);
+        }
+        if let Some(out) = try_zerocopy_narrow_shift(py, &a, &b, false)? {
             return Ok(out);
         }
         let x1 = extract_numeric_array(py, &a, "right_shift(x1)")?;
