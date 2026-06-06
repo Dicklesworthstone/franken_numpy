@@ -9615,6 +9615,132 @@ fn try_zerocopy_f64_cumulative_axis(
     Ok(Some(output))
 }
 
+// Generic typed core for per-axis integer cumsum. Reads the input `T` buffer and
+// writes the running sum into a fresh `A` buffer (the numpy-promoted accumulator
+// dtype) using the same outer*axis*inner decomposition as the f64 path: inner==1
+// (last axis) carries the accumulator in a register; inner>1 accumulates slab by
+// slab. `convert` widens each input element to A; `op` is the wrapping add.
+fn cumsum_axis_typed<'py, T, A, FC, FA>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    axis: isize,
+    dtype_name: &str,
+    convert: FC,
+    op: FA,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
+where
+    T: pyo3::buffer::Element + Copy,
+    A: pyo3::buffer::Element + Copy,
+    FC: Fn(T) -> A,
+    FA: Fn(A, A) -> A,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let ndim = shape.len() as isize;
+    if ndim == 0 {
+        return Ok(None);
+    }
+    let norm_axis = if axis < 0 { axis + ndim } else { axis };
+    if norm_axis < 0 || norm_axis >= ndim {
+        return Ok(None);
+    }
+    let ax = norm_axis as usize;
+    let axis_len = shape[ax];
+    if axis_len == 0 {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let total = input.len();
+    let outer: usize = shape[..ax].iter().product();
+    let inner: usize = shape[ax + 1..].iter().product();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 {
+        let Ok(out_buffer) = PyBuffer::<A>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let lane = axis_len * inner;
+        if inner == 1 {
+            for o in 0..outer {
+                let obase = o * axis_len;
+                let mut acc = convert(input[obase].get());
+                output[obase].set(acc);
+                for a_idx in 1..axis_len {
+                    acc = op(acc, convert(input[obase + a_idx].get()));
+                    output[obase + a_idx].set(acc);
+                }
+            }
+        } else {
+            for o in 0..outer {
+                let obase = o * lane;
+                for i in 0..inner {
+                    output[obase + i].set(convert(input[obase + i].get()));
+                }
+                for a_idx in 1..axis_len {
+                    let cur = obase + a_idx * inner;
+                    let prev = obase + (a_idx - 1) * inner;
+                    for i in 0..inner {
+                        let carried = output[prev + i].get();
+                        output[cur + i].set(op(carried, convert(input[cur + i].get())));
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some((flat, shape)))
+}
+
+// Zero-copy per-axis integer cumsum (explicit axis), all widths, with numpy's
+// accumulator promotion (signed -> int64, unsigned -> uint64). The flatten helper
+// covers axis=None; this covers a single integer axis of a multi-dim array.
+// Otherwise these extracted to an f64 Vec (~6-30x slower). Returns None for a
+// non-integer dtype, a 0-d / out-of-range axis, or a non-ndarray input.
+fn try_zerocopy_int_cumsum_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    let add_i64 = |x: i64, y: i64| x.wrapping_add(y);
+    let add_u64 = |x: u64, y: u64| x.wrapping_add(y);
+    let result = match (kind.as_str(), itemsize) {
+        ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
+        ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
+        ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
+        ("i", 8) => cumsum_axis_typed::<i64, i64, _, _>(py, &numpy, a, axis, "int64", |v| v, add_i64)?,
+        ("u", 1) => cumsum_axis_typed::<u8, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, add_u64)?,
+        ("u", 2) => cumsum_axis_typed::<u16, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, add_u64)?,
+        ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, add_u64)?,
+        ("u", 8) => cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, add_u64)?,
+        _ => return Ok(None),
+    };
+    let Some((flat, shape)) = result else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy np.tile(a, reps) for the 1-D scalar-reps form: a C-contiguous float64
 // 1-D ndarray tiled `reps` times into a length-(n*reps) result. numpy.tile lays
 // the input down end to end, so each output block is a verbatim copy of the
@@ -29888,6 +30014,13 @@ fn cumsum(
     // by-slab accumulation. Bit-identical; out-of-range axes fall through.
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_f64_cumulative_axis(py, a.bind(py), ax, false)?
+    {
+        return Ok(result);
+    }
+    // Zero-copy per-axis integer cumsum (explicit axis) with numpy's accumulator
+    // promotion; the flatten helper above only covers axis=None.
+    if let Some(ax) = axis_val
+        && let Some(result) = try_zerocopy_int_cumsum_axis(py, a.bind(py), ax)?
     {
         return Ok(result);
     }
