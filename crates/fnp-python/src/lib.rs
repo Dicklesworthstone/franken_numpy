@@ -6938,6 +6938,111 @@ fn zerocopy_f64_unary_flat<'py>(
     Ok(Some((flat, shape)))
 }
 
+// numpy sign for float32: nan -> nan, else (x>0) - (x<0); +-0 -> 0.
+#[inline(always)]
+fn numpy_sign_f32(x: f32) -> f32 {
+    if x.is_nan() {
+        f32::NAN
+    } else {
+        f32::from(i8::from(x > 0.0) - i8::from(x < 0.0))
+    }
+}
+
+// float32 counterpart of unary_map_f64: monomorphic, inlined, autovectorizable.
+#[inline(always)]
+fn unary_map_f32<F: Fn(f32) -> f32>(
+    input: &[pyo3::buffer::ReadOnlyCell<f32>],
+    output: &[std::cell::Cell<f32>],
+    f: F,
+) {
+    for (slot, cell) in output.iter().zip(input.iter()) {
+        slot.set(f(cell.get()));
+    }
+}
+
+// float32 sibling of zerocopy_f64_unary_flat. numpy's float32 ufuncs compute in
+// float32 and return float32; each op below is a single correctly-rounded IEEE
+// f32 primitive (or the exact rounding op), so reading the f32 buffer and
+// writing the op is bit-identical to numpy. Without this, float32 unary ops
+// extracted to an f64 Vec then rebuilt — ~60-360x slower than numpy — and
+// `sign` even returned float64 (a dtype divergence this path also fixes).
+// Degrees/Radians are deliberately omitted (float32 constant-rounding parity is
+// subtle); they keep using the existing path. Returns None for non-float32 /
+// non-C-contiguous / non-ndarray, and for sqrt of a finite-negative (which must
+// record numpy's invalid event on the slow path).
+fn zerocopy_f32_unary_flat<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    x: &Bound<'py, PyAny>,
+    op: UnaryOp,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    if !matches!(
+        op,
+        UnaryOp::Abs
+            | UnaryOp::Fabs
+            | UnaryOp::Negative
+            | UnaryOp::Positive
+            | UnaryOp::Rint
+            | UnaryOp::Sqrt
+            | UnaryOp::Floor
+            | UnaryOp::Ceil
+            | UnaryOp::Trunc
+            | UnaryOp::Sign
+            | UnaryOp::Square
+            | UnaryOp::Reciprocal
+    ) {
+        return Ok(None);
+    }
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    // PyBuffer::<f32>::get only succeeds for an exact float32 buffer (format 'f',
+    // itemsize 4); float16/float64/other dtypes fall through unchanged.
+    let Ok(in_buffer) = PyBuffer::<f32>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if matches!(op, UnaryOp::Sqrt)
+        && input.iter().any(|cell| {
+            let value = cell.get();
+            value.is_finite() && value < 0.0
+        })
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float32")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        match op {
+            UnaryOp::Abs | UnaryOp::Fabs => unary_map_f32(input, output, f32::abs),
+            UnaryOp::Negative => unary_map_f32(input, output, |x| -x),
+            UnaryOp::Positive => unary_map_f32(input, output, |x| x),
+            UnaryOp::Rint => unary_map_f32(input, output, f32::round_ties_even),
+            UnaryOp::Sqrt => unary_map_f32(input, output, f32::sqrt),
+            UnaryOp::Floor => unary_map_f32(input, output, f32::floor),
+            UnaryOp::Ceil => unary_map_f32(input, output, f32::ceil),
+            UnaryOp::Trunc => unary_map_f32(input, output, f32::trunc),
+            UnaryOp::Sign => unary_map_f32(input, output, numpy_sign_f32),
+            UnaryOp::Square => unary_map_f32(input, output, |x| x * x),
+            UnaryOp::Reciprocal => unary_map_f32(input, output, |x| 1.0 / x),
+            _ => return Ok(None),
+        }
+    }
+    Ok(Some((flat, shape)))
+}
+
 // int64 counterpart of unary_map_f64: monomorphic, inlined, autovectorizable.
 #[inline(always)]
 fn unary_map_i64<F: Fn(i64) -> i64>(
@@ -7024,6 +7129,25 @@ fn try_zerocopy_f64_unary(
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
     let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
+// float32 counterpart of try_zerocopy_f64_unary, for single-op handlers (sign,
+// floor, ...) that don't route through native_unary_elementwise.
+fn try_zerocopy_f32_unary(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    op: UnaryOp,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some((flat, shape)) = zerocopy_f32_unary_flat(py, &numpy, x, op)? else {
         return Ok(None);
     };
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
@@ -12936,6 +13060,10 @@ fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Sign)? {
         return Ok(out);
     }
+    // float32 input must stay float32; the extract path below widens to f64.
+    if let Some(out) = try_zerocopy_f32_unary(py, x.bind(py), UnaryOp::Sign)? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x.bind(py), "sign(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Sign))
 }
@@ -18179,6 +18307,17 @@ fn native_unary_elementwise(
         }
         return Ok(output);
     }
+    // float32 zero-copy fast path. float32 input otherwise extracted to an f64
+    // Vec and rebuilt (~60-360x slower), and `sign` returned float64; this keeps
+    // float32 in float32 throughout, bit-identical to numpy.
+    if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, &numpy, x, op)? {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+        if shape.is_empty() {
+            return Ok(output.bind(py).get_item(())?.unbind());
+        }
+        return Ok(output);
+    }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
         return fallback(py);
     };
@@ -18226,6 +18365,16 @@ fn native_unary_promoting(
     // (which this promoting path widens to float) are not float64 ndarrays, so
     // they correctly fall through unchanged.
     if let Some((flat, shape)) = zerocopy_f64_unary_flat(py, &numpy, x, op)? {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+        if shape.is_empty() {
+            return Ok(output.bind(py).get_item(())?.unbind());
+        }
+        return Ok(output);
+    }
+    // float32 input is float-preserving here (only integers promote to f64), so
+    // the zero-copy float32 path applies to the ops it supports (e.g. sqrt).
+    if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, &numpy, x, op)? {
         let output_shape = PyTuple::new(py, shape.iter().copied())?;
         let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
         if shape.is_empty() {
