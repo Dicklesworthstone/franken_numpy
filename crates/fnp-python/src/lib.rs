@@ -16076,6 +16076,113 @@ fn dsplit(py: Python<'_>, ary: Py<PyAny>, indices_or_sections: Py<PyAny>) -> PyR
     split_helper_default(py, ary, indices_or_sections, SplitHelperKind::Depth, None)
 }
 
+// Generic in-place scatter a.flat[ind[i]] = v[i % vlen] for one integer dtype.
+// The inverse of take/gather: numpy.put writes values (cycled when shorter than
+// the index list) into a's own buffer, applying indices in order so duplicates
+// resolve last-write-wins — a sequential loop matches exactly. Negative indices
+// wrap by += n. A validation pass checks every index BEFORE any write, so an
+// out-of-range index leaves a untouched and we defer to numpy.put for the exact
+// IndexError (no partial/double application). Requires a writable C-contiguous
+// buffer (as_mut_slice → None otherwise) and v of the identical dtype T
+// (PyBuffer::<T>::get on v is a free dtype-equality gate); mismatches fall
+// through. Returns Some(()) when the in-place write completed, None to defer.
+fn put_typed<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    a: &Bound<'py, PyAny>,
+    ind64: &Bound<'py, PyAny>,
+    v: &Bound<'py, PyAny>,
+) -> PyResult<Option<()>> {
+    let (Ok(a_buf), Ok(i_buf), Ok(v_buf)) = (
+        PyBuffer::<T>::get(a),
+        PyBuffer::<i64>::get(ind64),
+        PyBuffer::<T>::get(v),
+    ) else {
+        return Ok(None);
+    };
+    let (Some(idx_in), Some(v_in)) = (i_buf.as_slice(py), v_buf.as_slice(py)) else {
+        return Ok(None);
+    };
+    let vlen = v_in.len();
+    let nind = idx_in.len();
+    if nind == 0 {
+        return Ok(Some(())); // no indices → no-op (a unchanged)
+    }
+    if vlen == 0 {
+        return Ok(None); // numpy raises on empty values + non-empty indices; defer
+    }
+    let n = a_buf.item_count() as i64;
+    // Validate ALL indices first so an OOB leaves a unmutated (numpy raises IndexError).
+    for c in idx_in.iter() {
+        let mut idx = c.get();
+        if idx < 0 {
+            idx += n;
+        }
+        if idx < 0 || idx >= n {
+            return Ok(None);
+        }
+    }
+    let Some(out) = a_buf.as_mut_slice(py) else {
+        return Ok(None); // read-only / non-contiguous → defer
+    };
+    for (i, c) in idx_in.iter().enumerate() {
+        let mut idx = c.get();
+        if idx < 0 {
+            idx += n;
+        }
+        out[idx as usize].set(v_in[i % vlen].get());
+    }
+    Ok(Some(()))
+}
+
+// Zero-copy in-place np.put for the integer dtypes the native path sends through
+// the cold extract_numeric_array f64-bridge + full copy-back (~36x slower, and
+// lossy for wide ints). Indices are normalized to a contiguous int64 array;
+// values must already be an ndarray of a's dtype (so no cast is needed and the
+// write is bit-identical). 'raise' mode only (gated by the caller). Scalars,
+// python-list values, mismatched value dtypes, float indices, and non-ndarray
+// operands fall through.
+fn try_zerocopy_int_put(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    ind: &Bound<'_, PyAny>,
+    v: &Bound<'_, PyAny>,
+) -> PyResult<Option<()>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let a_dtype = a.getattr("dtype")?;
+    let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    // Normalize indices to a contiguous int64 array; only integer index dtypes
+    // are accepted (float indices raise in numpy — defer).
+    let ind_arr = numpy.call_method1("asarray", (ind,))?;
+    let ind_kind = ind_arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if ind_kind != "i" && ind_kind != "u" {
+        return Ok(None);
+    }
+    let kw = PyDict::new(py);
+    kw.set_item("dtype", "int64")?;
+    let ind64 = numpy
+        .getattr("ascontiguousarray")?
+        .call((ind_arr,), Some(&kw))?;
+    match (kind.as_str(), itemsize) {
+        ("i", 8) => put_typed::<i64>(py, a, &ind64, v),
+        ("i", 4) => put_typed::<i32>(py, a, &ind64, v),
+        ("i", 2) => put_typed::<i16>(py, a, &ind64, v),
+        ("i", 1) => put_typed::<i8>(py, a, &ind64, v),
+        ("u", 8) => put_typed::<u64>(py, a, &ind64, v),
+        ("u", 4) => put_typed::<u32>(py, a, &ind64, v),
+        ("u", 2) => put_typed::<u16>(py, a, &ind64, v),
+        ("u", 1) => put_typed::<u8>(py, a, &ind64, v),
+        _ => Ok(None),
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, ind, v, mode="raise"))]
 fn put(
@@ -16120,6 +16227,13 @@ fn put(
     let dtype_kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
     if dtype_kind == "c" {
         return fallback();
+    }
+
+    // Zero-copy in-place scatter for integer a + integer indices + same-dtype
+    // ndarray values (the common case); skips the cold extract + full copy-back.
+    // Bit-identical; other dtypes/scalar-or-list values/OOB indices fall through.
+    if try_zerocopy_int_put(py, a, ind.bind(py), v.bind(py))?.is_some() {
+        return Ok(py.None());
     }
 
     let mut array = extract_numeric_array(py, a, "put(a)")?;
