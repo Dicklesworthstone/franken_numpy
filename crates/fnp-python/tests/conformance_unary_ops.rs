@@ -142,6 +142,86 @@ print(wraps)
 }
 
 #[test]
+fn narrow_integer_unary_wraps_and_matches_numpy_golden_sha256() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+
+cases = [
+    np.array([-128, -17, -2, -1, 0, 1, 2, 11, 127], dtype=np.int8),
+    np.array([-32768, -257, -129, -2, -1, 0, 1, 2, 129, 257, 32767], dtype=np.int16),
+    np.arange(-18, 18, dtype=np.int16).reshape(6, 6),
+    np.array([0, 1, 2, 15, 16, 127, 128, 255], dtype=np.uint8),
+    np.arange(64, dtype=np.uint8).reshape(8, 8),
+    np.array([0, 1, 2, 255, 256, 32767, 32768, 65535], dtype=np.uint16),
+    np.array([0, 1, 2, 65535, 65536, 2147483648, 4294967295], dtype=np.uint32),
+    np.array([0, 1, 2, 4294967295, 4294967296, 9223372036854775808, 18446744073709551615], dtype=np.uint64),
+    np.array([], dtype=np.int16),
+    np.array([], dtype=np.uint32),
+]
+ops = [("positive", fnp.positive, np.positive), ("negative", fnp.negative, np.negative), ("abs", fnp.abs, np.abs), ("square", fnp.square, np.square)]
+
+def digest(which):
+    chunks = []
+    for name, fnp_op, np_op in ops:
+        op = fnp_op if which == "fnp" else np_op
+        for x in cases:
+            out = op(x)
+            chunks.append(name.encode())
+            chunks.append(b"|")
+            chunks.append(str(x.dtype).encode())
+            chunks.append(b"|")
+            chunks.append(str(out.dtype).encode())
+            chunks.append(b"|")
+            chunks.append(np.asarray(out.shape, dtype=np.int64).tobytes())
+            chunks.append(b"|")
+            chunks.append(np.ascontiguousarray(out).view(np.uint8).tobytes())
+            chunks.append(b";")
+    return hashlib.sha256(b"".join(chunks)).hexdigest()
+
+edge_checks = (
+    fnp.square(np.array([-128], dtype=np.int8))[0] == np.square(np.array([-128], dtype=np.int8))[0]
+    and fnp.abs(np.array([-32768], dtype=np.int16))[0] == np.abs(np.array([-32768], dtype=np.int16))[0]
+    and fnp.negative(np.array([1], dtype=np.uint8))[0] == np.negative(np.array([1], dtype=np.uint8))[0]
+    and fnp.square(np.array([18446744073709551615], dtype=np.uint64))[0] == np.square(np.array([18446744073709551615], dtype=np.uint64))[0]
+)
+
+ours = digest("fnp")
+theirs = digest("numpy")
+print(ours)
+print(theirs)
+print(ours == theirs)
+print(edge_checks)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let lines: Vec<&str> = result.lines().collect();
+    let expected_sha = "5fac5a6179d813fec16137caa57737b5761da194a9ddd9b014b1c12785895f09";
+    assert_eq!(
+        lines.get(2).copied(),
+        Some("True"),
+        "narrow integer unary raw output hash must match numpy: {result}"
+    );
+    assert_eq!(
+        lines.get(3).copied(),
+        Some("True"),
+        "narrow integer unary edge cases must preserve numpy wrapping: {result}"
+    );
+    assert_eq!(
+        lines.first().copied(),
+        Some(expected_sha),
+        "narrow integer unary fnp hash changed: {result}"
+    );
+    assert_eq!(
+        lines.get(1).copied(),
+        Some(expected_sha),
+        "narrow integer unary numpy golden hash changed: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn reciprocal_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"

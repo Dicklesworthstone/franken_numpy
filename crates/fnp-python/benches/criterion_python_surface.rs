@@ -95,6 +95,93 @@ fn bench_int32_unary_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_narrow_int_unary_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_narrow_int_unary_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let base = numpy
+            .call_method1("arange", (2_000_000_i64,))
+            .expect("2M integer input");
+        let input_i16 = base
+            .call_method1("astype", ("int16",))
+            .expect("int16 input");
+        let input_u8 = base
+            .call_method1("astype", ("uint8",))
+            .expect("uint8 input");
+        let input_u64 = base
+            .call_method1("astype", ("uint64",))
+            .expect("uint64 input");
+        let fnp_square = module.getattr("square").expect("fnp_python.square");
+        let fnp_negative = module.getattr("negative").expect("fnp_python.negative");
+        let numpy_square = numpy.getattr("square").expect("numpy.square");
+        let numpy_negative = numpy.getattr("negative").expect("numpy.negative");
+
+        group.bench_function("fnp_square_i16_2m", |bench| {
+            bench.iter(|| {
+                let result = fnp_square
+                    .call1((&input_i16,))
+                    .expect("fnp square int16 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_square_i16_2m", |bench| {
+            bench.iter(|| {
+                let result = numpy_square
+                    .call1((&input_i16,))
+                    .expect("numpy square int16 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_negative_u8_2m", |bench| {
+            bench.iter(|| {
+                let result = fnp_negative
+                    .call1((&input_u8,))
+                    .expect("fnp negative uint8 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_negative_u8_2m", |bench| {
+            bench.iter(|| {
+                let result = numpy_negative
+                    .call1((&input_u8,))
+                    .expect("numpy negative uint8 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_square_u64_2m", |bench| {
+            bench.iter(|| {
+                let result = fnp_square
+                    .call1((&input_u64,))
+                    .expect("fnp square uint64 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_square_u64_2m", |bench| {
+            bench.iter(|| {
+                let result = numpy_square
+                    .call1((&input_u64,))
+                    .expect("numpy square uint64 benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_ediff1d_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_ediff1d_boundary");
     group.sample_size(10);
@@ -481,6 +568,7 @@ criterion_group!(
     benches,
     bench_sqrt_input_extraction,
     bench_int32_unary_boundary,
+    bench_narrow_int_unary_boundary,
     bench_ediff1d_boundary,
     bench_select_boundary,
     bench_ldexp_boundary,
