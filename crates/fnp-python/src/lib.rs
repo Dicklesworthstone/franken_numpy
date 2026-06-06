@@ -28858,6 +28858,15 @@ fn prod(
         return Ok(out);
     }
 
+    // Zero-copy integer prod (full reduction): wrapping product with numpy's
+    // accumulator promotion (signed->int64, unsigned->uint64). Skips the cold,
+    // for-wide-ints lossy extract Vec. keepdims/per-axis/non-integer fall through.
+    if !keepdims
+        && let Some(out) = try_zerocopy_int_prod(py, a.bind(py), axis_val)?
+    {
+        return Ok(out);
+    }
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "prod(a)") {
         Ok(arr) => arr,
@@ -30888,6 +30897,93 @@ fn isnat(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     core_numpy_passthrough(py, "isnat", args, kwargs)
+}
+
+// Generic typed core for the integer prod full reduction. numpy promotes the
+// product accumulator (signed -> int64, unsigned -> uint64) and wraps on
+// overflow; integer multiplication is associative mod 2^n so the (vectorizable)
+// running wrapping product is bit-identical regardless of order. The empty
+// product is the identity 1. Returns a numpy scalar of the promoted dtype
+// (numpy.prod(axis=None) returns a scalar, not a 0-d array).
+fn prod_typed<'py, T, A, FC, FM>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    out_dtype_name: &str,
+    identity: A,
+    convert: FC,
+    mul: FM,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy,
+    A: Copy + IntoPyObject<'py>,
+    FC: Fn(T) -> A,
+    FM: Fn(A, A) -> A,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let mut acc = identity;
+    for c in input.iter() {
+        acc = mul(acc, convert(c.get()));
+    }
+    let scalar = numpy.getattr(out_dtype_name)?.call1((acc,))?;
+    Ok(Some(scalar.unbind()))
+}
+
+// Zero-copy integer prod for the full reduction (axis=None), all widths, with
+// numpy's accumulator promotion (signed -> int64, unsigned -> uint64). Otherwise
+// these extracted to an f64 Vec (~45x slower, lossy for wide ints). Returns None
+// for a per-axis reduction, a non-integer dtype, or a non-ndarray input.
+fn try_zerocopy_int_prod(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if axis.is_some() {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize) {
+        ("i", 1) => prod_typed::<i8, i64, _, _>(py, &numpy, a, "int64", 1, |v| v as i64, |x, y| {
+            x.wrapping_mul(y)
+        }),
+        ("i", 2) => prod_typed::<i16, i64, _, _>(py, &numpy, a, "int64", 1, |v| v as i64, |x, y| {
+            x.wrapping_mul(y)
+        }),
+        ("i", 4) => prod_typed::<i32, i64, _, _>(py, &numpy, a, "int64", 1, |v| v as i64, |x, y| {
+            x.wrapping_mul(y)
+        }),
+        ("i", 8) => {
+            prod_typed::<i64, i64, _, _>(py, &numpy, a, "int64", 1, |v| v, |x, y| x.wrapping_mul(y))
+        }
+        ("u", 1) => prod_typed::<u8, u64, _, _>(py, &numpy, a, "uint64", 1, |v| v as u64, |x, y| {
+            x.wrapping_mul(y)
+        }),
+        ("u", 2) => prod_typed::<u16, u64, _, _>(py, &numpy, a, "uint64", 1, |v| v as u64, |x, y| {
+            x.wrapping_mul(y)
+        }),
+        ("u", 4) => prod_typed::<u32, u64, _, _>(py, &numpy, a, "uint64", 1, |v| v as u64, |x, y| {
+            x.wrapping_mul(y)
+        }),
+        ("u", 8) => {
+            prod_typed::<u64, u64, _, _>(py, &numpy, a, "uint64", 1, |v| v, |x, y| x.wrapping_mul(y))
+        }
+        _ => Ok(None),
+    }
 }
 
 // Generic typed core for the integer ptp (peak-to-peak = max - min) full
