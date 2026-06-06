@@ -18188,6 +18188,21 @@ fn allequal(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, fill_value: bool) -> PyR
     Ok(PyBool::new(py, equal).to_owned().into_any().unbind())
 }
 
+// True for an exact integer (signed or unsigned) ndarray. Integer data cannot hold
+// NaN, so every np.nan<reduction> over it equals the plain reduction — the callers
+// use this to route integer input to numpy's fast SIMD reduction (via their own
+// `fallback()` to numpy.nan<op>) instead of the slow native f64-reduction machinery
+// (~2.5-440x slower for integers). Bit-identical: numpy's nan<op> for an int array
+// is exactly the plain reduction, same value and dtype.
+fn numpy_dtype_is_integer(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let numpy = py.import("numpy")?;
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(false);
+    }
+    let kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    Ok(kind == "i" || kind == "u")
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false))]
 fn nanmean(
@@ -18227,6 +18242,11 @@ fn nanmean(
     // The native kernel computes in f64; defer float16/float32/complex inputs
     // to numpy.nanmean so the narrow float dtype is preserved.
     if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
+        return fallback();
+    }
+    // Integer input cannot contain NaN, so nannanmean == the plain reduction; route to
+    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
+    if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanmean(a)") {
@@ -18293,6 +18313,11 @@ fn nansum(
     // The native kernel computes in f64; defer float16/float32/complex inputs
     // to numpy.nansum so the narrow float dtype is preserved.
     if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
+        return fallback();
+    }
+    // Integer input cannot contain NaN, so nannansum == the plain reduction; route to
+    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
+    if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
     let a = match extract_numeric_array(py, a.bind(py), "nansum(a)") {
@@ -18372,6 +18397,11 @@ fn nanprod(
     if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
         return fallback();
     }
+    // Integer input cannot contain NaN, so nannanprod == the plain reduction; route to
+    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
+    if numpy_dtype_is_integer(py, a.bind(py))? {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanprod(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -18426,6 +18456,11 @@ fn nanmax(
     if !native_minmax_preserves_dtype(py, a.bind(py)) {
         return fallback();
     }
+    // Integer input cannot contain NaN, so nannanmax == the plain reduction; route to
+    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
+    if numpy_dtype_is_integer(py, a.bind(py))? {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanmax(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -18478,6 +18513,11 @@ fn nanmin(
     // nanmin preserves the input dtype exactly; the native kernel widens
     // narrow ints/floats, so defer anything but bool/8-byte numerics to numpy.
     if !native_minmax_preserves_dtype(py, a.bind(py)) {
+        return fallback();
+    }
+    // Integer input cannot contain NaN, so nannanmin == the plain reduction; route to
+    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
+    if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanmin(a)") {
@@ -18555,6 +18595,11 @@ fn nanstd(
         return fallback();
     }
 
+    // Integer input cannot contain NaN, so nannanstd == the plain reduction; route to
+    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
+    if numpy_dtype_is_integer(py, a.bind(py))? {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanstd(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -18642,6 +18687,11 @@ fn nanvar(
         return fallback();
     }
 
+    // Integer input cannot contain NaN, so nannanvar == the plain reduction; route to
+    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
+    if numpy_dtype_is_integer(py, a.bind(py))? {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanvar(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -18700,6 +18750,11 @@ fn nanargmax(
         return fallback();
     }
 
+    // Integer input cannot contain NaN, so nannanargmax == the plain reduction; route to
+    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
+    if numpy_dtype_is_integer(py, a.bind(py))? {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanargmax(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -18751,6 +18806,11 @@ fn nanargmin(
         return fallback();
     }
 
+    // Integer input cannot contain NaN, so nannanargmin == the plain reduction; route to
+    // numpy's fast reduction (via fallback) instead of the slow native f64 path.
+    if numpy_dtype_is_integer(py, a.bind(py))? {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanargmin(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
