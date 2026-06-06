@@ -419,6 +419,8 @@ cases = [
     ("axis1_len6_nan_keep", np.array([[1.0, 2.0, 3.0, 4.0, nan_c, 6.0], [nan_a, -0.0, 0.0, 9.0, 10.0, 11.0]], dtype=np.float64), -1, True),
     ("axis0_finite_zero", np.array([[0.0, -0.0], [-0.0, 0.0]], dtype=np.float64), 0, False),
     ("noncontig_axis0_nan", noncontig, 0, False),
+    ("finite_nonzero_simd_flat", np.linspace(-5.0, -1.0, 64, dtype=np.float64), None, False),
+    ("finite_nonzero_simd_axis1", np.linspace(1.0, 128.0, 128, dtype=np.float64).reshape(4, 32), 1, False),
 ]
 
 def digest(which):
@@ -452,7 +454,7 @@ print(hmac.compare_digest(ours, theirs))
     );
     let result = numpy_oracle(&script)?;
     let lines: Vec<&str> = result.lines().collect();
-    let expected_sha = "255070c909f29c4a6fb71250a4605fbc5f97f215781fbf33df98e9e1a9e0b190";
+    let expected_sha = "ced2021a2238f28f2f4a33b842282f66e0b34fb4be253d473d113d014422789f";
     assert_eq!(
         lines.get(2).copied(),
         Some("True"),
