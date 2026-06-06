@@ -27948,6 +27948,89 @@ fn try_zerocopy_f64_kron1d(
     Ok(Some(out.unbind()))
 }
 
+// Generic zero-copy 1-D Kronecker product (= flattened outer) for one integer
+// dtype: out[i*m + j] = a[i] * b[j], length n*m, 1-D. numpy.kron of two 1-D
+// arrays returns a 1-D array; integer multiply wraps silently for ndarray ops so
+// `mul` is wrapping_mul (bit-identical). The inner scalar-times-vector row store
+// autovectorizes. Returns None on a non-contiguous buffer (caller falls through).
+fn kron1d_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T, T) -> T>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    b: &Bound<'py, PyAny>,
+    dtype_name: &str,
+    mul: F,
+) -> PyResult<Option<Py<PyAny>>> {
+    let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<T>::get(a), PyBuffer::<T>::get(b)) else {
+        return Ok(None);
+    };
+    if a_buffer.shape().len() != 1 || b_buffer.shape().len() != 1 {
+        return Ok(None);
+    }
+    let (Some(a_in), Some(b_in)) = (a_buffer.as_slice(py), b_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    let n = a_in.len();
+    let m = b_in.len();
+    let total = n * m;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let out = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (i, ai_cell) in a_in.iter().enumerate() {
+            let ai = ai_cell.get();
+            let row = &output[i * m..i * m + m];
+            for (slot, bj_cell) in row.iter().zip(b_in.iter()) {
+                slot.set(mul(ai, bj_cell.get()));
+            }
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
+// Zero-copy integer 1-D Kronecker product for the dtypes the f64 helper leaves to
+// the cold extract path (~20x slower, lossy/overflowing for wide ints). Requires
+// a and b to share one C-contiguous 1-D integer dtype (numpy result_type of
+// matching int dtypes is that dtype); mismatched dtypes, multi-dim, bool, and
+// non-ndarray operands fall through.
+fn try_zerocopy_int_kron1d(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let a_dtype = a.getattr("dtype")?;
+    let b_dtype = b.getattr("dtype")?;
+    let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    if kind != b_dtype.getattr("kind")?.extract::<String>()?
+        || itemsize != b_dtype.getattr("itemsize")?.extract::<usize>()?
+    {
+        return Ok(None);
+    }
+    match (kind.as_str(), itemsize) {
+        ("i", 8) => kron1d_typed::<i64, _>(py, &numpy, a, b, "int64", |x, y| x.wrapping_mul(y)),
+        ("i", 4) => kron1d_typed::<i32, _>(py, &numpy, a, b, "int32", |x, y| x.wrapping_mul(y)),
+        ("i", 2) => kron1d_typed::<i16, _>(py, &numpy, a, b, "int16", |x, y| x.wrapping_mul(y)),
+        ("i", 1) => kron1d_typed::<i8, _>(py, &numpy, a, b, "int8", |x, y| x.wrapping_mul(y)),
+        ("u", 8) => kron1d_typed::<u64, _>(py, &numpy, a, b, "uint64", |x, y| x.wrapping_mul(y)),
+        ("u", 4) => kron1d_typed::<u32, _>(py, &numpy, a, b, "uint32", |x, y| x.wrapping_mul(y)),
+        ("u", 2) => kron1d_typed::<u16, _>(py, &numpy, a, b, "uint16", |x, y| x.wrapping_mul(y)),
+        ("u", 1) => kron1d_typed::<u8, _>(py, &numpy, a, b, "uint8", |x, y| x.wrapping_mul(y)),
+        _ => Ok(None),
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -27960,6 +28043,9 @@ fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // ndarrays; skips the cold extract + full n*m build Vecs. Bit-identical;
     // multi-dim inputs and other dtypes fall through to the general path.
     if let Some(result) = try_zerocopy_f64_kron1d(py, a.bind(py), b.bind(py))? {
+        return Ok(result);
+    }
+    if let Some(result) = try_zerocopy_int_kron1d(py, a.bind(py), b.bind(py))? {
         return Ok(result);
     }
 
