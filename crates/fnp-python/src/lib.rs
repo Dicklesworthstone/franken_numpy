@@ -28659,8 +28659,9 @@ fn numpy_array_any_nan(numpy: &Bound<'_, PyModule>, value: &Bound<'_, PyAny>) ->
 // Zero-copy finite np.min/np.max reduction for exact C-contiguous float64
 // ndarrays. The finite update uses NumPy's later-equal tie behavior
 // (`if acc > v { acc } else { v }` for max, `<` for min), preserving signed-zero
-// selection in scan order. NaN reductions delegate to NumPy instead of trying to
-// emulate its position-dependent SIMD/scalar payload choices.
+// selection in scan order. NaN reductions delegate to NumPy as soon as the scan
+// observes one instead of paying a separate finite prepass; this keeps the
+// position-dependent SIMD/scalar payload choices owned by NumPy.
 fn try_zerocopy_f64_minmax(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -28686,9 +28687,6 @@ fn try_zerocopy_f64_minmax(
         }
         return Ok(F64MinMaxFastPath::NotApplicable);
     };
-    if input.iter().any(|cell| cell.get().is_nan()) {
-        return Ok(F64MinMaxFastPath::DelegateToNumpy);
-    }
     let ndim = shape.len();
 
     let (outer, axis_len, inner, out_shape): (usize, usize, usize, Vec<usize>) = match axis {
@@ -28734,8 +28732,15 @@ fn try_zerocopy_f64_minmax(
             for (o, slot) in output.iter().enumerate() {
                 let base = o * axis_len;
                 let mut acc = input[base].get();
+                if acc.is_nan() {
+                    return Ok(F64MinMaxFastPath::DelegateToNumpy);
+                }
                 for a in 1..axis_len {
-                    acc = f64_minmax_update(acc, input[base + a].get(), op);
+                    let value = input[base + a].get();
+                    if value.is_nan() {
+                        return Ok(F64MinMaxFastPath::DelegateToNumpy);
+                    }
+                    acc = f64_minmax_update(acc, value, op);
                 }
                 slot.set(acc);
             }
@@ -28745,13 +28750,21 @@ fn try_zerocopy_f64_minmax(
                 let obase = o * inner;
                 let ibase = o * lane;
                 for i in 0..inner {
-                    output[obase + i].set(input[ibase + i].get());
+                    let value = input[ibase + i].get();
+                    if value.is_nan() {
+                        return Ok(F64MinMaxFastPath::DelegateToNumpy);
+                    }
+                    output[obase + i].set(value);
                 }
                 for a in 1..axis_len {
                     let in_a = ibase + a * inner;
                     for i in 0..inner {
+                        let value = input[in_a + i].get();
+                        if value.is_nan() {
+                            return Ok(F64MinMaxFastPath::DelegateToNumpy);
+                        }
                         let slot = &output[obase + i];
-                        slot.set(f64_minmax_update(slot.get(), input[in_a + i].get(), op));
+                        slot.set(f64_minmax_update(slot.get(), value, op));
                     }
                 }
             }
@@ -31130,20 +31143,25 @@ fn try_zerocopy_f64_around(
     Ok(Some(output))
 }
 
-// np.around/np.round of an integer ndarray with decimals >= 0 is the identity
-// (rounding an integer to zero-or-more decimal places leaves it unchanged);
-// numpy returns a fresh copy preserving the input dtype. Returning a.copy()
-// skips the cold extract -> f64 Vec -> Rint -> rebuild path (~140-270x slower,
-// and lossy for wide ints). decimals < 0 rounds to powers of ten and is NOT the
-// identity, so it falls through. Returns None for non-integer / non-ndarray.
+// np.around/np.round of an integer ndarray.
+//
+// decimals >= 0 is the identity (rounding an integer to zero-or-more decimal
+// places leaves it unchanged); numpy returns a fresh copy preserving the input
+// dtype, so a.copy() is bit-identical and skips the cold extract -> f64 Vec ->
+// Rint -> rebuild path (~140-270x slower).
+//
+// decimals < 0 rounds to a power of ten. numpy computes this with a *lossy*
+// float cast (int -> f64 -> round -> back), which overflow-wraps and warns for
+// wide ints. fnp's extract path instead RAISES on any int that cannot round-trip
+// through f64 exactly (`to_storage ... cannot be represented exactly`), so it
+// CRASHED where numpy returns a value (bead xti0b). Delegate this case straight
+// to numpy.around for exact parity (including numpy's own overflow behavior) and
+// no crash. Returns None for non-integer / non-ndarray inputs.
 fn try_zerocopy_int_around(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     decimals: i32,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if decimals < 0 {
-        return Ok(None);
-    }
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type) {
@@ -31153,7 +31171,14 @@ fn try_zerocopy_int_around(
     if kind != "i" && kind != "u" {
         return Ok(None);
     }
-    Ok(Some(a.call_method0("copy")?.unbind()))
+    if decimals >= 0 {
+        return Ok(Some(a.call_method0("copy")?.unbind()));
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("decimals", decimals)?;
+    Ok(Some(
+        numpy.getattr("around")?.call((a,), Some(&kwargs))?.unbind(),
+    ))
 }
 
 // Rounding aliases (2).
