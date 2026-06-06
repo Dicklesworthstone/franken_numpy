@@ -12366,78 +12366,83 @@ fn nonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 // buffer's '?' format is rejected by PyBuffer::<u8>, so it is viewed as uint8
 // first. Returns Ok(None) — caller falls through — for any other dtype or a
 // non-contiguous / non-ndarray input.
+// Typed flatnonzero core: count the elements for which `pred` holds (vectorizes),
+// then write their flat indices into a fresh int64 buffer with a branchless
+// store + conditional increment. Integers are nonzero iff any bit is set, so they
+// are scanned through a uintN bit-view chosen by itemsize; floats must compare by
+// VALUE so +-0.0 (sign bit set) is excluded and NaN included — matching numpy.
+fn flatnonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    input: &[pyo3::buffer::ReadOnlyCell<T>],
+    pred: F,
+) -> PyResult<Option<Py<PyAny>>> {
+    let count = input.iter().filter(|cell| pred(cell.get())).count();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "int64")?;
+    let out = numpy.call_method("empty", (count,), Some(&kwargs))?.unbind();
+    if count > 0 {
+        let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let mut w = 0usize;
+        for (i, cell) in input.iter().enumerate() {
+            if w < count {
+                output[w].set(i as i64);
+            }
+            w += usize::from(pred(cell.get()));
+        }
+    }
+    Ok(Some(out))
+}
+
 fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
 
-    // Allocate the int64 output of the given length and return its writable slice
-    // along with the object. (count is computed by each typed branch first so the
-    // monomorphized fill loop below has no dynamic dispatch.)
-    let make_output = |py: Python<'_>, count: usize| -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        kwargs.set_item("dtype", "int64")?;
-        Ok(numpy
-            .call_method("empty", (count,), Some(&kwargs))?
-            .unbind())
-    };
-
-    match kind.as_str() {
-        "b" => {
-            let a_u8: Bound<'_, PyAny> = a.call_method1("view", (numpy.getattr("uint8")?,))?;
-            let Ok(buffer) = PyBuffer::<u8>::get(&a_u8) else {
+    macro_rules! via_uint {
+        ($view_dt:literal, $T:ty) => {{
+            let view = a.call_method1("view", (numpy.getattr($view_dt)?,))?;
+            let Ok(buffer) = PyBuffer::<$T>::get(&view) else {
                 return Ok(None);
             };
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            let count = input.iter().filter(|cell| cell.get() != 0).count();
-            let out = make_output(py, count)?;
-            if count > 0 {
-                let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
-                    return Ok(None);
-                };
-                let Some(output) = out_buffer.as_mut_slice(py) else {
-                    return Ok(None);
-                };
-                let mut w = 0usize;
-                for (i, cell) in input.iter().enumerate() {
-                    if cell.get() != 0 {
-                        output[w].set(i as i64);
-                        w += 1;
-                    }
-                }
-            }
-            Ok(Some(out))
-        }
-        "f" if numpy_dtype_is_f64(py, a) => {
+            flatnonzero_typed(py, &numpy, input, |v: $T| v != 0)
+        }};
+    }
+    match (kind.as_str(), itemsize) {
+        ("b", _) | ("i" | "u", 1) => via_uint!("uint8", u8),
+        ("i" | "u", 2) => via_uint!("uint16", u16),
+        ("i" | "u", 4) => via_uint!("uint32", u32),
+        ("i" | "u", 8) => via_uint!("uint64", u64),
+        ("f", 8) => {
             let Ok(buffer) = PyBuffer::<f64>::get(a) else {
                 return Ok(None);
             };
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            let count = input.iter().filter(|cell| cell.get() != 0.0).count();
-            let out = make_output(py, count)?;
-            if count > 0 {
-                let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
-                    return Ok(None);
-                };
-                let Some(output) = out_buffer.as_mut_slice(py) else {
-                    return Ok(None);
-                };
-                let mut w = 0usize;
-                for (i, cell) in input.iter().enumerate() {
-                    if cell.get() != 0.0 {
-                        output[w].set(i as i64);
-                        w += 1;
-                    }
-                }
-            }
-            Ok(Some(out))
+            flatnonzero_typed(py, &numpy, input, |v: f64| v != 0.0)
+        }
+        ("f", 4) => {
+            let Ok(buffer) = PyBuffer::<f32>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            flatnonzero_typed(py, &numpy, input, |v: f32| v != 0.0)
         }
         _ => Ok(None),
     }
