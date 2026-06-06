@@ -395,6 +395,83 @@ print(values_match and signs_match)
 }
 
 #[test]
+fn min_nan_payload_and_signed_zero_raw_bytes_match_numpy() -> Result<(), String> {
+    let script = fnp_min_script(
+        r#"
+import hashlib, hmac
+
+nan_a = np.array([0x7ff80000000000a1], dtype=np.uint64).view(np.float64)[0]
+nan_b = np.array([0x7ff80000000000b2], dtype=np.uint64).view(np.float64)[0]
+nan_c = np.array([0xfff80000000000c3], dtype=np.uint64).view(np.float64)[0]
+noncontig = np.array([
+    [nan_a, 1.0, -0.0, 4.0],
+    [2.0, nan_b, 0.0, -5.0],
+    [3.0, 6.0, nan_c, 7.0],
+    [8.0, 9.0, 10.0, 11.0],
+], dtype=np.float64)[:, ::2]
+cases = [
+    ("zero_pos_neg_flat", np.array([0.0, -0.0], dtype=np.float64), None, False),
+    ("zero_neg_pos_flat", np.array([-0.0, 0.0], dtype=np.float64), None, False),
+    ("nan_first_flat", np.array([nan_a, 1.0, 2.0, 3.0], dtype=np.float64), None, False),
+    ("nan_middle_flat", np.array([1.0, nan_b, 2.0, 3.0], dtype=np.float64), None, False),
+    ("nan_late_flat", np.array([1.0, 2.0, nan_c, 3.0], dtype=np.float64), None, False),
+    ("axis1_len4_nan", np.array([[1.0, 2.0, nan_a, 4.0], [5.0, -0.0, 0.0, nan_b]], dtype=np.float64), 1, False),
+    ("axis1_len6_nan_keep", np.array([[1.0, 2.0, 3.0, 4.0, nan_c, 6.0], [nan_a, -0.0, 0.0, 9.0, 10.0, 11.0]], dtype=np.float64), -1, True),
+    ("axis0_finite_zero", np.array([[0.0, -0.0], [-0.0, 0.0]], dtype=np.float64), 0, False),
+    ("noncontig_axis0_nan", noncontig, 0, False),
+]
+
+def digest(which):
+    chunks = []
+    op = fnp.min if which == "fnp" else np.min
+    for name, x, axis, keepdims in cases:
+        kwargs = {}
+        if axis is not None:
+            kwargs["axis"] = axis
+        if keepdims:
+            kwargs["keepdims"] = True
+        out = op(x, **kwargs)
+        arr = np.asarray(out)
+        chunks.append(name.encode())
+        chunks.append(b"|")
+        chunks.append(str(arr.dtype).encode())
+        chunks.append(b"|")
+        chunks.append(np.asarray(arr.shape, dtype=np.int64).tobytes())
+        chunks.append(b"|")
+        chunks.append(np.ascontiguousarray(arr).view(np.uint8).tobytes())
+        chunks.append(b";")
+    return hashlib.sha256(b"".join(chunks)).hexdigest()
+
+ours = digest("fnp")
+theirs = digest("numpy")
+print(ours)
+print(theirs)
+print(hmac.compare_digest(ours, theirs))
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let lines: Vec<&str> = result.lines().collect();
+    let expected_sha = "255070c909f29c4a6fb71250a4605fbc5f97f215781fbf33df98e9e1a9e0b190";
+    assert_eq!(
+        lines.get(2).copied(),
+        Some("True"),
+        "min raw bytes must match numpy for NaNs and signed zeros: {result}"
+    );
+    assert_eq!(
+        lines.first().copied(),
+        Some(expected_sha),
+        "min fnp raw-byte hash changed: {result}"
+    );
+    assert_eq!(
+        lines.get(1).copied(),
+        Some(expected_sha),
+        "min numpy raw-byte golden changed: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn min_empty_array_raises_valueerror() -> Result<(), String> {
     let script = fnp_min_script(
         r#"

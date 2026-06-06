@@ -7205,6 +7205,7 @@ fn unary_map_int<T: pyo3::buffer::Element + Copy, F: Fn(T) -> T>(
 // buffer of dtype `dtype_name`. Generic closures (not fn pointers) keep the loop
 // inlined and vectorizable. Bit-identical to numpy, whose integer ufuncs wrap
 // silently on two's-complement overflow in the input width.
+#[allow(clippy::too_many_arguments)]
 #[inline]
 fn zerocopy_int_unary_typed<'py, T, N, A, S>(
     py: Python<'py>,
@@ -8353,7 +8354,9 @@ fn try_zerocopy_any_roll(
     }
     let out_typed = out_u8.call_method1("view", (&dtype,))?;
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = out_typed.call_method1("reshape", (&output_shape,))?.unbind();
+    let output = out_typed
+        .call_method1("reshape", (&output_shape,))?
+        .unbind();
     Ok(Some(output))
 }
 
@@ -9127,6 +9130,76 @@ fn try_zerocopy_f64_tile(
         }
     }
     Ok(Some(flat.unbind()))
+}
+
+// Dtype-agnostic 1-D tile (scalar reps) for any dtype the f64 helper above does
+// not handle — all integer widths, float32, complex, bool. np.tile replicates
+// elements verbatim, so repeating the raw byte image r times is bit-identical
+// for every dtype. Views the data as 1-D uint8, copies the byte block r times
+// into a fresh uint8 buffer, then views back to the input dtype. Returns
+// Ok(None) for a multi-element reps tuple, a non-1-D array, or a non-ndarray.
+fn try_zerocopy_any_tile(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    reps: &[usize],
+) -> PyResult<Option<Py<PyAny>>> {
+    if reps.len() != 1 {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    if shape.len() != 1 {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    // Complex already has an efficient native/numpy fallback; the byte copy does
+    // not beat it, so leave it (and any zero-itemsize dtype) on the existing path.
+    if dtype.getattr("kind")?.extract::<String>()? == "c" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if itemsize == 0 {
+        return Ok(None);
+    }
+    let uint8 = numpy.getattr("uint8")?;
+    let Ok(in_u8) = a.call_method1("view", (&uint8,)) else {
+        return Ok(None);
+    };
+    let Ok(in_buffer) = PyBuffer::<u8>::get(&in_u8) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n_bytes = input.len();
+    let r = reps[0];
+    let Some(total_bytes) = n_bytes.checked_mul(r) else {
+        return Ok(None);
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let out_u8 = numpy.call_method("empty", (total_bytes,), Some(&kwargs))?;
+    if total_bytes > 0 {
+        let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for block in 0..r {
+            let base = block * n_bytes;
+            for i in 0..n_bytes {
+                output[base + i].set(input[i].get());
+            }
+        }
+    }
+    // view back to the input dtype; the 1-D length is total_bytes/itemsize = n*r.
+    let out_typed = out_u8.call_method1("view", (&dtype,))?;
+    Ok(Some(out_typed.unbind()))
 }
 
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
@@ -20118,6 +20191,13 @@ fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
         return Ok(out);
     }
 
+    // Dtype-agnostic 1-D tile (byte replication) for every other dtype — int (all
+    // widths), float32, complex, bool. Bit-identical (elements move verbatim) and
+    // skips the cold, for-ints-lossy extract Vec.
+    if let Some(out) = try_zerocopy_any_tile(py, a.bind(py), &reps_vec)? {
+        return Ok(out);
+    }
+
     let array = match extract_precise_numeric_array(py, a.bind(py), "tile(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -28399,6 +28479,156 @@ fn try_zerocopy_f64_prod(
     Ok(Some(output))
 }
 
+#[derive(Clone, Copy)]
+enum F64MinMaxOp {
+    Min,
+    Max,
+}
+
+enum F64MinMaxFastPath {
+    Output(Py<PyAny>),
+    DelegateToNumpy,
+    NotApplicable,
+}
+
+#[inline(always)]
+fn f64_minmax_update(acc: f64, value: f64, op: F64MinMaxOp) -> f64 {
+    match op {
+        F64MinMaxOp::Max => {
+            if acc > value {
+                acc
+            } else {
+                value
+            }
+        }
+        F64MinMaxOp::Min => {
+            if acc < value {
+                acc
+            } else {
+                value
+            }
+        }
+    }
+}
+
+fn numpy_array_any_nan(numpy: &Bound<'_, PyModule>, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    numpy
+        .getattr("isnan")?
+        .call1((value,))?
+        .call_method0("any")?
+        .extract::<bool>()
+}
+
+// Zero-copy finite np.min/np.max reduction for exact C-contiguous float64
+// ndarrays. The finite update uses NumPy's later-equal tie behavior
+// (`if acc > v { acc } else { v }` for max, `<` for min), preserving signed-zero
+// selection in scan order. NaN reductions delegate to NumPy instead of trying to
+// emulate its position-dependent SIMD/scalar payload choices.
+fn try_zerocopy_f64_minmax(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    keepdims: bool,
+    op: F64MinMaxOp,
+) -> PyResult<F64MinMaxFastPath> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, a) {
+        return Ok(F64MinMaxFastPath::NotApplicable);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(F64MinMaxFastPath::NotApplicable);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    if shape.is_empty() {
+        return Ok(F64MinMaxFastPath::NotApplicable);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        if numpy_array_any_nan(&numpy, a)? {
+            return Ok(F64MinMaxFastPath::DelegateToNumpy);
+        }
+        return Ok(F64MinMaxFastPath::NotApplicable);
+    };
+    if input.iter().any(|cell| cell.get().is_nan()) {
+        return Ok(F64MinMaxFastPath::DelegateToNumpy);
+    }
+    let ndim = shape.len();
+
+    let (outer, axis_len, inner, out_shape): (usize, usize, usize, Vec<usize>) = match axis {
+        None => {
+            let total = input.len();
+            let out_shape = if keepdims { vec![1; ndim] } else { Vec::new() };
+            (1, total, 1, out_shape)
+        }
+        Some(ax) => {
+            let ndim_i = ndim as isize;
+            let norm = if ax < 0 { ax + ndim_i } else { ax };
+            if norm < 0 || norm >= ndim_i {
+                return Ok(F64MinMaxFastPath::NotApplicable);
+            }
+            let axu = norm as usize;
+            let outer: usize = shape[..axu].iter().product();
+            let inner: usize = shape[axu + 1..].iter().product();
+            let mut out_shape = shape.clone();
+            if keepdims {
+                out_shape[axu] = 1;
+            } else {
+                out_shape.remove(axu);
+            }
+            (outer, shape[axu], inner, out_shape)
+        }
+    };
+    if axis_len == 0 || input.is_empty() {
+        return Ok(F64MinMaxFastPath::NotApplicable);
+    }
+
+    let out_elems = outer * inner;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (out_elems,), Some(&kwargs))?;
+    if out_elems > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(F64MinMaxFastPath::NotApplicable);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(F64MinMaxFastPath::NotApplicable);
+        };
+        if inner == 1 {
+            for (o, slot) in output.iter().enumerate() {
+                let base = o * axis_len;
+                let mut acc = input[base].get();
+                for a in 1..axis_len {
+                    acc = f64_minmax_update(acc, input[base + a].get(), op);
+                }
+                slot.set(acc);
+            }
+        } else {
+            let lane = axis_len * inner;
+            for o in 0..outer {
+                let obase = o * inner;
+                let ibase = o * lane;
+                for i in 0..inner {
+                    output[obase + i].set(input[ibase + i].get());
+                }
+                for a in 1..axis_len {
+                    let in_a = ibase + a * inner;
+                    for i in 0..inner {
+                        let slot = &output[obase + i];
+                        slot.set(f64_minmax_update(slot.get(), input[in_a + i].get(), op));
+                    }
+                }
+            }
+        }
+    }
+    if out_shape.is_empty() {
+        let zerod = flat.call_method1("reshape", (PyTuple::empty(py),))?;
+        return Ok(F64MinMaxFastPath::Output(zerod.get_item(())?.unbind()));
+    }
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(F64MinMaxFastPath::Output(output))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
@@ -28675,6 +28905,12 @@ fn py_min(
         }
     };
 
+    match try_zerocopy_f64_minmax(py, a.bind(py), axis_val, keepdims, F64MinMaxOp::Min)? {
+        F64MinMaxFastPath::Output(out) => return Ok(out),
+        F64MinMaxFastPath::DelegateToNumpy => return fallback(),
+        F64MinMaxFastPath::NotApplicable => {}
+    }
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "min(a)") {
         Ok(arr) => arr,
@@ -28758,6 +28994,12 @@ fn py_max(
             }
         }
     };
+
+    match try_zerocopy_f64_minmax(py, a.bind(py), axis_val, keepdims, F64MinMaxOp::Max)? {
+        F64MinMaxFastPath::Output(out) => return Ok(out),
+        F64MinMaxFastPath::DelegateToNumpy => return fallback(),
+        F64MinMaxFastPath::NotApplicable => {}
+    }
 
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "max(a)") {
