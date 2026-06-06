@@ -10215,6 +10215,74 @@ fn try_zerocopy_f64_ediff1d(
     Ok(Some(flat.unbind()))
 }
 
+// Generic typed core for the integer ediff1d (flat consecutive differences, no
+// to_begin/to_end). Reads the C-order `T` buffer (== numpy's ravel order) and
+// writes wrapping out[i] = in[i+1] - in[i] into a fresh same-dtype buffer via a
+// slice-iterator triple-zip so bounds checks elide and it autovectorizes.
+fn ediff1d_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T, T) -> T>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    ary: &Bound<'py, PyAny>,
+    dtype_name: &str,
+    sub: F,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Ok(in_buffer) = PyBuffer::<T>::get(ary) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n_out = input.len().saturating_sub(1);
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (n_out,), Some(&kwargs))?;
+    if n_out > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for ((slot, cur), nxt) in output.iter().zip(input.iter()).zip(input[1..].iter()) {
+            slot.set(sub(nxt.get(), cur.get()));
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
+// Zero-copy integer np.ediff1d (no to_begin/to_end), all widths. numpy flattens
+// the input and returns the wrapping consecutive differences in the same dtype.
+// Otherwise these extracted to an f64 Vec (~57x slower, lossy for wide ints).
+// Returns None when to_begin/to_end are present (handled by the general path), a
+// non-integer dtype, or a non-ndarray input.
+fn try_zerocopy_int_ediff1d(
+    py: Python<'_>,
+    ary: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !ary.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = ary.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize) {
+        ("i", 1) => ediff1d_typed::<i8, _>(py, &numpy, ary, "int8", |x, y| x.wrapping_sub(y)),
+        ("i", 2) => ediff1d_typed::<i16, _>(py, &numpy, ary, "int16", |x, y| x.wrapping_sub(y)),
+        ("i", 4) => ediff1d_typed::<i32, _>(py, &numpy, ary, "int32", |x, y| x.wrapping_sub(y)),
+        ("i", 8) => ediff1d_typed::<i64, _>(py, &numpy, ary, "int64", |x, y| x.wrapping_sub(y)),
+        ("u", 1) => ediff1d_typed::<u8, _>(py, &numpy, ary, "uint8", |x, y| x.wrapping_sub(y)),
+        ("u", 2) => ediff1d_typed::<u16, _>(py, &numpy, ary, "uint16", |x, y| x.wrapping_sub(y)),
+        ("u", 4) => ediff1d_typed::<u32, _>(py, &numpy, ary, "uint32", |x, y| x.wrapping_sub(y)),
+        ("u", 8) => ediff1d_typed::<u64, _>(py, &numpy, ary, "uint64", |x, y| x.wrapping_sub(y)),
+        _ => Ok(None),
+    }
+}
+
 fn build_numpy_array_from_storage(
     py: Python<'_>,
     shape: &[usize],
@@ -32835,6 +32903,16 @@ fn ediff1d(
     // and non-f64 / non-contiguous inputs fall through to the general path below.
     if let Some(out) =
         try_zerocopy_f64_ediff1d(py, ary.bind(py), to_begin.as_ref(), to_end.as_ref())?
+    {
+        return Ok(out);
+    }
+
+    // Zero-copy integer consecutive differences (no to_begin/to_end); wrapping
+    // subtraction, bit-identical to numpy. Skips the cold, for-wide-ints lossy
+    // extract Vec.
+    if to_begin.is_none()
+        && to_end.is_none()
+        && let Some(out) = try_zerocopy_int_ediff1d(py, ary.bind(py))?
     {
         return Ok(out);
     }
