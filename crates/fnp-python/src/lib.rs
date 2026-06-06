@@ -8437,6 +8437,91 @@ fn try_zerocopy_f64_roll_axis(
     Ok(Some(output))
 }
 
+// Dtype-agnostic per-axis np.roll (scalar shift, explicit integer axis) for the
+// dtypes the f64 helper above does not handle — int (all widths), float32, bool,
+// etc. Same insight as the f64 path: in C order each outer lane (axis_len*inner
+// contiguous elements) is a flat roll by s*inner positions, i.e. two contiguous
+// byte-runs of head*itemsize and split*itemsize bytes. np.roll moves elements
+// verbatim, so rolling the raw byte image is bit-identical for any fixed-width
+// dtype. Complex is excluded (its existing fallback already matches the byte
+// copy — no regression). Returns None for a 0-d array, an out-of-range axis
+// (numpy raises AxisError via the general path), or a non-ndarray input.
+fn try_zerocopy_any_roll_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    shift_scalar: i64,
+    axis: i64,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let a_dtype = a.getattr("dtype")?;
+    // Complex already has an efficient fallback; skip it (and zero-itemsize).
+    if a_dtype.getattr("kind")?.extract::<String>()? == "c" {
+        return Ok(None);
+    }
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    if itemsize == 0 {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    if ndim == 0 {
+        return Ok(None);
+    }
+    let norm_axis = if axis < 0 { axis + ndim } else { axis };
+    if norm_axis < 0 || norm_axis >= ndim {
+        return Ok(None);
+    }
+    let ax = norm_axis as usize;
+    let axis_len = shape[ax];
+    let inner: usize = shape[ax + 1..].iter().product();
+    let outer: usize = shape[..ax].iter().product();
+    let uint8 = numpy.getattr("uint8")?;
+    let Ok(a_flat) = a.call_method1("reshape", (-1i64,)) else {
+        return Ok(None);
+    };
+    let a_u8 = a_flat.call_method1("view", (&uint8,))?;
+    let Ok(in_buffer) = PyBuffer::<u8>::get(&a_u8) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let total_bytes = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let out_u8 = numpy.call_method("empty", (total_bytes,), Some(&kwargs))?;
+    if total_bytes > 0 && axis_len > 0 {
+        let s = (((shift_scalar % axis_len as i64) + axis_len as i64) % axis_len as i64) as usize;
+        let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // Per outer lane: a flat byte rotation by head bytes (two contiguous runs).
+        let lane_bytes = axis_len * inner * itemsize;
+        let head = s * inner * itemsize;
+        let split = lane_bytes - head;
+        for o in 0..outer {
+            let obase = o * lane_bytes;
+            for k in 0..head {
+                output[obase + k].set(input[obase + split + k].get());
+            }
+            for k in 0..split {
+                output[obase + head + k].set(input[obase + k].get());
+            }
+        }
+    }
+    let out_typed = out_u8.call_method1("view", (&a_dtype,))?;
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = out_typed.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy multi-axis np.roll for a 2-D C-contiguous float64 ndarray: a roll
 // along independent axes (a tuple of shifts + matching axes) moves each element
 // by the net shift on each axis simultaneously. This accumulates the net row and
@@ -14884,9 +14969,15 @@ fn roll(
         let axis_bound = axis_obj.bind(py);
         if !axis_bound.is_none()
             && let Ok(axis_int) = axis_bound.extract::<i64>()
-            && let Some(out) = try_zerocopy_f64_roll_axis(py, a.bind(py), shift_scalar, axis_int)?
         {
-            return Ok(out);
+            if let Some(out) = try_zerocopy_f64_roll_axis(py, a.bind(py), shift_scalar, axis_int)? {
+                return Ok(out);
+            }
+            // Dtype-agnostic byte per-axis roll for int/float32/bool (the non-f64
+            // dtypes); contiguous per-lane block copies, bit-identical.
+            if let Some(out) = try_zerocopy_any_roll_axis(py, a.bind(py), shift_scalar, axis_int)? {
+                return Ok(out);
+            }
         }
     }
 
