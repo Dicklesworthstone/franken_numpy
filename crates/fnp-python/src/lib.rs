@@ -31130,6 +31130,32 @@ fn try_zerocopy_f64_around(
     Ok(Some(output))
 }
 
+// np.around/np.round of an integer ndarray with decimals >= 0 is the identity
+// (rounding an integer to zero-or-more decimal places leaves it unchanged);
+// numpy returns a fresh copy preserving the input dtype. Returning a.copy()
+// skips the cold extract -> f64 Vec -> Rint -> rebuild path (~140-270x slower,
+// and lossy for wide ints). decimals < 0 rounds to powers of ten and is NOT the
+// identity, so it falls through. Returns None for non-integer / non-ndarray.
+fn try_zerocopy_int_around(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    decimals: i32,
+) -> PyResult<Option<Py<PyAny>>> {
+    if decimals < 0 {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    Ok(Some(a.call_method0("copy")?.unbind()))
+}
+
 // Rounding aliases (2).
 #[pyfunction]
 #[pyo3(signature = (a, decimals=0, out=None))]
@@ -31173,6 +31199,11 @@ fn around(
     if decimals != 0
         && let Some(result) = try_zerocopy_f64_around(py, a.bind(py), decimals)?
     {
+        return Ok(result);
+    }
+
+    // Integer input with decimals >= 0 is the identity; return a fast copy.
+    if let Some(result) = try_zerocopy_int_around(py, a.bind(py), decimals)? {
         return Ok(result);
     }
 
