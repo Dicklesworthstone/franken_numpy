@@ -7783,6 +7783,74 @@ fn try_zerocopy_f64_clip(
     Ok(Some(output))
 }
 
+// Zero-copy clip for exact C-contiguous float32 ndarrays with scalar bounds. The
+// f64 helper gates on float64, so float32 otherwise round-trips through an f64 Vec
+// (~19x slower). Clamps in float32 with the same comparison form as the f64 path
+// (`if v < lo {lo} else {v}` then `if t > hi {hi} else {t}`): for a NaN element
+// both comparisons are false so NaN propagates, matching numpy. Gated on a no-op
+// promotion (result_type(a, a_min, a_max) == float32) so a strong numpy-float64
+// scalar bound — which would widen the result to float64 — correctly defers. The
+// weak python-float bounds are cast f64 -> f32 by round-to-nearest, exactly as
+// numpy adopts them into the array's float32 dtype. Returns None otherwise.
+fn try_zerocopy_f32_clip(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    a_min: &Bound<'_, PyAny>,
+    a_max: &Bound<'_, PyAny>,
+    lo_f64: f64,
+    hi_f64: f64,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = x.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 4
+    {
+        return Ok(None);
+    }
+    // Result dtype must equal float32 (no promotion): a strong numpy-float64 scalar
+    // bound would widen the result to float64, which this path cannot produce.
+    let promoted = numpy.getattr("result_type")?.call1((x, a_min, a_max))?;
+    if !promoted.eq(&dtype)? {
+        return Ok(None);
+    }
+    let lo = lo_f64 as f32;
+    let hi = hi_f64 as f32;
+    let Ok(in_buffer) = PyBuffer::<f32>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float32")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            let v = cell.get();
+            let t = if v < lo { lo } else { v };
+            slot.set(if t > hi { hi } else { t });
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Generic typed core for integer clip: clamp each element into [lo, hi] in the
 // input integer width (max(lo).min(hi) — gives hi when lo>hi, matching numpy)
 // and write to a fresh buffer of dtype `dtype_name`. Clamping in the integer
@@ -13168,10 +13236,27 @@ fn clip(
         return fallback();
     };
 
+    // A NaN bound makes numpy.clip return all-NaN: clip == minimum(maximum(a, lo),
+    // hi) and numpy.maximum/minimum propagate NaN, so a NaN low or high bound poisons
+    // every element. The comparison-form clamp in the zero-copy paths below does not
+    // (v < NaN / t > NaN are false), so defer any NaN bound to numpy for exact parity
+    // across all dtypes (this also corrects the pre-existing f64 path).
+    if min_val.is_nan() || max_val.is_nan() {
+        return fallback();
+    }
+
     // Zero-copy clamp for exact f64 C-contiguous ndarrays: promotion is a no-op
     // for f64 input + real scalar bounds, so this is bit-identical to the
     // native array.clip below while skipping the cold extract/build Vecs.
     if let Some(out) = try_zerocopy_f64_clip(py, a.bind(py), min_val, max_val)? {
+        return Ok(out);
+    }
+
+    // Zero-copy float32 clip with scalar bounds: clamp in f32, gated on a no-op
+    // promotion so result dtype matches numpy; skips the cold f64 round-trip.
+    if let Some(out) =
+        try_zerocopy_f32_clip(py, a.bind(py), a_min.bind(py), a_max.bind(py), min_val, max_val)?
+    {
         return Ok(out);
     }
 
