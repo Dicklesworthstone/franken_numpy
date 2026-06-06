@@ -10215,6 +10215,41 @@ fn try_zerocopy_int_diff(
     Ok(Some(output))
 }
 
+// Zero-copy np.diff(n=1) for float32 ndarrays, any axis. numpy's float diff is the
+// plain IEEE-754 single-precision subtraction out[i] = a[i+1] - a[i] preserving the
+// float32 dtype, so the same diff_typed core with `x - y` is bit-identical (nan/inf
+// and signed-zero propagate exactly). The f64 helpers gate on float64 only, so
+// float32 otherwise extracted to an f64 Vec and rebuilt (~33x slower). Returns None
+// for n != 1, a non-float32 dtype, or a non-ndarray input.
+fn try_zerocopy_f32_diff(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: usize,
+    axis: i64,
+) -> PyResult<Option<Py<PyAny>>> {
+    if n != 1 {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 4
+    {
+        return Ok(None);
+    }
+    let result = diff_typed::<f32, _>(py, &numpy, a, "float32", axis, |x, y| x - y)?;
+    let Some((flat, out_shape)) = result else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy consecutive differences (np.ediff1d, no to_begin/to_end) for a
 // C-contiguous float64 ndarray of any shape. numpy.ediff1d flattens its input
 // in C order and returns out[i] = flat[i+1] - flat[i], length total_elems-1
@@ -15566,6 +15601,8 @@ fn diff(
             } else if let Some(out) = try_zerocopy_f64_diff_axis(py, cur, 1, axis)? {
                 Some(out)
             } else if let Some(out) = try_zerocopy_int_diff(py, cur, 1, axis)? {
+                Some(out)
+            } else if let Some(out) = try_zerocopy_f32_diff(py, cur, 1, axis)? {
                 Some(out)
             } else {
                 None
