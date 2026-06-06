@@ -7782,6 +7782,138 @@ fn try_zerocopy_f64_clip(
     Ok(Some(output))
 }
 
+// Generic typed core for integer clip: clamp each element into [lo, hi] in the
+// input integer width (max(lo).min(hi) — gives hi when lo>hi, matching numpy)
+// and write to a fresh buffer of dtype `dtype_name`. Clamping in the integer
+// width (not f64) is required: i64/u64 values above 2^53 would lose precision
+// through an f64 round-trip. Branchless -> autovectorizes.
+fn clip_typed<'py, T>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    dtype_name: &str,
+    lo: T,
+    hi: T,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
+where
+    T: pyo3::buffer::Element + Copy + Ord,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            slot.set(cell.get().max(lo).min(hi));
+        }
+    }
+    Ok(Some((flat, shape)))
+}
+
+// Zero-copy integer clip for exact int8/16/32/64 and uint8/16/32/64 ndarrays
+// with scalar bounds. Gated on a no-op dtype promotion (result_type(a, lo, hi)
+// == a.dtype) so the result dtype matches numpy exactly — this also guarantees
+// both bounds fit the input integer width, so extracting them as T succeeds.
+// Otherwise the f64 round-trip the extract path takes is both ~100-300x slower
+// and lossy for wide integers.
+fn try_zerocopy_int_clip(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    a_min: &Bound<'_, PyAny>,
+    a_max: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    // Result dtype must equal the input dtype (no promotion), e.g. a strong
+    // numpy-int64 scalar bound on an int8 array would widen to int64 in numpy.
+    let promoted = numpy.getattr("result_type")?.call1((a, a_min, a_max))?;
+    if !promoted.eq(&dtype)? {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    let result = match (kind.as_str(), itemsize) {
+        ("i", 1) => {
+            let (Ok(lo), Ok(hi)) = (a_min.extract::<i8>(), a_max.extract::<i8>()) else {
+                return Ok(None);
+            };
+            clip_typed::<i8>(py, &numpy, a, "int8", lo, hi)?
+        }
+        ("i", 2) => {
+            let (Ok(lo), Ok(hi)) = (a_min.extract::<i16>(), a_max.extract::<i16>()) else {
+                return Ok(None);
+            };
+            clip_typed::<i16>(py, &numpy, a, "int16", lo, hi)?
+        }
+        ("i", 4) => {
+            let (Ok(lo), Ok(hi)) = (a_min.extract::<i32>(), a_max.extract::<i32>()) else {
+                return Ok(None);
+            };
+            clip_typed::<i32>(py, &numpy, a, "int32", lo, hi)?
+        }
+        ("i", 8) => {
+            let (Ok(lo), Ok(hi)) = (a_min.extract::<i64>(), a_max.extract::<i64>()) else {
+                return Ok(None);
+            };
+            clip_typed::<i64>(py, &numpy, a, "int64", lo, hi)?
+        }
+        ("u", 1) => {
+            let (Ok(lo), Ok(hi)) = (a_min.extract::<u8>(), a_max.extract::<u8>()) else {
+                return Ok(None);
+            };
+            clip_typed::<u8>(py, &numpy, a, "uint8", lo, hi)?
+        }
+        ("u", 2) => {
+            let (Ok(lo), Ok(hi)) = (a_min.extract::<u16>(), a_max.extract::<u16>()) else {
+                return Ok(None);
+            };
+            clip_typed::<u16>(py, &numpy, a, "uint16", lo, hi)?
+        }
+        ("u", 4) => {
+            let (Ok(lo), Ok(hi)) = (a_min.extract::<u32>(), a_max.extract::<u32>()) else {
+                return Ok(None);
+            };
+            clip_typed::<u32>(py, &numpy, a, "uint32", lo, hi)?
+        }
+        ("u", 8) => {
+            let (Ok(lo), Ok(hi)) = (a_min.extract::<u64>(), a_max.extract::<u64>()) else {
+                return Ok(None);
+            };
+            clip_typed::<u64>(py, &numpy, a, "uint64", lo, hi)?
+        }
+        _ => return Ok(None),
+    };
+    let Some((flat, shape)) = result else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Zero-copy nan_to_num for exact C-contiguous float64 ndarrays. numpy replaces
 // NaN -> nan_rep, +inf -> posinf_rep, -inf -> neginf_rep, and leaves every
 // finite value (including signed zeros) untouched — reproduced bit-for-bit
@@ -11881,6 +12013,13 @@ fn clip(
     // for f64 input + real scalar bounds, so this is bit-identical to the
     // native array.clip below while skipping the cold extract/build Vecs.
     if let Some(out) = try_zerocopy_f64_clip(py, a.bind(py), min_val, max_val)? {
+        return Ok(out);
+    }
+
+    // Zero-copy integer clip (int8/16/32/64, uint8/16/32/64) with scalar bounds.
+    // Clamps in the integer width, gated on a no-op dtype promotion so result
+    // dtype matches numpy; skips the cold (and for wide ints lossy) f64 extract.
+    if let Some(out) = try_zerocopy_int_clip(py, a.bind(py), a_min.bind(py), a_max.bind(py))? {
         return Ok(out);
     }
 
