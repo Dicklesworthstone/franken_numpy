@@ -41,6 +41,60 @@ fn bench_sqrt_input_extraction(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_int32_unary_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_int32_unary_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let input = numpy
+            .call_method1("arange", (2_000_000_i64,))
+            .expect("2M int32 input")
+            .call_method1("astype", ("int32",))
+            .expect("int32 input dtype")
+            .call_method1("__sub__", (1_000_000_i64,))
+            .expect("centered int32 range");
+        let fnp_square = module.getattr("square").expect("fnp_python.square");
+        let fnp_negative = module.getattr("negative").expect("fnp_python.negative");
+        let numpy_square = numpy.getattr("square").expect("numpy.square");
+
+        group.bench_function("fnp_square_i32_2m", |bench| {
+            bench.iter(|| {
+                let result = fnp_square
+                    .call1((&input,))
+                    .expect("fnp square int32 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_negative_i32_2m", |bench| {
+            bench.iter(|| {
+                let result = fnp_negative
+                    .call1((&input,))
+                    .expect("fnp negative int32 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_square_i32_2m", |bench| {
+            bench.iter(|| {
+                let result = numpy_square
+                    .call1((&input,))
+                    .expect("numpy square int32 benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_ediff1d_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_ediff1d_boundary");
     group.sample_size(10);
@@ -426,6 +480,7 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_sqrt_input_extraction,
+    bench_int32_unary_boundary,
     bench_ediff1d_boundary,
     bench_select_boundary,
     bench_ldexp_boundary,

@@ -70,6 +70,78 @@ print(np.array_equal(result, expected))
 }
 
 #[test]
+fn int32_unary_wraps_and_matches_numpy_golden_sha256() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+
+cases = [
+    np.array([-2147483648, -46341, -129, -2, -1, 0, 1, 2, 127, 46341, 2147483647], dtype=np.int32),
+    np.arange(-32, 32, dtype=np.int32).reshape(8, 8),
+    np.array([], dtype=np.int32),
+]
+ops = [("positive", fnp.positive, np.positive), ("negative", fnp.negative, np.negative), ("abs", fnp.abs, np.abs), ("square", fnp.square, np.square)]
+
+def digest(which):
+    chunks = []
+    for name, fnp_op, np_op in ops:
+        op = fnp_op if which == "fnp" else np_op
+        for x in cases:
+            out = op(x)
+            chunks.append(name.encode())
+            chunks.append(b"|")
+            chunks.append(str(out.dtype).encode())
+            chunks.append(b"|")
+            chunks.append(np.asarray(out.shape, dtype=np.int64).tobytes())
+            chunks.append(b"|")
+            chunks.append(np.ascontiguousarray(out).view(np.uint8).tobytes())
+            chunks.append(b";")
+    return hashlib.sha256(b"".join(chunks)).hexdigest()
+
+wrap_input = np.array([-2147483648, -46341, 46341], dtype=np.int32)
+wraps = (
+    np.array_equal(fnp.square(wrap_input), np.square(wrap_input))
+    and fnp.square(wrap_input).dtype == np.dtype("int32")
+    and fnp.abs(wrap_input[:1])[0] == np.abs(wrap_input[:1])[0]
+    and fnp.negative(wrap_input[:1])[0] == np.negative(wrap_input[:1])[0]
+)
+
+ours = digest("fnp")
+theirs = digest("numpy")
+print(ours)
+print(theirs)
+print(ours == theirs)
+print(wraps)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let lines: Vec<&str> = result.lines().collect();
+    let expected_sha = "f8315dacdd43a78882f63bd17ad733375ba5fc3c5fa20459b25161c092ba182e";
+    assert_eq!(
+        lines.get(2).copied(),
+        Some("True"),
+        "int32 unary raw output hash must match numpy: {result}"
+    );
+    assert_eq!(
+        lines.get(3).copied(),
+        Some("True"),
+        "int32 unary edge cases must preserve numpy wrapping: {result}"
+    );
+    assert_eq!(
+        lines.first().copied(),
+        Some(expected_sha),
+        "int32 unary fnp hash changed: {result}"
+    );
+    assert_eq!(
+        lines.get(1).copied(),
+        Some(expected_sha),
+        "int32 unary numpy golden hash changed: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn reciprocal_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
