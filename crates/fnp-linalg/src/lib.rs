@@ -2439,14 +2439,14 @@ fn svd_bidiag_qr_full(
         }
     }
 
-    let vt_old = vt.clone();
+    let mut sorted_vt = vec![0.0; n * n];
     for (new_idx, &old_idx) in order.iter().enumerate() {
         for col in 0..n {
-            vt[new_idx * n + col] = vt_old[old_idx * n + col];
+            sorted_vt[new_idx * n + col] = vt[old_idx * n + col];
         }
     }
 
-    Ok((u, sigmas, vt))
+    Ok((u, sigmas, sorted_vt))
 }
 
 fn svd_bidiag_qr_values(
