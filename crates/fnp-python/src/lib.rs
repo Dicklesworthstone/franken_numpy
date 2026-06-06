@@ -8920,6 +8920,143 @@ fn try_zerocopy_f64_cumsum(
     Ok(Some(flat.unbind()))
 }
 
+// Generic typed core for integer cumsum: read the input `T` buffer and write a
+// strictly-sequential running sum into a fresh `A` buffer (the numpy-promoted
+// accumulator dtype — int64 for signed, uint64 for unsigned). `convert` widens
+// each input element to the accumulator type; `add` is the wrapping sum. numpy's
+// integer cumsum accumulates in the promoted type and wraps on overflow, so this
+// is bit-identical. Returns the 1-D result (cumsum flattens for axis=None).
+fn cumsum_typed<'py, T, A, FC, FA>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    out_dtype_name: &str,
+    convert: FC,
+    add: FA,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy,
+    A: pyo3::buffer::Element + Copy,
+    FC: Fn(T) -> A,
+    FA: Fn(A, A) -> A,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", out_dtype_name)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<A>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let mut acc = convert(input[0].get());
+        output[0].set(acc);
+        for i in 1..n {
+            acc = add(acc, convert(input[i].get()));
+            output[i].set(acc);
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
+// Zero-copy integer cumsum for the flatten case (axis=None any ndim, or 1-D with
+// axis 0/-1). numpy promotes the accumulator: signed widths -> int64, unsigned ->
+// uint64 (on 64-bit). Each width reads its own buffer, widens, and wrapping-sums.
+// Otherwise these extracted to an f64 Vec and rebuilt (~50x slower, lossy for
+// wide ints). Returns None for a non-integer dtype, an explicit per-axis multi-
+// dim cumsum, or a non-ndarray input.
+fn try_zerocopy_int_cumsum(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len();
+    let flatten_ok = match axis {
+        None => true,
+        Some(ax) => ndim == 1 && (ax == 0 || ax == -1),
+    };
+    if !flatten_ok {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize) {
+        ("i", 1) => cumsum_typed::<i8, i64, _, _>(
+            py,
+            &numpy,
+            a,
+            "int64",
+            |v| v as i64,
+            |a, b| a.wrapping_add(b),
+        ),
+        ("i", 2) => cumsum_typed::<i16, i64, _, _>(
+            py,
+            &numpy,
+            a,
+            "int64",
+            |v| v as i64,
+            |a, b| a.wrapping_add(b),
+        ),
+        ("i", 4) => cumsum_typed::<i32, i64, _, _>(
+            py,
+            &numpy,
+            a,
+            "int64",
+            |v| v as i64,
+            |a, b| a.wrapping_add(b),
+        ),
+        ("i", 8) => {
+            cumsum_typed::<i64, i64, _, _>(py, &numpy, a, "int64", |v| v, |a, b| a.wrapping_add(b))
+        }
+        ("u", 1) => cumsum_typed::<u8, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            "uint64",
+            |v| v as u64,
+            |a, b| a.wrapping_add(b),
+        ),
+        ("u", 2) => cumsum_typed::<u16, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            "uint64",
+            |v| v as u64,
+            |a, b| a.wrapping_add(b),
+        ),
+        ("u", 4) => cumsum_typed::<u32, u64, _, _>(
+            py,
+            &numpy,
+            a,
+            "uint64",
+            |v| v as u64,
+            |a, b| a.wrapping_add(b),
+        ),
+        ("u", 8) => {
+            cumsum_typed::<u64, u64, _, _>(py, &numpy, a, "uint64", |v| v, |a, b| a.wrapping_add(b))
+        }
+        _ => Ok(None),
+    }
+}
+
 // Zero-copy np.cumprod — the cumulative-product sibling of try_zerocopy_f64_cumsum
 // with identical gating (axis=None any ndim, or 1-D with axis 0/-1). The running
 // product is strictly sequential (out[i] = out[i-1] * in[i]), matching numpy's
@@ -29282,6 +29419,12 @@ fn cumsum(
     // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical
     // (strictly sequential accumulation); per-axis multi-dim cumsums fall through.
     if let Some(result) = try_zerocopy_f64_cumsum(py, a.bind(py), axis_val)? {
+        return Ok(result);
+    }
+    // Zero-copy integer cumsum (flatten case, all widths) with numpy's accumulator
+    // promotion (signed->int64, unsigned->uint64). Skips the cold, for-wide-ints
+    // lossy extract Vec.
+    if let Some(result) = try_zerocopy_int_cumsum(py, a.bind(py), axis_val)? {
         return Ok(result);
     }
     // Zero-copy per-axis cumsum for multi-dim f64 ndarrays (explicit axis); slab-
