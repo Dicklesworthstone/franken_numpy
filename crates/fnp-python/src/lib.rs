@@ -13692,6 +13692,79 @@ fn repeat(
         .unbind())
 }
 
+// Zero-copy np.append(arr, values, axis=None): ravel(arr) ++ ravel(values) as a 1-D
+// array. append moves whole ELEMENTS verbatim, so the concatenation is a pure
+// byte copy through a uint8 view — one path covers every dtype (int/float/bool/
+// complex). Gated on a no-op promotion (result_type(arr, values) == arr.dtype) so
+// values are cast to arr's dtype exactly (a promoting `values`, e.g. a float into an
+// int array, defers to numpy). The native path instead extracted both operands to an
+// f64 Vec and rebuilt (~124x slower, lossy for wide ints). Returns None for a
+// promoting/uncastable values, a non-ndarray arr, or a non-contiguous ravel.
+fn try_zerocopy_append_flat(
+    py: Python<'_>,
+    arr: &Bound<'_, PyAny>,
+    values: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !arr.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let arr_dtype = arr.getattr("dtype")?;
+    // Only fixed-width numeric/bool/complex bytes can be viewed as uint8 and copied
+    // verbatim; object/string/datetime dtypes defer to numpy.
+    let kind = arr_dtype.getattr("kind")?.extract::<String>()?;
+    if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
+        return Ok(None);
+    }
+    // No-op promotion only: result dtype must stay arr's dtype.
+    if !numpy
+        .getattr("result_type")?
+        .call1((arr, values))?
+        .eq(&arr_dtype)?
+    {
+        return Ok(None);
+    }
+    let uint8 = numpy.getattr("uint8")?;
+    // ravel both (C-order) and cast values to arr's dtype, then view the raw bytes.
+    let a_flat = arr.call_method0("ravel")?;
+    let kw = PyDict::new(py);
+    kw.set_item("dtype", &arr_dtype)?;
+    let v_flat = numpy
+        .getattr("asarray")?
+        .call((values,), Some(&kw))?
+        .call_method0("ravel")?;
+    let a_bytes = a_flat.call_method1("view", (&uint8,))?;
+    let v_bytes = v_flat.call_method1("view", (&uint8,))?;
+    let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<u8>::get(&a_bytes), PyBuffer::<u8>::get(&v_bytes))
+    else {
+        return Ok(None);
+    };
+    let (Some(a_in), Some(v_in)) = (a_buf.as_slice(py), v_buf.as_slice(py)) else {
+        return Ok(None);
+    };
+    let na = a_in.len();
+    let nv = v_in.len();
+    let kw2 = PyDict::new(py);
+    kw2.set_item("dtype", &uint8)?;
+    let out_bytes = numpy.call_method("empty", (na + nv,), Some(&kw2))?;
+    if na + nv > 0 {
+        let Ok(out_buf) = PyBuffer::<u8>::get(&out_bytes) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, src) in output[..na].iter().zip(a_in.iter()) {
+            slot.set(src.get());
+        }
+        for (slot, src) in output[na..].iter().zip(v_in.iter()) {
+            slot.set(src.get());
+        }
+    }
+    Ok(Some(out_bytes.call_method1("view", (&arr_dtype,))?.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (arr, values, axis=None))]
 fn append(
@@ -13727,6 +13800,15 @@ fn append(
             }
         }
     };
+
+    // Zero-copy byte concat for the axis=None case (ravel + concatenate), the common
+    // form; covers all dtypes and skips the cold extract. Bit-identical; promoting
+    // values and per-axis appends fall through.
+    if axis_val.is_none()
+        && let Some(out) = try_zerocopy_append_flat(py, arr.bind(py), values.bind(py))?
+    {
+        return Ok(out);
+    }
 
     let a = match extract_numeric_array(py, arr.bind(py), "append(arr)") {
         Ok(arr) => arr,
