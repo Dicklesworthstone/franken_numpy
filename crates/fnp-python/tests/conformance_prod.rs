@@ -327,6 +327,41 @@ fn prod_integer_dtypes_match_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn prod_integer_full_reduction_sha256_matches_numpy() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+chunks = []
+for dtype in [np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64]:
+    x = ((np.arange(512, dtype=np.int64) % 7) + 1).astype(dtype)
+    empty = np.array([], dtype=dtype)
+    for arr in [x, empty]:
+        result = np.asarray(mod.prod(arr))
+        chunks.append(str(result.dtype).encode())
+        chunks.append(result.tobytes())
+signed_wrap = np.array([np.iinfo(np.int64).max, 2, -3], dtype=np.int64)
+unsigned_wrap = np.array([np.iinfo(np.uint64).max, 3, 5], dtype=np.uint64)
+for arr in [signed_wrap, unsigned_wrap]:
+    result = np.asarray(mod.prod(arr))
+    chunks.append(str(result.dtype).encode())
+    chunks.append(result.tobytes())
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_prod_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "integer prod full reduction must preserve numpy dtype promotion, empty identity, and wrapping overflow"
+    );
+    Ok(())
+}
+
+#[test]
 fn prod_nan_handling_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         "[1.0, np.nan, 3.0]",

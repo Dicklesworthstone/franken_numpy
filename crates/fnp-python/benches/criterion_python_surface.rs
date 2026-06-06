@@ -262,6 +262,48 @@ fn bench_max_min_reduction_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_prod_reduction_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_prod_reduction_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "int64").expect("dtype kwarg");
+        let input_i64 = numpy
+            .call_method("full", ((2_000_000_usize,), 3_i64), Some(&kwargs))
+            .expect("2M int64 input");
+        let fnp_prod = module.getattr("prod").expect("fnp_python.prod");
+        let numpy_prod = numpy.getattr("prod").expect("numpy.prod");
+
+        group.bench_function("fnp_prod_i64_2m", |bench| {
+            bench.iter(|| {
+                let result = fnp_prod
+                    .call1((&input_i64,))
+                    .expect("fnp prod int64 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_prod_i64_2m", |bench| {
+            bench.iter(|| {
+                let result = numpy_prod
+                    .call1((&input_i64,))
+                    .expect("numpy prod int64 benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_ediff1d_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_ediff1d_boundary");
     group.sample_size(10);
@@ -650,6 +692,7 @@ criterion_group!(
     bench_int32_unary_boundary,
     bench_narrow_int_unary_boundary,
     bench_max_min_reduction_boundary,
+    bench_prod_reduction_boundary,
     bench_ediff1d_boundary,
     bench_select_boundary,
     bench_ldexp_boundary,
