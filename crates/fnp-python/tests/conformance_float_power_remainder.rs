@@ -155,6 +155,70 @@ print(fnp.float_power(x1, x2).tolist())
 }
 
 #[test]
+fn float_power_f64_boundary_bit_exact_golden_sha256() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+import warnings
+warnings.filterwarnings('ignore')
+
+cases = [
+    (
+        np.linspace(0.5, 4.5, 257, dtype=np.float64),
+        np.linspace(0.25, 2.25, 257, dtype=np.float64),
+    ),
+    (
+        np.array([0.0, -0.0, 1.0, -1.0, 2.0, -2.0, np.inf, -np.inf], dtype=np.float64),
+        np.array([3.0, 3.0, np.nan, 2.0, -1.0, 3.0, -2.0, 2.0], dtype=np.float64),
+    ),
+    (
+        np.array([np.nan, -3.0, -4.0, 16.0, 81.0, 256.0], dtype=np.float64),
+        np.array([0.0, 3.0, 0.5, 0.5, -0.5, 0.25], dtype=np.float64),
+    ),
+]
+
+def digest(func):
+    chunks = []
+    for x1, x2 in cases:
+        out = func(x1, x2)
+        chunks.append(str(out.dtype).encode())
+        chunks.append(b"|")
+        chunks.append(np.asarray(out.shape, dtype=np.int64).tobytes())
+        chunks.append(b"|")
+        chunks.append(np.ascontiguousarray(out).view(np.uint8).tobytes())
+        chunks.append(b";")
+    return hashlib.sha256(b"".join(chunks)).hexdigest()
+
+ours = digest(fnp.float_power)
+theirs = digest(np.float_power)
+print(ours)
+print(theirs)
+print(ours == theirs)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let lines: Vec<&str> = result.lines().collect();
+    let expected_sha = "ad8afeba2bc45e4e77e0e1a06cd547aa4646837ab54438977865448125555edc";
+    assert_eq!(
+        lines.get(2).copied(),
+        Some("True"),
+        "float_power f64 boundary raw output hash must match numpy: {result}"
+    );
+    assert_eq!(
+        lines.first().copied(),
+        Some(expected_sha),
+        "float_power f64 boundary fnp hash changed: {result}"
+    );
+    assert_eq!(
+        lines.get(1).copied(),
+        Some(expected_sha),
+        "float_power f64 boundary numpy golden hash changed: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn remainder_basic_match_numpy() -> Result<(), String> {
     let test_cases = vec![
         (

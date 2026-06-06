@@ -162,6 +162,51 @@ fn bench_ldexp_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_float_power_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_float_power_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(5));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let x1 = numpy
+            .call_method1("linspace", (0.5_f64, 4.5_f64, 2_000_000_usize))
+            .expect("2M f64 base input");
+        let x2 = numpy
+            .call_method1("linspace", (0.25_f64, 2.25_f64, 2_000_000_usize))
+            .expect("2M f64 exponent input");
+        let fnp_float_power = module
+            .getattr("float_power")
+            .expect("fnp_python.float_power");
+        let numpy_float_power = numpy.getattr("float_power").expect("numpy.float_power");
+
+        group.bench_function("fnp_float_power_f64_2m", |bench| {
+            bench.iter(|| {
+                let result = fnp_float_power
+                    .call1((&x1, &x2))
+                    .expect("fnp float_power f64/f64 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_float_power_f64_2m", |bench| {
+            bench.iter(|| {
+                let result = numpy_float_power
+                    .call1((&x1, &x2))
+                    .expect("numpy float_power f64/f64 benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_frexp_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_frexp_boundary");
     group.sample_size(10);
@@ -384,6 +429,7 @@ criterion_group!(
     bench_ediff1d_boundary,
     bench_select_boundary,
     bench_ldexp_boundary,
+    bench_float_power_boundary,
     bench_frexp_boundary,
     bench_shift_boundary,
     bench_concat_hstack_boundary,

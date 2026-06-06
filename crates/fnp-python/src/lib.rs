@@ -18619,8 +18619,13 @@ fn native_binary_float_power_or_passthrough(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "float_power(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "float_power(x2)")?;
+        let x1_arg = args.get_item(0)?;
+        let x2_arg = args.get_item(1)?;
+        if let Some(out) = try_zerocopy_f64_binary(py, &x1_arg, &x2_arg, BinaryOp::FloatPower)? {
+            return Ok(out);
+        }
+        let x1 = extract_numeric_array(py, &x1_arg, "float_power(x1)")?;
+        let x2 = extract_numeric_array(py, &x2_arg, "float_power(x2)")?;
         let result = ufunc_float_power(&x1, &x2).map_err(map_ufunc_error)?;
         build_numpy_scalar_or_array(py, &result)
     } else {
