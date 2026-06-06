@@ -27997,6 +27997,91 @@ fn try_zerocopy_f64_outer(
     Ok(Some(output))
 }
 
+// Generic zero-copy rank-1 product a[:,None]*b[None,:] for one integer dtype.
+// numpy.outer ravels both operands, so a flat-buffer read matches for any ndim of
+// a C-contiguous array. Integer multiply wraps silently for ndarray ops, so
+// `mul` is `wrapping_mul` — bit-identical to numpy. The inner row loop is a
+// scalar-times-vector store that autovectorizes. Returns None on a non-contiguous
+// buffer (caller falls through).
+#[allow(clippy::too_many_arguments)]
+fn outer_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T, T) -> T>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    b: &Bound<'py, PyAny>,
+    dtype_name: &str,
+    mul: F,
+) -> PyResult<Option<Py<PyAny>>> {
+    let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<T>::get(a), PyBuffer::<T>::get(b)) else {
+        return Ok(None);
+    };
+    let (Some(a_in), Some(b_in)) = (a_buffer.as_slice(py), b_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    let n = a_in.len();
+    let m = b_in.len();
+    let total = n * m;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (i, ai_cell) in a_in.iter().enumerate() {
+            let ai = ai_cell.get();
+            let row = &output[i * m..i * m + m];
+            for (slot, bj_cell) in row.iter().zip(b_in.iter()) {
+                slot.set(mul(ai, bj_cell.get()));
+            }
+        }
+    }
+    let output_shape = PyTuple::new(py, [n, m])?;
+    Ok(Some(
+        flat.call_method1("reshape", (&output_shape,))?.unbind(),
+    ))
+}
+
+// Zero-copy integer rank-1 product for the dtypes the f64 helper leaves to the
+// cold extract path (~25x slower, lossy/overflowing for wide ints). Requires a
+// and b to share one C-contiguous integer dtype (numpy result_type of matching
+// int dtypes is that dtype); mismatched dtypes, bool, and non-ndarray operands
+// fall through.
+fn try_zerocopy_int_outer(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let a_dtype = a.getattr("dtype")?;
+    let b_dtype = b.getattr("dtype")?;
+    let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    if kind != b_dtype.getattr("kind")?.extract::<String>()?
+        || itemsize != b_dtype.getattr("itemsize")?.extract::<usize>()?
+    {
+        return Ok(None);
+    }
+    match (kind.as_str(), itemsize) {
+        ("i", 8) => outer_typed::<i64, _>(py, &numpy, a, b, "int64", |x, y| x.wrapping_mul(y)),
+        ("i", 4) => outer_typed::<i32, _>(py, &numpy, a, b, "int32", |x, y| x.wrapping_mul(y)),
+        ("i", 2) => outer_typed::<i16, _>(py, &numpy, a, b, "int16", |x, y| x.wrapping_mul(y)),
+        ("i", 1) => outer_typed::<i8, _>(py, &numpy, a, b, "int8", |x, y| x.wrapping_mul(y)),
+        ("u", 8) => outer_typed::<u64, _>(py, &numpy, a, b, "uint64", |x, y| x.wrapping_mul(y)),
+        ("u", 4) => outer_typed::<u32, _>(py, &numpy, a, b, "uint32", |x, y| x.wrapping_mul(y)),
+        ("u", 2) => outer_typed::<u16, _>(py, &numpy, a, b, "uint16", |x, y| x.wrapping_mul(y)),
+        ("u", 1) => outer_typed::<u8, _>(py, &numpy, a, b, "uint8", |x, y| x.wrapping_mul(y)),
+        _ => Ok(None),
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b, out=None))]
 fn outer(
@@ -28025,6 +28110,9 @@ fn outer(
     // skips the cold extract + full n*m build Vecs. Bit-identical; other dtypes
     // and non-contiguous inputs fall through to the general path.
     if let Some(result) = try_zerocopy_f64_outer(py, a.bind(py), b.bind(py))? {
+        return Ok(result);
+    }
+    if let Some(result) = try_zerocopy_int_outer(py, a.bind(py), b.bind(py))? {
         return Ok(result);
     }
 
