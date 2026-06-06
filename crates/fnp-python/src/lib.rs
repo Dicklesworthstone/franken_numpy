@@ -12634,14 +12634,18 @@ fn try_zerocopy_count_nonzero(
     if !a.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
-    let kind = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    // The ndarray shape (one entry per element) is correct for both bool and f64.
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    // The ndarray shape (one entry per element) is correct for every dtype here.
     let shape: Vec<usize> = a.getattr("shape")?.extract::<Vec<usize>>()?;
     // Count directly from the typed buffer via a monomorphized nonzero predicate
-    // (no intermediate flags Vec). For float64, x != 0.0 excludes +-0.0 and
-    // includes NaN, matching numpy.
-    match kind.as_str() {
-        "b" => {
+    // (no intermediate flags Vec). Integers are nonzero iff any bit is set, so they
+    // are counted through a uintN bit-view chosen by itemsize (covering all 8 widths
+    // with 4 movers). Floats must compare by VALUE — x != 0 excludes +-0.0 (whose
+    // sign bit is set) and includes NaN — matching numpy.
+    match (kind.as_str(), itemsize) {
+        ("b", _) => {
             let a_u8: Bound<'_, PyAny> = a.call_method1("view", (numpy.getattr("uint8")?,))?;
             let Ok(buffer) = PyBuffer::<u8>::get(&a_u8) else {
                 return Ok(None);
@@ -12649,32 +12653,81 @@ fn try_zerocopy_count_nonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            finish_count_nonzero(py, &numpy, input.len(), &shape, axis, |i| {
-                input[i].get() != 0
-            })
+            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u8| v != 0)
         }
-        "f" if numpy_dtype_is_f64(py, a) => {
+        ("f", 8) => {
             let Ok(buffer) = PyBuffer::<f64>::get(a) else {
                 return Ok(None);
             };
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
-            finish_count_nonzero(py, &numpy, input.len(), &shape, axis, |i| {
-                input[i].get() != 0.0
-            })
+            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: f64| v != 0.0)
+        }
+        ("f", 4) => {
+            let Ok(buffer) = PyBuffer::<f32>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: f32| v != 0.0)
+        }
+        ("i" | "u", 1) => {
+            let view = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+            let Ok(buffer) = PyBuffer::<u8>::get(&view) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u8| v != 0)
+        }
+        ("i" | "u", 2) => {
+            let view = a.call_method1("view", (numpy.getattr("uint16")?,))?;
+            let Ok(buffer) = PyBuffer::<u16>::get(&view) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u16| v != 0)
+        }
+        ("i" | "u", 4) => {
+            let view = a.call_method1("view", (numpy.getattr("uint32")?,))?;
+            let Ok(buffer) = PyBuffer::<u32>::get(&view) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u32| v != 0)
+        }
+        ("i" | "u", 8) => {
+            let view = a.call_method1("view", (numpy.getattr("uint64")?,))?;
+            let Ok(buffer) = PyBuffer::<u64>::get(&view) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u64| v != 0)
         }
         _ => Ok(None),
     }
 }
 
-fn finish_count_nonzero<F: Fn(usize) -> bool>(
-    py: Python<'_>,
-    numpy: &Bound<'_, PyModule>,
-    n: usize,
+// Typed count_nonzero core: counts elements for which `pred` holds. The flat
+// (axis=None) case iterates the slice directly so the compare-and-accumulate
+// autovectorizes — an indexed closure `|i| input[i]...` does NOT (bounds checks
+// don't elide), which left narrow integers ~4x behind numpy's SIMD popcount.
+fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    input: &[pyo3::buffer::ReadOnlyCell<T>],
     shape: &[usize],
     axis: Option<isize>,
-    is_nonzero: F,
+    pred: F,
 ) -> PyResult<Option<Py<PyAny>>> {
     if shape.is_empty() {
         return Ok(None);
@@ -12683,7 +12736,10 @@ fn finish_count_nonzero<F: Fn(usize) -> bool>(
         None => {
             // numpy.count_nonzero(axis=None) returns a numpy.int64 scalar, not a
             // Python int, so wrap the count to match the return type exactly.
-            let count = (0..n).filter(|&i| is_nonzero(i)).count();
+            let mut count = 0usize;
+            for c in input.iter() {
+                count += usize::from(pred(c.get()));
+            }
             let scalar = numpy.getattr("int64")?.call1((count as i64,))?;
             Ok(Some(scalar.unbind()))
         }
@@ -12717,7 +12773,7 @@ fn finish_count_nonzero<F: Fn(usize) -> bool>(
                     for i in 0..inner {
                         let mut cnt = 0i64;
                         for a in 0..axis_len {
-                            cnt += i64::from(is_nonzero(ibase + a * inner + i));
+                            cnt += i64::from(pred(input[ibase + a * inner + i].get()));
                         }
                         output[obase + i].set(cnt);
                     }
