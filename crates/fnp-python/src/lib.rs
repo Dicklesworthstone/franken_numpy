@@ -30890,6 +30890,76 @@ fn isnat(
     core_numpy_passthrough(py, "isnat", args, kwargs)
 }
 
+// Generic typed core for the integer ptp (peak-to-peak = max - min) full
+// reduction. max() and min() over the buffer are independent vectorizable
+// reductions (pmaxs/pmins); the difference wraps in the input width, matching
+// numpy. Returns a numpy scalar of the input dtype (numpy.ptp(axis=None) returns
+// a scalar, not a 0-d array). None for an empty input (numpy raises — let the
+// fallback reproduce it).
+fn ptp_typed<'py, T, FS>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    dtype_name: &str,
+    sub: FS,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + Ord + IntoPyObject<'py>,
+    FS: Fn(T, T) -> T,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if input.is_empty() {
+        return Ok(None);
+    }
+    let max_v = input.iter().map(|c| c.get()).max().unwrap();
+    let min_v = input.iter().map(|c| c.get()).min().unwrap();
+    let result = sub(max_v, min_v);
+    let scalar = numpy.getattr(dtype_name)?.call1((result,))?;
+    Ok(Some(scalar.unbind()))
+}
+
+// Zero-copy integer ptp for the full reduction (axis=None), all widths. numpy's
+// ptp is max - min wrapping in the input dtype; both reductions are order-
+// independent so this is bit-identical. Otherwise these extracted to an f64 Vec
+// (~40-100x slower, lossy for wide ints). Returns None for a per-axis reduction,
+// a non-integer dtype, or a non-ndarray input.
+fn try_zerocopy_int_ptp(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if axis.is_some() {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize) {
+        ("i", 1) => ptp_typed::<i8, _>(py, &numpy, a, "int8", |x, y| x.wrapping_sub(y)),
+        ("i", 2) => ptp_typed::<i16, _>(py, &numpy, a, "int16", |x, y| x.wrapping_sub(y)),
+        ("i", 4) => ptp_typed::<i32, _>(py, &numpy, a, "int32", |x, y| x.wrapping_sub(y)),
+        ("i", 8) => ptp_typed::<i64, _>(py, &numpy, a, "int64", |x, y| x.wrapping_sub(y)),
+        ("u", 1) => ptp_typed::<u8, _>(py, &numpy, a, "uint8", |x, y| x.wrapping_sub(y)),
+        ("u", 2) => ptp_typed::<u16, _>(py, &numpy, a, "uint16", |x, y| x.wrapping_sub(y)),
+        ("u", 4) => ptp_typed::<u32, _>(py, &numpy, a, "uint32", |x, y| x.wrapping_sub(y)),
+        ("u", 8) => ptp_typed::<u64, _>(py, &numpy, a, "uint64", |x, y| x.wrapping_sub(y)),
+        _ => Ok(None),
+    }
+}
+
 // Peak-to-peak reduction (max - min) with native Rust fast path.
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=false))]
@@ -30941,6 +31011,13 @@ fn ptp(
             }
         }
     };
+
+    // Zero-copy integer ptp (full reduction): two vectorizable max/min scans,
+    // wrapping difference. Bit-identical; skips the cold, for-wide-ints lossy
+    // extract Vec. Per-axis and non-integer dtypes fall through.
+    if let Some(result) = try_zerocopy_int_ptp(py, a.bind(py), axis_val)? {
+        return Ok(result);
+    }
 
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "ptp(a)") {
