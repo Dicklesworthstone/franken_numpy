@@ -686,6 +686,104 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_average_nansum_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_average_nansum_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let rows = 2048_usize;
+        let cols = 512_usize;
+        let total = rows * cols;
+        let input = numpy
+            .call_method1("linspace", (-1.0_f64, 1.0_f64, total))
+            .expect("f64 input")
+            .call_method1("reshape", ((rows, cols),))
+            .expect("2-D f64 input");
+        let weights = numpy
+            .call_method1("linspace", (0.5_f64, 1.5_f64, cols))
+            .expect("axis weights");
+        let flat_index = numpy
+            .call_method1("arange", (total,))
+            .expect("flat index")
+            .call_method1("reshape", ((rows, cols),))
+            .expect("2-D index");
+        let nan_mask = numpy
+            .getattr("equal")
+            .expect("numpy.equal")
+            .call1((
+                flat_index
+                    .call_method1("__mod__", (17_i64,))
+                    .expect("mod index"),
+                0_i64,
+            ))
+            .expect("periodic nan mask");
+        let nan_value = numpy.getattr("nan").expect("numpy.nan");
+        let nan_input = numpy
+            .getattr("where")
+            .expect("numpy.where")
+            .call1((&nan_mask, &nan_value, &input))
+            .expect("input with periodic NaNs");
+
+        let average_kwargs = PyDict::new(py);
+        average_kwargs.set_item("axis", 1_i64).expect("axis kwarg");
+        average_kwargs
+            .set_item("weights", &weights)
+            .expect("weights kwarg");
+        let nansum_kwargs = PyDict::new(py);
+        nansum_kwargs.set_item("axis", 1_i64).expect("axis kwarg");
+
+        let fnp_average = module.getattr("average").expect("fnp_python.average");
+        let numpy_average = numpy.getattr("average").expect("numpy.average");
+        let fnp_nansum = module.getattr("nansum").expect("fnp_python.nansum");
+        let numpy_nansum = numpy.getattr("nansum").expect("numpy.nansum");
+
+        group.bench_function("fnp_average_axis1_weighted_f64_2048x512", |bench| {
+            bench.iter(|| {
+                let result = fnp_average
+                    .call((&input,), Some(&average_kwargs))
+                    .expect("fnp average axis=1 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_average_axis1_weighted_f64_2048x512", |bench| {
+            bench.iter(|| {
+                let result = numpy_average
+                    .call((&input,), Some(&average_kwargs))
+                    .expect("numpy average axis=1 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_nansum_axis1_f64_2048x512", |bench| {
+            bench.iter(|| {
+                let result = fnp_nansum
+                    .call((&nan_input,), Some(&nansum_kwargs))
+                    .expect("fnp nansum axis=1 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_nansum_axis1_f64_2048x512", |bench| {
+            bench.iter(|| {
+                let result = numpy_nansum
+                    .call((&nan_input,), Some(&nansum_kwargs))
+                    .expect("numpy nansum axis=1 benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_histogram_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_histogram_boundary");
     group.sample_size(10);
@@ -770,6 +868,7 @@ criterion_group!(
     bench_shift_boundary,
     bench_concat_hstack_boundary,
     bench_char_ascii_boundary,
+    bench_average_nansum_axis_boundary,
     bench_histogram_boundary
 );
 criterion_main!(benches);
