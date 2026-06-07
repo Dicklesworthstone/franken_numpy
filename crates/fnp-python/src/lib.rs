@@ -17674,6 +17674,122 @@ fn putmask(
     Ok(py.None())
 }
 
+// Generic fill of np.indices' k-th coordinate slab: output[f] = (f / inner) % dim_k,
+// written as contiguous blocks of `inner` equal values cycling 0..dim_k (a memset-like
+// block fill that vectorizes).
+fn fill_indices_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(usize) -> T>(
+    py: Python<'py>,
+    out: &Bound<'py, PyAny>,
+    dims: &[usize],
+    total: usize,
+    cast: F,
+) -> PyResult<bool> {
+    if total == 0 {
+        return Ok(true);
+    }
+    let Ok(buffer) = PyBuffer::<T>::get(out) else {
+        return Ok(false);
+    };
+    let Some(output) = buffer.as_mut_slice(py) else {
+        return Ok(false);
+    };
+    let d = dims.len();
+    for k in 0..d {
+        let inner: usize = dims[k + 1..].iter().product();
+        let dim_k = dims[k];
+        let slab_base = k * total;
+        let period = dim_k * inner; // one full cycle of the axis-k pattern
+        if period == 0 {
+            continue;
+        }
+        // Fill the first period: blocks of `inner` equal values cycling 0..dim_k.
+        let mut f = 0usize;
+        for v in 0..dim_k {
+            let cv = cast(v);
+            for cell in &output[slab_base + f..slab_base + f + inner] {
+                cell.set(cv);
+            }
+            f += inner;
+        }
+        // Replicate that period across the rest of the slab with block copies (which
+        // memcpy-vectorize) — far faster than re-deriving each element, especially for
+        // the last axis (inner==1) whose per-element cycle does not vectorize.
+        let mut dst = period;
+        while dst < total {
+            let (head, tail) = output[slab_base..slab_base + total].split_at(dst);
+            let src = &head[..period];
+            for (d8, s8) in tail[..period].iter().zip(src.iter()) {
+                d8.set(s8.get());
+            }
+            dst += period;
+        }
+    }
+    Ok(true)
+}
+
+// Zero-copy np.indices: build the (d, *dimensions) coordinate grid directly with
+// per-axis block fills instead of the cold UFuncArray build (~160x slower). Handles
+// the default and any integer dtype whose range fits every dimension (a too-narrow
+// dtype, which numpy wraps, and the float/sparse forms fall through to the slow path).
+fn try_zerocopy_indices(
+    py: Python<'_>,
+    dims: &[usize],
+    dtype: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let d = dims.len();
+    if d == 0 {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    // Resolve dtype (default int64); only integer dtypes that fit every index.
+    let (kind, itemsize, dt_obj): (String, usize, Bound<'_, PyAny>) = match dtype {
+        Some(dt) if !dt.is_none() => {
+            let np_dt = numpy.getattr("dtype")?.call1((dt,))?;
+            (
+                np_dt.getattr("kind")?.extract::<String>()?,
+                np_dt.getattr("itemsize")?.extract::<usize>()?,
+                np_dt,
+            )
+        }
+        _ => ("i".to_string(), 8, numpy.getattr("dtype")?.call1(("int64",))?),
+    };
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let max_idx = dims.iter().map(|&n| n.saturating_sub(1)).max().unwrap_or(0) as i128;
+    let bits = (8 * itemsize) as u32;
+    let fits = if kind == "i" {
+        max_idx <= (1i128 << (bits - 1)) - 1
+    } else {
+        max_idx <= (1i128 << bits) - 1
+    };
+    if !fits {
+        return Ok(None);
+    }
+    let total: usize = dims.iter().product();
+    let mut out_shape: Vec<usize> = Vec::with_capacity(d + 1);
+    out_shape.push(d);
+    out_shape.extend_from_slice(dims);
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", &dt_obj)?;
+    let out = numpy.call_method("empty", (PyTuple::new(py, out_shape)?,), Some(&kwargs))?;
+    let ok = match (kind.as_str(), itemsize) {
+        ("i", 8) => fill_indices_typed::<i64, _>(py, &out, dims, total, |v| v as i64)?,
+        ("i", 4) => fill_indices_typed::<i32, _>(py, &out, dims, total, |v| v as i32)?,
+        ("i", 2) => fill_indices_typed::<i16, _>(py, &out, dims, total, |v| v as i16)?,
+        ("i", 1) => fill_indices_typed::<i8, _>(py, &out, dims, total, |v| v as i8)?,
+        ("u", 8) => fill_indices_typed::<u64, _>(py, &out, dims, total, |v| v as u64)?,
+        ("u", 4) => fill_indices_typed::<u32, _>(py, &out, dims, total, |v| v as u32)?,
+        ("u", 2) => fill_indices_typed::<u16, _>(py, &out, dims, total, |v| v as u16)?,
+        ("u", 1) => fill_indices_typed::<u8, _>(py, &out, dims, total, |v| v as u8)?,
+        _ => return Ok(None),
+    };
+    if !ok {
+        return Ok(None);
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (dimensions, dtype=None))]
 fn indices(
@@ -17681,6 +17797,9 @@ fn indices(
     dimensions: Vec<usize>,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_indices(py, &dimensions, dtype.as_ref().map(|d| d.bind(py)))? {
+        return Ok(out);
+    }
     let dtype = extract_python_dtype(py, dtype, DType::I64, "indices(dtype)")?;
     let result = UFuncArray::indices(&dimensions, dtype).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
