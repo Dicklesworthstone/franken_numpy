@@ -30672,6 +30672,131 @@ fn ix_(py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
     build_numpy_tuple_from_ufuncs(py, &result)
 }
 
+// Build np.repeat(v, times).reshape(len(v), times): each row i is the scalar v[i]
+// repeated `times` times. Value-agnostic via a uintN bit-view chosen by itemsize; the
+// per-row fill is a memset that vectorizes. Returns None for complex128 / object /
+// string / non-contiguous (no fixed uintN mover).
+fn try_zerocopy_repeat_each(
+    py: Python<'_>,
+    v: &Bound<'_, PyAny>,
+    times: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let dtype = v.getattr("dtype")?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if !matches!(itemsize, 1 | 2 | 4 | 8) {
+        return Ok(None);
+    }
+    let mover_name = match itemsize {
+        1 => "uint8",
+        2 => "uint16",
+        4 => "uint32",
+        _ => "uint64",
+    };
+    let mover = numpy.getattr(mover_name)?;
+    let v_view = v.call_method1("view", (&mover,))?;
+    fn fill<'py, T: pyo3::buffer::Element + Copy>(
+        py: Python<'py>,
+        numpy: &Bound<'py, PyModule>,
+        v_view: &Bound<'py, PyAny>,
+        times: usize,
+        mover_name: &str,
+    ) -> PyResult<Option<(Bound<'py, PyAny>, usize)>> {
+        let Ok(in_buf) = PyBuffer::<T>::get(v_view) else {
+            return Ok(None);
+        };
+        let Some(input) = in_buf.as_slice(py) else {
+            return Ok(None);
+        };
+        let m = input.len();
+        let total = m * times;
+        let kw = PyDict::new(py);
+        kw.set_item("dtype", mover_name)?;
+        let out = numpy.call_method("empty", (total,), Some(&kw))?;
+        if total > 0 {
+            let Ok(out_buf) = PyBuffer::<T>::get(&out) else {
+                return Ok(None);
+            };
+            let Some(output) = out_buf.as_mut_slice(py) else {
+                return Ok(None);
+            };
+            for (i, c) in input.iter().enumerate() {
+                let val = c.get();
+                for cell in &output[i * times..i * times + times] {
+                    cell.set(val);
+                }
+            }
+        }
+        Ok(Some((out, m)))
+    }
+    let res = match itemsize {
+        1 => fill::<u8>(py, &numpy, &v_view, times, mover_name)?,
+        2 => fill::<u16>(py, &numpy, &v_view, times, mover_name)?,
+        4 => fill::<u32>(py, &numpy, &v_view, times, mover_name)?,
+        _ => fill::<u64>(py, &numpy, &v_view, times, mover_name)?,
+    };
+    let Some((out, m)) = res else {
+        return Ok(None);
+    };
+    let restored = out.call_method1("view", (&dtype,))?;
+    let shape = PyTuple::new(py, [m, times])?;
+    Ok(Some(restored.call_method1("reshape", (&shape,))?.unbind()))
+}
+
+// Zero-copy np.meshgrid for the common 2-input, dense, copy=True, xy/ij case. Each
+// output keeps its own input's dtype: one is the input tiled as rows (tile), the other
+// is the input repeated element-wise across rows (repeat_each) — both value-agnostic
+// byte/typed fills, far cheaper than the UFuncArray build (~160x). >2 inputs, sparse,
+// copy=False, non-1-D inputs, and complex128/object fall through to the existing path.
+fn try_zerocopy_meshgrid_2d(
+    py: Python<'_>,
+    xi: &Bound<'_, PyTuple>,
+    copy: bool,
+    sparse: bool,
+    indexing: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    if sparse || !copy || xi.len() != 2 || (indexing != "xy" && indexing != "ij") {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let x = xi.get_item(0)?;
+    let y = xi.get_item(1)?;
+    for v in [&x, &y] {
+        if !v.is_exact_instance(&ndarray_type)
+            || v.getattr("ndim")?.extract::<usize>()? != 1
+        {
+            return Ok(None);
+        }
+        let k = v.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+        if !matches!(k.as_str(), "b" | "i" | "u" | "f" | "c") {
+            return Ok(None);
+        }
+    }
+    let n = x.len()?; // len(x)
+    let m = y.len()?; // len(y)
+    // xy: X = tile(x) as m rows (m,n); Y = repeat each y across n cols (m,n).
+    // ij: X = repeat each x across m cols (n,m); Y = tile(y) as n rows (n,m).
+    let (out0, out1) = if indexing == "xy" {
+        let x_tile = try_zerocopy_any_tile(py, &x, &[m, 1])?;
+        let y_rep = try_zerocopy_repeat_each(py, &y, n)?;
+        match (x_tile, y_rep) {
+            (Some(a), Some(b)) => (a, b),
+            _ => return Ok(None),
+        }
+    } else {
+        let x_rep = try_zerocopy_repeat_each(py, &x, m)?;
+        let y_tile = try_zerocopy_any_tile(py, &y, &[n, 1])?;
+        match (x_rep, y_tile) {
+            (Some(a), Some(b)) => (a, b),
+            _ => return Ok(None),
+        }
+    };
+    Ok(Some(
+        PyTuple::new(py, [out0.bind(py), out1.bind(py)])?.unbind().into_any(),
+    ))
+}
+
 #[pyfunction]
 #[pyo3(signature = (*xi, copy=true, sparse=false, indexing="xy"))]
 fn meshgrid(
@@ -30681,6 +30806,9 @@ fn meshgrid(
     sparse: bool,
     indexing: &str,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_meshgrid_2d(py, xi, copy, sparse, indexing)? {
+        return Ok(out);
+    }
     let arrays = normalize_meshgrid_inputs(py, xi)?;
     if copy && meshgrid_rust_compatible(py, &arrays)? {
         let arrays = arrays
