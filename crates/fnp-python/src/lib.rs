@@ -34510,6 +34510,137 @@ fn try_zerocopy_f64_argextreme(
     }
 }
 
+// Per-lane integer argmax/argmin over the contiguous last axis: each lane is L
+// consecutive elements of the typed buffer. A tight scalar scan tracks the
+// running extreme and the FIRST index achieving it (strict compare → first
+// occurrence, numpy's tie-break). Integer order is total, so this is exact. The
+// loop reads the buffer cells directly (no widening to f64, no large temp Vec),
+// replacing the cold extract_precise → reduce_argmax path that was ~50x slower
+// for int64 over an axis.
+fn lastaxis_argextreme_int<T: pyo3::buffer::Element + Copy + PartialOrd>(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    outer: usize,
+    lane: usize,
+    take_max: bool,
+) -> Option<Vec<i64>> {
+    let in_buffer = PyBuffer::<T>::get(a).ok()?;
+    let cells = in_buffer.as_slice(py)?;
+    if cells.len() != outer * lane {
+        return None;
+    }
+    let mut out = Vec::with_capacity(outer);
+    for o in 0..outer {
+        let base = o * lane;
+        let row = &cells[base..base + lane];
+        let mut best_v = row[0].get();
+        let mut best_i = 0usize;
+        for (j, c) in row.iter().enumerate().skip(1) {
+            let v = c.get();
+            let better = if take_max { v > best_v } else { v < best_v };
+            if better {
+                best_v = v;
+                best_i = j;
+            }
+        }
+        out.push(best_i as i64);
+    }
+    Some(out)
+}
+
+// Zero-copy argmax/argmin over the CONTIGUOUS LAST axis of a C-contiguous
+// ndarray, for f64 (per-lane portable-SIMD) and every integer width (per-lane
+// scalar scan). Each lane is a contiguous run of `lane` elements; the SIMD/scalar
+// kernel runs over a reused row buffer (f64) or directly over the typed cells
+// (int), so there is no big intermediate allocation. The result is an intp array
+// of shape[:-1]. Gated to axis == last axis, ndim >= 2, non-empty lane. f64 lanes
+// containing NaN defer the whole call to numpy (first-NaN semantics); non-last
+// axis, non-contiguous, f32/complex, and 1-D inputs all defer.
+fn try_zerocopy_lastaxis_argextreme(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(ax) = axis else {
+        return Ok(None);
+    };
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len();
+    if ndim < 2 {
+        return Ok(None);
+    }
+    let norm = if ax < 0 { ax + ndim as isize } else { ax };
+    if norm != (ndim - 1) as isize {
+        return Ok(None); // only the contiguous last axis
+    }
+    let lane = shape[ndim - 1];
+    if lane == 0 {
+        return Ok(None); // numpy raises on a zero-length reduction axis
+    }
+    let outer: usize = shape[..ndim - 1].iter().product();
+    let out_shape: Vec<usize> = shape[..ndim - 1].to_vec();
+
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+
+    let indices: Vec<i64> = if kind == "f" && itemsize == 8 {
+        let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+            return Ok(None);
+        };
+        let Some(cells) = in_buffer.as_slice(py) else {
+            return Ok(None);
+        };
+        if cells.len() != outer * lane {
+            return Ok(None);
+        }
+        let mut buf = vec![0.0f64; lane];
+        let mut out = Vec::with_capacity(outer);
+        for o in 0..outer {
+            let base = o * lane;
+            for (d, c) in buf.iter_mut().zip(cells[base..base + lane].iter()) {
+                *d = c.get();
+            }
+            match simd_argextreme_f64(&buf, take_max) {
+                Some(i) => out.push(i as i64),
+                None => return Ok(None), // NaN lane — defer the whole call to numpy
+            }
+        }
+        out
+    } else if kind == "i" || kind == "u" {
+        let res = match (kind.as_str(), itemsize) {
+            ("i", 1) => lastaxis_argextreme_int::<i8>(py, a, outer, lane, take_max),
+            ("i", 2) => lastaxis_argextreme_int::<i16>(py, a, outer, lane, take_max),
+            ("i", 4) => lastaxis_argextreme_int::<i32>(py, a, outer, lane, take_max),
+            ("i", 8) => lastaxis_argextreme_int::<i64>(py, a, outer, lane, take_max),
+            ("u", 1) => lastaxis_argextreme_int::<u8>(py, a, outer, lane, take_max),
+            ("u", 2) => lastaxis_argextreme_int::<u16>(py, a, outer, lane, take_max),
+            ("u", 4) => lastaxis_argextreme_int::<u32>(py, a, outer, lane, take_max),
+            ("u", 8) => lastaxis_argextreme_int::<u64>(py, a, outer, lane, take_max),
+            _ => None,
+        };
+        match res {
+            Some(v) => v,
+            None => return Ok(None),
+        }
+    } else {
+        return Ok(None);
+    };
+
+    let flat = numpy_array_from_slice(py, &numpy, &indices, "intp")?;
+    let reshaped = flat.call_method1("reshape", (out_shape,))?;
+    Ok(Some(reshaped.unbind()))
+}
+
 // Arg reductions
 // Native Rust argmax with fallback for unsupported parameters.
 #[pyfunction]
@@ -34581,6 +34712,12 @@ fn argmax(
     // Single-pass SIMD f64 fast path (axis=None): ~5-13x faster than the cold
     // extract_precise → reduce_argmax scalar scan (NaN arrays defer to numpy).
     if let Some(out) = try_zerocopy_f64_argextreme(py, a.bind(py), axis_val, true)? {
+        return Ok(out);
+    }
+    // Zero-copy contiguous last-axis fast path (f64 SIMD + every int width): the
+    // per-axis extract_precise → reduce_argmax path was ~3x (f64) to ~50x (int64)
+    // slower than numpy.
+    if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a.bind(py), axis_val, true)? {
         return Ok(out);
     }
 
@@ -34673,6 +34810,12 @@ fn argmin(
     // Single-pass SIMD f64 fast path (axis=None): ~5-13x faster than the cold
     // extract_precise → reduce_argmin scalar scan (NaN arrays defer to numpy).
     if let Some(out) = try_zerocopy_f64_argextreme(py, a.bind(py), axis_val, false)? {
+        return Ok(out);
+    }
+    // Zero-copy contiguous last-axis fast path (f64 SIMD + every int width): the
+    // per-axis extract_precise → reduce_argmin path was ~3x (f64) to ~50x (int64)
+    // slower than numpy.
+    if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a.bind(py), axis_val, false)? {
         return Ok(out);
     }
 
