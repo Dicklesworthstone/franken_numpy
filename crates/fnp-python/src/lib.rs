@@ -20378,6 +20378,11 @@ fn isin(
     if assume_unique || kind.as_ref().is_some_and(|v| !v.bind(py).is_none()) {
         return fallback();
     }
+    // Fast hashed-set membership for matched integer dtypes — runs BEFORE the cold
+    // extract→UFuncArray path (~25x slower) so common id-membership skips it.
+    if let Some(out) = try_zerocopy_int_isin(py, element.bind(py), test_elements.bind(py), invert)? {
+        return Ok(out);
+    }
     let ar1 = match extract_precise_numeric_array(py, element.bind(py), "isin(element)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -20397,6 +20402,152 @@ fn isin(
     }
     let result = ar1.isin(&ar2, invert);
     build_numpy_array_from_ufunc(py, &result)
+}
+
+// A fast multiply-shift hasher for integer keys: std's default SipHash is far too
+// slow for the millions of single-int lookups np.isin performs. For a single
+// integer key Rust calls write_u64/write_i64 (etc.) exactly once, so a Fibonacci
+// multiply on that word is a high-quality, ~1-cycle hash. (write() is implemented
+// for completeness but is never on the hot integer path.)
+#[derive(Default)]
+struct FastIntHasher(u64);
+impl core::hash::Hasher for FastIntHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        let mut h = self.0;
+        for &b in bytes {
+            h = (h ^ b as u64).wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = h;
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.write_u64(i as u64);
+    }
+    fn write_u16(&mut self, i: u16) {
+        self.write_u64(i as u64);
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.write_u64(i as u64);
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.0 = i.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.write_u64(i as u64);
+    }
+    fn write_i8(&mut self, i: i8) {
+        self.write_u64(i as u64);
+    }
+    fn write_i16(&mut self, i: i16) {
+        self.write_u64(i as u64);
+    }
+    fn write_i32(&mut self, i: i32) {
+        self.write_u64(i as u64);
+    }
+    fn write_i64(&mut self, i: i64) {
+        self.write_u64(i as u64);
+    }
+}
+#[derive(Default, Clone)]
+struct FastIntBuildHasher;
+impl core::hash::BuildHasher for FastIntBuildHasher {
+    type Hasher = FastIntHasher;
+    fn build_hasher(&self) -> FastIntHasher {
+        FastIntHasher(0)
+    }
+}
+
+// Membership core for np.isin over a matched integer dtype. Builds a fast-hashed
+// set of the test values (O(m)) then maps every element to a bool (O(n)) — an
+// O(n+m) replacement for the cold extract→UFuncArray path (~25x slower). Integer
+// bit-equality IS value-equality (no NaN/-0.0 hazards), so this is bit-exact.
+// Result is XORed with `invert` to honour numpy's invert kwarg. Returns None if a
+// buffer is non-contiguous (as_slice fails) so the caller defers to numpy.
+fn isin_typed<'py, T: pyo3::buffer::Element + Copy + core::hash::Hash + Eq>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    element: &Bound<'py, PyAny>,
+    test: &Bound<'py, PyAny>,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let (Ok(e_buf), Ok(t_buf)) = (PyBuffer::<T>::get(element), PyBuffer::<T>::get(test)) else {
+        return Ok(None);
+    };
+    let (Some(e_s), Some(t_s)) = (e_buf.as_slice(py), t_buf.as_slice(py)) else {
+        return Ok(None);
+    };
+    let mut set: std::collections::HashSet<T, FastIntBuildHasher> =
+        std::collections::HashSet::with_capacity_and_hasher(t_s.len(), FastIntBuildHasher);
+    for c in t_s.iter() {
+        set.insert(c.get());
+    }
+    let n = e_s.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(o_buf) = PyBuffer::<u8>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = o_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (o, c) in output.iter().zip(e_s.iter()) {
+            o.set(set.contains(&c.get()) as u8);
+        }
+    }
+    Ok(Some(flat.call_method1("view", (numpy.getattr("bool_")?,))?))
+}
+
+// Zero-copy np.isin for matched integer dtypes (the common id-membership case),
+// dispatched by (kind, itemsize). Gated to: both ndarrays, identical integer
+// dtype (numpy would otherwise promote — defer for exact semantics), default
+// assume_unique/kind (handled by the caller). Output is a bool array of
+// element.shape. Floats/complex/mixed keep the existing path.
+fn try_zerocopy_int_isin(
+    py: Python<'_>,
+    element: &Bound<'_, PyAny>,
+    test: &Bound<'_, PyAny>,
+    invert: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !element.is_exact_instance(&ndarray_type) || !test.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let e_dtype = element.getattr("dtype")?;
+    let t_dtype = test.getattr("dtype")?;
+    if !e_dtype.eq(&t_dtype)? {
+        return Ok(None); // differing dtypes → numpy promotes; defer for exact semantics
+    }
+    let kind = e_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = e_dtype.getattr("itemsize")?.extract::<usize>()?;
+    let flat = match (kind.as_str(), itemsize) {
+        ("i", 1) => isin_typed::<i8>(py, &numpy, element, test)?,
+        ("i", 2) => isin_typed::<i16>(py, &numpy, element, test)?,
+        ("i", 4) => isin_typed::<i32>(py, &numpy, element, test)?,
+        ("i", 8) => isin_typed::<i64>(py, &numpy, element, test)?,
+        ("u", 1) => isin_typed::<u8>(py, &numpy, element, test)?,
+        ("u", 2) => isin_typed::<u16>(py, &numpy, element, test)?,
+        ("u", 4) => isin_typed::<u32>(py, &numpy, element, test)?,
+        ("u", 8) => isin_typed::<u64>(py, &numpy, element, test)?,
+        _ => return Ok(None),
+    };
+    let Some(flat) = flat else {
+        return Ok(None);
+    };
+    // numpy invert flips membership; XOR after the set lookups keeps it branch-light.
+    let result = if invert {
+        numpy.call_method1("logical_not", (&flat,))?
+    } else {
+        flat
+    };
+    let shape: Vec<usize> = element.getattr("shape")?.extract()?;
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    Ok(Some(
+        result.call_method1("reshape", (&output_shape,))?.unbind(),
+    ))
 }
 
 #[pyfunction]
