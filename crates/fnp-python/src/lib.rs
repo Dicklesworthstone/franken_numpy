@@ -9288,6 +9288,161 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy>(
     Ok(Some((flat, out_shape)))
 }
 
+// Per-axis gather core for np.take(a, idx, axis=ax). Unlike take_along_axis the
+// index list is SHARED across every outer/inner position (broadcast), so the same
+// flat idx array gathers a contiguous inner-block per (outer, idx) pair. Output is
+// outer * count * inner elements; each block of `inner` is copied with a
+// subslice+zip (the contiguous-block-copy pattern that memcpy-vectorizes — for
+// inner==1 it degrades to a single typed move, the correct form for a scattered
+// last-axis gather). OOB/negative-after-wrap indices return None so numpy raises
+// IndexError. T is the uintN bit-mover chosen by itemsize, so one core covers
+// int/uint/float/bool verbatim.
+fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    arr_u: &Bound<'py, PyAny>,
+    idx_in: &[pyo3::buffer::ReadOnlyCell<i64>],
+    out_dtype_name: &str,
+    outer: usize,
+    la: usize,
+    inner: usize,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Ok(arr_buf) = PyBuffer::<T>::get(arr_u) else {
+        return Ok(None);
+    };
+    let Some(arr_s) = arr_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let count = idx_in.len();
+    let total_out = outer * count * inner;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", out_dtype_name)?;
+    let flat = numpy.call_method("empty", (total_out,), Some(&kwargs))?;
+    if total_out > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let la_i = la as i64;
+        for o in 0..outer {
+            let abase = o * la * inner;
+            let obase = o * count * inner;
+            for (j, idx_cell) in idx_in.iter().enumerate() {
+                let mut k = idx_cell.get();
+                if k < 0 {
+                    k += la_i;
+                }
+                if k < 0 || k >= la_i {
+                    return Ok(None); // OOB → defer to numpy for exact IndexError
+                }
+                let sbase = abase + (k as usize) * inner;
+                let dbase = obase + j * inner;
+                for (dst, src) in output[dbase..dbase + inner]
+                    .iter()
+                    .zip(arr_s[sbase..sbase + inner].iter())
+                {
+                    dst.set(src.get());
+                }
+            }
+        }
+    }
+    Ok(Some(flat))
+}
+
+// Zero-copy np.take with an explicit axis for the gated dtypes (bool/int64/uint64/
+// float64) — the per-axis case the flat helpers skip, currently routed through the
+// cold extract→ndarray.take path (30-100x slower than numpy). numpy moves whole
+// elements, so the gather runs on a uintN bit-view chosen by itemsize and is
+// viewed back. Gated to: axis=Some, mode="raise", both ndarrays, an int64 index
+// array, and a C-contiguous source; non-contiguous/OOB inputs defer to numpy.
+fn try_zerocopy_take_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    indices: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    mode: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(axis) = axis else {
+        return Ok(None);
+    };
+    if mode != "raise" {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !indices.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    {
+        let dtype = indices.getattr("dtype")?;
+        if dtype.getattr("kind")?.extract::<String>()? != "i"
+            || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+        {
+            return Ok(None);
+        }
+    }
+    if !a
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None); // non-contiguous source: as_slice would be in wrong order
+    }
+    let a_dtype = a.getattr("dtype")?;
+    let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    let s_arr: Vec<usize> = a.getattr("shape")?.extract()?;
+    let d = s_arr.len();
+    if d == 0 {
+        return Ok(None);
+    }
+    let ax = if axis < 0 { axis + d as isize } else { axis };
+    if ax < 0 || ax >= d as isize {
+        return Ok(None); // out-of-range axis → defer for numpy AxisError
+    }
+    let ax = ax as usize;
+    let la = s_arr[ax];
+    let outer: usize = s_arr[..ax].iter().product();
+    let inner: usize = s_arr[ax + 1..].iter().product();
+    let s_idx: Vec<usize> = indices.getattr("shape")?.extract()?;
+    let Ok(idx_buf) = PyBuffer::<i64>::get(indices) else {
+        return Ok(None);
+    };
+    let Some(idx_in) = idx_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let mover_name = match itemsize {
+        1 => "uint8",
+        2 => "uint16",
+        4 => "uint32",
+        8 => "uint64",
+        _ => return Ok(None),
+    };
+    let orig_name = a_dtype.getattr("name")?.extract::<String>()?;
+    let arr_u = a.call_method1("view", (numpy.getattr(mover_name)?,))?;
+    let flat = match itemsize {
+        1 => take_axis_typed::<u8>(py, &numpy, &arr_u, idx_in, "uint8", outer, la, inner)?,
+        2 => take_axis_typed::<u16>(py, &numpy, &arr_u, idx_in, "uint16", outer, la, inner)?,
+        4 => take_axis_typed::<u32>(py, &numpy, &arr_u, idx_in, "uint32", outer, la, inner)?,
+        _ => take_axis_typed::<u64>(py, &numpy, &arr_u, idx_in, "uint64", outer, la, inner)?,
+    };
+    let Some(flat) = flat else {
+        return Ok(None);
+    };
+    let _ = kind;
+    let restored = flat.call_method1("view", (numpy.getattr(orig_name.as_str())?,))?;
+    // out shape = a.shape[:ax] + indices.shape + a.shape[ax+1:]
+    let mut out_shape: Vec<usize> = s_arr[..ax].to_vec();
+    out_shape.extend_from_slice(&s_idx);
+    out_shape.extend_from_slice(&s_arr[ax + 1..]);
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    Ok(Some(
+        restored.call_method1("reshape", (&output_shape,))?.unbind(),
+    ))
+}
+
 // Zero-copy flat gather for the non-f64 gated dtypes the f64 helper leaves to the
 // cold extract path: int64/uint64 (~39x slower, lossy for wide ints) and bool.
 // One element-move per index, bit-identical to numpy. Bool is gathered through a
@@ -12683,6 +12838,11 @@ fn take(
     // slower via the extract Vec, plus bool); elements move verbatim so it is
     // bit-identical. Out-of-range indices fall through so numpy raises IndexError.
     if let Some(out) = try_zerocopy_int_take(py, a.bind(py), indices.bind(py), axis, mode)? {
+        return Ok(out);
+    }
+    // Per-axis gather for the gated dtypes — the axis case the flat helpers skip,
+    // otherwise routed through the cold extract→ndarray.take path (30-100x slower).
+    if let Some(out) = try_zerocopy_take_axis(py, a.bind(py), indices.bind(py), axis, mode)? {
         return Ok(out);
     }
     let a = extract_numeric_array(py, a.bind(py), "take(a)")?;
