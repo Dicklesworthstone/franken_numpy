@@ -31715,12 +31715,130 @@ fn unravel_index(
     shape: Py<PyAny>,
     order: &str,
 ) -> PyResult<Py<PyAny>> {
+    // Zero-copy integer index→coordinate conversion for the common case (int64
+    // ndarray indices, C order). Skips the cold extract→UFuncArray path (~6.6x
+    // slower than numpy). Pure integer div/mod ⇒ bit-exact. Scalar indices,
+    // non-int64, F order, and out-of-bounds indices defer to the path below.
+    if let Some(out) = try_zerocopy_unravel_c(py, indices.bind(py), shape.bind(py), order)? {
+        return Ok(out);
+    }
     let indices = extract_integer_array(py, indices.bind(py), "unravel_index(indices)")?;
     let shape = extract_index_shape(py, shape.bind(py), "unravel_index(shape)")?;
     let scalar_output = indices.shape().is_empty();
     let result =
         UFuncArray::unravel_index_order(&indices, &shape, order).map_err(map_ufunc_error)?;
     build_numpy_index_tuple_from_ufuncs(py, &result, scalar_output)
+}
+
+// Zero-copy np.unravel_index for int64 ndarray indices in C order: each flat index
+// x maps to coordinates via the standard last-axis-first div/mod sweep
+// (coord[d] = (x / inner_d) % shape[d]). Returns a tuple of d int64 coordinate
+// arrays, each shaped like `indices`. Integer arithmetic is exact ⇒ bit-identical
+// to numpy. Returns None (caller defers) for non-int64 indices, scalar (0-d)
+// indices, F order, non-contiguous input, an empty/zero shape, or any index out of
+// range, so numpy's exact tuple/scalar return and ValueError are preserved.
+fn try_zerocopy_unravel_c(
+    py: Python<'_>,
+    indices: &Bound<'_, PyAny>,
+    shape: &Bound<'_, PyAny>,
+    order: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    if order != "C" {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !indices.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = indices.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "i"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let ishape: Vec<usize> = indices.getattr("shape")?.extract()?;
+    if ishape.is_empty() {
+        return Ok(None); // scalar indices → numpy returns a tuple of scalars; defer
+    }
+    // shape may be an int or a sequence of ints.
+    let dims: Vec<i64> = if let Ok(seq) = shape.extract::<Vec<i64>>() {
+        seq
+    } else if let Ok(single) = shape.extract::<i64>() {
+        vec![single]
+    } else {
+        return Ok(None);
+    };
+    let d = dims.len();
+    if d == 0 || dims.iter().any(|&v| v <= 0) {
+        return Ok(None); // empty/zero/negative dims → defer for numpy's semantics
+    }
+    let mut total: i128 = 1;
+    for &v in &dims {
+        total *= v as i128;
+    }
+    if total > i64::MAX as i128 {
+        return Ok(None);
+    }
+    let total = total as i64;
+    let Ok(buf) = PyBuffer::<i64>::get(indices) else {
+        return Ok(None);
+    };
+    let Some(s) = buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = s.len();
+    // Validate range; any OOB index defers so numpy raises its exact ValueError.
+    for c in s.iter() {
+        let x = c.get();
+        if x < 0 || x >= total {
+            return Ok(None);
+        }
+    }
+    // Allocate the d int64 coordinate arrays up front and write coordinates
+    // straight into their buffers in a single pass — no intermediate Vec, so the
+    // working set is just the inputs + outputs (avoids a memory-bound cache cliff
+    // at large n).
+    let flats: Vec<Bound<'_, PyAny>> = {
+        let mut v = Vec::with_capacity(d);
+        for _ in 0..d {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", "int64")?;
+            v.push(numpy.call_method("empty", (n,), Some(&kwargs))?);
+        }
+        v
+    };
+    let bufs: Vec<PyBuffer<i64>> = {
+        let mut v = Vec::with_capacity(d);
+        for f in flats.iter() {
+            match PyBuffer::<i64>::get(f) {
+                Ok(b) => v.push(b),
+                Err(_) => return Ok(None),
+            }
+        }
+        v
+    };
+    let mut slices: Vec<&[std::cell::Cell<i64>]> = Vec::with_capacity(d);
+    for b in bufs.iter() {
+        match b.as_mut_slice(py) {
+            Some(sl) => slices.push(sl),
+            None => return Ok(None),
+        }
+    }
+    for (i, c) in s.iter().enumerate() {
+        let mut rem = c.get();
+        for dd in (0..d).rev() {
+            let dim = dims[dd];
+            slices[dd][i].set(rem % dim);
+            rem /= dim;
+        }
+    }
+    let out_shape = PyTuple::new(py, ishape.iter().copied())?;
+    let mut outputs: Vec<Bound<'_, PyAny>> = Vec::with_capacity(d);
+    for f in flats.iter() {
+        outputs.push(f.call_method1("reshape", (&out_shape,))?);
+    }
+    Ok(Some(PyTuple::new(py, outputs)?.into_any().unbind()))
 }
 
 #[pyfunction]
