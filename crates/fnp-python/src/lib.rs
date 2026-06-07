@@ -16834,6 +16834,12 @@ fn histogram(
         None => 10,
     };
 
+    // O(n) uniform-bin counting for a 1-D f64 array — skips the cold
+    // extract→UFuncArray::histogram path (~6.8x slower than numpy).
+    if let Some(out) = try_zerocopy_histogram_f64(py, a.bind(py), nbins)? {
+        return Ok(out);
+    }
+
     let native = match extract_precise_numeric_array(py, a.bind(py), "histogram(a)") {
         Ok(value) => value,
         Err(_) => return fallback(py),
@@ -16862,6 +16868,111 @@ fn histogram(
     Ok(PyTuple::new(py, [counts_py.bind(py), edges_py.bind(py)])?
         .into_any()
         .unbind())
+}
+
+// O(n) uniform-bin np.histogram for a 1-D f64 array with bins=int and no
+// range/weights/density — the autorange uniform path. numpy's UFuncArray fallback
+// here is ~6.8x slower; this replicates numpy's exact algorithm: outer edges are
+// a.min()/a.max() (a±0.5 when all-equal, (0,1) when empty), edges =
+// linspace(first,last,nbins+1) (delegated to numpy so the edge floats are
+// bit-identical), then each in-range x maps to floor((x-first)*norm) with numpy's
+// two floating-point edge corrections (a decrement when x < edges[idx] and an
+// increment when x >= edges[idx+1]). Counts are exact integers ⇒ bit-exact.
+// Returns None (caller defers) for non-f64/non-1-D/non-contiguous/non-finite
+// inputs so the existing path keeps numpy's error and dtype semantics.
+fn try_zerocopy_histogram_f64(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    nbins: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(buf) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    if buf.shape().len() != 1 {
+        return Ok(None);
+    }
+    let Some(s) = buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = s.len();
+    // Outer edges from min/max; reject non-finite so the caller defers for numpy's
+    // exact ValueError surface.
+    let (mut first, mut last) = if n == 0 {
+        (0.0f64, 1.0f64)
+    } else {
+        let mut mn = s[0].get();
+        let mut mx = mn;
+        for c in s.iter() {
+            let v = c.get();
+            if !v.is_finite() {
+                return Ok(None);
+            }
+            if v < mn {
+                mn = v;
+            }
+            if v > mx {
+                mx = v;
+            }
+        }
+        (mn, mx)
+    };
+    if first == last {
+        first -= 0.5;
+        last += 0.5;
+    }
+    // Delegate the (nbins+1) edge floats to numpy.linspace for bit-identical edges.
+    let edges = numpy.call_method1("linspace", (first, last, nbins + 1))?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "int64")?;
+    let counts = numpy.call_method("zeros", (nbins,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(ebuf) = PyBuffer::<f64>::get(&edges) else {
+            return Ok(None);
+        };
+        let Some(es) = ebuf.as_slice(py) else {
+            return Ok(None);
+        };
+        let Ok(cbuf) = PyBuffer::<i64>::get(&counts) else {
+            return Ok(None);
+        };
+        let Some(cs) = cbuf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let norm = nbins as f64 / (last - first);
+        for c in s.iter() {
+            let x = c.get();
+            if x < first || x > last {
+                continue;
+            }
+            // (x-first)*norm ∈ [0, nbins]; truncation toward zero == floor (>=0).
+            let mut idx = ((x - first) * norm) as usize;
+            if idx == nbins {
+                idx -= 1;
+            }
+            if x < es[idx].get() {
+                idx -= 1; // x>=first==es[0] guarantees idx>0 here, no underflow
+            }
+            if idx != nbins - 1 && x >= es[idx + 1].get() {
+                idx += 1;
+            }
+            let slot = &cs[idx];
+            slot.set(slot.get() + 1);
+        }
+    }
+    Ok(Some(
+        PyTuple::new(py, [counts, edges])?.into_any().unbind(),
+    ))
 }
 
 #[pyfunction]
