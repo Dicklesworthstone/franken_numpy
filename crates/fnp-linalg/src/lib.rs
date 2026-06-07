@@ -36,6 +36,12 @@ pub const MAX_BATCH_SHAPE_CHECKS: usize = 2_000_000;
 
 /// Iteration limit coefficient for SVD bidiagonal QR convergence: max_iters = coeff * n * n.
 pub const SVD_QR_ITERATION_COEFF: usize = 100;
+/// Large full-SVD threshold where reconstructing U from A·V·Σ⁻¹ is cheaper
+/// than accumulating every left Householder/Givens rotation into an m×m matrix.
+#[cfg(not(test))]
+const SVD_RECONSTRUCT_LEFT_MIN_DIM: usize = 128;
+#[cfg(test)]
+const SVD_RECONSTRUCT_LEFT_MIN_DIM: usize = 32;
 /// Iteration limit coefficient for eigenvalue/Schur QR convergence: max_iters = coeff * n * n.
 pub const EIGEN_QR_ITERATION_COEFF: usize = 60;
 /// Maximum iterations for matrix square root (Denman-Beavers).
@@ -1939,6 +1945,54 @@ fn store_orthonormal_column(
     Err(LinAlgError::SvdNonConvergence)
 }
 
+fn reconstruct_u_from_vt(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    sigmas: &[f64],
+    vt: &[f64],
+) -> Result<Vec<f64>, LinAlgError> {
+    let k = sigmas.len();
+    let mut v = vec![0.0f64; n * k];
+    for col in 0..k {
+        for row in 0..n {
+            v[row * k + col] = vt[col * n + row];
+        }
+    }
+
+    let av = packed_gemm(a, &v, m, n, k);
+    let sigma_max = sigmas.first().copied().unwrap_or(0.0);
+    let tol = f64::EPSILON * (m.max(n) as f64) * sigma_max.max(1.0) * 8.0;
+    let mut u = vec![0.0; m * m];
+    let mut seed = vec![0.0; m];
+    for col in 0..k {
+        seed.fill(0.0);
+        let sigma = sigmas[col];
+        if sigma > tol {
+            let mut norm_sq = 0.0;
+            for row in 0..m {
+                seed[row] = av[row * k + col] / sigma;
+                norm_sq += seed[row] * seed[row];
+            }
+            let norm = norm_sq.sqrt();
+            if norm.is_finite() && norm > tol {
+                for row in 0..m {
+                    u[row * m + col] = seed[row] / norm;
+                }
+                continue;
+            }
+        }
+        store_orthonormal_column(&mut u, m, col, &seed, tol)?;
+    }
+
+    for col in k..m {
+        seed.fill(0.0);
+        store_orthonormal_column(&mut u, m, col, &seed, tol)?;
+    }
+
+    Ok(u)
+}
+
 fn svd_via_jacobi_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAlgError> {
     let k = m.min(n);
     let mut b = a.to_vec();
@@ -2151,14 +2205,20 @@ fn svd_bidiag_qr_full(
     let mut work = a.to_vec(); // m×n working copy
     let mut d = vec![0.0; n]; // diagonal
     let mut e = vec![0.0; n.saturating_sub(1)]; // superdiagonal
+    let reconstruct_left = m >= SVD_RECONSTRUCT_LEFT_MIN_DIM && n >= SVD_RECONSTRUCT_LEFT_MIN_DIM;
 
     // U1^T = transpose of the product of left Householder reflections. Keeping
     // this accumulator transposed makes both Householder and QR left rotations
     // row-contiguous while preserving the same scalar recurrence.
-    let mut u_t = vec![0.0; m * m];
-    for i in 0..m {
-        u_t[i * m + i] = 1.0;
-    }
+    let mut u_t = if reconstruct_left {
+        Vec::new()
+    } else {
+        let mut identity = vec![0.0; m * m];
+        for i in 0..m {
+            identity[i * m + i] = 1.0;
+        }
+        identity
+    };
     // V1 = product of right Householder reflections (n×n)
     let mut vt = vec![0.0; n * n];
     for i in 0..n {
@@ -2174,8 +2234,16 @@ fn svd_bidiag_qr_full(
     let mut rh_dot = vec![0.0; n];
     let mut rh_f = vec![0.0; n];
     // Scratch for transposed-U left Householder accumulation.
-    let mut uh_dot = vec![0.0; m];
-    let mut uh_f = vec![0.0; m];
+    let mut uh_dot = if reconstruct_left {
+        Vec::new()
+    } else {
+        vec![0.0; m]
+    };
+    let mut uh_f = if reconstruct_left {
+        Vec::new()
+    } else {
+        vec![0.0; m]
+    };
 
     for j in 0..n {
         // Left Householder: zero out column j below diagonal
@@ -2223,29 +2291,31 @@ fn svd_bidiag_qr_full(
                         *w -= fc * vi;
                     }
                 }
-                // Accumulate into U^T: U^T = (I - scale*v*v^T) * U^T.
-                // This is the exact transpose of U = U * H. For each output
-                // element the dot still runs reflector indices in ascending
-                // order, and the update uses the same scale*dot then *v scalar
-                // sequence as the row-major U path.
-                for x in uh_dot.iter_mut() {
-                    *x = 0.0;
-                }
-                for i in j..m {
-                    let vi = v_house[i];
-                    let u_row = &u_t[i * m..i * m + m];
-                    for (dot, &value) in uh_dot.iter_mut().zip(u_row.iter()) {
-                        *dot += vi * value;
+                if !reconstruct_left {
+                    // Accumulate into U^T: U^T = (I - scale*v*v^T) * U^T.
+                    // This is the exact transpose of U = U * H. For each output
+                    // element the dot still runs reflector indices in ascending
+                    // order, and the update uses the same scale*dot then *v scalar
+                    // sequence as the row-major U path.
+                    for x in uh_dot.iter_mut() {
+                        *x = 0.0;
                     }
-                }
-                for (fc, &dot) in uh_f.iter_mut().zip(uh_dot.iter()) {
-                    *fc = scale * dot;
-                }
-                for i in j..m {
-                    let vi = v_house[i];
-                    let u_row = &mut u_t[i * m..i * m + m];
-                    for (value, &fc) in u_row.iter_mut().zip(uh_f.iter()) {
-                        *value -= fc * vi;
+                    for i in j..m {
+                        let vi = v_house[i];
+                        let u_row = &u_t[i * m..i * m + m];
+                        for (dot, &value) in uh_dot.iter_mut().zip(u_row.iter()) {
+                            *dot += vi * value;
+                        }
+                    }
+                    for (fc, &dot) in uh_f.iter_mut().zip(uh_dot.iter()) {
+                        *fc = scale * dot;
+                    }
+                    for i in j..m {
+                        let vi = v_house[i];
+                        let u_row = &mut u_t[i * m..i * m + m];
+                        for (value, &fc) in u_row.iter_mut().zip(uh_f.iter()) {
+                            *value -= fc * vi;
+                        }
                     }
                 }
             }
@@ -2400,16 +2470,18 @@ fn svd_bidiag_qr_full(
                 e[kk + 1] *= cs;
             }
 
-            // Accumulate left rotation into U's columns kk, kk+1, applied as a
-            // contiguous rotation of rows kk, kk+1 of the transpose u_t.
-            let (head, tail) = u_t.split_at_mut((kk + 1) * m);
-            let row_k = &mut head[kk * m..kk * m + m];
-            let row_k1 = &mut tail[..m];
-            for r in 0..m {
-                let t1 = row_k[r];
-                let t2 = row_k1[r];
-                row_k[r] = cs * t1 + sn * t2;
-                row_k1[r] = -sn * t1 + cs * t2;
+            if !reconstruct_left {
+                // Accumulate left rotation into U's columns kk, kk+1, applied as a
+                // contiguous rotation of rows kk, kk+1 of the transpose u_t.
+                let (head, tail) = u_t.split_at_mut((kk + 1) * m);
+                let row_k = &mut head[kk * m..kk * m + m];
+                let row_k1 = &mut tail[..m];
+                for r in 0..m {
+                    let t1 = row_k[r];
+                    let t2 = row_k1[r];
+                    row_k[r] = cs * t1 + sn * t2;
+                    row_k1[r] = -sn * t1 + cs * t2;
+                }
             }
         }
         e[hi - 1] = f;
@@ -2435,27 +2507,32 @@ fn svd_bidiag_qr_full(
 
     let sigmas: Vec<f64> = order.iter().take(k).map(|&i| d[i]).collect();
 
-    // Transpose the accumulated rotations directly into sorted U columns.
-    // This preserves the same stable singular-value ordering as the former
-    // transpose-then-clone reorder, while avoiding an extra m*m clone/copy.
-    let mut u = vec![0.0; m * m];
-    for (new_idx, &old_idx) in order.iter().enumerate() {
-        for row in 0..m {
-            u[row * m + new_idx] = u_t[old_idx * m + row];
-        }
-    }
-    for col in n..m {
-        for row in 0..m {
-            u[row * m + col] = u_t[col * m + row];
-        }
-    }
-
     let mut sorted_vt = vec![0.0; n * n];
     for (new_idx, &old_idx) in order.iter().enumerate() {
         for col in 0..n {
             sorted_vt[new_idx * n + col] = vt[old_idx * n + col];
         }
     }
+
+    let u = if reconstruct_left {
+        reconstruct_u_from_vt(a, m, n, &sigmas, &sorted_vt)?
+    } else {
+        // Transpose the accumulated rotations directly into sorted U columns.
+        // This preserves the same stable singular-value ordering as the former
+        // transpose-then-clone reorder, while avoiding an extra m*m clone/copy.
+        let mut u = vec![0.0; m * m];
+        for (new_idx, &old_idx) in order.iter().enumerate() {
+            for row in 0..m {
+                u[row * m + new_idx] = u_t[old_idx * m + row];
+            }
+        }
+        for col in n..m {
+            for row in 0..m {
+                u[row * m + col] = u_t[col * m + row];
+            }
+        }
+        u
+    };
 
     Ok((u, sigmas, sorted_vt))
 }
@@ -11793,6 +11870,65 @@ mod tests {
         assert_eq!(
             digest, "498a91ab1c9f10d9572305acad1516997cc3e29dffbc21fe83c6b04585e870e4",
             "tall full SVD output bit pattern must remain fixed: {digest}"
+        );
+    }
+
+    #[test]
+    fn svd_full_reconstructed_u_fast_path_reconstructs_and_hashes() {
+        let n = 32usize;
+        let mut state = 0xA17E_F00D_5EED_1234u64;
+        let a: Vec<f64> = (0..(n * n))
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+            })
+            .collect();
+
+        let (u, s, vt) = svd_mxn_full(&a, n, n).expect("reconstructed-U full svd");
+        for pair in s.windows(2) {
+            assert!(pair[0] >= pair[1], "singular values must remain descending");
+        }
+
+        let mut max_recon = 0.0f64;
+        let mut max_u_orth = 0.0f64;
+        let mut max_v_orth = 0.0f64;
+        for i in 0..n {
+            for j in 0..n {
+                let mut reconstructed = 0.0;
+                let mut u_dot = 0.0;
+                let mut v_dot = 0.0;
+                for k in 0..n {
+                    reconstructed += u[i * n + k] * s[k] * vt[k * n + j];
+                    u_dot += u[k * n + i] * u[k * n + j];
+                    v_dot += vt[i * n + k] * vt[j * n + k];
+                }
+                max_recon = max_recon.max((reconstructed - a[i * n + j]).abs());
+                let target = if i == j { 1.0 } else { 0.0 };
+                max_u_orth = max_u_orth.max((u_dot - target).abs());
+                max_v_orth = max_v_orth.max((v_dot - target).abs());
+            }
+        }
+        assert!(max_recon < 1e-8, "SVD reconstruction drift {max_recon:e}");
+        assert!(max_u_orth < 1e-8, "U orthogonality drift {max_u_orth:e}");
+        assert!(max_v_orth < 1e-8, "Vt orthogonality drift {max_v_orth:e}");
+
+        let mut hasher = Sha256::new();
+        for part in [&u[..], &s[..], &vt[..]] {
+            hasher.update(part.len().to_le_bytes());
+            for value in part {
+                hasher.update(value.to_bits().to_le_bytes());
+            }
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "ed1ac139dac59fe907b7dd9d2a1dccd2ecbbbede840868afe2c9e9e1d41ed793",
+            "reconstructed-U full SVD digest must remain fixed: {digest}"
         );
     }
 
