@@ -10719,15 +10719,31 @@ fn try_zerocopy_f64_diff_axis(
         };
         let in_lane = axis_len * inner;
         let out_lane = out_axis_len * inner;
-        for o in 0..outer {
-            let ibase = o * in_lane;
-            let obase = o * out_lane;
-            for a_out in 0..out_axis_len {
-                let dst = obase + a_out * inner;
-                let cur = ibase + a_out * inner;
-                let nxt = ibase + (a_out + 1) * inner;
-                for i in 0..inner {
-                    output[dst + i].set(input[nxt + i].get() - input[cur + i].get());
+        if inner == 1 {
+            // Last-axis (or 1-D) lanes are contiguous: pair each element with its
+            // successor over slice iterators so bounds checks elide and the
+            // subtraction autovectorizes. The strided indexed branch below does
+            // not vectorize (the old code used it for every case, leaving f64
+            // 2-D last-axis diff ~7.7x behind numpy — integer diff already used
+            // this fast path via diff_typed).
+            for o in 0..outer {
+                let inl = &input[o * in_lane..o * in_lane + axis_len];
+                let outl = &output[o * out_lane..o * out_lane + out_axis_len];
+                for ((slot, cur), nxt) in outl.iter().zip(inl.iter()).zip(inl[1..].iter()) {
+                    slot.set(nxt.get() - cur.get());
+                }
+            }
+        } else {
+            for o in 0..outer {
+                let ibase = o * in_lane;
+                let obase = o * out_lane;
+                for a_out in 0..out_axis_len {
+                    let dst = obase + a_out * inner;
+                    let cur = ibase + a_out * inner;
+                    let nxt = ibase + (a_out + 1) * inner;
+                    for i in 0..inner {
+                        output[dst + i].set(input[nxt + i].get() - input[cur + i].get());
+                    }
                 }
             }
         }
