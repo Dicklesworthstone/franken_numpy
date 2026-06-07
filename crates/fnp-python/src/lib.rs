@@ -33603,6 +33603,11 @@ fn unique(
     // Fast path for simple single-arg calls
     if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 1 {
         let item = args.get_item(0)?;
+        // Counting-sort dedup for small-range integers — O(n+range) beats the sort
+        // path (and numpy) for narrow widths and tight value ranges.
+        if let Some(out) = try_zerocopy_int_unique(py, &item)? {
+            return Ok(out);
+        }
         // NumPy's unique preserves the input dtype exactly; our native kernel
         // canonicalizes narrow ints/floats (int32 -> int64, float32 -> float64),
         // so defer any non-canonical width to NumPy.
@@ -33620,6 +33625,131 @@ fn unique(
         return build_numpy_array_from_ufunc(py, &result);
     }
     core_numpy_passthrough(py, "unique", args, kwargs)
+}
+
+// Counting-sort dedup core for np.unique over a small-range integer array. numpy
+// (and our native kernel) sort then dedup — O(n log n). When the value range is
+// small a bitset pass is O(n + range): mark each value's bucket, then collect set
+// buckets in ascending order, which yields the sorted unique values directly.
+// Integer bit-equality is value-equality so this is bit-exact. `widen`/`narrow`
+// convert T to/from i128 for offset arithmetic (handles negative mins and the
+// full u64 range). Returns None for an empty array or a range too large to be
+// worth (or fit) a bucket array, so the caller keeps the sort path.
+fn unique_counting_typed<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    item: &Bound<'py, PyAny>,
+    dtype_name: &str,
+    widen: fn(T) -> i128,
+    narrow: fn(i128) -> T,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let Ok(buf) = PyBuffer::<T>::get(item) else {
+        return Ok(None);
+    };
+    let Some(s) = buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = s.len();
+    if n == 0 {
+        return Ok(None); // empty → let the existing path return the right empty array
+    }
+    let mut mn = widen(s[0].get());
+    let mut mx = mn;
+    for c in s.iter() {
+        let x = widen(c.get());
+        if x < mn {
+            mn = x;
+        }
+        if x > mx {
+            mx = x;
+        }
+    }
+    let range = (mx - mn) as u128;
+    // Use counting only when the bucket array is both worth it (range within a
+    // small multiple of n) and memory-bounded; otherwise defer to the sort path
+    // (which already beats numpy for wide ranges).
+    let cap = (4u128 * n as u128).max(1 << 16);
+    if range >= cap || range >= (1 << 26) {
+        return Ok(None);
+    }
+    let size = range as usize + 1;
+    let mut seen = vec![false; size];
+    for c in s.iter() {
+        seen[(widen(c.get()) - mn) as usize] = true;
+    }
+    let count = seen.iter().filter(|&&b| b).count();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let out = numpy.call_method("empty", (count,), Some(&kwargs))?;
+    if count > 0 {
+        let Ok(obuf) = PyBuffer::<T>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = obuf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let mut w = 0usize;
+        for (i, &b) in seen.iter().enumerate() {
+            if b {
+                output[w].set(narrow(mn + i as i128));
+                w += 1;
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+// Zero-copy np.unique(ar) for a small-range integer array via counting-sort dedup
+// (O(n+range) vs the sort path's O(n log n)). Gated to a C-contiguous integer
+// ndarray; dispatched by (kind, itemsize). Wide ranges / non-contiguous / empty
+// inputs return None so the caller keeps the existing sort path.
+fn try_zerocopy_int_unique(
+    py: Python<'_>,
+    item: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !item.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if !item
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let dtype = item.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    let out = match (kind.as_str(), itemsize) {
+        ("i", 1) => {
+            unique_counting_typed::<i8>(py, &numpy, item, "int8", |x| x as i128, |v| v as i8)?
+        }
+        ("i", 2) => {
+            unique_counting_typed::<i16>(py, &numpy, item, "int16", |x| x as i128, |v| v as i16)?
+        }
+        ("i", 4) => {
+            unique_counting_typed::<i32>(py, &numpy, item, "int32", |x| x as i128, |v| v as i32)?
+        }
+        ("i", 8) => {
+            unique_counting_typed::<i64>(py, &numpy, item, "int64", |x| x as i128, |v| v as i64)?
+        }
+        ("u", 1) => {
+            unique_counting_typed::<u8>(py, &numpy, item, "uint8", |x| x as i128, |v| v as u8)?
+        }
+        ("u", 2) => {
+            unique_counting_typed::<u16>(py, &numpy, item, "uint16", |x| x as i128, |v| v as u16)?
+        }
+        ("u", 4) => {
+            unique_counting_typed::<u32>(py, &numpy, item, "uint32", |x| x as i128, |v| v as u32)?
+        }
+        ("u", 8) => {
+            unique_counting_typed::<u64>(py, &numpy, item, "uint64", |x| x as i128, |v| v as u64)?
+        }
+        _ => return Ok(None),
+    };
+    Ok(out.map(|o| o.unbind()))
 }
 
 #[pyfunction]
