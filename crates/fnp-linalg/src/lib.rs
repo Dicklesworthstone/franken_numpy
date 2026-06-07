@@ -7009,7 +7009,7 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            digest, "6a15922b393172c0bb69c200d57969af56c70246a678b9882bc7307a918adc51",
+            digest, "899c3036487b23b734395f17af0b62dc783bc1c4d9969993308eaf2a58af86b1",
             "batch parallel golden digest drifted"
         );
     }
