@@ -1150,6 +1150,14 @@ pub fn solve_triangular(
 // >= the GEMM parallel gate (128) so the trailing-update GEMM runs parallel.
 const CHOL_BLOCK_MIN: usize = 896;
 const CHOL_PANEL_NB: usize = 128;
+// Mid-size matrices (below the large-n crossover) were factored by the unblocked
+// dot-product kernel, leaving them ~3.8x behind numpy at n=256. They now route
+// through the same blocked kernel with a narrow panel: a small diagonal block
+// keeps the scalar panel work tiny and pushes the bulk of the flops into the
+// vectorized, band-parallel trailing-update GEMM. Large-n behaviour is unchanged
+// (it keeps CHOL_PANEL_NB), so the shipped n>=896 path is bit-identical.
+const CHOL_MID_MIN: usize = 128;
+const CHOL_MID_PANEL: usize = 64;
 
 // Right-looking blocked Cholesky (LAPACK dpotrf shape). For each width-nb column
 // panel: factor the nb×nb diagonal block (unblocked), solve the panel below it
@@ -1157,12 +1165,12 @@ const CHOL_PANEL_NB: usize = 128;
 // cache-blocked packed GEMM. Numerically equivalent to the unblocked dot-product
 // factorization up to the GEMM's re-association (tolerance — Cholesky is not
 // bit-reproducible). Caller guarantees finite input.
-fn cholesky_blocked(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, LinAlgError> {
     let mut l = vec![0.0f64; n * n]; // output (lower triangular)
     let mut work = a.to_vec(); // trailing submatrix, updated in place (lower read)
     let mut jb = 0;
     while jb < n {
-        let bw = CHOL_PANEL_NB.min(n - jb);
+        let bw = panel_nb.min(n - jb);
         let pend = jb + bw;
 
         // (1) Factor the diagonal block A11 [jb,pend)×[jb,pend) into L11.
@@ -1244,7 +1252,10 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     }
 
     if n >= CHOL_BLOCK_MIN {
-        return cholesky_blocked(a, n);
+        return cholesky_blocked(a, n, CHOL_PANEL_NB);
+    }
+    if n >= CHOL_MID_MIN {
+        return cholesky_blocked(a, n, CHOL_MID_PANEL);
     }
 
     let mut l = vec![0.0; n * n];
@@ -10963,7 +10974,7 @@ mod tests {
         // L·L^T = A and that blocked agrees with the unblocked reference (tol).
         for &n in &[160usize, 200, 256] {
             let a = chol_spd(n, 0x71 + n as u64);
-            let lb = super::cholesky_blocked(&a, n).expect("blocked chol");
+            let lb = super::cholesky_blocked(&a, n, super::CHOL_MID_PANEL).expect("blocked chol");
             let lr = cholesky_unblocked_ref(&a, n);
             let mut max_recon = 0.0f64;
             let mut max_diff = 0.0f64;
