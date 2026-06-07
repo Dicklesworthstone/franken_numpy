@@ -10251,7 +10251,11 @@ fn try_zerocopy_any_tile(
     a: &Bound<'_, PyAny>,
     reps: &[usize],
 ) -> PyResult<Option<Py<PyAny>>> {
-    if reps.len() != 1 {
+    // 1-D input only. For a 1-D array the tiled data has no inner structure to break,
+    // so tile(a, reps) is a flat repetition by prod(reps) reshaped to the result shape
+    // (= reps with its last entry scaled by len(a)) — even for a multi-element reps
+    // tuple. Multi-dim inputs (whose inner axes do interleave) fall through.
+    if reps.is_empty() {
         return Ok(None);
     }
     let numpy = py.import("numpy")?;
@@ -10284,7 +10288,14 @@ fn try_zerocopy_any_tile(
         return Ok(None);
     };
     let n_bytes = input.len();
-    let r = reps[0];
+    // prod(reps): total flat repetition count (1-D input tiles flat).
+    let mut r: usize = 1;
+    for &rep in reps {
+        let Some(p) = r.checked_mul(rep) else {
+            return Ok(None);
+        };
+        r = p;
+    }
     let Some(total_bytes) = n_bytes.checked_mul(r) else {
         return Ok(None);
     };
@@ -10307,7 +10318,22 @@ fn try_zerocopy_any_tile(
     }
     // view back to the input dtype; the 1-D length is total_bytes/itemsize = n*r.
     let out_typed = out_u8.call_method1("view", (&dtype,))?;
-    Ok(Some(out_typed.unbind()))
+    if reps.len() == 1 {
+        // 1-D result, length n*r — no reshape needed.
+        return Ok(Some(out_typed.unbind()));
+    }
+    // Multi-element reps: result shape = reps with the last entry scaled by len(a).
+    // (a is 1-D, so a is right-aligned under the reps: result[k] = reps[k] for k <
+    // last, and reps[last] * n_elems for the last axis.) prod == n*r, so the flat
+    // buffer reshapes exactly.
+    let n_elems = n_bytes / itemsize;
+    let mut out_shape: Vec<usize> = reps.to_vec();
+    let last = out_shape.len() - 1;
+    out_shape[last] = out_shape[last].saturating_mul(n_elems);
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    Ok(Some(
+        out_typed.call_method1("reshape", (&output_shape,))?.unbind(),
+    ))
 }
 
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
