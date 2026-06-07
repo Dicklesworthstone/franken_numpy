@@ -13717,10 +13717,14 @@ fn try_zerocopy_append_flat(
     if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") {
         return Ok(None);
     }
-    // No-op promotion only: result dtype must stay arr's dtype.
+    // Materialize values as an array first: numpy.result_type with a raw Python list
+    // misinterprets it as a dtype field-spec (and a weak Python int under-promotes a
+    // narrow-int array). asarray gives the same strong dtype numpy.append concatenates
+    // against. No-op promotion only: result dtype must stay arr's dtype.
+    let v_arr = numpy.getattr("asarray")?.call1((values,))?;
     if !numpy
         .getattr("result_type")?
-        .call1((arr, values))?
+        .call1((arr, &v_arr))?
         .eq(&arr_dtype)?
     {
         return Ok(None);
@@ -13732,7 +13736,7 @@ fn try_zerocopy_append_flat(
     kw.set_item("dtype", &arr_dtype)?;
     let v_flat = numpy
         .getattr("asarray")?
-        .call((values,), Some(&kw))?
+        .call((&v_arr,), Some(&kw))?
         .call_method0("ravel")?;
     let a_bytes = a_flat.call_method1("view", (&uint8,))?;
     let v_bytes = v_flat.call_method1("view", (&uint8,))?;
@@ -13993,8 +13997,12 @@ fn try_zerocopy_f64_concatenate(
                 let block = alen * inner;
                 let in_base = o * block;
                 let out_base = o * out_slab + axis_off * inner;
-                for j in 0..block {
-                    output[out_base + j].set(slice[in_base + j].get());
+                // Subslice + zip so bounds checks elide and the contiguous block copy
+                // autovectorizes into a memcpy (computed-index indexing does not).
+                let outl = &output[out_base..out_base + block];
+                let inl = &slice[in_base..in_base + block];
+                for (dst, src) in outl.iter().zip(inl.iter()) {
+                    dst.set(src.get());
                 }
                 axis_off += alen;
             }
@@ -14005,6 +14013,159 @@ fn try_zerocopy_f64_concatenate(
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
     let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
     Ok(Some(output))
+}
+
+// Generic typed concatenate core: the same outer*axis*inner block copy as the f64
+// path, but over a mover type T (a uintN bit-view chosen by itemsize) so it copies
+// whole ELEMENTS — copying byte-by-byte (T=u8 for every dtype) does NOT vectorize and
+// lands ~20x behind numpy. `views` are the inputs already viewed as the mover dtype.
+fn concatenate_mover<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    views: &[Bound<'py, PyAny>],
+    shapes: &[Vec<usize>],
+    ax: usize,
+    mover_name: &str,
+    out_dtype: &Bound<'py, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let outer: usize = shapes[0][..ax].iter().product();
+    let inner: usize = shapes[0][ax + 1..].iter().product();
+    let out_axis: usize = shapes.iter().map(|s| s[ax]).sum();
+    let total = outer * out_axis * inner;
+    let kw = PyDict::new(py);
+    kw.set_item("dtype", mover_name)?;
+    let flat = numpy.call_method("empty", (total,), Some(&kw))?;
+    if total > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let mut buffers: Vec<PyBuffer<T>> = Vec::with_capacity(views.len());
+        for v in views {
+            let Ok(b) = PyBuffer::<T>::get(v) else {
+                return Ok(None);
+            };
+            buffers.push(b);
+        }
+        let mut slices = Vec::with_capacity(buffers.len());
+        for buffer in &buffers {
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            slices.push(slice);
+        }
+        let out_slab = out_axis * inner;
+        for o in 0..outer {
+            let mut axis_off = 0usize;
+            for (k, slice) in slices.iter().enumerate() {
+                let alen = shapes[k][ax];
+                let block = alen * inner;
+                let in_base = o * block;
+                let out_base = o * out_slab + axis_off * inner;
+                // Subslice + zip so bounds checks elide and the contiguous block copy
+                // autovectorizes into a memcpy (computed-index indexing does not).
+                let outl = &output[out_base..out_base + block];
+                let inl = &slice[in_base..in_base + block];
+                for (dst, src) in outl.iter().zip(inl.iter()) {
+                    dst.set(src.get());
+                }
+                axis_off += alen;
+            }
+        }
+    }
+    let mut out_shape = shapes[0].clone();
+    out_shape[ax] = out_axis;
+    let restored = flat.call_method1("view", (out_dtype,))?;
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    Ok(Some(restored.call_method1("reshape", (&output_shape,))?.unbind()))
+}
+
+// Typed-by-itemsize concatenate for the dtypes the f64 helper leaves to the cold
+// extract path (int all widths, float32, bool, complex64). concatenate moves whole
+// ELEMENTS verbatim, so the copy is done on a uintN bit-view chosen by itemsize
+// (u8/u16/u32/u64) — one path covers every fixed-width dtype. complex128 (16 bytes,
+// no mover) and mixed dtypes (which promote) defer to numpy. The native path
+// otherwise extracted every input to an f64 Vec and rebuilt (~120-360x slower).
+fn try_zerocopy_bytes_concatenate(
+    py: Python<'_>,
+    arrays_seq: &Bound<'_, PyAny>,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let Ok(iter) = arrays_seq.try_iter() else {
+        return Ok(None);
+    };
+    let items: Vec<Bound<'_, PyAny>> = iter.collect::<PyResult<Vec<_>>>()?;
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let dt0 = items[0].getattr("dtype")?;
+    let kind = dt0.getattr("kind")?.extract::<String>()?;
+    let itemsize = dt0.getattr("itemsize")?.extract::<usize>()?;
+    // Only fixed-width 1/2/4/8-byte dtypes have a uintN mover; complex128 (16) defers.
+    if !matches!(kind.as_str(), "b" | "i" | "u" | "f" | "c") || !matches!(itemsize, 1 | 2 | 4 | 8) {
+        return Ok(None);
+    }
+    let mover_name = match itemsize {
+        1 => "uint8",
+        2 => "uint16",
+        4 => "uint32",
+        _ => "uint64",
+    };
+    let mover = numpy.getattr(mover_name)?;
+    let mut shapes: Vec<Vec<usize>> = Vec::with_capacity(items.len());
+    let mut views: Vec<Bound<'_, PyAny>> = Vec::with_capacity(items.len());
+    for item in &items {
+        if !item.is_exact_instance(&ndarray_type) {
+            return Ok(None);
+        }
+        let d = item.getattr("dtype")?;
+        if d.getattr("kind")?.extract::<String>()? != kind
+            || d.getattr("itemsize")?.extract::<usize>()? != itemsize
+        {
+            return Ok(None); // mixed dtype → numpy would promote; defer
+        }
+        // A size-changing uintN view requires C-contiguous data; otherwise defer.
+        if !item
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        {
+            return Ok(None);
+        }
+        let shape: Vec<usize> = item.getattr("shape")?.extract()?;
+        if shape.is_empty() {
+            return Ok(None);
+        }
+        shapes.push(shape);
+        views.push(item.call_method1("view", (&mover,))?);
+    }
+    let ndim = shapes[0].len();
+    let ndim_isize = ndim as isize;
+    let norm_axis = if axis < 0 { axis + ndim_isize } else { axis };
+    if norm_axis < 0 || norm_axis >= ndim_isize {
+        return Ok(None);
+    }
+    let ax = norm_axis as usize;
+    for shape in &shapes {
+        if shape.len() != ndim {
+            return Ok(None);
+        }
+        for (d, (&a, &b)) in shapes[0].iter().zip(shape.iter()).enumerate() {
+            if d != ax && a != b {
+                return Ok(None);
+            }
+        }
+    }
+    match itemsize {
+        1 => concatenate_mover::<u8>(py, &numpy, &views, &shapes, ax, mover_name, &dt0),
+        2 => concatenate_mover::<u16>(py, &numpy, &views, &shapes, ax, mover_name, &dt0),
+        4 => concatenate_mover::<u32>(py, &numpy, &views, &shapes, ax, mover_name, &dt0),
+        _ => concatenate_mover::<u64>(py, &numpy, &views, &shapes, ax, mover_name, &dt0),
+    }
 }
 
 #[pyfunction]
@@ -14047,6 +14208,12 @@ fn concatenate(
     // into contiguous block copies. Bit-identical; other dtypes / shape mismatches
     // fall through.
     if let Some(out) = try_zerocopy_f64_concatenate(py, &arrays_seq, axis)? {
+        return Ok(out);
+    }
+    // Byte-level concat for other same-dtype numeric/bool/complex inputs (int all
+    // widths, float32, complex); skips the cold extract. Mixed dtypes (which promote)
+    // and non-contiguous inputs fall through.
+    if let Some(out) = try_zerocopy_bytes_concatenate(py, &arrays_seq, axis)? {
         return Ok(out);
     }
 
