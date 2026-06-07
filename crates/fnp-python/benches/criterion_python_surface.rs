@@ -731,9 +731,15 @@ fn bench_average_nansum_axis_boundary(c: &mut Criterion) {
             .call1((&nan_mask, &nan_value, &input))
             .expect("input with periodic NaNs");
 
-        let average_kwargs = PyDict::new(py);
-        average_kwargs.set_item("axis", 1_i64).expect("axis kwarg");
-        average_kwargs
+        let average_unweighted_kwargs = PyDict::new(py);
+        average_unweighted_kwargs
+            .set_item("axis", 1_i64)
+            .expect("axis kwarg");
+        let average_weighted_kwargs = PyDict::new(py);
+        average_weighted_kwargs
+            .set_item("axis", 1_i64)
+            .expect("axis kwarg");
+        average_weighted_kwargs
             .set_item("weights", &weights)
             .expect("weights kwarg");
         let nansum_kwargs = PyDict::new(py);
@@ -744,10 +750,28 @@ fn bench_average_nansum_axis_boundary(c: &mut Criterion) {
         let fnp_nansum = module.getattr("nansum").expect("fnp_python.nansum");
         let numpy_nansum = numpy.getattr("nansum").expect("numpy.nansum");
 
+        group.bench_function("fnp_average_axis1_unweighted_f64_2048x512", |bench| {
+            bench.iter(|| {
+                let result = fnp_average
+                    .call((&input,), Some(&average_unweighted_kwargs))
+                    .expect("fnp average unweighted axis=1 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_average_axis1_unweighted_f64_2048x512", |bench| {
+            bench.iter(|| {
+                let result = numpy_average
+                    .call((&input,), Some(&average_unweighted_kwargs))
+                    .expect("numpy average unweighted axis=1 benchmark call");
+                black_box(result);
+            });
+        });
+
         group.bench_function("fnp_average_axis1_weighted_f64_2048x512", |bench| {
             bench.iter(|| {
                 let result = fnp_average
-                    .call((&input,), Some(&average_kwargs))
+                    .call((&input,), Some(&average_weighted_kwargs))
                     .expect("fnp average axis=1 benchmark call");
                 black_box(result);
             });
@@ -756,7 +780,7 @@ fn bench_average_nansum_axis_boundary(c: &mut Criterion) {
         group.bench_function("numpy_average_axis1_weighted_f64_2048x512", |bench| {
             bench.iter(|| {
                 let result = numpy_average
-                    .call((&input,), Some(&average_kwargs))
+                    .call((&input,), Some(&average_weighted_kwargs))
                     .expect("numpy average axis=1 benchmark call");
                 black_box(result);
             });

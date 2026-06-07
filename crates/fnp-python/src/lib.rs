@@ -28106,17 +28106,16 @@ fn average(
     // Fused one-pass flat weighted average (axis=None) — avoids numpy's
     // multiply-into-temp + sum + the cold extract path (~3.6x slower).
     let axis_is_none = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
-    if axis_is_none && let Some(weights_val) = weights.as_ref() {
-        if let Some(out) =
+    if axis_is_none
+        && let Some(weights_val) = weights.as_ref()
+        && let Some(out) =
             try_zerocopy_f64_average_flat(py, a.bind(py), weights_val.bind(py), returned)?
-        {
-            return Ok(out);
-        }
+    {
+        return Ok(out);
     }
     // Fused per-axis f64 average. Exact dtype gates above keep float32/float16,
     // complex, keepdims, and incompatible weight cases on the NumPy fallback.
     if !axis_is_none
-        && weights.is_some()
         && let Some(axis_val) = axis.as_ref()
         && let Some(out) = try_zerocopy_f64_average_axis(
             py,
@@ -28322,15 +28321,18 @@ fn try_zerocopy_f64_average_flat(
     if returned {
         let w_scalar = numpy.getattr("float64")?.call1((wsum,))?;
         return Ok(Some(
-            PyTuple::new(py, [avg_scalar, w_scalar])?.into_any().unbind(),
+            PyTuple::new(py, [avg_scalar, w_scalar])?
+                .into_any()
+                .unbind(),
         ));
     }
     Ok(Some(avg_scalar.unbind()))
 }
 
-// Zero-copy weighted per-axis np.average for exact f64 arrays reduced along
-// one axis. Last-axis lanes are contiguous and use an 8-accumulator dot; other
-// axes use one slab accumulator per contiguous inner position. Cases outside
+// Zero-copy per-axis np.average for exact f64 arrays reduced along one axis.
+// Weighted last-axis lanes keep the existing 8-accumulator dot; unweighted lanes
+// mirror the generic reduce_sum_axis_contiguous order for exact output-cell
+// ordering while skipping Python-side extraction into UFuncArray. Cases outside
 // the exact f64 single-axis contract return None so the existing NumPy-parity
 // path owns dtype preservation, errors, keepdims, and shape corner cases.
 fn try_zerocopy_f64_average_axis(
@@ -28371,31 +28373,43 @@ fn try_zerocopy_f64_average_axis(
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
 
-    let Some(w) = weights else {
-        return Ok(None);
+    let (weights_vec, denominator) = match weights {
+        Some(w) => {
+            if !is_f64(w)? {
+                return Ok(None);
+            }
+            let wshape: Vec<usize> = w.getattr("shape")?.extract()?;
+            if wshape.len() != 1 || wshape[0] != axis_len {
+                return Ok(None);
+            }
+            let Ok(wb) = PyBuffer::<f64>::get(w) else {
+                return Ok(None);
+            };
+            let Some(wsl) = wb.as_slice(py) else {
+                return Ok(None);
+            };
+            let wvec: Vec<f64> = wsl.iter().map(|cell| cell.get()).collect();
+            let mut wsum = 0.0f64;
+            for &weight in &wvec {
+                wsum += weight;
+            }
+            if wsum == 0.0 {
+                return Ok(None);
+            }
+            (Some(wvec), wsum)
+        }
+        None => {
+            // The generic Rust path switches to compensated summation only for
+            // extremely long axes. Defer there so the fast path keeps the same
+            // floating-point order for all accelerated unweighted reductions.
+            const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
+            if axis_len > COMPENSATED_SUM_MIN_LEN {
+                return Ok(None);
+            }
+            (None, axis_len as f64)
+        }
     };
-    if !is_f64(w)? {
-        return Ok(None);
-    }
-    let wshape: Vec<usize> = w.getattr("shape")?.extract()?;
-    if wshape.len() != 1 || wshape[0] != axis_len {
-        return Ok(None);
-    }
-    let Ok(wb) = PyBuffer::<f64>::get(w) else {
-        return Ok(None);
-    };
-    let Some(wsl) = wb.as_slice(py) else {
-        return Ok(None);
-    };
-    let wvec: Vec<f64> = wsl.iter().map(|cell| cell.get()).collect();
-    let mut wsum = 0.0f64;
-    for &weight in &wvec {
-        wsum += weight;
-    }
-    if wsum == 0.0 {
-        return Ok(None);
-    }
-    let invden = 1.0 / wsum;
+    let invden = 1.0 / denominator;
 
     let Ok(ab) = PyBuffer::<f64>::get(a) else {
         return Ok(None);
@@ -28415,40 +28429,76 @@ fn try_zerocopy_f64_average_axis(
             return Ok(None);
         };
         if inner == 1 {
-            let input_values = asl.iter().map(|cell| cell.get()).collect::<Vec<_>>();
-            for (row, lane) in input_values.chunks_exact(axis_len).enumerate() {
-                let mut acc = [0.0f64; 8];
-                let chunks = axis_len / 8;
-                for chunk in 0..chunks {
-                    let base = chunk * 8;
-                    for j in 0..8 {
-                        acc[j] += lane[base + j] * wvec[base + j];
+            if let Some(wvec) = weights_vec.as_ref() {
+                let input_values = asl.iter().map(|cell| cell.get()).collect::<Vec<_>>();
+                for (row, lane) in input_values.chunks_exact(axis_len).enumerate() {
+                    let mut acc = [0.0f64; 8];
+                    let chunks = axis_len / 8;
+                    for chunk in 0..chunks {
+                        let base = chunk * 8;
+                        for j in 0..8 {
+                            acc[j] += lane[base + j] * wvec[base + j];
+                        }
                     }
+                    let mut sum = 0.0f64;
+                    for value in acc {
+                        sum += value;
+                    }
+                    for i in chunks * 8..axis_len {
+                        sum += lane[i] * wvec[i];
+                    }
+                    osl[row].set(sum * invden);
                 }
-                let mut sum = 0.0f64;
-                for value in acc {
-                    sum += value;
+            } else {
+                for (row, lane) in asl.chunks_exact(axis_len).enumerate() {
+                    let mut sum = 0.0f64;
+                    for value in lane {
+                        sum += value.get();
+                    }
+                    if sum == 0.0 {
+                        sum = 0.0;
+                    }
+                    osl[row].set(sum * invden);
                 }
-                for i in chunks * 8..axis_len {
-                    sum += lane[i] * wvec[i];
-                }
-                osl[row].set(sum * invden);
             }
         } else {
             let mut accs = vec![0.0f64; inner];
-            for out_outer in 0..outer {
-                accs.fill(0.0);
-                let base = out_outer * axis_len * inner;
-                for axis_index in 0..axis_len {
-                    let slab = &asl[base + axis_index * inner..base + axis_index * inner + inner];
-                    let weight = wvec[axis_index];
-                    for (acc, value) in accs.iter_mut().zip(slab.iter()) {
-                        *acc += value.get() * weight;
+            if let Some(wvec) = weights_vec.as_ref() {
+                for out_outer in 0..outer {
+                    accs.fill(0.0);
+                    let base = out_outer * axis_len * inner;
+                    for axis_index in 0..axis_len {
+                        let slab =
+                            &asl[base + axis_index * inner..base + axis_index * inner + inner];
+                        let weight = wvec[axis_index];
+                        for (acc, value) in accs.iter_mut().zip(slab.iter()) {
+                            *acc += value.get() * weight;
+                        }
+                    }
+                    let out_base = out_outer * inner;
+                    for inner_index in 0..inner {
+                        osl[out_base + inner_index].set(accs[inner_index] * invden);
                     }
                 }
-                let out_base = out_outer * inner;
-                for inner_index in 0..inner {
-                    osl[out_base + inner_index].set(accs[inner_index] * invden);
+            } else {
+                for out_outer in 0..outer {
+                    accs.fill(0.0);
+                    let base = out_outer * axis_len * inner;
+                    for axis_index in 0..axis_len {
+                        let slab =
+                            &asl[base + axis_index * inner..base + axis_index * inner + inner];
+                        for (acc, value) in accs.iter_mut().zip(slab.iter()) {
+                            *acc += value.get();
+                        }
+                    }
+                    let out_base = out_outer * inner;
+                    for inner_index in 0..inner {
+                        let mut sum = accs[inner_index];
+                        if sum == 0.0 {
+                            sum = 0.0;
+                        }
+                        osl[out_base + inner_index].set(sum * invden);
+                    }
                 }
             }
         }
@@ -28458,13 +28508,24 @@ fn try_zerocopy_f64_average_axis(
     out_shape.extend_from_slice(&shape[ax + 1..]);
     let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
     let avg_arr = flat.call_method1("reshape", (&shape_tuple,))?;
+    let avg_output = if out_shape.is_empty() {
+        avg_arr.get_item(())?
+    } else {
+        avg_arr
+    };
     if returned {
-        let sum_kwargs = PyDict::new(py);
-        sum_kwargs.set_item("dtype", "float64")?;
-        let sow = numpy.call_method("full", (&shape_tuple, wsum), Some(&sum_kwargs))?;
-        return Ok(Some(PyTuple::new(py, [avg_arr, sow])?.into_any().unbind()));
+        let sow = if out_shape.is_empty() {
+            numpy.getattr("float64")?.call1((denominator,))?
+        } else {
+            let sum_kwargs = PyDict::new(py);
+            sum_kwargs.set_item("dtype", "float64")?;
+            numpy.call_method("full", (&shape_tuple, denominator), Some(&sum_kwargs))?
+        };
+        return Ok(Some(
+            PyTuple::new(py, [avg_output, sow])?.into_any().unbind(),
+        ));
     }
-    Ok(Some(avg_arr.unbind()))
+    Ok(Some(avg_output.unbind()))
 }
 
 #[pyfunction]
@@ -31886,9 +31947,7 @@ fn try_zerocopy_meshgrid_2d(
     let x = xi.get_item(0)?;
     let y = xi.get_item(1)?;
     for v in [&x, &y] {
-        if !v.is_exact_instance(&ndarray_type)
-            || v.getattr("ndim")?.extract::<usize>()? != 1
-        {
+        if !v.is_exact_instance(&ndarray_type) || v.getattr("ndim")?.extract::<usize>()? != 1 {
             return Ok(None);
         }
         let k = v.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
@@ -31916,7 +31975,9 @@ fn try_zerocopy_meshgrid_2d(
         }
     };
     Ok(Some(
-        PyTuple::new(py, [out0.bind(py), out1.bind(py)])?.unbind().into_any(),
+        PyTuple::new(py, [out0.bind(py), out1.bind(py)])?
+            .unbind()
+            .into_any(),
     ))
 }
 
@@ -31997,12 +32058,12 @@ fn try_zerocopy_ravel_c(
     if order != "C" {
         return Ok(None);
     }
-    if let Some(m) = mode {
-        if !m.is_none() {
-            match m.extract::<String>() {
-                Ok(s) if s == "raise" => {}
-                _ => return Ok(None), // clip/wrap/sequence modes defer
-            }
+    if let Some(m) = mode
+        && !m.is_none()
+    {
+        match m.extract::<String>() {
+            Ok(s) if s == "raise" => {}
+            _ => return Ok(None), // clip/wrap/sequence modes defer
         }
     }
     let numpy = py.import("numpy")?;
@@ -75694,6 +75755,122 @@ mod tests {
                 }),
             )?;
             assert_eq!(repr_string(&ours_full), repr_string(&theirs_full));
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn average_unweighted_axis_f64_fast_path_golden_sha256() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let avg_fn = module.getattr("average")?;
+            let numpy = py.import("numpy")?;
+            let numpy_avg = numpy.getattr("average")?;
+            let array_fn = numpy.getattr("array")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            let matrix = array_fn.call1((vec![
+                vec![-3.25_f64, -1.5, 0.0, 2.0, 4.5, 6.25, 8.0, 11.5],
+                vec![13.0_f64, -17.25, 19.5, -23.75, 29.0, -31.5, 37.25, -41.0],
+                vec![43.5_f64, 47.0, -53.25, 59.5, -61.75, 67.0, -71.25, 73.5],
+                vec![79.0_f64, -83.25, 89.5, 97.0, -101.25, 103.5, 107.75, -109.0],
+            ],))?;
+
+            let mut proof_bytes = Vec::new();
+
+            let axis1_kwargs = PyDict::new(py);
+            axis1_kwargs.set_item("axis", 1_i64)?;
+            let ours_axis1 = avg_fn.call((matrix.clone(),), Some(&axis1_kwargs))?;
+            let theirs_axis1 = numpy_avg.call((matrix.clone(),), Some(&axis1_kwargs))?;
+            let ok_axis1: bool = allclose.call1((&ours_axis1, &theirs_axis1))?.extract()?;
+            assert!(ok_axis1, "unweighted average axis=1 f64 mismatch");
+            append_numpy_array_bytes(py, &ours_axis1, &mut proof_bytes)?;
+
+            let neg_axis_kwargs = PyDict::new(py);
+            neg_axis_kwargs.set_item("axis", -1_i64)?;
+            let ours_neg_axis = avg_fn.call((matrix.clone(),), Some(&neg_axis_kwargs))?;
+            assert_eq!(
+                repr_string(&ours_neg_axis),
+                repr_string(&ours_axis1),
+                "axis=-1 must preserve axis=1 ordering for a 2-D array"
+            );
+            append_numpy_array_bytes(py, &ours_neg_axis, &mut proof_bytes)?;
+
+            let axis0_kwargs = PyDict::new(py);
+            axis0_kwargs.set_item("axis", 0_i64)?;
+            let ours_axis0 = avg_fn.call((matrix.clone(),), Some(&axis0_kwargs))?;
+            let theirs_axis0 = numpy_avg.call((matrix.clone(),), Some(&axis0_kwargs))?;
+            let ok_axis0: bool = allclose.call1((&ours_axis0, &theirs_axis0))?.extract()?;
+            assert!(ok_axis0, "unweighted average axis=0 f64 mismatch");
+            append_numpy_array_bytes(py, &ours_axis0, &mut proof_bytes)?;
+
+            let returned_kwargs = PyDict::new(py);
+            returned_kwargs.set_item("axis", 1_i64)?;
+            returned_kwargs.set_item("returned", true)?;
+            let ours_returned = avg_fn.call((matrix.clone(),), Some(&returned_kwargs))?;
+            let theirs_returned = numpy_avg.call((matrix.clone(),), Some(&returned_kwargs))?;
+            let ours_avg = ours_returned.get_item(0_i64)?;
+            let ours_sow = ours_returned.get_item(1_i64)?;
+            let theirs_avg = theirs_returned.get_item(0_i64)?;
+            let theirs_sow = theirs_returned.get_item(1_i64)?;
+            let ok_avg: bool = allclose.call1((&ours_avg, &theirs_avg))?.extract()?;
+            let ok_sow: bool = allclose.call1((&ours_sow, &theirs_sow))?.extract()?;
+            assert!(
+                ok_avg,
+                "returned=True unweighted average component mismatch"
+            );
+            assert!(
+                ok_sow,
+                "returned=True unweighted sum-of-weights component mismatch"
+            );
+            append_numpy_array_bytes(py, &ours_avg, &mut proof_bytes)?;
+            append_numpy_array_bytes(py, &ours_sow, &mut proof_bytes)?;
+
+            let vector = array_fn.call1((vec![-2.0_f64, 0.5, 7.25, 12.0],))?;
+            let scalar_kwargs = PyDict::new(py);
+            scalar_kwargs.set_item("axis", 0_i64)?;
+            scalar_kwargs.set_item("returned", true)?;
+            let ours_scalar_returned = avg_fn.call((vector.clone(),), Some(&scalar_kwargs))?;
+            let theirs_scalar_returned = numpy_avg.call((vector.clone(),), Some(&scalar_kwargs))?;
+            assert_eq!(
+                repr_string(&ours_scalar_returned),
+                repr_string(&theirs_scalar_returned),
+                "scalar axis reduction must return numpy scalar tuple components"
+            );
+            append_numpy_array_bytes(py, &ours_scalar_returned.get_item(0_i64)?, &mut proof_bytes)?;
+            append_numpy_array_bytes(py, &ours_scalar_returned.get_item(1_i64)?, &mut proof_bytes)?;
+
+            let f32_kwargs = PyDict::new(py);
+            f32_kwargs.set_item("dtype", "float32")?;
+            let matrix_f32 = array_fn.call(
+                (vec![
+                    vec![1.25_f64, 2.5, 3.75, 4.0],
+                    vec![5.5_f64, 6.25, 7.75, 8.5],
+                ],),
+                Some(&f32_kwargs),
+            )?;
+            let fallback_kwargs = PyDict::new(py);
+            fallback_kwargs.set_item("axis", 1_i64)?;
+            let ours_f32 = avg_fn.call((matrix_f32.clone(),), Some(&fallback_kwargs))?;
+            let theirs_f32 = numpy_avg.call((matrix_f32.clone(),), Some(&fallback_kwargs))?;
+            assert_eq!(
+                repr_string(&ours_f32),
+                repr_string(&theirs_f32),
+                "float32 unweighted axis average must stay on the generic dtype path"
+            );
+            append_numpy_array_bytes(py, &ours_f32, &mut proof_bytes)?;
+
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest, "4e97d98ac0fedaedef207fd454790aa0d2cf081396c99d75a96df106b3961099",
+                "unweighted f64 axis average golden output changed"
+            );
 
             Ok(())
         });
