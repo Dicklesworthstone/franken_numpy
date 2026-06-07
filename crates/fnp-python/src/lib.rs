@@ -17114,13 +17114,78 @@ fn hstack(
     stack_helper_default(py, tup, StackHelperKind::Horizontal)
 }
 
+// Zero-copy column_stack / dstack: both are a per-input reshape (adding a trailing or
+// leading singleton axis) followed by a concatenate, so once the inputs are reshaped
+// (a view for contiguous data) the now-fast all-dtype concatenate does the work.
+//   column_stack: 1-D -> (n,1), 2-D kept; concatenate axis=1.
+//   dstack (atleast_3d): 1-D -> (1,n,1), 2-D -> (r,c,1), 3-D kept; concatenate axis=2.
+// Mismatched off-axis shapes / dtypes / non-contiguous inputs fall through to numpy.
+fn try_zerocopy_reshaped_concat(
+    py: Python<'_>,
+    tup: &Bound<'_, PyAny>,
+    depth: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let Ok(iter) = tup.try_iter() else {
+        return Ok(None);
+    };
+    let items: Vec<Bound<'_, PyAny>> = iter.collect::<PyResult<Vec<_>>>()?;
+    if items.is_empty() {
+        return Ok(None);
+    }
+    let reshaped = pyo3::types::PyList::empty(py);
+    for item in &items {
+        if !item.is_exact_instance(&ndarray_type) {
+            return Ok(None);
+        }
+        let nd = item.getattr("ndim")?.extract::<usize>()?;
+        let r = if depth {
+            match nd {
+                1 => {
+                    let s: Vec<usize> = item.getattr("shape")?.extract()?;
+                    item.call_method1("reshape", ((1usize, s[0], 1usize),))?
+                }
+                2 => {
+                    let s: Vec<usize> = item.getattr("shape")?.extract()?;
+                    item.call_method1("reshape", ((s[0], s[1], 1usize),))?
+                }
+                3 => item.clone(),
+                _ => return Ok(None),
+            }
+        } else {
+            match nd {
+                1 => item.call_method1("reshape", ((-1isize, 1isize),))?,
+                2 => item.clone(),
+                _ => return Ok(None),
+            }
+        };
+        reshaped.append(r)?;
+    }
+    let axis = if depth { 2 } else { 1 };
+    let seq = reshaped.as_any();
+    if let Some(out) = try_zerocopy_f64_concatenate(py, seq, axis)? {
+        return Ok(Some(out));
+    }
+    if let Some(out) = try_zerocopy_bytes_concatenate(py, seq, axis)? {
+        return Ok(Some(out));
+    }
+    Ok(None)
+}
+
 #[pyfunction]
 fn dstack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_reshaped_concat(py, tup.bind(py), true)? {
+        return Ok(out);
+    }
     stack_helper_default(py, tup, StackHelperKind::Depth)
 }
 
 #[pyfunction]
 fn column_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_reshaped_concat(py, tup.bind(py), false)? {
+        return Ok(out);
+    }
     stack_helper_default(py, tup, StackHelperKind::Column)
 }
 
