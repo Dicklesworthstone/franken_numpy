@@ -19622,6 +19622,114 @@ fn numpy_dtype_is_integer(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<bool
     Ok(kind == "i" || kind == "u")
 }
 
+// Direct exact-f64 np.nansum(axis=...) for C-contiguous ndarrays. The generic
+// native axis path first materializes a NaN-filled copy and then reduces it; this
+// scans the source once and writes the output directly. It stays in the same
+// left-to-right order as the generic linear path for axes below the compensated
+// summation threshold and defers all dtype/out/keepdims/long-axis cases.
+fn try_zerocopy_f64_nansum_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis_obj: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+
+    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
+    if ax < 0 || ax >= ndim {
+        return Ok(None);
+    }
+    let ax = ax as usize;
+    let axis_len = shape[ax];
+    const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
+    if axis_len == 0 || axis_len > COMPENSATED_SUM_MIN_LEN {
+        return Ok(None);
+    }
+
+    let Ok(ab) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(asl) = ab.as_slice(py) else {
+        return Ok(None);
+    };
+
+    let outer: usize = shape[..ax].iter().product();
+    let inner: usize = shape[ax + 1..].iter().product();
+    let total_out = outer * inner;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (total_out,), Some(&kwargs))?;
+    if total_out > 0 {
+        let Ok(ob) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(osl) = ob.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        if inner == 1 {
+            for (row, lane) in asl.chunks_exact(axis_len).enumerate() {
+                let mut sum = 0.0f64;
+                for value in lane {
+                    let value = value.get();
+                    if !value.is_nan() {
+                        sum += value;
+                    }
+                }
+                if sum == 0.0 {
+                    sum = 0.0;
+                }
+                osl[row].set(sum);
+            }
+        } else {
+            let mut accs = vec![0.0f64; inner];
+            for out_outer in 0..outer {
+                accs.fill(0.0);
+                let base = out_outer * axis_len * inner;
+                for axis_index in 0..axis_len {
+                    let slab = &asl[base + axis_index * inner..base + axis_index * inner + inner];
+                    for (acc, value) in accs.iter_mut().zip(slab.iter()) {
+                        let value = value.get();
+                        if !value.is_nan() {
+                            *acc += value;
+                        }
+                    }
+                }
+                let out_base = out_outer * inner;
+                for inner_index in 0..inner {
+                    let mut sum = accs[inner_index];
+                    if sum == 0.0 {
+                        sum = 0.0;
+                    }
+                    osl[out_base + inner_index].set(sum);
+                }
+            }
+        }
+    }
+
+    let mut out_shape: Vec<usize> = shape[..ax].to_vec();
+    out_shape.extend_from_slice(&shape[ax + 1..]);
+    let shape_tuple = PyTuple::new(py, out_shape.iter().copied())?;
+    let out_arr = flat.call_method1("reshape", (&shape_tuple,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(out_arr.get_item(())?.unbind()));
+    }
+    Ok(Some(out_arr.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false))]
 fn nanmean(
@@ -19738,6 +19846,13 @@ fn nansum(
     // numpy's fast reduction (via fallback) instead of the slow native f64 path.
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
+    }
+    if !keepdims
+        && let Some(axis_val) = axis.as_ref()
+        && !axis_val.bind(py).is_none()
+        && let Some(out) = try_zerocopy_f64_nansum_axis(py, a.bind(py), axis_val.bind(py))?
+    {
+        return Ok(out);
     }
     let a = match extract_numeric_array(py, a.bind(py), "nansum(a)") {
         Ok(array) => array,
@@ -66719,6 +66834,121 @@ mod tests {
             assert_eq!(
                 ours_shape, theirs_shape,
                 "nansum keepdims shape must match numpy",
+            );
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn nansum_axis_f64_fast_path_golden_sha256() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let nansum_fn = module.getattr("nansum")?;
+            let numpy = py.import("numpy")?;
+            let numpy_nansum = numpy.getattr("nansum")?;
+            let array_fn = numpy.getattr("array")?;
+            let allclose = numpy.getattr("allclose")?;
+            let signbit = numpy.getattr("signbit")?;
+
+            let matrix = array_fn.call1((vec![
+                vec![1.0_f64, f64::NAN, -2.0, 4.0],
+                vec![f64::NAN, f64::NAN, f64::NAN, f64::NAN],
+                vec![-0.0_f64, -0.0, f64::NAN, 0.0],
+                vec![5.5_f64, -7.25, 9.0, f64::NAN],
+            ],))?;
+
+            let mut proof_bytes = Vec::new();
+
+            let axis1_kwargs = PyDict::new(py);
+            axis1_kwargs.set_item("axis", 1_i64)?;
+            let ours_axis1 = nansum_fn.call((matrix.clone(),), Some(&axis1_kwargs))?;
+            let theirs_axis1 = numpy_nansum.call((matrix.clone(),), Some(&axis1_kwargs))?;
+            let ok_axis1: bool = allclose.call1((&ours_axis1, &theirs_axis1))?.extract()?;
+            assert!(ok_axis1, "nansum axis=1 f64 mismatch");
+            assert_eq!(
+                repr_string(&signbit.call1((&ours_axis1,))?),
+                repr_string(&signbit.call1((&theirs_axis1,))?),
+                "nansum axis=1 zero signs must match numpy"
+            );
+            append_numpy_array_bytes(py, &ours_axis1, &mut proof_bytes)?;
+
+            let neg_axis_kwargs = PyDict::new(py);
+            neg_axis_kwargs.set_item("axis", -1_i64)?;
+            let ours_neg_axis = nansum_fn.call((matrix.clone(),), Some(&neg_axis_kwargs))?;
+            assert_eq!(
+                repr_string(&ours_neg_axis),
+                repr_string(&ours_axis1),
+                "axis=-1 must preserve axis=1 ordering for a 2-D array"
+            );
+            append_numpy_array_bytes(py, &ours_neg_axis, &mut proof_bytes)?;
+
+            let axis0_kwargs = PyDict::new(py);
+            axis0_kwargs.set_item("axis", 0_i64)?;
+            let ours_axis0 = nansum_fn.call((matrix.clone(),), Some(&axis0_kwargs))?;
+            let theirs_axis0 = numpy_nansum.call((matrix.clone(),), Some(&axis0_kwargs))?;
+            let ok_axis0: bool = allclose.call1((&ours_axis0, &theirs_axis0))?.extract()?;
+            assert!(ok_axis0, "nansum axis=0 f64 mismatch");
+            append_numpy_array_bytes(py, &ours_axis0, &mut proof_bytes)?;
+
+            let scalar = array_fn.call1((vec![f64::NAN, -0.0_f64, -0.0],))?;
+            let scalar_kwargs = PyDict::new(py);
+            scalar_kwargs.set_item("axis", 0_i64)?;
+            let ours_scalar = nansum_fn.call((scalar.clone(),), Some(&scalar_kwargs))?;
+            let theirs_scalar = numpy_nansum.call((scalar.clone(),), Some(&scalar_kwargs))?;
+            assert_eq!(
+                repr_string(&ours_scalar),
+                repr_string(&theirs_scalar),
+                "axis reduction to scalar must return numpy scalar parity"
+            );
+            assert_eq!(
+                repr_string(&signbit.call1((&ours_scalar,))?),
+                repr_string(&signbit.call1((&theirs_scalar,))?),
+                "scalar zero sign must match numpy"
+            );
+            append_numpy_array_bytes(py, &ours_scalar, &mut proof_bytes)?;
+
+            let keepdims_kwargs = PyDict::new(py);
+            keepdims_kwargs.set_item("axis", 1_i64)?;
+            keepdims_kwargs.set_item("keepdims", true)?;
+            let ours_keepdims = nansum_fn.call((matrix.clone(),), Some(&keepdims_kwargs))?;
+            let theirs_keepdims = numpy_nansum.call((matrix.clone(),), Some(&keepdims_kwargs))?;
+            assert_eq!(
+                repr_string(&ours_keepdims.getattr("shape")?),
+                repr_string(&theirs_keepdims.getattr("shape")?),
+                "keepdims fallback must preserve shape"
+            );
+            append_numpy_array_bytes(py, &ours_keepdims, &mut proof_bytes)?;
+
+            let f32_kwargs = PyDict::new(py);
+            f32_kwargs.set_item("dtype", "float32")?;
+            let matrix_f32 = array_fn.call(
+                (vec![
+                    vec![1.25_f64, f64::NAN, 3.75, 4.0],
+                    vec![5.5_f64, 6.25, f64::NAN, 8.5],
+                ],),
+                Some(&f32_kwargs),
+            )?;
+            let fallback_kwargs = PyDict::new(py);
+            fallback_kwargs.set_item("axis", 1_i64)?;
+            let ours_f32 = nansum_fn.call((matrix_f32.clone(),), Some(&fallback_kwargs))?;
+            let theirs_f32 = numpy_nansum.call((matrix_f32.clone(),), Some(&fallback_kwargs))?;
+            assert_eq!(
+                repr_string(&ours_f32),
+                repr_string(&theirs_f32),
+                "float32 axis nansum must stay on the dtype-preserving path"
+            );
+            append_numpy_array_bytes(py, &ours_f32, &mut proof_bytes)?;
+
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest, "ccdffa8b256025065c7b27ee9fd5a1ce5048253cc287709be125c31640deedb4",
+                "nansum f64 axis golden output changed"
             );
 
             Ok(())
