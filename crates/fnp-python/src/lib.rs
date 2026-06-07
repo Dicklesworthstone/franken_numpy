@@ -12341,10 +12341,131 @@ fn vectorize(
 #[pyfunction]
 #[pyo3(signature = (x, bins, right=false))]
 fn digitize(py: Python<'_>, x: Py<PyAny>, bins: Py<PyAny>, right: bool) -> PyResult<Py<PyAny>> {
+    // Fast branchless binary-search path for an increasing-bins, matched-dtype
+    // array x — skips the cold extract→UFuncArray path (~1.4-2.3x slower).
+    if let Some(out) = try_zerocopy_digitize(py, x.bind(py), bins.bind(py), right)? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x.bind(py), "digitize(x)")?;
     let bins = extract_numeric_array(py, bins.bind(py), "digitize(bins)")?;
     let result = x.digitize_right(&bins, right).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
+}
+
+// Typed core for np.digitize over monotonically-increasing bins. numpy's digitize
+// is defined by searchsorted: right=False ≡ searchsorted(bins, x, "right") and
+// right=True ≡ searchsorted(bins, x, "left"), so each query is the same branchless
+// lower/upper-bound probe shipped for searchsorted (the compiler lowers the
+// if/else to a cmov). The one extra rule vs an integer search: numpy maps NaN to
+// len(bins) (NaN sorts to the end), so a NaN key short-circuits to n — for integer
+// T the `key != key` test is always false and folds away. Output is intp of
+// x.shape. Returns None for non-contiguous buffers or non-increasing bins so the
+// caller defers (covers decreasing/unsorted bins, which numpy handles separately).
+fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    x: &Bound<'py, PyAny>,
+    bins: &Bound<'py, PyAny>,
+    right_probe: bool,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let (Ok(xb), Ok(bb)) = (PyBuffer::<T>::get(x), PyBuffer::<T>::get(bins)) else {
+        return Ok(None);
+    };
+    let (Some(xs), Some(bs)) = (xb.as_slice(py), bb.as_slice(py)) else {
+        return Ok(None);
+    };
+    // Bins must be non-decreasing for the searchsorted equivalence; a NaN bin (or a
+    // decreasing run) fails this and defers. (`<=` is false for NaN.)
+    for w in 1..bs.len() {
+        if !(bs[w - 1].get() <= bs[w].get()) {
+            return Ok(None);
+        }
+    }
+    let n = bs.len();
+    let m = xs.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "intp")?;
+    let out = numpy.call_method("empty", (m,), Some(&kwargs))?;
+    if m > 0 {
+        let Ok(ob) = PyBuffer::<i64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = ob.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (o, xc) in output.iter().zip(xs.iter()) {
+            let key = xc.get();
+            #[allow(clippy::eq_op)]
+            let idx = if key != key {
+                n // NaN → len(bins), matching numpy
+            } else {
+                let mut left = 0usize;
+                let mut len = n;
+                while len > 0 {
+                    let half = len / 2;
+                    let mid = left + half;
+                    let probe = bs[mid].get();
+                    let cond = if right_probe { probe <= key } else { probe < key };
+                    if cond {
+                        left = mid + 1;
+                        len -= half + 1;
+                    } else {
+                        len = half;
+                    }
+                }
+                left
+            };
+            o.set(idx as i64);
+        }
+    }
+    let shape: Vec<usize> = x.getattr("shape")?.extract()?;
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    Ok(Some(out.call_method1("reshape", (&output_shape,))?))
+}
+
+// Zero-copy np.digitize for an increasing-bins, matched-dtype (f64/f32/integer)
+// array x. Gated to: both ndarrays, x.ndim>=1 (scalar x keeps the existing
+// scalar-return path), a 1-D bins array, and identical dtype (numpy would promote
+// otherwise). Decreasing/unsorted bins, mixed dtypes, complex, and scalar x defer.
+fn try_zerocopy_digitize(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    bins: &Bound<'_, PyAny>,
+    right: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.is_exact_instance(&ndarray_type) || !bins.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if x.getattr("ndim")?.extract::<usize>()? < 1
+        || bins.getattr("ndim")?.extract::<usize>()? != 1
+    {
+        return Ok(None);
+    }
+    let x_dtype = x.getattr("dtype")?;
+    if !x_dtype.eq(&bins.getattr("dtype")?)? {
+        return Ok(None); // numpy promotes differing dtypes; defer
+    }
+    // digitize right=False ≡ searchsorted side="right" (probe<=key); right=True ≡
+    // side="left" (probe<key).
+    let right_probe = !right;
+    let kind = x_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = x_dtype.getattr("itemsize")?.extract::<usize>()?;
+    let out = match (kind.as_str(), itemsize) {
+        ("f", 8) => digitize_typed::<f64>(py, &numpy, x, bins, right_probe)?,
+        ("f", 4) => digitize_typed::<f32>(py, &numpy, x, bins, right_probe)?,
+        ("i", 1) => digitize_typed::<i8>(py, &numpy, x, bins, right_probe)?,
+        ("i", 2) => digitize_typed::<i16>(py, &numpy, x, bins, right_probe)?,
+        ("i", 4) => digitize_typed::<i32>(py, &numpy, x, bins, right_probe)?,
+        ("i", 8) => digitize_typed::<i64>(py, &numpy, x, bins, right_probe)?,
+        ("u", 1) => digitize_typed::<u8>(py, &numpy, x, bins, right_probe)?,
+        ("u", 2) => digitize_typed::<u16>(py, &numpy, x, bins, right_probe)?,
+        ("u", 4) => digitize_typed::<u32>(py, &numpy, x, bins, right_probe)?,
+        ("u", 8) => digitize_typed::<u64>(py, &numpy, x, bins, right_probe)?,
+        _ => return Ok(None),
+    };
+    Ok(out.map(|o| o.unbind()))
 }
 
 // Zero-copy np.bincount for the common case: a 1-D non-negative int64 ndarray
