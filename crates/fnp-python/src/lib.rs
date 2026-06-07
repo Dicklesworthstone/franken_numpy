@@ -34812,6 +34812,66 @@ fn einsum_native(
         }
         operands.push(arr);
     }
+    // Single-operand pure-reduction fast path ('ij->i', 'ij->j', 'ijk->ik',
+    // 'ij->', ...): the output labels are an in-order subsequence of the (all
+    // distinct) input labels, so the call just sums the dropped axes. numpy
+    // itself treats this as a plain reduction (np.einsum('ij->j', a) ==
+    // np.sum(a, axis=0)); routing to reduce_sum_axes skips the general einsum
+    // kernel, which was ~19x slower than numpy for a pure row/col reduction.
+    // Transposes (output not in input order), diagonals/traces (repeated input
+    // labels), ellipsis, implicit-mode (no '->'), and multi-operand contractions
+    // all fall through to the existing kernel. Float-tolerance identical (same
+    // summed values), matching how numpy's float einsum is conformance-checked.
+    if operands.len() == 1
+        && let Some((inp, outp)) = subscripts.split_once("->")
+    {
+        let inp = inp.trim();
+        let outp = outp.trim();
+        let op = &operands[0];
+        let inb: Vec<char> = inp.chars().collect();
+        let oub: Vec<char> = outp.chars().collect();
+        let distinct = |s: &[char]| {
+            s.iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == s.len()
+        };
+        if op.dtype() == DType::F64
+            && !inp.contains('.')
+            && !outp.contains('.')
+            && inb.iter().all(|c| c.is_ascii_alphabetic())
+            && oub.iter().all(|c| c.is_ascii_alphabetic())
+            && inb.len() == op.shape().len()
+            && distinct(&inb)
+            && distinct(&oub)
+        {
+            // Output must be an in-order subsequence of the input labels.
+            let mut last_pos: isize = -1;
+            let mut subseq_ok = true;
+            for &c in &oub {
+                match inb.iter().position(|&x| x == c) {
+                    Some(p) if (p as isize) > last_pos => last_pos = p as isize,
+                    _ => {
+                        subseq_ok = false;
+                        break;
+                    }
+                }
+            }
+            if subseq_ok {
+                let dropped: Vec<isize> = inb
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| !oub.contains(c))
+                    .map(|(i, _)| i as isize)
+                    .collect();
+                if !dropped.is_empty()
+                    && let Ok(result) = op.reduce_sum_axes(&dropped, false)
+                {
+                    return Ok(Some(build_numpy_scalar_or_array(py, &result)?));
+                }
+            }
+        }
+    }
     let refs: Vec<&UFuncArray> = operands.iter().collect();
     match UFuncArray::einsum(&subscripts, &refs) {
         Ok(result) => Ok(Some(build_numpy_scalar_or_array(py, &result)?)),
