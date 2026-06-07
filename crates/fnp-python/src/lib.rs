@@ -16533,6 +16533,14 @@ fn searchsorted(
                 || v_bound.extract::<bool>().is_ok()
         }
     };
+    // Fast typed binary search for matched integer dtypes with an array `v` and no
+    // sorter — skips the cold extract→UFuncArray path (~11x slower).
+    if sorter.is_none()
+        && !v_is_scalar
+        && let Some(out) = try_zerocopy_int_searchsorted(py, a.bind(py), v_bound, side)?
+    {
+        return Ok(out);
+    }
     let a = extract_numeric_array(py, a.bind(py), "searchsorted(a)")?;
     let v = extract_numeric_array(py, v_bound, "searchsorted(v)")?;
     let sorter = sorter
@@ -16550,6 +16558,104 @@ fn searchsorted(
     } else {
         Ok(array)
     }
+}
+
+// Typed binary-search core for np.searchsorted over a sorted haystack. For each
+// query it computes the insertion index via a tight lower/upper-bound loop (the
+// `if cond { left=mid+1 } else { len=half }` form the compiler lowers to a cmov,
+// so it is effectively branchless). side="left" counts elements < key (first
+// index >= key); side="right" counts elements <= key (first index > key). Integer
+// ordering is total, so this is bit-exact with numpy. Output is intp of v.shape.
+fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    v: &Bound<'py, PyAny>,
+    right: bool,
+) -> PyResult<Option<Bound<'py, PyAny>>> {
+    let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<T>::get(a), PyBuffer::<T>::get(v)) else {
+        return Ok(None);
+    };
+    let (Some(a_s), Some(v_s)) = (a_buf.as_slice(py), v_buf.as_slice(py)) else {
+        return Ok(None);
+    };
+    let m = v_s.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "intp")?;
+    let flat = numpy.call_method("empty", (m,), Some(&kwargs))?;
+    if m > 0 {
+        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = o_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let n = a_s.len();
+        for (o, vc) in output.iter().zip(v_s.iter()) {
+            let key = vc.get();
+            let mut left = 0usize;
+            let mut len = n;
+            while len > 0 {
+                let half = len / 2;
+                let mid = left + half;
+                let probe = a_s[mid].get();
+                let cond = if right { probe <= key } else { probe < key };
+                if cond {
+                    left = mid + 1;
+                    len -= half + 1;
+                } else {
+                    len = half;
+                }
+            }
+            o.set(left as i64);
+        }
+    }
+    let shape: Vec<usize> = v.getattr("shape")?.extract()?;
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    Ok(Some(flat.call_method1("reshape", (&output_shape,))?))
+}
+
+// Zero-copy np.searchsorted for a matched integer dtype haystack/query (array v,
+// sorter=None). Gated to: both ndarrays, identical integer dtype (numpy would
+// otherwise promote to a common type — defer for exact comparison semantics).
+// float/complex/mixed/sorter/scalar-v keep the existing path.
+fn try_zerocopy_int_searchsorted(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    v: &Bound<'_, PyAny>,
+    side: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if a.getattr("ndim")?.extract::<usize>()? != 1 {
+        return Ok(None); // numpy searchsorted requires a 1-D haystack
+    }
+    let a_dtype = a.getattr("dtype")?;
+    if !a_dtype.eq(&v.getattr("dtype")?)? {
+        return Ok(None); // differing dtypes → numpy promotes; defer
+    }
+    let right = match side {
+        "left" => false,
+        "right" => true,
+        _ => return Ok(None),
+    };
+    let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    let flat = match (kind.as_str(), itemsize) {
+        ("i", 1) => searchsorted_typed::<i8>(py, &numpy, a, v, right)?,
+        ("i", 2) => searchsorted_typed::<i16>(py, &numpy, a, v, right)?,
+        ("i", 4) => searchsorted_typed::<i32>(py, &numpy, a, v, right)?,
+        ("i", 8) => searchsorted_typed::<i64>(py, &numpy, a, v, right)?,
+        ("u", 1) => searchsorted_typed::<u8>(py, &numpy, a, v, right)?,
+        ("u", 2) => searchsorted_typed::<u16>(py, &numpy, a, v, right)?,
+        ("u", 4) => searchsorted_typed::<u32>(py, &numpy, a, v, right)?,
+        ("u", 8) => searchsorted_typed::<u64>(py, &numpy, a, v, right)?,
+        _ => return Ok(None),
+    };
+    Ok(flat.map(|f| f.unbind()))
 }
 
 #[pyfunction]
