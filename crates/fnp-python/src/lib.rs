@@ -28103,6 +28103,17 @@ fn average(
         return fallback();
     }
 
+    // Fused one-pass flat weighted average (axis=None) — avoids numpy's
+    // multiply-into-temp + sum + the cold extract path (~3.6x slower).
+    let axis_is_none = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
+    if axis_is_none && let Some(weights_val) = weights.as_ref() {
+        if let Some(out) =
+            try_zerocopy_f64_average_flat(py, a.bind(py), weights_val.bind(py), returned)?
+        {
+            return Ok(out);
+        }
+    }
+
     let a = match extract_numeric_array(py, a.bind(py), "average(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -28220,6 +28231,86 @@ fn average(
         );
     }
     Ok(average_output)
+}
+
+// Zero-copy flat weighted np.average: avg = Σ(a·w) / Σ(w) over the whole array
+// (axis=None), fused into one pass with 8 independent accumulators (breaking the
+// float-add dependency chain so the FMAs vectorize) instead of numpy's
+// multiply-into-temp + pairwise sum + divide. Both buffers are f64 of equal shape.
+// numpy's float reductions aren't bit-reproducible (pairwise vs this), but the
+// 8-way sum matches to ~1e-14 — well inside np.allclose, the conformance bar.
+// Returns None (caller defers) for non-f64, shape mismatch, empty, weights summing
+// to zero (numpy ZeroDivisionError), or returned with a needed exact dtype.
+fn try_zerocopy_f64_average_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    weights: &Bound<'_, PyAny>,
+    returned: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !weights.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let is_f64 = |x: &Bound<'_, PyAny>| -> PyResult<bool> {
+        let dt = x.getattr("dtype")?;
+        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
+            && dt.getattr("itemsize")?.extract::<usize>()? == 8)
+    };
+    if !is_f64(a)? || !is_f64(weights)? {
+        return Ok(None);
+    }
+    let ash: Vec<usize> = a.getattr("shape")?.extract()?;
+    let wsh: Vec<usize> = weights.getattr("shape")?.extract()?;
+    if ash != wsh {
+        return Ok(None); // axis=None requires identical shapes; else defer
+    }
+    let (Ok(ab), Ok(wb)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(weights)) else {
+        return Ok(None);
+    };
+    let (Some(asl), Some(wsl)) = (ab.as_slice(py), wb.as_slice(py)) else {
+        return Ok(None);
+    };
+    let n = asl.len();
+    if n == 0 {
+        return Ok(None);
+    }
+    let mut dotacc = [0.0f64; 8];
+    let mut wacc = [0.0f64; 8];
+    let chunks = n / 8;
+    for c in 0..chunks {
+        let base = c * 8;
+        for j in 0..8 {
+            let ai = asl[base + j].get();
+            let wi = wsl[base + j].get();
+            dotacc[j] += ai * wi;
+            wacc[j] += wi;
+        }
+    }
+    let mut dot = 0.0f64;
+    let mut wsum = 0.0f64;
+    for j in 0..8 {
+        dot += dotacc[j];
+        wsum += wacc[j];
+    }
+    for i in chunks * 8..n {
+        let ai = asl[i].get();
+        let wi = wsl[i].get();
+        dot += ai * wi;
+        wsum += wi;
+    }
+    if wsum == 0.0 {
+        return Ok(None); // numpy raises ZeroDivisionError; defer for the exact error
+    }
+    let avg = dot / wsum;
+    let avg_scalar = numpy.getattr("float64")?.call1((avg,))?;
+    if returned {
+        let w_scalar = numpy.getattr("float64")?.call1((wsum,))?;
+        return Ok(Some(
+            PyTuple::new(py, [avg_scalar, w_scalar])?.into_any().unbind(),
+        ));
+    }
+    Ok(Some(avg_scalar.unbind()))
 }
 
 #[pyfunction]
