@@ -17449,12 +17449,12 @@ fn put_typed<'py, T: pyo3::buffer::Element + Copy>(
 }
 
 // Zero-copy in-place np.put for the integer dtypes the native path sends through
-// the cold extract_numeric_array f64-bridge + full copy-back (~36x slower, and
-// lossy for wide ints). Indices are normalized to a contiguous int64 array;
-// values must already be an ndarray of a's dtype (so no cast is needed and the
-// write is bit-identical). 'raise' mode only (gated by the caller). Scalars,
-// python-list values, mismatched value dtypes, float indices, and non-ndarray
-// operands fall through.
+// the cold extract_numeric_array f64-bridge + full copy-back (~36-45x slower, and
+// lossy for wide ints). Indices are normalized to a contiguous int64 array; the
+// values are cast to a's dtype and raveled (matching numpy.put's own cast — a SCALAR
+// value broadcasts, a wider/float value truncates, and an out-of-range python int
+// raises OverflowError exactly as numpy does, so we defer that case to numpy). 'raise'
+// mode only (gated by the caller). Float indices and non-ndarray `a` fall through.
 fn try_zerocopy_int_put(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -17463,7 +17463,7 @@ fn try_zerocopy_int_put(
 ) -> PyResult<Option<()>> {
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type) {
+    if !a.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
     let a_dtype = a.getattr("dtype")?;
@@ -17484,15 +17484,31 @@ fn try_zerocopy_int_put(
     let ind64 = numpy
         .getattr("ascontiguousarray")?
         .call((ind_arr,), Some(&kw))?;
+    // Cast values to a's dtype and ravel (covers scalar / list / array, any dtype),
+    // matching numpy.put's cast. asarray raises OverflowError for an out-of-range
+    // python int exactly as numpy.put does; on any cast failure, route the call to
+    // numpy.put so it raises the canonical error (the native fallback path would
+    // raise a different exception type) — numpy raises before any in-place write.
+    let kw_v = PyDict::new(py);
+    kw_v.set_item("dtype", &a_dtype)?;
+    let v_cast = match numpy.getattr("asarray")?.call((v,), Some(&kw_v)) {
+        Ok(arr) => arr.call_method1("reshape", ((-1isize,),))?,
+        Err(_) => {
+            let kwp = PyDict::new(py);
+            kwp.set_item("mode", "raise")?;
+            numpy.getattr("put")?.call((a, ind, v), Some(&kwp))?;
+            return Ok(Some(()));
+        }
+    };
     match (kind.as_str(), itemsize) {
-        ("i", 8) => put_typed::<i64>(py, a, &ind64, v),
-        ("i", 4) => put_typed::<i32>(py, a, &ind64, v),
-        ("i", 2) => put_typed::<i16>(py, a, &ind64, v),
-        ("i", 1) => put_typed::<i8>(py, a, &ind64, v),
-        ("u", 8) => put_typed::<u64>(py, a, &ind64, v),
-        ("u", 4) => put_typed::<u32>(py, a, &ind64, v),
-        ("u", 2) => put_typed::<u16>(py, a, &ind64, v),
-        ("u", 1) => put_typed::<u8>(py, a, &ind64, v),
+        ("i", 8) => put_typed::<i64>(py, a, &ind64, &v_cast),
+        ("i", 4) => put_typed::<i32>(py, a, &ind64, &v_cast),
+        ("i", 2) => put_typed::<i16>(py, a, &ind64, &v_cast),
+        ("i", 1) => put_typed::<i8>(py, a, &ind64, &v_cast),
+        ("u", 8) => put_typed::<u64>(py, a, &ind64, &v_cast),
+        ("u", 4) => put_typed::<u32>(py, a, &ind64, &v_cast),
+        ("u", 2) => put_typed::<u16>(py, a, &ind64, &v_cast),
+        ("u", 1) => put_typed::<u8>(py, a, &ind64, &v_cast),
         _ => Ok(None),
     }
 }
