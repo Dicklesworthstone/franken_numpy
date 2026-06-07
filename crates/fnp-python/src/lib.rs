@@ -34446,6 +34446,12 @@ fn argmax(
         }
     };
 
+    // Zero-copy integer fast path (axis=None): scan the buffer for the first
+    // maximum directly instead of widening to an f64 Vec (~55x slower for int64).
+    if let Some(out) = try_zerocopy_int_argextreme(py, a.bind(py), axis_val, true)? {
+        return Ok(out);
+    }
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "argmax(a)") {
         Ok(arr) => arr,
@@ -34526,6 +34532,12 @@ fn argmin(
             }
         }
     };
+
+    // Zero-copy integer fast path (axis=None): scan the buffer for the first
+    // minimum directly instead of widening to an f64 Vec (~55x slower for int64).
+    if let Some(out) = try_zerocopy_int_argextreme(py, a.bind(py), axis_val, false)? {
+        return Ok(out);
+    }
 
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "argmin(a)") {
@@ -36230,6 +36242,87 @@ fn try_zerocopy_int_prod(
             |v| v,
             |x, y| x.wrapping_mul(y),
         ),
+        _ => Ok(None),
+    }
+}
+
+// Generic typed core for the integer argmax/argmin full reduction (axis=None).
+// `take_max` selects argmax (true) vs argmin (false). Two vectorizable passes:
+// pass 1 finds the extreme VALUE via the same `.max()`/`.min()` fold ptp uses
+// (pmaxs/pmins — fully autovectorized); pass 2 finds the FIRST buffer index
+// holding it via `.position()` (a short-circuiting equality scan). numpy returns
+// the index of the first occurrence of the extreme, so first-position is
+// bit-identical. Integer comparison is total (no NaN/signed-zero hazard), so the
+// result is exact. Gated to a C-contiguous buffer: numpy's axis=None flattens in
+// C order, which equals memory order only when C-contiguous (a strided/Fortran
+// view would scan in the wrong order → defer to numpy). Empty input defers
+// (numpy raises ValueError). Returns a numpy intp scalar, matching
+// np.argmax/argmin(axis=None). This replaces the cold
+// extract_precise_numeric_array → f64 widen → reduce_argmax path (~55x slower for
+// int64, which both allocates an f64 Vec and loses the zero-copy scan).
+fn argextreme_typed<'py, T>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + Ord,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if input.is_empty() {
+        return Ok(None);
+    }
+    let extreme = if take_max {
+        input.iter().map(|c| c.get()).max().unwrap()
+    } else {
+        input.iter().map(|c| c.get()).min().unwrap()
+    };
+    let idx = input.iter().position(|c| c.get() == extreme).unwrap();
+    let scalar = numpy.getattr("intp")?.call1((idx,))?;
+    Ok(Some(scalar.unbind()))
+}
+
+// Zero-copy integer argmax/argmin for the full reduction (axis=None), all 8
+// widths. `take_max` picks argmax vs argmin. None for a per-axis reduction, a
+// non-integer dtype, or a non-ndarray input — those keep the existing path.
+fn try_zerocopy_int_argextreme(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if axis.is_some() {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize) {
+        ("i", 1) => argextreme_typed::<i8>(py, &numpy, a, take_max),
+        ("i", 2) => argextreme_typed::<i16>(py, &numpy, a, take_max),
+        ("i", 4) => argextreme_typed::<i32>(py, &numpy, a, take_max),
+        ("i", 8) => argextreme_typed::<i64>(py, &numpy, a, take_max),
+        ("u", 1) => argextreme_typed::<u8>(py, &numpy, a, take_max),
+        ("u", 2) => argextreme_typed::<u16>(py, &numpy, a, take_max),
+        ("u", 4) => argextreme_typed::<u32>(py, &numpy, a, take_max),
+        ("u", 8) => argextreme_typed::<u64>(py, &numpy, a, take_max),
         _ => Ok(None),
     }
 }
