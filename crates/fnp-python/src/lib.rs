@@ -9297,6 +9297,7 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy>(
 // last-axis gather). OOB/negative-after-wrap indices return None so numpy raises
 // IndexError. T is the uintN bit-mover chosen by itemsize, so one core covers
 // int/uint/float/bool verbatim.
+#[allow(clippy::too_many_arguments)]
 fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
@@ -12377,7 +12378,10 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd>(
     // Bins must be non-decreasing for the searchsorted equivalence; a NaN bin (or a
     // decreasing run) fails this and defers. (`<=` is false for NaN.)
     for w in 1..bs.len() {
-        if !(bs[w - 1].get() <= bs[w].get()) {
+        if !matches!(
+            bs[w - 1].get().partial_cmp(&bs[w].get()),
+            Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+        ) {
             return Ok(None);
         }
     }
@@ -16834,13 +16838,23 @@ fn histogram(
         None => 10,
     };
 
-    // O(n) uniform-bin counting for a 1-D f64 array — skips the cold
-    // extract→UFuncArray::histogram path (~6.8x slower than numpy).
-    if let Some(out) = try_zerocopy_histogram_f64(py, a.bind(py), nbins)? {
+    // O(n) uniform-bin counting for 1-D f64/f32/integer arrays — skips the cold
+    // extract→UFuncArray::histogram path (several-x slower than numpy).
+    let a_bound = a.bind(py);
+    if let Some(out) = try_zerocopy_histogram(py, a_bound, nbins)? {
         return Ok(out);
     }
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if a_bound.is_exact_instance(&ndarray_type) {
+        let dtype = a_bound.getattr("dtype")?;
+        if dtype.getattr("kind")?.extract::<String>()? == "f"
+            && dtype.getattr("itemsize")?.extract::<usize>()? == 4
+        {
+            return fallback(py);
+        }
+    }
 
-    let native = match extract_precise_numeric_array(py, a.bind(py), "histogram(a)") {
+    let native = match extract_precise_numeric_array(py, a_bound, "histogram(a)") {
         Ok(value) => value,
         Err(_) => return fallback(py),
     };
@@ -16870,63 +16884,71 @@ fn histogram(
         .unbind())
 }
 
-// O(n) uniform-bin np.histogram for a 1-D f64 array with bins=int and no
-// range/weights/density — the autorange uniform path. numpy's UFuncArray fallback
-// here is ~6.8x slower; this replicates numpy's exact algorithm: outer edges are
-// a.min()/a.max() (a±0.5 when all-equal, (0,1) when empty), edges =
-// linspace(first,last,nbins+1) (delegated to numpy so the edge floats are
-// bit-identical), then each in-range x maps to floor((x-first)*norm) with numpy's
-// two floating-point edge corrections (a decrement when x < edges[idx] and an
-// increment when x >= edges[idx+1]). Counts are exact integers ⇒ bit-exact.
-// Returns None (caller defers) for non-f64/non-1-D/non-contiguous/non-finite
-// inputs so the existing path keeps numpy's error and dtype semantics.
-fn try_zerocopy_histogram_f64(
+// Typed O(n) uniform-bin histogram core. Reads the input buffer as T, mapping each
+// element to f64 via `to_f64` (identity for f64, widening cast for exactly
+// representable integers). Wider i64/u64 values defer because NumPy keeps integer
+// outer edges before producing float64 bins, and large non-representable values can
+// intentionally raise "too many bins" rather than returning duplicate edges.
+fn i64_is_f64_exact(value: i64) -> bool {
+    const F64_EXACT_INT_LIMIT: i64 = 9_007_199_254_740_992;
+    (-F64_EXACT_INT_LIMIT..=F64_EXACT_INT_LIMIT).contains(&value)
+}
+
+fn u64_is_f64_exact(value: u64) -> bool {
+    const F64_EXACT_INT_LIMIT: u64 = 9_007_199_254_740_992;
+    value <= F64_EXACT_INT_LIMIT
+}
+
+fn histogram_typed<T: pyo3::buffer::Element + Copy>(
     py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     nbins: usize,
+    to_f64: fn(T) -> f64,
+    check_finite: bool,
+    value_supported: fn(T) -> bool,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type) {
-        return Ok(None);
-    }
-    let dtype = a.getattr("dtype")?;
-    if dtype.getattr("kind")?.extract::<String>()? != "f"
-        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
-    {
-        return Ok(None);
-    }
-    let Ok(buf) = PyBuffer::<f64>::get(a) else {
+    let Ok(buf) = PyBuffer::<T>::get(a) else {
         return Ok(None);
     };
     if buf.shape().len() != 1 {
         return Ok(None);
     }
+    let n = buf.item_count();
+    if n == 0 {
+        let edges = numpy.call_method1("linspace", (0.0f64, 1.0f64, nbins + 1))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "int64")?;
+        let counts = numpy.call_method("zeros", (nbins,), Some(&kwargs))?;
+        return Ok(Some(
+            PyTuple::new(py, [counts, edges])?.into_any().unbind(),
+        ));
+    }
     let Some(s) = buf.as_slice(py) else {
-        return Ok(None);
+        let histogram_fn = numpy.getattr("histogram")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("bins", nbins)?;
+        return Ok(Some(histogram_fn.call((a,), Some(&kwargs))?.unbind()));
     };
-    let n = s.len();
-    // Outer edges from min/max; reject non-finite so the caller defers for numpy's
-    // exact ValueError surface.
-    let (mut first, mut last) = if n == 0 {
-        (0.0f64, 1.0f64)
-    } else {
-        let mut mn = s[0].get();
-        let mut mx = mn;
-        for c in s.iter() {
-            let v = c.get();
-            if !v.is_finite() {
-                return Ok(None);
-            }
-            if v < mn {
-                mn = v;
-            }
-            if v > mx {
-                mx = v;
-            }
+    let mut mn = to_f64(s[0].get());
+    let mut mx = mn;
+    for c in s.iter() {
+        let raw = c.get();
+        if !value_supported(raw) {
+            return Ok(None);
         }
-        (mn, mx)
-    };
+        let v = to_f64(raw);
+        if check_finite && !v.is_finite() {
+            return Ok(None);
+        }
+        if v < mn {
+            mn = v;
+        }
+        if v > mx {
+            mx = v;
+        }
+    }
+    let (mut first, mut last) = (mn, mx);
     if first == last {
         first -= 0.5;
         last += 0.5;
@@ -16943,25 +16965,36 @@ fn try_zerocopy_histogram_f64(
         let Some(es) = ebuf.as_slice(py) else {
             return Ok(None);
         };
+        for i in 1..es.len() {
+            if es[i - 1].get() >= es[i].get() {
+                return Ok(None);
+            }
+        }
         let Ok(cbuf) = PyBuffer::<i64>::get(&counts) else {
             return Ok(None);
         };
         let Some(cs) = cbuf.as_mut_slice(py) else {
             return Ok(None);
         };
-        let norm = nbins as f64 / (last - first);
+        let norm_denom = last - first;
+        let norm_numerator = nbins as f64;
         for c in s.iter() {
-            let x = c.get();
+            let x = to_f64(c.get());
             if x < first || x > last {
                 continue;
             }
-            // (x-first)*norm ∈ [0, nbins]; truncation toward zero == floor (>=0).
-            let mut idx = ((x - first) * norm) as usize;
+            let mut idx = (((x - first) / norm_denom) * norm_numerator) as usize;
+            if idx > nbins {
+                return Ok(None);
+            }
             if idx == nbins {
                 idx -= 1;
             }
             if x < es[idx].get() {
-                idx -= 1; // x>=first==es[0] guarantees idx>0 here, no underflow
+                if idx == 0 {
+                    return Ok(None);
+                }
+                idx -= 1;
             }
             if idx != nbins - 1 && x >= es[idx + 1].get() {
                 idx += 1;
@@ -16973,6 +17006,187 @@ fn try_zerocopy_histogram_f64(
     Ok(Some(
         PyTuple::new(py, [counts, edges])?.into_any().unbind(),
     ))
+}
+
+fn histogram_f32(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    nbins: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Ok(buf) = PyBuffer::<f32>::get(a) else {
+        return Ok(None);
+    };
+    if buf.shape().len() != 1 {
+        return Ok(None);
+    }
+    let n = buf.item_count();
+    if n == 0 {
+        let edge_kwargs = PyDict::new(py);
+        edge_kwargs.set_item("dtype", "float32")?;
+        let np_float32 = numpy.getattr("float32")?;
+        let first_py = np_float32.call1((0.0f32,))?;
+        let last_py = np_float32.call1((1.0f32,))?;
+        let edges = numpy.call_method(
+            "linspace",
+            (&first_py, &last_py, nbins + 1),
+            Some(&edge_kwargs),
+        )?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "int64")?;
+        let counts = numpy.call_method("zeros", (nbins,), Some(&kwargs))?;
+        return Ok(Some(
+            PyTuple::new(py, [counts, edges])?.into_any().unbind(),
+        ));
+    }
+    let Some(s) = buf.as_slice(py) else {
+        let histogram_fn = numpy.getattr("histogram")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("bins", nbins)?;
+        return Ok(Some(histogram_fn.call((a,), Some(&kwargs))?.unbind()));
+    };
+    let mut mn = s[0].get();
+    let mut mx = mn;
+    for c in s.iter() {
+        let v = c.get();
+        if !v.is_finite() {
+            return Ok(None);
+        }
+        if v < mn {
+            mn = v;
+        }
+        if v > mx {
+            mx = v;
+        }
+    }
+    let (mut first, mut last) = (mn, mx);
+    if first == last {
+        first -= 0.5;
+        last += 0.5;
+    }
+    let edge_kwargs = PyDict::new(py);
+    edge_kwargs.set_item("dtype", "float32")?;
+    let np_float32 = numpy.getattr("float32")?;
+    let first_py = np_float32.call1((first,))?;
+    let last_py = np_float32.call1((last,))?;
+    let edges = numpy.call_method(
+        "linspace",
+        (&first_py, &last_py, nbins + 1),
+        Some(&edge_kwargs),
+    )?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "int64")?;
+    let counts = numpy.call_method("zeros", (nbins,), Some(&kwargs))?;
+    let Ok(ebuf) = PyBuffer::<f32>::get(&edges) else {
+        return Ok(None);
+    };
+    let Some(es) = ebuf.as_slice(py) else {
+        return Ok(None);
+    };
+    for i in 1..es.len() {
+        if es[i - 1].get() >= es[i].get() {
+            return Ok(None);
+        }
+    }
+    let Ok(cbuf) = PyBuffer::<i64>::get(&counts) else {
+        return Ok(None);
+    };
+    let Some(cs) = cbuf.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    for c in s.iter() {
+        let x = c.get();
+        if x < first || x > last {
+            continue;
+        }
+        let idx = if x == last {
+            nbins - 1
+        } else {
+            let mut left = 0usize;
+            let mut len = nbins;
+            while len > 0 {
+                let half = len / 2;
+                let mid = left + half;
+                if x >= es[mid + 1].get() {
+                    left = mid + 1;
+                    len -= half + 1;
+                } else {
+                    len = half;
+                }
+            }
+            left
+        };
+        if idx >= nbins {
+            return Ok(None);
+        }
+        let slot = &cs[idx];
+        slot.set(slot.get() + 1);
+    }
+    Ok(Some(
+        PyTuple::new(py, [counts, edges])?.into_any().unbind(),
+    ))
+}
+
+// O(n) uniform-bin np.histogram for exact 1-D f64/f32/integer ndarrays with
+// bins=int and no range/weights/density. The f64/integer path mirrors NumPy's
+// uniform-bin affine index calculation and edge corrections; the f32 path bins
+// against NumPy's returned float32 edges so near-edge values classify identically.
+// Unsupported layouts and values return None or call NumPy directly so fallback
+// error and dtype semantics stay intact.
+fn try_zerocopy_histogram(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    nbins: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize) {
+        ("f", 4) => histogram_f32(py, &numpy, a, nbins),
+        ("f", 8) => histogram_typed::<f64>(py, &numpy, a, nbins, |x| x, true, |_| true),
+        ("i", 1) => {
+            histogram_typed::<i8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+        }
+        ("i", 2) => {
+            histogram_typed::<i16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+        }
+        ("i", 4) => {
+            histogram_typed::<i32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+        }
+        ("i", 8) => histogram_typed::<i64>(
+            py,
+            &numpy,
+            a,
+            nbins,
+            |x| x as f64,
+            false,
+            i64_is_f64_exact,
+        ),
+        ("u", 1) => {
+            histogram_typed::<u8>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+        }
+        ("u", 2) => {
+            histogram_typed::<u16>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+        }
+        ("u", 4) => {
+            histogram_typed::<u32>(py, &numpy, a, nbins, |x| x as f64, false, |_| true)
+        }
+        ("u", 8) => histogram_typed::<u64>(
+            py,
+            &numpy,
+            a,
+            nbins,
+            |x| x as f64,
+            false,
+            u64_is_f64_exact,
+        ),
+        _ => Ok(None),
+    }
 }
 
 #[pyfunction]
@@ -17061,10 +17275,8 @@ fn diff(
                 Some(out)
             } else if let Some(out) = try_zerocopy_int_diff(py, cur, 1, axis)? {
                 Some(out)
-            } else if let Some(out) = try_zerocopy_f32_diff(py, cur, 1, axis)? {
-                Some(out)
             } else {
-                None
+                try_zerocopy_f32_diff(py, cur, 1, axis)?
             };
             match step {
                 Some(out) => current = out,
@@ -18257,9 +18469,9 @@ fn try_zerocopy_indices(
     let max_idx = dims.iter().map(|&n| n.saturating_sub(1)).max().unwrap_or(0) as i128;
     let bits = (8 * itemsize) as u32;
     let fits = if kind == "i" {
-        max_idx <= (1i128 << (bits - 1)) - 1
+        max_idx < (1i128 << (bits - 1))
     } else {
-        max_idx <= (1i128 << bits) - 1
+        max_idx < (1i128 << bits)
     };
     if !fits {
         return Ok(None);
@@ -22853,6 +23065,7 @@ fn try_zerocopy_i64_shift(
 // encodes numpy's exact out-of-range behavior (shl → 0; shr → 0 / -1 by sign) verified
 // against numpy. Otherwise these hit the f64-bridge (~390x slower, and left_shift of a
 // wide value CRASHES the bridge). Returns None to defer.
+#[allow(clippy::too_many_arguments)]
 fn shift_typed_nw<'py, T, F>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
@@ -31582,6 +31795,7 @@ fn triu_indices_from(py: Python<'_>, arr: Py<PyAny>, k: i64) -> PyResult<Py<PyAn
 // None with arr untouched, so the caller can defer to numpy for the exact
 // IndexError without a partial/double write. Duplicate indices in a lane resolve
 // last-write-wins, matching numpy's sequential scatter.
+#[allow(clippy::too_many_arguments)]
 fn scatter_along_typed<'py, T: pyo3::buffer::Element + Copy>(
     py: Python<'py>,
     arr_u: &Bound<'py, PyAny>,
@@ -31840,6 +32054,7 @@ fn put_along_axis(
 // indices wrap (k += la, matching numpy's fancy-index semantics); an out-of-range
 // index returns None so the caller defers to numpy for the exact IndexError (the
 // half-filled fresh buffer is simply dropped). Returns the flat uintN output.
+#[allow(clippy::too_many_arguments)]
 fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
@@ -34019,7 +34234,7 @@ fn try_zerocopy_int_unique(
 // All auxiliary outputs are intp (int64); inverse is reshaped to the input shape.
 // Returns the requested components in numpy's order; None (caller defers) for an
 // empty array or a range too large to bucket.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,

@@ -438,6 +438,93 @@ print(np.array_equal(hist, np_hist) and np.allclose(edges, np_edges))
     Ok(())
 }
 
+/// Locks the typed uniform-bin histogram fast path to NumPy's raw output bytes:
+/// int64 counts, f32 edges for f32 inputs, f64 edges for f64 and supported
+/// integer inputs, and fallback/error parity for unsupported cases.
+#[test]
+fn histogram_typed_uniform_bins_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+chunks = []
+
+def capture(func):
+    try:
+        hist, edges = func()
+    except Exception as exc:
+        return ("E", type(exc).__name__, None, None)
+    return ("O", None, np.asarray(hist), np.asarray(edges))
+
+def record(label, values, bins=10, **kwargs):
+    got_kind, got_exc, got_hist, got_edges = capture(
+        lambda: fnp.histogram(values, bins=bins, **kwargs)
+    )
+    exp_kind, exp_exc, exp_hist, exp_edges = capture(
+        lambda: np.histogram(values, bins=bins, **kwargs)
+    )
+    assert got_kind == exp_kind, (label, got_kind, exp_kind)
+    chunks.append(label.encode())
+    chunks.append(b'\0')
+    if got_kind == "E":
+        assert got_exc == exp_exc, (label, got_exc, exp_exc)
+        chunks.append(b'E')
+        chunks.append(got_exc.encode())
+        return
+    assert got_hist.dtype == exp_hist.dtype, (label, got_hist.dtype, exp_hist.dtype)
+    assert got_edges.dtype == exp_edges.dtype, (label, got_edges.dtype, exp_edges.dtype)
+    assert got_hist.shape == exp_hist.shape, (label, got_hist.shape, exp_hist.shape)
+    assert got_edges.shape == exp_edges.shape, (label, got_edges.shape, exp_edges.shape)
+    assert got_hist.tobytes() == exp_hist.tobytes(), (
+        label,
+        got_hist.tolist(),
+        exp_hist.tolist(),
+    )
+    assert got_edges.tobytes() == exp_edges.tobytes(), (
+        label,
+        got_edges.tolist(),
+        exp_edges.tolist(),
+    )
+    chunks.append(b'O')
+    chunks.append(got_hist.dtype.str.encode())
+    chunks.append(str(got_hist.shape).encode())
+    chunks.append(got_hist.tobytes())
+    chunks.append(got_edges.dtype.str.encode())
+    chunks.append(str(got_edges.shape).encode())
+    chunks.append(got_edges.tobytes())
+
+for dtype in (np.float32, np.float64):
+    record(f'{dtype.__name__}:empty', np.array([], dtype=dtype), bins=5)
+    record(f'{dtype.__name__}:same', np.array([7, 7, 7], dtype=dtype), bins=5)
+    record(f'{dtype.__name__}:linear', np.linspace(-1000, 1000, 10000, dtype=dtype), bins=50)
+    record(f'{dtype.__name__}:edges',
+           np.array([-1, -0.8, -0.2, 0, 0.2, 0.8, 1], dtype=dtype), bins=5)
+
+for dtype in (np.int8, np.int16, np.int32, np.int64):
+    record(f'{dtype.__name__}:signed', ((np.arange(1000) % 37) - 13).astype(dtype), bins=11)
+
+for dtype in (np.uint8, np.uint16, np.uint32, np.uint64):
+    record(f'{dtype.__name__}:unsigned', (np.arange(1000) % 37).astype(dtype), bins=11)
+
+record('int64:exact-boundary', np.array([-2**53, -1, 0, 2**53], dtype=np.int64), bins=4)
+record('uint64:exact-boundary', np.array([0, 1, 2**32, 2**53], dtype=np.uint64), bins=4)
+record('int64:large-error', np.array([2**60, 2**60 + 3], dtype=np.int64), bins=5)
+record('float32:nonfinite-error', np.array([1, np.inf], dtype=np.float32), bins=5)
+record('float32:strided-defer', np.arange(20, dtype=np.float32)[::2], bins=5)
+record('float32:range-defer', np.arange(20, dtype=np.float32), bins=5, range=(2, 18))
+record('float32:density-defer', np.arange(20, dtype=np.float32), bins=5, density=True)
+
+print(hashlib.sha256(b''.join(chunks)).hexdigest())
+"#
+        .into(),
+    );
+    let hash = numpy_oracle(&script)?;
+    assert_eq!(
+        hash, "dca1ab4a9b56fc672a88e951bcd68f25b8db593ee67dfd5364f17214b39f5739",
+        "typed uniform-bin histogram must be bit-identical to numpy (sha256 of dtype/shape/raw output bytes)"
+    );
+    Ok(())
+}
+
 #[test]
 fn bincount_zeros_only() -> Result<(), String> {
     let script = fnp_script(

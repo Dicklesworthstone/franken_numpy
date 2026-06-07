@@ -686,6 +686,75 @@ fn bench_char_ascii_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_histogram_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_histogram_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let hist = module.getattr("histogram").expect("fnp_python.histogram");
+        let numpy_hist = numpy.getattr("histogram").expect("numpy.histogram");
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("bins", 50_i64).expect("bins kwarg");
+        let int_input = numpy
+            .call_method1("arange", (100_000_i64,))
+            .expect("100k int input")
+            .call_method1("__mod__", (5000_i64,))
+            .expect("bounded int range")
+            .call_method1("astype", ("int64",))
+            .expect("int64 input");
+        let float32_input = numpy
+            .call_method1("linspace", (-1000.0_f64, 1000.0_f64, 100_000_usize))
+            .expect("100k f32 input")
+            .call_method1("astype", ("float32",))
+            .expect("float32 input");
+
+        group.bench_function("fnp_histogram_i64_100k_50", |bench| {
+            bench.iter(|| {
+                let result = hist
+                    .call((&int_input,), Some(&kwargs))
+                    .expect("fnp int histogram benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_histogram_i64_100k_50", |bench| {
+            bench.iter(|| {
+                let result = numpy_hist
+                    .call((&int_input,), Some(&kwargs))
+                    .expect("numpy int histogram benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_histogram_f32_100k_50", |bench| {
+            bench.iter(|| {
+                let result = hist
+                    .call((&float32_input,), Some(&kwargs))
+                    .expect("fnp f32 histogram benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_histogram_f32_100k_50", |bench| {
+            bench.iter(|| {
+                let result = numpy_hist
+                    .call((&float32_input,), Some(&kwargs))
+                    .expect("numpy f32 histogram benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sqrt_input_extraction,
@@ -700,6 +769,7 @@ criterion_group!(
     bench_frexp_boundary,
     bench_shift_boundary,
     bench_concat_hstack_boundary,
-    bench_char_ascii_boundary
+    bench_char_ascii_boundary,
+    bench_histogram_boundary
 );
 criterion_main!(benches);
