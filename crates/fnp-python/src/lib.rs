@@ -17031,11 +17031,16 @@ fn vstack(
                         .and_then(|n| n.extract::<usize>())
                         .map(|n| n == 2)
                         .unwrap_or(false)
-                    && numpy_dtype_is_f64(py, item)
             })
-            && let Some(out) = try_zerocopy_f64_concatenate(py, tup.bind(py), 0)?
         {
-            return Ok(out);
+            // All-2-D: vstack == concatenate(axis=0). Try the f64 zero-copy path, then
+            // the typed-by-itemsize path (int/f32/bool/complex) — both bit-identical.
+            if let Some(out) = try_zerocopy_f64_concatenate(py, tup.bind(py), 0)? {
+                return Ok(out);
+            }
+            if let Some(out) = try_zerocopy_bytes_concatenate(py, tup.bind(py), 0)? {
+                return Ok(out);
+            }
         }
     }
     stack_helper_default(py, tup, StackHelperKind::Vertical)
@@ -17083,7 +17088,7 @@ fn hstack(
         let ndims: Option<Vec<usize>> = items
             .iter()
             .map(|item| {
-                if item.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, item) {
+                if item.is_exact_instance(&ndarray_type) {
                     item.getattr("ndim").ok()?.extract::<usize>().ok()
                 } else {
                     None
@@ -17095,8 +17100,13 @@ fn hstack(
             && ndims.iter().all(|&n| n == ndims[0])
             && ndims[0] >= 1
         {
+            // hstack == concatenate(axis 0 for 1-D, axis 1 for ndim>=2). Try the f64
+            // zero-copy path, then the typed-by-itemsize path (int/f32/bool/complex).
             let concat_axis = if ndims[0] == 1 { 0 } else { 1 };
             if let Some(out) = try_zerocopy_f64_concatenate(py, tup.bind(py), concat_axis)? {
+                return Ok(out);
+            }
+            if let Some(out) = try_zerocopy_bytes_concatenate(py, tup.bind(py), concat_axis)? {
                 return Ok(out);
             }
         }
