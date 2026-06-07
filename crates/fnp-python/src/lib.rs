@@ -10336,6 +10336,120 @@ fn try_zerocopy_any_tile(
     ))
 }
 
+// Zero-copy multi-dim np.tile (a.ndim >= 2) via byte row-block replication. tile
+// moves whole elements, and along the last axis the source data is contiguous, so the
+// result is built one last-axis "row" at a time: each output super-row (the index over
+// all axes but the last) maps to a SOURCE super-row by per-axis modulo, and that
+// source row (a contiguous block of A[last] elements) is copied R[last] times. The
+// block copy uses a subslice so it memcpy-vectorizes; the modular source index is
+// tracked with an odometer over the output super-shape. Covers int/float/bool/complex
+// in one path. numpy pads the shorter of a.shape / reps with leading 1s. Returns None
+// for a 1-D input (the dedicated helper handles it), complex (fast already), a
+// non-contiguous / zero-itemsize / non-ndarray input.
+fn try_zerocopy_any_tile_multidim(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    reps: &[usize],
+) -> PyResult<Option<Py<PyAny>>> {
+    if reps.is_empty() {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let a_shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    if a_shape.len() < 2 {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? == "c" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if itemsize == 0 {
+        return Ok(None);
+    }
+    // Pad a.shape and reps to a common ndim d with leading 1s (numpy's rule).
+    let d = a_shape.len().max(reps.len());
+    let mut av = vec![1usize; d];
+    av[d - a_shape.len()..].copy_from_slice(&a_shape);
+    let mut rv = vec![1usize; d];
+    rv[d - reps.len()..].copy_from_slice(reps);
+    let out_shape: Vec<usize> = (0..d).map(|k| av[k] * rv[k]).collect();
+    let a_last = av[d - 1];
+    let out_last = out_shape[d - 1];
+    let r_last = rv[d - 1];
+    // Source row strides (in rows) for the modular super-index → source-row mapping.
+    let mut a_rowstride = vec![1usize; d - 1];
+    for k in (0..d - 1).rev() {
+        a_rowstride[k] = if k + 1 < d - 1 {
+            a_rowstride[k + 1] * av[k + 1]
+        } else {
+            1
+        };
+    }
+    let n_super_out: usize = out_shape[..d - 1].iter().product();
+    let uint8 = numpy.getattr("uint8")?;
+    let Ok(in_u8) = a.call_method1("view", (&uint8,)) else {
+        return Ok(None);
+    };
+    let Ok(in_buffer) = PyBuffer::<u8>::get(&in_u8) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let row_bytes = a_last * itemsize;
+    let total_bytes: usize = out_shape.iter().product::<usize>() * itemsize;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let out_u8 = numpy.call_method("empty", (total_bytes,), Some(&kwargs))?;
+    if total_bytes > 0 && row_bytes > 0 {
+        let Ok(out_buffer) = PyBuffer::<u8>::get(&out_u8) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let out_row_bytes = out_last * itemsize;
+        let mut digits = vec![0usize; d - 1];
+        let mut out_off = 0usize;
+        for _s in 0..n_super_out {
+            // source row = sum over non-last axes of (digit mod A[k]) * a_rowstride[k]
+            let mut src_row = 0usize;
+            for k in 0..d - 1 {
+                src_row += (digits[k] % av[k]) * a_rowstride[k];
+            }
+            let src_off = src_row * row_bytes;
+            let src = &input[src_off..src_off + row_bytes];
+            let mut o = out_off;
+            for _rep in 0..r_last {
+                let dst = &output[o..o + row_bytes];
+                for (d8, s8) in dst.iter().zip(src.iter()) {
+                    d8.set(s8.get());
+                }
+                o += row_bytes;
+            }
+            out_off += out_row_bytes;
+            // odometer increment of the output super-index (rightmost digit fastest)
+            for k in (0..d - 1).rev() {
+                digits[k] += 1;
+                if digits[k] < out_shape[k] {
+                    break;
+                }
+                digits[k] = 0;
+            }
+        }
+    }
+    let out_typed = out_u8.call_method1("view", (&dtype,))?;
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    Ok(Some(
+        out_typed.call_method1("reshape", (&output_shape,))?.unbind(),
+    ))
+}
+
 // Zero-copy first-difference (np.diff with n==1) for a 1-D C-contiguous float64
 // ndarray. Output[i] = a[i+1] - a[i], length len-1 (empty for len 0 or 1, which
 // matches numpy). Reads the input buffer and writes the (len-1)-length output
@@ -22525,6 +22639,12 @@ fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // widths), float32, complex, bool. Bit-identical (elements move verbatim) and
     // skips the cold, for-ints-lossy extract Vec.
     if let Some(out) = try_zerocopy_any_tile(py, a.bind(py), &reps_vec)? {
+        return Ok(out);
+    }
+
+    // Dtype-agnostic multi-dim tile (a.ndim >= 2): byte row-block replication with a
+    // modular source-row mapping. Bit-identical; complex / non-contiguous fall through.
+    if let Some(out) = try_zerocopy_any_tile_multidim(py, a.bind(py), &reps_vec)? {
         return Ok(out);
     }
 
