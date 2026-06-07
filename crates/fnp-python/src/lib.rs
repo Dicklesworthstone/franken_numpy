@@ -33856,6 +33856,32 @@ fn unique(
         let result = arr.unique();
         return build_numpy_array_from_ufunc(py, &result);
     }
+    // Counting-sort path for return_index/return_inverse/return_counts on a
+    // small-range integer array — numpy is sort-based (O(n log n)) here too, so
+    // these defer to numpy at parity; the counting pass yields all three outputs
+    // O(n+range). Only engage when the sole kwargs are those three flags (axis,
+    // equal_nan, or anything else defers).
+    if args.len() == 1
+        && let Some(kw) = kwargs
+        && !kw.is_empty()
+    {
+        let mut allowed_only = true;
+        let (mut ri, mut rinv, mut rc) = (false, false, false);
+        for (k, v) in kw.iter() {
+            match k.extract::<String>()?.as_str() {
+                "return_index" => ri = v.extract()?,
+                "return_inverse" => rinv = v.extract()?,
+                "return_counts" => rc = v.extract()?,
+                _ => allowed_only = false,
+            }
+        }
+        if allowed_only && (ri || rinv || rc) {
+            let item = args.get_item(0)?;
+            if let Some(out) = try_zerocopy_int_unique_full(py, &item, ri, rinv, rc)? {
+                return Ok(out);
+            }
+        }
+    }
     core_numpy_passthrough(py, "unique", args, kwargs)
 }
 
@@ -33982,6 +34008,242 @@ fn try_zerocopy_int_unique(
         _ => return Ok(None),
     };
     Ok(out.map(|o| o.unbind()))
+}
+
+// Counting-sort core for np.unique with return_index/return_inverse/return_counts.
+// One mark pass over the small-range integer array records, per bucket, presence,
+// the first-occurrence index, and the tally; the ascending bucket walk then yields
+// the sorted unique values plus the matching first-index and count arrays in one
+// sweep (O(n+range) vs numpy's O(n log n) sort). return_inverse builds a
+// bucket→rank map during that walk and remaps the input in a second O(n) pass.
+// All auxiliary outputs are intp (int64); inverse is reshaped to the input shape.
+// Returns the requested components in numpy's order; None (caller defers) for an
+// empty array or a range too large to bucket.
+#[allow(clippy::type_complexity)]
+fn unique_counting_full_typed<'py, T: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    item: &Bound<'py, PyAny>,
+    dtype_name: &str,
+    widen: fn(T) -> i128,
+    narrow: fn(i128) -> T,
+    want_index: bool,
+    want_inverse: bool,
+    want_counts: bool,
+) -> PyResult<
+    Option<(
+        Bound<'py, PyAny>,
+        Option<Bound<'py, PyAny>>,
+        Option<Bound<'py, PyAny>>,
+        Option<Bound<'py, PyAny>>,
+    )>,
+> {
+    let Ok(buf) = PyBuffer::<T>::get(item) else {
+        return Ok(None);
+    };
+    let Some(s) = buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = s.len();
+    if n == 0 {
+        return Ok(None);
+    }
+    let mut mn = widen(s[0].get());
+    let mut mx = mn;
+    for c in s.iter() {
+        let x = widen(c.get());
+        if x < mn {
+            mn = x;
+        }
+        if x > mx {
+            mx = x;
+        }
+    }
+    let range = (mx - mn) as u128;
+    let cap = (4u128 * n as u128).max(1 << 16);
+    if range >= cap || range >= (1 << 26) {
+        return Ok(None);
+    }
+    let size = range as usize + 1;
+    let mut seen = vec![false; size];
+    let mut first_idx = if want_index { vec![0i64; size] } else { Vec::new() };
+    let mut counts = if want_counts || want_inverse {
+        vec![0i64; size]
+    } else {
+        Vec::new()
+    };
+    for (i, c) in s.iter().enumerate() {
+        let off = (widen(c.get()) - mn) as usize;
+        if !seen[off] {
+            seen[off] = true;
+            if want_index {
+                first_idx[off] = i as i64;
+            }
+        }
+        if want_counts || want_inverse {
+            counts[off] += 1;
+        }
+    }
+    // Ascending bucket walk → sorted unique values + aligned aux arrays.
+    let mut uvals: Vec<i128> = Vec::new();
+    let mut idxv: Vec<i64> = Vec::new();
+    let mut cntv: Vec<i64> = Vec::new();
+    let mut rank = if want_inverse { vec![0i64; size] } else { Vec::new() };
+    let mut w: i64 = 0;
+    for (i, &b) in seen.iter().enumerate() {
+        if b {
+            uvals.push(mn + i as i128);
+            if want_index {
+                idxv.push(first_idx[i]);
+            }
+            if want_counts {
+                cntv.push(counts[i]);
+            }
+            if want_inverse {
+                rank[i] = w;
+            }
+            w += 1;
+        }
+    }
+    let count = uvals.len();
+    // Build the unique-values array in the input dtype.
+    let ukw = PyDict::new(py);
+    ukw.set_item("dtype", dtype_name)?;
+    let uarr = numpy.call_method("empty", (count,), Some(&ukw))?;
+    {
+        let Ok(ub) = PyBuffer::<T>::get(&uarr) else {
+            return Ok(None);
+        };
+        let Some(uout) = ub.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (o, &v) in uout.iter().zip(uvals.iter()) {
+            o.set(narrow(v));
+        }
+    }
+    // Helper: build an intp array from a Vec<i64>.
+    let build_i64 = |data: &[i64]| -> PyResult<Option<Bound<'py, PyAny>>> {
+        let kw = PyDict::new(py);
+        kw.set_item("dtype", "intp")?;
+        let arr = numpy.call_method("empty", (data.len(),), Some(&kw))?;
+        let Ok(ab) = PyBuffer::<i64>::get(&arr) else {
+            return Ok(None);
+        };
+        let Some(aout) = ab.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (o, &v) in aout.iter().zip(data.iter()) {
+            o.set(v);
+        }
+        Ok(Some(arr))
+    };
+    let index_arr = if want_index {
+        match build_i64(&idxv)? {
+            Some(a) => Some(a),
+            None => return Ok(None),
+        }
+    } else {
+        None
+    };
+    let counts_arr = if want_counts {
+        match build_i64(&cntv)? {
+            Some(a) => Some(a),
+            None => return Ok(None),
+        }
+    } else {
+        None
+    };
+    let inverse_arr = if want_inverse {
+        let kw = PyDict::new(py);
+        kw.set_item("dtype", "intp")?;
+        let inv = numpy.call_method("empty", (n,), Some(&kw))?;
+        {
+            let Ok(ib) = PyBuffer::<i64>::get(&inv) else {
+                return Ok(None);
+            };
+            let Some(iout) = ib.as_mut_slice(py) else {
+                return Ok(None);
+            };
+            for (o, c) in iout.iter().zip(s.iter()) {
+                o.set(rank[(widen(c.get()) - mn) as usize]);
+            }
+        }
+        // numpy (>=2.0) reshapes inverse to the input shape.
+        let shape: Vec<usize> = item.getattr("shape")?.extract()?;
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        Some(inv.call_method1("reshape", (&output_shape,))?)
+    } else {
+        None
+    };
+    Ok(Some((uarr, index_arr, inverse_arr, counts_arr)))
+}
+
+// Zero-copy np.unique(ar, return_index/inverse/counts=...) for small-range
+// integers. Dispatches the counting core by (kind, itemsize) and assembles the
+// requested outputs in numpy's order: unique, [index], [inverse], [counts].
+fn try_zerocopy_int_unique_full(
+    py: Python<'_>,
+    item: &Bound<'_, PyAny>,
+    want_index: bool,
+    want_inverse: bool,
+    want_counts: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !item.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if !item
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let dtype = item.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    macro_rules! run {
+        ($t:ty, $name:expr, $narrow:expr) => {
+            unique_counting_full_typed::<$t>(
+                py,
+                &numpy,
+                item,
+                $name,
+                |x| x as i128,
+                $narrow,
+                want_index,
+                want_inverse,
+                want_counts,
+            )?
+        };
+    }
+    let parts = match (kind.as_str(), itemsize) {
+        ("i", 1) => run!(i8, "int8", |v| v as i8),
+        ("i", 2) => run!(i16, "int16", |v| v as i16),
+        ("i", 4) => run!(i32, "int32", |v| v as i32),
+        ("i", 8) => run!(i64, "int64", |v| v as i64),
+        ("u", 1) => run!(u8, "uint8", |v| v as u8),
+        ("u", 2) => run!(u16, "uint16", |v| v as u16),
+        ("u", 4) => run!(u32, "uint32", |v| v as u32),
+        ("u", 8) => run!(u64, "uint64", |v| v as u64),
+        _ => return Ok(None),
+    };
+    let Some((uarr, index_arr, inverse_arr, counts_arr)) = parts else {
+        return Ok(None);
+    };
+    // Assemble in numpy's fixed order: unique, [index], [inverse], [counts].
+    let mut outputs: Vec<Bound<'_, PyAny>> = vec![uarr];
+    if let Some(a) = index_arr {
+        outputs.push(a);
+    }
+    if let Some(a) = inverse_arr {
+        outputs.push(a);
+    }
+    if let Some(a) = counts_arr {
+        outputs.push(a);
+    }
+    Ok(Some(PyTuple::new(py, outputs)?.into_any().unbind()))
 }
 
 #[pyfunction]
