@@ -33871,6 +33871,145 @@ fn try_zerocopy_int_ptp(
     }
 }
 
+// Generic per-axis integer ptp core: out[lane] = max(lane) - min(lane) over the axis,
+// preserving the input dtype (wrapping). Integer max/min are order-independent (no
+// signed-zero wall), so this is bit-identical. The contiguous (inner==1, last-axis)
+// case uses slice-iterator max/min scans that autovectorize; the strided (inner>1)
+// case uses an indexed reduction.
+fn ptp_axis_typed<'py, T, FS>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    axis: isize,
+    dtype_name: &str,
+    sub: FS,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
+where
+    T: pyo3::buffer::Element + Copy + Ord,
+    FS: Fn(T, T) -> T,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let ndim = shape.len() as isize;
+    if ndim == 0 {
+        return Ok(None);
+    }
+    let norm = if axis < 0 { axis + ndim } else { axis };
+    if norm < 0 || norm >= ndim {
+        return Ok(None);
+    }
+    let ax = norm as usize;
+    let axis_len = shape[ax];
+    if axis_len == 0 {
+        return Ok(None); // numpy raises on a zero-length reduction axis; defer
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let outer: usize = shape[..ax].iter().product();
+    let inner: usize = shape[ax + 1..].iter().product();
+    let mut out_shape = shape.clone();
+    out_shape.remove(ax);
+    let out_elems = outer * inner;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (out_elems,), Some(&kwargs))?;
+    if out_elems > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let lane = axis_len * inner;
+        if inner == 1 {
+            for o in 0..outer {
+                let l = &input[o * lane..o * lane + axis_len];
+                let mx = l.iter().map(|c| c.get()).max().unwrap();
+                let mn = l.iter().map(|c| c.get()).min().unwrap();
+                output[o].set(sub(mx, mn));
+            }
+        } else {
+            // Strided (non-last axis): reduce along the axis but keep per-inner running
+            // max/min accumulators so the slab update vectorizes ACROSS inner (an
+            // indexed per-i strided scan does not — it was ~4-18x behind numpy).
+            let mut mxv: Vec<T> = Vec::with_capacity(inner);
+            let mut mnv: Vec<T> = Vec::with_capacity(inner);
+            for o in 0..outer {
+                let obase = o * lane;
+                mxv.clear();
+                mnv.clear();
+                for c in &input[obase..obase + inner] {
+                    let v = c.get();
+                    mxv.push(v);
+                    mnv.push(v);
+                }
+                for a_idx in 1..axis_len {
+                    let slab = &input[obase + a_idx * inner..obase + a_idx * inner + inner];
+                    for ((m, n), c) in mxv.iter_mut().zip(mnv.iter_mut()).zip(slab.iter()) {
+                        let v = c.get();
+                        if v > *m {
+                            *m = v;
+                        }
+                        if v < *n {
+                            *n = v;
+                        }
+                    }
+                }
+                let outl = &output[o * inner..o * inner + inner];
+                for ((slot, &m), &n) in outl.iter().zip(mxv.iter()).zip(mnv.iter()) {
+                    slot.set(sub(m, n));
+                }
+            }
+        }
+    }
+    Ok(Some((flat, out_shape)))
+}
+
+// Zero-copy per-axis integer ptp (explicit axis), all widths. The flatten helper
+// covers axis=None; this covers a single integer axis of a multi-dim array (~15x
+// slower via the f64 extract otherwise). Returns None for a non-integer dtype, a
+// 0-d / out-of-range / zero-length axis, or a non-ndarray input.
+fn try_zerocopy_int_ptp_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    let result = match (kind.as_str(), itemsize) {
+        ("i", 1) => ptp_axis_typed::<i8, _>(py, &numpy, a, axis, "int8", |x, y| x.wrapping_sub(y))?,
+        ("i", 2) => ptp_axis_typed::<i16, _>(py, &numpy, a, axis, "int16", |x, y| x.wrapping_sub(y))?,
+        ("i", 4) => ptp_axis_typed::<i32, _>(py, &numpy, a, axis, "int32", |x, y| x.wrapping_sub(y))?,
+        ("i", 8) => ptp_axis_typed::<i64, _>(py, &numpy, a, axis, "int64", |x, y| x.wrapping_sub(y))?,
+        ("u", 1) => ptp_axis_typed::<u8, _>(py, &numpy, a, axis, "uint8", |x, y| x.wrapping_sub(y))?,
+        ("u", 2) => ptp_axis_typed::<u16, _>(py, &numpy, a, axis, "uint16", |x, y| x.wrapping_sub(y))?,
+        ("u", 4) => ptp_axis_typed::<u32, _>(py, &numpy, a, axis, "uint32", |x, y| x.wrapping_sub(y))?,
+        ("u", 8) => ptp_axis_typed::<u64, _>(py, &numpy, a, axis, "uint64", |x, y| x.wrapping_sub(y))?,
+        _ => return Ok(None),
+    };
+    let Some((flat, out_shape)) = result else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if out_shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Peak-to-peak reduction (max - min) with native Rust fast path.
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=false))]
@@ -33927,6 +34066,13 @@ fn ptp(
     // wrapping difference. Bit-identical; skips the cold, for-wide-ints lossy
     // extract Vec. Per-axis and non-integer dtypes fall through.
     if let Some(result) = try_zerocopy_int_ptp(py, a.bind(py), axis_val)? {
+        return Ok(result);
+    }
+    // Zero-copy per-axis integer ptp (explicit axis): max/min reduction per lane,
+    // wrapping difference, dtype-preserving. Bit-identical; skips the f64 extract.
+    if let Some(ax) = axis_val
+        && let Some(result) = try_zerocopy_int_ptp_axis(py, a.bind(py), ax)?
+    {
         return Ok(result);
     }
 
