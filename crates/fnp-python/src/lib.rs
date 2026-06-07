@@ -32024,6 +32024,9 @@ fn diag_indices_from(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (n, k=0, m=None))]
 fn tril_indices(py: Python<'_>, n: usize, k: i64, m: Option<usize>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = build_tri_indices(py, n, m.unwrap_or(n), k, false)? {
+        return Ok(out);
+    }
     let (rows, cols) = UFuncArray::tril_indices(n, m.unwrap_or(n), k);
     build_numpy_tuple_from_ufuncs(py, &[rows, cols])
 }
@@ -32036,6 +32039,9 @@ fn tril_indices_from(py: Python<'_>, arr: Py<PyAny>, k: i64) -> PyResult<Py<PyAn
         return Err(PyValueError::new_err("input array must be 2-d"));
     }
 
+    if let Some(out) = build_tri_indices(py, shape[0], shape[1], k, false)? {
+        return Ok(out);
+    }
     let (rows, cols) = UFuncArray::tril_indices(shape[0], shape[1], k);
     build_numpy_tuple_from_ufuncs(py, &[rows, cols])
 }
@@ -32043,6 +32049,9 @@ fn tril_indices_from(py: Python<'_>, arr: Py<PyAny>, k: i64) -> PyResult<Py<PyAn
 #[pyfunction]
 #[pyo3(signature = (n, k=0, m=None))]
 fn triu_indices(py: Python<'_>, n: usize, k: i64, m: Option<usize>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = build_tri_indices(py, n, m.unwrap_or(n), k, true)? {
+        return Ok(out);
+    }
     let (rows, cols) = UFuncArray::triu_indices(n, m.unwrap_or(n), k);
     build_numpy_tuple_from_ufuncs(py, &[rows, cols])
 }
@@ -32055,8 +32064,73 @@ fn triu_indices_from(py: Python<'_>, arr: Py<PyAny>, k: i64) -> PyResult<Py<PyAn
         return Err(PyValueError::new_err("input array must be 2-d"));
     }
 
+    if let Some(out) = build_tri_indices(py, shape[0], shape[1], k, true)? {
+        return Ok(out);
+    }
     let (rows, cols) = UFuncArray::triu_indices(shape[0], shape[1], k);
     build_numpy_tuple_from_ufuncs(py, &[rows, cols])
+}
+
+// Direct O(count) construction of np.tril_indices / np.triu_indices: numpy builds
+// the full n×m triangular mask and runs nonzero (O(n·m) + an n×m allocation); this
+// emits the row/col index pairs straight in row-major order, visiting only the
+// kept entries. For each row i the kept columns are a contiguous run — triu: j in
+// [max(i+k,0), m); tril: j in [0, min(i+k, m-1)] — so rows is a constant fill and
+// cols an arange per row, written directly into two int64 buffers. Exact integers
+// ⇒ bit-identical to numpy (intp = int64). Returns None on buffer failure so the
+// caller keeps the UFuncArray path.
+fn build_tri_indices(
+    py: Python<'_>,
+    n: usize,
+    m: usize,
+    k: i64,
+    upper: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let mut count: usize = 0;
+    for i in 0..n {
+        let r = i as i64;
+        if upper {
+            let start = (r + k).max(0);
+            if (start as i128) < m as i128 {
+                count += m - start as usize;
+            }
+        } else {
+            let end = (r + k).min(m as i64 - 1);
+            if end >= 0 {
+                count += end as usize + 1;
+            }
+        }
+    }
+    let kw = PyDict::new(py);
+    kw.set_item("dtype", "int64")?;
+    let rows = numpy.call_method("empty", (count,), Some(&kw))?;
+    let cols = numpy.call_method("empty", (count,), Some(&kw))?;
+    if count > 0 {
+        let (Ok(rb), Ok(cb)) = (PyBuffer::<i64>::get(&rows), PyBuffer::<i64>::get(&cols)) else {
+            return Ok(None);
+        };
+        let (Some(rs), Some(cs)) = (rb.as_mut_slice(py), cb.as_mut_slice(py)) else {
+            return Ok(None);
+        };
+        let mut p = 0usize;
+        for i in 0..n {
+            let r = i as i64;
+            let (jstart, jend) = if upper {
+                ((r + k).max(0), m as i64) // [jstart, jend)
+            } else {
+                (0i64, (r + k).min(m as i64 - 1) + 1) // [0, jend)
+            };
+            let mut j = jstart;
+            while j < jend {
+                rs[p].set(r);
+                cs[p].set(j);
+                p += 1;
+                j += 1;
+            }
+        }
+    }
+    Ok(Some(PyTuple::new(py, [rows, cols])?.into_any().unbind()))
 }
 
 // Generic per-axis in-place scatter core for put_along_axis — the inverse of
