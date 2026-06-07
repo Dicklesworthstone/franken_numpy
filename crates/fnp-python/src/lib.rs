@@ -31697,6 +31697,17 @@ fn ravel_multi_index(
     mode: Option<Py<PyAny>>,
     order: &str,
 ) -> PyResult<Py<PyAny>> {
+    // Zero-copy multiply-add flat-index for int64 coords in C order, raise mode
+    // (~5x slower otherwise via the cold extract→UFuncArray path). Defers the rest.
+    if let Some(out) = try_zerocopy_ravel_c(
+        py,
+        multi_index.bind(py),
+        dims.bind(py),
+        mode.as_ref().map(|m| m.bind(py)),
+        order,
+    )? {
+        return Ok(out);
+    }
     let dims = extract_index_shape(py, dims.bind(py), "ravel_multi_index(dims)")?;
     let coords = extract_ravel_multi_index_inputs(py, multi_index.bind(py), dims.len())?;
     let modes = extract_ravel_multi_index_modes(py, mode)?;
@@ -31705,6 +31716,134 @@ fn ravel_multi_index(
     let result = UFuncArray::ravel_multi_index_with_options(&refs, &dims, &raw_modes, order)
         .map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array_from_ufunc(py, &result)
+}
+
+// Zero-copy np.ravel_multi_index for the common case: a tuple/list of d int64
+// ndarray coordinate arrays of equal shape, C order, default "raise" mode. Each
+// output flat index is the multiply-add flat = Σ coord[d]·stride[d] (C strides,
+// no division), read straight from the coordinate buffers into one int64 output.
+// Integer arithmetic is exact ⇒ bit-identical to numpy. Returns None (caller
+// defers) for non-int64/scalar/ragged coords, F order, clip/wrap modes, a
+// coord-count mismatch, non-contiguous input, or any out-of-range coordinate so
+// numpy's exact ValueError and scalar-return semantics are preserved.
+fn try_zerocopy_ravel_c(
+    py: Python<'_>,
+    multi_index: &Bound<'_, PyAny>,
+    dims_obj: &Bound<'_, PyAny>,
+    mode: Option<&Bound<'_, PyAny>>,
+    order: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    if order != "C" {
+        return Ok(None);
+    }
+    if let Some(m) = mode {
+        if !m.is_none() {
+            match m.extract::<String>() {
+                Ok(s) if s == "raise" => {}
+                _ => return Ok(None), // clip/wrap/sequence modes defer
+            }
+        }
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    // dims may be an int or a sequence of ints.
+    let dims: Vec<i64> = if let Ok(seq) = dims_obj.extract::<Vec<i64>>() {
+        seq
+    } else if let Ok(single) = dims_obj.extract::<i64>() {
+        vec![single]
+    } else {
+        return Ok(None);
+    };
+    let d = dims.len();
+    if d == 0 || dims.iter().any(|&v| v <= 0) {
+        return Ok(None);
+    }
+    // multi_index must be a sequence of exactly d int64 ndarrays of equal shape.
+    let Ok(seq) = multi_index.try_iter() else {
+        return Ok(None);
+    };
+    let mut coord_arrays: Vec<Bound<'_, PyAny>> = Vec::new();
+    for item in seq {
+        coord_arrays.push(item?);
+    }
+    if coord_arrays.len() != d {
+        return Ok(None);
+    }
+    let mut shape0: Option<Vec<usize>> = None;
+    for c in &coord_arrays {
+        if !c.is_exact_instance(&ndarray_type) {
+            return Ok(None);
+        }
+        let dt = c.getattr("dtype")?;
+        if dt.getattr("kind")?.extract::<String>()? != "i"
+            || dt.getattr("itemsize")?.extract::<usize>()? != 8
+        {
+            return Ok(None);
+        }
+        let sh: Vec<usize> = c.getattr("shape")?.extract()?;
+        if sh.is_empty() {
+            return Ok(None); // scalar coord → numpy returns a scalar; defer
+        }
+        match &shape0 {
+            None => shape0 = Some(sh),
+            Some(s0) if *s0 == sh => {}
+            _ => return Ok(None), // ragged/broadcast coords defer
+        }
+    }
+    let ishape = shape0.unwrap();
+    // C-order strides: stride[d-1] = 1, stride[k] = stride[k+1] * dims[k+1].
+    let mut strides = vec![0i64; d];
+    let mut acc: i128 = 1;
+    for k in (0..d).rev() {
+        strides[k] = acc as i64;
+        acc *= dims[k] as i128;
+    }
+    if acc > i64::MAX as i128 {
+        return Ok(None);
+    }
+    // Read all coordinate buffers.
+    let bufs: Vec<PyBuffer<i64>> = {
+        let mut v = Vec::with_capacity(d);
+        for c in &coord_arrays {
+            match PyBuffer::<i64>::get(c) {
+                Ok(b) => v.push(b),
+                Err(_) => return Ok(None),
+            }
+        }
+        v
+    };
+    let mut inputs: Vec<&[pyo3::buffer::ReadOnlyCell<i64>]> = Vec::with_capacity(d);
+    for b in &bufs {
+        match b.as_slice(py) {
+            Some(sl) => inputs.push(sl),
+            None => return Ok(None),
+        }
+    }
+    let n = inputs[0].len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "int64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(ob) = PyBuffer::<i64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out) = ob.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for i in 0..n {
+            let mut flat_idx: i64 = 0;
+            for dd in 0..d {
+                let coord = inputs[dd][i].get();
+                if coord < 0 || coord >= dims[dd] {
+                    return Ok(None); // raise mode OOB → defer for numpy's ValueError
+                }
+                flat_idx += coord * strides[dd];
+            }
+            out[i].set(flat_idx);
+        }
+    }
+    let out_shape = PyTuple::new(py, ishape.iter().copied())?;
+    Ok(Some(flat.call_method1("reshape", (&out_shape,))?.unbind()))
 }
 
 #[pyfunction]
