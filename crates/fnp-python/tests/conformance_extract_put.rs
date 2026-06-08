@@ -578,6 +578,86 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     Ok(())
 }
 
+/// Locks the same-width zero-copy in-place fast path for non-f64 `numpy.putmask`.
+/// The fast path views fixed-width bool/int/float arrays as same-width unsigned
+/// words and scatters values by flat index, so the proof hashes dtype, shape, and
+/// raw mutated bytes to catch signed-zero, NaN, and large-integer drift.
+#[test]
+fn putmask_zerocopy_same_dtype_all_widths_golden_sha256() -> Result<(), String> {
+    let body = r#"
+import hashlib
+mod = MODULE
+
+cases = [
+    (
+        np.array([False, True, False, True, True, False, True], dtype=np.bool_),
+        np.array([True, False, True, True, False, True, False], dtype=np.bool_),
+        np.array([True, False, True], dtype=np.bool_),
+    ),
+    (
+        np.arange(257, dtype=np.uint8),
+        (np.arange(257) % 3) == 0,
+        np.array([0, 255, 17, 128], dtype=np.uint8),
+    ),
+    (
+        (np.arange(513, dtype=np.int16) - 300).astype(np.int16),
+        (np.arange(513) % 5) <= 1,
+        np.array([-32768, -1, 0, 32767], dtype=np.int16),
+    ),
+    (
+        (np.arange(1025, dtype=np.int64) * 100003 - 2_000_000_000).astype(np.int32),
+        (np.arange(1025) % 7) == 2,
+        np.array([-2_147_483_648, -12345, 0, 2_147_483_647], dtype=np.int32),
+    ),
+    (
+        np.array(
+            [0, 1, 2**53 + 17, 2**63 + 123, 2**64 - 1, 42, 99, 2**60 + 3],
+            dtype=np.uint64,
+        ),
+        np.array([True, False, True, True, False, True, False, True]),
+        np.array([2**63 + 1, 2**62 + 9, 2**64 - 5], dtype=np.uint64),
+    ),
+    (
+        np.array([-0.0, 0.0, 1.5, -2.5, np.inf, -np.inf, np.nan], dtype=np.float32),
+        np.array([True, True, False, True, True, False, True]),
+        np.array([0.0, -0.0, np.float32("nan"), np.float32("inf")], dtype=np.float32),
+    ),
+]
+
+h = hashlib.sha256()
+for base, mask, vals in cases:
+    got = base.copy()
+    expected = base.copy()
+    mod.putmask(got, mask, vals)
+    np.putmask(expected, mask, vals)
+    assert got.dtype == expected.dtype, (got.dtype, expected.dtype)
+    assert got.shape == expected.shape, (got.shape, expected.shape)
+    assert got.tobytes() == expected.tobytes(), (got, expected)
+    h.update(str(got.dtype).encode())
+    h.update(str(got.shape).encode())
+    h.update(got.tobytes())
+
+print(h.hexdigest())
+"#;
+
+    let fnp_hash = numpy_oracle(&fnp_script(body.replace("MODULE", "fnp")))?;
+    let numpy_hash = numpy_oracle(&format!(
+        "import numpy as np\n{}",
+        body.replace("MODULE", "np")
+    ))?;
+
+    assert_eq!(
+        fnp_hash, numpy_hash,
+        "same-dtype fixed-width putmask outputs must be bit-identical to numpy"
+    );
+    assert_eq!(
+        fnp_hash, "c0e0c54ade3ec56cb1c4eb82544e4d8726ddb86a7836dbd325b502294af5bd9c",
+        "golden sha256 of fixed-width putmask dtype/shape/raw mutated bytes"
+    );
+
+    Ok(())
+}
+
 /// Locks the zero-copy in-place fast path for `numpy.place` (`try_zerocopy_f64_place`)
 /// to bit-exact parity. place assigns the True positions in flat order, the k-th
 /// True taking vals[k % len(vals)] (cycling by True count, unlike putmask's

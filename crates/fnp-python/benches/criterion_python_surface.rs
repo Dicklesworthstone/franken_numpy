@@ -552,6 +552,101 @@ fn bench_modf_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_putmask_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_putmask_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let n = 1_000_000_i64;
+        let index = numpy.call_method1("arange", (n,)).expect("1M index");
+        let mask = index
+            .call_method1("__mod__", (3_i64,))
+            .expect("periodic mask index")
+            .call_method1("__eq__", (0_i64,))
+            .expect("periodic bool mask");
+        let base_u8 = index
+            .call_method1("astype", ("uint8",))
+            .expect("uint8 putmask base");
+        let base_i32 = index
+            .call_method1("astype", ("int32",))
+            .expect("int32 putmask base");
+        let base_f32 = numpy
+            .call_method1("linspace", (-1.0_f64, 1.0_f64, n as usize))
+            .expect("f32 putmask linspace")
+            .call_method1("astype", ("float32",))
+            .expect("float32 putmask base");
+        let vals_u8 = numpy
+            .call_method1("array", (vec![7_i64, 255_i64, 1_i64, 128_i64],))
+            .expect("uint8 values")
+            .call_method1("astype", ("uint8",))
+            .expect("uint8 values dtype");
+        let vals_i32 = numpy
+            .call_method1(
+                "array",
+                (vec![-2_000_000_000_i64, 0_i64, 1_234_567_i64, 99_i64],),
+            )
+            .expect("int32 values")
+            .call_method1("astype", ("int32",))
+            .expect("int32 values dtype");
+        let vals_f32 = numpy
+            .call_method1("array", (vec![-0.0_f32, 0.0_f32, f32::INFINITY, f32::NAN],))
+            .expect("float32 values")
+            .call_method1("astype", ("float32",))
+            .expect("float32 values dtype");
+        let fnp_putmask = module.getattr("putmask").expect("fnp_python.putmask");
+        let numpy_putmask = numpy.getattr("putmask").expect("numpy.putmask");
+
+        group.bench_function("fnp_putmask_u8_1m", |bench| {
+            bench.iter(|| {
+                let a = base_u8.call_method0("copy").expect("copy uint8 base");
+                fnp_putmask
+                    .call1((&a, &mask, &vals_u8))
+                    .expect("fnp uint8 putmask benchmark call");
+                black_box(a);
+            });
+        });
+
+        group.bench_function("numpy_putmask_u8_1m", |bench| {
+            bench.iter(|| {
+                let a = base_u8.call_method0("copy").expect("copy uint8 base");
+                numpy_putmask
+                    .call1((&a, &mask, &vals_u8))
+                    .expect("numpy uint8 putmask benchmark call");
+                black_box(a);
+            });
+        });
+
+        group.bench_function("fnp_putmask_i32_1m", |bench| {
+            bench.iter(|| {
+                let a = base_i32.call_method0("copy").expect("copy int32 base");
+                fnp_putmask
+                    .call1((&a, &mask, &vals_i32))
+                    .expect("fnp int32 putmask benchmark call");
+                black_box(a);
+            });
+        });
+
+        group.bench_function("fnp_putmask_f32_1m", |bench| {
+            bench.iter(|| {
+                let a = base_f32.call_method0("copy").expect("copy float32 base");
+                fnp_putmask
+                    .call1((&a, &mask, &vals_f32))
+                    .expect("fnp float32 putmask benchmark call");
+                black_box(a);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_shift_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_shift_boundary");
     group.sample_size(10);
@@ -931,6 +1026,7 @@ criterion_group!(
     bench_float_power_boundary,
     bench_frexp_boundary,
     bench_modf_boundary,
+    bench_putmask_boundary,
     bench_shift_boundary,
     bench_concat_hstack_boundary,
     bench_char_ascii_boundary,
