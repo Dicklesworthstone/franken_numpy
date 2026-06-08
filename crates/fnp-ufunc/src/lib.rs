@@ -16597,9 +16597,12 @@ impl UFuncArray {
                 if self.values.iter().any(|v| v.is_nan()) {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
-                let mut sorted = self.values.clone();
-                sorted.sort_by(|a, b| a.total_cmp(b));
-                let val = interpolate_percentile_method(&sorted, fraction, method);
+                // O(n) quickselect instead of an O(n log n) full sort — bit-identical
+                // for every QuantileInterp method (it reads only the order statistics at
+                // floor/ceil(pos), exactly as the axis path below already does and as
+                // NumPy's introselect-based np.percentile does).
+                let mut buf = self.values.clone();
+                let val = select_percentile_method(&mut buf, fraction, method);
                 Ok(Self::scalar(val, DType::F64))
             }
             Some(ax) => {
@@ -57479,6 +57482,73 @@ print(json.dumps(payload))
             .quantile_method(0.25, None, QuantileInterp::Lower)
             .unwrap();
         assert!((r.values()[0] - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn percentile_method_axis_none_quickselect_order_independent() {
+        // axis=None percentile_method now uses O(n) quickselect (was O(n log n) sort).
+        // A percentile is a pure function of the multiset, so the result must be
+        // bit-for-bit independent of input order — a direct correctness check that the
+        // quickselect path returns the same order statistic the sort path did, across
+        // every interpolation method and several q.
+        let methods = [
+            QuantileInterp::Linear,
+            QuantileInterp::Lower,
+            QuantileInterp::Higher,
+            QuantileInterp::Nearest,
+            QuantileInterp::Midpoint,
+        ];
+        let n = 4001usize;
+        let base: Vec<f64> = (0..n)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 100003) as f64) / 7.0 - 5000.0)
+            .collect();
+        let mut sorted = base.clone();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let arr = UFuncArray::new(vec![n], base, DType::F64).unwrap();
+        let arr_sorted = UFuncArray::new(vec![n], sorted, DType::F64).unwrap();
+        for &m in &methods {
+            for &q in &[0.0f64, 7.5, 25.0, 50.0, 73.3, 100.0] {
+                let a = arr.percentile_method(q, None, m).unwrap().values()[0];
+                let b = arr_sorted.percentile_method(q, None, m).unwrap().values()[0];
+                assert_eq!(
+                    a.to_bits(),
+                    b.to_bits(),
+                    "percentile_method(None) order-dependent: method {m:?} q{q}: {a} vs {b}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B: percentile_method(None) quickselect vs full sort; run --release -- --ignored --nocapture"]
+    fn percentile_method_none_quickselect_ab_bench() {
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let data: Vec<f64> = (0..n)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 1_000_003) as f64) / 7.0 - 5000.0)
+            .collect();
+        let arr = UFuncArray::new(vec![n], data.clone(), DType::F64).unwrap();
+        let iters = 5;
+        let _ = arr.percentile_method(37.0, None, QuantileInterp::Linear).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(arr.percentile_method(37.0, None, QuantileInterp::Linear).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = full sort + index (the previous axis=None path).
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut sorted = data.clone();
+            sorted.sort_by(|a, b| a.total_cmp(b));
+            let pos = 0.37 * (n - 1) as f64;
+            let lo = pos.floor() as usize;
+            std::hint::black_box(sorted[lo]);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "PERCENTILE_NONE new={new_ms:.3}ms old_sort={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
     }
 
     #[test]
