@@ -23210,6 +23210,30 @@ impl UFuncArray {
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
+                let axis_len = self.shape[ax];
+                let inner: usize = self.shape[ax + 1..].iter().product();
+                if inner > 1 && axis_len >= 1 && axis_len <= COMPENSATED_SUM_MIN_LEN {
+                    // Fused NaN-ignoring sum — no `filled` clone, single pass.
+                    let outer: usize = self.shape[..ax].iter().product();
+                    let out_shape = reduced_shape(&self.shape, ax, keepdims);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    let mut sums = vec![0.0f64; out_count];
+                    let mut nan_counts = vec![0usize; out_count];
+                    nan_sum_count_axis_simd(
+                        &self.values,
+                        axis_len,
+                        inner,
+                        outer,
+                        &mut sums,
+                        &mut nan_counts,
+                    );
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: sums,
+                        dtype: promote_for_sum_reduction(self.dtype),
+                        integer_sidecar: None,
+                    });
+                }
                 let (filled, _) = self.nan_fill_for_axis(ax, 0.0);
                 filled.reduce_sum(Some(ax as isize), keepdims)
             }
@@ -23249,6 +23273,32 @@ impl UFuncArray {
                         keepdims,
                         promote_for_mean_reduction(self.dtype),
                     );
+                }
+                let inner: usize = self.shape[ax + 1..].iter().product();
+                if inner > 1 && axis_len <= COMPENSATED_SUM_MIN_LEN {
+                    // Fused NaN-ignoring sum + per-column NaN count — no clone, one pass.
+                    let outer: usize = self.shape[..ax].iter().product();
+                    let out_shape = reduced_shape(&self.shape, ax, keepdims);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    let mut sums = vec![0.0f64; out_count];
+                    let mut nan_counts = vec![0usize; out_count];
+                    nan_sum_count_axis_simd(
+                        &self.values,
+                        axis_len,
+                        inner,
+                        outer,
+                        &mut sums,
+                        &mut nan_counts,
+                    );
+                    for (s, &nc) in sums.iter_mut().zip(&nan_counts) {
+                        *s /= (axis_len - nc) as f64;
+                    }
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: sums,
+                        dtype: promote_for_mean_reduction(self.dtype),
+                        integer_sidecar: None,
+                    });
                 }
                 let (filled, nan_counts) = self.nan_fill_for_axis(ax, 0.0);
                 let mut result = filled.reduce_sum(Some(ax as isize), keepdims)?;
@@ -27858,6 +27908,101 @@ fn reduce_sum_axis_linear_simd(
         out.chunks_mut(inner)
             .enumerate()
             .for_each(|(o, ob)| reduce(o, 0, ob));
+    }
+}
+
+/// Fused NaN-ignoring sum + NaN-count over a NON-LAST axis (`inner > 1`), in ONE
+/// register-blocked pass with NO materialised `filled` copy. This is the fused form
+/// of `nan_fill_for_axis(axis, 0.0)` followed by `reduce_sum` — eliminating the
+/// full-array clone and the separate fill pass that dominated the nan-reductions.
+///
+/// Bit-identical to that fill-then-sum for `axis_len <= COMPENSATED_SUM_MIN_LEN`
+/// (the linear-sum regime): each lane accumulates `acc += is_nan ? 0.0 : v`
+/// row-ascending from 0.0 — note the NaN branch ADDS +0.0 rather than skipping, so a
+/// running `-0.0` is promoted to `+0.0` exactly as `sum += filled[r]` would — and the
+/// final `acc == 0.0 ? +0.0 : acc` select reproduces `finalize_sum`. `nan_counts[c]`
+/// is the exact per-column NaN tally (so callers recover the valid count as
+/// `axis_len - nan_counts[c]`). Lanes are independent columns; parallel chunks are
+/// disjoint, so the result is bit-identical for any thread count.
+fn nan_sum_count_axis_simd(
+    values: &[f64],
+    axis_len: usize,
+    inner: usize,
+    outer: usize,
+    sums: &mut [f64],
+    nan_counts: &mut [usize],
+) {
+    use std::simd::cmp::SimdPartialEq;
+    use std::simd::num::SimdFloat;
+    use std::simd::{Select, Simd};
+    const LANES: usize = 8;
+    type V = Simd<f64, LANES>;
+    type I = Simd<i64, LANES>;
+    let zero = V::splat(0.0);
+    let one_i = I::splat(1);
+    let zero_i = I::splat(0);
+
+    let reduce = |o: usize, c0: usize, sum_slice: &mut [f64], cnt_slice: &mut [usize]| {
+        let len = sum_slice.len();
+        let base = o * axis_len * inner + c0;
+        let mut c = 0;
+        while c + LANES <= len {
+            let mut acc = zero;
+            let mut nanc = zero_i;
+            for r in 0..axis_len {
+                let v = V::from_slice(&values[base + r * inner + c..]);
+                let m = v.is_nan();
+                acc += m.select(zero, v);
+                nanc += m.select(one_i, zero_i);
+            }
+            acc.simd_eq(zero)
+                .select(zero, acc)
+                .copy_to_slice(&mut sum_slice[c..]);
+            let nan_arr = nanc.to_array();
+            for (k, &nc) in nan_arr.iter().enumerate() {
+                cnt_slice[c + k] = nc as usize;
+            }
+            c += LANES;
+        }
+        while c < len {
+            let mut sum = 0.0f64;
+            let mut nan = 0usize;
+            for r in 0..axis_len {
+                let v = values[base + r * inner + c];
+                if v.is_nan() {
+                    sum += 0.0;
+                    nan += 1;
+                } else {
+                    sum += v;
+                }
+            }
+            sum_slice[c] = if sum == 0.0 { 0.0 } else { sum };
+            cnt_slice[c] = nan;
+            c += 1;
+        }
+    };
+
+    const NAN_SUM_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+    let parallel = sums.len() >= 2
+        && values.len() >= NAN_SUM_AXIS_PARALLEL_MIN_ELEMS
+        && rayon::current_num_threads() >= 2;
+    if parallel && outer == 1 {
+        let threads = rayon::current_num_threads();
+        let chunk = inner.div_ceil(threads * 2).max(8);
+        sums.par_chunks_mut(chunk)
+            .zip(nan_counts.par_chunks_mut(chunk))
+            .enumerate()
+            .for_each(|(ci, (ss, cs))| reduce(0, ci * chunk, ss, cs));
+    } else if parallel {
+        sums.par_chunks_mut(inner)
+            .zip(nan_counts.par_chunks_mut(inner))
+            .enumerate()
+            .for_each(|(o, (ss, cs))| reduce(o, 0, ss, cs));
+    } else {
+        sums.chunks_mut(inner)
+            .zip(nan_counts.chunks_mut(inner))
+            .enumerate()
+            .for_each(|(o, (ss, cs))| reduce(o, 0, ss, cs));
     }
 }
 
@@ -49125,6 +49270,41 @@ print(json.dumps(payload))
     }
 
     #[test]
+    #[ignore = "perf A/B: fused nansum(axis=0) vs nan_fill+reduce_sum; run --release -- --ignored --nocapture"]
+    fn fused_nansum_axis0_ab_bench() {
+        use std::time::Instant;
+        let n = 2048usize;
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| {
+                if i % 5 == 2 {
+                    f64::NAN
+                } else {
+                    ((i % 101) as f64) * 0.01 - 0.5
+                }
+            })
+            .collect();
+        let a = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+        let iters = 50;
+        let _ = a.nansum(Some(0), false).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.nansum(Some(0), false).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = the fill-then-reduce path the fused kernel replaces (clone + fill + sum).
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let (filled, _) = a.nan_fill_for_axis(0, 0.0);
+            std::hint::black_box(filled.reduce_sum(Some(0), false).unwrap());
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "FUSED_NANSUM_AXIS0 new={new_ms:.3}ms old={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
+    }
+
+    #[test]
     #[ignore = "perf A/B: cache-friendly nan_fill_for_axis(axis=0) vs strided gather; run --release -- --ignored --nocapture"]
     fn nan_fill_axis0_ab_bench() {
         use std::time::Instant;
@@ -51578,6 +51758,68 @@ print(json.dumps(payload))
             digest_of(&mx),
             "102d83f15cce2bf0ec6f58f69c63b56b3ab90e556f1ffcf5f671f6f0e215d1ed"
         );
+    }
+
+    #[test]
+    fn fused_nansum_nanmean_axis_matches_fill_reduce_bits() {
+        // The fused nan_sum_count_axis_simd path (no clone) must be BIT-IDENTICAL to the
+        // fill-then-reduce path it replaces, for nansum AND nanmean, across the LANES=8
+        // boundary and axis 0/1 of 2-D + 3-D, incl all-NaN, partial-NaN and clean
+        // columns and signed-zero-cancelling columns.
+        let shapes: &[Vec<usize>] = &[
+            vec![37, 21],
+            vec![21, 37],
+            vec![5, 4, 6],
+            vec![6, 5, 4],
+            vec![8, 8],
+            vec![3, 17],
+        ];
+        let bits = |v: f64| v.to_bits();
+        for shape in shapes {
+            let n: usize = shape.iter().product();
+            let mut data = Vec::with_capacity(n);
+            for i in 0..n {
+                let cell = if i % 7 == 0 {
+                    f64::NAN
+                } else if i % 23 == 5 {
+                    if i % 2 == 0 { 0.0 } else { -0.0 }
+                } else {
+                    (((i * 13 + 3) % 31) as f64) - 15.0
+                };
+                data.push(cell);
+            }
+            let a = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            for axis in 0..shape.len() {
+                for keepdims in [false, true] {
+                    // Reference: the exact fill-then-reduce path the fused kernel replaces.
+                    let (filled, nan_counts) = a.nan_fill_for_axis(axis, 0.0);
+                    let ref_sum = filled.reduce_sum(Some(axis as isize), keepdims).unwrap();
+                    let axis_len = shape[axis];
+
+                    let got_sum = a.nansum(Some(axis as isize), keepdims).unwrap();
+                    assert_eq!(got_sum.shape(), ref_sum.shape(), "nansum shape {shape:?} ax{axis}");
+                    for (g, r) in got_sum.values().iter().zip(ref_sum.values()) {
+                        assert_eq!(bits(*g), bits(*r), "nansum bits {shape:?} ax{axis}: {g} vs {r}");
+                    }
+
+                    let got_mean = a.nanmean(Some(axis as isize), keepdims).unwrap();
+                    for (i, (g, rs)) in got_mean
+                        .values()
+                        .iter()
+                        .zip(ref_sum.values())
+                        .enumerate()
+                    {
+                        let valid = (axis_len - nan_counts[i]) as f64;
+                        let r = rs / valid;
+                        if r.is_nan() {
+                            assert!(g.is_nan(), "nanmean NaN {shape:?} ax{axis} i{i}");
+                        } else {
+                            assert_eq!(bits(*g), bits(r), "nanmean bits {shape:?} ax{axis} i{i}: {g} vs {r}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
