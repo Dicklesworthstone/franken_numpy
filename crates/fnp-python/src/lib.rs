@@ -38094,41 +38094,14 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
         return fallback();
     }
 
-    if mode == "valid" && a_arr.dtype() == DType::F64 && v_arr.dtype() == DType::F64 {
-        let n = a_arr.shape()[0];
-        let m = v_arr.shape()[0];
-        if n == 0 || m == 0 {
-            return fallback();
-        }
-
-        let a_values = a_arr.values();
-        let v_values = v_arr.values();
-        let out_len = n.max(m) - n.min(m) + 1;
-        let mut values = Vec::with_capacity(out_len);
-        if n >= m {
-            for offset in 0..out_len {
-                let mut acc = 0.0;
-                for j in 0..m {
-                    acc += a_values[offset + j] * v_values[j];
-                }
-                values.push(acc);
-            }
-        } else {
-            let base = m - n;
-            for offset in 0..out_len {
-                let v_start = base - offset;
-                let mut acc = 0.0;
-                for j in 0..n {
-                    acc += a_values[j] * v_values[v_start + j];
-                }
-                values.push(acc);
-            }
-        }
-
-        let result = UFuncArray::new(vec![out_len], values, DType::F64).map_err(map_ufunc_error)?;
-        return build_numpy_array_from_ufunc(py, &result);
-    }
-
+    // All modes (including "valid") route through correlate_mode, which computes
+    // correlate(a, v) = convolve(a, v[::-1]) via the same cache-friendly convolve
+    // kernel that already serves "full"/"same" and beats numpy. The previous
+    // "valid"-only branch used a naive O(n*m) scalar dot whose `acc` dependency
+    // never vectorized — ~26x slower than numpy on a 50000⊗1000 correlate. Result
+    // matches numpy within float tolerance, exactly as the "full"/"same" path
+    // already does (correlate is a non-associative sum reduction, so neither
+    // kernel is bit-reproducible across summation orders).
     let result = match a_arr.correlate_mode(&v_arr, mode) {
         Ok(result) => result,
         Err(_) => return fallback(),
