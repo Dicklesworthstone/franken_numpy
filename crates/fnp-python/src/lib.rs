@@ -17520,68 +17520,78 @@ fn histogram_f32(
             mx = v;
         }
     }
-    let (mut first, mut last) = (mn, mx);
-    if first == last {
-        first -= 0.5;
-        last += 0.5;
+    // Returned edges: numpy computes float32 histogram edges natively in float32
+    // (linspace(min, max, nbins+1, dtype=float32), with the equal-range +/-0.5
+    // expansion done in float32). Build those for the result tuple.
+    let (mut first32, mut last32) = (mn, mx);
+    if first32 == last32 {
+        first32 -= 0.5;
+        last32 += 0.5;
     }
     let edge_kwargs = PyDict::new(py);
     edge_kwargs.set_item("dtype", "float32")?;
     let np_float32 = numpy.getattr("float32")?;
-    let first_py = np_float32.call1((first,))?;
-    let last_py = np_float32.call1((last,))?;
+    let first_py = np_float32.call1((first32,))?;
+    let last_py = np_float32.call1((last32,))?;
     let edges = numpy.call_method(
         "linspace",
         (&first_py, &last_py, nbins + 1),
         Some(&edge_kwargs),
     )?;
+    // Counts: numpy bins float32 data using float32 arithmetic against the float32
+    // edges (this genuinely differs from an f64 computation at extreme scales), so
+    // compute the same O(1) affine index + edge corrections the f64/integer path
+    // uses, but in float32 — replacing the previous O(n log nbins) per-element binary
+    // search. first32/last32 are the float32 edge endpoints used for the linspace.
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "int64")?;
     let counts = numpy.call_method("zeros", (nbins,), Some(&kwargs))?;
-    let Ok(ebuf) = PyBuffer::<f32>::get(&edges) else {
-        return Ok(None);
-    };
-    let Some(es) = ebuf.as_slice(py) else {
-        return Ok(None);
-    };
-    for i in 1..es.len() {
-        if es[i - 1].get() >= es[i].get() {
+    {
+        let Ok(ebuf) = PyBuffer::<f32>::get(&edges) else {
             return Ok(None);
-        }
-    }
-    let Ok(cbuf) = PyBuffer::<i64>::get(&counts) else {
-        return Ok(None);
-    };
-    let Some(cs) = cbuf.as_mut_slice(py) else {
-        return Ok(None);
-    };
-    for c in s.iter() {
-        let x = c.get();
-        if x < first || x > last {
-            continue;
-        }
-        let idx = if x == last {
-            nbins - 1
-        } else {
-            let mut left = 0usize;
-            let mut len = nbins;
-            while len > 0 {
-                let half = len / 2;
-                let mid = left + half;
-                if x >= es[mid + 1].get() {
-                    left = mid + 1;
-                    len -= half + 1;
-                } else {
-                    len = half;
-                }
-            }
-            left
         };
-        if idx >= nbins {
+        let Some(es) = ebuf.as_slice(py) else {
             return Ok(None);
+        };
+        // numpy raises "Too many bins for data range" when the float32 edges are not
+        // strictly increasing (the bin width underflows). Defer so numpy raises.
+        for i in 1..es.len() {
+            if es[i - 1].get() >= es[i].get() {
+                return Ok(None);
+            }
         }
-        let slot = &cs[idx];
-        slot.set(slot.get() + 1);
+        let Ok(cbuf) = PyBuffer::<i64>::get(&counts) else {
+            return Ok(None);
+        };
+        let Some(cs) = cbuf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let norm_denom = last32 - first32;
+        let norm_numerator = nbins as f32;
+        for c in s.iter() {
+            let x = c.get();
+            if x < first32 || x > last32 {
+                continue;
+            }
+            let mut idx = (((x - first32) / norm_denom) * norm_numerator) as usize;
+            if idx > nbins {
+                return Ok(None);
+            }
+            if idx == nbins {
+                idx -= 1;
+            }
+            if x < es[idx].get() {
+                if idx == 0 {
+                    return Ok(None);
+                }
+                idx -= 1;
+            }
+            if idx != nbins - 1 && x >= es[idx + 1].get() {
+                idx += 1;
+            }
+            let slot = &cs[idx];
+            slot.set(slot.get() + 1);
+        }
     }
     Ok(Some(
         PyTuple::new(py, [counts, edges])?.into_any().unbind(),
