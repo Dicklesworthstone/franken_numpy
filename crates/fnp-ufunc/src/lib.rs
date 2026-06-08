@@ -30781,6 +30781,91 @@ fn fft_pow2_butterflies<const FINITE: bool>(
         let wb_angle = sign * std::f64::consts::TAU / len4 as f64;
         let wb_re = wb_angle.cos();
         let wb_im = wb_angle.sin();
+        // `h` is always a power of two, so for h >= LANES it is divisible by LANES:
+        // 8 consecutive k touch 4 CONTIGUOUS 8-lane windows (p0,p1,p2,p3 each h
+        // apart), which vectorize with no remainder. The finite path (no Inf/NaN
+        // guard) takes the SIMD butterfly; the guarded path stays scalar.
+        const LANES: usize = 8;
+        if FINITE && h >= LANES {
+            use std::simd::Simd;
+            type V = Simd<f64, LANES>;
+            // Per-pass twiddle ramp: w_b^l for l in 0..LANES, and the per-step factor
+            // w_b^LANES. w_b^k for the 8 lanes = ramp · (w_b^LANES)^(k/LANES).
+            let mut ramp_re = [0.0f64; LANES];
+            let mut ramp_im = [0.0f64; LANES];
+            for l in 0..LANES {
+                let a = wb_angle * l as f64;
+                ramp_re[l] = a.cos();
+                ramp_im[l] = a.sin();
+            }
+            let step_re = V::splat((wb_angle * LANES as f64).cos());
+            let step_im = V::splat((wb_angle * LANES as f64).sin());
+            let ramp_re = V::from_array(ramp_re);
+            let ramp_im = V::from_array(ramp_im);
+            let neg_sign = V::splat(-sign);
+            let pos_sign = V::splat(sign);
+            let two = V::splat(2.0);
+            let mut start = 0;
+            while start < n {
+                let mut wvr = ramp_re; // w_b^(k..k+7)
+                let mut wvi = ramp_im;
+                let mut k = 0;
+                while k < h {
+                    let p0 = start + k;
+                    let p1 = p0 + h;
+                    let p2 = p1 + h;
+                    let p3 = p2 + h;
+                    let x0r = V::from_slice(&re[p0..]);
+                    let x0i = V::from_slice(&im[p0..]);
+                    let x1r = V::from_slice(&re[p1..]);
+                    let x1i = V::from_slice(&im[p1..]);
+                    let x2r = V::from_slice(&re[p2..]);
+                    let x2i = V::from_slice(&im[p2..]);
+                    let x3r = V::from_slice(&re[p3..]);
+                    let x3i = V::from_slice(&im[p3..]);
+                    // w_a = w_b²
+                    let war = wvr * wvr - wvi * wvi;
+                    let wai = wvr * wvi * two;
+                    // Stage A
+                    let a1r = war * x1r - wai * x1i;
+                    let a1i = war * x1i + wai * x1r;
+                    let b0r = x0r + a1r;
+                    let b0i = x0i + a1i;
+                    let b1r = x0r - a1r;
+                    let b1i = x0i - a1i;
+                    let a3r = war * x3r - wai * x3i;
+                    let a3i = war * x3i + wai * x3r;
+                    let b2r = x2r + a3r;
+                    let b2i = x2i + a3i;
+                    let b3r = x2r - a3r;
+                    let b3i = x2i - a3i;
+                    // Stage B: j=k uses w_b; j=k+h uses w_b·i^s = (-s·w_im, s·w_re).
+                    let cr = wvr * b2r - wvi * b2i;
+                    let ci = wvr * b2i + wvi * b2r;
+                    (b0r + cr).copy_to_slice(&mut re[p0..p0 + LANES]);
+                    (b0i + ci).copy_to_slice(&mut im[p0..p0 + LANES]);
+                    (b0r - cr).copy_to_slice(&mut re[p2..p2 + LANES]);
+                    (b0i - ci).copy_to_slice(&mut im[p2..p2 + LANES]);
+                    let wbhr = neg_sign * wvi;
+                    let wbhi = pos_sign * wvr;
+                    let dr = wbhr * b3r - wbhi * b3i;
+                    let di = wbhr * b3i + wbhi * b3r;
+                    (b1r + dr).copy_to_slice(&mut re[p1..p1 + LANES]);
+                    (b1i + di).copy_to_slice(&mut im[p1..p1 + LANES]);
+                    (b1r - dr).copy_to_slice(&mut re[p3..p3 + LANES]);
+                    (b1i - di).copy_to_slice(&mut im[p3..p3 + LANES]);
+                    // Advance the twiddle vector by w_b^LANES.
+                    let nwr = wvr * step_re - wvi * step_im;
+                    let nwi = wvr * step_im + wvi * step_re;
+                    wvr = nwr;
+                    wvi = nwi;
+                    k += LANES;
+                }
+                start += len4;
+            }
+            len = len4;
+            continue;
+        }
         let mut start = 0;
         while start < n {
             let mut w_re = 1.0; // w_b^k
