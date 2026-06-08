@@ -18287,7 +18287,7 @@ fn put_typed<'py, T: pyo3::buffer::Element + Copy>(
 // value broadcasts, a wider/float value truncates, and an out-of-range python int
 // raises OverflowError exactly as numpy does, so we defer that case to numpy). 'raise'
 // mode only (gated by the caller). Float indices and non-ndarray `a` fall through.
-fn try_zerocopy_int_put(
+fn try_zerocopy_any_put(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     ind: &Bound<'_, PyAny>,
@@ -18301,7 +18301,7 @@ fn try_zerocopy_int_put(
     let a_dtype = a.getattr("dtype")?;
     let kind = a_dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
-    if kind != "i" && kind != "u" {
+    if kind != "i" && kind != "u" && kind != "f" {
         return Ok(None);
     }
     // Normalize indices to a contiguous int64 array; only integer index dtypes
@@ -18341,6 +18341,41 @@ fn try_zerocopy_int_put(
         ("u", 4) => put_typed::<u32>(py, a, &ind64, &v_cast),
         ("u", 2) => put_typed::<u16>(py, a, &ind64, &v_cast),
         ("u", 1) => put_typed::<u8>(py, a, &ind64, &v_cast),
+        // Float scatter is value-agnostic: view both `a` (aliasing its own buffer,
+        // so the write is in-place) and the dtype-cast values as the same-width
+        // unsigned integer and reuse the u16/u32/u64 put_typed instantiations — no
+        // new monomorphizations that could perturb the already-fast integer path.
+        // A non-contiguous `a` (or values) makes .view raise; defer to numpy then.
+        ("f", 8) => {
+            let uview = numpy.getattr("uint64")?;
+            let (Ok(a_u), Ok(v_u)) = (
+                a.call_method1("view", (&uview,)),
+                v_cast.call_method1("view", (&uview,)),
+            ) else {
+                return Ok(None);
+            };
+            put_typed::<u64>(py, &a_u, &ind64, &v_u)
+        }
+        ("f", 4) => {
+            let uview = numpy.getattr("uint32")?;
+            let (Ok(a_u), Ok(v_u)) = (
+                a.call_method1("view", (&uview,)),
+                v_cast.call_method1("view", (&uview,)),
+            ) else {
+                return Ok(None);
+            };
+            put_typed::<u32>(py, &a_u, &ind64, &v_u)
+        }
+        ("f", 2) => {
+            let uview = numpy.getattr("uint16")?;
+            let (Ok(a_u), Ok(v_u)) = (
+                a.call_method1("view", (&uview,)),
+                v_cast.call_method1("view", (&uview,)),
+            ) else {
+                return Ok(None);
+            };
+            put_typed::<u16>(py, &a_u, &ind64, &v_u)
+        }
         _ => Ok(None),
     }
 }
@@ -18394,7 +18429,7 @@ fn put(
     // Zero-copy in-place scatter for integer a + integer indices + same-dtype
     // ndarray values (the common case); skips the cold extract + full copy-back.
     // Bit-identical; other dtypes/scalar-or-list values/OOB indices fall through.
-    if try_zerocopy_int_put(py, a, ind.bind(py), v.bind(py))?.is_some() {
+    if try_zerocopy_any_put(py, a, ind.bind(py), v.bind(py))?.is_some() {
         return Ok(py.None());
     }
 
