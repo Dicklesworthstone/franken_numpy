@@ -24,6 +24,7 @@
 //! implemented in safe Rust with no raw pointer manipulation.
 
 #![forbid(unsafe_code)]
+#![feature(portable_simd)]
 
 use fnp_dtype::{
     ArrayStorage, DType, f16, promote, promote_for_mean_reduction, promote_for_sum_reduction,
@@ -21777,32 +21778,82 @@ impl UFuncArray {
                         // ascending order (bit-identical signed-zero/NaN handling), but
                         // the per-row buffer update is an independent element-wise min/
                         // max over a contiguous row, which the compiler autovectorizes.
-                        let block_ptp = |(o, out_block): (usize, &mut [f64])| {
-                            let base = o * axis_len * inner;
-                            let mut mn = values[base..base + inner].to_vec();
-                            let mut mx = mn.clone();
-                            let mut nan = vec![false; inner];
-                            for i in 0..inner {
-                                nan[i] = mn[i].is_nan();
-                            }
-                            for a in 1..axis_len {
-                                let row = &values[base + a * inner..base + a * inner + inner];
-                                for i in 0..inner {
-                                    let v = row[i];
-                                    nan[i] |= v.is_nan();
-                                    mn[i] = if mn[i] < v { mn[i] } else { v };
-                                    mx[i] = if mx[i] > v { mx[i] } else { v };
+                        // Register-blocked portable-SIMD reduction over the inner axis.
+                        // Column tiles of LANES are reduced with mn/mx/nan accumulators
+                        // held in SIMD REGISTERS across the ENTIRE down-axis scan; the
+                        // tile is stored back exactly ONCE (vs the prior form, which
+                        // round-tripped mn/mx/nan heap buffers through memory on every
+                        // row — equal store traffic to the scalar loop and thus no win).
+                        // `simd_lt(mn,v).select(mn,v)` is the EXACT lane-wise form of the
+                        // scalar `if mn<v {mn} else {v}` keep-2nd select (NOT IEEE minpd,
+                        // whose NaN/signed-zero rules differ), so every lane is bit-
+                        // identical to the scalar two-reduction reference. Each column's
+                        // reduction is still strictly row-ascending, preserving the
+                        // signed-zero keep-2nd tie order. NaN is sticky: a lane becomes
+                        // NaN once any value in it is NaN (`v.is_nan().select(NaN, nan)`),
+                        // matching the scalar `nan |= v.is_nan()` flag exactly.
+                        use std::simd::cmp::SimdPartialOrd;
+                        use std::simd::num::SimdFloat;
+                        use std::simd::{Select, Simd};
+                        const LANES: usize = 8;
+                        type V = Simd<f64, LANES>;
+                        // Reduce outer block `o`'s inner sub-range starting at column
+                        // `c0` (length = out_slice.len()) down the axis into out_slice.
+                        let nan_v = V::splat(f64::NAN);
+                        let reduce = |o: usize, c0: usize, out_slice: &mut [f64]| {
+                            let len = out_slice.len();
+                            let base = o * axis_len * inner + c0;
+                            let mut c = 0;
+                            // Vector tiles: accumulators stay in registers for the scan.
+                            while c + LANES <= len {
+                                let mut mn = V::from_slice(&values[base + c..]);
+                                let mut mx = mn;
+                                let mut nan = mn;
+                                for r in 1..axis_len {
+                                    let v = V::from_slice(&values[base + r * inner + c..]);
+                                    mn = mn.simd_lt(v).select(mn, v);
+                                    mx = mx.simd_gt(v).select(mx, v);
+                                    nan = v.is_nan().select(nan_v, nan);
                                 }
+                                let out_v = nan.is_nan().select(nan_v, mx - mn);
+                                out_v.copy_to_slice(&mut out_slice[c..]);
+                                c += LANES;
                             }
-                            for i in 0..inner {
-                                out_block[i] = if nan[i] { f64::NAN } else { mx[i] - mn[i] };
+                            // Scalar tail (columns short of a full tile): same scalar
+                            // accumulators held in locals, row-ascending keep-2nd.
+                            while c < len {
+                                let mut mn = values[base + c];
+                                let mut mx = mn;
+                                let mut is_nan = mn.is_nan();
+                                for r in 1..axis_len {
+                                    let v = values[base + r * inner + c];
+                                    is_nan |= v.is_nan();
+                                    mn = if mn < v { mn } else { v };
+                                    mx = if mx > v { mx } else { v };
+                                }
+                                out_slice[c] = if is_nan { f64::NAN } else { mx - mn };
+                                c += 1;
                             }
                         };
                         let mut out = vec![0.0f64; out_count];
-                        if parallel && outer >= 2 {
-                            out.par_chunks_mut(inner).enumerate().for_each(block_ptp);
+                        if parallel && outer == 1 {
+                            // axis-0 style (single outer block): the per-block work is
+                            // serial otherwise, so parallelize over disjoint INNER chunks
+                            // — each chunk's cells still scan all rows in order (bit-exact)
+                            // and use the full memory bandwidth of several cores.
+                            let threads = rayon::current_num_threads();
+                            let chunk = inner.div_ceil(threads * 2).max(LANES);
+                            out.par_chunks_mut(chunk).enumerate().for_each(|(ci, oc)| {
+                                reduce(0, ci * chunk, oc);
+                            });
+                        } else if parallel {
+                            out.par_chunks_mut(inner)
+                                .enumerate()
+                                .for_each(|(o, ob)| reduce(o, 0, ob));
                         } else {
-                            out.chunks_mut(inner).enumerate().for_each(block_ptp);
+                            out.chunks_mut(inner)
+                                .enumerate()
+                                .for_each(|(o, ob)| reduce(o, 0, ob));
                         }
                         return Ok(Self {
                             shape: out_shape,
@@ -48285,6 +48336,60 @@ print(json.dumps(payload))
     }
 
     #[test]
+    #[ignore = "perf A/B: SIMD+parallel axis-0 ptp vs committed serial-scalar buffer; run --release -- --ignored --nocapture"]
+    fn ptp_axis0_simd_ab_bench() {
+        use std::time::Instant;
+        // axis-0 of a square [n,n] f64 array: outer=1, inner=n, axis_len=n. This is the
+        // case the committed 3c62774c kernel ran SERIAL + scalar (outer>=2 gate missed
+        // it). The new lever runs the inner reduction through portable-SIMD min/max and
+        // parallelizes over disjoint inner chunks.
+        let n = 2048usize;
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| ((i % 101) as f64) * 0.01 - 0.5)
+            .collect();
+        let a = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+        let iters = 50;
+        let _ = a.ptp(Some(0)).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.ptp(Some(0)).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = committed serial-scalar buffer form for outer==1 (the literal pre-lever
+        // algorithm: per-row element-wise min/max into mn[i]/mx[i], sticky nan flag).
+        let inner = n;
+        let axis_len = n;
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut mn = data[0..inner].to_vec();
+            let mut mx = mn.clone();
+            let mut nan = vec![false; inner];
+            for i in 0..inner {
+                nan[i] = mn[i].is_nan();
+            }
+            for r in 1..axis_len {
+                let row = &data[r * inner..r * inner + inner];
+                for i in 0..inner {
+                    let v = row[i];
+                    nan[i] |= v.is_nan();
+                    mn[i] = if mn[i] < v { mn[i] } else { v };
+                    mx[i] = if mx[i] > v { mx[i] } else { v };
+                }
+            }
+            let mut out = vec![0.0f64; inner];
+            for i in 0..inner {
+                out[i] = if nan[i] { f64::NAN } else { mx[i] - mn[i] };
+            }
+            std::hint::black_box(&out);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "PTP_AXIS0 new={new_ms:.3}ms old={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
+    }
+
+    #[test]
     fn ptp_axis_single_pass_matches_two_reduction_reference() {
         // Lock: the fused single-traversal float ptp(axis) must be BIT-IDENTICAL to
         // the old `reduce_max(axis) - reduce_min(axis)` path it replaced, including
@@ -48364,6 +48469,49 @@ print(json.dumps(payload))
         assert_eq!(
             hex,
             "f4505b761f428ed283ec6eeba4662f410dfec583ac2c4356d26a0d4237c78901"
+        );
+    }
+
+    #[test]
+    fn ptp_axis0_simd_golden_sha256() {
+        // Locks the portable-SIMD inner-reduction axis-0 path BYTE-EXACT. inner=21
+        // deliberately crosses the LANES=8 boundary (8 + 8 + 5-wide scalar tail) so a
+        // regression in either the vector body or the tail is caught. Rows include
+        // signed zeros and NaN scattered across lane positions to pin the keep-2nd
+        // signed-zero tie order and the sticky-NaN accumulator.
+        let rows = 17usize;
+        let cols = 21usize;
+        let mut data = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                let v = (((r * 31 + c * 13 + 5) % 47) as f64) - 23.0;
+                let cell = if (r + c) % 29 == 0 {
+                    -0.0
+                } else if (r * cols + c) % 53 == 7 {
+                    f64::NAN
+                } else {
+                    v / 8.0
+                };
+                data.push(cell);
+            }
+        }
+        let a = UFuncArray::new(vec![rows, cols], data, DType::F64).unwrap();
+        let r = a.ptp(Some(0)).unwrap();
+        assert_eq!(r.shape(), &[cols]);
+        let mut digest = Sha256::new();
+        for v in r.values() {
+            digest.update(v.to_bits().to_le_bytes());
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        // Independently cross-checked: numpy np.ptp(a, axis=0) over the identical data
+        // produces this exact digest (byte-for-byte, incl NaN/signed-zero columns).
+        assert_eq!(
+            hex,
+            "87495f3348d999c482763748f9074733425e07088b5fff82fb02462afc57fefe"
         );
     }
 
