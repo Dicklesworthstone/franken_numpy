@@ -9578,6 +9578,121 @@ fn try_zerocopy_f64_putmask(
     Ok(true)
 }
 
+// Generic in-place masked scatter for np.putmask over an unsigned-integer view of
+// the writable array and the values array (both already viewed as the same width
+// `T`). numpy.putmask sets a.flat[i] = values.flat[i % values.size] for every i
+// where mask.flat[i] is True, so the move is value-agnostic — a same-width typed
+// store is bit-identical (incl. nan/inf/signed zeros) and mutates a's own buffer.
+// Returns Ok(false) — caller falls through — on a shape mismatch, empty values, a
+// read-only/non-contiguous array, or a buffer-protocol failure.
+fn putmask_scatter_typed<T: pyo3::buffer::Element + Copy>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    mask: &Bound<'_, PyAny>,
+    a_view: &Bound<'_, PyAny>,
+    val_view: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let mask_u8 = mask.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let (Ok(a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
+        PyBuffer::<T>::get(a_view),
+        PyBuffer::<u8>::get(&mask_u8),
+        PyBuffer::<T>::get(val_view),
+    ) else {
+        return Ok(false);
+    };
+    if a_buffer.shape() != mask_buffer.shape() {
+        return Ok(false);
+    }
+    let (Some(mask_in), Some(val_in)) = (mask_buffer.as_slice(py), val_buffer.as_slice(py)) else {
+        return Ok(false);
+    };
+    let v = val_in.len();
+    if v == 0 {
+        return Ok(false);
+    }
+    let Some(a_out) = a_buffer.as_mut_slice(py) else {
+        return Ok(false);
+    };
+    // numpy cycles values by flat position (a.flat[i] = values.flat[i % v]); track
+    // the wrapped index with a counter+reset instead of a per-element modulo. When
+    // values spans the array (v >= len, the overwhelmingly common a-shaped values
+    // and scalar-broadcast cases) the index never wraps — a plain zip with no
+    // bookkeeping, which autovectorizes the masked store.
+    if v >= mask_in.len() {
+        for (slot, (mask_cell, val_cell)) in a_out.iter().zip(mask_in.iter().zip(val_in.iter())) {
+            if mask_cell.get() != 0 {
+                slot.set(val_cell.get());
+            }
+        }
+    } else {
+        let mut vi = 0usize;
+        for (slot, mask_cell) in a_out.iter().zip(mask_in.iter()) {
+            if mask_cell.get() != 0 {
+                slot.set(val_in[vi].get());
+            }
+            vi += 1;
+            if vi == v {
+                vi = 0;
+            }
+        }
+    }
+    Ok(true)
+}
+
+// All-width zero-copy np.putmask: the f64 helper covers only float64, leaving
+// narrow ints, int64/uint64, float32 and bool on the cold extract path that
+// widens through f64 (24x slower for narrow ints). putmask moves elements
+// verbatim by mask, so dispatch by itemsize through a same-width UNSIGNED view of
+// both the array and the values (the array view aliases its own buffer, so the
+// scatter is in-place). Requires a and values to share an identical dtype (numpy
+// otherwise casts values — deferred to the fallback) and a bool mask. complex
+// (itemsize 16) and mismatched/unsupported dtypes return Ok(false).
+fn try_zerocopy_any_putmask(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    mask: &Bound<'_, PyAny>,
+    values: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type)
+        || !mask.is_exact_instance(&ndarray_type)
+        || !values.is_exact_instance(&ndarray_type)
+    {
+        return Ok(false);
+    }
+    if mask.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+        return Ok(false);
+    }
+    let a_dtype = a.getattr("dtype")?;
+    let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    if !matches!(kind.as_str(), "i" | "u" | "f" | "b") {
+        return Ok(false);
+    }
+    // numpy casts values to a's dtype; only an identical dtype is a verbatim move.
+    if !a_dtype.eq(values.getattr("dtype")?)? {
+        return Ok(false);
+    }
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    let uname = match itemsize {
+        1 => "uint8",
+        2 => "uint16",
+        4 => "uint32",
+        8 => "uint64",
+        _ => return Ok(false),
+    };
+    let uview = numpy.getattr(uname)?;
+    let a_u = a.call_method1("view", (&uview,))?;
+    let v_u = values.call_method1("view", (&uview,))?;
+    match itemsize {
+        1 => putmask_scatter_typed::<u8>(py, &numpy, mask, &a_u, &v_u),
+        2 => putmask_scatter_typed::<u16>(py, &numpy, mask, &a_u, &v_u),
+        4 => putmask_scatter_typed::<u32>(py, &numpy, mask, &a_u, &v_u),
+        8 => putmask_scatter_typed::<u64>(py, &numpy, mask, &a_u, &v_u),
+        _ => Ok(false),
+    }
+}
+
 // Zero-copy in-place np.place(arr, mask, vals) for a writable float64 arr ndarray,
 // a bool mask of the identical shape, and a non-empty float64 vals ndarray.
 // numpy.place assigns the True positions in flat order, the k-th True taking
@@ -18275,6 +18390,12 @@ fn putmask(
     // buffer, skipping the cold extract/copy-back. Bit-identical; shape mismatch,
     // empty values, and other dtypes fall through.
     if try_zerocopy_f64_putmask(py, a, mask.bind(py), values.bind(py))? {
+        return Ok(py.None());
+    }
+    // All other fixed-width dtypes (narrow ints, int64/uint64, float32, bool):
+    // in-place scatter through a same-width unsigned view, skipping the cold
+    // extract/copy-back that widens narrow ints through f64. Bit-identical.
+    if try_zerocopy_any_putmask(py, a, mask.bind(py), values.bind(py))? {
         return Ok(py.None());
     }
 
