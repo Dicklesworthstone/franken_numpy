@@ -23127,35 +23127,38 @@ impl UFuncArray {
     /// by replacing NaN with `fill` before the reduction.
     /// Returns (filled array, per-lane NaN counts).
     fn nan_fill_for_axis(&self, axis: usize, fill: f64) -> (Self, Vec<usize>) {
-        let strides = c_strides_elems(&self.shape);
         let axis_len = self.shape[axis];
-        let outer_count = self.values.len().checked_div(axis_len).unwrap_or(0);
+        let out_count = self.values.len().checked_div(axis_len).unwrap_or(0);
+        let inner: usize = self.shape[axis + 1..].iter().product();
+        let outer: usize = self.shape[..axis].iter().product();
 
         let mut filled = self.values.clone();
-        let mut nan_counts = vec![0usize; outer_count];
+        let mut nan_counts = vec![0usize; out_count];
 
-        for (outer, nan_count) in nan_counts.iter_mut().enumerate() {
-            // Map outer index to multi-index skipping the reduction axis
-            let mut remainder = outer;
-            let mut base_flat = 0usize;
-            for (d, (&_s, &stride)) in self.shape.iter().zip(strides.iter()).enumerate() {
-                if d == axis {
-                    continue;
-                }
-                let outer_stride = if d < axis {
-                    strides[d] / axis_len
-                } else {
-                    strides[d]
-                };
-                let coord = remainder / outer_stride;
-                remainder %= outer_stride;
-                base_flat += coord * stride;
-            }
-            for k in 0..axis_len {
-                let idx = base_flat + k * strides[axis];
-                if filled[idx].is_nan() {
-                    filled[idx] = fill;
-                    *nan_count += 1;
+        // Cache-friendly fill+count. The previous form gathered each output column
+        // down the axis with stride `strides[axis]` (== `inner`) — a cache-line miss
+        // per element for any non-last axis. Here each outer block is swept row by
+        // row in CONTIGUOUS order: a NaN is replaced by `fill` in place and tallied
+        // into its column's `nan_counts` slot, so each cache line is touched once and
+        // the per-row fill/count zip autovectorizes. The output is bit-identical —
+        // value replacement is order-independent and the per-column counts are exact.
+        // For axis_len > 0, out_count == outer * inner, so column `c` of outer block
+        // `o` maps to output cell `o * inner + c` (row-major), matching the prior
+        // per-output-cell mapping.
+        if axis_len != 0 {
+            for o in 0..outer {
+                let base = o * axis_len * inner;
+                let counts = &mut nan_counts[o * inner..o * inner + inner];
+                for k in 0..axis_len {
+                    let row_base = base + k * inner;
+                    let row = &mut filled[row_base..row_base + inner];
+                    for (slot, cnt) in row.iter_mut().zip(counts.iter_mut()) {
+                        let is_nan = slot.is_nan();
+                        if is_nan {
+                            *slot = fill;
+                        }
+                        *cnt += is_nan as usize;
+                    }
                 }
             }
         }
@@ -49122,6 +49125,54 @@ print(json.dumps(payload))
     }
 
     #[test]
+    #[ignore = "perf A/B: cache-friendly nan_fill_for_axis(axis=0) vs strided gather; run --release -- --ignored --nocapture"]
+    fn nan_fill_axis0_ab_bench() {
+        use std::time::Instant;
+        let n = 2048usize;
+        // ~20% NaN scattered through the data.
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| {
+                if i % 5 == 2 {
+                    f64::NAN
+                } else {
+                    ((i % 101) as f64) * 0.01 - 0.5
+                }
+            })
+            .collect();
+        let a = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+        let iters = 50;
+        let _ = a.nan_fill_for_axis(0, 0.0);
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.nan_fill_for_axis(0, 0.0));
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = the literal strided per-output-cell gather (idx = base_flat + k*inner).
+        let inner = n;
+        let axis_len = n;
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut filled = data.clone();
+            let mut counts = vec![0usize; inner];
+            for (c, cnt) in counts.iter_mut().enumerate() {
+                for k in 0..axis_len {
+                    let idx = c + k * inner;
+                    if filled[idx].is_nan() {
+                        filled[idx] = 0.0;
+                        *cnt += 1;
+                    }
+                }
+            }
+            std::hint::black_box((&filled, &counts));
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "NAN_FILL_AXIS0 new={new_ms:.3}ms old={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
+    }
+
+    #[test]
     #[ignore = "perf A/B: register-blocked SIMD reduce_var(axis=0) vs strided serial sum-of-squares; run --release -- --ignored --nocapture"]
     fn reduce_var_axis0_simd_ab_bench() {
         use std::time::Instant;
@@ -51477,6 +51528,124 @@ print(json.dumps(payload))
         let r = a.nansum(Some(0), false).unwrap();
         assert_eq!(r.shape(), &[5]);
         assert_eq!(r.values(), &[0.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+
+    fn nan_fill_golden_data(rows: usize, cols: usize) -> Vec<f64> {
+        // 3 all-NaN columns (c % 7 == 0), scattered NaN, else finite — exercises the
+        // all-NaN -> NaN fix, partial-NaN columns, and clean columns.
+        let mut data = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                let cell = if c % 7 == 0 {
+                    f64::NAN
+                } else if (r * cols + c) % 11 == 3 {
+                    f64::NAN
+                } else {
+                    ((((r * 31 + c * 13 + 5) % 47) as f64) - 23.0) / 8.0
+                };
+                data.push(cell);
+            }
+        }
+        data
+    }
+
+    #[test]
+    fn nanmin_nanmax_axis0_golden_sha256() {
+        // The cache-friendly nan_fill_for_axis rewrite must keep nanmin/nanmax(axis=0)
+        // byte-exact. nanmin/nanmax are exact (min/max ignoring NaN), so the digests are
+        // cross-checked independently against numpy np.nanmin/np.nanmax(axis=0) of the
+        // identical [17,21] data (3 all-NaN columns -> NaN result).
+        let rows = 17usize;
+        let cols = 21usize;
+        let data = nan_fill_golden_data(rows, cols);
+        let a = UFuncArray::new(vec![rows, cols], data, DType::F64).unwrap();
+        let digest_of = |arr: &UFuncArray| -> String {
+            let mut d = Sha256::new();
+            for v in arr.values() {
+                d.update(v.to_bits().to_le_bytes());
+            }
+            d.finalize().iter().map(|b| format!("{b:02x}")).collect()
+        };
+        let mn = a.nanmin(Some(0), false).unwrap();
+        let mx = a.nanmax(Some(0), false).unwrap();
+        assert_eq!(mn.shape(), &[cols]);
+        assert_eq!(mx.shape(), &[cols]);
+        assert_eq!(
+            digest_of(&mn),
+            "c52361116eb3515813d40e48159c3b13a65632f95292149fe6aae9fc693a6204"
+        );
+        assert_eq!(
+            digest_of(&mx),
+            "102d83f15cce2bf0ec6f58f69c63b56b3ab90e556f1ffcf5f671f6f0e215d1ed"
+        );
+    }
+
+    #[test]
+    fn nan_fill_for_axis_matches_strided_reference() {
+        // The rewritten cache-friendly nan_fill_for_axis must produce the IDENTICAL
+        // (filled values, per-column NaN counts) as the original strided gather, across
+        // axis 0 / 1 of 2-D and 3-D shapes incl all-NaN columns. Reference recomputes
+        // both via the literal per-output-cell strided scan.
+        let shapes: &[Vec<usize>] = &[
+            vec![17, 21],
+            vec![21, 17],
+            vec![5, 4, 6],
+            vec![6, 5, 4],
+            vec![8, 8],
+        ];
+        for shape in shapes {
+            let n: usize = shape.iter().product();
+            let mut data = Vec::with_capacity(n);
+            for i in 0..n {
+                data.push(if i % 5 == 2 || i % 13 == 0 {
+                    f64::NAN
+                } else {
+                    ((i % 19) as f64) - 9.0
+                });
+            }
+            let a = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            for axis in 0..shape.len() {
+                let (filled, counts) = a.nan_fill_for_axis(axis, 0.0);
+                // Reference via the original strided per-output-cell algorithm.
+                // C-order (row-major) strides computed inline.
+                let mut strides = vec![1usize; shape.len()];
+                for d in (0..shape.len().saturating_sub(1)).rev() {
+                    strides[d] = strides[d + 1] * shape[d + 1];
+                }
+                let axis_len = shape[axis];
+                let out_count = data.len() / axis_len;
+                let mut ref_filled = data.clone();
+                let mut ref_counts = vec![0usize; out_count];
+                for (outer, nan_count) in ref_counts.iter_mut().enumerate() {
+                    let mut remainder = outer;
+                    let mut base_flat = 0usize;
+                    for (d, &stride) in strides.iter().enumerate() {
+                        if d == axis {
+                            continue;
+                        }
+                        let outer_stride = if d < axis {
+                            strides[d] / axis_len
+                        } else {
+                            strides[d]
+                        };
+                        let coord = remainder / outer_stride;
+                        remainder %= outer_stride;
+                        base_flat += coord * stride;
+                    }
+                    for k in 0..axis_len {
+                        let idx = base_flat + k * strides[axis];
+                        if ref_filled[idx].is_nan() {
+                            ref_filled[idx] = 0.0;
+                            *nan_count += 1;
+                        }
+                    }
+                }
+                assert_eq!(counts, ref_counts, "counts axis {axis} shape {shape:?}");
+                for (g, r) in filled.values().iter().zip(ref_filled.iter()) {
+                    assert_eq!(g.to_bits(), r.to_bits(), "filled axis {axis} shape {shape:?}");
+                }
+            }
+        }
     }
 
     #[test]
