@@ -943,6 +943,64 @@ fn solve_nxn_into_out(
     Ok(())
 }
 
+/// Multiple-RHS sibling of `solve_nxn_into_out`: solve `A·X = B` (B is `n*m`,
+/// row-major) writing the `n*m` solution directly into `out`, reusing the caller's
+/// lu/perm scratch. Byte-identical to `solve_nxn_multi`'s unblocked path (the only
+/// path reachable for `n < LU_BLOCK_MIN`, since the blocked TRSM needs
+/// `n >= TRSM_BLOCK_MIN`); non-finite inputs defer to `solve_nxn_multi`.
+fn solve_nxn_multi_into_out(
+    a: &[f64],
+    b: &[f64],
+    n: usize,
+    m: usize,
+    lu: &mut [f64],
+    perm: &mut [usize],
+    out: &mut [f64],
+) -> Result<(), LinAlgError> {
+    if b.len() != n * m || out.len() != n * m {
+        return Err(LinAlgError::ShapeContractViolation(
+            "solve_nxn_multi_into_out: b and out length must equal n*m",
+        ));
+    }
+    if a.iter().any(|value| !value.is_finite()) {
+        let solved = solve_nxn_multi(a, b, n, m)?;
+        out.copy_from_slice(&solved);
+        return Ok(());
+    }
+    let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let singularity_threshold = (n as f64) * f64::EPSILON * matrix_max_abs;
+    lu_factor_unblocked_into(a, n, singularity_threshold, lu, perm)?;
+    // Permutation (Pb) + unit-lower forward + upper back, into `out` (byte-identical
+    // to lu_forward_back_multi's unblocked form).
+    for i in 0..n {
+        let p_i = perm[i];
+        for col in 0..m {
+            out[i * m + col] = b[p_i * m + col];
+        }
+    }
+    for i in 1..n {
+        for j in 0..i {
+            let l_ij = lu[i * n + j];
+            for col in 0..m {
+                out[i * m + col] -= l_ij * out[j * m + col];
+            }
+        }
+    }
+    for i in (0..n).rev() {
+        for j in (i + 1)..n {
+            let u_ij = lu[i * n + j];
+            for col in 0..m {
+                out[i * m + col] -= u_ij * out[j * m + col];
+            }
+        }
+        let u_ii = lu[i * n + i];
+        for col in 0..m {
+            out[i * m + col] /= u_ii;
+        }
+    }
+    Ok(())
+}
+
 /// Determinant of an NxN matrix (flat row-major).  Returns 0.0 for singular
 /// matrices instead of erroring.
 pub fn det_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
@@ -6069,15 +6127,23 @@ pub fn batch_solve(
         ));
     }
 
-    if vector_rhs && n < LU_BLOCK_MIN {
-        // Vector-RHS small/medium solves: write each lane's solution DIRECTLY into the
-        // flat output through per-thread reusable (lu, perm) scratch — no per-lane Vec,
-        // no Vec<Vec> collection, no flatten, ZERO per-lane allocation (the regime
-        // where the original per-lane lu+perm+x allocs dwarf the O(n^3) compute). The
-        // LU + forward/back is byte-for-byte identical to per-lane solve_nxn
-        // (solve_nxn_into_out shares lu_factor_unblocked_into and the same
-        // substitution). The lowest-indexed failing lane's error is returned, matching
-        // the batch_map_lanes ordering.
+    // Matrix-RHS does m columns of substitution per lane, so its per-lane compute
+    // (~O(n²·m)) overtakes the constant per-lane alloc cost at a much smaller n than
+    // vector-RHS: same-worker A/B shows matrix-RHS 3.3x @ n=3, 1.3-1.6x @ n=8, but
+    // only ~neutral (0.9-1.1x, noise) at n>=16. Gate the matrix scratch path to the
+    // small-n regime where it clearly wins; vector-RHS stays unrestricted (neutral-to
+    // -positive all the way to LU_BLOCK_MIN since its alloc savings never go negative).
+    const MATRIX_RHS_SCRATCH_MAX_N: usize = 16;
+    if n < LU_BLOCK_MIN && (vector_rhs || n < MATRIX_RHS_SCRATCH_MAX_N) {
+        // Small/medium batched solve (vector OR matrix RHS): write each lane's solution
+        // DIRECTLY into the flat output through per-thread reusable (lu, perm) scratch —
+        // no per-lane Vec, no Vec<Vec> collection, no flatten, ZERO per-lane allocation
+        // (the regime where the per-lane lu+perm+X allocs dwarf the O(n^3) compute; the
+        // matrix-RHS X is n*rhs_cols, so eliminating it helps even more). The LU +
+        // forward/back is byte-for-byte identical to per-lane solve_nxn[_multi]
+        // (the *_into_out helpers share lu_factor_unblocked_into and the same
+        // substitution; n < LU_BLOCK_MIN keeps the unblocked TRSM). The lowest-indexed
+        // failing lane's error is returned, matching the batch_map_lanes ordering.
         let mut result = vec![0.0f64; batch * rhs_width];
         let lane_inputs = |idx: usize| {
             let a_idx = if a_batch == 1 { 0 } else { idx };
@@ -6087,6 +6153,18 @@ pub fn batch_solve(
                 &b[b_idx * rhs_width..(b_idx + 1) * rhs_width],
             )
         };
+        let solve_into = |a_sub: &[f64],
+                          b_sub: &[f64],
+                          lu: &mut [f64],
+                          perm: &mut [usize],
+                          out: &mut [f64]|
+         -> Result<(), LinAlgError> {
+            if vector_rhs {
+                solve_nxn_into_out(a_sub, b_sub, n, lu, perm, out)
+            } else {
+                solve_nxn_multi_into_out(a_sub, b_sub, n, rhs_cols, lu, perm, out)
+            }
+        };
         if batch_should_parallelize(batch, mat_size + rhs_width) {
             use std::sync::Mutex;
             let first_err: Mutex<Option<(usize, LinAlgError)>> = Mutex::new(None);
@@ -6094,7 +6172,7 @@ pub fn batch_solve(
                 || (vec![0.0f64; mat_size], vec![0usize; n]),
                 |(lu, perm), (idx, out_chunk)| {
                     let (a_sub, b_sub) = lane_inputs(idx);
-                    if let Err(e) = solve_nxn_into_out(a_sub, b_sub, n, lu, perm, out_chunk) {
+                    if let Err(e) = solve_into(a_sub, b_sub, lu, perm, out_chunk) {
                         let mut slot = first_err.lock().unwrap();
                         let replace = match slot.as_ref() {
                             None => true,
@@ -6114,7 +6192,7 @@ pub fn batch_solve(
             let mut perm = vec![0usize; n];
             for (idx, out_chunk) in result.chunks_mut(rhs_width).enumerate() {
                 let (a_sub, b_sub) = lane_inputs(idx);
-                solve_nxn_into_out(a_sub, b_sub, n, &mut lu, &mut perm, out_chunk)?;
+                solve_into(a_sub, b_sub, &mut lu, &mut perm, out_chunk)?;
             }
         }
         return Ok(result);
@@ -8839,6 +8917,99 @@ mod tests {
             for (i, (g, r)) in got.iter().zip(&reference).enumerate() {
                 assert_eq!(g.to_bits(), r.to_bits(), "n={n} lane-flat index {i} diverged");
             }
+        }
+    }
+
+    #[test]
+    fn batch_solve_matrix_scratch_matches_per_lane_solve_nxn_multi_bits() {
+        // Matrix-RHS zero-alloc path must be BYTE-IDENTICAL to per-lane solve_nxn_multi.
+        for &(n, m) in &[(2usize, 3usize), (3, 2), (5, 4), (8, 8), (16, 5)] {
+            let batch = 2048usize;
+            let ms = n * n;
+            let rw = n * m;
+            let a: Vec<f64> = (0..batch * ms)
+                .map(|i| {
+                    let cell = i % ms;
+                    let (r, c) = (cell / n, cell % n);
+                    if r == c {
+                        n as f64 + 2.0 + ((i / ms) % 5) as f64
+                    } else {
+                        (((i % 11) as f64) - 5.0) * 0.1
+                    }
+                })
+                .collect();
+            let b: Vec<f64> = (0..batch * rw)
+                .map(|i| (((i % 19) as f64) - 9.0) * 0.2)
+                .collect();
+            let a_shape = [batch, n, n];
+            let b_shape = [batch, n, m];
+            let got = super::batch_solve(&a, &a_shape, &b, &b_shape, false).expect("batch_solve");
+            let mut reference = Vec::with_capacity(batch * rw);
+            for lane in 0..batch {
+                let x = super::solve_nxn_multi(
+                    &a[lane * ms..(lane + 1) * ms],
+                    &b[lane * rw..(lane + 1) * rw],
+                    n,
+                    m,
+                )
+                .expect("solve_nxn_multi");
+                reference.extend_from_slice(&x);
+            }
+            assert_eq!(got.len(), reference.len());
+            for (i, (g, r)) in got.iter().zip(&reference).enumerate() {
+                assert_eq!(g.to_bits(), r.to_bits(), "n={n} m={m} index {i} diverged");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B bench; run with --release -- --ignored --nocapture"]
+    fn batch_solve_matrix_scratch_ab_bench() {
+        use rayon::prelude::*;
+        use std::time::Instant;
+        for &(n, m) in &[(3usize, 3usize), (8, 8), (16, 8), (32, 8)] {
+            let batch = (1usize << 22) / (n * n + n * m);
+            let ms = n * n;
+            let rw = n * m;
+            let a: Vec<f64> = (0..batch * ms)
+                .map(|i| {
+                    let cell = i % ms;
+                    let (r, c) = (cell / n, cell % n);
+                    if r == c { n as f64 + 2.0 } else { ((i % 11) as f64 - 5.0) * 0.1 }
+                })
+                .collect();
+            let b: Vec<f64> = (0..batch * rw).map(|i| (i % 19) as f64 - 9.0).collect();
+            let a_shape = [batch, n, n];
+            let b_shape = [batch, n, m];
+            let old = || -> usize {
+                let lanes: Vec<Vec<f64>> = (0..batch)
+                    .into_par_iter()
+                    .map(|i| {
+                        super::solve_nxn_multi(&a[i * ms..(i + 1) * ms], &b[i * rw..(i + 1) * rw], n, m)
+                            .unwrap()
+                    })
+                    .collect();
+                let mut out = Vec::with_capacity(batch * rw);
+                for x in &lanes {
+                    out.extend_from_slice(x);
+                }
+                out.len()
+            };
+            let new = || -> usize {
+                super::batch_solve(&a, &a_shape, &b, &b_shape, false).unwrap().len()
+            };
+            let _ = old();
+            let _ = new();
+            let t = Instant::now();
+            std::hint::black_box(old());
+            let old_ms = t.elapsed().as_secs_f64() * 1e3;
+            let t = Instant::now();
+            std::hint::black_box(new());
+            let new_ms = t.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                "batch_solve_multi n={n:2} m={m:2} batch={batch:8}: per-lane={old_ms:8.2}ms scratch={new_ms:8.2}ms speedup={:.2}x",
+                old_ms / new_ms
+            );
         }
     }
 
