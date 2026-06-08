@@ -21763,35 +21763,73 @@ impl UFuncArray {
                     let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                     let axis_len = self.shape[ax_idx];
                     let inner: usize = self.shape[ax_idx + 1..].iter().copied().product();
-                    // Each output cell is an independent per-lane min/max scan, so
-                    // mapping over the flattened output index is bit-for-bit identical
-                    // to the serial o-major/i-minor loop (same per-lane ascending
-                    // scan, same signed-zero/NaN handling) and parallelizes across
-                    // the independent lanes. `of` decodes to lane (o, i) with stride
-                    // `inner` down the axis.
+                    let outer: usize = self.shape[..ax_idx].iter().copied().product();
                     let values = &self.values;
+                    const PTP_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                    let parallel = out_count >= 2
+                        && self.values.len() >= PTP_AXIS_PARALLEL_MIN_ELEMS
+                        && rayon::current_num_threads() >= 2;
+                    if inner > 1 {
+                        // Non-last axis: the per-lane scan would stride by `inner`
+                        // (cache-thrashing for axis 0). Instead reduce one OUTER block
+                        // at a time over CONTIGUOUS rows into min/max/any_nan buffers of
+                        // length `inner` — each buffer cell still scans its lane in axis-
+                        // ascending order (bit-identical signed-zero/NaN handling), but
+                        // the per-row buffer update is an independent element-wise min/
+                        // max over a contiguous row, which the compiler autovectorizes.
+                        let block_ptp = |(o, out_block): (usize, &mut [f64])| {
+                            let base = o * axis_len * inner;
+                            let mut mn = values[base..base + inner].to_vec();
+                            let mut mx = mn.clone();
+                            let mut nan = vec![false; inner];
+                            for i in 0..inner {
+                                nan[i] = mn[i].is_nan();
+                            }
+                            for a in 1..axis_len {
+                                let row = &values[base + a * inner..base + a * inner + inner];
+                                for i in 0..inner {
+                                    let v = row[i];
+                                    nan[i] |= v.is_nan();
+                                    mn[i] = if mn[i] < v { mn[i] } else { v };
+                                    mx[i] = if mx[i] > v { mx[i] } else { v };
+                                }
+                            }
+                            for i in 0..inner {
+                                out_block[i] = if nan[i] { f64::NAN } else { mx[i] - mn[i] };
+                            }
+                        };
+                        let mut out = vec![0.0f64; out_count];
+                        if parallel && outer >= 2 {
+                            out.par_chunks_mut(inner).enumerate().for_each(block_ptp);
+                        } else {
+                            out.chunks_mut(inner).enumerate().for_each(block_ptp);
+                        }
+                        return Ok(Self {
+                            shape: out_shape,
+                            values: out,
+                            dtype: self.dtype,
+                            integer_sidecar: None,
+                        });
+                    }
+                    // Last axis (inner == 1): each lane is a contiguous run; the per-
+                    // lane scan over the flattened output index is bit-for-bit identical
+                    // to the serial loop and parallelizes across the independent lanes.
                     let lane_ptp = |of: usize| -> f64 {
-                        let o = of / inner;
-                        let i = of % inner;
-                        let mut off = o * axis_len * inner + i;
+                        let mut off = of * axis_len;
                         let first = values[off];
                         let (mut mn, mut mx) = (first, first);
                         let mut any_nan = first.is_nan();
-                        off += inner;
+                        off += 1;
                         for _ in 1..axis_len {
                             let v = values[off];
                             any_nan |= v.is_nan();
                             mn = if mn < v { mn } else { v };
                             mx = if mx > v { mx } else { v };
-                            off += inner;
+                            off += 1;
                         }
                         if any_nan { f64::NAN } else { mx - mn }
                     };
-                    const PTP_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-                    let out: Vec<f64> = if out_count >= 2
-                        && self.values.len() >= PTP_AXIS_PARALLEL_MIN_ELEMS
-                        && rayon::current_num_threads() >= 2
-                    {
+                    let out: Vec<f64> = if parallel {
                         (0..out_count).into_par_iter().map(lane_ptp).collect()
                     } else {
                         (0..out_count).map(lane_ptp).collect()
