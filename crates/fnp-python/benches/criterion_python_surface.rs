@@ -511,6 +511,47 @@ fn bench_frexp_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_modf_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_modf_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let input = numpy
+            .call_method1(
+                "linspace",
+                (-1_000_000.75_f64, 1_000_000.75_f64, 1_000_000_usize),
+            )
+            .expect("1M f64 input");
+        let fnp_modf = module.getattr("modf").expect("fnp_python.modf");
+        let numpy_modf = numpy.getattr("modf").expect("numpy.modf");
+
+        group.bench_function("fnp_modf_f64_1m", |bench| {
+            bench.iter(|| {
+                let result = fnp_modf.call1((&input,)).expect("fnp modf benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_modf_f64_1m", |bench| {
+            bench.iter(|| {
+                let result = numpy_modf
+                    .call1((&input,))
+                    .expect("numpy modf benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_shift_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_shift_boundary");
     group.sample_size(10);
@@ -889,6 +930,7 @@ criterion_group!(
     bench_ldexp_boundary,
     bench_float_power_boundary,
     bench_frexp_boundary,
+    bench_modf_boundary,
     bench_shift_boundary,
     bench_concat_hstack_boundary,
     bench_char_ascii_boundary,
