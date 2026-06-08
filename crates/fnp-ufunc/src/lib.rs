@@ -10852,19 +10852,40 @@ impl UFuncArray {
                                 integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
                             });
                         }
-                        let mut lane_indices = vec![0usize; axis_len];
-                        for outer_idx in 0..outer {
-                            let base = outer_idx * axis_len * inner;
-                            for inner_idx in 0..inner {
-                                for (k, idx) in lane_indices.iter_mut().enumerate() {
-                                    *idx = base + k * inner + inner_idx;
-                                }
-                                sort_value_indices_by_kind(&mut lane_indices, &values, kind);
-                                for (k, &src) in lane_indices.iter().enumerate() {
-                                    let dst = base + k * inner + inner_idx;
-                                    out_values[dst] = values[src] as f64;
-                                    source_indices[dst] = src;
-                                }
+                        // Non-last-axis integer sort: each output column (outer_idx,
+                        // inner_idx) sorts an independent strided lane of GLOBAL indices by
+                        // the same deterministic sort_value_indices_by_kind (radix for
+                        // length >= 256). Sorting every column in a parallel map (each task
+                        // builds + sorts its own index buffer, reading the shared `values`
+                        // immutably) is bit-for-bit identical to the serial loop for any
+                        // thread count; the strided scatter of values + source_indices is
+                        // done serially (cheap O(n)). The previous form ran fully SERIAL.
+                        let n_lanes = outer * inner;
+                        let sort_cell = |cell: usize| -> Vec<usize> {
+                            let outer_idx = cell / inner;
+                            let inner_idx = cell % inner;
+                            let base = outer_idx * axis_len * inner + inner_idx;
+                            let mut lane_indices: Vec<usize> =
+                                (0..axis_len).map(|k| base + k * inner).collect();
+                            sort_value_indices_by_kind(&mut lane_indices, &values, kind);
+                            lane_indices
+                        };
+                        const SORT_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                        let lanes: Vec<Vec<usize>> = if n_lanes >= 2
+                            && values.len() >= SORT_AXIS_PARALLEL_MIN_ELEMS
+                            && rayon::current_num_threads() >= 2
+                        {
+                            (0..n_lanes).into_par_iter().map(sort_cell).collect()
+                        } else {
+                            (0..n_lanes).map(sort_cell).collect()
+                        };
+                        for (cell, lane_indices) in lanes.into_iter().enumerate() {
+                            let outer_idx = cell / inner;
+                            let inner_idx = cell % inner;
+                            let base = outer_idx * axis_len * inner + inner_idx;
+                            for (k, src) in lane_indices.into_iter().enumerate() {
+                                out_values[base + k * inner] = values[src] as f64;
+                                source_indices[base + k * inner] = src;
                             }
                         }
 
@@ -10944,19 +10965,35 @@ impl UFuncArray {
                                 integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
                             });
                         }
-                        let mut lane_indices = vec![0usize; axis_len];
-                        for outer_idx in 0..outer {
-                            let base = outer_idx * axis_len * inner;
-                            for inner_idx in 0..inner {
-                                for (k, idx) in lane_indices.iter_mut().enumerate() {
-                                    *idx = base + k * inner + inner_idx;
-                                }
-                                sort_value_indices_by_kind(&mut lane_indices, &values, kind);
-                                for (k, &src) in lane_indices.iter().enumerate() {
-                                    let dst = base + k * inner + inner_idx;
-                                    out_values[dst] = values[src] as f64;
-                                    source_indices[dst] = src;
-                                }
+                        // Non-last-axis integer sort (parallel over independent strided
+                        // columns; see the I64 arm for the isomorphism argument). Bit-for-
+                        // bit identical to the serial loop for any thread count.
+                        let n_lanes = outer * inner;
+                        let sort_cell = |cell: usize| -> Vec<usize> {
+                            let outer_idx = cell / inner;
+                            let inner_idx = cell % inner;
+                            let base = outer_idx * axis_len * inner + inner_idx;
+                            let mut lane_indices: Vec<usize> =
+                                (0..axis_len).map(|k| base + k * inner).collect();
+                            sort_value_indices_by_kind(&mut lane_indices, &values, kind);
+                            lane_indices
+                        };
+                        const SORT_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                        let lanes: Vec<Vec<usize>> = if n_lanes >= 2
+                            && values.len() >= SORT_AXIS_PARALLEL_MIN_ELEMS
+                            && rayon::current_num_threads() >= 2
+                        {
+                            (0..n_lanes).into_par_iter().map(sort_cell).collect()
+                        } else {
+                            (0..n_lanes).map(sort_cell).collect()
+                        };
+                        for (cell, lane_indices) in lanes.into_iter().enumerate() {
+                            let outer_idx = cell / inner;
+                            let inner_idx = cell % inner;
+                            let base = outer_idx * axis_len * inner + inner_idx;
+                            for (k, src) in lane_indices.into_iter().enumerate() {
+                                out_values[base + k * inner] = values[src] as f64;
+                                source_indices[base + k * inner] = src;
                             }
                         }
 
@@ -43870,6 +43907,47 @@ print(json.dumps(payload))
                                 ref_sorted.values()[k].to_bits(),
                                 "{shape:?} ax{axis} col(o{o},i{i}) k{k} diverged"
                             );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sort_non_last_axis_int_parallel_matches_per_slice_reference() {
+        // The now-parallel non-last-axis INTEGER sort (i64/u64 sidecar paths) must be
+        // bit-for-bit identical to fnp's OWN 1-D int sort applied per column, preserving
+        // the exact integer values (via the sidecar) and dtype. [200,100]=20000 > 1<<14
+        // engages the parallel path; 3-D covers inner>1, outer>1.
+        for &dt in &[DType::I64, DType::U64] {
+            let cases: &[Vec<usize>] = &[vec![200, 100], vec![64, 4, 33]];
+            for shape in cases {
+                let n: usize = shape.iter().product();
+                let data: Vec<f64> = (0..n)
+                    .map(|i| ((i as u64).wrapping_mul(2654435761) % 100003) as f64)
+                    .collect();
+                let arr = UFuncArray::new(shape.clone(), data.clone(), dt).unwrap();
+                for axis in 0..shape.len() - 1 {
+                    let axis_len = shape[axis];
+                    let inner: usize = shape[axis + 1..].iter().product();
+                    let outer: usize = shape[..axis].iter().product();
+                    let out = arr.sort(Some(axis as isize), Some("quicksort")).unwrap();
+                    assert_eq!(out.dtype(), dt, "dtype preserved {shape:?} ax{axis}");
+                    for o in 0..outer {
+                        for i in 0..inner {
+                            let base = o * axis_len * inner + i;
+                            let col: Vec<f64> =
+                                (0..axis_len).map(|k| data[base + k * inner]).collect();
+                            let col_arr = UFuncArray::new(vec![axis_len], col, dt).unwrap();
+                            let ref_sorted = col_arr.sort(None, Some("quicksort")).unwrap();
+                            for k in 0..axis_len {
+                                assert_eq!(
+                                    out.values()[base + k * inner].to_bits(),
+                                    ref_sorted.values()[k].to_bits(),
+                                    "{dt:?} {shape:?} ax{axis} col(o{o},i{i}) k{k} diverged"
+                                );
+                            }
                         }
                     }
                 }
