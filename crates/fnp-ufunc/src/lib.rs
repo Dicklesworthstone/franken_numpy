@@ -18593,33 +18593,58 @@ impl UFuncArray {
         if m == 0 {
             return Err(UFuncError::Msg("v cannot be empty".to_string()));
         }
-        // Compute full convolution. Gather form of the scatter `full[i+j] +=
-        // a[i]*k[j]` loop: each output p sums a[i]*k[p-i] over the contributing i.
-        // In the scatter, contributions to a fixed p arrive in i-ascending order;
-        // iterating i ascending here reproduces that exact FP accumulation order, so
-        // the result is bit-for-bit identical. Output positions are independent, so
-        // an indexed parallel map is bit-exact for any thread count.
+        // Compute the full convolution with the SCATTER form `full[i+j] +=
+        // a[i]*k[j]`. For a fixed output p, its contributions arrive as the outer
+        // loop visits i ascending — the exact i-ascending order the gather form
+        // (`sum_i a[i]*k[p-i]`) produces, so the result is bit-for-bit identical.
+        // Unlike the gather's reversed `k[p-i]` reduction (which cannot vectorize
+        // without reordering the non-associative f64 adds), the scatter's inner loop
+        // is a SAXPY over contiguous, forward slices (`full[i..i+m] += a[i]*k[..]`)
+        // that the compiler autovectorizes.
         let full_len = n + m - 1;
         let a = &self.values;
         let k = &kernel.values;
-        let conv_at = |p: usize| -> f64 {
-            let i_lo = p.saturating_sub(m - 1);
-            let i_hi = p.min(n - 1);
-            let mut acc = 0.0f64;
-            for i in i_lo..=i_hi {
-                acc += a[i] * k[p - i];
-            }
-            acc
-        };
+        let mut full = vec![0.0f64; full_len];
         const CONVOLVE_PARALLEL_MIN_ELEMS: usize = 1 << 12;
-        let full: Vec<f64> = if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
+        if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
             && n.min(m) >= 2
             && rayon::current_num_threads() >= 2
         {
-            (0..full_len).into_par_iter().map(conv_at).collect()
+            // Parallelize over DISJOINT output blocks: each block writes only its own
+            // slice of `full`, scattering the contributions of the i that overlap it
+            // (i visited ascending, so each output keeps the bit-exact accumulation
+            // order). Blocks never share an output index, so this is conflict-free
+            // and identical for any thread/chunk count.
+            let threads = rayon::current_num_threads();
+            let chunk = (full_len / (threads * 2)).max(m).max(1);
+            full.par_chunks_mut(chunk).enumerate().for_each(|(c, out)| {
+                let lo = c * chunk;
+                let hi = lo + out.len();
+                let i_start = lo.saturating_sub(m - 1);
+                let i_end = hi.min(n);
+                for i in i_start..i_end {
+                    let ai = a[i];
+                    let j0 = lo.saturating_sub(i);
+                    let j1 = m.min(hi - i);
+                    if j0 >= j1 {
+                        continue;
+                    }
+                    let out_off = i + j0 - lo;
+                    for (d, &kv) in out[out_off..out_off + (j1 - j0)]
+                        .iter_mut()
+                        .zip(k[j0..j1].iter())
+                    {
+                        *d += ai * kv;
+                    }
+                }
+            });
         } else {
-            (0..full_len).map(conv_at).collect()
-        };
+            for (i, &ai) in a.iter().enumerate() {
+                for (d, &kv) in full[i..i + m].iter_mut().zip(k.iter()) {
+                    *d += ai * kv;
+                }
+            }
+        }
         // Trim based on mode
         let values = match mode {
             "full" => full,
