@@ -749,6 +749,7 @@ dependencies = [
  "fnp-random",
  "fnp-ufunc",
  "pyo3",
+ "rayon",
 ]
 
 [[package]]

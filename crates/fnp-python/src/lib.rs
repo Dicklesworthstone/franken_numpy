@@ -7593,6 +7593,8 @@ fn zerocopy_f64_binary_flat<'py>(
     b: &Bound<'py, PyAny>,
     op: BinaryOp,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    const FLOAT_POWER_PARALLEL_MIN_LEN: usize = 16_384;
+
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.get_type().is(&ndarray_type) || !b.get_type().is(&ndarray_type) {
         return Ok(None);
@@ -7619,8 +7621,23 @@ fn zerocopy_f64_binary_flat<'py>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
-            slot.set(op.apply(a_cell.get(), b_cell.get()));
+        if matches!(op, BinaryOp::FloatPower) && n >= FLOAT_POWER_PARALLEL_MIN_LEN {
+            use rayon::prelude::*;
+
+            let lhs: Vec<f64> = a_in.iter().map(|cell| cell.get()).collect();
+            let rhs: Vec<f64> = b_in.iter().map(|cell| cell.get()).collect();
+            let values: Vec<f64> = lhs
+                .par_iter()
+                .zip(rhs.par_iter())
+                .map(|(&base, &exp)| base.powf(exp))
+                .collect();
+            for (slot, value) in output.iter().zip(values) {
+                slot.set(value);
+            }
+        } else {
+            for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+                slot.set(op.apply(a_cell.get(), b_cell.get()));
+            }
         }
     }
     Ok(Some((flat, shape)))
