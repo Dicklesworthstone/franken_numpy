@@ -17328,8 +17328,11 @@ impl UFuncArray {
         let strides = c_strides_elems(&self.shape);
         let total: usize = fnp_ndarray::element_count(&self.shape).map_err(UFuncError::Shape)?;
         let out_strides = c_strides_elems(&self.shape);
-        let values: Vec<f64> = (0..total)
-            .map(|flat| {
+        // Each output element is a pure function of `flat` (reads strided neighbours of
+        // the input, no shared state), so an indexed parallel map over the flat range is
+        // bit-for-bit identical to the serial loop for any thread count. The previous
+        // form ran fully serial.
+        let compute = |flat: usize| -> f64 {
                 let mut rem = flat;
                 let mut k_val = 0usize;
                 for (d, &stride) in out_strides.iter().enumerate() {
@@ -17397,8 +17400,15 @@ impl UFuncArray {
                         (f(k_val + 1) - f(k_val - 1)) / 2.0
                     }
                 }
-            })
-            .collect();
+        };
+        const GRADIENT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+        let values: Vec<f64> = if total >= GRADIENT_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+        {
+            (0..total).into_par_iter().map(compute).collect()
+        } else {
+            (0..total).map(compute).collect()
+        };
         Ok(Self {
             shape: self.shape.clone(),
             values,
@@ -54312,6 +54322,95 @@ print(json.dumps(payload))
         // edge_order=2 requires at least 3 elements
         let a = UFuncArray::new(vec![2], vec![1.0, 2.0], DType::F64).unwrap();
         assert!(a.gradient_advanced(None, 2, None).is_err());
+    }
+
+    #[test]
+    fn gradient_parallel_matches_per_slice_reference() {
+        // The now-parallel gradient_advanced must be bit-for-bit identical to fnp's OWN
+        // 1-D gradient applied per axis-slice (the exact same edge/interior formulas, run
+        // serially because a 1-D slice is below the parallel threshold). [200,100]=20000
+        // elements > 1<<14 engages the parallel path. Covers axis 0/1 and edge_order 1/2.
+        let (rows, cols) = (200usize, 100usize);
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 13.0 - 200.0)
+            .collect();
+        let a = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).unwrap();
+        for eo in [1usize, 2usize] {
+            // axis 0: output column c == 1-D gradient of column c.
+            let g0 = a.gradient_advanced(Some(0), eo, None).unwrap();
+            for c in 0..cols {
+                let col: Vec<f64> = (0..rows).map(|r| data[r * cols + c]).collect();
+                let col_arr = UFuncArray::new(vec![rows], col, DType::F64).unwrap();
+                let ref_col = col_arr.gradient_advanced(None, eo, None).unwrap();
+                for r in 0..rows {
+                    assert_eq!(
+                        g0.values()[r * cols + c].to_bits(),
+                        ref_col.values()[r].to_bits(),
+                        "gradient axis0 eo{eo} ({r},{c}) diverged"
+                    );
+                }
+            }
+            // axis 1: output row r == 1-D gradient of row r.
+            let g1 = a.gradient_advanced(Some(1), eo, None).unwrap();
+            for r in 0..rows {
+                let row: Vec<f64> = data[r * cols..(r + 1) * cols].to_vec();
+                let row_arr = UFuncArray::new(vec![cols], row, DType::F64).unwrap();
+                let ref_row = row_arr.gradient_advanced(None, eo, None).unwrap();
+                for c in 0..cols {
+                    assert_eq!(
+                        g1.values()[r * cols + c].to_bits(),
+                        ref_row.values()[c].to_bits(),
+                        "gradient axis1 eo{eo} ({r},{c}) diverged"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B: parallel gradient vs serial; run --release -- --ignored --nocapture"]
+    fn gradient_parallel_ab_bench() {
+        use std::time::Instant;
+        let (rows, cols) = (4000usize, 4000usize);
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 13.0 - 200.0)
+            .collect();
+        let a = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).unwrap();
+        let iters = 20;
+        let _ = a.gradient_advanced(Some(0), 1, None).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.gradient_advanced(Some(0), 1, None).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = the literal serial map over the same per-element closure. Axis 0 of a
+        // [rows,cols] C-order array has stride `cols`.
+        let stride = cols;
+        let n = rows;
+        let total = rows * cols;
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let out: Vec<f64> = (0..total)
+                .map(|flat| {
+                    let k_val = (flat / stride) % n;
+                    let base = flat - k_val * stride;
+                    let f = |k: usize| data[base + k * stride];
+                    if k_val == 0 {
+                        f(1) - f(0)
+                    } else if k_val == n - 1 {
+                        f(n - 1) - f(n - 2)
+                    } else {
+                        (f(k_val + 1) - f(k_val - 1)) / 2.0
+                    }
+                })
+                .collect();
+            std::hint::black_box(&out);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "GRADIENT_AXIS0 new={new_ms:.3}ms old_serial={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
     }
 
     #[test]
