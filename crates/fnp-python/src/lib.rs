@@ -9693,6 +9693,110 @@ fn try_zerocopy_any_putmask(
     }
 }
 
+// Generic in-place masked scatter for np.place over an unsigned-integer view of
+// the writable array and the values array (both already viewed as the same width
+// `T`). numpy.place assigns the True positions in flat order, the k-th True taking
+// values.flat[k % values.size] — it cycles values by the RUNNING True count
+// (unlike putmask, which cycles by flat position). The move is value-agnostic, so
+// a same-width typed store is bit-identical (incl. nan/inf/signed zeros) and
+// mutates arr's own buffer. The wrapped index is tracked with a counter+reset
+// instead of a per-element modulo (the reset never fires when v >= the number of
+// True positions). Returns Ok(false) on shape mismatch, empty values, a read-only/
+// non-contiguous array, or a buffer-protocol failure.
+fn place_scatter_typed<T: pyo3::buffer::Element + Copy>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    mask: &Bound<'_, PyAny>,
+    a_view: &Bound<'_, PyAny>,
+    val_view: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let mask_u8 = mask.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let (Ok(a_buffer), Ok(mask_buffer), Ok(val_buffer)) = (
+        PyBuffer::<T>::get(a_view),
+        PyBuffer::<u8>::get(&mask_u8),
+        PyBuffer::<T>::get(val_view),
+    ) else {
+        return Ok(false);
+    };
+    if a_buffer.shape() != mask_buffer.shape() {
+        return Ok(false);
+    }
+    let (Some(mask_in), Some(val_in)) = (mask_buffer.as_slice(py), val_buffer.as_slice(py)) else {
+        return Ok(false);
+    };
+    let v = val_in.len();
+    if v == 0 {
+        return Ok(false);
+    }
+    let Some(a_out) = a_buffer.as_mut_slice(py) else {
+        return Ok(false);
+    };
+    let mut k = 0usize;
+    for (slot, mask_cell) in a_out.iter().zip(mask_in.iter()) {
+        if mask_cell.get() != 0 {
+            slot.set(val_in[k].get());
+            k += 1;
+            if k == v {
+                k = 0;
+            }
+        }
+    }
+    Ok(true)
+}
+
+// All-width zero-copy np.place: the f64 helper covers only float64, leaving narrow
+// ints, int64/uint64, float32 and bool on the cold extract path (6-8x slower).
+// place cycles values by the running True count but still moves elements verbatim,
+// so dispatch by itemsize through a same-width UNSIGNED view of both the array and
+// the values (the array view aliases its own buffer, so the scatter is in-place).
+// Requires arr and values to share an identical dtype (numpy otherwise casts —
+// deferred to the fallback) and a bool mask. complex / mismatched dtypes return
+// Ok(false).
+fn try_zerocopy_any_place(
+    py: Python<'_>,
+    arr: &Bound<'_, PyAny>,
+    mask: &Bound<'_, PyAny>,
+    vals: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !arr.is_exact_instance(&ndarray_type)
+        || !mask.is_exact_instance(&ndarray_type)
+        || !vals.is_exact_instance(&ndarray_type)
+    {
+        return Ok(false);
+    }
+    if mask.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+        return Ok(false);
+    }
+    let a_dtype = arr.getattr("dtype")?;
+    let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    if !matches!(kind.as_str(), "i" | "u" | "f" | "b") {
+        return Ok(false);
+    }
+    if !a_dtype.eq(vals.getattr("dtype")?)? {
+        return Ok(false);
+    }
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    let uname = match itemsize {
+        1 => "uint8",
+        2 => "uint16",
+        4 => "uint32",
+        8 => "uint64",
+        _ => return Ok(false),
+    };
+    let uview = numpy.getattr(uname)?;
+    let a_u = arr.call_method1("view", (&uview,))?;
+    let v_u = vals.call_method1("view", (&uview,))?;
+    match itemsize {
+        1 => place_scatter_typed::<u8>(py, &numpy, mask, &a_u, &v_u),
+        2 => place_scatter_typed::<u16>(py, &numpy, mask, &a_u, &v_u),
+        4 => place_scatter_typed::<u32>(py, &numpy, mask, &a_u, &v_u),
+        8 => place_scatter_typed::<u64>(py, &numpy, mask, &a_u, &v_u),
+        _ => Ok(false),
+    }
+}
+
 // Zero-copy in-place np.place(arr, mask, vals) for a writable float64 arr ndarray,
 // a bool mask of the identical shape, and a non-empty float64 vals ndarray.
 // numpy.place assigns the True positions in flat order, the k-th True taking
@@ -18352,6 +18456,12 @@ fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> Py
     // arr's own buffer, cycling vals by the running True count. Bit-identical;
     // shape mismatch, empty vals, and other dtypes fall through.
     if try_zerocopy_f64_place(py, arr, mask.bind(py), vals.bind(py))? {
+        return Ok(py.None());
+    }
+    // All other fixed-width dtypes (narrow ints, int64/uint64, float32, bool):
+    // in-place scatter through a same-width unsigned view, skipping the cold
+    // extract/copy-back (6-8x slower for ints). Bit-identical.
+    if try_zerocopy_any_place(py, arr, mask.bind(py), vals.bind(py))? {
         return Ok(py.None());
     }
 
