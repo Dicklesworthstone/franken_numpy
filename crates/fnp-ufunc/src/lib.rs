@@ -28579,9 +28579,10 @@ fn reduce_sum_axis_contiguous(
 //     A[i,k] scalar feeds all NR columns — raising arithmetic intensity to
 //     ~MR*NR/(MR+NR) flops/load and giving MR*NR independent FMA chains for ILP.
 // Remainder rows/columns use a sequential-k scalar tail that preserves the order.
-// MR*NR = 32 f64 accumulators = 8 AVX2 registers, leaving headroom for the A/B
-// operands under the workspace `+avx2` build.
-const MATMUL_MR: usize = 4;
+// MR*NR = 64 f64 accumulators. Keeping eight rows in flight halves the number
+// of row tiles that reread each packed B micropanel on deep-K/small-output GEMM
+// while preserving the per-cell increasing-k accumulation order.
+const MATMUL_MR: usize = 8;
 const MATMUL_NR: usize = 8;
 
 // Minimum MAC-op count below which GEMM stays single-threaded (pool dispatch
