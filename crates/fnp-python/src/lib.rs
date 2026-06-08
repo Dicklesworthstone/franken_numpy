@@ -26487,6 +26487,104 @@ fn try_zerocopy_f64_triangular(
     Ok(Some(out.unbind()))
 }
 
+// Generic per-row triangle copy over a same-width unsigned view of the input and a
+// pre-zeroed output (both viewed as `T`). Copies the kept contiguous j-range of each
+// row verbatim; the rest stays the +0/0 zero fill numpy.zeros produced. Bit-identical
+// for every dtype (verbatim element move; numpy.triu/tril fills the dropped triangle
+// with 0). Returns None on a buffer-protocol failure so the caller defers to numpy.
+fn triangular_typed<T: pyo3::buffer::Element + Copy>(
+    py: Python<'_>,
+    m_view: &Bound<'_, PyAny>,
+    out_view: &Bound<'_, PyAny>,
+    rows: usize,
+    cols: usize,
+    k: i64,
+    upper: bool,
+) -> PyResult<Option<()>> {
+    let (Ok(in_buffer), Ok(out_buffer)) =
+        (PyBuffer::<T>::get(m_view), PyBuffer::<T>::get(out_view))
+    else {
+        return Ok(None);
+    };
+    let (Some(input), Some(output)) = (in_buffer.as_slice(py), out_buffer.as_mut_slice(py)) else {
+        return Ok(None);
+    };
+    for i in 0..rows {
+        let diag = i as i64 + k;
+        let (j_start, j_end) = if upper {
+            (diag.clamp(0, cols as i64) as usize, cols)
+        } else {
+            (0, (diag + 1).clamp(0, cols as i64) as usize)
+        };
+        let base = i * cols;
+        for j in j_start..j_end {
+            output[base + j].set(input[base + j].get());
+        }
+    }
+    Ok(Some(()))
+}
+
+// All-width zero-copy np.triu / np.tril: the f64 helper covers only float64; narrow
+// ints, int64/uint64, float32 and bool fall to the cold extract path that widens
+// through f64 (21x slower for int64, and that f64 bridge is also lossy for wide
+// ints). triu/tril move elements verbatim, so allocate numpy.zeros of the input's
+// own dtype and copy each row's kept triangle through a same-width unsigned view —
+// byte-exact for every fixed-width dtype (incl. exact int64/uint64). complex (kind
+// 'c') and non-2-D / non-contiguous inputs return None and defer to numpy.
+fn try_zerocopy_any_triangular(
+    py: Python<'_>,
+    m: &Bound<'_, PyAny>,
+    k: i64,
+    upper: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !m.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = m.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if !matches!(kind.as_str(), "i" | "u" | "f" | "b") {
+        return Ok(None);
+    }
+    let shape = m.getattr("shape")?.extract::<Vec<usize>>()?;
+    if shape.len() != 2 {
+        return Ok(None);
+    }
+    let (rows, cols) = (shape[0], shape[1]);
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    let uname = match itemsize {
+        1 => "uint8",
+        2 => "uint16",
+        4 => "uint32",
+        8 => "uint64",
+        _ => return Ok(None),
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", &dtype)?;
+    let out = numpy.call_method("zeros", ((rows, cols),), Some(&kwargs))?;
+    if rows > 0 && cols > 0 {
+        let uview = numpy.getattr(uname)?;
+        let (Ok(m_u), Ok(out_u)) = (
+            m.call_method1("view", (&uview,)),
+            out.call_method1("view", (&uview,)),
+        ) else {
+            return Ok(None);
+        };
+        let done = match itemsize {
+            1 => triangular_typed::<u8>(py, &m_u, &out_u, rows, cols, k, upper)?,
+            2 => triangular_typed::<u16>(py, &m_u, &out_u, rows, cols, k, upper)?,
+            4 => triangular_typed::<u32>(py, &m_u, &out_u, rows, cols, k, upper)?,
+            8 => triangular_typed::<u64>(py, &m_u, &out_u, rows, cols, k, upper)?,
+            _ => None,
+        };
+        if done.is_none() {
+            return Ok(None);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 fn triangular_impl(
     py: Python<'_>,
     m: Py<PyAny>,
@@ -26503,6 +26601,12 @@ fn triangular_impl(
     // extract + full n*n build Vecs. Bit-identical; N-D and other dtypes fall
     // through to the general path.
     if let Some(result) = try_zerocopy_f64_triangular(py, m.bind(py), k, upper)? {
+        return Ok(result);
+    }
+    // All other fixed-width dtypes (narrow ints, int64/uint64, float32, bool):
+    // zeros-of-input-dtype + per-row verbatim triangle copy through an unsigned
+    // view, skipping the cold extract+f64-bridge path (21x slower for int64).
+    if let Some(result) = try_zerocopy_any_triangular(py, m.bind(py), k, upper)? {
         return Ok(result);
     }
     let array = match extract_precise_numeric_array(py, m.bind(py), numpy_name) {
