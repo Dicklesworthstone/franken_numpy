@@ -20236,34 +20236,36 @@ fn nanprod(
 // mask records whether ANY non-NaN was seen; if none (all-NaN or empty), returns
 // None so the caller defers to numpy, which emits the "All-NaN slice" RuntimeWarning
 // and returns NaN (or raises on empty) — preserving that behavior exactly.
-fn simd_nanextreme_f64(cells: &[pyo3::buffer::ReadOnlyCell<f64>], take_max: bool) -> Option<f64> {
+// Core SIMD nan-ignoring max/min fold. Returns (extreme, saw_non_nan): `extreme`
+// is the IEEE maxNum/minNum fold over the non-NaN values (or init = ±inf when the
+// slice is empty/all-NaN), and `saw_non_nan` is whether any non-NaN was seen.
+// Block-wise over a reused 64 KiB buffer so there is no whole-array allocation.
+const NANEXTREME_BLK: usize = 8192; // 64 KiB reused buffer size (multiple of 8)
+
+fn simd_nanextreme_raw(
+    cells: &[pyo3::buffer::ReadOnlyCell<f64>],
+    take_max: bool,
+    buf: &mut [f64],
+) -> (f64, bool) {
     use std::simd::cmp::SimdPartialEq;
     use std::simd::num::SimdFloat;
     use std::simd::{Mask, Simd};
     const L: usize = 8;
-    const BLK: usize = 8192; // 64 KiB reused buffer (multiple of L); stays L1/L2-resident
-    let n = cells.len();
-    if n == 0 {
-        return None;
-    }
+    let blk = buf.len();
     type V = Simd<f64, L>;
     let init = if take_max {
         f64::NEG_INFINITY
     } else {
         f64::INFINITY
     };
+    let n = cells.len();
     let mut acc = V::splat(init);
     let mut vsaw = Mask::<i64, L>::splat(false);
     let mut m_tail = init;
     let mut saw_tail = false;
-    // Block-wise: copy each ~64 KiB block of buffer cells into a reused Vec (a
-    // memcpy-shaped, vectorized loop that stays in cache) and SIMD-fold it — so
-    // there is no big intermediate allocation (the cost that floors a whole-array
-    // collect at ~1 ms / 2 M elements and thrashes at 10 M+).
-    let mut buf = vec![0.0f64; BLK];
     let mut base = 0usize;
     while base < n {
-        let len = BLK.min(n - base);
+        let len = blk.min(n - base);
         for (d, c) in buf[..len].iter_mut().zip(cells[base..base + len].iter()) {
             *d = c.get();
         }
@@ -20287,14 +20289,23 @@ fn simd_nanextreme_f64(cells: &[pyo3::buffer::ReadOnlyCell<f64>], take_max: bool
     for &v in &acc.to_array() {
         m = if take_max { m.max(v) } else { m.min(v) };
     }
-    if !(vsaw.any() || saw_tail) {
+    (m, vsaw.any() || saw_tail)
+}
+
+fn simd_nanextreme_f64(cells: &[pyo3::buffer::ReadOnlyCell<f64>], take_max: bool) -> Option<f64> {
+    if cells.is_empty() {
+        return None;
+    }
+    let mut buf = vec![0.0f64; NANEXTREME_BLK.min(cells.len().max(1))];
+    let (m, saw) = simd_nanextreme_raw(cells, take_max, &mut buf);
+    if !saw {
         return None; // all-NaN or empty — defer to numpy for warning/NaN/error parity
     }
     if m == 0.0 {
         // The extreme is a zero. numpy's RETURNED SIGN of a ±0 tie is
         // position-dependent / implementation-defined (bead franken_numpy-u89e0),
-        // so a fold can't reproduce it bit-exactly — defer this (rare) case to the
-        // existing path. `== 0.0` matches both +0.0 and -0.0.
+        // so a fold can't reproduce it bit-exactly — defer this (rare) case.
+        // `== 0.0` matches both +0.0 and -0.0.
         return None;
     }
     Some(m)
@@ -20344,6 +20355,88 @@ fn try_zerocopy_f64_nanextreme(
     }
 }
 
+// Zero-copy SIMD nanmax/nanmin over the CONTIGUOUS LAST axis of a C-contiguous
+// f64 ndarray: each lane is a contiguous run, reduced by simd_nanextreme_f64 (the
+// same IEEE maxNum/minNum fold as the flat path — bit-exact, NaN-skipping). The
+// result is an f64 array of shape[:-1]. If any lane is all-NaN or has a ±0 extreme
+// (where numpy's value/sign is special, bead franken_numpy-u89e0), the WHOLE call
+// defers to numpy so those rare lanes stay bit-exact. Non-last axis (strided
+// lanes), non-contiguous, and non-f64 defer.
+fn try_zerocopy_f64_nanextreme_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis_obj: &Bound<'_, PyAny>,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
+    if ax < 0 || ax != ndim - 1 {
+        return Ok(None); // only the contiguous last axis (inner == 1)
+    }
+    let ax = ax as usize;
+    let axis_len = shape[ax];
+    if axis_len == 0 {
+        return Ok(None); // zero-length reduction axis — numpy raises; defer
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let outer: usize = shape[..ax].iter().product();
+    let mut out: Vec<f64> = Vec::with_capacity(outer);
+    let mut any_all_nan = false;
+    // One reused buffer across all lanes (no per-lane allocation).
+    let mut buf = vec![0.0f64; NANEXTREME_BLK.min(axis_len.max(1))];
+    for lane in cells.chunks_exact(axis_len) {
+        let (m, saw) = simd_nanextreme_raw(lane, take_max, &mut buf);
+        if !saw {
+            // All-NaN lane: numpy returns NaN for this lane (and one warning for
+            // the whole reduction). f64::NAN is numpy's np.nan bit pattern.
+            out.push(f64::NAN);
+            any_all_nan = true;
+        } else if m == 0.0 {
+            // ±0 extreme: numpy's returned sign is position-dependent
+            // (bead franken_numpy-u89e0) — defer the whole call (rare).
+            return Ok(None);
+        } else {
+            out.push(m);
+        }
+    }
+    if any_all_nan {
+        // Reproduce numpy's single "All-NaN slice encountered" RuntimeWarning.
+        let warnings = py.import("warnings")?;
+        let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
+        warnings.call_method1("warn", ("All-NaN slice encountered", &category))?;
+    }
+    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let out_shape: Vec<usize> = shape[..ax].to_vec();
+    let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
 fn nanmax(
@@ -20389,6 +20482,15 @@ fn nanmax(
     if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && !keepdims.unwrap_or(false)
         && let Some(out) = try_zerocopy_f64_nanextreme(py, a.bind(py), true)?
+    {
+        return Ok(out);
+    }
+    // Zero-copy SIMD per-lane fast path for the contiguous last axis (~12x faster
+    // than the extract → native scan; all-NaN/±0 lanes defer to numpy).
+    if !keepdims.unwrap_or(false)
+        && let Some(axis_val) = axis.as_ref()
+        && !axis_val.bind(py).is_none()
+        && let Some(out) = try_zerocopy_f64_nanextreme_axis(py, a.bind(py), axis_val.bind(py), true)?
     {
         return Ok(out);
     }
@@ -20456,6 +20558,15 @@ fn nanmin(
     if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && !keepdims.unwrap_or(false)
         && let Some(out) = try_zerocopy_f64_nanextreme(py, a.bind(py), false)?
+    {
+        return Ok(out);
+    }
+    // Zero-copy SIMD per-lane fast path for the contiguous last axis (~12x faster
+    // than the extract → native scan; all-NaN/±0 lanes defer to numpy).
+    if !keepdims.unwrap_or(false)
+        && let Some(axis_val) = axis.as_ref()
+        && !axis_val.bind(py).is_none()
+        && let Some(out) = try_zerocopy_f64_nanextreme_axis(py, a.bind(py), axis_val.bind(py), false)?
     {
         return Ok(out);
     }
