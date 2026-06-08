@@ -21110,8 +21110,12 @@ impl UFuncArray {
         // output cell independently in that exact order — identical FP bits — which
         // makes the per-cell loop embarrassingly parallel over output cells.
         let result: Vec<f64> = if let Some(contracted_size) = total_iters.checked_div(output_size) {
-            let compute_cell = |o: usize| -> f64 {
-                let mut label_vals = vec![0usize; n_labels];
+            // `label_vals` is a per-cell scratch decode buffer. The previous loop
+            // allocated it fresh inside the closure on EVERY output cell (O(output
+            // cells) heap allocations); hoist it to a per-thread buffer (reused
+            // across that thread's cells) — bit-identical arithmetic, no allocator
+            // traffic in the hot loop.
+            let compute_cell = |label_vals: &mut [usize], o: usize| -> f64 {
                 let base = o * contracted_size;
                 let mut sum = 0.0;
                 for c in 0..contracted_size {
@@ -21139,9 +21143,13 @@ impl UFuncArray {
                 && total_iters >= EINSUM_PARALLEL_MIN_ITERS
                 && rayon::current_num_threads() >= 2
             {
-                (0..output_size).into_par_iter().map(compute_cell).collect()
+                (0..output_size)
+                    .into_par_iter()
+                    .map_init(|| vec![0usize; n_labels], |lv, o| compute_cell(lv, o))
+                    .collect()
             } else {
-                (0..output_size).map(compute_cell).collect()
+                let mut lv = vec![0usize; n_labels];
+                (0..output_size).map(|o| compute_cell(&mut lv, o)).collect()
             }
         } else {
             Vec::new()
@@ -57381,6 +57389,64 @@ print(json.dumps(payload))
             }
             let (s, f) = (med(ts), med(tf));
             println!("einsum i,j->ij {ni}x{nj}: oldpath={s:8.3}ms fastpath={f:8.3}ms speedup={:.2}x", s / f);
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --release -- --ignored --nocapture"]
+    fn einsum_general_path_alloc_hoist_speedup_report() {
+        use std::time::Instant;
+        // Alloc-dominated general-path cases (transpose 'ij->ji', hadamard
+        // 'ij,ij->ij' — both fall through the GEMM/outer fast paths to the general
+        // scatter with contracted_size == 1). A/B: the hoisted einsum vs a replica
+        // of the OLD loop that allocated `label_vals` per output cell.
+        for &(n, two_op) in &[(1500usize, false), (1500usize, true)] {
+            let a: Vec<f64> = (0..n * n).map(|i| (i as f64) * 1e-4 - 0.5).collect();
+            let b: Vec<f64> = (0..n * n).map(|i| (i as f64) * 2e-4 - 0.5).collect();
+            let av = UFuncArray::new(vec![n, n], a.clone(), DType::F64).unwrap();
+            let bv = UFuncArray::new(vec![n, n], b.clone(), DType::F64).unwrap();
+            let it = 5;
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|p: &f64, q: &f64| p.partial_cmp(q).unwrap());
+                xs[xs.len() / 2]
+            };
+            // Replica of the OLD general scatter: PARALLEL (as the old code already
+            // was) but allocating `label_vals` per output cell. Comparing this to the
+            // new parallel+hoisted einsum isolates the alloc-hoist's contribution
+            // (both run on the same rayon pool).
+            let slow = |a: &[f64], b: &[f64], n: usize, two: bool| -> Vec<f64> {
+                let dims = [n, n];
+                (0..n * n)
+                    .into_par_iter()
+                    .map(|o| {
+                        let mut lv = vec![0usize; 2]; // per-cell allocation (the cost)
+                        let mut rem = o;
+                        for i in (0..2).rev() {
+                            lv[i] = rem % dims[i];
+                            rem /= dims[i];
+                        }
+                        if two {
+                            a[lv[0] * n + lv[1]] * b[lv[0] * n + lv[1]]
+                        } else {
+                            a[lv[1] * n + lv[0]]
+                        }
+                    })
+                    .collect()
+            };
+            let subs = if two_op { "ij,ij->ij" } else { "ij->ji" };
+            let mut ts = Vec::new();
+            let mut tf = Vec::new();
+            for _ in 0..it {
+                let t = Instant::now();
+                std::hint::black_box(slow(&a, &b, n, two_op));
+                ts.push(t.elapsed().as_secs_f64() * 1e3);
+                let ops: Vec<&UFuncArray> = if two_op { vec![&av, &bv] } else { vec![&av] };
+                let t = Instant::now();
+                std::hint::black_box(UFuncArray::einsum(subs, &ops).unwrap());
+                tf.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let (s, f) = (med(ts), med(tf));
+            println!("einsum {subs} {n}x{n}: oldalloc={s:8.3}ms hoisted={f:8.3}ms speedup={:.2}x", s / f);
         }
     }
 
