@@ -23478,6 +23478,21 @@ impl UFuncArray {
                     return Err(UFuncError::EmptyReduction { op: "nanmin" });
                 }
                 let axis_len = self.shape[ax];
+                let inner: usize = self.shape[ax + 1..].iter().product();
+                if inner > 1 {
+                    // Fused NaN-ignoring min — no `filled` clone, single pass.
+                    let outer: usize = self.shape[..ax].iter().product();
+                    let out_shape = reduced_shape(&self.shape, ax, keepdims);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    let mut out = vec![0.0f64; out_count];
+                    nan_minmax_axis_simd::<false>(&self.values, axis_len, inner, outer, &mut out);
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: out,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
+                }
                 let (filled, nan_counts) = self.nan_fill_for_axis(ax, f64::INFINITY);
                 let mut result = filled.reduce_min(Some(ax as isize), keepdims)?;
                 for (val, &count) in result.values.iter_mut().zip(&nan_counts) {
@@ -23525,6 +23540,21 @@ impl UFuncArray {
                     return Err(UFuncError::EmptyReduction { op: "nanmax" });
                 }
                 let axis_len = self.shape[ax];
+                let inner: usize = self.shape[ax + 1..].iter().product();
+                if inner > 1 {
+                    // Fused NaN-ignoring max — no `filled` clone, single pass.
+                    let outer: usize = self.shape[..ax].iter().product();
+                    let out_shape = reduced_shape(&self.shape, ax, keepdims);
+                    let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+                    let mut out = vec![0.0f64; out_count];
+                    nan_minmax_axis_simd::<true>(&self.values, axis_len, inner, outer, &mut out);
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: out,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
+                }
                 let (filled, nan_counts) = self.nan_fill_for_axis(ax, f64::NEG_INFINITY);
                 let mut result = filled.reduce_max(Some(ax as isize), keepdims)?;
                 for (val, &count) in result.values.iter_mut().zip(&nan_counts) {
@@ -28003,6 +28033,114 @@ fn nan_sum_count_axis_simd(
             .zip(nan_counts.chunks_mut(inner))
             .enumerate()
             .for_each(|(o, (ss, cs))| reduce(o, 0, ss, cs));
+    }
+}
+
+/// Fused NaN-ignoring min (`MAX=false`) / max (`MAX=true`) over a NON-LAST axis
+/// (`inner > 1`), in ONE register-blocked pass with NO materialised `filled` copy.
+/// This is the fused form of `nan_fill_for_axis(axis, ±INF)` -> `reduce_min/max` ->
+/// (all-NaN column -> NaN), eliminating the clone and the separate fill pass.
+///
+/// Bit-identical to that fill-then-reduce: every element is treated as
+/// `is_nan ? ±INF : v` (the exact fill value), then reduced with the SAME keep-2nd
+/// select (`acc < el ? acc : el` / `acc > el ? acc : el`) reduce_min/reduce_max use
+/// — so the signed-zero tie order is preserved — and a per-column NaN tally turns an
+/// all-NaN column (`nan_count == axis_len`) into NaN, matching the post-pass fixup.
+/// Lanes are independent columns; parallel chunks are disjoint -> identical for any
+/// thread count.
+fn nan_minmax_axis_simd<const MAX: bool>(
+    values: &[f64],
+    axis_len: usize,
+    inner: usize,
+    outer: usize,
+    out: &mut [f64],
+) {
+    use std::simd::cmp::{SimdPartialEq, SimdPartialOrd};
+    use std::simd::num::SimdFloat;
+    use std::simd::{Select, Simd};
+    const LANES: usize = 8;
+    type V = Simd<f64, LANES>;
+    type I = Simd<i64, LANES>;
+    let inf = V::splat(if MAX { f64::NEG_INFINITY } else { f64::INFINITY });
+    let nan_v = V::splat(f64::NAN);
+    let one_i = I::splat(1);
+    let zero_i = I::splat(0);
+    let axis_len_i = I::splat(axis_len as i64);
+    let scalar_inf = if MAX { f64::NEG_INFINITY } else { f64::INFINITY };
+
+    let reduce = |o: usize, c0: usize, out_slice: &mut [f64]| {
+        let len = out_slice.len();
+        let base = o * axis_len * inner + c0;
+        let mut c = 0;
+        while c + LANES <= len {
+            let v0 = V::from_slice(&values[base + c..]);
+            let m0 = v0.is_nan();
+            let mut acc = m0.select(inf, v0);
+            let mut nanc = m0.select(one_i, zero_i);
+            for r in 1..axis_len {
+                let v = V::from_slice(&values[base + r * inner + c..]);
+                let m = v.is_nan();
+                let el = m.select(inf, v);
+                acc = if MAX {
+                    acc.simd_gt(el).select(acc, el)
+                } else {
+                    acc.simd_lt(el).select(acc, el)
+                };
+                nanc += m.select(one_i, zero_i);
+            }
+            nanc.simd_eq(axis_len_i)
+                .select(nan_v, acc)
+                .copy_to_slice(&mut out_slice[c..]);
+            c += LANES;
+        }
+        while c < len {
+            let v0 = values[base + c];
+            let mut nan = 0usize;
+            let mut acc = if v0.is_nan() {
+                nan += 1;
+                scalar_inf
+            } else {
+                v0
+            };
+            for r in 1..axis_len {
+                let v = values[base + r * inner + c];
+                let el = if v.is_nan() {
+                    nan += 1;
+                    scalar_inf
+                } else {
+                    v
+                };
+                acc = if MAX {
+                    if acc > el { acc } else { el }
+                } else if acc < el {
+                    acc
+                } else {
+                    el
+                };
+            }
+            out_slice[c] = if nan == axis_len { f64::NAN } else { acc };
+            c += 1;
+        }
+    };
+
+    const NAN_MINMAX_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+    let parallel = out.len() >= 2
+        && values.len() >= NAN_MINMAX_AXIS_PARALLEL_MIN_ELEMS
+        && rayon::current_num_threads() >= 2;
+    if parallel && outer == 1 {
+        let threads = rayon::current_num_threads();
+        let chunk = inner.div_ceil(threads * 2).max(8);
+        out.par_chunks_mut(chunk).enumerate().for_each(|(ci, oc)| {
+            reduce(0, ci * chunk, oc);
+        });
+    } else if parallel {
+        out.par_chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
+    } else {
+        out.chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
     }
 }
 
@@ -49270,6 +49408,48 @@ print(json.dumps(payload))
     }
 
     #[test]
+    #[ignore = "perf A/B: fused nanmax(axis=0) vs nan_fill+reduce_max; run --release -- --ignored --nocapture"]
+    fn fused_nanmax_axis0_ab_bench() {
+        use std::time::Instant;
+        let n = 2048usize;
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| {
+                if i % 5 == 2 {
+                    f64::NAN
+                } else {
+                    ((i % 101) as f64) * 0.01 - 0.5
+                }
+            })
+            .collect();
+        let a = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+        let iters = 50;
+        let _ = a.nanmax(Some(0), false).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.nanmax(Some(0), false).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = the fill(-INF)+reduce_max+fixup path the fused kernel replaces.
+        let axis_len = n;
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let (filled, nan_counts) = a.nan_fill_for_axis(0, f64::NEG_INFINITY);
+            let mut res = filled.reduce_max(Some(0), false).unwrap();
+            for (v, &cnt) in res.values.iter_mut().zip(&nan_counts) {
+                if cnt == axis_len {
+                    *v = f64::NAN;
+                }
+            }
+            std::hint::black_box(&res);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "FUSED_NANMAX_AXIS0 new={new_ms:.3}ms old={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
+    }
+
+    #[test]
     #[ignore = "perf A/B: fused nansum(axis=0) vs nan_fill+reduce_sum; run --release -- --ignored --nocapture"]
     fn fused_nansum_axis0_ab_bench() {
         use std::time::Instant;
@@ -51758,6 +51938,76 @@ print(json.dumps(payload))
             digest_of(&mx),
             "102d83f15cce2bf0ec6f58f69c63b56b3ab90e556f1ffcf5f671f6f0e215d1ed"
         );
+    }
+
+    #[test]
+    fn fused_nanmin_nanmax_axis_matches_fill_reduce_bits() {
+        // The fused nan_minmax_axis_simd path (no clone) must be BIT-IDENTICAL to the
+        // fill(±INF)+reduce_min/max+all-NaN-fixup path it replaces, across the LANES=8
+        // boundary and axis 0/1 of 2-D + 3-D, incl all-NaN / partial-NaN / clean and
+        // signed-zero columns (keep-2nd tie order is signed-zero-sensitive).
+        let shapes: &[Vec<usize>] = &[
+            vec![37, 21],
+            vec![21, 37],
+            vec![5, 4, 6],
+            vec![6, 5, 4],
+            vec![8, 8],
+            vec![3, 17],
+        ];
+        let bits = |v: f64| v.to_bits();
+        for shape in shapes {
+            let n: usize = shape.iter().product();
+            let mut data = Vec::with_capacity(n);
+            for i in 0..n {
+                let cell = if i % 7 == 0 {
+                    f64::NAN
+                } else if i % 23 == 5 {
+                    if i % 2 == 0 { 0.0 } else { -0.0 }
+                } else {
+                    (((i * 13 + 3) % 31) as f64) - 15.0
+                };
+                data.push(cell);
+            }
+            let a = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            for axis in 0..shape.len() {
+                for keepdims in [false, true] {
+                    let axis_len = shape[axis];
+                    // Reference: the exact fill(±INF)+reduce+fixup path being replaced.
+                    let reference = |fill: f64, is_max: bool| -> Vec<f64> {
+                        let (filled, nan_counts) = a.nan_fill_for_axis(axis, fill);
+                        let mut res = if is_max {
+                            filled.reduce_max(Some(axis as isize), keepdims).unwrap()
+                        } else {
+                            filled.reduce_min(Some(axis as isize), keepdims).unwrap()
+                        };
+                        for (val, &cnt) in res.values.iter_mut().zip(&nan_counts) {
+                            if cnt == axis_len {
+                                *val = f64::NAN;
+                            }
+                        }
+                        res.values
+                    };
+                    let ref_min = reference(f64::INFINITY, false);
+                    let ref_max = reference(f64::NEG_INFINITY, true);
+                    let got_min = a.nanmin(Some(axis as isize), keepdims).unwrap();
+                    let got_max = a.nanmax(Some(axis as isize), keepdims).unwrap();
+                    for (g, r) in got_min.values().iter().zip(&ref_min) {
+                        if r.is_nan() {
+                            assert!(g.is_nan(), "nanmin NaN {shape:?} ax{axis}");
+                        } else {
+                            assert_eq!(bits(*g), bits(*r), "nanmin bits {shape:?} ax{axis}: {g} vs {r}");
+                        }
+                    }
+                    for (g, r) in got_max.values().iter().zip(&ref_max) {
+                        if r.is_nan() {
+                            assert!(g.is_nan(), "nanmax NaN {shape:?} ax{axis}");
+                        } else {
+                            assert_eq!(bits(*g), bits(*r), "nanmax bits {shape:?} ax{axis}: {g} vs {r}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
