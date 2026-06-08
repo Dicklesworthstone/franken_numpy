@@ -20002,6 +20002,29 @@ impl UFuncArray {
     /// Compute the 1-D DFT for real input (np.fft.rfft).
     /// Returns the first n//2 + 1 complex coefficients as shape [n//2+1, 2].
     pub fn rfft(&self, n: Option<usize>) -> Result<Self, UFuncError> {
+        let len = n.unwrap_or(self.values.len());
+        // Even length ≥ 2: real-FFT two-for-one trick (one length-L/2 complex FFT
+        // + O(L) untangle ≈ half the work of the full length-L complex FFT). Odd
+        // or degenerate length: fall back to the full complex FFT then truncate
+        // (the rare odd case; keeps the error path identical for len == 0).
+        if len >= 2 && len % 2 == 0 {
+            let out_len = len / 2 + 1;
+            let mut real = vec![0.0f64; len];
+            let input_len = self.values.len().min(len);
+            real[..input_len].copy_from_slice(&self.values[..input_len]);
+            let (re_half, im_half) = rfft_half_spectrum(&real);
+            let mut values = vec![0.0f64; out_len * 2];
+            for k in 0..out_len {
+                values[2 * k] = re_half[k];
+                values[2 * k + 1] = im_half[k];
+            }
+            return Ok(Self {
+                shape: vec![out_len, 2],
+                values,
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
         let full = self.fft(n)?;
         let len = full.shape[0];
         let out_len = len / 2 + 1;
@@ -30396,6 +30419,54 @@ fn fft_mul(a: f64, b: f64) -> f64 {
     } else {
         a * b
     }
+}
+
+/// Real-input FFT via the two-for-one (packing) trick. A length-`L` real signal
+/// (L even, ≥2) is packed into a length-`M = L/2` complex signal `z[j] = x[2j] +
+/// i·x[2j+1]`; a single length-`M` complex FFT then yields the interleaved
+/// even/odd sub-spectra, which are untangled into the `M+1` non-redundant
+/// coefficients `X[0..=M]` of the real transform:
+///   X[k] = A[k] + W_L^k · B[k],   W_L^k = exp(-2πi·k/L),
+///   A[k] = (Z[k] + conj(Z[M-k]))/2   (even-sample spectrum),
+///   B[k] = (Z[k] − conj(Z[M-k]))/(2i) (odd-sample spectrum),
+/// with Z[M] ≡ Z[0] (the `% M` wrap). This costs one length-`M` FFT plus an O(L)
+/// untangle — about half the work of the length-`L` complex FFT the result would
+/// otherwise require. Matches the full-FFT path to FFT round-off; rfft parity is
+/// tolerance-based. Returns `(re, im)` each of length `M+1`.
+fn rfft_half_spectrum(real: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let l = real.len();
+    let m = l / 2;
+    let mut zr = vec![0.0f64; m];
+    let mut zi = vec![0.0f64; m];
+    for j in 0..m {
+        zr[j] = real[2 * j];
+        zi[j] = real[2 * j + 1];
+    }
+    fft_dit(&mut zr, &mut zi, false);
+    let mut out_re = vec![0.0f64; m + 1];
+    let mut out_im = vec![0.0f64; m + 1];
+    let two_pi_over_l = std::f64::consts::TAU / l as f64;
+    for k in 0..=m {
+        let kk = k % m; // Z[k]
+        let mk = (m - k) % m; // Z[M-k]
+        let pr = zr[kk];
+        let pi = zi[kk];
+        let qr = zr[mk];
+        let qi = zi[mk];
+        // A = (Z[k] + conj(Z[M-k])) / 2
+        let ar = (pr + qr) * 0.5;
+        let ai = (pi - qi) * 0.5;
+        // B = (Z[k] - conj(Z[M-k])) / (2i)
+        let br = (pi + qi) * 0.5;
+        let bi = -(pr - qr) * 0.5;
+        // W_L^k = exp(-2πi·k/L)
+        let ang = two_pi_over_l * k as f64;
+        let wr = ang.cos();
+        let wi = -ang.sin();
+        out_re[k] = ar + (wr * br - wi * bi);
+        out_im[k] = ai + (wr * bi + wi * br);
+    }
+    (out_re, out_im)
 }
 
 fn fft_dit(re: &mut [f64], im: &mut [f64], inverse: bool) {
@@ -57433,6 +57504,94 @@ print(json.dumps(payload))
         for (x, y) in rfft1.values().iter().zip(rfftn.values().iter()) {
             assert!((x - y).abs() < 1e-10, "rfftn vs rfft mismatch");
         }
+    }
+
+    #[test]
+    fn rfft_real_trick_matches_full_fft_within_tolerance() {
+        // Even-length rfft uses the two-for-one real-FFT trick (length-L/2 complex
+        // FFT + untangle); it must agree with the full complex FFT truncated to
+        // L/2+1 coefficients to FFT round-off. Cover pow2 and non-pow2 even lengths,
+        // and the `n` parameter (zero-pad when n>len, truncate when n<len). An odd
+        // length exercises the fall-back path (must be identical).
+        let base: Vec<f64> = (0..2048)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 9.0 - 500.0)
+            .collect();
+        let cases: &[(usize, Option<usize>)] = &[
+            (8, None),
+            (16, None),
+            (64, None),
+            (1024, None),
+            (6, None),
+            (12, None),
+            (100, None),
+            (50, Some(128)), // zero-pad to a pow2
+            (200, Some(64)), // truncate
+            (37, None),      // odd -> fall-back path
+            (2, None),
+        ];
+        for &(len, n) in cases {
+            let arr = UFuncArray::new(vec![len], base[..len].to_vec(), DType::F64).unwrap();
+            let got = arr.rfft(n).unwrap();
+            // Reference: full complex FFT, truncated to n//2+1.
+            let full = arr.fft(n).unwrap();
+            let out_len = full.shape()[0] / 2 + 1;
+            assert_eq!(got.shape(), &[out_len, 2], "len={len} n={n:?} shape");
+            let maxref = full.values()[..out_len * 2]
+                .iter()
+                .fold(1.0f64, |m, &v| m.max(v.abs()));
+            let tol = 1e-9 * maxref;
+            for k in 0..out_len * 2 {
+                let d = (got.values()[k] - full.values()[k]).abs();
+                assert!(
+                    d <= tol,
+                    "len={len} n={n:?} k={k}: rfft={} full={} d={d:e} tol={tol:e}",
+                    got.values()[k],
+                    full.values()[k]
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B bench; run with --release -- --ignored --nocapture"]
+    fn rfft_real_trick_ab_bench() {
+        use std::time::Instant;
+        let len = 1usize << 21; // 2,097,152 real samples -> inner complex FFT is 2^20.
+        let real: Vec<f64> = (0..len)
+            .map(|i| ((i as f64) * 0.000123).sin() + ((i as f64) * 0.0007).cos())
+            .collect();
+        let arr = UFuncArray::new(vec![len], real.clone(), DType::F64).unwrap();
+        let iters = 12;
+        // warmup + correctness
+        let new = arr.rfft(None).unwrap();
+        let full = arr.fft(None).unwrap();
+        let out_len = len / 2 + 1;
+        let mut maxd = 0.0f64;
+        for k in 0..out_len * 2 {
+            maxd = maxd.max((new.values()[k] - full.values()[k]).abs());
+        }
+
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            let full = arr.fft(None).unwrap();
+            let v = full.values()[..out_len * 2].to_vec();
+            std::hint::black_box(v);
+        }
+        let old_ns = t0.elapsed().as_nanos() as f64 / iters as f64;
+
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(arr.rfft(None).unwrap());
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / iters as f64;
+
+        eprintln!(
+            "rfft L=2^21: full-fft+trunc={:.0}us real-trick={:.0}us  speedup={:.2}x  (maxdiff={:.2e})",
+            old_ns / 1000.0,
+            new_ns / 1000.0,
+            old_ns / new_ns,
+            maxd
+        );
     }
 
     #[test]
