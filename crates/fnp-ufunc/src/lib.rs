@@ -20057,6 +20057,27 @@ impl UFuncArray {
                 integer_sidecar: None,
             });
         }
+        // Even output with no spectrum truncation (m ≤ n/2+1, i.e. the natural
+        // roundtrip + zero-padded cases): inverse two-for-one trick — one length-n/2
+        // inverse complex FFT + O(n) re-tangle, ≈ half the work of the full path.
+        // Spectrum-truncating (m > n/2+1) or odd n fall back to the full path below.
+        if n >= 2 && n % 2 == 0 && m <= n / 2 + 1 {
+            let needed = n / 2 + 1;
+            let mut half_re = vec![0.0f64; needed];
+            let mut half_im = vec![0.0f64; needed];
+            let avail = m.min(needed);
+            for k in 0..avail {
+                half_re[k] = self.values[k * 2];
+                half_im[k] = self.values[k * 2 + 1];
+            }
+            let out = irfft_half_spectrum(&half_re, &half_im, n);
+            return Ok(Self {
+                shape: vec![n],
+                values: out,
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
         // Reconstruct full spectrum from hermitian symmetry: X[k] = conj(X[n-k])
         let mut re = vec![0.0; n];
         let mut im = vec![0.0; n];
@@ -30467,6 +30488,51 @@ fn rfft_half_spectrum(real: &[f64]) -> (Vec<f64>, Vec<f64>) {
         out_im[k] = ai + (wr * bi + wi * br);
     }
     (out_re, out_im)
+}
+
+/// Inverse of `rfft_half_spectrum`: recover the length-`n` (n even, ≥2) real signal
+/// from its half-spectrum `X[0..=M]` (M = n/2, so `M+1` interleaved coefficients)
+/// using one length-`M` inverse complex FFT plus an O(n) re-tangle — about half the
+/// work of reconstructing the full length-`n` Hermitian spectrum and running a full
+/// inverse FFT. Inverts the forward relations: from `X[k]` and `X[M-k]`,
+///   Xe[k] = (X[k] + conj(X[M-k]))/2,   Xo[k] = ((X[k] − conj(X[M-k]))/2)·conj(W_n^k),
+///   Z[k] = Xe[k] + i·Xo[k]   (W_n^k = exp(-2πi·k/n), matching the forward twiddle).
+/// Then `z = IDFT_M(Z)` (the 1/M scaling is exactly right since `Z = DFT_M(z)`),
+/// and the real output unpacks as `x[2j] = Re z[j]`, `x[2j+1] = Im z[j]`.
+fn irfft_half_spectrum(half_re: &[f64], half_im: &[f64], n: usize) -> Vec<f64> {
+    let m = n / 2;
+    let mut zr = vec![0.0f64; m];
+    let mut zi = vec![0.0f64; m];
+    let two_pi_over_n = std::f64::consts::TAU / n as f64;
+    for k in 0..m {
+        let xkr = half_re[k];
+        let xki = half_im[k];
+        let mk = m - k; // k=0 -> M (Nyquist); k=1..M-1 -> M-k
+        let xmr = half_re[mk];
+        let xmi = half_im[mk];
+        // Xe = (X[k] + conj(X[M-k])) / 2
+        let xer = (xkr + xmr) * 0.5;
+        let xei = (xki - xmi) * 0.5;
+        // diff = (X[k] - conj(X[M-k])) / 2
+        let dr = (xkr - xmr) * 0.5;
+        let di = (xki + xmi) * 0.5;
+        // Xo = diff · conj(W_n^k), conj(W_n^k) = exp(+2πi·k/n) = (cos, +sin)
+        let ang = two_pi_over_n * k as f64;
+        let cwr = ang.cos();
+        let cwi = ang.sin();
+        let xor = dr * cwr - di * cwi;
+        let xoi = dr * cwi + di * cwr;
+        // Z[k] = Xe + i·Xo
+        zr[k] = xer - xoi;
+        zi[k] = xei + xor;
+    }
+    fft_dit(&mut zr, &mut zi, true); // inverse length-M (applies 1/M)
+    let mut out = vec![0.0f64; n];
+    for j in 0..m {
+        out[2 * j] = zr[j];
+        out[2 * j + 1] = zi[j];
+    }
+    out
 }
 
 fn fft_dit(re: &mut [f64], im: &mut [f64], inverse: bool) {
@@ -57198,6 +57264,115 @@ print(json.dumps(payload))
         let result = a.irfft(None).unwrap();
         assert_eq!(result.shape, vec![0]);
         assert!(result.values.is_empty());
+    }
+
+    #[test]
+    fn irfft_real_trick_matches_full_path_within_tolerance() {
+        // Even-length irfft (no spectrum truncation) uses the inverse two-for-one
+        // trick (length-n/2 inverse FFT + re-tangle). It must agree with the
+        // full-spectrum Hermitian reconstruction + full inverse FFT to FFT
+        // round-off, for the natural roundtrip length and zero-padded lengths,
+        // across pow2 and non-pow2 even sizes.
+        fn ref_full_irfft(half: &UFuncArray, n: usize) -> Vec<f64> {
+            let m = half.shape()[0];
+            let mut re = vec![0.0f64; n];
+            let mut im = vec![0.0f64; n];
+            for k in 0..m.min(n) {
+                re[k] = half.values()[k * 2];
+                im[k] = half.values()[k * 2 + 1];
+            }
+            for k in m.min(n)..n {
+                let mirror = n - k;
+                if mirror < m {
+                    re[k] = half.values()[mirror * 2];
+                    im[k] = -half.values()[mirror * 2 + 1];
+                }
+            }
+            fft_dit(&mut re, &mut im, true);
+            re
+        }
+        let base: Vec<f64> = (0..2048)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 9.0 - 500.0)
+            .collect();
+        for &l in &[2usize, 6, 8, 12, 64, 100, 1024] {
+            let arr = UFuncArray::new(vec![l], base[..l].to_vec(), DType::F64).unwrap();
+            let rf = arr.rfft(None).unwrap(); // m = l/2 + 1 coefficients
+            // Natural length (m == n/2+1) and a zero-padded even length (m < n/2+1).
+            for &n in &[l, 2 * l] {
+                let got = rf.irfft(Some(n)).unwrap();
+                let reference = ref_full_irfft(&rf, n);
+                assert_eq!(got.shape(), &[n], "l={l} n={n} shape");
+                let maxref = reference.iter().fold(1.0f64, |mx, &v| mx.max(v.abs()));
+                let tol = 1e-9 * maxref;
+                for k in 0..n {
+                    let d = (got.values()[k] - reference[k]).abs();
+                    assert!(
+                        d <= tol,
+                        "l={l} n={n} k={k}: trick={} full={} d={d:e} tol={tol:e}",
+                        got.values()[k],
+                        reference[k]
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B bench; run with --release -- --ignored --nocapture"]
+    fn irfft_real_trick_ab_bench() {
+        use std::time::Instant;
+        let l = 1usize << 21; // output length 2^21 -> inner inverse FFT is 2^20.
+        let real: Vec<f64> = (0..l)
+            .map(|i| ((i as f64) * 0.000123).sin() + ((i as f64) * 0.0007).cos())
+            .collect();
+        let arr = UFuncArray::new(vec![l], real, DType::F64).unwrap();
+        let rf = arr.rfft(None).unwrap();
+        let m = rf.shape()[0];
+        let iters = 12;
+        // Reference closure: full Hermitian reconstruction + full inverse FFT.
+        let ref_full = || {
+            let mut re = vec![0.0f64; l];
+            let mut im = vec![0.0f64; l];
+            for k in 0..m.min(l) {
+                re[k] = rf.values()[k * 2];
+                im[k] = rf.values()[k * 2 + 1];
+            }
+            for k in m.min(l)..l {
+                let mirror = l - k;
+                if mirror < m {
+                    re[k] = rf.values()[mirror * 2];
+                    im[k] = -rf.values()[mirror * 2 + 1];
+                }
+            }
+            fft_dit(&mut re, &mut im, true);
+            re
+        };
+        let new = rf.irfft(Some(l)).unwrap();
+        let refv = ref_full();
+        let mut maxd = 0.0f64;
+        for k in 0..l {
+            maxd = maxd.max((new.values()[k] - refv[k]).abs());
+        }
+
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(ref_full());
+        }
+        let old_ns = t0.elapsed().as_nanos() as f64 / iters as f64;
+
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(rf.irfft(Some(l)).unwrap());
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / iters as f64;
+
+        eprintln!(
+            "irfft L=2^21: full-path={:.0}us inverse-trick={:.0}us  speedup={:.2}x  (maxdiff={:.2e})",
+            old_ns / 1000.0,
+            new_ns / 1000.0,
+            old_ns / new_ns,
+            maxd
+        );
     }
 
     // ── fft2 / ifft2 tests ──
