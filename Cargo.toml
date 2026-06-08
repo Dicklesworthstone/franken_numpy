@@ -46,7 +46,7 @@ getrandom = "0.3.4"
 # CPython bridge used by the NumPy oracle wrappers and Python-facing parity tests.
 pyo3 = { version = "0.28.3", features = ["auto-initialize"] }
 # Optional structured async runtime for long-running conformance/artifact jobs.
-asupersync = { version = "0.3.1", default-features = false }
+asupersync = { version = "0.3.4", default-features = false }
 # Safe-Rust data parallelism (work-stealing pool) for compute-bound numeric
 # kernels (e.g. the register-tiled GEMM). Pure safe Rust — no C BLAS linkage.
 rayon = "1.10"
