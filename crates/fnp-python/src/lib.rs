@@ -19956,6 +19956,122 @@ fn nanprod(
     build_numpy_scalar_or_array(py, &result)
 }
 
+// Single-pass portable-SIMD nan-ignoring max/min over an f64 slice. `take_max`
+// picks nanmax (true) vs nanmin (false). std's simd_max/simd_min follow IEEE
+// maxNum/minNum — a NaN lane yields the other operand — which is exactly numpy's
+// nanmax/nanmin "ignore NaN" rule, so folding skips NaNs for free. The returned
+// extreme is an actual input value (no arithmetic) so it is bit-identical. A lane
+// mask records whether ANY non-NaN was seen; if none (all-NaN or empty), returns
+// None so the caller defers to numpy, which emits the "All-NaN slice" RuntimeWarning
+// and returns NaN (or raises on empty) — preserving that behavior exactly.
+fn simd_nanextreme_f64(cells: &[pyo3::buffer::ReadOnlyCell<f64>], take_max: bool) -> Option<f64> {
+    use std::simd::cmp::SimdPartialEq;
+    use std::simd::num::SimdFloat;
+    use std::simd::{Mask, Simd};
+    const L: usize = 8;
+    const BLK: usize = 8192; // 64 KiB reused buffer (multiple of L); stays L1/L2-resident
+    let n = cells.len();
+    if n == 0 {
+        return None;
+    }
+    type V = Simd<f64, L>;
+    let init = if take_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+    let mut acc = V::splat(init);
+    let mut vsaw = Mask::<i64, L>::splat(false);
+    let mut m_tail = init;
+    let mut saw_tail = false;
+    // Block-wise: copy each ~64 KiB block of buffer cells into a reused Vec (a
+    // memcpy-shaped, vectorized loop that stays in cache) and SIMD-fold it — so
+    // there is no big intermediate allocation (the cost that floors a whole-array
+    // collect at ~1 ms / 2 M elements and thrashes at 10 M+).
+    let mut buf = vec![0.0f64; BLK];
+    let mut base = 0usize;
+    while base < n {
+        let len = BLK.min(n - base);
+        for (d, c) in buf[..len].iter_mut().zip(cells[base..base + len].iter()) {
+            *d = c.get();
+        }
+        let full = len - len % L;
+        let mut off = 0;
+        while off < full {
+            let c = V::from_slice(&buf[off..off + L]);
+            vsaw |= c.simd_eq(c); // non-NaN lanes (c == c)
+            acc = if take_max { acc.simd_max(c) } else { acc.simd_min(c) };
+            off += L;
+        }
+        for &v in &buf[full..len] {
+            if !v.is_nan() {
+                saw_tail = true;
+                m_tail = if take_max { m_tail.max(v) } else { m_tail.min(v) };
+            }
+        }
+        base += len;
+    }
+    let mut m = m_tail;
+    for &v in &acc.to_array() {
+        m = if take_max { m.max(v) } else { m.min(v) };
+    }
+    if !(vsaw.any() || saw_tail) {
+        return None; // all-NaN or empty — defer to numpy for warning/NaN/error parity
+    }
+    if m == 0.0 {
+        // The extreme is a zero. numpy's RETURNED SIGN of a ±0 tie is
+        // position-dependent / implementation-defined (bead franken_numpy-u89e0),
+        // so a fold can't reproduce it bit-exactly — defer this (rare) case to the
+        // existing path. `== 0.0` matches both +0.0 and -0.0.
+        return None;
+    }
+    Some(m)
+}
+
+// Zero-copy SIMD nanmax/nanmin for the f64 full reduction (axis=None). Gated to a
+// C-contiguous f64 ndarray; all-NaN/empty defer (numpy warning/error). Returns a
+// numpy float64 scalar, matching numpy's full-reduction return.
+fn try_zerocopy_f64_nanextreme(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if kind != "f" || itemsize != 8 {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.is_empty() {
+        return Ok(None);
+    }
+    match simd_nanextreme_f64(cells, take_max) {
+        Some(m) => Ok(Some(numpy.getattr("float64")?.call1((m,))?.unbind())),
+        // all-NaN / empty / ±0-tie: let numpy produce the exact value (and its
+        // "All-NaN slice" RuntimeWarning, or the empty-array ValueError, or the
+        // position-dependent zero sign of bead franken_numpy-u89e0). Rare, so the
+        // extra numpy call is fine and keeps parity bit-exact in every case.
+        None => {
+            let f = if take_max { "nanmax" } else { "nanmin" };
+            Ok(Some(numpy.getattr(f)?.call1((a,))?.unbind()))
+        }
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
 fn nanmax(
@@ -19995,6 +20111,14 @@ fn nanmax(
     // numpy's fast reduction (via fallback) instead of the slow native f64 path.
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
+    }
+    // Zero-copy SIMD f64 fast path (axis=None, no keepdims): ~8x faster than the
+    // extract → scalar nan-scan. All-NaN/empty defer to numpy (warning/error).
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && !keepdims.unwrap_or(false)
+        && let Some(out) = try_zerocopy_f64_nanextreme(py, a.bind(py), true)?
+    {
+        return Ok(out);
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanmax(a)") {
         Ok(array) => array,
@@ -20054,6 +20178,14 @@ fn nanmin(
     // numpy's fast reduction (via fallback) instead of the slow native f64 path.
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
+    }
+    // Zero-copy SIMD f64 fast path (axis=None, no keepdims): ~9x faster than the
+    // extract → scalar nan-scan. All-NaN/empty defer to numpy (warning/error).
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && !keepdims.unwrap_or(false)
+        && let Some(out) = try_zerocopy_f64_nanextreme(py, a.bind(py), false)?
+    {
+        return Ok(out);
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanmin(a)") {
         Ok(array) => array,
