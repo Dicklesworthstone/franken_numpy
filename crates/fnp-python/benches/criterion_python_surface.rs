@@ -1013,6 +1013,123 @@ fn bench_histogram_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_linalg_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_linalg_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let numpy_linalg = numpy.getattr("linalg").expect("numpy.linalg");
+
+        let batch = 8192_usize;
+        let n = 4_usize;
+        let matrix_count = batch * n * n;
+        let raw = numpy
+            .call_method1("arange", (matrix_count,))
+            .expect("batched linalg raw values")
+            .call_method1("astype", ("float64",))
+            .expect("f64 matrix values")
+            .call_method1("reshape", ((batch, n, n),))
+            .expect("batched matrix shape");
+        let scaled = raw
+            .call_method1("__mul__", (0.001_f64,))
+            .expect("scale matrix values");
+        let eye = numpy
+            .call_method1("eye", (n,))
+            .expect("identity matrix")
+            .call_method1("__mul__", (3.0_f64,))
+            .expect("scaled identity");
+        let matrices = scaled
+            .call_method1("__add__", (&eye,))
+            .expect("well-conditioned batched matrices");
+        let rhs_vec = numpy
+            .call_method1("arange", (n,))
+            .expect("vector rhs raw values")
+            .call_method1("astype", ("float64",))
+            .expect("f64 rhs values")
+            .call_method1("__mul__", (0.01_f64,))
+            .expect("scaled vector rhs");
+        let rhs_matrix = numpy
+            .call_method1("arange", (batch * n * 2,))
+            .expect("matrix rhs raw values")
+            .call_method1("astype", ("float64",))
+            .expect("f64 matrix rhs values")
+            .call_method1("reshape", ((batch, n, 2_usize),))
+            .expect("batched matrix rhs")
+            .call_method1("__mul__", (0.01_f64,))
+            .expect("scaled matrix rhs");
+
+        let fnp_slogdet = module.getattr("slogdet").expect("fnp_python.slogdet");
+        let numpy_slogdet = numpy_linalg
+            .getattr("slogdet")
+            .expect("numpy.linalg.slogdet");
+        let fnp_solve = module.getattr("solve").expect("fnp_python.solve");
+        let numpy_solve = numpy_linalg.getattr("solve").expect("numpy.linalg.solve");
+
+        group.bench_function("fnp_slogdet_f64_batch8192_4x4", |bench| {
+            bench.iter(|| {
+                let result = fnp_slogdet
+                    .call1((&matrices,))
+                    .expect("fnp slogdet benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_slogdet_f64_batch8192_4x4", |bench| {
+            bench.iter(|| {
+                let result = numpy_slogdet
+                    .call1((&matrices,))
+                    .expect("numpy slogdet benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_solve_f64_batch8192_4x4_vec", |bench| {
+            bench.iter(|| {
+                let result = fnp_solve
+                    .call1((&matrices, &rhs_vec))
+                    .expect("fnp solve benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_solve_f64_batch8192_4x4_vec", |bench| {
+            bench.iter(|| {
+                let result = numpy_solve
+                    .call1((&matrices, &rhs_vec))
+                    .expect("numpy solve benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_solve_f64_batch8192_4x4_mat2", |bench| {
+            bench.iter(|| {
+                let result = fnp_solve
+                    .call1((&matrices, &rhs_matrix))
+                    .expect("fnp solve benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_solve_f64_batch8192_4x4_mat2", |bench| {
+            bench.iter(|| {
+                let result = numpy_solve
+                    .call1((&matrices, &rhs_matrix))
+                    .expect("numpy solve benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sqrt_input_extraction,
@@ -1031,6 +1148,7 @@ criterion_group!(
     bench_concat_hstack_boundary,
     bench_char_ascii_boundary,
     bench_average_nansum_axis_boundary,
-    bench_histogram_boundary
+    bench_histogram_boundary,
+    bench_linalg_boundary
 );
 criterion_main!(benches);

@@ -51530,6 +51530,103 @@ mod tests {
     }
 
     #[test]
+    fn slogdet_batched_f64_fast_path_golden_sha256() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_slogdet_golden")?;
+            fnp_python(&module)?;
+            let slogdet_fn = module.getattr("slogdet")?;
+            let numpy = py.import("numpy")?;
+            let numpy_slogdet = numpy.getattr("linalg")?.getattr("slogdet")?;
+            let allclose = numpy.getattr("allclose")?;
+            let mut proof_bytes = Vec::new();
+
+            let cases = [
+                (
+                    "batch_2x2_mixed_sign",
+                    numpy.getattr("array")?.call1((PyList::new(
+                        py,
+                        [
+                            PyList::new(
+                                py,
+                                [
+                                    PyList::new(py, [2.0_f64, 0.0])?,
+                                    PyList::new(py, [0.0_f64, 3.0])?,
+                                ],
+                            )?,
+                            PyList::new(
+                                py,
+                                [
+                                    PyList::new(py, [1.0_f64, 0.0])?,
+                                    PyList::new(py, [0.0_f64, -1.0])?,
+                                ],
+                            )?,
+                            PyList::new(
+                                py,
+                                [
+                                    PyList::new(py, [1.0_f64, 2.0])?,
+                                    PyList::new(py, [2.0_f64, 4.0])?,
+                                ],
+                            )?,
+                        ],
+                    )?,))?,
+                ),
+                (
+                    "batch_3x3_finite",
+                    numpy
+                        .getattr("arange")?
+                        .call1((18_i64,))?
+                        .call_method1("astype", ("float64",))?
+                        .call_method1("reshape", ((2_i64, 3_i64, 3_i64),))?
+                        .call_method1("__mul__", (0.01_f64,))?
+                        .call_method1(
+                            "__add__",
+                            (numpy
+                                .getattr("eye")?
+                                .call1((3_i64,))?
+                                .call_method1("__mul__", (4.0_f64,))?,),
+                        )?,
+                ),
+            ];
+
+            for (label, input) in cases {
+                let actual = slogdet_fn.call1((input.clone(),))?;
+                let expected = numpy_slogdet.call1((input.clone(),))?;
+                let actual_sign = actual.getattr("sign")?;
+                let expected_sign = expected.getattr("sign")?;
+                let actual_logabsdet = actual.getattr("logabsdet")?;
+                let expected_logabsdet = expected.getattr("logabsdet")?;
+                assert!(
+                    allclose
+                        .call1((&actual_sign, &expected_sign))?
+                        .extract::<bool>()?,
+                    "slogdet sign diverged for {label}"
+                );
+                assert!(
+                    allclose
+                        .call1((&actual_logabsdet, &expected_logabsdet))?
+                        .extract::<bool>()?,
+                    "slogdet logabsdet diverged for {label}"
+                );
+                proof_bytes.extend_from_slice(label.as_bytes());
+                proof_bytes.push(0);
+                append_numpy_array_bytes(py, &actual_sign, &mut proof_bytes)?;
+                append_numpy_array_bytes(py, &actual_logabsdet, &mut proof_bytes)?;
+            }
+
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest, "5002a1f255b690422b60a91d5fb0cd8832c2fc43fdd1c07f9a507dff7151320d",
+                "golden sha256 of batched slogdet sign/logabsdet dtype/shape/raw bytes"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
     fn svd_matches_numpy_namedtuple_array_and_error_paths() {
         with_python(|py| {
             if !numpy_available(py) {
