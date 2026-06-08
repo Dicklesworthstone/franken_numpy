@@ -2873,14 +2873,18 @@ fn svd_bidiag_qr_values(
                 let w_norm_sq: f64 = w_house[(j + 1)..].iter().map(|x| x * x).sum();
                 if w_norm_sq > 0.0 {
                     let scale = 2.0 / w_norm_sq;
+                    let w_tail = &w_house[(j + 1)..n];
                     for row in j..m {
                         let mut dot = 0.0;
-                        for col in (j + 1)..n {
-                            dot += work[row * n + col] * w_house[col];
+                        let row_tail_start = row * n + j + 1;
+                        let row_tail_end = row * n + n;
+                        let row_tail = &mut work[row_tail_start..row_tail_end];
+                        for (&value, &weight) in row_tail.iter().zip(w_tail.iter()) {
+                            dot += value * weight;
                         }
                         let f = scale * dot;
-                        for col in (j + 1)..n {
-                            work[row * n + col] -= f * w_house[col];
+                        for (value, &weight) in row_tail.iter_mut().zip(w_tail.iter()) {
+                            *value -= f * weight;
                         }
                     }
                 }
