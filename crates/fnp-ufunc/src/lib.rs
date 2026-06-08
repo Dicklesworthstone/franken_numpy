@@ -18566,6 +18566,20 @@ impl UFuncArray {
     /// the part that does not rely on zero-padding, `"same"` returns output with
     /// the same length as the first input.
     pub fn convolve_mode(&self, kernel: &Self, mode: &str) -> Result<Self, UFuncError> {
+        // This kernel accumulates in f64, so only pure float64 inputs round-trip
+        // with NumPy's exact result dtype and arithmetic. NumPy returns convolve in
+        // the promoted *input* dtype: narrow ints / int×int stay integer and
+        // wraparound on overflow (e.g. int8 [100,100]*[100,100] -> [16,32,16]), and
+        // float32 stays float32. An f64 compute-then-cast would both widen the dtype
+        // and saturate instead of wrap. Defer every non-float64 case to the caller's
+        // NumPy fallback (lib.rs convolve/correlate treat Err as "fall back") so the
+        // dtype and overflow semantics stay bit-exact. float64 keeps the fast kernel.
+        if self.dtype != DType::F64 || kernel.dtype != DType::F64 {
+            return Err(UFuncError::Msg(
+                "convolve: non-float64 inputs deferred to NumPy for dtype/overflow parity"
+                    .to_string(),
+            ));
+        }
         if self.shape.len() != 1 || kernel.shape.len() != 1 {
             return Err(UFuncError::Msg(
                 "convolve: only 1-D arrays supported".to_string(),
