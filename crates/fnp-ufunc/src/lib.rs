@@ -8448,13 +8448,27 @@ impl UFuncArray {
                 let out_shape = reduced_shape(&self.shape, axis, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![f64::INFINITY; out_count];
-                reduce_fold_axis_contiguous(
-                    &self.values,
-                    &self.shape,
-                    axis,
-                    &mut out_values,
-                    nan_min,
-                );
+                let inner: usize = self.shape[axis + 1..].iter().copied().product();
+                if inner > 1 {
+                    // Non-last axis: register-blocked SIMD min (bit-identical to the
+                    // nan_min fold; see reduce_minmax_axis_simd).
+                    let outer: usize = self.shape[..axis].iter().copied().product();
+                    reduce_minmax_axis_simd::<false>(
+                        &self.values,
+                        self.shape[axis],
+                        inner,
+                        outer,
+                        &mut out_values,
+                    );
+                } else {
+                    reduce_fold_axis_contiguous(
+                        &self.values,
+                        &self.shape,
+                        axis,
+                        &mut out_values,
+                        nan_min,
+                    );
+                }
 
                 Ok(Self {
                     shape: out_shape,
@@ -8601,13 +8615,27 @@ impl UFuncArray {
                 let out_shape = reduced_shape(&self.shape, axis, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
                 let mut out_values = vec![f64::NEG_INFINITY; out_count];
-                reduce_fold_axis_contiguous(
-                    &self.values,
-                    &self.shape,
-                    axis,
-                    &mut out_values,
-                    nan_max,
-                );
+                let inner: usize = self.shape[axis + 1..].iter().copied().product();
+                if inner > 1 {
+                    // Non-last axis: register-blocked SIMD max (bit-identical to the
+                    // nan_max fold; see reduce_minmax_axis_simd).
+                    let outer: usize = self.shape[..axis].iter().copied().product();
+                    reduce_minmax_axis_simd::<true>(
+                        &self.values,
+                        self.shape[axis],
+                        inner,
+                        outer,
+                        &mut out_values,
+                    );
+                } else {
+                    reduce_fold_axis_contiguous(
+                        &self.values,
+                        &self.shape,
+                        axis,
+                        &mut out_values,
+                        nan_max,
+                    );
+                }
 
                 Ok(Self {
                     shape: out_shape,
@@ -28461,6 +28489,101 @@ fn reduce_fold_axis_contiguous(
     }
 }
 
+/// Register-blocked portable-SIMD min (`MAX=false`) or max (`MAX=true`) reduction
+/// over a NON-LAST axis (`inner > 1`) of f64 data. This is the reduction analogue
+/// of the per-axis ptp fast path: `reduce_fold_axis_contiguous` walks each output
+/// column with stride `inner` (`offset += inner`), a cache-thrashing serial gather
+/// for axis 0; here we instead tile the inner axis by `LANES` and hold the running
+/// min/max accumulator in SIMD REGISTERS across the entire down-axis scan, storing
+/// each tile back exactly once.
+///
+/// Bit-identical to the scalar `nan_min`/`nan_max` left-fold: each column still
+/// reduces strictly row-ascending, and `simd_lt(acc,v).select(acc,v)` /
+/// `simd_gt(acc,v).select(acc,v)` reproduce the `if acc<v {acc} else {v}` /
+/// `if acc>v {acc} else {v}` keep-2nd-when-equal select EXACTLY (NOT IEEE
+/// min/maxpd), so the signed-zero tie order is preserved. NaN propagation uses a
+/// sticky accumulator (`nan` becomes NaN once any value in the lane is NaN),
+/// matching the fold's "any NaN ⇒ NaN" rule. The SIMD parallelizes ACROSS
+/// independent columns, never within a column's reduction — so this does not
+/// reorder the order-dependent fold the reduce_max/reduce_min doc-comments warn
+/// against.
+fn reduce_minmax_axis_simd<const MAX: bool>(
+    values: &[f64],
+    axis_len: usize,
+    inner: usize,
+    outer: usize,
+    out: &mut [f64],
+) {
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    use std::simd::{Select, Simd};
+    const LANES: usize = 8;
+    type V = Simd<f64, LANES>;
+    let nan_v = V::splat(f64::NAN);
+
+    let reduce = |o: usize, c0: usize, out_slice: &mut [f64]| {
+        let len = out_slice.len();
+        let base = o * axis_len * inner + c0;
+        let mut c = 0;
+        while c + LANES <= len {
+            let mut acc = V::from_slice(&values[base + c..]);
+            let mut nan = acc;
+            for r in 1..axis_len {
+                let v = V::from_slice(&values[base + r * inner + c..]);
+                acc = if MAX {
+                    acc.simd_gt(v).select(acc, v)
+                } else {
+                    acc.simd_lt(v).select(acc, v)
+                };
+                nan = v.is_nan().select(nan_v, nan);
+            }
+            let out_v = nan.is_nan().select(nan_v, acc);
+            out_v.copy_to_slice(&mut out_slice[c..]);
+            c += LANES;
+        }
+        while c < len {
+            let mut acc = values[base + c];
+            let mut is_nan = acc.is_nan();
+            for r in 1..axis_len {
+                let v = values[base + r * inner + c];
+                is_nan |= v.is_nan();
+                acc = if MAX {
+                    if acc > v { acc } else { v }
+                } else if acc < v {
+                    acc
+                } else {
+                    v
+                };
+            }
+            out_slice[c] = if is_nan { f64::NAN } else { acc };
+            c += 1;
+        }
+    };
+
+    const MINMAX_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+    let parallel = out.len() >= 2
+        && values.len() >= MINMAX_AXIS_PARALLEL_MIN_ELEMS
+        && rayon::current_num_threads() >= 2;
+    if parallel && outer == 1 {
+        // Single outer block (axis 0): parallelize over disjoint INNER chunks so the
+        // otherwise-serial block uses several cores; each chunk reduces complete
+        // columns, so the result is bit-identical for any thread count.
+        let threads = rayon::current_num_threads();
+        let chunk = inner.div_ceil(threads * 2).max(8);
+        out.par_chunks_mut(chunk).enumerate().for_each(|(ci, oc)| {
+            reduce(0, ci * chunk, oc);
+        });
+    } else if parallel {
+        out.par_chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
+    } else {
+        out.chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
+    }
+}
+
 fn cumulate_axis(
     values: &[f64],
     shape: &[usize],
@@ -40121,6 +40244,54 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn reduce_minmax_axis0_simd_golden_sha256() {
+        // Locks the register-blocked SIMD non-last-axis min/max path BYTE-EXACT.
+        // inner=21 deliberately crosses the LANES=8 boundary (8 + 8 + 5-wide scalar
+        // tail). Rows include signed zeros and NaN scattered across lane positions to
+        // pin the keep-2nd signed-zero tie order and the sticky-NaN propagation. The
+        // digests are cross-checked independently against numpy np.min/np.max(axis=0)
+        // of the identical data (see the accompanying differential).
+        let rows = 17usize;
+        let cols = 21usize;
+        let mut data = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                let v = (((r * 31 + c * 13 + 5) % 47) as f64) - 23.0;
+                let cell = if (r + c) % 29 == 0 {
+                    -0.0
+                } else if (r * cols + c) % 53 == 7 {
+                    f64::NAN
+                } else {
+                    v / 8.0
+                };
+                data.push(cell);
+            }
+        }
+        let a = UFuncArray::new(vec![rows, cols], data, DType::F64).unwrap();
+        let digest_of = |arr: &UFuncArray| -> String {
+            let mut d = Sha256::new();
+            for v in arr.values() {
+                d.update(v.to_bits().to_le_bytes());
+            }
+            d.finalize().iter().map(|b| format!("{b:02x}")).collect()
+        };
+        let mn = a.reduce_min(Some(0), false).unwrap();
+        let mx = a.reduce_max(Some(0), false).unwrap();
+        assert_eq!(mn.shape(), &[cols]);
+        assert_eq!(mx.shape(), &[cols]);
+        // Cross-checked: numpy np.min/np.max(a, axis=0) over the identical data
+        // produce these exact digests (byte-for-byte, incl NaN/signed-zero columns).
+        assert_eq!(
+            digest_of(&mn),
+            "d8d1b3afc446e0d084bd9be6ef3d3cd471abc7edd995c7aed1cdbf78d6753230"
+        );
+        assert_eq!(
+            digest_of(&mx),
+            "56be108983b70208836f2f11feb30b90b63c3298aea27a1dc01f1acbe2185613"
+        );
+    }
+
+    #[test]
     fn reduce_max_axis_none() {
         let arr = UFuncArray::new(vec![2, 3], vec![3.0, 1.0, 4.0, 1.5, 5.0, 2.0], DType::F64)
             .expect("arr");
@@ -48385,6 +48556,57 @@ print(json.dumps(payload))
         let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
         println!(
             "PTP_AXIS0 new={new_ms:.3}ms old={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B: register-blocked SIMD reduce_max(axis=0) vs strided serial scan; run --release -- --ignored --nocapture"]
+    fn reduce_max_axis0_simd_ab_bench() {
+        use std::time::Instant;
+        // axis-0 of [n,n] f64: outer=1, inner=n, axis_len=n — the case the shared
+        // reduce_fold_axis_contiguous ran as a SERIAL stride-`inner` per-lane scan.
+        let n = 2048usize;
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| ((i % 101) as f64) * 0.01 - 0.5)
+            .collect();
+        let a = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+        let iters = 50;
+        let _ = a.reduce_max(Some(0), false).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.reduce_max(Some(0), false).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = the literal strided per-lane scan reduce_fold_axis_contiguous used
+        // (offset += inner), with nan_max keep-2nd semantics.
+        let inner = n;
+        let axis_len = n;
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut out = vec![0.0f64; inner];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let mut offset = i;
+                let mut acc = data[offset];
+                offset += inner;
+                for _ in 1..axis_len {
+                    let v = data[offset];
+                    acc = if acc.is_nan() || v.is_nan() {
+                        f64::NAN
+                    } else if acc > v {
+                        acc
+                    } else {
+                        v
+                    };
+                    offset += inner;
+                }
+                *slot = acc;
+            }
+            std::hint::black_box(&out);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "REDUCE_MAX_AXIS0 new={new_ms:.3}ms old={old_ms:.3}ms speedup={:.2}x",
             old_ms / new_ms
         );
     }
