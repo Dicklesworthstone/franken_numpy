@@ -23360,10 +23360,33 @@ impl UFuncArray {
                 }
                 // Compute nanmean first, then compute variance from filled data
                 let mean_arr = self.nanmean(Some(ax as isize), true)?;
-                let strides = c_strides_elems(&self.shape);
-
                 let out_shape = reduced_shape(&self.shape, ax, keepdims);
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+
+                let inner: usize = self.shape[ax + 1..].iter().product();
+                if inner > 1 {
+                    // Fused NaN-ignoring variance — register-blocked sum-of-squared-
+                    // deviations over the precomputed per-column means, no strided gather.
+                    let outer: usize = self.shape[..ax].iter().product();
+                    let mut out_values = vec![0.0f64; out_count];
+                    nan_var_axis_simd(
+                        &self.values,
+                        &mean_arr.values,
+                        axis_len,
+                        inner,
+                        outer,
+                        ddof,
+                        &mut out_values,
+                    );
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: out_values,
+                        dtype: promote_for_mean_reduction(self.dtype),
+                        integer_sidecar: None,
+                    });
+                }
+
+                let strides = c_strides_elems(&self.shape);
 
                 // Each output element is a pure function of its `outer` index: derive
                 // the lane base offset, scan the (possibly strided) lane accumulating
@@ -28126,6 +28149,108 @@ fn nan_minmax_axis_simd<const MAX: bool>(
     const NAN_MINMAX_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
     let parallel = out.len() >= 2
         && values.len() >= NAN_MINMAX_AXIS_PARALLEL_MIN_ELEMS
+        && rayon::current_num_threads() >= 2;
+    if parallel && outer == 1 {
+        let threads = rayon::current_num_threads();
+        let chunk = inner.div_ceil(threads * 2).max(8);
+        out.par_chunks_mut(chunk).enumerate().for_each(|(ci, oc)| {
+            reduce(0, ci * chunk, oc);
+        });
+    } else if parallel {
+        out.par_chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
+    } else {
+        out.chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
+    }
+}
+
+/// Fused NaN-ignoring variance (sum of squared deviations / (valid - ddof)) over a
+/// NON-LAST axis (`inner > 1`), in ONE register-blocked pass over the precomputed
+/// per-column `means`. Replaces nanvar's strided per-output-cell gather
+/// (`values[base_flat + k*strides[axis]]`).
+///
+/// Bit-identical to that scalar scan: per column the squared deviation
+/// `(v - mean)^2` of each NON-NaN element is summed in row-ascending order and NaN
+/// elements are skipped. The skip is realised as `acc += is_nan ? 0.0 : d*d`, which
+/// equals skipping because `d*d` is always non-negative (a square is never `-0.0`)
+/// so the running `acc` is never `-0.0` and `acc + 0.0 == acc` exactly. `(v-mean)^2`
+/// is computed as `d*d` (the same value LLVM lowers `.powi(2)` to). The valid count
+/// drives `valid.saturating_sub(ddof)`; a zero denominator yields NaN, matching the
+/// scalar fixup. Lanes are independent columns; parallel chunks are disjoint.
+fn nan_var_axis_simd(
+    values: &[f64],
+    means: &[f64],
+    axis_len: usize,
+    inner: usize,
+    outer: usize,
+    ddof: usize,
+    out: &mut [f64],
+) {
+    use std::simd::num::SimdFloat;
+    use std::simd::{Select, Simd};
+    const LANES: usize = 8;
+    type V = Simd<f64, LANES>;
+    type I = Simd<i64, LANES>;
+    let zero = V::splat(0.0);
+    let one_i = I::splat(1);
+    let zero_i = I::splat(0);
+
+    let reduce = |o: usize, c0: usize, out_slice: &mut [f64]| {
+        let len = out_slice.len();
+        let base = o * axis_len * inner + c0;
+        let mean_base = o * inner + c0;
+        let mut c = 0;
+        while c + LANES <= len {
+            let mean_v = V::from_slice(&means[mean_base + c..]);
+            let mut acc = zero;
+            let mut valid = zero_i;
+            for r in 0..axis_len {
+                let v = V::from_slice(&values[base + r * inner + c..]);
+                let m = v.is_nan();
+                let d = m.select(zero, v - mean_v);
+                acc += d * d;
+                valid += m.select(zero_i, one_i);
+            }
+            let acc_arr = acc.to_array();
+            let valid_arr = valid.to_array();
+            for k in 0..LANES {
+                let denom = (valid_arr[k] as usize).saturating_sub(ddof);
+                out_slice[c + k] = if denom == 0 {
+                    f64::NAN
+                } else {
+                    acc_arr[k] / denom as f64
+                };
+            }
+            c += LANES;
+        }
+        while c < len {
+            let mean = means[mean_base + c];
+            let mut acc = 0.0f64;
+            let mut valid = 0usize;
+            for r in 0..axis_len {
+                let v = values[base + r * inner + c];
+                if !v.is_nan() {
+                    let d = v - mean;
+                    acc += d * d;
+                    valid += 1;
+                }
+            }
+            let denom = valid.saturating_sub(ddof);
+            out_slice[c] = if denom == 0 {
+                f64::NAN
+            } else {
+                acc / denom as f64
+            };
+            c += 1;
+        }
+    };
+
+    const NAN_VAR_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+    let parallel = out.len() >= 2
+        && values.len() >= NAN_VAR_AXIS_PARALLEL_MIN_ELEMS
         && rayon::current_num_threads() >= 2;
     if parallel && outer == 1 {
         let threads = rayon::current_num_threads();
@@ -49408,6 +49533,60 @@ print(json.dumps(payload))
     }
 
     #[test]
+    #[ignore = "perf A/B: fused nanvar(axis=0) vs strided per-output-cell scan; run --release -- --ignored --nocapture"]
+    fn fused_nanvar_axis0_ab_bench() {
+        use std::time::Instant;
+        let n = 2048usize;
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| {
+                if i % 5 == 2 {
+                    f64::NAN
+                } else {
+                    ((i % 101) as f64) * 0.01 - 0.5
+                }
+            })
+            .collect();
+        let a = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+        let iters = 30;
+        let _ = a.nanvar(Some(0), false, 0).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.nanvar(Some(0), false, 0).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = nanmean + the literal strided per-output-cell non-NaN sq-sum scan
+        // (the full pre-fusion nanvar; nanmean is computed inside the loop so both
+        // paths pay it and the ratio isolates the sq-sum-scan lever).
+        let inner = n;
+        let axis_len = n;
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let means = a.nanmean(Some(0), true).unwrap().values;
+            let mut out = vec![0.0f64; inner];
+            for (c, slot) in out.iter_mut().enumerate() {
+                let mean = means[c];
+                let mut acc = 0.0f64;
+                let mut valid = 0usize;
+                for k in 0..axis_len {
+                    let v = data[c + k * inner];
+                    if !v.is_nan() {
+                        let d = v - mean;
+                        acc += d * d;
+                        valid += 1;
+                    }
+                }
+                *slot = if valid == 0 { f64::NAN } else { acc / valid as f64 };
+            }
+            std::hint::black_box(&out);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "FUSED_NANVAR_AXIS0 new={new_ms:.3}ms old_sqscan={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
+    }
+
+    #[test]
     #[ignore = "perf A/B: fused nanmax(axis=0) vs nan_fill+reduce_max; run --release -- --ignored --nocapture"]
     fn fused_nanmax_axis0_ab_bench() {
         use std::time::Instant;
@@ -51938,6 +52117,85 @@ print(json.dumps(payload))
             digest_of(&mx),
             "102d83f15cce2bf0ec6f58f69c63b56b3ab90e556f1ffcf5f671f6f0e215d1ed"
         );
+    }
+
+    #[test]
+    fn fused_nanvar_nanstd_axis_matches_strided_reference_bits() {
+        // The fused nan_var_axis_simd path must be BIT-IDENTICAL to the scalar
+        // per-column non-NaN sum-of-squared-deviations it replaces, for nanvar AND
+        // nanstd, across the LANES=8 boundary, axis 0/1 of 2-D + 3-D, both ddof, incl
+        // all-NaN columns (-> NaN) and columns with valid <= ddof (-> NaN).
+        let shapes: &[Vec<usize>] = &[
+            vec![37, 21],
+            vec![21, 37],
+            vec![5, 4, 6],
+            vec![6, 5, 4],
+            vec![8, 8],
+            vec![3, 17],
+        ];
+        let bits = |v: f64| v.to_bits();
+        for shape in shapes {
+            let n: usize = shape.iter().product();
+            let mut data = Vec::with_capacity(n);
+            for i in 0..n {
+                let cell = if i % 7 == 0 {
+                    f64::NAN
+                } else {
+                    (((i * 13 + 3) % 31) as f64) - 15.0
+                };
+                data.push(cell);
+            }
+            let a = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            let cols_after = |axis: usize| -> usize { shape[axis + 1..].iter().product() };
+            for axis in 0..shape.len() {
+                let axis_len = shape[axis];
+                let inner = cols_after(axis);
+                for &ddof in &[0usize, 1usize] {
+                    for keepdims in [false, true] {
+                        // Reference: nanmean (same in both paths) then the literal scalar
+                        // per-column non-NaN sq-sum / (valid - ddof) scan.
+                        let means = a.nanmean(Some(axis as isize), true).unwrap().values;
+                        let outer: usize = shape[..axis].iter().product();
+                        let mut reference = vec![0.0f64; outer * inner];
+                        for o in 0..outer {
+                            for c in 0..inner {
+                                let mean = means[o * inner + c];
+                                let mut acc = 0.0f64;
+                                let mut valid = 0usize;
+                                for k in 0..axis_len {
+                                    let v = data[o * axis_len * inner + k * inner + c];
+                                    if !v.is_nan() {
+                                        let d = v - mean;
+                                        acc += d * d;
+                                        valid += 1;
+                                    }
+                                }
+                                let denom = valid.saturating_sub(ddof);
+                                reference[o * inner + c] =
+                                    if denom == 0 { f64::NAN } else { acc / denom as f64 };
+                            }
+                        }
+                        let got_var = a.nanvar(Some(axis as isize), keepdims, ddof).unwrap();
+                        for (g, r) in got_var.values().iter().zip(&reference) {
+                            if r.is_nan() {
+                                assert!(g.is_nan(), "nanvar NaN {shape:?} ax{axis} ddof{ddof}");
+                            } else {
+                                assert_eq!(bits(*g), bits(*r), "nanvar bits {shape:?} ax{axis} ddof{ddof}: {g} vs {r}");
+                            }
+                        }
+                        let got_std = a.nanstd(Some(axis as isize), keepdims, ddof).unwrap();
+                        for (g, r) in got_std.values().iter().zip(&reference) {
+                            let rs = r.sqrt();
+                            if rs.is_nan() {
+                                assert!(g.is_nan(), "nanstd NaN {shape:?} ax{axis} ddof{ddof}");
+                            } else {
+                                assert_eq!(bits(*g), bits(rs), "nanstd bits {shape:?} ax{axis} ddof{ddof}: {g} vs {rs}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
