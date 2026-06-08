@@ -21024,6 +21024,53 @@ impl UFuncArray {
             });
         }
 
+        // Fast path: 2-operand generalized outer product. No contracted labels, no
+        // label shared between the operands, no repeated label within an operand, and
+        // the output labels are exactly op0's labels followed by op1's. Then every
+        // output cell is a single product `out[ia*sizeB + ib] = a[ia] * b[ib]` with
+        // NO summation — bit-identical to the general scatter (which runs with
+        // contracted_size == 1, i.e. the same lone multiply) but without its per-cell
+        // index-decode and per-cell `label_vals` allocation. Covers
+        // `np.einsum('i,j->ij', a, b)` (== `np.outer`) and scalar-broadcast forms
+        // like `'i,->i'`. The inner row is a contiguous `a[ia]*b[..]` stream that
+        // autovectorizes; rows are disjoint so they fan out across the rayon pool.
+        if operands.len() == 2
+            && contracted.is_empty()
+            && !einsum_has_dup_label(&input_chars[0])
+            && !einsum_has_dup_label(&input_chars[1])
+            && input_chars[0].iter().all(|c| !input_chars[1].contains(c))
+            && output_labels.len() == input_chars[0].len() + input_chars[1].len()
+            && output_labels[..input_chars[0].len()] == input_chars[0][..]
+            && output_labels[input_chars[0].len()..] == input_chars[1][..]
+        {
+            let a_vals = &operands[0].values;
+            let b_vals = &operands[1].values;
+            let size_b = b_vals.len();
+            let mut values = vec![0.0f64; a_vals.len().saturating_mul(size_b)];
+            if size_b > 0 {
+                let fill = |(row, &av): (&mut [f64], &f64)| {
+                    for (o, &bv) in row.iter_mut().zip(b_vals.iter()) {
+                        *o = av * bv;
+                    }
+                };
+                const EINSUM_OUTER_PAR_MIN: usize = 1 << 12;
+                if values.len() >= EINSUM_OUTER_PAR_MIN && rayon::current_num_threads() >= 2 {
+                    values
+                        .par_chunks_mut(size_b)
+                        .zip(a_vals.par_iter())
+                        .for_each(fill);
+                } else {
+                    values.chunks_mut(size_b).zip(a_vals.iter()).for_each(fill);
+                }
+            }
+            return Ok(Self {
+                shape: output_shape,
+                values,
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
+
         // Precompute integer stride tables once, keyed by each label's position in
         // `all_labels`, so the hot loop is pure index arithmetic — no per-iteration
         // HashMap allocation or hashing.
@@ -57234,6 +57281,107 @@ print(json.dumps(payload))
         assert!((c.values[3] - 6.0).abs() < 1e-10);
         assert!((c.values[4] - 8.0).abs() < 1e-10);
         assert!((c.values[5] - 10.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn einsum_outer_fast_path_matches_reference_bits_and_golden_sha256() {
+        // The generalized-outer-product fast path must be BYTE-IDENTICAL to the
+        // single-multiply reference out[ia*sizeB+ib] = a[ia]*b[ib] (which is exactly
+        // what the general scatter computes with contracted_size == 1). Cover the
+        // 1-D×1-D ('i,j->ij'), 2-D×1-D ('ij,k->ijk'), and scalar-broadcast ('i,->i')
+        // shapes, at sizes above the parallel gate so the rayon path is exercised.
+        let lcg = |seed: u64, n: usize| -> Vec<f64> {
+            let mut s = seed;
+            (0..n)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((s >> 33) as f64) / (u32::MAX as f64) - 0.5
+                })
+                .collect()
+        };
+        let mut hasher = Sha256::new();
+        let cases: &[(&str, Vec<usize>, Vec<usize>)] = &[
+            ("i,j->ij", vec![97], vec![89]),
+            ("ij,k->ijk", vec![13, 9], vec![41]),
+            ("i,->i", vec![128], vec![]),
+        ];
+        for (subs, ashape, bshape) in cases {
+            let asz: usize = ashape.iter().product::<usize>().max(1);
+            let bsz: usize = bshape.iter().product::<usize>().max(1);
+            let a = UFuncArray::new(ashape.clone(), lcg(0x51 + asz as u64, asz), DType::F64).unwrap();
+            let b = UFuncArray::new(bshape.clone(), lcg(0xA3 + bsz as u64, bsz), DType::F64).unwrap();
+            let c = UFuncArray::einsum(subs, &[&a, &b]).unwrap();
+            assert_eq!(c.values.len(), asz * bsz, "{subs} size");
+            for ia in 0..asz {
+                for ib in 0..bsz {
+                    let expect = a.values[ia] * b.values[ib];
+                    assert_eq!(
+                        c.values[ia * bsz + ib].to_bits(),
+                        expect.to_bits(),
+                        "{subs} outer drifted at ({ia},{ib})"
+                    );
+                }
+            }
+            for v in &c.values {
+                hasher.update(v.to_bits().to_le_bytes());
+            }
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "f3dbddb67e61ffb0e415e30a83d9c0168318424027db17a6e054c548a5348ae0",
+            "einsum outer fast-path golden digest drifted"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --release -- --ignored --nocapture"]
+    fn einsum_outer_fast_path_speedup_report() {
+        use std::time::Instant;
+        // Same-process A/B: the new generalized-outer fast path vs a faithful replica
+        // of the pre-existing general scatter (per-cell `label_vals` allocation +
+        // modulo/div index decode), which is exactly what 'i,j->ij' used to hit.
+        for &(ni, nj) in &[(1000usize, 1000usize), (2000, 2000)] {
+            let a: Vec<f64> = (0..ni).map(|i| (i as f64) * 0.001 - 0.5).collect();
+            let b: Vec<f64> = (0..nj).map(|j| (j as f64) * 0.002 - 0.5).collect();
+            let av = UFuncArray::new(vec![ni], a.clone(), DType::F64).unwrap();
+            let bv = UFuncArray::new(vec![nj], b.clone(), DType::F64).unwrap();
+            let it = 5;
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|p: &f64, q: &f64| p.partial_cmp(q).unwrap());
+                xs[xs.len() / 2]
+            };
+            // Replica of the old general path for 'i,j->ij' (contracted_size == 1).
+            let slow = |a: &[f64], b: &[f64]| -> Vec<f64> {
+                let all_dims = [a.len(), b.len()];
+                let mut out = vec![0.0f64; a.len() * b.len()];
+                for (o, cell) in out.iter_mut().enumerate() {
+                    let mut label_vals = vec![0usize; 2];
+                    let mut remaining = o;
+                    for i in (0..2).rev() {
+                        label_vals[i] = remaining % all_dims[i];
+                        remaining /= all_dims[i];
+                    }
+                    *cell = a[label_vals[0]] * b[label_vals[1]];
+                }
+                out
+            };
+            let mut ts = Vec::new();
+            let mut tf = Vec::new();
+            for _ in 0..it {
+                let t = Instant::now();
+                std::hint::black_box(slow(&a, &b));
+                ts.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                std::hint::black_box(UFuncArray::einsum("i,j->ij", &[&av, &bv]).unwrap());
+                tf.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let (s, f) = (med(ts), med(tf));
+            println!("einsum i,j->ij {ni}x{nj}: oldpath={s:8.3}ms fastpath={f:8.3}ms speedup={:.2}x", s / f);
+        }
     }
 
     #[test]
