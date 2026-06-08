@@ -4751,23 +4751,6 @@ fn try_normalize_axis(axis: isize, ndim: usize) -> Option<usize> {
     (normalized < usize::try_from(ndim).ok()?).then_some(normalized)
 }
 
-fn try_normalize_permutation_axes(axes: &[isize], ndim: usize) -> Option<Vec<usize>> {
-    if axes.len() != ndim {
-        return None;
-    }
-
-    let mut seen = std::collections::HashSet::with_capacity(axes.len());
-    let mut normalized = Vec::with_capacity(axes.len());
-    for &axis in axes {
-        let normalized_axis = try_normalize_axis(axis, ndim)?;
-        if !seen.insert(normalized_axis) {
-            return None;
-        }
-        normalized.push(normalized_axis);
-    }
-    Some(normalized)
-}
-
 /// Extract and validate axes for tensorsolve permutation.
 /// Reserved for numpy.linalg.tensorsolve support.
 #[allow(dead_code)]
@@ -17579,56 +17562,33 @@ fn reshape(py: Python<'_>, a: Py<PyAny>, newshape: Py<PyAny>, order: &str) -> Py
 #[pyfunction]
 #[pyo3(signature = (a, axes=None))]
 fn transpose(py: Python<'_>, a: Py<PyAny>, axes: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    // np.transpose is a pure stride permutation — it returns a VIEW (O(1)), never
+    // moves data. The old native path materialized a full transposed copy, ~14x
+    // slower AND a view-semantics divergence (and it widened narrow dtypes via the
+    // extract). Delegate to numpy.transpose, which yields the exact view, preserves
+    // the dtype, and reproduces numpy's exact error surface.
     let numpy = py.import("numpy")?;
-    let transpose_fn = numpy.getattr("transpose")?;
-    let axes_for_parse = axes.as_ref().map(|value| value.clone_ref(py));
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        if let Some(axes_val) = axes.as_ref() {
-            kwargs.set_item("axes", axes_val.bind(py))?;
-        }
-        Ok(transpose_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
-    };
-
-    let a = match extract_numeric_array(py, a.bind(py), "transpose(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let axes = match extract_axis_spec(py, axes_for_parse, "transpose") {
-        Ok(axes) => axes,
-        Err(_) => return fallback(),
-    };
-    let normalized_axes = match axes.as_deref() {
-        None => None,
-        Some(axes) => match try_normalize_permutation_axes(axes, a.shape().len()) {
-            Some(axes) => Some(axes),
-            None => return fallback(),
-        },
-    };
-    let result = match a.transpose(normalized_axes.as_deref()) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    let kwargs = PyDict::new(py);
+    if let Some(axes_val) = axes.as_ref() {
+        kwargs.set_item("axes", axes_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("transpose")?
+        .call((a.bind(py),), Some(&kwargs))?
+        .unbind())
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, axis1, axis2))]
 fn swapaxes(py: Python<'_>, a: Py<PyAny>, axis1: i64, axis2: i64) -> PyResult<Py<PyAny>> {
+    // np.swapaxes swaps two strides — a VIEW (O(1)). The old native path
+    // materialized a copy (~13x slower + view-semantics divergence). Delegate to
+    // numpy.swapaxes for the exact view, dtype, and error surface.
     let numpy = py.import("numpy")?;
-    let swapaxes_fn = numpy.getattr("swapaxes")?;
-    let fallback =
-        || -> PyResult<Py<PyAny>> { Ok(swapaxes_fn.call1((a.bind(py), axis1, axis2))?.unbind()) };
-
-    let a = match extract_numeric_array(py, a.bind(py), "swapaxes(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let result = match a.swapaxes(axis1 as isize, axis2 as isize) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(numpy
+        .getattr("swapaxes")?
+        .call1((a.bind(py), axis1, axis2))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -17639,46 +17599,14 @@ fn moveaxis(
     source: Py<PyAny>,
     destination: Py<PyAny>,
 ) -> PyResult<Py<PyAny>> {
+    // np.moveaxis is a pure stride permutation — a VIEW (O(1)). The old native
+    // path materialized a copy (~4x slower + view-semantics divergence). Delegate
+    // to numpy.moveaxis for the exact view, dtype, and error surface.
     let numpy = py.import("numpy")?;
-    let moveaxis_fn = numpy.getattr("moveaxis")?;
-    let source_for_parse = source.clone_ref(py);
-    let destination_for_parse = destination.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(moveaxis_fn
-            .call1((a.bind(py), source.bind(py), destination.bind(py)))?
-            .unbind())
-    };
-
-    let a = match extract_numeric_array(py, a.bind(py), "moveaxis(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let Some(source_axes) = (match extract_axis_spec(py, Some(source_for_parse), "moveaxis(source)")
-    {
-        Ok(axes) => axes,
-        Err(_) => return fallback(),
-    }) else {
-        return fallback();
-    };
-    let Some(destination_axes) =
-        (match extract_axis_spec(py, Some(destination_for_parse), "moveaxis(destination)") {
-            Ok(axes) => axes,
-            Err(_) => return fallback(),
-        })
-    else {
-        return fallback();
-    };
-
-    let result = if source_axes.len() == 1 && destination_axes.len() == 1 {
-        a.moveaxis(source_axes[0], destination_axes[0])
-    } else {
-        a.moveaxis_multi(&source_axes, &destination_axes)
-    };
-    let result = match result {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(numpy
+        .getattr("moveaxis")?
+        .call1((a.bind(py), source.bind(py), destination.bind(py)))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -17720,30 +17648,12 @@ fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py
 #[pyfunction]
 #[pyo3(signature = (m, k=1, axes=(0, 1)))]
 fn rot90(py: Python<'_>, m: Py<PyAny>, k: i64, axes: (i64, i64)) -> PyResult<Py<PyAny>> {
-    // Native rot90 via UFuncArray::rot90_axes for real/complex numeric
-    // inputs. Axis validation errors, repeated-axes rejection, and
-    // non-numeric / 1-D inputs fall back to np.rot90 so numpy's error
-    // surface and dispatch stay exact.
+    // np.rot90 is flip + transpose — both stride ops — so it returns a VIEW
+    // (O(1)). The old native path materialized a rotated copy (~13x slower +
+    // view-semantics divergence). Delegate to numpy.rot90 for the exact view,
+    // dtype, and error surface.
     let numpy = py.import("numpy")?;
-    let m_for_fallback = m.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(numpy
-            .getattr("rot90")?
-            .call1((m_for_fallback.bind(py), k, axes))?
-            .unbind())
-    };
-    let Ok(k_i32) = i32::try_from(k) else {
-        return fallback();
-    };
-    let array = match extract_precise_numeric_array(py, m.bind(py), "rot90(m)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let result = match array.rot90_axes(k_i32, (axes.0 as isize, axes.1 as isize)) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(numpy.getattr("rot90")?.call1((m.bind(py), k, axes))?.unbind())
 }
 
 #[pyfunction]
@@ -32369,36 +32279,16 @@ fn diagonal(
     axis1: isize,
     axis2: isize,
 ) -> PyResult<Py<PyAny>> {
+    // np.diagonal returns a strided, READ-ONLY VIEW (O(1)) since numpy 1.9 — it
+    // never copies. The old native path materialized a writable copy, which both
+    // cost O(n^2) (it bridged the whole matrix) and diverged from numpy's
+    // read-only-view semantics. Delegate to numpy.diagonal for the exact view,
+    // dtype, writeable flag, and error surface.
     let numpy = py.import("numpy")?;
-    let arr = numpy.call_method1("asarray", (a.bind(py),))?;
-    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    if dtype_kind == "c" {
-        return Ok(numpy
-            .getattr("diagonal")?
-            .call1((arr, offset, axis1, axis2))?
-            .unbind());
-    }
-    // 2-D canonical-axes fast path: np.diagonal extracts N values from an N×N matrix;
-    // the generic path copies the whole matrix across the bridge first. Read NumPy's
-    // diagonal VIEW (O(1), strided) and extract only those N — bit-identical to
-    // a.diagonal(offset, 0, 1) (same elements/order/dtype). Swapped/other axes and
-    // N-D inputs keep the validated generic path.
-    if let Ok(shape) = arr.getattr("shape").and_then(|s| s.extract::<Vec<usize>>())
-        && shape.len() == 2
-    {
-        let n1 = if axis1 < 0 { axis1 + 2 } else { axis1 };
-        let n2 = if axis2 < 0 { axis2 + 2 } else { axis2 };
-        if n1 == 0
-            && n2 == 1
-            && let Ok(diag_view) = arr.call_method1("diagonal", (offset,))
-            && let Ok(result) = extract_precise_numeric_array(py, &diag_view, "diagonal(view)")
-        {
-            return build_numpy_array_from_ufunc(py, &result);
-        }
-    }
-    let a = extract_precise_numeric_array(py, a.bind(py), "diagonal(a)")?;
-    let result = a.diagonal(offset, axis1, axis2).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(numpy
+        .getattr("diagonal")?
+        .call1((a.bind(py), offset, axis1, axis2))?
+        .unbind())
 }
 
 // Zero-copy in-place np.fill_diagonal(a, val) for a 2-D float64 ndarray with a
