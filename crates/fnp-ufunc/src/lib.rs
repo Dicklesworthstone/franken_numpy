@@ -23839,6 +23839,31 @@ impl UFuncArray {
                 let strides = c_strides_elems(&self.shape);
                 let out_shape = reduced_shape(&self.shape, ax, false);
                 let outer_count = self.values.len().checked_div(axis_len).unwrap_or(0);
+                let inner: usize = self.shape[ax + 1..].iter().copied().product();
+                if inner > 1 {
+                    // Non-last axis: register-blocked SIMD NaN-ignoring argmin (reads
+                    // contiguous row segments instead of the strided per-lane gather;
+                    // bit-identical to the scalar reference, including all-NaN lanes
+                    // which produce the `-1` sentinel -> EmptyReduction).
+                    let outer: usize = self.shape[..ax].iter().copied().product();
+                    let mut out_values = vec![0.0f64; outer_count];
+                    reduce_nanargminmax_axis_simd::<false>(
+                        &self.values,
+                        axis_len,
+                        inner,
+                        outer,
+                        &mut out_values,
+                    );
+                    if out_values.iter().any(|&v| v < 0.0) {
+                        return Err(UFuncError::EmptyReduction { op: "nanargmin" });
+                    }
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: out_values,
+                        dtype: DType::I64,
+                        integer_sidecar: None,
+                    });
+                }
                 let mut out_values = Vec::with_capacity(outer_count);
 
                 for outer in 0..outer_count {
@@ -23912,6 +23937,29 @@ impl UFuncArray {
                 let strides = c_strides_elems(&self.shape);
                 let out_shape = reduced_shape(&self.shape, ax, false);
                 let outer_count = self.values.len().checked_div(axis_len).unwrap_or(0);
+                let inner: usize = self.shape[ax + 1..].iter().copied().product();
+                if inner > 1 {
+                    // Non-last axis: register-blocked SIMD NaN-ignoring argmax (see
+                    // the nanargmin twin above).
+                    let outer: usize = self.shape[..ax].iter().copied().product();
+                    let mut out_values = vec![0.0f64; outer_count];
+                    reduce_nanargminmax_axis_simd::<true>(
+                        &self.values,
+                        axis_len,
+                        inner,
+                        outer,
+                        &mut out_values,
+                    );
+                    if out_values.iter().any(|&v| v < 0.0) {
+                        return Err(UFuncError::EmptyReduction { op: "nanargmax" });
+                    }
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: out_values,
+                        dtype: DType::I64,
+                        integer_sidecar: None,
+                    });
+                }
                 let mut out_values = Vec::with_capacity(outer_count);
 
                 for outer in 0..outer_count {
@@ -29736,6 +29784,94 @@ fn reduce_argminmax_axis_simd<const MAX: bool>(
     const ARGMINMAX_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
     let parallel = out.len() >= 2
         && values.len() >= ARGMINMAX_AXIS_PARALLEL_MIN_ELEMS
+        && rayon::current_num_threads() >= 2;
+    if parallel && outer == 1 {
+        let threads = rayon::current_num_threads();
+        let chunk = inner.div_ceil(threads * 2).max(8);
+        out.par_chunks_mut(chunk).enumerate().for_each(|(ci, oc)| {
+            reduce(0, ci * chunk, oc);
+        });
+    } else if parallel {
+        out.par_chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
+    } else {
+        out.chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
+    }
+}
+
+/// NaN-IGNORING register-blocked SIMD argmin/argmax along a non-last axis
+/// (`inner > 1`). Unlike `reduce_argminmax_axis_simd` (where NaN wins, matching
+/// `np.argmin`), this drops NaN lanes entirely (matching `np.nanargmin`): the best
+/// value starts at +/-inf with a sentinel index `-1`, and only a finite-or-real
+/// strictly-better element updates it. A lane that never sees a real element keeps
+/// index `-1`, which the caller maps to `EmptyReduction`. This reproduces the scalar
+/// `for k` reference (init `best=+/-inf`, `best_k=None`, `!v.is_nan() && strict better`)
+/// bit-for-bit — including the all-`inf` quirk (a `[+inf]` lane keeps `-1` because
+/// `+inf < +inf` is false), so it is a pure perf change with identical behavior.
+fn reduce_nanargminmax_axis_simd<const MAX: bool>(
+    values: &[f64],
+    axis_len: usize,
+    inner: usize,
+    outer: usize,
+    out: &mut [f64],
+) {
+    use std::simd::cmp::SimdPartialOrd;
+    use std::simd::num::SimdFloat;
+    use std::simd::{Select, Simd};
+    const LANES: usize = 8;
+    type V = Simd<f64, LANES>;
+    type I = Simd<i64, LANES>;
+
+    let init_best = if MAX { f64::NEG_INFINITY } else { f64::INFINITY };
+
+    let reduce = |o: usize, c0: usize, out_slice: &mut [f64]| {
+        let len = out_slice.len();
+        let base = o * axis_len * inner + c0;
+        let mut c = 0;
+        while c + LANES <= len {
+            let mut best_val = V::splat(init_best);
+            let mut best_idx = I::splat(-1);
+            for r in 0..axis_len {
+                let v = V::from_slice(&values[base + r * inner + c..]);
+                let cmp = if MAX {
+                    v.simd_gt(best_val)
+                } else {
+                    v.simd_lt(best_val)
+                };
+                // NaN compares false in both directions, so `cmp` already excludes
+                // NaN elements; an explicit `!v.is_nan()` keeps parity if a platform
+                // ever returns a non-false comparison for NaN.
+                let update = !v.is_nan() & cmp;
+                best_val = update.select(v, best_val);
+                best_idx = update.select(I::splat(r as i64), best_idx);
+            }
+            let idx_arr = best_idx.to_array();
+            for (lane, &idx) in idx_arr.iter().enumerate() {
+                out_slice[c + lane] = idx as f64;
+            }
+            c += LANES;
+        }
+        while c < len {
+            let mut best_val = init_best;
+            let mut best_idx: i64 = -1;
+            for r in 0..axis_len {
+                let cur = values[base + r * inner + c];
+                if !cur.is_nan() && (if MAX { cur > best_val } else { cur < best_val }) {
+                    best_val = cur;
+                    best_idx = r as i64;
+                }
+            }
+            out_slice[c] = best_idx as f64;
+            c += 1;
+        }
+    };
+
+    const NANARGMINMAX_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+    let parallel = out.len() >= 2
+        && values.len() >= NANARGMINMAX_AXIS_PARALLEL_MIN_ELEMS
         && rayon::current_num_threads() >= 2;
     if parallel && outer == 1 {
         let threads = rayon::current_num_threads();
@@ -45696,6 +45832,170 @@ print(json.dumps(payload))
                 }
             }
         }
+    }
+
+    #[test]
+    fn nanargminmax_non_last_axis_simd_matches_scalar_reference() {
+        // The non-last-axis (inner>1) nanargmin/nanargmax route through the
+        // register-blocked SIMD kernel reduce_nanargminmax_axis_simd. It must be
+        // bit-identical to the scalar per-lane reference (init best=+/-inf,
+        // best_k=None, `!v.is_nan() && strict-better`), including the all-`inf`
+        // quirk (a `[+inf]` min lane keeps the `-1` sentinel because `+inf<+inf`
+        // is false) and all-NaN lanes which must raise EmptyReduction.
+        let (d0, d1, d2) = (29usize, 37usize, 19usize);
+        let mut data: Vec<f64> = (0..d0 * d1 * d2)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
+            .collect();
+        // Scatter NaNs and a few infinities to exercise the NaN-skip / inf paths.
+        for i in (0..data.len()).step_by(7) {
+            data[i] = f64::NAN;
+        }
+        for i in (0..data.len()).step_by(53) {
+            data[i] = f64::INFINITY;
+        }
+        for i in (0..data.len()).step_by(97) {
+            data[i] = f64::NEG_INFINITY;
+        }
+        let arr = UFuncArray::new(vec![d0, d1, d2], data.clone(), DType::F64).expect("arr");
+        let strides = [d1 * d2, d2, 1usize];
+
+        // ax=0 (inner = d1*d2 > 1) and ax=1 (inner = d2 > 1) both hit the SIMD path.
+        for ax in [0isize, 1isize] {
+            let axu = ax as usize;
+            let axis_len = [d0, d1, d2][axu];
+            let outer_count = data.len() / axis_len;
+            for is_max in [false, true] {
+                let out = if is_max {
+                    arr.nanargmax(Some(ax))
+                } else {
+                    arr.nanargmin(Some(ax))
+                }
+                .expect("nanarg axis");
+                for outer in 0..outer_count {
+                    let mut remainder = outer;
+                    let mut base_flat = 0usize;
+                    for (d, &stride) in strides.iter().enumerate() {
+                        if d == axu {
+                            continue;
+                        }
+                        let outer_stride = if d < axu { stride / axis_len } else { stride };
+                        let coord = remainder / outer_stride;
+                        remainder %= outer_stride;
+                        base_flat += coord * stride;
+                    }
+                    let mut best_k: Option<usize> = None;
+                    let mut best_v = if is_max {
+                        f64::NEG_INFINITY
+                    } else {
+                        f64::INFINITY
+                    };
+                    for k in 0..axis_len {
+                        let v = data[base_flat + k * strides[axu]];
+                        let better = if is_max { v > best_v } else { v < best_v };
+                        if !v.is_nan() && better {
+                            best_v = v;
+                            best_k = Some(k);
+                        }
+                    }
+                    // Lanes are seeded so none are fully NaN here; assert the index.
+                    let exp = best_k.expect("lane has a real element") as f64;
+                    let got = out.values()[outer];
+                    assert_eq!(
+                        got.to_bits(),
+                        exp.to_bits(),
+                        "nanarg{} ax={ax} outer {outer} diverged from scalar reference",
+                        if is_max { "max" } else { "min" }
+                    );
+                }
+            }
+        }
+
+        // All-NaN lane along a non-last axis must raise EmptyReduction (matching the
+        // scalar `best_k == None` -> Err), via the `-1` sentinel scan.
+        let (e0, e1, e2) = (3usize, 5usize, 4usize);
+        let mut nan_data = vec![1.0f64; e0 * e1 * e2];
+        // Make every lane along ax=1 (inner = e2 > 1) at outer (0,*,0) fully NaN.
+        for k in 0..e1 {
+            nan_data[k * e2] = f64::NAN; // (0, k, 0)
+        }
+        let nan_arr = UFuncArray::new(vec![e0, e1, e2], nan_data, DType::F64).expect("nan_arr");
+        assert!(
+            matches!(
+                nan_arr.nanargmin(Some(1)),
+                Err(UFuncError::EmptyReduction { op: "nanargmin" })
+            ),
+            "all-NaN non-last-axis lane must raise EmptyReduction"
+        );
+        assert!(matches!(
+            nan_arr.nanargmax(Some(1)),
+            Err(UFuncError::EmptyReduction { op: "nanargmax" })
+        ));
+    }
+
+    #[test]
+    #[ignore = "perf A/B bench; run with --ignored --nocapture"]
+    fn nanargminmax_non_last_axis_ab_bench() {
+        use std::time::Instant;
+        // Non-last-axis reduction: shape [n, n], axis=0 -> inner = n (strided lanes
+        // in the old path). Compare the old strided per-lane serial scan against the
+        // new register-blocked SIMD + parallel path.
+        let n = 2048usize;
+        let mut data: Vec<f64> = (0..n * n)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 99991) as f64) / 7.0 - 7000.0)
+            .collect();
+        for i in (0..data.len()).step_by(9) {
+            data[i] = f64::NAN;
+        }
+        let arr = UFuncArray::new(vec![n, n], data.clone(), DType::F64).expect("arr");
+        let axis_len = n;
+        let inner = n;
+        let outer_count = data.len() / axis_len;
+
+        // Old reference: strided per-lane serial scan (what nanargmin did before).
+        let old_ref = || -> Vec<f64> {
+            let mut out = Vec::with_capacity(outer_count);
+            for o in 0..outer_count {
+                let base_flat = o; // ax=0: outer index == inner offset
+                let mut best_k: Option<usize> = None;
+                let mut best_v = f64::INFINITY;
+                for k in 0..axis_len {
+                    let v = data[base_flat + k * inner];
+                    if !v.is_nan() && v < best_v {
+                        best_v = v;
+                        best_k = Some(k);
+                    }
+                }
+                out.push(best_k.unwrap() as f64);
+            }
+            out
+        };
+
+        let iters = 30;
+        // warmup
+        let _ = old_ref();
+        let _ = arr.nanargmin(Some(0)).unwrap();
+
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(old_ref());
+        }
+        let old_ns = t0.elapsed().as_nanos() as f64 / iters as f64;
+
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(arr.nanargmin(Some(0)).unwrap());
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / iters as f64;
+
+        eprintln!(
+            "nanargmin axis=0 [{n},{n}]: old(strided-serial)={:.1}us new(simd+par)={:.1}us  speedup={:.2}x",
+            old_ns / 1000.0,
+            new_ns / 1000.0,
+            old_ns / new_ns
+        );
+        // Sanity: both agree.
+        let got = arr.nanargmin(Some(0)).unwrap();
+        assert_eq!(got.values(), &old_ref()[..]);
     }
 
     #[test]
