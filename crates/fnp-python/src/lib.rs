@@ -21363,6 +21363,28 @@ fn irfftn(
     Ok(irfftn_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
+// Build numpy's reversed VIEW of `arr` by basic slicing: `slice(None, None, -1)`
+// on each axis marked in `mask`, `slice(None)` elsewhere. This is exactly what
+// numpy.flip/flipud/fliplr do internally — a stride flip, no data movement — so
+// the result is bit-identical AND shares memory like numpy (the previous native
+// path materialized a full copy, which was both ~25x slower and a behavior
+// divergence). Dtype-agnostic: works for every dtype, not just 8-byte numerics.
+fn build_flip_view<'py>(
+    py: Python<'py>,
+    arr: &Bound<'py, PyAny>,
+    mask: &[bool],
+) -> PyResult<Bound<'py, PyAny>> {
+    let builtins = py.import("builtins")?;
+    let slice_cls = builtins.getattr("slice")?;
+    let full = slice_cls.call1((py.None(),))?; // slice(None) -> whole axis
+    let rev = slice_cls.call1((py.None(), py.None(), -1i64))?; // slice(None, None, -1)
+    let items: Vec<Bound<'py, PyAny>> = mask
+        .iter()
+        .map(|&flip| if flip { rev.clone() } else { full.clone() })
+        .collect();
+    arr.get_item(PyTuple::new(py, items)?)
+}
+
 #[pyfunction]
 #[pyo3(signature = (m, axis=None))]
 fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
@@ -21380,83 +21402,70 @@ fn flip(py: Python<'_>, m: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<Py
             .unbind())
     };
 
-    // flip is a pure reversal that preserves the input dtype. The native path
-    // widens narrow widths via extract_numeric_array, so it only matches numpy's
-    // dtype for bool and 8-byte int/uint/float. Delegate every other dtype
-    // (narrow numeric, complex, string, datetime64, timedelta64, object, void)
-    // to numpy.flip so the dtype round-trips.
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
-    let dtype = arr.getattr("dtype")?;
-    let dtype_kind = dtype.getattr("kind")?.extract::<String>()?;
-    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
-    if !(dtype_kind == "b" || (matches!(dtype_kind.as_str(), "i" | "u" | "f") && itemsize == 8)) {
-        return fallback();
-    }
+    let ndim = arr.getattr("ndim")?.extract::<usize>()?;
 
-    let m = extract_numeric_array(py, m.bind(py), "flip(m)")?;
-    let axes = extract_axis_spec(py, axis, "flip")?;
-    // Out-of-bounds axis: numpy raises AxisError (subclass of ValueError).
-    // Fall back so the error type and message match exactly.
-    if let Some(axes) = axes.as_ref() {
-        let ndim = m.shape().len();
-        for &ax in axes {
-            if try_normalize_axis(ax, ndim).is_none() {
+    // Resolve the set of axes to reverse into a per-axis boolean mask. Any
+    // out-of-range or repeated axis defers to numpy so its exact AxisError /
+    // ValueError type and message are reproduced.
+    let mut mask = vec![false; ndim];
+    match axis {
+        None => mask.iter_mut().for_each(|f| *f = true),
+        Some(ax) => {
+            let ax = ax.bind(py);
+            if ax.is_none() {
+                mask.iter_mut().for_each(|f| *f = true);
+            } else if let Ok(single) = ax.extract::<isize>() {
+                match try_normalize_axis(single, ndim) {
+                    Some(n) => mask[n] = true,
+                    None => return fallback(),
+                }
+            } else if let Ok(tuple) = ax.extract::<Vec<isize>>() {
+                for a in tuple {
+                    match try_normalize_axis(a, ndim) {
+                        Some(n) if !mask[n] => mask[n] = true,
+                        _ => return fallback(), // out-of-range or repeated axis
+                    }
+                }
+            } else {
                 return fallback();
             }
         }
     }
-    let result = match axes {
-        None => m.flip(None),
-        Some(axes) if axes.is_empty() => Ok(m.clone()),
-        Some(axes) if axes.len() == 1 => m.flip(Some(axes[0])),
-        Some(axes) => {
-            ensure_unique_axes(&axes, m.shape().len())?;
-            m.flip_axes(&axes)
-        }
-    }
-    .map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(build_flip_view(py, &arr, &mask)?.unbind())
 }
 
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn flipud(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Pure reversal — numpy.flipud preserves the input dtype. Native path
-    // widens narrow widths, so it only matches numpy for bool and 8-byte
-    // int/uint/float; delegate every other dtype (narrow numeric, complex,
-    // string, datetime64, timedelta64, object, void) to numpy.flipud.
+    // numpy.flipud(m) == m[::-1, ...] — a stride-flip view of axis 0 (requires
+    // ndim >= 1, else numpy raises ValueError). Build the view directly.
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
-    let dtype = arr.getattr("dtype")?;
-    let dtype_kind = dtype.getattr("kind")?.extract::<String>()?;
-    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
-    if !(dtype_kind == "b" || (matches!(dtype_kind.as_str(), "i" | "u" | "f") && itemsize == 8)) {
+    let ndim = arr.getattr("ndim")?.extract::<usize>()?;
+    if ndim < 1 {
         return Ok(numpy.getattr("flipud")?.call1((arr,))?.unbind());
     }
-    let m = extract_numeric_array(py, m.bind(py), "flipud(m)")?;
-    let result = m.flipud().map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    let mut mask = vec![false; ndim];
+    mask[0] = true;
+    Ok(build_flip_view(py, &arr, &mask)?.unbind())
 }
 
 #[pyfunction]
 #[pyo3(signature = (m,))]
 fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Pure reversal — numpy.fliplr preserves the input dtype. Native path
-    // widens narrow widths, so it only matches numpy for bool and 8-byte
-    // int/uint/float; delegate every other dtype (narrow numeric, complex,
-    // string, datetime64, timedelta64, object, void) to numpy.fliplr.
+    // numpy.fliplr(m) == m[:, ::-1] — a stride-flip view of axis 1 (requires
+    // ndim >= 2, else numpy raises ValueError). Build the view directly.
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (m.bind(py),))?;
-    let dtype = arr.getattr("dtype")?;
-    let dtype_kind = dtype.getattr("kind")?.extract::<String>()?;
-    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
-    if !(dtype_kind == "b" || (matches!(dtype_kind.as_str(), "i" | "u" | "f") && itemsize == 8)) {
+    let ndim = arr.getattr("ndim")?.extract::<usize>()?;
+    if ndim < 2 {
         return Ok(numpy.getattr("fliplr")?.call1((arr,))?.unbind());
     }
-    let m = extract_numeric_array(py, m.bind(py), "fliplr(m)")?;
-    let result = m.fliplr().map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    let mut mask = vec![false; ndim];
+    mask[1] = true;
+    Ok(build_flip_view(py, &arr, &mask)?.unbind())
 }
 
 #[pyfunction]
