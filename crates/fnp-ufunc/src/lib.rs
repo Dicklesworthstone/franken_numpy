@@ -16289,22 +16289,41 @@ impl UFuncArray {
                         integer_sidecar: None,
                     });
                 }
-                let mut values = Vec::with_capacity(outer * inner);
-                for o in 0..outer {
-                    for i in 0..inner {
-                        let lane: Vec<f64> = (0..axis_len)
-                            .map(|a| self.values[o * axis_len * inner + a * inner + i])
-                            .collect();
-                        // NumPy propagates NaN in median
-                        if lane.iter().any(|v| v.is_nan()) {
-                            values.push(f64::NAN);
-                            continue;
-                        }
-                        let mut buf = lane;
-                        let med = select_median(&mut buf);
-                        values.push(med);
+                // Non-last-axis median. Each output cell (o, i) reduces one strided
+                // column independently via O(L) quickselect, so an indexed parallel map
+                // over output cells is bit-for-bit identical to the serial loop for any
+                // thread count (select_median returns the deterministic order statistic
+                // regardless of input order). The previous form ran fully SERIAL while
+                // the last-axis path above was already parallel.
+                let src = &self.values;
+                let n_out = outer * inner;
+                let compute_cell = |flat: usize| -> f64 {
+                    let o = flat / inner;
+                    let i = flat % inner;
+                    let base = o * axis_len * inner + i;
+                    let mut buf: Vec<f64> = Vec::with_capacity(axis_len);
+                    let mut has_nan = false;
+                    for a in 0..axis_len {
+                        let v = src[base + a * inner];
+                        has_nan |= v.is_nan();
+                        buf.push(v);
                     }
-                }
+                    // NumPy propagates NaN in median.
+                    if has_nan {
+                        f64::NAN
+                    } else {
+                        select_median(&mut buf)
+                    }
+                };
+                const MEDIAN_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                let values: Vec<f64> = if n_out >= 2
+                    && self.values.len() >= MEDIAN_AXIS_PARALLEL_MIN_ELEMS
+                    && rayon::current_num_threads() >= 2
+                {
+                    (0..n_out).into_par_iter().map(compute_cell).collect()
+                } else {
+                    (0..n_out).map(compute_cell).collect()
+                };
                 Ok(Self {
                     shape: out_shape,
                     values,
@@ -16391,25 +16410,40 @@ impl UFuncArray {
                         integer_sidecar: None,
                     });
                 }
-                let mut values = Vec::with_capacity(outer * inner);
-                for o in 0..outer {
-                    for i in 0..inner {
-                        let lane: Vec<f64> = (0..axis_len)
-                            .map(|a| self.values[o * axis_len * inner + a * inner + i])
-                            .collect();
-                        // NumPy propagates NaN in percentile
-                        if lane.iter().any(|v| v.is_nan()) {
-                            values.push(f64::NAN);
-                            continue;
-                        }
-                        let mut buf = lane;
-                        values.push(select_percentile_method(
-                            &mut buf,
-                            fraction,
-                            QuantileInterp::Linear,
-                        ));
+                // Non-last-axis percentile: each output cell (o, i) reduces one strided
+                // column independently via O(L) quickselect, so an indexed parallel map
+                // over output cells is bit-for-bit identical to the serial loop for any
+                // thread count. The previous form ran fully SERIAL while the last-axis
+                // path above was already parallel.
+                let src = &self.values;
+                let n_out = outer * inner;
+                let compute_cell = |flat: usize| -> f64 {
+                    let o = flat / inner;
+                    let i = flat % inner;
+                    let base = o * axis_len * inner + i;
+                    let mut buf: Vec<f64> = Vec::with_capacity(axis_len);
+                    let mut has_nan = false;
+                    for a in 0..axis_len {
+                        let v = src[base + a * inner];
+                        has_nan |= v.is_nan();
+                        buf.push(v);
                     }
-                }
+                    // NumPy propagates NaN in percentile.
+                    if has_nan {
+                        f64::NAN
+                    } else {
+                        select_percentile_method(&mut buf, fraction, QuantileInterp::Linear)
+                    }
+                };
+                const PERCENTILE_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                let values: Vec<f64> = if n_out >= 2
+                    && self.values.len() >= PERCENTILE_AXIS_PARALLEL_MIN_ELEMS
+                    && rayon::current_num_threads() >= 2
+                {
+                    (0..n_out).into_par_iter().map(compute_cell).collect()
+                } else {
+                    (0..n_out).map(compute_cell).collect()
+                };
                 Ok(Self {
                     shape: out_shape,
                     values,
@@ -44135,6 +44169,160 @@ print(json.dumps(payload))
                 );
             }
         }
+    }
+
+    #[test]
+    fn median_non_last_axis_parallel_matches_serial_reference() {
+        // Non-last-axis median (now parallel over output cells) must be bit-identical
+        // to a serial per-column sort + median over the strided column, across the
+        // parallel threshold, incl even/odd axis_len and NaN columns. 3-D included so
+        // inner stride > 1 and outer > 1.
+        let cases: &[Vec<usize>] = &[vec![138, 256], vec![64, 4, 33], vec![17, 8, 8]];
+        for shape in cases {
+            let n: usize = shape.iter().product();
+            let mut data: Vec<f64> = (0..n)
+                .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
+                .collect();
+            for j in (0..n).step_by(53) {
+                data[j] = f64::NAN;
+            }
+            let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            for axis in 0..shape.len() - 1 {
+                let axis_len = shape[axis];
+                let inner: usize = shape[axis + 1..].iter().product();
+                let outer: usize = shape[..axis].iter().product();
+                let got = arr.median(Some(axis as isize)).unwrap();
+                let mut expected = vec![0.0f64; outer * inner];
+                for o in 0..outer {
+                    for i in 0..inner {
+                        let mut lane: Vec<f64> = (0..axis_len)
+                            .map(|a| data[o * axis_len * inner + a * inner + i])
+                            .collect();
+                        expected[o * inner + i] = if lane.iter().any(|v| v.is_nan()) {
+                            f64::NAN
+                        } else {
+                            lane.sort_by(|a, b| a.total_cmp(b));
+                            if axis_len % 2 == 1 {
+                                lane[axis_len / 2]
+                            } else {
+                                (lane[axis_len / 2 - 1] + lane[axis_len / 2]) / 2.0
+                            }
+                        };
+                    }
+                }
+                for (idx, &exp) in expected.iter().enumerate() {
+                    let g = got.values()[idx];
+                    if exp.is_nan() {
+                        assert!(g.is_nan(), "{shape:?} ax{axis} cell {idx} expected NaN");
+                    } else {
+                        assert_eq!(
+                            g.to_bits(),
+                            exp.to_bits(),
+                            "{shape:?} ax{axis} cell {idx}: parallel median diverged"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn percentile_non_last_axis_parallel_matches_serial_reference() {
+        // Non-last-axis percentile (now parallel over output cells) must be bit-identical
+        // to a serial per-column scalar reference, across the parallel threshold, several
+        // q values, incl NaN columns. 3-D so inner stride > 1 and outer > 1.
+        let cases: &[Vec<usize>] = &[vec![138, 256], vec![64, 4, 33]];
+        for shape in cases {
+            let n: usize = shape.iter().product();
+            let mut data: Vec<f64> = (0..n)
+                .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
+                .collect();
+            for j in (0..n).step_by(53) {
+                data[j] = f64::NAN;
+            }
+            let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            for &q in &[0.0f64, 25.0, 50.0, 90.0, 100.0] {
+                let fraction = q / 100.0;
+                for axis in 0..shape.len() - 1 {
+                    let axis_len = shape[axis];
+                    let inner: usize = shape[axis + 1..].iter().product();
+                    let outer: usize = shape[..axis].iter().product();
+                    let _ = fraction;
+                    let got = arr.percentile(q, Some(axis as isize)).unwrap();
+                    for o in 0..outer {
+                        for i in 0..inner {
+                            let lane: Vec<f64> = (0..axis_len)
+                                .map(|a| data[o * axis_len * inner + a * inner + i])
+                                .collect();
+                            // Reference: fnp's OWN per-column 1-D percentile (the exact
+                            // select_percentile_method the axis path calls), so this is a
+                            // true axis-vs-per-column isomorphism check, not a re-derived
+                            // interpolation formula.
+                            let col = UFuncArray::new(vec![axis_len], lane, DType::F64).unwrap();
+                            let exp = col.percentile(q, None).unwrap().values()[0];
+                            let g = got.values()[o * inner + i];
+                            if exp.is_nan() {
+                                assert!(g.is_nan(), "{shape:?} ax{axis} q{q} cell expected NaN");
+                            } else {
+                                assert_eq!(
+                                    g.to_bits(),
+                                    exp.to_bits(),
+                                    "{shape:?} ax{axis} q{q}: parallel percentile diverged ({g} vs {exp})"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B: parallel non-last-axis median(axis=0) vs serial; run --release -- --ignored --nocapture"]
+    fn median_axis0_parallel_ab_bench() {
+        use std::time::Instant;
+        let n = 1024usize;
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
+            .collect();
+        let a = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+        let iters = 20;
+        let _ = a.median(Some(0)).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.median(Some(0)).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = serial strided gather + O(n) quickselect per cell (same algorithm class
+        // as production; only the parallelism differs, so the ratio is the parallel
+        // lever). n is even here, so exercise the (lo+hi)/2 path.
+        let inner = n;
+        let axis_len = n;
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut out = vec![0.0f64; inner];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let mut buf: Vec<f64> = (0..axis_len).map(|aa| data[aa * inner + i]).collect();
+                *slot = if buf.iter().any(|v| v.is_nan()) {
+                    f64::NAN
+                } else {
+                    let mid = axis_len / 2;
+                    buf.select_nth_unstable_by(mid, |a, b| a.total_cmp(b));
+                    let hi = buf[mid];
+                    let lo = buf[..mid]
+                        .iter()
+                        .copied()
+                        .fold(f64::NEG_INFINITY, |m, v| if v > m { v } else { m });
+                    (lo + hi) / 2.0
+                };
+            }
+            std::hint::black_box(&out);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "MEDIAN_AXIS0 new={new_ms:.3}ms old_serial={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
     }
 
     #[test]
