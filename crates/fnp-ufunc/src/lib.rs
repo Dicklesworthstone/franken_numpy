@@ -57395,6 +57395,7 @@ print(json.dumps(payload))
     #[test]
     #[ignore = "perf A/B; run with --release -- --ignored --nocapture"]
     fn einsum_general_path_alloc_hoist_speedup_report() {
+        use rayon::prelude::*;
         use std::time::Instant;
         // Alloc-dominated general-path cases (transpose 'ij->ji', hadamard
         // 'ij,ij->ij' — both fall through the GEMM/outer fast paths to the general
