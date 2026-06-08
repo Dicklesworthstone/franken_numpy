@@ -30497,35 +30497,15 @@ fn fft_pow2(re: &mut [f64], im: &mut [f64], inverse: bool) {
         j += m;
     }
 
-    // Butterfly passes
-    let sign = if inverse { 1.0 } else { -1.0 };
-    let mut len = 2;
-    while len <= n {
-        let half = len / 2;
-        let angle_step = sign * std::f64::consts::TAU / len as f64;
-        let wn_re = angle_step.cos();
-        let wn_im = angle_step.sin();
-        let mut start = 0;
-        while start < n {
-            let mut w_re = 1.0;
-            let mut w_im = 0.0;
-            for k in 0..half {
-                let even = start + k;
-                let odd = start + k + half;
-                let tr = fft_mul(w_re, re[odd]) - fft_mul(w_im, im[odd]);
-                let ti = fft_mul(w_re, im[odd]) + fft_mul(w_im, re[odd]);
-                re[odd] = re[even] - tr;
-                im[odd] = im[even] - ti;
-                re[even] += tr;
-                im[even] += ti;
-                let new_w_re = w_re * wn_re - w_im * wn_im;
-                let new_w_im = w_re * wn_im + w_im * wn_re;
-                w_re = new_w_re;
-                w_im = new_w_im;
-            }
-            start += len;
-        }
-        len <<= 1;
+    // Butterfly passes — radix-4 decimation-in-time (see fft_pow2_butterflies).
+    // Finite fast path: when every sample is finite, fft_mul(a,b) ≡ a*b, so a
+    // branchless `*` kernel is numerically identical to the guarded one yet drops
+    // the per-multiply Inf/NaN branch from the hot loop. Non-finite data keeps the
+    // guarded kernel so Inf/NaN propagate exactly as NumPy's FFT does.
+    if re.iter().all(|x| x.is_finite()) && im.iter().all(|x| x.is_finite()) {
+        fft_pow2_butterflies::<true>(re, im, n, inverse);
+    } else {
+        fft_pow2_butterflies::<false>(re, im, n, inverse);
     }
 
     if inverse {
@@ -30534,6 +30514,124 @@ fn fft_pow2(re: &mut [f64], im: &mut [f64], inverse: bool) {
             re[i] *= scale;
             im[i] *= scale;
         }
+    }
+}
+
+/// Complex multiply for the FFT butterfly. With `FINITE` the operands are known
+/// finite so the plain product is used (monomorphized branchless); otherwise the
+/// Inf/NaN-guarding `fft_mul` is used so 0·∞ collapses to 0 as NumPy's FFT does.
+#[inline(always)]
+fn fft_cmul<const FINITE: bool>(ar: f64, ai: f64, br: f64, bi: f64) -> (f64, f64) {
+    if FINITE {
+        (ar * br - ai * bi, ar * bi + ai * br)
+    } else {
+        (
+            fft_mul(ar, br) - fft_mul(ai, bi),
+            fft_mul(ar, bi) + fft_mul(ai, br),
+        )
+    }
+}
+
+/// Radix-4 decimation-in-time butterfly passes for a bit-reversed power-of-two
+/// buffer. Each fused pass performs TWO consecutive radix-2 DIT stages (length
+/// h→2h then 2h→4h) on the same four elements held in registers, sweeping the
+/// array once per *two* stages instead of once per stage. A single leading
+/// radix-2 stage handles odd log2(n). Twiddles come from two plain recurrences:
+/// `w_b *= wb` (wb = exp(s·2π/4h)) and `w_a *= wb²` (so w_a = w_b² = wb^{2k});
+/// stage A (length 2h) uses w_a, stage B (length 4h) uses w_b (j=k) and w_b·i^s
+/// (j=k+h, since wb^h = i^s). The math is two correct radix-2 stages, so the
+/// output matches the radix-2 kernel to FFT round-off (FFT parity is
+/// tolerance-based, not bit-exact). `FINITE` selects the branchless multiply.
+fn fft_pow2_butterflies<const FINITE: bool>(
+    re: &mut [f64],
+    im: &mut [f64],
+    n: usize,
+    inverse: bool,
+) {
+    let sign = if inverse { 1.0 } else { -1.0 };
+    let stages = n.trailing_zeros();
+    let mut len = 1usize; // transform length already achieved
+
+    if stages % 2 == 1 {
+        // One radix-2 stage: combine length-1 DFTs into length-2 (twiddle == 1,
+        // so no multiply — Inf/NaN pass through identically on both paths).
+        let mut start = 0;
+        while start < n {
+            let o = start + 1;
+            let tr = re[o];
+            let ti = im[o];
+            re[o] = re[start] - tr;
+            im[o] = im[start] - ti;
+            re[start] += tr;
+            im[start] += ti;
+            start += 2;
+        }
+        len = 2;
+    }
+
+    while len < n {
+        let h = len; // stage-A half; fused pass spans length 4h
+        let len4 = 4 * h;
+        let wb_angle = sign * std::f64::consts::TAU / len4 as f64;
+        let wb_re = wb_angle.cos();
+        let wb_im = wb_angle.sin();
+        let mut start = 0;
+        while start < n {
+            let mut w_re = 1.0; // w_b^k
+            let mut w_im = 0.0;
+            for k in 0..h {
+                let p0 = start + k;
+                let p1 = p0 + h;
+                let p2 = p1 + h;
+                let p3 = p2 + h;
+                // Load the four elements once; store once after both stages.
+                let x0r = re[p0];
+                let x0i = im[p0];
+                let x1r = re[p1];
+                let x1i = im[p1];
+                let x2r = re[p2];
+                let x2i = im[p2];
+                let x3r = re[p3];
+                let x3i = im[p3];
+                // w_a = w_b² (length-2h twiddle). Twiddles are always finite, so the
+                // plain square is exact-as-needed and branchless on both paths; it
+                // tracks w_b's drift (a separate w_a recurrence drifts independently
+                // and loses the tight convolve tolerance).
+                let wa_re = w_re * w_re - w_im * w_im;
+                let wa_im = 2.0 * w_re * w_im;
+                // Stage A on the two length-h sub-blocks (k vs k+h within each).
+                let (a1r, a1i) = fft_cmul::<FINITE>(wa_re, wa_im, x1r, x1i);
+                let b0r = x0r + a1r;
+                let b0i = x0i + a1i;
+                let b1r = x0r - a1r;
+                let b1i = x0i - a1i;
+                let (a3r, a3i) = fft_cmul::<FINITE>(wa_re, wa_im, x3r, x3i);
+                let b2r = x2r + a3r;
+                let b2i = x2i + a3i;
+                let b3r = x2r - a3r;
+                let b3i = x2i - a3i;
+                // Stage B across the sub-blocks. j=k uses w_b; j=k+h uses w_b·i^s.
+                let (cr, ci) = fft_cmul::<FINITE>(w_re, w_im, b2r, b2i);
+                re[p0] = b0r + cr;
+                im[p0] = b0i + ci;
+                re[p2] = b0r - cr;
+                im[p2] = b0i - ci;
+                let wbh_re = -sign * w_im;
+                let wbh_im = sign * w_re;
+                let (dr, di) = fft_cmul::<FINITE>(wbh_re, wbh_im, b3r, b3i);
+                re[p1] = b1r + dr;
+                im[p1] = b1i + di;
+                re[p3] = b1r - dr;
+                im[p3] = b1i - di;
+                // Advance the w_b recurrence (always finite — plain product).
+                let nw_re = w_re * wb_re - w_im * wb_im;
+                let nw_im = w_re * wb_im + w_im * wb_re;
+                w_re = nw_re;
+                w_im = nw_im;
+            }
+            start += len4;
+        }
+        len = len4;
     }
 }
 
@@ -38055,7 +38153,8 @@ mod tests {
         UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset,
         busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
         chebint, chebmul, chebroots, chebsub, chebval, checked_window_total, copysign,
-        datetime_as_string, divmod_arrays, errstate, fft_dit, fftn_along_axis, financial_fv,
+        datetime_as_string, divmod_arrays, errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis,
+        financial_fv,
         financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
         financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc,
         frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
@@ -55687,6 +55786,166 @@ print(json.dumps(payload))
                 f.values[i * 2 + 1]
             );
         }
+    }
+
+    // Reference radix-2 DIT FFT (the kernel fft_pow2 replaced) — used to (a) prove
+    // the radix-4 fft_pow2 agrees within FFT round-off and (b) provide the "before"
+    // timing for the A/B bench.
+    #[cfg(test)]
+    fn fft_pow2_radix2_reference(re: &mut [f64], im: &mut [f64], inverse: bool) {
+        let n = re.len();
+        if n <= 1 {
+            return;
+        }
+        let mut j: usize = 0;
+        for i in 0..n {
+            if i < j {
+                re.swap(i, j);
+                im.swap(i, j);
+            }
+            let mut m = n >> 1;
+            while m >= 1 && j >= m {
+                j -= m;
+                m >>= 1;
+            }
+            j += m;
+        }
+        let sign = if inverse { 1.0 } else { -1.0 };
+        let mut len = 2;
+        while len <= n {
+            let half = len / 2;
+            let angle_step = sign * std::f64::consts::TAU / len as f64;
+            let wn_re = angle_step.cos();
+            let wn_im = angle_step.sin();
+            let mut start = 0;
+            while start < n {
+                let mut w_re = 1.0;
+                let mut w_im = 0.0;
+                for k in 0..half {
+                    let even = start + k;
+                    let odd = start + k + half;
+                    let tr = fft_mul(w_re, re[odd]) - fft_mul(w_im, im[odd]);
+                    let ti = fft_mul(w_re, im[odd]) + fft_mul(w_im, re[odd]);
+                    re[odd] = re[even] - tr;
+                    im[odd] = im[even] - ti;
+                    re[even] += tr;
+                    im[even] += ti;
+                    let nw_re = w_re * wn_re - w_im * wn_im;
+                    let nw_im = w_re * wn_im + w_im * wn_re;
+                    w_re = nw_re;
+                    w_im = nw_im;
+                }
+                start += len;
+            }
+            len <<= 1;
+        }
+        if inverse {
+            let scale = 1.0 / n as f64;
+            for i in 0..n {
+                re[i] *= scale;
+                im[i] *= scale;
+            }
+        }
+    }
+
+    #[test]
+    fn fft_pow2_radix4_matches_radix2_within_tolerance() {
+        // The radix-4 fft_pow2 must agree with the radix-2 reference to FFT
+        // round-off across several sizes (incl odd log2(n) -> leading radix-2 stage),
+        // both forward and inverse.
+        for &nbits in &[1u32, 2, 3, 5, 8, 12] {
+            let n = 1usize << nbits;
+            let mut re: Vec<f64> = (0..n)
+                .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 11.0 - 400.0)
+                .collect();
+            let mut im: Vec<f64> = (0..n)
+                .map(|i| (((i as u64).wrapping_mul(40503) % 7919) as f64) / 13.0 - 250.0)
+                .collect();
+            for &inverse in &[false, true] {
+                let (mut ar, mut ai) = (re.clone(), im.clone());
+                let (mut br, mut bi) = (re.clone(), im.clone());
+                fft_pow2(&mut ar, &mut ai, inverse);
+                fft_pow2_radix2_reference(&mut br, &mut bi, inverse);
+                // Tight relative tolerance: radix-4 vs radix-2 differ only by FFT
+                // round-off (~log2(n)·eps), so the diff must be a tiny fraction of the
+                // largest reference bin. 1e-11 is far below the ~1e-14 expected diff
+                // yet would catch the twiddle-recurrence drift (~1e-8) it replaced.
+                let maxref = br
+                    .iter()
+                    .chain(bi.iter())
+                    .fold(1.0f64, |m, &v| m.max(v.abs()));
+                let tol = 1e-11 * maxref;
+                for i in 0..n {
+                    let dr = (ar[i] - br[i]).abs();
+                    let di = (ai[i] - bi[i]).abs();
+                    assert!(
+                        dr <= tol && di <= tol,
+                        "nbits={nbits} inv={inverse} i={i}: radix4=({},{}) radix2=({},{}) d=({dr:e},{di:e}) tol={tol:e}",
+                        ar[i], ai[i], br[i], bi[i]
+                    );
+                }
+            }
+            // keep re/im for next size (no-op)
+            let _ = (&mut re, &mut im);
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B bench; run with --ignored --nocapture"]
+    fn fft_pow2_radix4_ab_bench() {
+        use std::time::Instant;
+        let n = 1usize << 20; // 1,048,576-point — re/im ~16MB total, memory-bound.
+        let re0: Vec<f64> = (0..n)
+            .map(|i| ((i as f64) * 0.000123).sin() + ((i as f64) * 0.0007).cos())
+            .collect();
+        let im0: Vec<f64> = (0..n).map(|i| ((i as f64) * 0.00031).sin()).collect();
+
+        let iters = 20;
+        // warmup + correctness
+        let (mut wr, mut wi) = (re0.clone(), im0.clone());
+        fft_pow2(&mut wr, &mut wi, false);
+        let (mut rr, mut ri) = (re0.clone(), im0.clone());
+        fft_pow2_radix2_reference(&mut rr, &mut ri, false);
+        let mut maxd = 0.0f64;
+        for i in 0..n {
+            maxd = maxd.max((wr[i] - rr[i]).abs()).max((wi[i] - ri[i]).abs());
+        }
+
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            let (mut a, mut b) = (re0.clone(), im0.clone());
+            fft_pow2_radix2_reference(&mut a, &mut b, false);
+            std::hint::black_box((&a, &b));
+        }
+        let old_ns = t0.elapsed().as_nanos() as f64 / iters as f64;
+
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let (mut a, mut b) = (re0.clone(), im0.clone());
+            fft_pow2(&mut a, &mut b, false);
+            std::hint::black_box((&a, &b));
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / iters as f64;
+
+        // Subtract the clone cost (same in both) for a kernel-only ratio estimate.
+        let t2 = Instant::now();
+        for _ in 0..iters {
+            let (a, b) = (re0.clone(), im0.clone());
+            std::hint::black_box((&a, &b));
+        }
+        let clone_ns = t2.elapsed().as_nanos() as f64 / iters as f64;
+
+        let old_k = old_ns - clone_ns;
+        let new_k = new_ns - clone_ns;
+        eprintln!(
+            "fft_pow2 n=2^20: radix2={:.0}us radix4={:.0}us  speedup(incl clone)={:.2}x  kernel-only={:.2}x  (clone={:.0}us, maxdiff={:.2e})",
+            old_ns / 1000.0,
+            new_ns / 1000.0,
+            old_ns / new_ns,
+            old_k / new_k,
+            clone_ns / 1000.0,
+            maxd
+        );
     }
 
     #[test]
