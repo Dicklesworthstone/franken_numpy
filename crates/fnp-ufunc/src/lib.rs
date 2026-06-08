@@ -22239,7 +22239,18 @@ impl UFuncArray {
                         .enumerate()
                         .map(|(i, v)| (v, i))
                         .collect();
-                    indexed.sort_by_key(|a| a.0);
+                    // Stable sort by value. rayon's par_sort_by_key is a parallel STABLE
+                    // merge sort, so equal keys keep input order exactly as the serial
+                    // sort_by_key did — the first-index / inverse / counts results are
+                    // bit-identical for any thread count; only large inputs parallelize.
+                    const UNIQUE_SORT_PARALLEL_MIN: usize = 1 << 14;
+                    if indexed.len() >= UNIQUE_SORT_PARALLEL_MIN
+                        && rayon::current_num_threads() >= 2
+                    {
+                        indexed.par_sort_by_key(|a| a.0);
+                    } else {
+                        indexed.sort_by_key(|a| a.0);
+                    }
 
                     let mut unique_vals: Vec<f64> = Vec::new();
                     let mut first_indices: Vec<f64> = Vec::new();
@@ -22325,7 +22336,18 @@ impl UFuncArray {
                         .enumerate()
                         .map(|(i, v)| (v, i))
                         .collect();
-                    indexed.sort_by_key(|a| a.0);
+                    // Stable sort by value. rayon's par_sort_by_key is a parallel STABLE
+                    // merge sort, so equal keys keep input order exactly as the serial
+                    // sort_by_key did — the first-index / inverse / counts results are
+                    // bit-identical for any thread count; only large inputs parallelize.
+                    const UNIQUE_SORT_PARALLEL_MIN: usize = 1 << 14;
+                    if indexed.len() >= UNIQUE_SORT_PARALLEL_MIN
+                        && rayon::current_num_threads() >= 2
+                    {
+                        indexed.par_sort_by_key(|a| a.0);
+                    } else {
+                        indexed.sort_by_key(|a| a.0);
+                    }
 
                     let mut unique_vals: Vec<f64> = Vec::new();
                     let mut first_indices: Vec<f64> = Vec::new();
@@ -50856,6 +50878,80 @@ print(json.dumps(payload))
     }
 
     // ── set operations ──────────────────────────────────────────────────
+
+    #[test]
+    fn unique_with_info_parallel_path_correct() {
+        // Exercise the parallel (par_sort_by_key) path for the integer sidecar: a large
+        // array with many duplicates. Validates sorted-unique values, first-OCCURRENCE
+        // indices (which require the sort to be STABLE), counts, and inverse mapping —
+        // exactly the invariants the serial sort_by_key guaranteed.
+        let n = 20000usize; // > 1<<14, engages the parallel sort
+        let data: Vec<f64> = (0..n)
+            .map(|i| ((i as u64).wrapping_mul(2654435761) % 97) as f64) // ~97 distinct keys
+            .collect();
+        let arr = UFuncArray::new(vec![n], data.clone(), DType::I64).unwrap();
+        let (u, idx, inv, cnt) = arr.unique_with_info(true, true, true);
+        let uv = u.values();
+        // 1. Sorted ascending + strictly increasing (unique).
+        for w in uv.windows(2) {
+            assert!(w[0] < w[1], "unique not strictly sorted: {} >= {}", w[0], w[1]);
+        }
+        // 2. Counts sum to n and match actual occurrence counts.
+        let cnt = cnt.unwrap();
+        assert_eq!(cnt.values().iter().sum::<f64>() as usize, n, "counts sum");
+        for (g, &val) in uv.iter().enumerate() {
+            let actual = data.iter().filter(|&&v| v == val).count();
+            assert_eq!(cnt.values()[g] as usize, actual, "count for value {val}");
+        }
+        // 3. First indices = FIRST occurrence (stability proof).
+        let idx = idx.unwrap();
+        for (g, &val) in uv.iter().enumerate() {
+            let first = data.iter().position(|&v| v == val).unwrap();
+            assert_eq!(idx.values()[g] as usize, first, "first index for value {val}");
+        }
+        // 4. Inverse maps each original element back to its unique value.
+        let inv = inv.unwrap();
+        for i in 0..n {
+            let g = inv.values()[i] as usize;
+            assert_eq!(uv[g], data[i], "inverse[{i}]");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B: parallel unique sort vs serial; run --release -- --ignored --nocapture"]
+    fn unique_axis_parallel_ab_bench() {
+        use rayon::prelude::*;
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let vals: Vec<i64> = (0..n)
+            .map(|i| (i as u64).wrapping_mul(2654435761) % 500_000)
+            .map(|v| v as i64)
+            .collect();
+        let build = || -> Vec<(i64, usize)> {
+            vals.iter().copied().enumerate().map(|(i, v)| (v, i)).collect()
+        };
+        let iters = 5;
+        // NEW: rayon parallel stable sort (the lever).
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            let mut indexed = build();
+            indexed.par_sort_by_key(|a| a.0);
+            std::hint::black_box(&indexed);
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD: serial stable sort_by_key (both include the identical `build`).
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut indexed = build();
+            indexed.sort_by_key(|a| a.0);
+            std::hint::black_box(&indexed);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "UNIQUE_SORT new={new_ms:.3}ms old_serial={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
+        );
+    }
 
     #[test]
     fn unique_with_info_all() {
