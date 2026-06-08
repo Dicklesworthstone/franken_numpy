@@ -15933,13 +15933,52 @@ fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
         Err(_) => return fallback(),
     };
     let shape = array.shape();
-    if shape.len() != 2
-        || shape[0] != shape[1]
-        || !matches!(array.dtype(), DType::F64)
-        || array.has_integer_sidecar()
-        || array.values().iter().any(|value| !value.is_finite())
-        || !matches!(UPLO, "L" | "U")
-    {
+    let real_f64_finite = matches!(array.dtype(), DType::F64)
+        && !array.has_integer_sidecar()
+        && array.values().iter().all(|value| value.is_finite())
+        && matches!(UPLO, "L" | "U");
+    // Batched (stacked) symmetric inputs: eigvalsh returns only the eigenvalues in
+    // ascending order (NumPy convention), so there is no eigenvector-sign ambiguity
+    // and the result is well-defined per lane. Symmetrize every lane from the
+    // selected UPLO triangle (matching the 2-D path), then run the parallel
+    // batch_eigvalsh. Output shape = batch dims + [n]. On any Err fall back to numpy.
+    if shape.len() >= 3 && shape[shape.len() - 1] == shape[shape.len() - 2] && real_f64_finite {
+        let n = shape[shape.len() - 1];
+        let mat_size = n * n;
+        let vals = array.values();
+        let batch = vals.len() / mat_size;
+        let mut sym = vec![0.0f64; vals.len()];
+        for b in 0..batch {
+            let base = b * mat_size;
+            if UPLO == "L" {
+                for row in 0..n {
+                    for col in 0..=row {
+                        let v = vals[base + row * n + col];
+                        sym[base + row * n + col] = v;
+                        sym[base + col * n + row] = v;
+                    }
+                }
+            } else {
+                for row in 0..n {
+                    for col in row..n {
+                        let v = vals[base + row * n + col];
+                        sym[base + row * n + col] = v;
+                        sym[base + col * n + row] = v;
+                    }
+                }
+            }
+        }
+        let owned_shape = shape.to_vec();
+        if let Ok(values) = fnp_linalg::batch_eigvalsh(&sym, &owned_shape) {
+            let mut out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+            out_shape.push(n);
+            let result =
+                UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
+            return build_numpy_array_from_ufunc(py, &result);
+        }
+        return fallback();
+    }
+    if shape.len() != 2 || shape[0] != shape[1] || !real_f64_finite {
         return fallback();
     }
 
