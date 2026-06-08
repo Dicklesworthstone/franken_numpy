@@ -35032,8 +35032,7 @@ fn simd_argextreme_f64(data: &[f64], take_max: bool) -> Option<usize> {
     let mut saw_nan = vnan.any();
     // Scalar remainder. Tail indices exceed every SIMD index, so a tie must NOT
     // displace the earlier SIMD result (strict compare preserves first occurrence).
-    for i in (chunks * L)..n {
-        let v = data[i];
+    for (i, &v) in data.iter().enumerate().take(n).skip(chunks * L) {
         if v.is_nan() {
             saw_nan = true;
             continue;
