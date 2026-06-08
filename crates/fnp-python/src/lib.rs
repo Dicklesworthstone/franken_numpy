@@ -20009,6 +20009,63 @@ fn try_zerocopy_f64_nanmean_flat(
     Ok(Some(numpy.getattr("float64")?.call1((mean,))?.unbind()))
 }
 
+// Pairwise sum of squared deviations from `avg`: each <=128 leaf computes
+// (x - avg)^2 for a non-NaN x and 0.0 for a NaN x, then the same bit-exact
+// pairwise reduce as the sum. This matches numpy's _nanvar exactly: it subtracts
+// the mean, zeroes the NaN positions, squares, then np.sum (pairwise).
+fn pairwise_sqr_dev_f64(
+    cells: &[pyo3::buffer::ReadOnlyCell<f64>],
+    off: usize,
+    n: usize,
+    avg: f64,
+    buf: &mut [f64; 128],
+) -> f64 {
+    if n <= 128 {
+        for j in 0..n {
+            let v = cells[off + j].get();
+            buf[j] = if v.is_nan() {
+                0.0
+            } else {
+                let d = v - avg;
+                d * d
+            };
+        }
+        return base_sum_simd(&buf[..n]);
+    }
+    let mut n2 = n / 2;
+    n2 -= n2 % 8;
+    let left = pairwise_sqr_dev_f64(cells, off, n2, avg, buf);
+    let right = pairwise_sqr_dev_f64(cells, off + n2, n - n2, avg, buf);
+    left + right
+}
+
+// Bit-exact flat nanvar value (axis=None) via numpy's two-pass algorithm:
+// avg = pairwise nansum / count, then var = pairwise sum((x-avg)^2, NaN->0) /
+// (count - ddof). Returns None to defer when there is no C-contiguous f64 buffer
+// or count - ddof <= 0 (numpy emits a "Degrees of freedom <= 0" warning + NaN).
+fn compute_f64_nanvar_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    ddof: usize,
+) -> PyResult<Option<f64>> {
+    let numpy = py.import("numpy")?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+        return Ok(None);
+    };
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    let mut buf = [0.0f64; 128];
+    let (total, count) = pairwise_nansum_count_f64(cells, 0, n, &mut buf);
+    if count <= ddof {
+        return Ok(None); // count - ddof <= 0: numpy warns + returns NaN — defer
+    }
+    let avg = total / count as f64;
+    let sqr_sum = pairwise_sqr_dev_f64(cells, 0, n, avg, &mut buf);
+    Ok(Some(sqr_sum / (count - ddof) as f64))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false))]
 fn nansum(
@@ -20482,6 +20539,18 @@ fn nanstd(
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
+    // nanstd == sqrt(nanvar); same bit-exact SIMD two-pass flat fast path.
+    if !keepdims.unwrap_or(false)
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(ddof_val) = ddof
+            .as_ref()
+            .map_or(Some(0isize), |v| v.bind(py).extract::<isize>().ok())
+        && ddof_val >= 0
+        && let Some(var) = compute_f64_nanvar_flat(py, a.bind(py), ddof_val as usize)?
+    {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("float64")?.call1((var.sqrt(),))?.unbind());
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanstd(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -20573,6 +20642,19 @@ fn nanvar(
     // numpy's fast reduction (via fallback) instead of the slow native f64 path.
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
+    }
+    // Bit-exact SIMD two-pass flat fast path (axis=None, no keepdims): ~3x faster
+    // than the extract → native scan. DoF<=0 / all-NaN defer to numpy (warning).
+    if !keepdims.unwrap_or(false)
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(ddof_val) = ddof
+            .as_ref()
+            .map_or(Some(0isize), |v| v.bind(py).extract::<isize>().ok())
+        && ddof_val >= 0
+        && let Some(var) = compute_f64_nanvar_flat(py, a.bind(py), ddof_val as usize)?
+    {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("float64")?.call1((var,))?.unbind());
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanvar(a)") {
         Ok(array) => array,
