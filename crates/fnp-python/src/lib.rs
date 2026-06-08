@@ -16848,7 +16848,7 @@ fn try_zerocopy_int_choose(
     let c0_dtype = items[0].getattr("dtype")?;
     let kind = c0_dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = c0_dtype.getattr("itemsize")?.extract::<usize>()?;
-    if kind != "i" && kind != "u" {
+    if kind != "i" && kind != "u" && kind != "f" {
         return Ok(None);
     }
     for c in &items {
@@ -16877,7 +16877,54 @@ fn try_zerocopy_int_choose(
         ("u", 4) => choose_typed::<u32>(py, &numpy, &a64, &items, "uint32", &a_shape),
         ("u", 2) => choose_typed::<u16>(py, &numpy, &a64, &items, "uint16", &a_shape),
         ("u", 1) => choose_typed::<u8>(py, &numpy, &a64, &items, "uint8", &a_shape),
+        // Float choose is a value-agnostic gather: view every (same-shape,
+        // same-dtype) choice as the same-width unsigned integer, gather through the
+        // existing u16/u32/u64 choose_typed instantiations, then view the result
+        // back to the float dtype. No new monomorphizations, so the integer path is
+        // unchanged. A non-contiguous choice makes .view raise; defer to numpy then.
+        ("f", 8) => choose_float_via_unsigned::<u64>(
+            py, &numpy, &a64, &items, "uint64", "float64", &a_shape,
+        ),
+        ("f", 4) => choose_float_via_unsigned::<u32>(
+            py, &numpy, &a64, &items, "uint32", "float32", &a_shape,
+        ),
+        ("f", 2) => choose_float_via_unsigned::<u16>(
+            py, &numpy, &a64, &items, "uint16", "float16", &a_shape,
+        ),
         _ => Ok(None),
+    }
+}
+
+// Float np.choose through a same-width unsigned-integer view: gather the unsigned
+// reinterpretations of the choices with the existing choose_typed::<u*>, then view
+// the result back to `float_name`. Verbatim element move => bit-identical incl.
+// nan/inf/signed zeros. Returns Ok(None) — caller defers to numpy — if any choice
+// is non-contiguous (so .view raises) or the gather declines.
+fn choose_float_via_unsigned<'py, U: pyo3::buffer::Element + Copy>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a64: &Bound<'py, PyAny>,
+    items: &[Bound<'py, PyAny>],
+    uint_name: &str,
+    float_name: &str,
+    out_shape: &[usize],
+) -> PyResult<Option<Py<PyAny>>> {
+    let uview = numpy.getattr(uint_name)?;
+    let mut viewed = Vec::with_capacity(items.len());
+    for c in items {
+        let Ok(cv) = c.call_method1("view", (&uview,)) else {
+            return Ok(None);
+        };
+        viewed.push(cv);
+    }
+    match choose_typed::<U>(py, numpy, a64, &viewed, uint_name, out_shape)? {
+        Some(out_u) => Ok(Some(
+            out_u
+                .bind(py)
+                .call_method1("view", (numpy.getattr(float_name)?,))?
+                .unbind(),
+        )),
+        None => Ok(None),
     }
 }
 
