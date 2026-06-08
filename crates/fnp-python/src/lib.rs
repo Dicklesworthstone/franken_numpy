@@ -15795,12 +15795,28 @@ fn cholesky(
         Err(_) => return fallback(),
     };
     let shape = array.shape();
-    if shape.len() != 2
-        || shape[0] != shape[1]
-        || array.has_integer_sidecar()
-        || array.values().iter().any(|value| !value.is_finite())
-        || !matches!(array.dtype(), DType::F64)
+    let real_f64_finite = !array.has_integer_sidecar()
+        && matches!(array.dtype(), DType::F64)
+        && array.values().iter().all(|value| value.is_finite());
+    // Batched (stacked) square real-f64 inputs, lower triangle (the default):
+    // factor every lane natively via the parallel batch_cholesky. upper=true is
+    // left to numpy (it returns the conjugate-transpose convention). On any
+    // non-positive-definite lane batch_cholesky errs -> fall back to numpy so the
+    // LinAlgError matches exactly.
+    if !upper
+        && shape.len() >= 3
+        && shape[shape.len() - 1] == shape[shape.len() - 2]
+        && real_f64_finite
     {
+        let owned_shape = shape.to_vec();
+        if let Ok(values) = fnp_linalg::batch_cholesky(array.values(), &owned_shape) {
+            let result =
+                UFuncArray::new(owned_shape, values, DType::F64).map_err(map_ufunc_error)?;
+            return build_numpy_array_from_ufunc(py, &result);
+        }
+        return fallback();
+    }
+    if shape.len() != 2 || shape[0] != shape[1] || !real_f64_finite {
         return fallback();
     }
 
@@ -15913,12 +15929,23 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
     if let Ok(array) = extract_numeric_array(py, bound, "det(a)") {
         let shape = array.shape();
-        if shape.len() == 2
-            && shape[0] == shape[1]
-            && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
-        {
+        let real = !matches!(array.dtype(), DType::Complex64 | DType::Complex128);
+        if shape.len() == 2 && shape[0] == shape[1] && real {
             let value = fnp_linalg::det_nxn(array.values(), shape[0]).map_err(map_ufunc_error)?;
             return Ok(numpy.getattr("float64")?.call1((value,))?.unbind());
+        }
+        // Batched (stacked) square real inputs: one det per lane via the parallel
+        // batch_det, instead of passing the whole stack through to numpy. Output
+        // shape is the batch dims (the two matrix axes are reduced). On any Err
+        // (shape mismatch) fall through to the numpy passthrough below.
+        if shape.len() >= 3 && shape[shape.len() - 1] == shape[shape.len() - 2] && real {
+            let owned_shape = shape.to_vec();
+            if let Ok(values) = fnp_linalg::batch_det(array.values(), &owned_shape) {
+                let out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+                let result =
+                    UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
+                return build_numpy_array_from_ufunc(py, &result);
+            }
         }
     }
     Ok(numpy
