@@ -9105,10 +9105,18 @@ fn compact_typed<'py, T: pyo3::buffer::Element + Copy>(
     Ok(Some(flat.unbind()))
 }
 
-// Dispatch a typed compaction for int64/uint64/bool arrays (the dtypes the f64
-// compress/extract helpers leave to the cold extract path). bool gathers through
-// a uint8 view and returns bool. Returns None for other dtypes.
-fn try_zerocopy_int_compact(
+// Dispatch a branchless compaction for every fixed-width numeric dtype (all 8
+// integer widths, float32/float64, bool). compress/extract move whole elements
+// verbatim by mask, so the move is value-agnostic: we VIEW the array as the
+// same-width unsigned integer, compact that, then view the result back to the
+// input dtype. This is bit-identical (incl. nan/inf/signed zeros), preserves the
+// dtype, and reuses a single per-width unsigned `compact_typed` instantiation
+// (u8/u16/u32/u64) for every kind — so int64/uint64/float64 share the same hot
+// code with no extra monomorphizations, while narrow ints/float32 (previously
+// widened through f64 by the cold extract path, 24x slower) get the fast path
+// too. complex keeps its existing fast path (returns None for itemsize 16).
+// Returns None for non-ndarray operands or non-bool conditions.
+fn try_zerocopy_any_compact(
     py: Python<'_>,
     cond: &Bound<'_, PyAny>,
     arr: &Bound<'_, PyAny>,
@@ -9123,23 +9131,38 @@ fn try_zerocopy_int_compact(
     }
     let a_dtype = arr.getattr("dtype")?;
     let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    // Only fixed-width int/uint/float/bool; complex (kind 'c') and anything else
+    // keep their existing fast paths.
+    if !matches!(kind.as_str(), "i" | "u" | "f" | "b") {
+        return Ok(None);
+    }
     let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
-    match (kind.as_str(), itemsize) {
-        ("i", 8) => compact_typed::<i64>(py, &numpy, cond, arr, "int64"),
-        ("u", 8) => compact_typed::<u64>(py, &numpy, cond, arr, "uint64"),
-        ("b", 1) => {
-            let arr_u8 = arr.call_method1("view", (numpy.getattr("uint8")?,))?;
-            match compact_typed::<u8>(py, &numpy, cond, &arr_u8, "uint8")? {
-                Some(flat_u8) => Ok(Some(
-                    flat_u8
-                        .bind(py)
-                        .call_method1("view", (numpy.getattr("bool_")?,))?
-                        .unbind(),
-                )),
-                None => Ok(None),
-            }
+    // Compact the array through its same-width unsigned-integer view, then view
+    // the compacted result back to the original dtype.
+    let compacted = match itemsize {
+        1 => {
+            let v = arr.call_method1("view", (numpy.getattr("uint8")?,))?;
+            compact_typed::<u8>(py, &numpy, cond, &v, "uint8")?
         }
-        _ => Ok(None),
+        2 => {
+            let v = arr.call_method1("view", (numpy.getattr("uint16")?,))?;
+            compact_typed::<u16>(py, &numpy, cond, &v, "uint16")?
+        }
+        4 => {
+            let v = arr.call_method1("view", (numpy.getattr("uint32")?,))?;
+            compact_typed::<u32>(py, &numpy, cond, &v, "uint32")?
+        }
+        8 => {
+            let v = arr.call_method1("view", (numpy.getattr("uint64")?,))?;
+            compact_typed::<u64>(py, &numpy, cond, &v, "uint64")?
+        }
+        _ => return Ok(None),
+    };
+    match compacted {
+        Some(flat) => Ok(Some(
+            flat.bind(py).call_method1("view", (&a_dtype,))?.unbind(),
+        )),
+        None => Ok(None),
     }
 }
 
@@ -16261,17 +16284,20 @@ fn compress(
             )?
             .unbind())
     };
-    // Zero-copy gather for the common case (axis=None, bool condition + f64 a);
-    // skips the cold extract/build Vecs. Bit-identical; per-axis compress,
-    // non-bool conditions, and other dtypes fall through.
-    if let Some(out) = try_zerocopy_f64_compress(py, condition.bind(py), a.bind(py), axis)? {
+    // Zero-copy branchless compaction for the flat case (axis=None, bool
+    // condition) over every fixed-width numeric dtype — all 8 integer widths,
+    // float32/float64, bool. Skips the cold extract_numeric_array path that
+    // widens narrow ints/float32 through f64 (24x) and the older branchy f64
+    // helper (5x). Bit-identical (elements move verbatim). Per-axis compress,
+    // complex, non-bool conditions, and non-ndarray operands fall through.
+    if axis.is_none()
+        && let Some(out) = try_zerocopy_any_compact(py, condition.bind(py), a.bind(py))?
+    {
         return Ok(out);
     }
-    // Typed compaction for int64/uint64/bool (flat compress); skips the cold,
-    // for-wide-ints lossy extract Vec. Bit-identical (elements move verbatim).
-    if axis.is_none()
-        && let Some(out) = try_zerocopy_int_compact(py, condition.bind(py), a.bind(py))?
-    {
+    // Remaining flat float64 cases (e.g. when the generic path declines) and any
+    // residue keep the dedicated f64 helper before the cold extract path.
+    if let Some(out) = try_zerocopy_f64_compress(py, condition.bind(py), a.bind(py), axis)? {
         return Ok(out);
     }
     let condition = match extract_condition_mask(py, condition.bind(py), "compress(condition)") {
@@ -16311,9 +16337,11 @@ fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<
     if let Some(out) = try_zerocopy_f64_extract(py, condition.bind(py), arr.bind(py))? {
         return Ok(out);
     }
-    // Typed compaction for int64/uint64/bool (extract == compress over the raveled
-    // operands); skips the cold, for-wide-ints lossy extract Vec.
-    if let Some(out) = try_zerocopy_int_compact(py, condition.bind(py), arr.bind(py))? {
+    // Typed compaction (extract == compress over the raveled operands); skips the
+    // cold, for-wide-ints lossy extract Vec. Narrow ints/float32 are already
+    // deferred to NumPy by the dtype-roundtrip guard above, so this engages for
+    // the canonical widths (int64/uint64/float64/bool) that reach here.
+    if let Some(out) = try_zerocopy_any_compact(py, condition.bind(py), arr.bind(py))? {
         return Ok(out);
     }
     let condition = match extract_numeric_array(py, condition.bind(py), "extract(condition)") {
