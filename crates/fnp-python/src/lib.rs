@@ -13515,57 +13515,17 @@ fn is_numpy_bool_scalar(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     value.is_instance(&bool_type).unwrap_or(false)
 }
 
-fn extract_expand_dims_axes(
-    py: Python<'_>,
-    axis: Py<PyAny>,
-    input_ndim: usize,
-) -> PyResult<Vec<isize>> {
-    let Some(axes) = extract_axis_spec(py, Some(axis), "expand_dims")? else {
-        return Err(PyTypeError::new_err(
-            "'NoneType' object cannot be interpreted as an integer",
-        ));
-    };
-
-    let new_ndim = input_ndim + axes.len();
-    ensure_unique_axes(&axes, new_ndim)?;
-    Ok(axes)
-}
-
 #[pyfunction]
 fn expand_dims(py: Python<'_>, a: Py<PyAny>, axis: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let a_for_fallback = a.clone_ref(py);
-    let axis_for_fallback = axis.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        Ok(numpy
-            .getattr("expand_dims")?
-            .call1((a_for_fallback.bind(py), axis_for_fallback.bind(py)))?
-            .unbind())
-    };
-
-    // Check for complex dtype and fallback to numpy
+    // np.expand_dims returns a VIEW (inserts length-1 axes via stride metadata).
+    // The old native path materialized a copy and diverged from numpy's view
+    // semantics. Delegate to numpy.expand_dims for the exact view, dtype, and
+    // error surface (e.g. the AxisError for an out-of-range axis).
     let numpy = py.import("numpy")?;
-    let arr = numpy.call_method1("asarray", (a.bind(py),))?;
-    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-    if dtype_kind == "c" {
-        return fallback();
-    }
-
-    let a = extract_numeric_array(py, a.bind(py), "expand_dims(a)")?;
-    let axes = extract_expand_dims_axes(py, axis, a.shape().len())?;
-    // Out-of-bounds axis: numpy raises AxisError (subclass of ValueError).
-    // Fall back so the error type and message match exactly.
-    let new_ndim = a.shape().len() + axes.len();
-    for &ax in &axes {
-        if try_normalize_axis(ax, new_ndim).is_none() {
-            return fallback();
-        }
-    }
-    let result = match axes.as_slice() {
-        [axis] => a.expand_dims(*axis).map_err(map_ufunc_error)?,
-        axes => a.expand_dims_axes(axes).map_err(map_ufunc_error)?,
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(numpy
+        .getattr("expand_dims")?
+        .call1((a.bind(py), axis.bind(py)))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -17590,85 +17550,30 @@ fn histogram_bin_edges(
 #[pyfunction]
 #[pyo3(signature = (a, order="C"))]
 fn ravel(py: Python<'_>, a: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
-    // Native ravel via UFuncArray::ravel for real/complex numeric arrays
-    // with default C-order flattening. F-order, 'A', 'K' and non-numeric
-    // (object, string, structured) inputs fall back to np.ravel so
-    // numpy's order-sensitive behavior and dispatch surface are preserved
-    // exactly.
+    // np.ravel returns a flattened VIEW when the input is contiguous in the
+    // requested order (a copy otherwise) — pure shape/stride metadata, no data
+    // movement. The old native path materialized a full O(n) copy AND diverged
+    // from numpy's view semantics (writing through the result must alias the
+    // input). Build the view via the array's ravel method, which reproduces
+    // numpy's exact view-or-copy decision and preserves the input dtype.
     let numpy = py.import("numpy")?;
-    let a_for_fallback = a.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(numpy
-            .getattr("ravel")?
-            .call1((a_for_fallback.bind(py), order))?
-            .unbind())
-    };
-    if order != "C" {
-        return fallback();
-    }
-    let array = match extract_precise_numeric_array(py, a.bind(py), "ravel(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let result = array.ravel();
-    build_numpy_array_from_ufunc(py, &result)
+    let arr = numpy.call_method1("asarray", (a.bind(py),))?;
+    Ok(arr.call_method1("ravel", (order,))?.unbind())
 }
 
 #[pyfunction]
 #[pyo3(signature = (a, newshape, order="C"))]
 fn reshape(py: Python<'_>, a: Py<PyAny>, newshape: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
+    // np.reshape returns a VIEW when the new shape is stride-compatible (a copy
+    // otherwise) — pure metadata. The old native path always materialized a copy
+    // (slow, a view-semantics divergence, and it widened narrow dtypes). Delegate
+    // to numpy.reshape, which yields the exact view/copy, preserves the input
+    // dtype, and raises numpy's exact errors (including the 'K'-order ValueError).
     let numpy = py.import("numpy")?;
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(numpy
-            .getattr("reshape")?
-            .call1((a.bind(py), newshape.bind(py), order))?
-            .unbind())
-    };
-
-    // numpy.reshape accepts only 'C', 'F', and 'A' (NOT 'K' — that's a ravel/
-    // copy order, and numpy raises ValueError for it here). The native path
-    // always reads the logical elements in C order, so 'A' — which numpy
-    // resolves to Fortran iff the input is F-contiguous and not C-contiguous,
-    // else C — must be mapped to the concrete order before dispatch. Delegate
-    // 'K' and any other value so numpy raises its exact ValueError.
-    let resolved_order: &str = match order {
-        "C" | "F" => order,
-        "A" => {
-            let flags = numpy
-                .call_method1("asarray", (a.bind(py),))?
-                .getattr("flags")?;
-            let f_contig = flags.getattr("f_contiguous")?.extract::<bool>()?;
-            let c_contig = flags.getattr("c_contiguous")?.extract::<bool>()?;
-            if f_contig && !c_contig { "F" } else { "C" }
-        }
-        _ => return fallback(),
-    };
-
-    let array = match extract_numeric_array(py, a.bind(py), "reshape(a)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    if array.has_integer_sidecar() {
-        return fallback();
-    }
-
-    // Parse newshape as Vec<isize>
-    let shape: Vec<isize> = match newshape.bind(py).extract::<Vec<isize>>() {
-        Ok(s) => s,
-        Err(_) => {
-            // Try as single integer
-            match newshape.bind(py).extract::<isize>() {
-                Ok(s) => vec![s],
-                Err(_) => return fallback(),
-            }
-        }
-    };
-
-    let result = match array.reshape_order(&shape, resolved_order) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(numpy
+        .getattr("reshape")?
+        .call1((a.bind(py), newshape.bind(py), order))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -17798,36 +17703,18 @@ fn rollaxis(py: Python<'_>, a: Py<PyAny>, axis: i64, start: i64) -> PyResult<Py<
 #[pyfunction]
 #[pyo3(signature = (a, axis=None))]
 fn squeeze(py: Python<'_>, a: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
+    // np.squeeze returns a VIEW (drops length-1 axes via stride metadata). The old
+    // native path materialized a copy and diverged from numpy's view semantics.
+    // Delegate to numpy.squeeze for the exact view, dtype, and error surface.
     let numpy = py.import("numpy")?;
-    let squeeze_fn = numpy.getattr("squeeze")?;
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let kwargs = PyDict::new(py);
-        if let Some(axis_val) = axis.as_ref() {
-            kwargs.set_item("axis", axis_val.bind(py))?;
-        }
-        Ok(squeeze_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
-    };
-
-    let a = match extract_numeric_array(py, a.bind(py), "squeeze(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let axes = match extract_axis_spec(py, axis_for_parse, "squeeze") {
-        Ok(axes) => axes,
-        Err(_) => return fallback(),
-    };
-    let result = match axes {
-        None => a.squeeze(None),
-        Some(axes) if axes.is_empty() => Ok(a.clone()),
-        Some(axes) if axes.len() == 1 => a.squeeze(Some(axes[0])),
-        Some(axes) => a.squeeze_axes(&axes),
-    };
-    let result = match result {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = axis.as_ref() {
+        kwargs.set_item("axis", axis_val.bind(py))?;
+    }
+    Ok(numpy
+        .getattr("squeeze")?
+        .call((a.bind(py),), Some(&kwargs))?
+        .unbind())
 }
 
 #[pyfunction]
