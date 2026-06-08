@@ -27793,6 +27793,71 @@ fn reduce_sum_strided(values: &[f64], start: usize, step: usize, len: usize) -> 
     neumaier_sum_strided(values, start, step, len)
 }
 
+/// Register-blocked portable-SIMD linear sum over a NON-LAST axis (`inner > 1`).
+/// For `axis_len <= COMPENSATED_SUM_MIN_LEN` (i.e. every realistic axis length)
+/// `reduce_sum_strided` is exactly `linear_sum_strided` — a plain left-to-right
+/// `sum += value` per column followed by `finalize_sum` — so the per-column
+/// accumulation can be tiled by `LANES`: each lane sums ITS column row-ascending
+/// from 0.0, held in a SIMD register across the whole axis, and the tile is stored
+/// once. The scalar strided path instead gathers each column with stride `inner`
+/// (a cache-line miss per element); here one contiguous 8-wide load per row feeds
+/// 8 columns. Bit-identical to `linear_sum_strided` per lane: same elements, same
+/// 0.0-initialised left-to-right order; the final `acc == 0.0 ? +0.0 : acc` select
+/// reproduces `finalize_sum` (which normalises ±0.0 to +0.0, NaN/inf pass through).
+fn reduce_sum_axis_linear_simd(
+    values: &[f64],
+    axis_len: usize,
+    inner: usize,
+    outer: usize,
+    out: &mut [f64],
+) {
+    use std::simd::cmp::SimdPartialEq;
+    use std::simd::{Select, Simd};
+    const LANES: usize = 8;
+    type V = Simd<f64, LANES>;
+    let zero = V::splat(0.0);
+
+    let reduce = |o: usize, c0: usize, out_slice: &mut [f64]| {
+        let len = out_slice.len();
+        let base = o * axis_len * inner + c0;
+        let mut c = 0;
+        while c + LANES <= len {
+            let mut acc = zero;
+            for r in 0..axis_len {
+                acc += V::from_slice(&values[base + r * inner + c..]);
+            }
+            let out_v = acc.simd_eq(zero).select(zero, acc);
+            out_v.copy_to_slice(&mut out_slice[c..]);
+            c += LANES;
+        }
+        while c < len {
+            // Same scalar helper the strided path used (linear for axis_len <= MIN).
+            out_slice[c] = reduce_sum_strided(values, base + c, inner, axis_len);
+            c += 1;
+        }
+    };
+
+    const SUM_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+    let parallel = out.len() >= 2
+        && values.len() >= SUM_AXIS_PARALLEL_MIN_ELEMS
+        && rayon::current_num_threads() >= 2;
+    if parallel && outer == 1 {
+        let threads = rayon::current_num_threads();
+        let chunk = inner.div_ceil(threads * 2).max(8);
+        out.par_chunks_mut(chunk).enumerate().for_each(|(ci, oc)| {
+            reduce(0, ci * chunk, oc);
+        });
+    } else if parallel {
+        out.par_chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
+    } else {
+        out.chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
+    }
+}
+
 fn reduce_sum_axis_contiguous(
     values: &[f64],
     shape: &[usize],
@@ -27816,6 +27881,15 @@ fn reduce_sum_axis_contiguous(
         for (slot, chunk) in out_values.iter_mut().zip(values.chunks_exact(axis_len)) {
             *slot = reduce_sum_values(chunk);
         }
+        return;
+    }
+
+    // Non-last axis. For every realistic axis length the strided sum is a plain
+    // left-to-right linear sum, which register-blocks cleanly (bit-identical). The
+    // rare axis_len > 1e6 case can engage Neumaier compensation, so keep it on the
+    // exact scalar strided path.
+    if axis_len <= COMPENSATED_SUM_MIN_LEN {
+        reduce_sum_axis_linear_simd(values, axis_len, inner, outer, out_values);
         return;
     }
 
@@ -40464,6 +40538,95 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn reduce_sum_axis0_simd_matches_strided_reference_bits() {
+        // The register-blocked SIMD non-last-axis sum must be BIT-IDENTICAL to the
+        // scalar `reduce_sum_strided` helper it replaces (fnp's sum is linear
+        // left-to-right, NOT numpy's pairwise — so the reference is the fnp helper,
+        // not numpy). Covers the LANES=8 boundary (inner not a multiple of 8),
+        // signed-zero-cancelling columns, and NaN / +inf / -inf columns.
+        let cases: &[(usize, usize)] = &[(37, 21), (8, 8), (5, 3), (64, 33), (2, 16)];
+        let bits = |v: f64| v.to_bits();
+        for &(rows, cols) in cases {
+            let mut data = Vec::with_capacity(rows * cols);
+            for r in 0..rows {
+                for c in 0..cols {
+                    let v = (((r * 17 + c * 5 + 3) % 31) as f64) - 15.0;
+                    let cell = if c % 7 == 3 {
+                        if r % 2 == 0 { 0.0 } else { -0.0 }
+                    } else if c % 11 == 5 && r == rows / 2 {
+                        f64::NAN
+                    } else if c % 13 == 6 && r == 0 {
+                        f64::INFINITY
+                    } else if c % 13 == 9 && r == 0 {
+                        f64::NEG_INFINITY
+                    } else {
+                        v / 4.0
+                    };
+                    data.push(cell);
+                }
+            }
+            let a = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).unwrap();
+            let got = a.reduce_sum(Some(0), false).unwrap();
+            assert_eq!(got.shape(), &[cols]);
+            for (c, slot) in got.values().iter().enumerate() {
+                // Reference = the exact scalar linear strided sum the old path used
+                // (`linear_sum_strided`): 0.0-initialised left-to-right, then finalize.
+                let mut sum = 0.0f64;
+                for r in 0..rows {
+                    sum += data[r * cols + c];
+                }
+                let reference = if sum == 0.0 { 0.0 } else { sum };
+                if reference.is_nan() {
+                    assert!(slot.is_nan(), "NaN parity col {c} (rows={rows},cols={cols})");
+                } else {
+                    assert_eq!(
+                        bits(*slot),
+                        bits(reference),
+                        "bit parity col {c} (rows={rows},cols={cols}): {slot} vs {reference}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reduce_sum_axis0_simd_golden_sha256() {
+        // Byte-locks the register-blocked SIMD non-last-axis sum. inner=21 crosses the
+        // 8+8+5 SIMD/tail boundary; signed-zero-cancelling columns exercise the
+        // finalize_sum (-0.0 -> +0.0) select. Digest pins fnp's exact linear-sum bytes.
+        let rows = 37usize;
+        let cols = 21usize;
+        let mut data = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                let v = (((r * 17 + c * 5 + 3) % 31) as f64) - 15.0;
+                let cell = if c % 7 == 3 {
+                    if r % 2 == 0 { 0.0 } else { -0.0 }
+                } else {
+                    v / 4.0
+                };
+                data.push(cell);
+            }
+        }
+        let a = UFuncArray::new(vec![rows, cols], data, DType::F64).unwrap();
+        let r = a.reduce_sum(Some(0), false).unwrap();
+        assert_eq!(r.shape(), &[cols]);
+        let mut digest = Sha256::new();
+        for v in r.values() {
+            digest.update(v.to_bits().to_le_bytes());
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex,
+            "a8eb53a7db8daf51db9bae259e65f23de4347fab74c832965d70e4fd1014dd7a"
+        );
+    }
+
+    #[test]
     fn reduce_max_axis_none() {
         let arr = UFuncArray::new(vec![2, 3], vec![3.0, 1.0, 4.0, 1.5, 5.0, 2.0], DType::F64)
             .expect("arr");
@@ -48729,6 +48892,69 @@ print(json.dumps(payload))
         println!(
             "PTP_AXIS0 new={new_ms:.3}ms old={old_ms:.3}ms speedup={:.2}x",
             old_ms / new_ms
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B: register-blocked SIMD reduce_sum(axis=0) vs strided serial linear sum; run --release -- --ignored --nocapture"]
+    fn reduce_sum_axis0_simd_ab_bench() {
+        use std::time::Instant;
+        let n = 2048usize;
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| ((i % 101) as f64) * 0.01 - 0.5)
+            .collect();
+        let a = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+        let iters = 50;
+        let _ = a.reduce_sum(Some(0), false).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.reduce_sum(Some(0), false).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = the literal strided per-lane linear sum (sum += values[off]; off += inner).
+        let inner = n;
+        let axis_len = n;
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut out = vec![0.0f64; inner];
+            for (i, slot) in out.iter_mut().enumerate() {
+                let mut sum = 0.0f64;
+                let mut offset = i;
+                for _ in 0..axis_len {
+                    sum += data[offset];
+                    offset += inner;
+                }
+                *slot = if sum == 0.0 { 0.0 } else { sum };
+            }
+            std::hint::black_box(&out);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // SERIAL SIMD register-blocked, single-threaded — load-independent algorithmic win.
+        let t2 = Instant::now();
+        for _ in 0..iters {
+            use std::simd::cmp::SimdPartialEq;
+            use std::simd::{Select, Simd};
+            const LANES: usize = 8;
+            type V = Simd<f64, LANES>;
+            let zero = V::splat(0.0);
+            let mut out = vec![0.0f64; inner];
+            let mut c = 0;
+            while c + LANES <= inner {
+                let mut acc = zero;
+                for r in 0..axis_len {
+                    acc += V::from_slice(&data[r * inner + c..]);
+                }
+                acc.simd_eq(zero).select(zero, acc).copy_to_slice(&mut out[c..]);
+                c += LANES;
+            }
+            std::hint::black_box(&out);
+        }
+        let serial_simd_ms = t2.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "REDUCE_SUM_AXIS0 parallel_new={new_ms:.3}ms serial_simd={serial_simd_ms:.3}ms \
+             scalar_old={old_ms:.3}ms parallel_speedup={:.2}x serial_simd_speedup={:.2}x",
+            old_ms / new_ms,
+            old_ms / serial_simd_ms
         );
     }
 
