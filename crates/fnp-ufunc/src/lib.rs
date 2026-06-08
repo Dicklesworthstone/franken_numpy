@@ -28869,6 +28869,78 @@ fn cumulate_axis_u64(
     Ok(out)
 }
 
+/// Register-blocked portable-SIMD sum-of-squared-deviations over a NON-LAST axis
+/// (`inner > 1`). The scalar `reduce_var_axis_contiguous` gathers each output column
+/// with stride `inner` (a cache-line miss per element); here the inner axis is tiled
+/// by `LANES` and each column's `sum_sq` accumulator is held in a SIMD register
+/// across the whole down-axis scan, with one contiguous 8-wide load per row feeding
+/// 8 columns. The per-column precomputed `means` are loaded once per tile.
+///
+/// Bit-identical to the scalar loop: each lane computes `sum_sq += (v - mean)*(v -
+/// mean)` row-ascending with a separate multiply and add (Rust emits no FMA
+/// contraction by default, matching the scalar), so the f64 accumulation order — and
+/// NaN/inf propagation — is preserved exactly. Lanes are independent columns, never a
+/// within-column reorder.
+fn reduce_var_axis_simd(
+    values: &[f64],
+    means: &[f64],
+    axis_len: usize,
+    inner: usize,
+    outer: usize,
+    out: &mut [f64],
+) {
+    use std::simd::Simd;
+    const LANES: usize = 8;
+    type V = Simd<f64, LANES>;
+
+    let reduce = |o: usize, c0: usize, out_slice: &mut [f64]| {
+        let len = out_slice.len();
+        let base = o * axis_len * inner + c0;
+        let mean_base = o * inner + c0;
+        let mut c = 0;
+        while c + LANES <= len {
+            let mean_v = V::from_slice(&means[mean_base + c..]);
+            let mut acc = V::splat(0.0);
+            for r in 0..axis_len {
+                let diff = V::from_slice(&values[base + r * inner + c..]) - mean_v;
+                acc += diff * diff;
+            }
+            acc.copy_to_slice(&mut out_slice[c..]);
+            c += LANES;
+        }
+        while c < len {
+            let mean = means[mean_base + c];
+            let mut sum_sq = 0.0f64;
+            for r in 0..axis_len {
+                let diff = values[base + r * inner + c] - mean;
+                sum_sq += diff * diff;
+            }
+            out_slice[c] = sum_sq;
+            c += 1;
+        }
+    };
+
+    const VAR_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+    let parallel = out.len() >= 2
+        && values.len() >= VAR_AXIS_PARALLEL_MIN_ELEMS
+        && rayon::current_num_threads() >= 2;
+    if parallel && outer == 1 {
+        let threads = rayon::current_num_threads();
+        let chunk = inner.div_ceil(threads * 2).max(8);
+        out.par_chunks_mut(chunk).enumerate().for_each(|(ci, oc)| {
+            reduce(0, ci * chunk, oc);
+        });
+    } else if parallel {
+        out.par_chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
+    } else {
+        out.chunks_mut(inner)
+            .enumerate()
+            .for_each(|(o, ob)| reduce(o, 0, ob));
+    }
+}
+
 fn reduce_var_axis_contiguous(
     values: &[f64],
     shape: &[usize],
@@ -28888,6 +28960,11 @@ fn reduce_var_axis_contiguous(
 
     let inner = shape[axis + 1..].iter().copied().product::<usize>();
     let outer = shape[..axis].iter().copied().product::<usize>();
+
+    if inner > 1 {
+        reduce_var_axis_simd(values, means, axis_len, inner, outer, out_values);
+        return;
+    }
 
     let mut out_flat = 0usize;
     for outer_idx in 0..outer {
@@ -40627,6 +40704,92 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn reduce_var_axis0_simd_matches_scalar_reference_bits() {
+        // The register-blocked SIMD non-last-axis variance must be BIT-IDENTICAL to the
+        // scalar path it replaces (fnp uses linear sums for both mean and sum-of-squares,
+        // NOT numpy's pairwise — so the reference is the fnp scalar algorithm). Covers the
+        // LANES=8 boundary, both ddof values, and NaN / +inf columns.
+        let cases: &[(usize, usize)] = &[(37, 21), (8, 8), (5, 3), (64, 33), (3, 17)];
+        let bits = |v: f64| v.to_bits();
+        for &(rows, cols) in cases {
+            let mut data = Vec::with_capacity(rows * cols);
+            for r in 0..rows {
+                for c in 0..cols {
+                    let v = (((r * 17 + c * 5 + 3) % 31) as f64) - 15.0;
+                    let cell = if c % 11 == 5 && r == rows / 2 {
+                        f64::NAN
+                    } else if c % 13 == 6 && r == 0 {
+                        f64::INFINITY
+                    } else {
+                        v / 4.0
+                    };
+                    data.push(cell);
+                }
+            }
+            let a = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).unwrap();
+            for ddof in [0usize, 1usize] {
+                let got = a.reduce_var(Some(0), false, ddof).unwrap();
+                assert_eq!(got.shape(), &[cols]);
+                for (c, slot) in got.values().iter().enumerate() {
+                    // Reference = the exact scalar fnp algorithm: linear strided mean,
+                    // then linear strided sum of squared deviations, then /(n-ddof).
+                    let mut sum = 0.0f64;
+                    for r in 0..rows {
+                        sum += data[r * cols + c];
+                    }
+                    let mean = sum / rows as f64;
+                    let mut sum_sq = 0.0f64;
+                    for r in 0..rows {
+                        let diff = data[r * cols + c] - mean;
+                        sum_sq += diff * diff;
+                    }
+                    let reference = sum_sq / (rows.saturating_sub(ddof) as f64);
+                    if reference.is_nan() {
+                        assert!(slot.is_nan(), "NaN parity col {c} ddof {ddof}");
+                    } else {
+                        assert_eq!(
+                            bits(*slot),
+                            bits(reference),
+                            "bit parity col {c} ddof {ddof} ({rows}x{cols}): {slot} vs {reference}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn reduce_var_axis0_simd_golden_sha256() {
+        // Byte-locks the register-blocked SIMD non-last-axis variance (ddof=0). inner=21
+        // crosses the 8+8+5 SIMD/tail boundary. Pins fnp's exact linear-arithmetic bytes.
+        let rows = 37usize;
+        let cols = 21usize;
+        let mut data = Vec::with_capacity(rows * cols);
+        for r in 0..rows {
+            for c in 0..cols {
+                let v = (((r * 17 + c * 5 + 3) % 31) as f64) - 15.0;
+                data.push(v / 4.0);
+            }
+        }
+        let a = UFuncArray::new(vec![rows, cols], data, DType::F64).unwrap();
+        let r = a.reduce_var(Some(0), false, 0).unwrap();
+        assert_eq!(r.shape(), &[cols]);
+        let mut digest = Sha256::new();
+        for v in r.values() {
+            digest.update(v.to_bits().to_le_bytes());
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex,
+            "bd737d8e00f926ae0efeb8233d0141d5de55d93130c0fa38b95cc089fc7a4c09"
+        );
+    }
+
+    #[test]
     fn reduce_max_axis_none() {
         let arr = UFuncArray::new(vec![2, 3], vec![3.0, 1.0, 4.0, 1.5, 5.0, 2.0], DType::F64)
             .expect("arr");
@@ -48952,6 +49115,81 @@ print(json.dumps(payload))
         let serial_simd_ms = t2.elapsed().as_secs_f64() * 1e3 / iters as f64;
         println!(
             "REDUCE_SUM_AXIS0 parallel_new={new_ms:.3}ms serial_simd={serial_simd_ms:.3}ms \
+             scalar_old={old_ms:.3}ms parallel_speedup={:.2}x serial_simd_speedup={:.2}x",
+            old_ms / new_ms,
+            old_ms / serial_simd_ms
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B: register-blocked SIMD reduce_var(axis=0) vs strided serial sum-of-squares; run --release -- --ignored --nocapture"]
+    fn reduce_var_axis0_simd_ab_bench() {
+        use std::time::Instant;
+        let n = 2048usize;
+        let data: Vec<f64> = (0..n * n)
+            .map(|i| ((i % 101) as f64) * 0.01 - 0.5)
+            .collect();
+        let a = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+        // Precompute the per-column means once (same for both timed paths; the lever is
+        // the sum-of-squares pass, not the mean).
+        let inner = n;
+        let axis_len = n;
+        let mut means = vec![0.0f64; inner];
+        for (c, m) in means.iter_mut().enumerate() {
+            let mut s = 0.0f64;
+            for r in 0..axis_len {
+                s += data[r * inner + c];
+            }
+            *m = s / axis_len as f64;
+        }
+        let iters = 50;
+        let _ = a.reduce_var(Some(0), false, 0).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.reduce_var(Some(0), false, 0).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = the literal strided per-lane sum-of-squared-deviations.
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut out = vec![0.0f64; inner];
+            for (c, slot) in out.iter_mut().enumerate() {
+                let mean = means[c];
+                let mut sum_sq = 0.0f64;
+                let mut offset = c;
+                for _ in 0..axis_len {
+                    let diff = data[offset] - mean;
+                    sum_sq += diff * diff;
+                    offset += inner;
+                }
+                *slot = sum_sq;
+            }
+            std::hint::black_box(&out);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // SERIAL SIMD register-blocked sum-of-squares, single-threaded — load-independent.
+        let t2 = Instant::now();
+        for _ in 0..iters {
+            use std::simd::Simd;
+            const LANES: usize = 8;
+            type V = Simd<f64, LANES>;
+            let mut out = vec![0.0f64; inner];
+            let mut c = 0;
+            while c + LANES <= inner {
+                let mean_v = V::from_slice(&means[c..]);
+                let mut acc = V::splat(0.0);
+                for r in 0..axis_len {
+                    let diff = V::from_slice(&data[r * inner + c..]) - mean_v;
+                    acc += diff * diff;
+                }
+                acc.copy_to_slice(&mut out[c..]);
+                c += LANES;
+            }
+            std::hint::black_box(&out);
+        }
+        let serial_simd_ms = t2.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "REDUCE_VAR_AXIS0 parallel_new={new_ms:.3}ms serial_simd={serial_simd_ms:.3}ms \
              scalar_old={old_ms:.3}ms parallel_speedup={:.2}x serial_simd_speedup={:.2}x",
             old_ms / new_ms,
             old_ms / serial_simd_ms
