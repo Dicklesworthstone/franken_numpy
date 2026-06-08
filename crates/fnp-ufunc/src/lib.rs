@@ -30342,6 +30342,31 @@ fn digamma_approx(mut x: f64) -> f64 {
 /// `shape` is the full N-D shape of the data.
 /// `re` and `im` are flat row-major arrays of length `product(shape)`.
 /// `axis` is the axis along which to apply the 1-D FFT.
+/// Cache-tiled transpose of a row-major `[r, c]` matrix `src` into the row-major
+/// `[c, r]` matrix `dst` (`dst[j*r + i] = src[i*c + j]`). Processing T×T tiles keeps
+/// the strided side of the copy within a small working set, so each cache line is
+/// touched once instead of being evicted between strided accesses — the difference
+/// between a cache-resident and a cache-thrashing transpose on large matrices.
+fn transpose_tiled(src: &[f64], dst: &mut [f64], r: usize, c: usize) {
+    const T: usize = 32;
+    let mut i0 = 0;
+    while i0 < r {
+        let i1 = (i0 + T).min(r);
+        let mut j0 = 0;
+        while j0 < c {
+            let j1 = (j0 + T).min(c);
+            for i in i0..i1 {
+                let src_row = i * c;
+                for j in j0..j1 {
+                    dst[j * r + i] = src[src_row + j];
+                }
+            }
+            j0 += T;
+        }
+        i0 += T;
+    }
+}
+
 fn fftn_along_axis(shape: &[usize], re: &mut [f64], im: &mut [f64], axis: usize, inverse: bool) {
     let ndim = shape.len();
     if axis >= ndim {
@@ -30384,20 +30409,48 @@ fn fftn_along_axis(shape: &[usize], re: &mut [f64], im: &mut [f64], axis: usize,
     };
 
     const FFT_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+    // Above ~64 MB per re/im array (8M f64), the strided per-column gather for a
+    // leading-axis transform misses last-level cache on every access; the tiled
+    // transpose then wins (measured 1.53x at 4096², 0.81x at 2048² where the array
+    // is still L3-resident). Gate the transpose path to this regime.
+    const FFT_TRANSPOSE_MIN_ELEMS: usize = 1 << 23;
     let want_parallel =
         re.len() >= FFT_AXIS_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2;
     if outer_size >= 2 && want_parallel {
         re.par_chunks_mut(block)
             .zip(im.par_chunks_mut(block))
             .for_each(process_block);
+    } else if outer_size == 1 && inner_size >= 2 && want_parallel && re.len() >= FFT_TRANSPOSE_MIN_ELEMS
+    {
+        // Leading-axis transform, array LARGER than last-level cache: the
+        // `inner_size` lanes are strided by inner_size, so a per-lane gather/scatter
+        // thrashes cache (every column read touches a fresh cache line that is
+        // evicted before reuse). Instead, transpose [axis_len, inner_size] ->
+        // [inner_size, axis_len] with a CACHE-TILED transpose so every original
+        // column becomes a CONTIGUOUS row, FFT the rows in parallel (the fast
+        // contiguous kernel), then transpose back. fft_dit sees the exact same
+        // per-column data in the same order as the strided gather, so the result is
+        // BIT-FOR-BIT identical for any thread count. The two extra O(n) tiled passes
+        // only pay off once strided access misses cache — below the threshold the
+        // gather (next branch) wins, so this is gated to large arrays.
+        let r = axis_len;
+        let c = inner_size;
+        let mut tre = vec![0.0f64; re.len()];
+        let mut tim = vec![0.0f64; im.len()];
+        transpose_tiled(re, &mut tre, r, c);
+        transpose_tiled(im, &mut tim, r, c);
+        tre.par_chunks_mut(axis_len)
+            .zip(tim.par_chunks_mut(axis_len))
+            .for_each(|(row_re, row_im)| fft_dit(row_re, row_im, inverse));
+        transpose_tiled(&tre, re, c, r);
+        transpose_tiled(&tim, im, c, r);
     } else if outer_size == 1 && inner_size >= 2 && want_parallel {
-        // Leading-axis transform: a single super-block holds inner_size strided
-        // lanes (stride = inner_size, base = inner). par_chunks_mut can't split
-        // strided lanes, so transform them in parallel into owned buffers (each
-        // task only reads re/im), then scatter back serially. fft_dit is
-        // deterministic per lane and the scatter order is fixed, so the result is
-        // bit-for-bit identical to the serial gather/fft/scatter for any thread
-        // count. Extra O(total) allocation is amortized by the O(n log n) FFTs.
+        // Leading-axis transform, cache-resident array: a single super-block holds
+        // inner_size strided lanes. par_chunks_mut can't split strided lanes, so
+        // transform them in parallel into owned buffers (each task only reads re/im),
+        // then scatter back serially. fft_dit is deterministic per lane and the
+        // scatter order is fixed, so the result is bit-for-bit identical to the
+        // serial gather/fft/scatter for any thread count.
         let re_ro: &[f64] = re;
         let im_ro: &[f64] = im;
         let lanes: Vec<(Vec<f64>, Vec<f64>)> = (0..inner_size)
@@ -38291,7 +38344,7 @@ mod tests {
         busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
         chebint, chebmul, chebroots, chebsub, chebval, checked_window_total, copysign,
         datetime_as_string, divmod_arrays, errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis,
-        financial_fv,
+        transpose_tiled, financial_fv,
         financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
         financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc,
         frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
@@ -45883,6 +45936,105 @@ print(json.dumps(payload))
                 );
             }
         }
+    }
+
+    #[test]
+    fn transpose_tiled_matches_naive() {
+        // transpose_tiled([r,c]) -> [c,r] must equal the naive transpose, for square
+        // and non-square shapes and sizes straddling the 32-wide tile boundary (so
+        // partial edge tiles are exercised). A round-trip must restore the original.
+        for &(r, c) in &[(1usize, 1usize), (3, 5), (32, 32), (33, 31), (64, 17), (40, 96)] {
+            let src: Vec<f64> = (0..r * c).map(|i| i as f64 * 0.5 - 7.0).collect();
+            let mut dst = vec![0.0f64; r * c];
+            transpose_tiled(&src, &mut dst, r, c);
+            for i in 0..r {
+                for j in 0..c {
+                    assert_eq!(
+                        dst[j * r + i], src[i * c + j],
+                        "transpose ({r}x{c}) at ({i},{j})"
+                    );
+                }
+            }
+            // Round-trip [c,r] -> [r,c] restores the original.
+            let mut back = vec![0.0f64; r * c];
+            transpose_tiled(&dst, &mut back, c, r);
+            assert_eq!(back, src, "round-trip ({r}x{c})");
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B bench; run with --release -- --ignored --nocapture"]
+    fn fftn_leading_axis_transpose_ab_bench() {
+        use rayon::prelude::*;
+        use std::time::Instant;
+        // Leading-axis (axis 0) FFT of a large [R, C] matrix: the column lanes are
+        // strided by C. Compare the old per-column strided gather/scatter against the
+        // new cache-tiled transpose path.
+        let (r, c) = (4096usize, 4096usize);
+        let re0: Vec<f64> = (0..r * c)
+            .map(|i| ((i as f64) * 0.000131).sin())
+            .collect();
+        let im0: Vec<f64> = (0..r * c).map(|i| ((i as f64) * 0.00029).cos()).collect();
+        let shape = [r, c];
+
+        // Old reference: parallel per-column strided gather -> fft -> serial scatter.
+        let old_path = |re: &mut [f64], im: &mut [f64]| {
+            let re_ro: &[f64] = re;
+            let im_ro: &[f64] = im;
+            let lanes: Vec<(Vec<f64>, Vec<f64>)> = (0..c)
+                .into_par_iter()
+                .map(|inner| {
+                    let mut br = vec![0.0; r];
+                    let mut bi = vec![0.0; r];
+                    for k in 0..r {
+                        br[k] = re_ro[k * c + inner];
+                        bi[k] = im_ro[k * c + inner];
+                    }
+                    fft_dit(&mut br, &mut bi, false);
+                    (br, bi)
+                })
+                .collect();
+            for (inner, (br, bi)) in lanes.into_iter().enumerate() {
+                for k in 0..r {
+                    re[k * c + inner] = br[k];
+                    im[k * c + inner] = bi[k];
+                }
+            }
+        };
+
+        let iters = 10;
+        // warmup + correctness (new vs old must be bit-identical)
+        let (mut a_re, mut a_im) = (re0.clone(), im0.clone());
+        fftn_along_axis(&shape, &mut a_re, &mut a_im, 0, false);
+        let (mut b_re, mut b_im) = (re0.clone(), im0.clone());
+        old_path(&mut b_re, &mut b_im);
+        let bitwise_eq = a_re.iter().zip(&b_re).all(|(x, y)| x.to_bits() == y.to_bits())
+            && a_im.iter().zip(&b_im).all(|(x, y)| x.to_bits() == y.to_bits());
+
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            let (mut re, mut im) = (re0.clone(), im0.clone());
+            old_path(&mut re, &mut im);
+            std::hint::black_box((&re, &im));
+        }
+        let old_ns = t0.elapsed().as_nanos() as f64 / iters as f64;
+
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let (mut re, mut im) = (re0.clone(), im0.clone());
+            fftn_along_axis(&shape, &mut re, &mut im, 0, false);
+            std::hint::black_box((&re, &im));
+        }
+        let new_ns = t1.elapsed().as_nanos() as f64 / iters as f64;
+
+        eprintln!(
+            "fftn axis0 [{r},{c}]: old(strided-gather)={:.0}us new(tiled-transpose)={:.0}us  speedup={:.2}x  bit_eq={}",
+            old_ns / 1000.0,
+            new_ns / 1000.0,
+            old_ns / new_ns,
+            bitwise_eq
+        );
+        assert!(bitwise_eq, "transpose path must be bit-identical to strided gather");
     }
 
     #[test]
