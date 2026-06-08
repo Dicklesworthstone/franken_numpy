@@ -5210,6 +5210,25 @@ fn build_numpy_slogdet_result(py: Python<'_>, sign: f64, logabsdet: f64) -> PyRe
     Ok(slogdet_result_type.call1((sign, logabsdet))?.unbind())
 }
 
+fn build_numpy_slogdet_result_arrays(
+    py: Python<'_>,
+    sign: &UFuncArray,
+    logabsdet: &UFuncArray,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let eye = numpy.getattr("eye")?.call1((1,))?;
+    let slogdet_result_type = numpy
+        .getattr("linalg")?
+        .getattr("slogdet")?
+        .call1((eye,))?
+        .get_type();
+    let sign = build_numpy_array_from_ufunc(py, sign)?;
+    let logabsdet = build_numpy_array_from_ufunc(py, logabsdet)?;
+    Ok(slogdet_result_type
+        .call1((sign.bind(py), logabsdet.bind(py)))?
+        .unbind())
+}
+
 fn build_numpy_eigh_result(
     py: Python<'_>,
     eigenvalues: &UFuncArray,
@@ -15676,15 +15695,32 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
         Err(_) => return fallback(),
     };
     let shape = array.shape();
-    if shape.len() != 2
-        || shape[0] != shape[1]
-        || array.has_integer_sidecar()
-        || array.values().iter().any(|value| !value.is_finite())
-        || matches!(
+    let real_f64_finite = !array.has_integer_sidecar()
+        && !matches!(
             array.dtype(),
             DType::F16 | DType::F32 | DType::Complex64 | DType::Complex128
         )
+        && array.values().iter().all(|value| value.is_finite());
+    // Batched (stacked) square inputs: one (sign, logabsdet) per lane via the
+    // parallel batch_slogdet, reducing the two matrix axes. On any Err (singular
+    // is still valid: sign=0, logabsdet=-inf; only shape errors out) fall back to
+    // numpy. Mirrors the 2-D guards.
+    if shape.len() >= 3
+        && shape[shape.len() - 1] == shape[shape.len() - 2]
+        && real_f64_finite
     {
+        let owned_shape = shape.to_vec();
+        if let Ok((signs, logs)) = fnp_linalg::batch_slogdet(array.values(), &owned_shape) {
+            let out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+            let sign_arr = UFuncArray::new(out_shape.clone(), signs, DType::F64)
+                .map_err(map_ufunc_error)?;
+            let log_arr =
+                UFuncArray::new(out_shape, logs, DType::F64).map_err(map_ufunc_error)?;
+            return build_numpy_slogdet_result_arrays(py, &sign_arr, &log_arr);
+        }
+        return fallback();
+    }
+    if shape.len() != 2 || shape[0] != shape[1] || !real_f64_finite {
         return fallback();
     }
 
