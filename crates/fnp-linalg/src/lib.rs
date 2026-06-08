@@ -1473,6 +1473,47 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     Ok(l)
 }
 
+/// Write the lower Cholesky factor `L` (n*n) directly into `out`, with no per-lane
+/// allocation. `out` MUST be pre-zeroed (the upper triangle is never written, matching
+/// `cholesky_nxn`'s zeroed buffer). Byte-identical to `cholesky_nxn`'s unblocked path
+/// (the only path for `n < CHOL_MID_MIN`): same direct formula, reading the
+/// already-written lower-triangle entries from `out` instead of an owned `l`. Returns
+/// the same finite / not-positive-definite errors.
+fn cholesky_nxn_into_out(a: &[f64], n: usize, out: &mut [f64]) -> Result<(), LinAlgError> {
+    if out.len() != n * n {
+        return Err(LinAlgError::CholeskyContractViolation(
+            "cholesky_nxn_into_out: out length must equal n*n",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::CholeskyContractViolation(
+            "cholesky requires finite entries",
+        ));
+    }
+    for i in 0..n {
+        let row_i = i * n;
+        for j in 0..=i {
+            let row_j = j * n;
+            let mut sum = 0.0;
+            for k in 0..j {
+                sum += out[row_i + k] * out[row_j + k];
+            }
+            if i == j {
+                let diag = a[row_i + i] - sum;
+                if diag <= 0.0 {
+                    return Err(LinAlgError::CholeskyContractViolation(
+                        "matrix is not positive definite",
+                    ));
+                }
+                out[row_i + j] = diag.sqrt();
+            } else {
+                out[row_i + j] = (a[row_i + j] - sum) / out[row_j + j];
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Solve A*x = b given the lower Cholesky factor L where A = L*L^T.
 ///
 /// Two-step forward/back substitution:
@@ -6447,6 +6488,42 @@ pub fn batch_cholesky(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgE
             "batch_cholesky: data length does not match shape",
         ));
     }
+    // Tiny matrices: write each L DIRECTLY into the flat (pre-zeroed) output — no
+    // per-lane Vec, no Vec<Vec>, no flatten. cholesky writes L in place with no
+    // scratch, so this needs no per-thread buffers at all. Byte-identical to per-lane
+    // cholesky_nxn (the unblocked formula reachable for n < CHOL_MID_MIN). Gated to
+    // the small-n regime where alloc-elimination wins (per-lane O(n^3) compute
+    // overtakes it beyond that — same shape as batch_inv).
+    const CHOL_SCRATCH_MAX_N: usize = 16;
+    if n < CHOL_SCRATCH_MAX_N {
+        let mut result = vec![0.0f64; batch * mat_size];
+        if batch_should_parallelize(batch, mat_size) {
+            use std::sync::Mutex;
+            let first_err: Mutex<Option<(usize, LinAlgError)>> = Mutex::new(None);
+            result.par_chunks_mut(mat_size).enumerate().for_each(|(idx, out_chunk)| {
+                let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
+                if let Err(e) = cholesky_nxn_into_out(a_sub, n, out_chunk) {
+                    let mut slot = first_err.lock().unwrap();
+                    let replace = match slot.as_ref() {
+                        None => true,
+                        Some((i, _)) => idx < *i,
+                    };
+                    if replace {
+                        *slot = Some((idx, e));
+                    }
+                }
+            });
+            if let Some((_, e)) = first_err.into_inner().unwrap() {
+                return Err(e);
+            }
+        } else {
+            for (idx, out_chunk) in result.chunks_mut(mat_size).enumerate() {
+                let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
+                cholesky_nxn_into_out(a_sub, n, out_chunk)?;
+            }
+        }
+        return Ok(result);
+    }
     let lanes = batch_map_lanes(batch, mat_size, |b| {
         cholesky_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
     })?;
@@ -9188,6 +9265,89 @@ mod tests {
             for (i, (g, r)) in got.iter().zip(&reference).enumerate() {
                 assert_eq!(g.to_bits(), r.to_bits(), "n={n} index {i} diverged");
             }
+        }
+    }
+
+    #[test]
+    fn batch_cholesky_scratch_matches_per_lane_cholesky_nxn_bits() {
+        // Zero-alloc batch_cholesky must be BYTE-IDENTICAL to per-lane cholesky_nxn.
+        for &n in &[2usize, 3, 5, 8, 15] {
+            let batch = 2048usize;
+            let ms = n * n;
+            // Symmetric positive-definite per lane: A = M·Mᵀ + diag boost. Build a
+            // diagonally-dominant symmetric matrix directly.
+            let a: Vec<f64> = (0..batch * ms)
+                .map(|i| {
+                    let cell = i % ms;
+                    let (r, c) = (cell / n, cell % n);
+                    if r == c {
+                        n as f64 * 4.0 + ((i / ms) % 5) as f64
+                    } else {
+                        let lo = r.min(c);
+                        let hi = r.max(c);
+                        (((lo * 7 + hi) % 9) as f64 - 4.0) * 0.1
+                    }
+                })
+                .collect();
+            let shape = [batch, n, n];
+            let got = super::batch_cholesky(&a, &shape).expect("batch_cholesky");
+            let mut reference = Vec::with_capacity(batch * ms);
+            for lane in 0..batch {
+                let l = super::cholesky_nxn(&a[lane * ms..(lane + 1) * ms], n).expect("cholesky_nxn");
+                reference.extend_from_slice(&l);
+            }
+            assert_eq!(got.len(), reference.len());
+            for (i, (g, r)) in got.iter().zip(&reference).enumerate() {
+                assert_eq!(g.to_bits(), r.to_bits(), "n={n} index {i} diverged");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B bench; run with --release -- --ignored --nocapture"]
+    fn batch_cholesky_scratch_ab_bench() {
+        use rayon::prelude::*;
+        use std::time::Instant;
+        for &n in &[3usize, 8, 12, 16] {
+            let batch = (1usize << 22) / (n * n);
+            let ms = n * n;
+            let a: Vec<f64> = (0..batch * ms)
+                .map(|i| {
+                    let cell = i % ms;
+                    let (r, c) = (cell / n, cell % n);
+                    if r == c {
+                        n as f64 * 4.0
+                    } else {
+                        let (lo, hi) = (r.min(c), r.max(c));
+                        ((lo * 7 + hi) % 9) as f64 * 0.1 - 0.4
+                    }
+                })
+                .collect();
+            let shape = [batch, n, n];
+            let old = || -> usize {
+                let lanes: Vec<Vec<f64>> = (0..batch)
+                    .into_par_iter()
+                    .map(|i| super::cholesky_nxn(&a[i * ms..(i + 1) * ms], n).unwrap())
+                    .collect();
+                let mut out = Vec::with_capacity(batch * ms);
+                for x in &lanes {
+                    out.extend_from_slice(x);
+                }
+                out.len()
+            };
+            let new = || -> usize { super::batch_cholesky(&a, &shape).unwrap().len() };
+            let _ = old();
+            let _ = new();
+            let t = Instant::now();
+            std::hint::black_box(old());
+            let old_ms = t.elapsed().as_secs_f64() * 1e3;
+            let t = Instant::now();
+            std::hint::black_box(new());
+            let new_ms = t.elapsed().as_secs_f64() * 1e3;
+            eprintln!(
+                "batch_chol n={n:2} batch={batch:8}: per-lane={old_ms:8.2}ms scratch={new_ms:8.2}ms speedup={:.2}x",
+                old_ms / new_ms
+            );
         }
     }
 
