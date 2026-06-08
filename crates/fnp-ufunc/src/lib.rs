@@ -18763,12 +18763,24 @@ impl UFuncArray {
         let full_len = n + m - 1;
         let a = &self.values;
         let k = &kernel.values;
-        let mut full = vec![0.0f64; full_len];
+
+        // FFT-based linear convolution: O((n+m) log) vs the direct O(n*m) scatter.
+        // numpy.convolve is ALWAYS direct, so this beats numpy for large kernels. The
+        // result matches the direct sum to FFT round-off (~1e-12 rel), and convolve
+        // parity vs NumPy is tolerance-based; the gate sits ABOVE every bit-exact
+        // internal small-kernel case (m <= 33), so those keep the exact scatter path.
+        const CONVOLVE_FFT_MIN_MINDIM: usize = 64;
+        const CONVOLVE_FFT_MIN_FLOPS: usize = 1 << 18;
         const CONVOLVE_PARALLEL_MIN_ELEMS: usize = 1 << 12;
-        if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
+        let full: Vec<f64> = if n.min(m) >= CONVOLVE_FFT_MIN_MINDIM
+            && n.saturating_mul(m) >= CONVOLVE_FFT_MIN_FLOPS
+        {
+            fft_linear_convolve(a, k, full_len)
+        } else if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
             && n.min(m) >= 2
             && rayon::current_num_threads() >= 2
         {
+            let mut full = vec![0.0f64; full_len];
             // Parallelize over DISJOINT output blocks: each block writes only its own
             // slice of `full`, scattering the contributions of the i that overlap it
             // (i visited ascending, so each output keeps the bit-exact accumulation
@@ -18797,13 +18809,16 @@ impl UFuncArray {
                     }
                 }
             });
+            full
         } else {
+            let mut full = vec![0.0f64; full_len];
             for (i, &ai) in a.iter().enumerate() {
                 for (d, &kv) in full[i..i + m].iter_mut().zip(k.iter()) {
                     *d += ai * kv;
                 }
             }
-        }
+            full
+        };
         // Trim based on mode
         let values = match mode {
             "full" => full,
@@ -30359,6 +30374,40 @@ fn fft_pow2(re: &mut [f64], im: &mut [f64], inverse: bool) {
             im[i] *= scale;
         }
     }
+}
+
+/// Linear convolution of `a` and `b` (output length `a.len()+b.len()-1`) via FFT,
+/// in O((n+m) log(n+m)) instead of the direct O(n*m) scatter. Both spectra are
+/// zero-padded to a power of two >= `full_len`, so the circular convolution's first
+/// `full_len` samples ARE the linear convolution; the real part is returned. The
+/// result matches the direct scatter sum to FFT round-off (~1e-12 rel) — convolve
+/// parity vs NumPy is tolerance-based, and this path is gated to large kernels only.
+fn fft_linear_convolve(a: &[f64], b: &[f64], full_len: usize) -> Vec<f64> {
+    let fft_len = full_len.next_power_of_two();
+    let mut ar = vec![0.0f64; fft_len];
+    let mut ai = vec![0.0f64; fft_len];
+    ar[..a.len()].copy_from_slice(a);
+    let mut br = vec![0.0f64; fft_len];
+    let mut bi = vec![0.0f64; fft_len];
+    br[..b.len()].copy_from_slice(b);
+    // The two forward transforms are independent — run them on separate cores.
+    rayon::join(
+        || fft_pow2(&mut ar, &mut ai, false),
+        || fft_pow2(&mut br, &mut bi, false),
+    );
+    // Pointwise complex multiply of the spectra (embarrassingly parallel).
+    ar.par_iter_mut()
+        .zip(ai.par_iter_mut())
+        .zip(br.par_iter().zip(bi.par_iter()))
+        .for_each(|((arr, aii), (brr, bii))| {
+            let tr = *arr * *brr - *aii * *bii;
+            let ti = *arr * *bii + *aii * *brr;
+            *arr = tr;
+            *aii = ti;
+        });
+    fft_pow2(&mut ar, &mut ai, true);
+    ar.truncate(full_len);
+    ar
 }
 
 /// Reflect index for 'reflect' pad mode (no edge duplication).
@@ -45093,6 +45142,117 @@ print(json.dumps(payload))
             out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "parallel polyval diverged from serial Horner reference"
+        );
+    }
+
+    #[test]
+    fn convolve_fft_matches_direct_within_tolerance() {
+        // Large-kernel convolve takes the FFT path (O((n+m)log) vs direct O(n*m)).
+        // It is NOT bit-exact to the direct sum (FFT round-off ~1e-12) — convolve
+        // parity is tolerance-based — so assert it matches a direct scatter reference
+        // to a tight relative tolerance, for full/same/valid. n=8192,m=2048 clears the
+        // gate (min=2048>=64, n*m=16.7M >= 1<<18).
+        let (n, m) = (8192usize, 2048usize);
+        let a: Vec<f64> = (0..n)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 17.0 - 200.0)
+            .collect();
+        let k: Vec<f64> = (0..m)
+            .map(|i| (((i as u64).wrapping_mul(40503).wrapping_add(7) % 211) as f64) / 5.0 - 20.0)
+            .collect();
+        let arr = UFuncArray::new(vec![n], a.clone(), DType::F64).unwrap();
+        let ker = UFuncArray::new(vec![m], k.clone(), DType::F64).unwrap();
+        // Direct reference (scatter), full length.
+        let full_len = n + m - 1;
+        let mut full_ref = vec![0.0f64; full_len];
+        for (i, &ai) in a.iter().enumerate() {
+            for (d, &kv) in full_ref[i..i + m].iter_mut().zip(k.iter()) {
+                *d += ai * kv;
+            }
+        }
+        let trim = |mode: &str| -> Vec<f64> {
+            match mode {
+                "full" => full_ref.clone(),
+                "same" => {
+                    let same_len = n.max(m);
+                    let start = (n.min(m) - 1) / 2;
+                    full_ref[start..start + same_len].to_vec()
+                }
+                _ => {
+                    let valid_len = n.max(m) - n.min(m) + 1;
+                    let start = n.min(m) - 1;
+                    full_ref[start..start + valid_len].to_vec()
+                }
+            }
+        };
+        for mode in ["full", "same", "valid"] {
+            let got = arr.convolve_mode(&ker, mode).unwrap();
+            let expected = trim(mode);
+            assert_eq!(got.values().len(), expected.len(), "{mode} length");
+            let mut max_rel = 0.0f64;
+            for (g, e) in got.values().iter().zip(&expected) {
+                let denom = e.abs().max(1.0);
+                max_rel = max_rel.max((g - e).abs() / denom);
+            }
+            assert!(
+                max_rel < 1e-9,
+                "FFT convolve {mode} max_rel {max_rel:e} exceeds tolerance"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B: FFT convolve vs direct scatter (large kernel); run --release -- --ignored --nocapture"]
+    fn convolve_fft_vs_direct_ab_bench() {
+        use rayon::prelude::*;
+        use std::time::Instant;
+        let (n, m) = (16384usize, 16384usize);
+        let a: Vec<f64> = (0..n)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 17.0 - 200.0)
+            .collect();
+        let k: Vec<f64> = (0..m)
+            .map(|i| (((i as u64).wrapping_mul(40503).wrapping_add(7) % 211) as f64) / 5.0 - 20.0)
+            .collect();
+        let arr = UFuncArray::new(vec![n], a.clone(), DType::F64).unwrap();
+        let ker = UFuncArray::new(vec![m], k.clone(), DType::F64).unwrap();
+        let iters = 10;
+        let _ = arr.convolve_mode(&ker, "full").unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(arr.convolve_mode(&ker, "full").unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = the direct parallel scatter (what numpy also does, O(n*m)).
+        let full_len = n + m - 1;
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut full = vec![0.0f64; full_len];
+            let threads = rayon::current_num_threads();
+            let chunk = (full_len / (threads * 2)).max(m).max(1);
+            full.par_chunks_mut(chunk).enumerate().for_each(|(c, out)| {
+                let lo = c * chunk;
+                let hi = lo + out.len();
+                let i_start = lo.saturating_sub(m - 1);
+                let i_end = hi.min(n);
+                for i in i_start..i_end {
+                    let ai = a[i];
+                    let j0 = lo.saturating_sub(i);
+                    let j1 = m.min(hi - i);
+                    if j0 >= j1 {
+                        continue;
+                    }
+                    let out_off = i + j0 - lo;
+                    for (d, &kv) in out[out_off..out_off + (j1 - j0)].iter_mut().zip(k[j0..j1].iter())
+                    {
+                        *d += ai * kv;
+                    }
+                }
+            });
+            std::hint::black_box(&full);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "CONVOLVE_FFT new={new_ms:.3}ms old_direct={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
         );
     }
 
