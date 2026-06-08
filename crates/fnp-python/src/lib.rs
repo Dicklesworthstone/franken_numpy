@@ -15944,10 +15944,8 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     };
     if let Ok(array) = extract_numeric_array(py, bound, "inv(a)") {
         let shape = array.shape();
-        if shape.len() == 2
-            && shape[0] == shape[1]
-            && !matches!(array.dtype(), DType::Complex64 | DType::Complex128)
-        {
+        let real = !matches!(array.dtype(), DType::Complex64 | DType::Complex128);
+        if shape.len() == 2 && shape[0] == shape[1] && real {
             // inv_nxn returns Err on singular inputs. numpy raises LinAlgError
             // (subclass of ValueError); mapping via map_ufunc_error would
             // flatten to PyValueError and drop the LinAlgError identity.
@@ -15959,6 +15957,20 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
             };
             let result = UFuncArray::new(vec![shape[0], shape[0]], values, DType::F64)
                 .map_err(map_ufunc_error)?;
+            return build_numpy_array_from_ufunc(py, &result);
+        }
+        // Batched (stacked) square real inputs: invert every lane natively via the
+        // parallel batch_inv instead of passing the whole stack through to numpy.
+        // On any singular lane (or shape mismatch) fall back to numpy so the
+        // LinAlgError type/message/chain stays bit-exact.
+        if shape.len() >= 3 && shape[shape.len() - 1] == shape[shape.len() - 2] && real {
+            let owned_shape = shape.to_vec();
+            let values = match fnp_linalg::batch_inv(array.values(), &owned_shape) {
+                Ok(values) => values,
+                Err(_) => return fallback(),
+            };
+            let result =
+                UFuncArray::new(owned_shape, values, DType::F64).map_err(map_ufunc_error)?;
             return build_numpy_array_from_ufunc(py, &result);
         }
     }
