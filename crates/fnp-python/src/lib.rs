@@ -8341,6 +8341,11 @@ fn try_zerocopy_int_where(
     let x_dtype = x.getattr("dtype")?;
     let kind = x_dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = x_dtype.getattr("itemsize")?.extract::<usize>()?;
+    // The integer/bool arms are dtype-safe because PyBuffer::<T> requires a
+    // matching buffer format; the float arms select through an unsigned view, which
+    // bypasses that check, so they additionally require x and y to share the exact
+    // dtype (numpy would otherwise promote — deferred to the general path).
+    let same_dtype = x_dtype.eq(y.getattr("dtype")?)?;
     let result = match (kind.as_str(), itemsize) {
         ("i", 1) => where_typed::<i8>(py, &numpy, &cond_u8, x, y, "int8")?,
         ("i", 2) => where_typed::<i16>(py, &numpy, &cond_u8, x, y, "int16")?,
@@ -8350,13 +8355,54 @@ fn try_zerocopy_int_where(
         ("u", 2) => where_typed::<u16>(py, &numpy, &cond_u8, x, y, "uint16")?,
         ("u", 4) => where_typed::<u32>(py, &numpy, &cond_u8, x, y, "uint32")?,
         ("u", 8) => where_typed::<u64>(py, &numpy, &cond_u8, x, y, "uint64")?,
-        ("b", 1) => {
+        // bool select also goes through a uint8 view, which (like the float arms)
+        // bypasses PyBuffer's format check, so it likewise requires x and y to share
+        // the bool dtype — otherwise e.g. where(bool_x, int8_y) must promote to int8
+        // (deferred to numpy) instead of being returned as bool.
+        ("b", 1) if same_dtype => {
             let x_u8 = x.call_method1("view", (numpy.getattr("uint8")?,))?;
             let y_u8 = y.call_method1("view", (numpy.getattr("uint8")?,))?;
             match where_typed::<u8>(py, &numpy, &cond_u8, &x_u8, &y_u8, "uint8")? {
                 Some((flat_u8, shape)) => {
                     let flat_bool = flat_u8.call_method1("view", (numpy.getattr("bool_")?,))?;
                     Some((flat_bool, shape))
+                }
+                None => None,
+            }
+        }
+        // float16 / float32 select is value-agnostic: pick verbatim through a
+        // same-width unsigned view of x and y, reusing the existing u16/u32
+        // where_typed instantiations, then view the result back to the float dtype
+        // (f64 is handled by try_zerocopy_f64_where before this). A non-contiguous
+        // x/y makes .view raise; defer to numpy then.
+        ("f", 2) if same_dtype => {
+            let u16t = numpy.getattr("uint16")?;
+            let (Ok(x_u), Ok(y_u)) = (
+                x.call_method1("view", (&u16t,)),
+                y.call_method1("view", (&u16t,)),
+            ) else {
+                return Ok(None);
+            };
+            match where_typed::<u16>(py, &numpy, &cond_u8, &x_u, &y_u, "uint16")? {
+                Some((flat_u16, shape)) => {
+                    let flat_f = flat_u16.call_method1("view", (numpy.getattr("float16")?,))?;
+                    Some((flat_f, shape))
+                }
+                None => None,
+            }
+        }
+        ("f", 4) if same_dtype => {
+            let u32t = numpy.getattr("uint32")?;
+            let (Ok(x_u), Ok(y_u)) = (
+                x.call_method1("view", (&u32t,)),
+                y.call_method1("view", (&u32t,)),
+            ) else {
+                return Ok(None);
+            };
+            match where_typed::<u32>(py, &numpy, &cond_u8, &x_u, &y_u, "uint32")? {
+                Some((flat_u32, shape)) => {
+                    let flat_f = flat_u32.call_method1("view", (numpy.getattr("float32")?,))?;
+                    Some((flat_f, shape))
                 }
                 None => None,
             }
