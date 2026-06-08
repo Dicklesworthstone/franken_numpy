@@ -12825,6 +12825,96 @@ fn try_zerocopy_bincount(
     Ok(Some(out.unbind()))
 }
 
+// Zero-copy weighted np.bincount: out[x[i]] += weights[i], accumulated in float64
+// (numpy always returns float64 for weighted bincount). numpy iterates i in input
+// order doing `ans[x[i]] += w[i]`, so a single forward pass reproduces that exact
+// accumulation order — bit-identical for the non-associative float64 adds, incl.
+// nan/inf weights. x must be a 1-D int64 ndarray with non-negative values; weights
+// are cast to a contiguous float64 array of x's length. Any cast failure, a length
+// mismatch, a negative index, or a non-int64 / multi-dim x defers to the general
+// path so numpy raises its canonical error.
+fn try_zerocopy_bincount_weighted(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    weights: &Bound<'_, PyAny>,
+    minlength: i64,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = x.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "i"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(x_buffer) = PyBuffer::<i64>::get(x) else {
+        return Ok(None);
+    };
+    if x_buffer.shape().len() != 1 {
+        return Ok(None);
+    }
+    let Some(x_in) = x_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // numpy returns an int64 (not float64) array for an empty x even when weights
+    // are given (there is nothing to accumulate), and raises if the weights length
+    // disagrees — delegate that edge case straight to numpy for exact parity (the
+    // general fallback path would otherwise produce a float64 result here).
+    if x_in.is_empty() {
+        let kwb = PyDict::new(py);
+        kwb.set_item("weights", weights)?;
+        kwb.set_item("minlength", minlength)?;
+        let out = numpy.getattr("bincount")?.call((x,), Some(&kwb))?;
+        return Ok(Some(out.unbind()));
+    }
+    // numpy accumulates weighted bincount in float64; cast weights to a contiguous
+    // float64 array (a no-op view when already f64). Defer on any cast failure.
+    let kw = PyDict::new(py);
+    kw.set_item("dtype", "float64")?;
+    let Ok(w_arr) = numpy.getattr("ascontiguousarray")?.call((weights,), Some(&kw)) else {
+        return Ok(None);
+    };
+    let Ok(w_buffer) = PyBuffer::<f64>::get(&w_arr) else {
+        return Ok(None);
+    };
+    if w_buffer.shape().len() != 1 || w_buffer.item_count() != x_in.len() {
+        return Ok(None);
+    }
+    let Some(w_in) = w_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let mut max_val: i64 = -1;
+    for cell in x_in.iter() {
+        let value = cell.get();
+        if value < 0 {
+            return Ok(None);
+        }
+        if value > max_val {
+            max_val = value;
+        }
+    }
+    let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
+    let kwz = PyDict::new(py);
+    kwz.set_item("dtype", "float64")?;
+    let out = numpy.call_method("zeros", (length,), Some(&kwz))?;
+    if length > 0 && !x_in.is_empty() {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (xc, wc) in x_in.iter().zip(w_in.iter()) {
+            let slot = &output[xc.get() as usize];
+            slot.set(slot.get() + wc.get());
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (x, weights=None, minlength=0))]
 fn bincount(
@@ -12860,6 +12950,16 @@ fn bincount(
         && let Some(out) = try_zerocopy_bincount(py, x.bind(py), minlength)?
     {
         return Ok(out);
+    }
+    // Zero-copy weighted tally (float64), single forward pass matching numpy's
+    // accumulation order; mismatched length / negative / non-int64 fall through.
+    if let Some(w) = weights.as_ref() {
+        let wb = w.bind(py);
+        if !wb.is_none()
+            && let Some(out) = try_zerocopy_bincount_weighted(py, x.bind(py), wb, minlength)?
+        {
+            return Ok(out);
+        }
     }
 
     let x = extract_numeric_array(py, x.bind(py), "bincount(x)")?;
