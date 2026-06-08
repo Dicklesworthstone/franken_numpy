@@ -11046,17 +11046,38 @@ impl UFuncArray {
                     });
                 }
 
-                let mut lane = vec![0.0f64; axis_len];
-                for outer_idx in 0..outer {
-                    let base = outer_idx * axis_len * inner;
-                    for inner_idx in 0..inner {
-                        for k in 0..axis_len {
-                            lane[k] = values[base + k * inner + inner_idx];
-                        }
-                        sort_slice_by_kind(&mut lane, kind);
-                        for k in 0..axis_len {
-                            values[base + k * inner + inner_idx] = lane[k];
-                        }
+                // Non-last-axis float sort. Each output column (outer_idx, inner_idx) is
+                // an independent strided lane sorted by the same deterministic
+                // sort_slice_by_kind, so sorting all columns in a parallel map (each with
+                // its own gathered buffer, no shared mutation) is bit-for-bit identical to
+                // the serial loop for any thread count. The strided scatter-back is done
+                // serially (cheap O(n)) since lanes overlap in memory. The previous form
+                // ran fully SERIAL while the last-axis path above was already parallel.
+                let n_lanes = outer * inner;
+                let gather_sort = |cell: usize| -> Vec<f64> {
+                    let outer_idx = cell / inner;
+                    let inner_idx = cell % inner;
+                    let base = outer_idx * axis_len * inner + inner_idx;
+                    let mut lane: Vec<f64> =
+                        (0..axis_len).map(|k| values[base + k * inner]).collect();
+                    sort_slice_by_kind(&mut lane, kind);
+                    lane
+                };
+                const SORT_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+                let sorted: Vec<Vec<f64>> = if n_lanes >= 2
+                    && values.len() >= SORT_AXIS_PARALLEL_MIN_ELEMS
+                    && rayon::current_num_threads() >= 2
+                {
+                    (0..n_lanes).into_par_iter().map(gather_sort).collect()
+                } else {
+                    (0..n_lanes).map(gather_sort).collect()
+                };
+                for (cell, lane) in sorted.into_iter().enumerate() {
+                    let outer_idx = cell / inner;
+                    let inner_idx = cell % inner;
+                    let base = outer_idx * axis_len * inner + inner_idx;
+                    for (k, v) in lane.into_iter().enumerate() {
+                        values[base + k * inner] = v;
                     }
                 }
 
@@ -43814,6 +43835,90 @@ print(json.dumps(payload))
             out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "parallel last-axis sort diverged from serial reference"
+        );
+    }
+
+    #[test]
+    fn sort_non_last_axis_parallel_matches_per_slice_reference() {
+        // The now-parallel non-last-axis float sort must be bit-for-bit identical to
+        // fnp's OWN 1-D sort applied per column (same sort_slice_by_kind, NaN-at-tail).
+        // [200,100]=20000 > 1<<14 engages the parallel path; 3-D covers inner>1, outer>1.
+        let cases: &[Vec<usize>] = &[vec![200, 100], vec![64, 4, 33]];
+        for shape in cases {
+            let n: usize = shape.iter().product();
+            let mut data: Vec<f64> = (0..n)
+                .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 7.0 - 300.0)
+                .collect();
+            for j in (0..n).step_by(101) {
+                data[j] = f64::NAN;
+            }
+            let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            for axis in 0..shape.len() - 1 {
+                let axis_len = shape[axis];
+                let inner: usize = shape[axis + 1..].iter().product();
+                let outer: usize = shape[..axis].iter().product();
+                let out = arr.sort(Some(axis as isize), Some("quicksort")).unwrap();
+                for o in 0..outer {
+                    for i in 0..inner {
+                        let base = o * axis_len * inner + i;
+                        let col: Vec<f64> = (0..axis_len).map(|k| data[base + k * inner]).collect();
+                        let col_arr = UFuncArray::new(vec![axis_len], col, DType::F64).unwrap();
+                        let ref_sorted = col_arr.sort(None, Some("quicksort")).unwrap();
+                        for k in 0..axis_len {
+                            assert_eq!(
+                                out.values()[base + k * inner].to_bits(),
+                                ref_sorted.values()[k].to_bits(),
+                                "{shape:?} ax{axis} col(o{o},i{i}) k{k} diverged"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "perf A/B: parallel non-last-axis sort(axis=0) vs serial; run --release -- --ignored --nocapture"]
+    fn sort_axis0_parallel_ab_bench() {
+        use std::time::Instant;
+        let (rows, cols) = (2048usize, 2048usize);
+        let data: Vec<f64> = (0..rows * cols)
+            .map(|i| (((i as u64).wrapping_mul(2654435761) % 99991) as f64) / 7.0 - 300.0)
+            .collect();
+        let a = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).unwrap();
+        let iters = 10;
+        let _ = a.sort(Some(0), Some("quicksort")).unwrap();
+        let t0 = Instant::now();
+        for _ in 0..iters {
+            std::hint::black_box(a.sort(Some(0), Some("quicksort")).unwrap());
+        }
+        let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        // OLD = serial strided gather + sort + scatter per column (one shared buffer).
+        let (axis_len, inner) = (rows, cols);
+        let t1 = Instant::now();
+        for _ in 0..iters {
+            let mut vals = data.clone();
+            let mut lane = vec![0.0f64; axis_len];
+            for i in 0..inner {
+                for k in 0..axis_len {
+                    lane[k] = vals[k * inner + i];
+                }
+                lane.sort_by(|a, b| match (a.is_nan(), b.is_nan()) {
+                    (false, false) => a.total_cmp(b),
+                    (false, true) => std::cmp::Ordering::Less,
+                    (true, false) => std::cmp::Ordering::Greater,
+                    (true, true) => std::cmp::Ordering::Equal,
+                });
+                for k in 0..axis_len {
+                    vals[k * inner + i] = lane[k];
+                }
+            }
+            std::hint::black_box(&vals);
+        }
+        let old_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        println!(
+            "SORT_AXIS0 new={new_ms:.3}ms old_serial={old_ms:.3}ms speedup={:.2}x",
+            old_ms / new_ms
         );
     }
 
