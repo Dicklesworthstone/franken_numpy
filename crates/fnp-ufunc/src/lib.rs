@@ -13010,6 +13010,49 @@ impl UFuncArray {
     }
 
     /// Reverse the order of elements along an axis.
+    /// Build the axis-reversed copy of a `[outer, axis_len, inner]` array: output
+    /// row `(o, k)` is the contiguous source row `(o, axis_len-1-k)`. The old code
+    /// reversed in place swapping one element at a time; instead build the output
+    /// fresh (`vec![T::default(); n]` is a free `alloc_zeroed`) and memcpy each
+    /// output row from its mirror via `copy_from_slice`, parallel across the
+    /// independent output rows. Generic over `Copy` so the f64 value plane and the
+    /// i64/u64 sidecar share one kernel. A pure data move → bit-identical.
+    fn flip_axis_build<T: Copy + Default + Send + Sync>(
+        src: &[T],
+        outer: usize,
+        axis_len: usize,
+        inner: usize,
+    ) -> Vec<T> {
+        let n = outer * axis_len * inner;
+        let mut out = vec![T::default(); n];
+        if n == 0 {
+            return out;
+        }
+        let block = axis_len * inner;
+        let do_block = |(out_blk, in_blk): (&mut [T], &[T])| {
+            for k in 0..axis_len {
+                let rk = axis_len - 1 - k;
+                out_blk[k * inner..k * inner + inner]
+                    .copy_from_slice(&in_blk[rk * inner..rk * inner + inner]);
+            }
+        };
+        const FLIP_PAR_MIN: usize = 1 << 15;
+        if outer >= 2 && n >= FLIP_PAR_MIN && rayon::current_num_threads() >= 2 {
+            out.par_chunks_mut(block)
+                .zip(src.par_chunks(block))
+                .for_each(do_block);
+        } else if n >= FLIP_PAR_MIN && rayon::current_num_threads() >= 2 {
+            // Single outer block (e.g. flip axis 0): parallelize over output rows.
+            out.par_chunks_mut(inner.max(1)).enumerate().for_each(|(k, out_row)| {
+                let rk = axis_len - 1 - k;
+                out_row.copy_from_slice(&src[rk * inner..rk * inner + inner]);
+            });
+        } else {
+            out.chunks_mut(block).zip(src.chunks(block)).for_each(do_block);
+        }
+        out
+    }
+
     pub fn flip(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
             None => {
@@ -13036,24 +13079,16 @@ impl UFuncArray {
                 let outer: usize =
                     fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
                 let axis_len = self.shape[ax];
-                let mut values = self.values.clone();
-                let mut sidecar_vals = self.cloned_integer_sidecar();
-                for o in 0..outer {
-                    for k in 0..axis_len / 2 {
-                        let rev_k = axis_len - 1 - k;
-                        for i in 0..inner {
-                            let a = o * axis_len * inner + k * inner + i;
-                            let b = o * axis_len * inner + rev_k * inner + i;
-                            values.swap(a, b);
-                            if let Some(ref mut sidecar) = sidecar_vals {
-                                match sidecar {
-                                    IntegerSidecar::I64(v) => v.swap(a, b),
-                                    IntegerSidecar::U64(v) => v.swap(a, b),
-                                }
-                            }
-                        }
-                    }
-                }
+                let values = Self::flip_axis_build(&self.values, outer, axis_len, inner);
+                let sidecar_vals = match &self.integer_sidecar {
+                    Some(IntegerSidecar::I64(v)) => Some(IntegerSidecar::I64(
+                        Self::flip_axis_build(v, outer, axis_len, inner),
+                    )),
+                    Some(IntegerSidecar::U64(v)) => Some(IntegerSidecar::U64(
+                        Self::flip_axis_build(v, outer, axis_len, inner),
+                    )),
+                    None => None,
+                };
                 Ok(Self {
                     shape: self.shape.clone(),
                     values,
@@ -49287,6 +49322,106 @@ print(json.dumps(payload))
             UFuncArray::new(vec![2, 3], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], DType::F64).unwrap();
         let flipped = arr.flip(Some(1)).unwrap();
         assert_eq!(flipped.values(), &[3.0, 2.0, 1.0, 6.0, 5.0, 4.0]);
+    }
+
+    #[test]
+    fn flip_axis_build_matches_naive_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The parallel copy_from_slice flip must be BIT-IDENTICAL to the old
+        // element-by-element in-place swap, across 1-D / 2-D / 3-D, every axis
+        // (incl the contiguous last axis where inner==1 and odd axis lengths),
+        // non-tile-multiple dims, and sizes crossing the parallel threshold
+        // (1<<15) in both the multi-outer-block and single-outer-block (axis 0)
+        // regimes. Pure data move => to_bits equality incl NaN / ±inf / -0.0,
+        // plus identical i64-sidecar relocation.
+        fn naive(values: &[f64], shape: &[usize], ax: usize) -> Vec<f64> {
+            let inner: usize = shape[ax + 1..].iter().product();
+            let outer: usize = shape[..ax].iter().product();
+            let axis_len = shape[ax];
+            let mut out = values.to_vec();
+            for o in 0..outer {
+                for k in 0..axis_len / 2 {
+                    let rk = axis_len - 1 - k;
+                    for i in 0..inner {
+                        let a = o * axis_len * inner + k * inner + i;
+                        let b = o * axis_len * inner + rk * inner + i;
+                        out.swap(a, b);
+                    }
+                }
+            }
+            out
+        }
+        // (shape, axis) — odd axis lengths exercise the middle element, axis 0
+        // exercises the single-outer-block parallel path.
+        let cases: &[(Vec<usize>, usize)] = &[
+            (vec![65537], 0),
+            (vec![513, 131], 0),
+            (vec![131, 513], 1),
+            (vec![41, 33, 49], 1),
+            (vec![41, 33, 49], 2),
+            (vec![257, 257], 0),
+        ];
+        let mut seed = 0x1f2e_3d4c_5b6a_7988u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            match (seed >> 9) % 17 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => -0.0,
+                _ => (seed >> 11) as f64 / (1u64 << 53) as f64 * 30.0 - 15.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        for (shape, ax) in cases {
+            let n: usize = shape.iter().product();
+            let data: Vec<f64> = (0..n).map(|_| next()).collect();
+            let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            let got = arr.flip(Some(*ax as isize)).unwrap();
+            let want = naive(&data, shape, *ax);
+            assert_eq!(got.shape(), &shape[..], "shape {shape:?} ax{ax}");
+            for (g, w) in got.values().iter().zip(want.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "flip {shape:?} ax{ax}");
+            }
+            for v in got.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+            // i64 sidecar relocates identically.
+            let ivals: Vec<i64> = (0..n as i64).map(|k| (k << 17) ^ (k * 13 + 7)).collect();
+            let iarr = UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(ivals.clone()))
+                .expect("from_storage");
+            let it = iarr.flip(Some(*ax as isize)).expect("iflip");
+            let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
+                panic!("expected i64 storage");
+            };
+            let mut want_i = ivals.clone();
+            {
+                let inner: usize = shape[*ax + 1..].iter().product();
+                let outer: usize = shape[..*ax].iter().product();
+                let axis_len = shape[*ax];
+                for o in 0..outer {
+                    for k in 0..axis_len / 2 {
+                        let rk = axis_len - 1 - k;
+                        for i in 0..inner {
+                            let a = o * axis_len * inner + k * inner + i;
+                            let b = o * axis_len * inner + rk * inner + i;
+                            want_i.swap(a, b);
+                        }
+                    }
+                }
+            }
+            assert_eq!(got_i, want_i, "i64 flip {shape:?} ax{ax}");
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "5d444e2ffe0bdf72c06fddcc2a367bb0b02879469ba1a2e1f61697959c1729b5",
+            "flip axis build golden digest drifted"
+        );
     }
 
     #[test]
