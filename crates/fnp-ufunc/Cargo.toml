@@ -94,3 +94,7 @@ harness = false
 [[bench]]
 name = "einsum_general"
 harness = false
+
+[[bench]]
+name = "histogram_full"
+harness = false

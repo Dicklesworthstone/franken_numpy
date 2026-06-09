@@ -18318,17 +18318,76 @@ impl UFuncArray {
             edges.push(lo + i as f64 * width);
         }
 
-        let mut counts = vec![0.0f64; bins];
-        for (i, &v) in self.values.iter().enumerate() {
+        // Per-element bin assignment: the O(log bins) `partition_point` search
+        // over the edges is the expensive, independent-per-element work.
+        // Returns None for values outside the range or NaN (skipped), exactly
+        // as the serial `continue`. Bit-identical bin choice to the serial path.
+        let bin_of = |v: f64| -> Option<usize> {
             if !(v >= lo && v <= hi) {
-                continue; // outside range or NaN
+                return None;
             }
             let count_le = edges.partition_point(|edge| *edge <= v);
             let idx = if count_le == 0 { 0 } else { count_le - 1 };
-            let idx = idx.min(bins - 1);
-            let w = weights.map_or(1.0, |wt| wt.values[i]);
-            counts[idx] += w;
-        }
+            Some(idx.min(bins - 1))
+        };
+
+        const HISTOGRAM_FULL_PARALLEL_MIN_ELEMS: usize = 1 << 13;
+        let parallel = self.values.len() >= HISTOGRAM_FULL_PARALLEL_MIN_ELEMS
+            && bins >= 2
+            && rayon::current_num_threads() >= 2;
+
+        let mut counts = if weights.is_none() && parallel {
+            // PRIVATIZED FOLD: each rayon task tallies into its own cache-resident
+            // local bin array, then the locals are reduced by elementwise add. No
+            // shared-state contention and no O(N) intermediate index buffer. The
+            // tallies are exact integers (each +1.0), so the merged counts are
+            // bit-identical to the serial scatter regardless of fold/reduce
+            // grouping (any-order sum of K ones is exactly K in f64 for K < 2^53).
+            self.values
+                .par_iter()
+                .fold(
+                    || vec![0.0f64; bins],
+                    |mut local, &v| {
+                        if let Some(idx) = bin_of(v) {
+                            local[idx] += 1.0;
+                        }
+                        local
+                    },
+                )
+                .reduce(
+                    || vec![0.0f64; bins],
+                    |mut a, b| {
+                        for (x, y) in a.iter_mut().zip(b.iter()) {
+                            *x += *y;
+                        }
+                        a
+                    },
+                )
+        } else if parallel {
+            // Weighted parallel: compute the bin indices across the pool (the
+            // expensive search), then accumulate the weights SERIALLY in NumPy's
+            // input order — float sums are order-sensitive, so this preserves
+            // bit-exact parity while still parallelizing the binary search.
+            let bins_idx: Vec<Option<usize>> =
+                self.values.par_iter().map(|&v| bin_of(v)).collect();
+            let wv = weights.map(|wt| &wt.values);
+            let mut counts = vec![0.0f64; bins];
+            for (i, b) in bins_idx.iter().enumerate() {
+                if let Some(idx) = b {
+                    counts[*idx] += wv.map_or(1.0, |w| w[i]);
+                }
+            }
+            counts
+        } else {
+            // Small-input serial fallback (both weighted and unweighted).
+            let mut counts = vec![0.0f64; bins];
+            for (i, &v) in self.values.iter().enumerate() {
+                if let Some(idx) = bin_of(v) {
+                    counts[idx] += weights.map_or(1.0, |wt| wt.values[i]);
+                }
+            }
+            counts
+        };
 
         if density {
             let total: f64 = counts.iter().sum();
@@ -46694,6 +46753,125 @@ print(json.dumps(payload))
             counts.values(),
             &[0.0, 1.0, 1.0, 1.0, 1.0],
             "histogram_full mis-binned values on internal edges (floor-division bug)"
+        );
+    }
+
+    #[test]
+    fn histogram_full_parallel_matches_serial_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The parallelized histogram_full (privatized fold for unweighted, parallel
+        // bin-lookup + ordered serial accumulate for weighted) must be BIT-IDENTICAL
+        // to a straightforward serial reference across unweighted / weighted /
+        // density, explicit + auto range, with NaN and out-of-range values dropped,
+        // at sizes that cross the 1<<13 parallel gate. Golden sha256 locks drift.
+        fn serial_ref(
+            data: &[f64],
+            bins: usize,
+            range: Option<(f64, f64)>,
+            weights: Option<&[f64]>,
+            density: bool,
+        ) -> Vec<f64> {
+            let (mut lo, mut hi) = match range {
+                Some((a, b)) => (a, b),
+                None => {
+                    let mut mn = f64::INFINITY;
+                    let mut mx = f64::NEG_INFINITY;
+                    for &v in data {
+                        if v < mn {
+                            mn = v;
+                        }
+                        if v > mx {
+                            mx = v;
+                        }
+                    }
+                    (mn, mx)
+                }
+            };
+            if (hi - lo).abs() < f64::EPSILON {
+                lo -= 0.5;
+                hi += 0.5;
+            }
+            let width = (hi - lo) / bins as f64;
+            let mut edges = Vec::with_capacity(bins + 1);
+            for i in 0..=bins {
+                edges.push(lo + i as f64 * width);
+            }
+            let mut counts = vec![0.0f64; bins];
+            for (i, &v) in data.iter().enumerate() {
+                if !(v >= lo && v <= hi) {
+                    continue;
+                }
+                let count_le = edges.partition_point(|e| *e <= v);
+                let idx = if count_le == 0 { 0 } else { count_le - 1 }.min(bins - 1);
+                counts[idx] += weights.map_or(1.0, |w| w[i]);
+            }
+            if density {
+                let total: f64 = counts.iter().sum();
+                let denom = total * width;
+                for c in &mut counts {
+                    *c /= denom;
+                }
+            }
+            counts
+        }
+
+        let mut seed = 0x243f_6a88_85a3_08d3u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        // ~20k elements crosses the 1<<13 gate; sprinkle NaN and out-of-[0,1) values.
+        let n = 20_000usize;
+        // Finite data (auto-range rejects NaN, matching NumPy); out-of-[0,3]
+        // outliers exercise the range-drop (bin_of → None) path under explicit
+        // range. Spread spans roughly [-0.5, 3.5] with a few far outliers.
+        let data: Vec<f64> = (0..n)
+            .map(|k| match k % 311 {
+                1 => 5.0,   // above an explicit [0,3] range
+                2 => -3.0,  // below range
+                _ => next() * 4.0 - 0.5,
+            })
+            .collect();
+        let weights: Vec<f64> = (0..n).map(|_| next() * 2.0 - 1.0).collect();
+        let arr = UFuncArray::new(vec![n], data.clone(), DType::F64).unwrap();
+        let warr = UFuncArray::new(vec![n], weights.clone(), DType::F64).unwrap();
+
+        let mut digest = Sha256::new();
+        let configs: &[(usize, Option<(f64, f64)>, bool, bool)] = &[
+            (64, None, false, false),         // unweighted, auto range  → fold path
+            (64, Some((0.0, 3.0)), false, false), // unweighted, explicit range
+            (50, Some((0.0, 3.0)), false, true),  // unweighted, density
+            (64, None, true, false),          // weighted, auto range → lookup path
+            (37, Some((0.0, 3.0)), true, true),   // weighted, density, range
+        ];
+        for &(bins, range, weighted, density) in configs {
+            let w = weighted.then_some(&warr);
+            let (counts, _edges) = arr.histogram_full(bins, range, w, density).unwrap();
+            let reference = serial_ref(
+                &data,
+                bins,
+                range,
+                weighted.then_some(weights.as_slice()),
+                density,
+            );
+            assert_eq!(counts.values().len(), reference.len());
+            for (g, r) in counts.values().iter().zip(reference.iter()) {
+                assert_eq!(
+                    g.to_bits(),
+                    r.to_bits(),
+                    "histogram_full bins={bins} weighted={weighted} density={density}"
+                );
+            }
+            for v in counts.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+        }
+        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "6af7cd4e88f0310230d97549531653f46a233fbd6b53f1ed8e2806440ba8d4aa",
+            "histogram_full golden digest drifted"
         );
     }
 
