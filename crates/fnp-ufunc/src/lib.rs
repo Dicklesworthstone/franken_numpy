@@ -5714,9 +5714,16 @@ impl UFuncArray {
     /// Create a lower-triangular array of ones.
     ///
     /// Mimics `np.tri(N, M, k)`.
-    pub fn tri(n: usize, m: Option<usize>, k: i64, dtype: DType) -> Self {
+    pub fn tri(n: usize, m: Option<usize>, k: i64, dtype: DType) -> Result<Self, UFuncError> {
         let cols = m.unwrap_or(n);
-        let mut values = vec![0.0; n * cols];
+        // n*cols can overflow usize for very large inputs, and the buffer can exceed
+        // memory; compute the area checked and allocate fallibly so a huge np.tri
+        // raises (→ Python MemoryError) instead of wrapping the length or aborting
+        // the process via the infallible vec! allocation handler.
+        let count = n
+            .checked_mul(cols)
+            .ok_or_else(|| UFuncError::Msg("tri: output size overflow".to_string()))?;
+        let mut values = try_filled_f64(count, 0.0, "tri")?;
         for r in 0..n {
             for c in 0..cols {
                 if (c as i64) <= (r as i64).saturating_add(k) {
@@ -5724,7 +5731,7 @@ impl UFuncArray {
                 }
             }
         }
-        Self::from_values_with_dtype_lossy(vec![n, cols], values, dtype)
+        Ok(Self::from_values_with_dtype_lossy(vec![n, cols], values, dtype))
     }
 
     /// Create a diagonal matrix from a 1-D array with optional offset.
@@ -54217,7 +54224,7 @@ print(json.dumps(payload))
 
     #[test]
     fn tri_basic() {
-        let r = UFuncArray::tri(3, None, 0, DType::F64);
+        let r = UFuncArray::tri(3, None, 0, DType::F64).unwrap();
         assert_eq!(r.shape(), &[3, 3]);
         // [[1,0,0],[1,1,0],[1,1,1]]
         assert_eq!(r.values(), &[1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0, 1.0]);
@@ -54225,9 +54232,21 @@ print(json.dumps(payload))
 
     #[test]
     fn tri_positive_k() {
-        let r = UFuncArray::tri(3, None, 1, DType::F64);
+        let r = UFuncArray::tri(3, None, 1, DType::F64).unwrap();
         // [[1,1,0],[1,1,1],[1,1,1]]
         assert_eq!(r.values(), &[1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn tri_huge_allocation_errors_instead_of_aborting() {
+        // Regression for the value-sized infallible-alloc abort class: a 1e9-row
+        // tri sizes the buffer at 1e18 elements (8e18 bytes) — beyond any address
+        // space — so try_filled_f64 must return Err (→ Python MemoryError) instead
+        // of vec! invoking handle_alloc_error and crashing the process.
+        assert!(UFuncArray::tri(1_000_000_000, None, 0, DType::F64).is_err());
+        // Normal sizes still work and are unchanged.
+        let r = UFuncArray::tri(2, None, 0, DType::F64).unwrap();
+        assert_eq!(r.values(), &[1.0, 0.0, 1.0, 1.0]);
     }
 
     #[test]

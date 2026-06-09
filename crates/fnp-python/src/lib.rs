@@ -19116,7 +19116,7 @@ fn tri(
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let dtype = extract_python_dtype(py, dtype, DType::F64, "tri(dtype)")?;
-    let result = UFuncArray::tri(n, m, k, dtype);
+    let result = UFuncArray::tri(n, m, k, dtype).map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }
 
