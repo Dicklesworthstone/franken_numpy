@@ -19457,38 +19457,22 @@ fn masked_not_equal(
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn vdot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Passthrough to numpy.vdot. vdot flattens both operands and reduces — a 1-D
+    // dot product with NO GEMM window, so (unlike dot/inner/matmul, which keep a
+    // native kernel only inside their profiled f64 2-D GEMM sweet spot and defer
+    // everything else to numpy) there is no perf gap to close here: numpy's vdot is
+    // a single BLAS-class reduction we cannot beat at parity. The previous native
+    // path computed the reduction in f64 and re-tagged the result with the
+    // sum-promoted dtype, which BROKE parity two ways: (1) it widened the result
+    // dtype — NumPy's vdot PRESERVES the input dtype (int8→int8, float32→float32),
+    // not the int64/uint64/float64 accumulator np.sum uses; (2) for int32/uint32 the
+    // exact products exceed 2^53 so the f64 accumulator was lossy and the
+    // wrap-to-int32 gave wrong values (e.g. vdot([2^30,2^30,7],[2^30,2^30,3])
+    // returned 0 instead of 21). Deferring to numpy makes dtype, integer
+    // wraparound, and float pairwise-summation all bit-exact.
     let numpy = py.import("numpy")?;
     let vdot_fn = numpy.getattr("vdot")?;
-    let fallback =
-        || -> PyResult<Py<PyAny>> { Ok(vdot_fn.call1((a.bind(py), b.bind(py)))?.unbind()) };
-
-    let a_arr = match extract_numeric_array(py, a.bind(py), "vdot(a)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-    let b_arr = match extract_numeric_array(py, b.bind(py), "vdot(b)") {
-        Ok(arr) => arr,
-        Err(_) => return fallback(),
-    };
-
-    // Fall back for complex (needs conjugate semantics) or sidecars
-    if a_arr.has_integer_sidecar()
-        || b_arr.has_integer_sidecar()
-        || matches!(a_arr.dtype(), DType::Complex64 | DType::Complex128)
-        || matches!(b_arr.dtype(), DType::Complex64 | DType::Complex128)
-    {
-        return fallback();
-    }
-
-    let result = match a_arr.vdot(&b_arr) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    Ok(vdot_fn.call1((a.bind(py), b.bind(py)))?.unbind())
 }
 
 #[pyfunction]
@@ -62721,6 +62705,57 @@ mod tests {
                     ))?
                     .extract::<bool>()?,
                 "vdot n-D flattened diverged"
+            );
+
+            // Regression: vdot must PRESERVE the input dtype (not the int64/uint64/
+            // float64 sum-accumulator) and reproduce NumPy's native-integer
+            // wraparound — the old native f64 path widened the dtype and, for
+            // int32, lost precision (exact products exceed 2^53) and returned wrong
+            // values. Check dtype + exact value across narrow ints, an int8
+            // overflow, int32 large-value overflow, and float32 dtype.
+            let arr = numpy.getattr("array")?;
+            let cases: &[(&str, Vec<i64>, Vec<i64>)] = &[
+                ("int8", vec![100, 100], vec![100, 100]), // 20000 wraps int8 -> 32
+                ("int16", vec![1, 2, 3], vec![4, 5, 6]),
+                ("int32", vec![1 << 30, 1 << 30, 7], vec![1 << 30, 1 << 30, 3]), // 2^61+21 -> int32 21
+                ("uint8", vec![200, 200], vec![200, 200]),
+                ("uint32", vec![1 << 30, 1 << 30], vec![4, 4]),
+            ];
+            for (dt, av, bv) in cases {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("dtype", *dt)?;
+                let a = arr.call((av.clone(),), Some(&kwargs))?;
+                let b = arr.call((bv.clone(),), Some(&kwargs))?;
+                let got = vdot_fn.call1((a.clone(), b.clone()))?;
+                let want = numpy_vdot.call1((a.clone(), b.clone()))?;
+                // dtype parity
+                assert_eq!(
+                    got.getattr("dtype")?.str()?.extract::<String>()?,
+                    want.getattr("dtype")?.str()?.extract::<String>()?,
+                    "vdot dtype diverged for {dt}"
+                );
+                // exact value parity (integer wraparound)
+                assert!(
+                    numpy
+                        .getattr("array_equal")?
+                        .call1((&got, &want))?
+                        .extract::<bool>()?,
+                    "vdot value diverged for {dt}"
+                );
+            }
+            // float32 keeps float32 (not float64).
+            let f32kw = PyDict::new(py);
+            f32kw.set_item("dtype", "float32")?;
+            let fa = arr.call((vec![1.0_f64, 2.0, 3.0],), Some(&f32kw))?;
+            let fb = arr.call((vec![4.0_f64, 5.0, 6.0],), Some(&f32kw))?;
+            assert_eq!(
+                vdot_fn
+                    .call1((fa.clone(), fb.clone()))?
+                    .getattr("dtype")?
+                    .str()?
+                    .extract::<String>()?,
+                "float32",
+                "vdot float32 dtype diverged"
             );
 
             Ok(())
