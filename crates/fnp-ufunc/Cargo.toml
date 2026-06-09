@@ -98,3 +98,7 @@ harness = false
 [[bench]]
 name = "histogram_full"
 harness = false
+
+[[bench]]
+name = "meshgrid"
+harness = false

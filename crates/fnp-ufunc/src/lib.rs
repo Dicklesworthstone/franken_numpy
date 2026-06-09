@@ -17842,20 +17842,54 @@ impl UFuncArray {
             } else {
                 dim
             };
-            let mut values = Vec::with_capacity(out_count);
-            let mut source_indices = Vec::with_capacity(out_count);
-            for flat in 0..out_count {
-                let idx = (flat / out_strides[axis]) % out_shape[axis];
-                values.push(arr.values[idx]);
-                source_indices.push(idx);
-            }
+            // Each output cell is a pure function of its flat index — the source
+            // coordinate along `axis` is `(flat / stride) % len`, a broadcast of
+            // the 1-D input. The per-cell integer DIVISION + gather is the work,
+            // and cells are independent, so an indexed parallel map is bit-for-bit
+            // identical to the serial loop for any thread count. (Mirrors gradient.)
+            let stride = out_strides[axis];
+            let alen = out_shape[axis];
             let dtype = arr.dtype;
-            results.push(Self {
-                shape: out_shape.clone(),
-                values,
-                dtype,
-                integer_sidecar: arr.reindexed_integer_sidecar(&source_indices),
-            });
+            const MESHGRID_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+            let parallel =
+                out_count >= MESHGRID_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2;
+            let result = if arr.integer_sidecar.is_some() {
+                // Sidecar present: materialize the source indices (reused to both
+                // gather f64 values and reindex the integer sidecar identically).
+                let mut source_indices = vec![0usize; out_count];
+                if parallel {
+                    source_indices
+                        .par_iter_mut()
+                        .enumerate()
+                        .for_each(|(flat, s)| *s = (flat / stride) % alen);
+                } else {
+                    for (flat, s) in source_indices.iter_mut().enumerate() {
+                        *s = (flat / stride) % alen;
+                    }
+                }
+                let values: Vec<f64> = source_indices.iter().map(|&i| arr.values[i]).collect();
+                Self {
+                    shape: out_shape.clone(),
+                    values,
+                    dtype,
+                    integer_sidecar: arr.reindexed_integer_sidecar(&source_indices),
+                }
+            } else {
+                // Common no-sidecar case: gather directly, skipping the index Vec.
+                let compute = |flat: usize| arr.values[(flat / stride) % alen];
+                let values: Vec<f64> = if parallel {
+                    (0..out_count).into_par_iter().map(compute).collect()
+                } else {
+                    (0..out_count).map(compute).collect()
+                };
+                Self {
+                    shape: out_shape.clone(),
+                    values,
+                    dtype,
+                    integer_sidecar: None,
+                }
+            };
+            results.push(result);
         }
         Ok(results)
     }
@@ -51492,6 +51526,92 @@ print(json.dumps(payload))
         // yy shape should be (2, 3)
         assert_eq!(grids[1].shape(), &[2, 3]);
         assert_eq!(grids[1].values(), &[4.0, 4.0, 4.0, 5.0, 5.0, 5.0]);
+    }
+
+    #[test]
+    fn meshgrid_parallel_matches_serial_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The parallel meshgrid fill must be BIT-IDENTICAL to the serial
+        // per-element division+gather across both indexing modes ('ij' and 'xy'),
+        // shapes crossing the 1<<14 parallel gate, including u64-sidecar
+        // relocation. Pure data move => to_bits equality. Golden sha256 locks drift.
+        fn serial_ref(shapes: &[usize], data: &[Vec<f64>], swap: bool) -> Vec<Vec<f64>> {
+            let ndim = shapes.len();
+            let mut out_shape = shapes.to_vec();
+            if swap {
+                out_shape.swap(0, 1);
+            }
+            let out_count: usize = out_shape.iter().product();
+            let mut strides = vec![1usize; ndim];
+            for i in (0..ndim.saturating_sub(1)).rev() {
+                strides[i] = strides[i + 1] * out_shape[i + 1];
+            }
+            let mut out = Vec::new();
+            for dim in 0..ndim {
+                let axis = if swap {
+                    match dim {
+                        0 => 1,
+                        1 => 0,
+                        d => d,
+                    }
+                } else {
+                    dim
+                };
+                let mut v = Vec::with_capacity(out_count);
+                for flat in 0..out_count {
+                    v.push(data[dim][(flat / strides[axis]) % out_shape[axis]]);
+                }
+                out.push(v);
+            }
+            out
+        }
+
+        // 200×150 = 30000 cells crosses the 1<<14 gate; non-square exercises
+        // distinct per-axis strides.
+        let xs: Vec<f64> = (0..200).map(|i| i as f64 * 0.5 - 3.0).collect();
+        let ys: Vec<f64> = (0..150).map(|i| i as f64 * -0.25 + 1.0).collect();
+        let arr_x = UFuncArray::new(vec![200], xs.clone(), DType::F64).unwrap();
+        let arr_y = UFuncArray::new(vec![150], ys.clone(), DType::F64).unwrap();
+        let data = vec![xs.clone(), ys.clone()];
+
+        let mut digest = Sha256::new();
+        for (indexing, swap) in [("ij", false), ("xy", true)] {
+            let grids =
+                UFuncArray::meshgrid_advanced(&[arr_x.clone(), arr_y.clone()], indexing, false)
+                    .unwrap();
+            let reference = serial_ref(&[200, 150], &data, swap);
+            assert_eq!(grids.len(), reference.len());
+            for (g, r) in grids.iter().zip(reference.iter()) {
+                assert_eq!(g.values().len(), r.len(), "{indexing} len");
+                for (a, b) in g.values().iter().zip(r.iter()) {
+                    assert_eq!(a.to_bits(), b.to_bits(), "meshgrid {indexing}");
+                }
+                for v in g.values() {
+                    digest.update(v.to_bits().to_le_bytes());
+                }
+            }
+        }
+
+        // u64 sidecar relocates identically through the parallel index map.
+        let large = (1_u64 << 53) + 7;
+        let ix: Vec<u64> = (0..200).map(|i| (i as u64) ^ (large + i as u64)).collect();
+        let sx = UFuncArray::from_storage(vec![200], ArrayStorage::U64(ix.clone())).unwrap();
+        let grids = UFuncArray::meshgrid_advanced(&[sx, arr_y.clone()], "ij", false).unwrap();
+        assert!(grids[0].has_integer_sidecar());
+        let ArrayStorage::U64(got) = grids[0].to_storage().unwrap() else {
+            panic!("expected u64 storage");
+        };
+        let want: Vec<u64> = {
+            let out_count = 200 * 150;
+            (0..out_count).map(|flat| ix[(flat / 150) % 200]).collect()
+        };
+        assert_eq!(got, want, "meshgrid u64 sidecar");
+
+        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "c72472123b05d5728507832f6dc35c05b8b77ead8a3638c6413df71f34092e07",
+            "meshgrid golden digest drifted"
+        );
     }
 
     #[test]
