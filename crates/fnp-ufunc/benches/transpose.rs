@@ -82,7 +82,11 @@ fn old_batched_t(values: &[f64], dims: &[usize]) -> Vec<f64> {
 
 fn bench_transpose_batched(c: &mut Criterion) {
     // Batched matrix transpose (swapaxes(-1,-2) on a stack): the dominant N-D case.
-    for dims in [vec![64usize, 512, 512], vec![256, 256, 256], vec![1024, 128, 128]] {
+    for dims in [
+        vec![64usize, 512, 512],
+        vec![256, 256, 256],
+        vec![1024, 128, 128],
+    ] {
         let n: usize = dims.iter().product();
         let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.25 - 3.0).collect();
         let arr = UFuncArray::new(dims.clone(), data.clone(), DType::F64).unwrap();

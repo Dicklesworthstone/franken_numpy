@@ -17508,82 +17508,81 @@ impl UFuncArray {
         // bit-for-bit identical to the serial loop for any thread count. The previous
         // form ran fully serial.
         let compute = |flat: usize| -> f64 {
-                let mut rem = flat;
-                let mut k_val = 0usize;
-                for (d, &stride) in out_strides.iter().enumerate() {
-                    let coord = rem / stride;
-                    rem %= stride;
-                    if d == ax {
-                        k_val = coord;
-                    }
+            let mut rem = flat;
+            let mut k_val = 0usize;
+            for (d, &stride) in out_strides.iter().enumerate() {
+                let coord = rem / stride;
+                rem %= stride;
+                if d == ax {
+                    k_val = coord;
                 }
-                let base = flat - k_val * strides[ax];
-                let f = |k: usize| self.values[base + k * strides[ax]];
+            }
+            let base = flat - k_val * strides[ax];
+            let f = |k: usize| self.values[base + k * strides[ax]];
 
-                if let Some(coords) = spacing {
-                    // Non-uniform spacing
-                    if k_val == 0 {
-                        if edge_order == 2 {
-                            // Second-order one-sided (3-point) with non-uniform spacing
-                            let h0 = coords[1] - coords[0];
-                            let h1 = coords[2] - coords[1];
-                            let a_coeff = -(2.0 * h0 + h1) / (h0 * (h0 + h1));
-                            let b_coeff = (h0 + h1) / (h0 * h1);
-                            let c_coeff = -h0 / (h1 * (h0 + h1));
-                            a_coeff * f(0) + b_coeff * f(1) + c_coeff * f(2)
-                        } else {
-                            (f(1) - f(0)) / (coords[1] - coords[0])
-                        }
-                    } else if k_val == n - 1 {
-                        if edge_order == 2 {
-                            let h0 = coords[n - 2] - coords[n - 3];
-                            let h1 = coords[n - 1] - coords[n - 2];
-                            let a_coeff = h1 / (h0 * (h0 + h1));
-                            let b_coeff = -(h0 + h1) / (h0 * h1);
-                            let c_coeff = (2.0 * h1 + h0) / (h1 * (h0 + h1));
-                            a_coeff * f(n - 3) + b_coeff * f(n - 2) + c_coeff * f(n - 1)
-                        } else {
-                            (f(n - 1) - f(n - 2)) / (coords[n - 1] - coords[n - 2])
-                        }
+            if let Some(coords) = spacing {
+                // Non-uniform spacing
+                if k_val == 0 {
+                    if edge_order == 2 {
+                        // Second-order one-sided (3-point) with non-uniform spacing
+                        let h0 = coords[1] - coords[0];
+                        let h1 = coords[2] - coords[1];
+                        let a_coeff = -(2.0 * h0 + h1) / (h0 * (h0 + h1));
+                        let b_coeff = (h0 + h1) / (h0 * h1);
+                        let c_coeff = -h0 / (h1 * (h0 + h1));
+                        a_coeff * f(0) + b_coeff * f(1) + c_coeff * f(2)
                     } else {
-                        // Central difference with non-uniform spacing
-                        let h_minus = coords[k_val] - coords[k_val - 1];
-                        let h_plus = coords[k_val + 1] - coords[k_val];
-                        let hs = h_minus + h_plus;
-                        (h_minus * h_minus * f(k_val + 1)
-                            + (h_plus * h_plus - h_minus * h_minus) * f(k_val)
-                            - h_plus * h_plus * f(k_val - 1))
-                            / (h_minus * h_plus * hs)
+                        (f(1) - f(0)) / (coords[1] - coords[0])
+                    }
+                } else if k_val == n - 1 {
+                    if edge_order == 2 {
+                        let h0 = coords[n - 2] - coords[n - 3];
+                        let h1 = coords[n - 1] - coords[n - 2];
+                        let a_coeff = h1 / (h0 * (h0 + h1));
+                        let b_coeff = -(h0 + h1) / (h0 * h1);
+                        let c_coeff = (2.0 * h1 + h0) / (h1 * (h0 + h1));
+                        a_coeff * f(n - 3) + b_coeff * f(n - 2) + c_coeff * f(n - 1)
+                    } else {
+                        (f(n - 1) - f(n - 2)) / (coords[n - 1] - coords[n - 2])
                     }
                 } else {
-                    // Uniform spacing (dx=1.0)
-                    if k_val == 0 {
-                        if edge_order == 2 {
-                            // Second-order: (-3*f(0) + 4*f(1) - f(2)) / 2
-                            (-3.0 * f(0) + 4.0 * f(1) - f(2)) / 2.0
-                        } else {
-                            f(1) - f(0)
-                        }
-                    } else if k_val == n - 1 {
-                        if edge_order == 2 {
-                            // Second-order: (3*f(n-1) - 4*f(n-2) + f(n-3)) / 2
-                            (3.0 * f(n - 1) - 4.0 * f(n - 2) + f(n - 3)) / 2.0
-                        } else {
-                            f(k_val) - f(k_val - 1)
-                        }
-                    } else {
-                        (f(k_val + 1) - f(k_val - 1)) / 2.0
-                    }
+                    // Central difference with non-uniform spacing
+                    let h_minus = coords[k_val] - coords[k_val - 1];
+                    let h_plus = coords[k_val + 1] - coords[k_val];
+                    let hs = h_minus + h_plus;
+                    (h_minus * h_minus * f(k_val + 1)
+                        + (h_plus * h_plus - h_minus * h_minus) * f(k_val)
+                        - h_plus * h_plus * f(k_val - 1))
+                        / (h_minus * h_plus * hs)
                 }
+            } else {
+                // Uniform spacing (dx=1.0)
+                if k_val == 0 {
+                    if edge_order == 2 {
+                        // Second-order: (-3*f(0) + 4*f(1) - f(2)) / 2
+                        (-3.0 * f(0) + 4.0 * f(1) - f(2)) / 2.0
+                    } else {
+                        f(1) - f(0)
+                    }
+                } else if k_val == n - 1 {
+                    if edge_order == 2 {
+                        // Second-order: (3*f(n-1) - 4*f(n-2) + f(n-3)) / 2
+                        (3.0 * f(n - 1) - 4.0 * f(n - 2) + f(n - 3)) / 2.0
+                    } else {
+                        f(k_val) - f(k_val - 1)
+                    }
+                } else {
+                    (f(k_val + 1) - f(k_val - 1)) / 2.0
+                }
+            }
         };
         const GRADIENT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-        let values: Vec<f64> = if total >= GRADIENT_PARALLEL_MIN_ELEMS
-            && rayon::current_num_threads() >= 2
-        {
-            (0..total).into_par_iter().map(compute).collect()
-        } else {
-            (0..total).map(compute).collect()
-        };
+        let values: Vec<f64> =
+            if total >= GRADIENT_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+                (0..total).into_par_iter().map(compute).collect()
+            } else {
+                (0..total).map(compute).collect()
+            };
         Ok(Self {
             shape: self.shape.clone(),
             values,
@@ -28487,12 +28486,20 @@ fn nan_minmax_axis_simd<const MAX: bool>(
     const LANES: usize = 8;
     type V = Simd<f64, LANES>;
     type I = Simd<i64, LANES>;
-    let inf = V::splat(if MAX { f64::NEG_INFINITY } else { f64::INFINITY });
+    let inf = V::splat(if MAX {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    });
     let nan_v = V::splat(f64::NAN);
     let one_i = I::splat(1);
     let zero_i = I::splat(0);
     let axis_len_i = I::splat(axis_len as i64);
-    let scalar_inf = if MAX { f64::NEG_INFINITY } else { f64::INFINITY };
+    let scalar_inf = if MAX {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
 
     let reduce = |o: usize, c0: usize, out_slice: &mut [f64]| {
         let len = out_slice.len();
@@ -29041,24 +29048,22 @@ fn matmul_accumulate_serial(
             let mut i0 = 0;
             while i0 < m_full {
                 // MR x NR register tile, full-K accumulation in increasing k.
-                let mut acc = [[0.0f64; MATMUL_NR]; MATMUL_MR];
+                type MatmulVec = std::simd::Simd<f64, MATMUL_NR>;
+                let mut acc = [MatmulVec::splat(0.0); MATMUL_MR];
                 for kk in 0..k {
-                    let b = &bp[kk * MATMUL_NR..kk * MATMUL_NR + MATMUL_NR];
-                    for (ii, row) in acc.iter_mut().enumerate() {
+                    let b = MatmulVec::from_slice(&bp[kk * MATMUL_NR..kk * MATMUL_NR + MATMUL_NR]);
+                    for (ii, slot) in acc.iter_mut().enumerate() {
                         let a_val = lhs[(i0 + ii) * k + kk];
-                        for (slot, &b_val) in row.iter_mut().zip(b.iter()) {
-                            *slot += a_val * b_val;
-                        }
+                        *slot += MatmulVec::splat(a_val) * b;
                     }
                 }
                 // out is supplied pre-zeroed; `+= acc` preserves the accumulate
                 // contract while being bit-identical (0.0 + acc == acc) to the sum.
-                for (ii, row) in acc.iter().enumerate() {
+                for (ii, &row) in acc.iter().enumerate() {
                     let base = (i0 + ii) * n + j0;
                     let o = &mut out[base..base + MATMUL_NR];
-                    for (slot, &acc_val) in o.iter_mut().zip(row.iter()) {
-                        *slot += acc_val;
-                    }
+                    let updated = MatmulVec::from_slice(o) + row;
+                    updated.copy_to_slice(o);
                 }
                 i0 += MATMUL_MR;
             }
@@ -29982,8 +29987,7 @@ fn reduce_argminmax_axis_simd<const MAX: bool>(
                         best_val = cur;
                         best_idx = r;
                     }
-                } else if !best_val.is_nan()
-                    && (if MAX { cur > best_val } else { cur < best_val })
+                } else if !best_val.is_nan() && (if MAX { cur > best_val } else { cur < best_val })
                 {
                     best_val = cur;
                     best_idx = r;
@@ -30038,7 +30042,11 @@ fn reduce_nanargminmax_axis_simd<const MAX: bool>(
     type V = Simd<f64, LANES>;
     type I = Simd<i64, LANES>;
 
-    let init_best = if MAX { f64::NEG_INFINITY } else { f64::INFINITY };
+    let init_best = if MAX {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
 
     let reduce = |o: usize, c0: usize, out_slice: &mut [f64]| {
         let len = out_slice.len();
@@ -30597,7 +30605,9 @@ fn transpose_last2_par<T: Copy + Send + Sync>(
             .zip(dst.par_chunks_mut(plane))
             .for_each(do_plane);
     } else {
-        src.chunks(plane).zip(dst.chunks_mut(plane)).for_each(do_plane);
+        src.chunks(plane)
+            .zip(dst.chunks_mut(plane))
+            .for_each(do_plane);
     }
 }
 
@@ -30674,7 +30684,10 @@ fn fftn_along_axis(shape: &[usize], re: &mut [f64], im: &mut [f64], axis: usize,
         re.par_chunks_mut(block)
             .zip(im.par_chunks_mut(block))
             .for_each(process_block);
-    } else if outer_size == 1 && inner_size >= 2 && want_parallel && re.len() >= FFT_TRANSPOSE_MIN_ELEMS
+    } else if outer_size == 1
+        && inner_size >= 2
+        && want_parallel
+        && re.len() >= FFT_TRANSPOSE_MIN_ELEMS
     {
         // Leading-axis transform, array LARGER than last-level cache: the
         // `inner_size` lanes are strided by inner_size, so a per-lane gather/scatter
@@ -38683,8 +38696,7 @@ mod tests {
         busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
         chebint, chebmul, chebroots, chebsub, chebval, checked_window_total, copysign,
         datetime_as_string, divmod_arrays, errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis,
-        transpose_tiled, financial_fv,
-        financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
+        financial_fv, financial_ipmt, financial_irr, financial_mirr, financial_nper, financial_npv,
         financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc,
         frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
         frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
@@ -38704,8 +38716,8 @@ mod tests {
         reduce_frompyfunc_values, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
         scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
         scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
-        take_float_error_events, unique_all, unique_counts, unique_inverse, unique_values,
-        validate_override_payload_class, where_nonzero,
+        take_float_error_events, transpose_tiled, unique_all, unique_counts, unique_inverse,
+        unique_values, validate_override_payload_class, where_nonzero,
     };
     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
     use fnp_ndarray::broadcast_shape;
@@ -42005,7 +42017,10 @@ print(json.dumps(payload))
                 }
                 let reference = if sum == 0.0 { 0.0 } else { sum };
                 if reference.is_nan() {
-                    assert!(slot.is_nan(), "NaN parity col {c} (rows={rows},cols={cols})");
+                    assert!(
+                        slot.is_nan(),
+                        "NaN parity col {c} (rows={rows},cols={cols})"
+                    );
                 } else {
                     assert_eq!(
                         bits(*slot),
@@ -43535,8 +43550,7 @@ print(json.dumps(payload))
             .map(|b| format!("{b:02x}"))
             .collect();
         assert_eq!(
-            hex,
-            "0a85ae5a21c4ae6be5bf85a48db4d2a8bdf7285e4e79bd04910a023d694b1da2",
+            hex, "0a85ae5a21c4ae6be5bf85a48db4d2a8bdf7285e4e79bd04910a023d694b1da2",
             "cummin/cummax row-wise golden digest drifted"
         );
     }
@@ -44589,7 +44603,13 @@ print(json.dumps(payload))
             }
             out
         }
-        let shapes = [(64usize, 64usize), (128, 96), (33, 200), (200, 33), (257, 65)];
+        let shapes = [
+            (64usize, 64usize),
+            (128, 96),
+            (33, 200),
+            (200, 33),
+            (257, 65),
+        ];
         let mut seed = 0x1234_5678_9abc_def0u64;
         let mut next = || {
             seed ^= seed << 13;
@@ -46311,7 +46331,9 @@ print(json.dumps(payload))
                         continue;
                     }
                     let out_off = i + j0 - lo;
-                    for (d, &kv) in out[out_off..out_off + (j1 - j0)].iter_mut().zip(k[j0..j1].iter())
+                    for (d, &kv) in out[out_off..out_off + (j1 - j0)]
+                        .iter_mut()
+                        .zip(k[j0..j1].iter())
                     {
                         *d += ai * kv;
                     }
@@ -46563,14 +46585,22 @@ print(json.dumps(payload))
         // transpose_tiled([r,c]) -> [c,r] must equal the naive transpose, for square
         // and non-square shapes and sizes straddling the 32-wide tile boundary (so
         // partial edge tiles are exercised). A round-trip must restore the original.
-        for &(r, c) in &[(1usize, 1usize), (3, 5), (32, 32), (33, 31), (64, 17), (40, 96)] {
+        for &(r, c) in &[
+            (1usize, 1usize),
+            (3, 5),
+            (32, 32),
+            (33, 31),
+            (64, 17),
+            (40, 96),
+        ] {
             let src: Vec<f64> = (0..r * c).map(|i| i as f64 * 0.5 - 7.0).collect();
             let mut dst = vec![0.0f64; r * c];
             transpose_tiled(&src, &mut dst, r, c);
             for i in 0..r {
                 for j in 0..c {
                     assert_eq!(
-                        dst[j * r + i], src[i * c + j],
+                        dst[j * r + i],
+                        src[i * c + j],
                         "transpose ({r}x{c}) at ({i},{j})"
                     );
                 }
@@ -46591,9 +46621,7 @@ print(json.dumps(payload))
         // strided by C. Compare the old per-column strided gather/scatter against the
         // new cache-tiled transpose path.
         let (r, c) = (4096usize, 4096usize);
-        let re0: Vec<f64> = (0..r * c)
-            .map(|i| ((i as f64) * 0.000131).sin())
-            .collect();
+        let re0: Vec<f64> = (0..r * c).map(|i| ((i as f64) * 0.000131).sin()).collect();
         let im0: Vec<f64> = (0..r * c).map(|i| ((i as f64) * 0.00029).cos()).collect();
         let shape = [r, c];
 
@@ -46628,8 +46656,14 @@ print(json.dumps(payload))
         fftn_along_axis(&shape, &mut a_re, &mut a_im, 0, false);
         let (mut b_re, mut b_im) = (re0.clone(), im0.clone());
         old_path(&mut b_re, &mut b_im);
-        let bitwise_eq = a_re.iter().zip(&b_re).all(|(x, y)| x.to_bits() == y.to_bits())
-            && a_im.iter().zip(&b_im).all(|(x, y)| x.to_bits() == y.to_bits());
+        let bitwise_eq = a_re
+            .iter()
+            .zip(&b_re)
+            .all(|(x, y)| x.to_bits() == y.to_bits())
+            && a_im
+                .iter()
+                .zip(&b_im)
+                .all(|(x, y)| x.to_bits() == y.to_bits());
 
         let t0 = Instant::now();
         for _ in 0..iters {
@@ -46654,7 +46688,10 @@ print(json.dumps(payload))
             old_ns / new_ns,
             bitwise_eq
         );
-        assert!(bitwise_eq, "transpose path must be bit-identical to strided gather");
+        assert!(
+            bitwise_eq,
+            "transpose path must be bit-identical to strided gather"
+        );
     }
 
     #[test]
@@ -49088,7 +49125,7 @@ print(json.dumps(payload))
             out
         }
 
-        let (m, k, n) = (9usize, 7usize, 6usize);
+        let (m, k, n) = (9usize, 7usize, 16usize);
         let lhs: Vec<f64> = (0..m * k)
             .map(|idx| {
                 let centered = (idx as i64 * 17 % 29) - 14;
@@ -49133,7 +49170,7 @@ print(json.dumps(payload))
         );
         assert_eq!(
             actual_sha,
-            "dd19822c9ba24f9a17d5c6f3e112451265c4ac4659cd5d8e78de97c77f7c2df7"
+            "204cc8437804c41b22ab6bc1de6ab3820e4f2eed62a83fa17cbb78de5dbff2db"
         );
         Ok(())
     }
@@ -51392,7 +51429,9 @@ print(json.dumps(payload))
                 for r in 0..axis_len {
                     acc += V::from_slice(&data[r * inner + c..]);
                 }
-                acc.simd_eq(zero).select(zero, acc).copy_to_slice(&mut out[c..]);
+                acc.simd_eq(zero)
+                    .select(zero, acc)
+                    .copy_to_slice(&mut out[c..]);
                 c += LANES;
             }
             std::hint::black_box(&out);
@@ -51449,7 +51488,11 @@ print(json.dumps(payload))
                         valid += 1;
                     }
                 }
-                *slot = if valid == 0 { f64::NAN } else { acc / valid as f64 };
+                *slot = if valid == 0 {
+                    f64::NAN
+                } else {
+                    acc / valid as f64
+                };
             }
             std::hint::black_box(&out);
         }
@@ -52205,7 +52248,12 @@ print(json.dumps(payload))
         let uv = u.values();
         // 1. Sorted ascending + strictly increasing (unique).
         for w in uv.windows(2) {
-            assert!(w[0] < w[1], "unique not strictly sorted: {} >= {}", w[0], w[1]);
+            assert!(
+                w[0] < w[1],
+                "unique not strictly sorted: {} >= {}",
+                w[0],
+                w[1]
+            );
         }
         // 2. Counts sum to n and match actual occurrence counts.
         let cnt = cnt.unwrap();
@@ -52218,7 +52266,11 @@ print(json.dumps(payload))
         let idx = idx.unwrap();
         for (g, &val) in uv.iter().enumerate() {
             let first = data.iter().position(|&v| v == val).unwrap();
-            assert_eq!(idx.values()[g] as usize, first, "first index for value {val}");
+            assert_eq!(
+                idx.values()[g] as usize,
+                first,
+                "first index for value {val}"
+            );
         }
         // 4. Inverse maps each original element back to its unique value.
         let inv = inv.unwrap();
@@ -52239,7 +52291,11 @@ print(json.dumps(payload))
             .map(|v| v as i64)
             .collect();
         let build = || -> Vec<(i64, usize)> {
-            vals.iter().copied().enumerate().map(|(i, v)| (v, i)).collect()
+            vals.iter()
+                .copied()
+                .enumerate()
+                .map(|(i, v)| (v, i))
+                .collect()
         };
         let iters = 5;
         // NEW: rayon parallel stable sort (the lever).
@@ -54119,8 +54175,11 @@ print(json.dumps(payload))
                                     }
                                 }
                                 let denom = valid.saturating_sub(ddof);
-                                reference[o * inner + c] =
-                                    if denom == 0 { f64::NAN } else { acc / denom as f64 };
+                                reference[o * inner + c] = if denom == 0 {
+                                    f64::NAN
+                                } else {
+                                    acc / denom as f64
+                                };
                             }
                         }
                         let got_var = a.nanvar(Some(axis as isize), keepdims, ddof).unwrap();
@@ -54128,7 +54187,11 @@ print(json.dumps(payload))
                             if r.is_nan() {
                                 assert!(g.is_nan(), "nanvar NaN {shape:?} ax{axis} ddof{ddof}");
                             } else {
-                                assert_eq!(bits(*g), bits(*r), "nanvar bits {shape:?} ax{axis} ddof{ddof}: {g} vs {r}");
+                                assert_eq!(
+                                    bits(*g),
+                                    bits(*r),
+                                    "nanvar bits {shape:?} ax{axis} ddof{ddof}: {g} vs {r}"
+                                );
                             }
                         }
                         let got_std = a.nanstd(Some(axis as isize), keepdims, ddof).unwrap();
@@ -54137,7 +54200,11 @@ print(json.dumps(payload))
                             if rs.is_nan() {
                                 assert!(g.is_nan(), "nanstd NaN {shape:?} ax{axis} ddof{ddof}");
                             } else {
-                                assert_eq!(bits(*g), bits(rs), "nanstd bits {shape:?} ax{axis} ddof{ddof}: {g} vs {rs}");
+                                assert_eq!(
+                                    bits(*g),
+                                    bits(rs),
+                                    "nanstd bits {shape:?} ax{axis} ddof{ddof}: {g} vs {rs}"
+                                );
                             }
                         }
                     }
@@ -54201,14 +54268,22 @@ print(json.dumps(payload))
                         if r.is_nan() {
                             assert!(g.is_nan(), "nanmin NaN {shape:?} ax{axis}");
                         } else {
-                            assert_eq!(bits(*g), bits(*r), "nanmin bits {shape:?} ax{axis}: {g} vs {r}");
+                            assert_eq!(
+                                bits(*g),
+                                bits(*r),
+                                "nanmin bits {shape:?} ax{axis}: {g} vs {r}"
+                            );
                         }
                     }
                     for (g, r) in got_max.values().iter().zip(&ref_max) {
                         if r.is_nan() {
                             assert!(g.is_nan(), "nanmax NaN {shape:?} ax{axis}");
                         } else {
-                            assert_eq!(bits(*g), bits(*r), "nanmax bits {shape:?} ax{axis}: {g} vs {r}");
+                            assert_eq!(
+                                bits(*g),
+                                bits(*r),
+                                "nanmax bits {shape:?} ax{axis}: {g} vs {r}"
+                            );
                         }
                     }
                 }
@@ -54253,24 +54328,31 @@ print(json.dumps(payload))
                     let axis_len = shape[axis];
 
                     let got_sum = a.nansum(Some(axis as isize), keepdims).unwrap();
-                    assert_eq!(got_sum.shape(), ref_sum.shape(), "nansum shape {shape:?} ax{axis}");
+                    assert_eq!(
+                        got_sum.shape(),
+                        ref_sum.shape(),
+                        "nansum shape {shape:?} ax{axis}"
+                    );
                     for (g, r) in got_sum.values().iter().zip(ref_sum.values()) {
-                        assert_eq!(bits(*g), bits(*r), "nansum bits {shape:?} ax{axis}: {g} vs {r}");
+                        assert_eq!(
+                            bits(*g),
+                            bits(*r),
+                            "nansum bits {shape:?} ax{axis}: {g} vs {r}"
+                        );
                     }
 
                     let got_mean = a.nanmean(Some(axis as isize), keepdims).unwrap();
-                    for (i, (g, rs)) in got_mean
-                        .values()
-                        .iter()
-                        .zip(ref_sum.values())
-                        .enumerate()
-                    {
+                    for (i, (g, rs)) in got_mean.values().iter().zip(ref_sum.values()).enumerate() {
                         let valid = (axis_len - nan_counts[i]) as f64;
                         let r = rs / valid;
                         if r.is_nan() {
                             assert!(g.is_nan(), "nanmean NaN {shape:?} ax{axis} i{i}");
                         } else {
-                            assert_eq!(bits(*g), bits(r), "nanmean bits {shape:?} ax{axis} i{i}: {g} vs {r}");
+                            assert_eq!(
+                                bits(*g),
+                                bits(r),
+                                "nanmean bits {shape:?} ax{axis} i{i}: {g} vs {r}"
+                            );
                         }
                     }
                 }
@@ -54340,7 +54422,11 @@ print(json.dumps(payload))
                 }
                 assert_eq!(counts, ref_counts, "counts axis {axis} shape {shape:?}");
                 for (g, r) in filled.values().iter().zip(ref_filled.iter()) {
-                    assert_eq!(g.to_bits(), r.to_bits(), "filled axis {axis} shape {shape:?}");
+                    assert_eq!(
+                        g.to_bits(),
+                        r.to_bits(),
+                        "filled axis {axis} shape {shape:?}"
+                    );
                 }
             }
         }
@@ -56790,7 +56876,10 @@ print(json.dumps(payload))
                     assert!(
                         dr <= tol && di <= tol,
                         "nbits={nbits} inv={inverse} i={i}: radix4=({},{}) radix2=({},{}) d=({dr:e},{di:e}) tol={tol:e}",
-                        ar[i], ai[i], br[i], bi[i]
+                        ar[i],
+                        ai[i],
+                        br[i],
+                        bi[i]
                     );
                 }
             }
@@ -57780,8 +57869,10 @@ print(json.dumps(payload))
         for (subs, ashape, bshape) in cases {
             let asz: usize = ashape.iter().product::<usize>().max(1);
             let bsz: usize = bshape.iter().product::<usize>().max(1);
-            let a = UFuncArray::new(ashape.clone(), lcg(0x51 + asz as u64, asz), DType::F64).unwrap();
-            let b = UFuncArray::new(bshape.clone(), lcg(0xA3 + bsz as u64, bsz), DType::F64).unwrap();
+            let a =
+                UFuncArray::new(ashape.clone(), lcg(0x51 + asz as u64, asz), DType::F64).unwrap();
+            let b =
+                UFuncArray::new(bshape.clone(), lcg(0xA3 + bsz as u64, bsz), DType::F64).unwrap();
             let c = UFuncArray::einsum(subs, &[&a, &b]).unwrap();
             assert_eq!(c.values.len(), asz * bsz, "{subs} size");
             for ia in 0..asz {
@@ -57852,7 +57943,10 @@ print(json.dumps(payload))
                 tf.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let (s, f) = (med(ts), med(tf));
-            println!("einsum i,j->ij {ni}x{nj}: oldpath={s:8.3}ms fastpath={f:8.3}ms speedup={:.2}x", s / f);
+            println!(
+                "einsum i,j->ij {ni}x{nj}: oldpath={s:8.3}ms fastpath={f:8.3}ms speedup={:.2}x",
+                s / f
+            );
         }
     }
 
@@ -57911,7 +58005,10 @@ print(json.dumps(payload))
                 tf.push(t.elapsed().as_secs_f64() * 1e3);
             }
             let (s, f) = (med(ts), med(tf));
-            println!("einsum {subs} {n}x{n}: oldalloc={s:8.3}ms hoisted={f:8.3}ms speedup={:.2}x", s / f);
+            println!(
+                "einsum {subs} {n}x{n}: oldalloc={s:8.3}ms hoisted={f:8.3}ms speedup={:.2}x",
+                s / f
+            );
         }
     }
 
@@ -59354,10 +59451,15 @@ print(json.dumps(payload))
             .collect();
         let arr = UFuncArray::new(vec![n], data.clone(), DType::F64).unwrap();
         let iters = 5;
-        let _ = arr.percentile_method(37.0, None, QuantileInterp::Linear).unwrap();
+        let _ = arr
+            .percentile_method(37.0, None, QuantileInterp::Linear)
+            .unwrap();
         let t0 = Instant::now();
         for _ in 0..iters {
-            std::hint::black_box(arr.percentile_method(37.0, None, QuantileInterp::Linear).unwrap());
+            std::hint::black_box(
+                arr.percentile_method(37.0, None, QuantileInterp::Linear)
+                    .unwrap(),
+            );
         }
         let new_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
         // OLD = full sort + index (the previous axis=None path).

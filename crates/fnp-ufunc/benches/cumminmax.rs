@@ -55,7 +55,7 @@ fn data_for(n: usize) -> Vec<f64> {
 
 fn bench_cumminmax(c: &mut Criterion) {
     let configs: &[(Vec<usize>, usize)] = &[
-        (vec![4096, 4096], 0), // single outer block: cache win only
+        (vec![4096, 4096], 0),   // single outer block: cache win only
         (vec![64, 256, 256], 1), // many outer blocks: cache + parallel
     ];
     for (shape, axis) in configs {
