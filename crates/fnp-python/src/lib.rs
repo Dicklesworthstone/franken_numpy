@@ -16395,6 +16395,12 @@ fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_int_sign(py, x.bind(py))? {
         return Ok(out);
     }
+    // float16 (and any non-contiguous narrow input that slipped the typed fast paths)
+    // would be widened to f64 by extract_numeric_array; numpy keeps the input float
+    // width (e.g. sign(float16) -> float16). Defer every non-f64 input to numpy.sign.
+    if !numpy_dtype_is_f64(py, x.bind(py)) {
+        return Ok(numpy.getattr("sign")?.call1((arr,))?.unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "sign(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Sign))
 }
@@ -16467,19 +16473,18 @@ fn degrees(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Degrees)? {
         return Ok(out);
     }
+    // NumPy promotes by exact width: int8/uint8 -> float16, int16/uint16 -> float32,
+    // wider ints -> float64, bool -> float16, and float16/float32 are preserved. The
+    // native path mapped every integer to float64 (widening int8/int16), so defer all
+    // non-float64 inputs to numpy.degrees for exact dtype + value parity.
+    if !numpy_dtype_is_f64(py, x.bind(py)) {
+        return Ok(py
+            .import("numpy")?
+            .getattr("degrees")?
+            .call1((x.bind(py),))?
+            .unbind());
+    }
     let x = extract_precise_numeric_array(py, x.bind(py), "degrees(x)")?;
-    let x = match x.dtype() {
-        DType::Bool => x.astype(DType::F16),
-        DType::I8
-        | DType::I16
-        | DType::I32
-        | DType::I64
-        | DType::U8
-        | DType::U16
-        | DType::U32
-        | DType::U64 => x.astype(DType::F64),
-        _ => x,
-    };
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Degrees))
 }
 
@@ -16488,24 +16493,32 @@ fn radians(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Radians)? {
         return Ok(out);
     }
+    // See degrees: NumPy promotes narrow ints to float16/float32 by width, so defer
+    // every non-float64 input to numpy.radians for exact dtype + value parity instead
+    // of widening int8/int16 to float64.
+    if !numpy_dtype_is_f64(py, x.bind(py)) {
+        return Ok(py
+            .import("numpy")?
+            .getattr("radians")?
+            .call1((x.bind(py),))?
+            .unbind());
+    }
     let x = extract_precise_numeric_array(py, x.bind(py), "radians(x)")?;
-    let x = match x.dtype() {
-        DType::Bool => x.astype(DType::F16),
-        DType::I8
-        | DType::I16
-        | DType::I32
-        | DType::I64
-        | DType::U8
-        | DType::U16
-        | DType::U32
-        | DType::U64 => x.astype(DType::F64),
-        _ => x,
-    };
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Radians))
 }
 
 #[pyfunction]
 fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // extract_numeric_array canonicalizes narrow widths to f64, so the native sinc
+    // kernel returns float64 for float32/float16 input where numpy preserves the
+    // narrow float. Defer all non-float64 inputs to numpy.sinc for exact dtype parity.
+    if !numpy_dtype_is_f64(py, x.bind(py)) {
+        return Ok(py
+            .import("numpy")?
+            .getattr("sinc")?
+            .call1((x.bind(py),))?
+            .unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "sinc(x)")?;
     build_numpy_scalar_or_array(py, &x.sinc())
 }
@@ -23493,8 +23506,8 @@ fn heaviside(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
 #[pyo3(signature = (x,))]
 fn rad2deg(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Rust-owned alias of np.degrees. Matches numpy's dtype surface:
-    // bool -> float16, integers -> float64, and inexact inputs preserve
-    // their floating width while multiplying by 180/pi.
+    // bool/int8/uint8 -> float16, int16/uint16 -> float32, wider ints -> float64,
+    // and inexact inputs preserve their floating width while multiplying by 180/pi.
     degrees(py, x)
 }
 
@@ -24841,8 +24854,8 @@ fn log1p(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyo3(signature = (x,))]
 fn deg2rad(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Rust-owned alias of np.radians. Matches numpy's dtype surface:
-    // bool -> float16, integers -> float64, and inexact inputs preserve
-    // their floating width while multiplying by pi/180.
+    // bool/int8/uint8 -> float16, int16/uint16 -> float32, wider ints -> float64,
+    // and inexact inputs preserve their floating width while multiplying by pi/180.
     radians(py, x)
 }
 
@@ -30920,6 +30933,14 @@ fn nanmedian(
     };
 
     if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) || overwrite_input || keepdims {
+        return fallback();
+    }
+
+    // The native kernel computes in f64; defer float16/float32/complex inputs to
+    // numpy.nanmedian so the narrow float dtype is preserved (numpy keeps float32 ->
+    // float32) instead of widening to float64. int/bool/float64 keep the native path
+    // (numpy's nanmedian of integers is float64, matching the widened native result).
+    if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
         return fallback();
     }
 
@@ -56582,6 +56603,58 @@ mod tests {
                     .call_method0("tolist")?
                     .extract::<Vec<Vec<f64>>>()?
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn narrow_dtype_preserved_across_unary_and_nan_reductions() {
+        // Regression guard for the extract_numeric_array f64-widening class: these
+        // ops route narrow inputs through the native kernel (which computes in f64)
+        // and previously returned float64 for float32/float16 input and for the angle
+        // conversions on int8/int16. NumPy preserves narrow floats and promotes narrow
+        // ints by exact width (int8/uint8 -> float16, int16/uint16 -> float32). Each op
+        // must now match numpy's dtype surface exactly.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // (op, dtypes-to-check). Angle ops add narrow ints; sign adds float16;
+            // sinc/nanmedian cover narrow floats.
+            let cases: [(&str, &[&str]); 7] = [
+                ("degrees", &["float32", "float16", "int8", "int16", "uint8", "int32"]),
+                ("radians", &["float32", "float16", "int8", "int16", "uint8", "int32"]),
+                ("deg2rad", &["float32", "float16", "int8", "int16", "uint8"]),
+                ("rad2deg", &["float32", "float16", "int8", "int16", "uint8"]),
+                ("sinc", &["float32", "float16"]),
+                ("sign", &["float32", "float16"]),
+                ("nanmedian", &["float32", "float16"]),
+            ];
+            for (op, dtypes) in cases {
+                let fnp_fn = module.getattr(op)?;
+                let numpy_fn = numpy.getattr(op)?;
+                for dt in dtypes {
+                    let dtype_obj = numpy.getattr(*dt)?;
+                    let base = numpy
+                        .getattr("array")?
+                        .call1((vec![1.0_f64, 2.0, 3.0, 4.0],))?;
+                    let arr = base.call_method1("astype", (dtype_obj,))?;
+                    let ours = fnp_fn.call1((arr.clone(),))?;
+                    let theirs = numpy_fn.call1((arr.clone(),))?;
+                    assert_eq!(
+                        ours.getattr("dtype")?.str()?.to_string(),
+                        theirs.getattr("dtype")?.str()?.to_string(),
+                        "{op}({dt}) result dtype must match numpy (no widen to float64)",
+                    );
+                    let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                    assert!(ok, "{op}({dt}) values must match numpy");
+                }
+            }
             Ok(())
         });
     }
