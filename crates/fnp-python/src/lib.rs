@@ -38835,6 +38835,17 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
         return fallback();
     }
 
+    // numpy promotes convolve's result to `result_type(a, v)`. Our native kernel
+    // canonicalises inputs to f64 (`extract_numeric_array` widens float32/float16),
+    // so a non-float64 result dtype would be silently widened to float64 — e.g.
+    // `np.convolve(float32, float32)` must stay float32, not become float64. Defer
+    // any non-f64 result dtype to numpy so the output dtype matches exactly.
+    // (Integer inputs already fall back via `convolve_mode` returning Err.)
+    let result_dtype = numpy.getattr("result_type")?.call1((a.bind(py), v.bind(py)))?;
+    if !result_dtype.eq(numpy.getattr("float64")?)? {
+        return fallback();
+    }
+
     let result = match a_arr.convolve_mode(&v_arr, mode) {
         Ok(result) => result,
         Err(_) => return fallback(),
@@ -38883,6 +38894,14 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
     // since the "same" mode centering has complex edge-case semantics that
     // differ from convolve(a, v[::-1], mode="same").
     if mode == "same" && v_arr.shape()[0] > a_arr.shape()[0] {
+        return fallback();
+    }
+
+    // numpy promotes correlate's result to `result_type(a, v)`; our native kernel
+    // canonicalises to f64, so defer any non-f64 result dtype (float32/float16) to
+    // numpy to keep the output dtype exact. (See convolve for the full rationale.)
+    let result_dtype = numpy.getattr("result_type")?.call1((a.bind(py), v.bind(py)))?;
+    if !result_dtype.eq(numpy.getattr("float64")?)? {
         return fallback();
     }
 
@@ -47725,6 +47744,34 @@ mod tests {
                 assert!(
                     array_equal.call1((&ours, &theirs))?.extract::<bool>()?,
                     "{name} diverged"
+                );
+            }
+
+            // float32 convolve/correlate must PRESERVE float32 (numpy result_type),
+            // not silently widen to float64 (the native kernel canonicalises to f64).
+            let f32a = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [1.0_f64, 2.0, 3.0, 4.0])?,))?
+                .call_method1("astype", ("float32",))?;
+            let f32b = numpy
+                .getattr("array")?
+                .call1((PyList::new(py, [0.5_f64, 1.5])?,))?
+                .call_method1("astype", ("float32",))?;
+            for name in ["convolve", "correlate"] {
+                let ours = module.getattr(name)?.call1((f32a.clone(), f32b.clone()))?;
+                let theirs = numpy.getattr(name)?.call1((f32a.clone(), f32b.clone()))?;
+                let ours_dt = ours.getattr("dtype")?.str()?.extract::<String>()?;
+                let theirs_dt = theirs.getattr("dtype")?.str()?.extract::<String>()?;
+                assert_eq!(
+                    ours_dt, theirs_dt,
+                    "{name} float32 dtype diverged (ours={ours_dt} theirs={theirs_dt})"
+                );
+                assert!(
+                    numpy
+                        .getattr("allclose")?
+                        .call1((&ours, &theirs))?
+                        .extract::<bool>()?,
+                    "{name} float32 values diverged"
                 );
             }
 
