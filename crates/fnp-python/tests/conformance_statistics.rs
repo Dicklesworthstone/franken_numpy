@@ -551,3 +551,34 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn cov_corrcoef_orientation_and_scalar_edge_cases_match_numpy() -> Result<(), String> {
+    // Regression for two parity gaps: (1) a genuine 2-D (1, N) input with rowvar=False
+    // is N variables -> (N, N), not a scalar (the old shape[0]!=1 guard wrongly skipped
+    // the transpose); a true 1-D input stays one variable. (2) cov/corrcoef of a single
+    // variable squeezes to a 0-d scalar, not (1, 1).
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(0)
+for fn in ("cov", "corrcoef"):
+    ffn = getattr(fnp, fn); nfn = getattr(np, fn)
+    for shape in [(1, 5), (5, 1), (1, 100), (3, 5), (100,), (4, 4), (1, 1)]:
+        X = rng.standard_normal(shape)
+        for kw in ({}, {"rowvar": False}, {"rowvar": True}):
+            f = np.asarray(ffn(X, **kw)); n = np.asarray(nfn(X, **kw))
+            if f.shape != n.shape or not np.allclose(f, n, rtol=1e-9, atol=1e-12, equal_nan=True):
+                ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cov/corrcoef orientation + single-variable scalar must match numpy"
+    );
+    Ok(())
+}

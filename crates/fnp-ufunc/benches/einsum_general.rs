@@ -17,11 +17,16 @@ fn arr(shape: &[usize]) -> UFuncArray {
 fn bench_einsum_general(c: &mut Criterion) {
     // (subscripts, operand shapes)
     let cases: &[(&str, Vec<Vec<usize>>)] = &[
+        ("ij->ji", vec![vec![2048, 2048]]),
+        ("ii->i", vec![vec![4096, 4096]]),
         ("ijk->i", vec![vec![256, 256, 256]]),
         ("ijk->ik", vec![vec![256, 256, 256]]),
         ("ijkl->il", vec![vec![64, 64, 64, 64]]),
         ("ij,ij->i", vec![vec![1024, 1024], vec![1024, 1024]]),
-        ("ij,jk,kl->il", vec![vec![192, 192], vec![192, 192], vec![192, 192]]),
+        (
+            "ij,jk,kl->il",
+            vec![vec![192, 192], vec![192, 192], vec![192, 192]],
+        ),
     ];
     for (subs, shapes) in cases {
         let ops: Vec<UFuncArray> = shapes.iter().map(|s| arr(s)).collect();

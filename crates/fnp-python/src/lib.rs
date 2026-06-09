@@ -20132,6 +20132,8 @@ fn native_cov_unweighted(
     };
 
     // Normalize m to 2-D: 1-D becomes a single row (rowvar=True orientation).
+    let m_was_1d = m_arr.shape().len() == 1;
+    let has_y = y_arr.is_some();
     let to_2d = |arr: UFuncArray| -> Option<UFuncArray> {
         match arr.shape().len() {
             1 => {
@@ -20158,9 +20160,19 @@ fn native_cov_unweighted(
         m_2d
     };
 
-    // After stacking: if rowvar=False and we have more than one row, transpose
-    // so rows are variables. Matches numpy's `if not rowvar and X.shape[0] != 1: X = X.T`.
-    let oriented = if !rowvar && stacked.shape()[0] != 1 {
+    // For rowvar=False, variables are the columns, so transpose. numpy ALWAYS transposes
+    // a genuine 2-D input here (even (1, N) -> N variables); only a 1-D input stays one
+    // variable (it is the (1, N) reshape above, not a real (1, N) matrix). The old
+    // `stacked.shape()[0] != 1` guard conflated those, so np.cov of a 2-D (1, N) array with
+    // rowvar=False wrongly returned a scalar instead of (N, N). For the y path keep the
+    // prior row-count guard (its stacking semantics are unchanged).
+    let transpose_for_colvars = !rowvar
+        && if has_y {
+            stacked.shape()[0] != 1
+        } else {
+            !m_was_1d
+        };
+    let oriented = if transpose_for_colvars {
         match stacked.transpose(None) {
             Ok(value) => value,
             Err(_) => return Ok(None),
@@ -20409,7 +20421,13 @@ fn corrcoef(
         Ok(value) => value,
         Err(_) => return fallback(py),
     };
-    build_numpy_array_from_ufunc(py, &result)
+    let built = build_numpy_array_from_ufunc(py, &result)?;
+    // numpy.corrcoef of a single variable is the 0-d scalar 1.0 (like cov's squeeze),
+    // not a (1, 1) matrix.
+    if n_vars == 1 {
+        return Ok(built.bind(py).call_method0("squeeze")?.unbind());
+    }
+    Ok(built)
 }
 
 #[pyfunction]

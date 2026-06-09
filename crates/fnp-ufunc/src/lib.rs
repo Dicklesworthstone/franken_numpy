@@ -21688,6 +21688,55 @@ impl UFuncArray {
         Self::einsum_impl(subscripts, operands, false)
     }
 
+    // Fast path for a single operand whose subscript is a pure permutation (transpose) or a
+    // repeated 2-D label (trace / diagonal). Returns None to fall through to the general
+    // nested-sum path (axis reductions, dropped labels, non-square repeats, sidecar ints).
+    fn einsum_single_operand_fast(
+        input_sub: &str,
+        output_labels: &[char],
+        op: &Self,
+    ) -> Result<Option<Self>, UFuncError> {
+        // Exact large-int sidecars accumulate/relocate outside the f64 lane; keep those on
+        // the proven general path.
+        if op.has_integer_sidecar() {
+            return Ok(None);
+        }
+        let input_chars: Vec<char> = input_sub.chars().collect();
+        let ndim = input_chars.len();
+        if ndim != op.shape.len() {
+            return Ok(None);
+        }
+        let distinct = (0..ndim).all(|i| (i + 1..ndim).all(|j| input_chars[i] != input_chars[j]));
+
+        if distinct {
+            // Pure permutation: output reorders ALL input labels (no contraction). A
+            // shorter output is an axis reduction; defer.
+            if output_labels.len() != ndim {
+                return Ok(None);
+            }
+            let mut perm = Vec::with_capacity(ndim);
+            for &oc in output_labels {
+                match input_chars.iter().position(|&c| c == oc) {
+                    Some(p) => perm.push(p),
+                    None => return Ok(None),
+                }
+            }
+            return Ok(Some(op.transpose(Some(&perm))?));
+        }
+
+        // Repeated label: only the canonical 2-D square 'ii' (trace) / 'ii->i' (diagonal).
+        // NumPy requires the repeated dims to match; defer the mismatch to the general path.
+        if ndim == 2 && input_chars[0] == input_chars[1] && op.shape[0] == op.shape[1] {
+            if output_labels.is_empty() {
+                return Ok(Some(op.trace(0)?));
+            }
+            if output_labels.len() == 1 && output_labels[0] == input_chars[0] {
+                return Ok(Some(op.diagonal(0, 0, 1)?));
+            }
+        }
+        Ok(None)
+    }
+
     fn einsum_impl(
         subscripts: &str,
         operands: &[&Self],
@@ -21751,6 +21800,18 @@ impl UFuncArray {
             labels
         };
         Self::validate_einsum_output_labels("einsum", &input_subs, &output_labels)?;
+
+        // Single-operand fast paths: a pure label permutation is a transpose, a repeated
+        // label is a trace/diagonal. The general nested-sum path below is alloc-dominated
+        // and O(n^d) per output cell; these route to the cache-tiled transpose / O(n)
+        // diagonal instead. Same data move / sum is byte-identical (transpose/diagonal) or
+        // tolerance-equal (trace), matching the general path within the einsum envelope.
+        if operands.len() == 1
+            && let Some(result) =
+                Self::einsum_single_operand_fast(&input_subs[0], &output_labels, operands[0])?
+        {
+            return Ok(result);
+        }
 
         // Build label-to-dimension mapping
         let mut label_sizes: std::collections::HashMap<char, usize> =
