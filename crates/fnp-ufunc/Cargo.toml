@@ -50,3 +50,7 @@ harness = false
 [[bench]]
 name = "searchsorted"
 harness = false
+
+[[bench]]
+name = "cumminmax"
+harness = false

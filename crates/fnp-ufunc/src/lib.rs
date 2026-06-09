@@ -16860,7 +16860,7 @@ impl UFuncArray {
     fn cumulative_op(
         &self,
         axis: Option<isize>,
-        op: impl Fn(f64, f64) -> f64,
+        op: impl Fn(f64, f64) -> f64 + Sync,
     ) -> Result<Self, UFuncError> {
         match axis {
             None => {
@@ -16898,17 +16898,74 @@ impl UFuncArray {
                     fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
                 let inner: usize =
                     fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
-                let mut values = vec![0.0f64; self.values.len()];
-                for o in 0..outer {
-                    for i in 0..inner {
-                        let base = o * axis_len * inner;
-                        let mut acc = self.values[base + i];
-                        values[base + i] = acc;
-                        for a in 1..axis_len {
-                            let idx = base + a * inner + i;
-                            acc = op(acc, self.values[idx]);
-                            values[idx] = acc;
+                let total = self.values.len();
+                let mut values = vec![0.0f64; total];
+
+                if inner == 1 {
+                    // Last-axis scan: each lane is a contiguous `axis_len` chunk. Row 0
+                    // copies the input; every later slot folds the running accumulator.
+                    // The per-lane left-to-right order is preserved, so parallelizing
+                    // across independent lanes is bit-for-bit identical for any thread
+                    // count.
+                    let scan_lane = |(out_lane, in_lane): (&mut [f64], &[f64])| {
+                        let mut acc = in_lane[0];
+                        out_lane[0] = acc;
+                        for (out_slot, &v) in out_lane[1..].iter_mut().zip(in_lane[1..].iter()) {
+                            acc = op(acc, v);
+                            *out_slot = acc;
                         }
+                    };
+                    const CUM_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+                    if outer >= 2
+                        && total >= CUM_PARALLEL_MIN_ELEMS
+                        && rayon::current_num_threads() >= 2
+                    {
+                        values
+                            .par_chunks_mut(axis_len)
+                            .zip(self.values.par_chunks(axis_len))
+                            .for_each(scan_lane);
+                    } else {
+                        values
+                            .chunks_mut(axis_len)
+                            .zip(self.values.chunks(axis_len))
+                            .for_each(scan_lane);
+                    }
+                } else {
+                    // Non-last-axis scan. The old form scanned each column with stride
+                    // `inner` (cache-thrashing) and ran serially. Instead walk each outer
+                    // block row-by-row: row 0 copies the input row, and every later row is
+                    // the CONTIGUOUS vector fold of the previous OUTPUT row with the current
+                    // input row. Per column the fold still runs over the axis in ascending
+                    // order, so the result is bit-for-bit identical — but each row op is a
+                    // unit-stride pass and independent outer blocks run in parallel. Mirrors
+                    // the `cumulate_axis` reform used by cumsum/cumprod.
+                    let block = axis_len * inner;
+                    let process_block = |(out_block, in_block): (&mut [f64], &[f64])| {
+                        out_block[..inner].copy_from_slice(&in_block[..inner]);
+                        for a in 1..axis_len {
+                            let (done, todo) = out_block.split_at_mut(a * inner);
+                            let prev_row = &done[(a - 1) * inner..a * inner];
+                            let curr_row = &mut todo[..inner];
+                            let in_row = &in_block[a * inner..a * inner + inner];
+                            for c in 0..inner {
+                                curr_row[c] = op(prev_row[c], in_row[c]);
+                            }
+                        }
+                    };
+                    const CUM_AXIS_PARALLEL_MIN_ELEMS: usize = 1 << 15;
+                    if outer >= 2
+                        && total >= CUM_AXIS_PARALLEL_MIN_ELEMS
+                        && rayon::current_num_threads() >= 2
+                    {
+                        values
+                            .par_chunks_mut(block)
+                            .zip(self.values.par_chunks(block))
+                            .for_each(process_block);
+                    } else {
+                        values
+                            .chunks_mut(block)
+                            .zip(self.values.chunks(block))
+                            .for_each(process_block);
                     }
                 }
                 Ok(Self {
@@ -43243,6 +43300,118 @@ print(json.dumps(payload))
         assert_eq!(
             hex,
             "707fb35e03a7d2a2267dfa243e5f891af1b511b0eb96468734ff52a7b692bcbd"
+        );
+    }
+
+    #[test]
+    fn cumminmax_axis_rowwise_matches_strided_reference_and_golden() {
+        use sha2::{Digest, Sha256};
+        // cummin/cummax (np.minimum/maximum.accumulate) over a non-last axis now use
+        // the same row-wise contiguous + parallel rewrite as cumsum. It must be
+        // BIT-IDENTICAL to the old stride-`inner` serial column scan, including NaN
+        // propagation (once a NaN appears every later output is NaN) and signed
+        // zeros. Reference replicates the exact original per-column scan.
+        fn strided_reference(
+            values: &[f64],
+            shape: &[usize],
+            axis: usize,
+            fold: impl Fn(f64, f64) -> f64,
+        ) -> Vec<f64> {
+            let total: usize = shape.iter().product();
+            let mut out = vec![0.0f64; total];
+            let axis_len = shape[axis];
+            let inner: usize = shape[axis + 1..].iter().product();
+            let outer: usize = shape[..axis].iter().product();
+            for o in 0..outer {
+                let base = o * axis_len * inner;
+                for ii in 0..inner {
+                    // Row 0 copies the input (matches `acc = values[base+ii]`); later
+                    // rows fold the running accumulator.
+                    let mut acc = values[base + ii];
+                    out[base + ii] = acc;
+                    let mut off = base + ii + inner;
+                    for _ in 1..axis_len {
+                        acc = fold(acc, values[off]);
+                        out[off] = acc;
+                        off += inner;
+                    }
+                }
+            }
+            out
+        }
+        let cmin = |a: f64, b: f64| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else if a < b {
+                a
+            } else {
+                b
+            }
+        };
+        let cmax = |a: f64, b: f64| {
+            if a.is_nan() || b.is_nan() {
+                f64::NAN
+            } else if a > b {
+                a
+            } else {
+                b
+            }
+        };
+        // Shapes spanning non-last axis on 2-D, a middle axis on 3-D (inner>1 and
+        // outer>1), and a large axis-0 case that crosses the parallel threshold.
+        let cases: &[(Vec<usize>, usize)] = &[
+            (vec![64, 48], 0),
+            (vec![5, 7, 9], 1),
+            (vec![9, 5, 7], 0),
+            (vec![3, 4, 5, 6], 2),
+            (vec![512, 512], 0),
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            // Mostly finite, occasional NaN/inf/-0.0 to exercise propagation + ties.
+            let u = (seed >> 11) as f64 / (1u64 << 53) as f64;
+            match (seed >> 5) % 17 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                3 => -0.0,
+                _ => u * 6.0 - 3.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        for (shape, axis) in cases {
+            let n: usize = shape.iter().product();
+            let data: Vec<f64> = (0..n).map(|_| next()).collect();
+            let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            let got_min = arr.cummin(Some(*axis as isize)).unwrap();
+            let want_min = strided_reference(&data, shape, *axis, cmin);
+            for (g, w) in got_min.values().iter().zip(want_min.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "cummin {shape:?} ax={axis}");
+            }
+            let got_max = arr.cummax(Some(*axis as isize)).unwrap();
+            let want_max = strided_reference(&data, shape, *axis, cmax);
+            for (g, w) in got_max.values().iter().zip(want_max.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "cummax {shape:?} ax={axis}");
+            }
+            for v in got_min.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+            for v in got_max.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex,
+            "0a85ae5a21c4ae6be5bf85a48db4d2a8bdf7285e4e79bd04910a023d694b1da2",
+            "cummin/cummax row-wise golden digest drifted"
         );
     }
 
