@@ -5095,6 +5095,34 @@ impl UFuncArray {
         }
     }
 
+    /// Sidecar synthesis for the PROMOTING reductions (`sum`/`prod`), where NumPy
+    /// widens bool/int8/int16/int32 → int64 and uint8/16/32 → uint64 and wraps the
+    /// accumulator on overflow.
+    ///
+    /// Unlike [`synthesized_integer_sidecar`] (which only covers the canonical
+    /// I64/U64 storage and returns `None` for narrow ints), this also synthesizes
+    /// for the narrow integer dtypes: their f64 `values` are exact integers within
+    /// range, so casting to i64/u64 is lossless and lets the reduction be carried
+    /// EXACTLY with two's-complement wraparound. Without it a narrow-int product
+    /// (which overflows almost immediately — e.g. three int32 values) was computed
+    /// in f64 and then either raised in `to_storage` (the f64 exceeds the integer
+    /// range) or returned the wrong wrapped value once it passed 2^53. Float /
+    /// complex / other dtypes return `None` so the f64 accumulator is kept.
+    fn promoting_reduction_sidecar(&self) -> Option<IntegerSidecar> {
+        if let Some(s) = &self.integer_sidecar {
+            return Some(s.clone());
+        }
+        match self.dtype {
+            DType::Bool | DType::I8 | DType::I16 | DType::I32 | DType::I64 => Some(
+                IntegerSidecar::I64(self.values.iter().map(|&v| v as i64).collect()),
+            ),
+            DType::U8 | DType::U16 | DType::U32 | DType::U64 => Some(
+                IntegerSidecar::U64(self.values.iter().map(|&v| v as u64).collect()),
+            ),
+            _ => None,
+        }
+    }
+
     fn exact_integer_sidecar(&self, context: &str) -> Result<Option<IntegerSidecar>, UFuncError> {
         if let Some(s) = &self.integer_sidecar {
             return Ok(Some(s.clone()));
@@ -7825,13 +7853,21 @@ impl UFuncArray {
 
     pub fn reduce_sum(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         let out_dtype = promote_for_sum_reduction(self.dtype);
-        let source_sidecar = self.synthesized_integer_sidecar("sum")?;
+        // Carry an exact i64/u64 sidecar for ALL integer inputs (incl. narrow ints
+        // NumPy widens to int64/uint64). Fold with wrapping arithmetic so an
+        // overflowing integer sum matches NumPy's wraparound accumulator instead of
+        // panicking (debug) / going lossy through the f64 path.
+        let source_sidecar = self.promoting_reduction_sidecar();
         match axis {
             None => {
                 let sum = reduce_sum_values(&self.values);
                 let out_sidecar = source_sidecar.as_ref().map(|s| match s {
-                    IntegerSidecar::I64(v) => IntegerSidecar::I64(vec![v.iter().copied().sum()]),
-                    IntegerSidecar::U64(v) => IntegerSidecar::U64(vec![v.iter().copied().sum()]),
+                    IntegerSidecar::I64(v) => {
+                        IntegerSidecar::I64(vec![v.iter().copied().fold(0i64, i64::wrapping_add)])
+                    }
+                    IntegerSidecar::U64(v) => {
+                        IntegerSidecar::U64(vec![v.iter().copied().fold(0u64, u64::wrapping_add)])
+                    }
                 });
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
@@ -8260,7 +8296,12 @@ impl UFuncArray {
 
     pub fn reduce_prod(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         let out_dtype = promote_for_sum_reduction(self.dtype);
-        let source_sidecar = self.synthesized_integer_sidecar("prod")?;
+        // Carry an exact i64/u64 sidecar for ALL integer inputs (incl. narrow ints
+        // NumPy widens to int64/uint64). A product overflows almost immediately, so
+        // folding the sidecar with wrapping arithmetic is essential: the old f64
+        // accumulator overflowed the integer range and raised in to_storage (or
+        // returned the wrong value past 2^53). Empty product is the identity 1.
+        let source_sidecar = self.promoting_reduction_sidecar();
         match axis {
             None => {
                 let prod: f64 = self.values.iter().copied().product();
@@ -8272,10 +8313,10 @@ impl UFuncArray {
                 } else {
                     source_sidecar.as_ref().map(|s| match s {
                         IntegerSidecar::I64(v) => {
-                            IntegerSidecar::I64(vec![v.iter().copied().product()])
+                            IntegerSidecar::I64(vec![v.iter().copied().fold(1i64, i64::wrapping_mul)])
                         }
                         IntegerSidecar::U64(v) => {
-                            IntegerSidecar::U64(vec![v.iter().copied().product()])
+                            IntegerSidecar::U64(vec![v.iter().copied().fold(1u64, u64::wrapping_mul)])
                         }
                     })
                 };
@@ -62218,6 +62259,45 @@ print(json.dumps(payload))
         assert_eq!(
             r.to_storage().unwrap(),
             ArrayStorage::I64(vec![large.wrapping_mul(6)])
+        );
+    }
+
+    #[test]
+    fn reduce_prod_narrow_int_axis_overflow_wraps_not_raises() {
+        // Regression: np.prod on narrow ints promotes to int64/uint64 and WRAPS on
+        // overflow. A product of a few int32 values overflows int64 immediately;
+        // the old f64 accumulator overflowed the integer range and RAISED in
+        // to_storage. Now reduce_prod must carry an exact wrapping i64/u64 result
+        // for both the per-axis and full-reduction paths.
+        let vals: Vec<i64> = vec![46341, 70000, 65000, 50000, 60000];
+        let f: Vec<f64> = vals.iter().map(|&v| v as f64).collect();
+        let a = UFuncArray::new(vec![1, 5], f, DType::I32).unwrap();
+        let expected = vals.iter().copied().fold(1i64, i64::wrapping_mul);
+        assert_eq!(
+            a.reduce_prod(Some(1), false).unwrap().to_storage().unwrap(),
+            ArrayStorage::I64(vec![expected]),
+            "per-axis narrow-int prod must wrap, not raise"
+        );
+        assert_eq!(
+            a.reduce_prod(None, false).unwrap().to_storage().unwrap(),
+            ArrayStorage::I64(vec![expected]),
+            "full-reduction narrow-int prod must wrap"
+        );
+        // uint32 wraps into uint64.
+        let uvals: Vec<u64> = vec![4_000_000_000, 3_500_000_000, 2, 9];
+        let uf: Vec<f64> = uvals.iter().map(|&v| v as f64).collect();
+        let au = UFuncArray::new(vec![1, 4], uf, DType::U32).unwrap();
+        let uexp = uvals.iter().copied().fold(1u64, u64::wrapping_mul);
+        assert_eq!(
+            au.reduce_prod(Some(1), false).unwrap().to_storage().unwrap(),
+            ArrayStorage::U64(vec![uexp]),
+            "per-axis narrow-uint prod must wrap into u64"
+        );
+        // Small (non-overflowing) narrow-int prod stays exact and unchanged.
+        let s = UFuncArray::new(vec![1, 3], vec![3.0, 5.0, 7.0], DType::I16).unwrap();
+        assert_eq!(
+            s.reduce_prod(Some(1), false).unwrap().to_storage().unwrap(),
+            ArrayStorage::I64(vec![105])
         );
     }
 
