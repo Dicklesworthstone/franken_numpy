@@ -4124,16 +4124,39 @@ pub fn kron_nxn(
     }
     let out_rows = m * p;
     let out_cols = n * q;
-    let mut result = vec![0.0; out_rows * out_cols];
-    for i in 0..m {
+    let out_count = out_rows * out_cols;
+    let mut result = vec![0.0; out_count];
+    if out_count == 0 {
+        return Ok(result);
+    }
+
+    // Each output row `R = i*p + k` (so `i = R/p`, `k = R%p`) is an independent
+    // function of a-row `i` and b-row `k`: `result[R][j*q + l] = a[i*n+j] *
+    // b[k*q+l]`. The old nested loops also wrote each cell from a single product
+    // with no accumulation, so filling the disjoint contiguous output rows across
+    // the rayon pool is bit-for-bit identical to the serial order. The inner scaled
+    // copy of a contiguous b-row auto-vectorizes (vs the old strided cell writes).
+    let fill_row = |(r, row): (usize, &mut [f64])| {
+        let i = r / p;
+        let k = r % p;
+        let a_base = i * n;
+        let b_row = &b[k * q..k * q + q];
         for j in 0..n {
-            let a_val = a[i * n + j];
-            for k in 0..p {
-                for l in 0..q {
-                    result[(i * p + k) * out_cols + (j * q + l)] = a_val * b[k * q + l];
-                }
+            let a_val = a[a_base + j];
+            let dst = &mut row[j * q..j * q + q];
+            for l in 0..q {
+                dst[l] = a_val * b_row[l];
             }
         }
+    };
+    const KRON_PAR_MIN: usize = 1 << 15;
+    if out_count >= KRON_PAR_MIN && rayon::current_num_threads() >= 2 {
+        result
+            .par_chunks_mut(out_cols)
+            .enumerate()
+            .for_each(fill_row);
+    } else {
+        result.chunks_mut(out_cols).enumerate().for_each(fill_row);
     }
     Ok(result)
 }
@@ -12371,6 +12394,74 @@ mod tests {
     }
 
     // ── Kronecker product tests ──
+
+    #[test]
+    fn kron_parallel_matches_serial_reference_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The parallel row-fill kron must be BIT-IDENTICAL to the serial nested
+        // loop (each cell is a single product, no accumulation), across square and
+        // rectangular factors and output sizes crossing the parallel threshold
+        // (1<<15). Reference is an independent serial implementation; values include
+        // NaN / ±inf / -0.0 to lock the exact product semantics.
+        fn serial(a: &[f64], m: usize, n: usize, b: &[f64], p: usize, q: usize) -> Vec<f64> {
+            let out_cols = n * q;
+            let mut out = vec![0.0f64; m * p * out_cols];
+            for i in 0..m {
+                for j in 0..n {
+                    let av = a[i * n + j];
+                    for k in 0..p {
+                        for l in 0..q {
+                            out[(i * p + k) * out_cols + (j * q + l)] = av * b[k * q + l];
+                        }
+                    }
+                }
+            }
+            out
+        }
+        // (m, n, p, q) — square, tall, wide; sizes both below and above the gate.
+        let cases: &[(usize, usize, usize, usize)] = &[
+            (40, 33, 13, 17),
+            (8, 8, 64, 64),
+            (100, 1, 1, 100),
+            (3, 3, 3, 3),
+        ];
+        let mut seed = 0x9b1c_4e2f_7a05_d3c8u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            match (seed >> 9) % 19 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                3 => -0.0,
+                _ => (seed >> 11) as f64 / (1u64 << 53) as f64 * 20.0 - 10.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        for &(m, n, p, q) in cases {
+            let a: Vec<f64> = (0..m * n).map(|_| next()).collect();
+            let b: Vec<f64> = (0..p * q).map(|_| next()).collect();
+            let got = kron_nxn(&a, m, n, &b, p, q).unwrap();
+            let want = serial(&a, m, n, &b, p, q);
+            assert_eq!(got.len(), want.len(), "len {m}x{n} kron {p}x{q}");
+            for (g, w) in got.iter().zip(want.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "kron {m}x{n} ⊗ {p}x{q}");
+            }
+            for v in &got {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "6d16bc3a90ee6673f1f7f200b5955b17bfbe5402416926516eff16920d77efc7",
+            "kron parallel golden digest drifted"
+        );
+    }
 
     #[test]
     fn kron_identity_identity() {
