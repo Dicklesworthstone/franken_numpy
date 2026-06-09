@@ -13564,8 +13564,43 @@ impl UFuncArray {
     /// Compute the trace of a 2-D matrix.
     pub fn trace(&self, offset: i64) -> Result<Self, UFuncError> {
         let d = self.diag(offset)?;
-        let sum: f64 = d.values.iter().sum();
-        Ok(Self::scalar(sum, self.dtype))
+        Ok(d.sum_extracted_diagonal_to_scalar())
+    }
+
+    /// Sum an already-extracted 1-D diagonal (as produced by `diag`/`diagonal`)
+    /// into a trace scalar.
+    ///
+    /// For int64/uint64 the f64 `values` are lossy once `|x| > 2^53`, and NumPy
+    /// accumulates the diagonal in the native integer accumulator with two's-
+    /// complement wraparound (e.g. `trace([[i64::MAX,_],[_,i64::MAX]])` wraps).
+    /// Sum the exact-integer sidecar with `wrapping_add` and carry the result in
+    /// a fresh sidecar so the scalar bridges back bit-exact; narrower ints have
+    /// no sidecar (they fit f64 losslessly) and keep the plain f64 fold.
+    pub fn sum_extracted_diagonal_to_scalar(&self) -> Self {
+        match &self.integer_sidecar {
+            Some(IntegerSidecar::I64(v)) => {
+                let s = v.iter().copied().fold(0i64, i64::wrapping_add);
+                Self {
+                    shape: Vec::new(),
+                    values: vec![s as f64],
+                    dtype: self.dtype,
+                    integer_sidecar: Some(IntegerSidecar::I64(vec![s])),
+                }
+            }
+            Some(IntegerSidecar::U64(v)) => {
+                let s = v.iter().copied().fold(0u64, u64::wrapping_add);
+                Self {
+                    shape: Vec::new(),
+                    values: vec![s as f64],
+                    dtype: self.dtype,
+                    integer_sidecar: Some(IntegerSidecar::U64(vec![s])),
+                }
+            }
+            None => {
+                let sum: f64 = self.values.iter().sum();
+                Self::scalar(sum, self.dtype)
+            }
+        }
     }
 
     /// Compute trace along specified axes (np.ndarray.trace with axis1/axis2).
@@ -50696,6 +50731,72 @@ print(json.dumps(payload))
         assert_eq!(a.trace(0).unwrap().values(), &[15.0]); // 1+5+9
         assert_eq!(a.trace(1).unwrap().values(), &[8.0]); // 2+6
         assert_eq!(a.trace(-1).unwrap().values(), &[12.0]); // 4+8
+    }
+
+    #[test]
+    fn trace_int64_uint64_accumulates_native_with_wraparound() {
+        // Regression: trace summed the diagonal in f64, losing precision once a
+        // diagonal element exceeds 2^53 and never carrying the exact-integer
+        // sidecar — so int64/uint64 traces returned garbage (e.g. 0) where NumPy
+        // accumulates in the native integer type with two's-complement wraparound.
+        // i64: diag = [i64::MAX, i64::MAX, 8] → MAX+MAX wraps to -2, -2+8 = 6.
+        let diag_i = [i64::MAX, i64::MAX, 8i64];
+        let mut ai = UFuncArray::new(
+            vec![3, 3],
+            vec![
+                diag_i[0] as f64, 0.0, 0.0,
+                0.0, diag_i[1] as f64, 0.0,
+                0.0, 0.0, diag_i[2] as f64,
+            ],
+            DType::I64,
+        )
+        .unwrap();
+        ai.integer_sidecar = Some(IntegerSidecar::I64(vec![
+            diag_i[0], 0, 0, 0, diag_i[1], 0, 0, 0, diag_i[2],
+        ]));
+        let ti = ai.trace(0).unwrap();
+        let expected_i = diag_i
+            .iter()
+            .copied()
+            .fold(0i64, i64::wrapping_add); // 6
+        assert_eq!(expected_i, 6);
+        match ti.integer_sidecar() {
+            Some(IntegerSidecar::I64(v)) => assert_eq!(v, &[expected_i]),
+            other => panic!("expected i64 sidecar, got {other:?}"),
+        }
+
+        // u64: diag = [u64::MAX, 1, 8] → MAX+1 wraps to 0, 0+8 = 8.
+        let diag_u = [u64::MAX, 1u64, 8u64];
+        let mut au = UFuncArray::new(
+            vec![3, 3],
+            vec![
+                diag_u[0] as f64, 0.0, 0.0,
+                0.0, diag_u[1] as f64, 0.0,
+                0.0, 0.0, diag_u[2] as f64,
+            ],
+            DType::U64,
+        )
+        .unwrap();
+        au.integer_sidecar = Some(IntegerSidecar::U64(vec![
+            diag_u[0], 0, 0, 0, diag_u[1], 0, 0, 0, diag_u[2],
+        ]));
+        let tu = au.trace(0).unwrap();
+        let expected_u = diag_u.iter().copied().fold(0u64, u64::wrapping_add); // 8
+        assert_eq!(expected_u, 8);
+        match tu.integer_sidecar() {
+            Some(IntegerSidecar::U64(v)) => assert_eq!(v, &[expected_u]),
+            other => panic!("expected u64 sidecar, got {other:?}"),
+        }
+
+        // f64 diagonals keep the plain fold (no sidecar) — unchanged behaviour.
+        let af = UFuncArray::new(
+            vec![2, 2],
+            vec![1.5, 0.0, 0.0, 2.5],
+            DType::F64,
+        )
+        .unwrap();
+        assert_eq!(af.trace(0).unwrap().values(), &[4.0]);
+        assert!(af.trace(0).unwrap().integer_sidecar().is_none());
     }
 
     #[test]

@@ -35813,8 +35813,12 @@ fn trace(
             && let Ok(diag_view) = a_bound.call_method1("diagonal", (offset,))
             && let Ok(diag_array) = extract_precise_numeric_array(py, &diag_view, "trace(diagonal)")
         {
-            let sum: f64 = diag_array.values().iter().sum();
-            let result = UFuncArray::scalar(sum, diag_array.dtype());
+            // diag_array is the 1-D diagonal view. Sum it via the shared helper,
+            // which accumulates the exact-integer sidecar with wraparound for
+            // int64/uint64 and folds f64 otherwise — matching NumPy's native
+            // accumulator. This keeps the O(n) diagonal-only fast path while fixing
+            // the int64/uint64 precision loss the plain f64 sum had for |x| > 2^53.
+            let result = diag_array.sum_extracted_diagonal_to_scalar();
             return build_numpy_scalar_or_array(py, &result);
         }
     }
