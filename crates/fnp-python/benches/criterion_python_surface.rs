@@ -2,7 +2,7 @@
 //!
 //! These target Python-boundary costs that the Rust engine benches do not see.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use fnp_python::fnp_python;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
 use pyo3::{PyResult, Python};
@@ -1013,6 +1013,69 @@ fn bench_histogram_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_statistics_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_statistics_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let rows = 200_usize;
+        let cols = 500_usize;
+        let total = rows * cols;
+        let input = numpy
+            .call_method1("linspace", (-2.0_f64, 3.0_f64, total))
+            .expect("cov f64 input")
+            .call_method1("reshape", ((rows, cols),))
+            .expect("2-D cov input");
+        let fnp_cov = module.getattr("cov").expect("fnp_python.cov");
+        let numpy_cov = numpy.getattr("cov").expect("numpy.cov");
+        let fnp_corrcoef = module.getattr("corrcoef").expect("fnp_python.corrcoef");
+        let numpy_corrcoef = numpy.getattr("corrcoef").expect("numpy.corrcoef");
+
+        group.bench_function("fnp_cov_rowvar_f64_200x500", |bench| {
+            bench.iter(|| {
+                let result = fnp_cov.call1((&input,)).expect("fnp cov benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_cov_rowvar_f64_200x500", |bench| {
+            bench.iter(|| {
+                let result = numpy_cov
+                    .call1((&input,))
+                    .expect("numpy cov benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_corrcoef_rowvar_f64_200x500", |bench| {
+            bench.iter(|| {
+                let result = fnp_corrcoef
+                    .call1((&input,))
+                    .expect("fnp corrcoef benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_corrcoef_rowvar_f64_200x500", |bench| {
+            bench.iter(|| {
+                let result = numpy_corrcoef
+                    .call1((&input,))
+                    .expect("numpy corrcoef benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_linalg_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_linalg_boundary");
     group.sample_size(10);
@@ -1149,6 +1212,7 @@ criterion_group!(
     bench_char_ascii_boundary,
     bench_average_nansum_axis_boundary,
     bench_histogram_boundary,
+    bench_statistics_boundary,
     bench_linalg_boundary
 );
 criterion_main!(benches);
