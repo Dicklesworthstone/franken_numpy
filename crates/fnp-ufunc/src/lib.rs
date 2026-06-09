@@ -12793,8 +12793,6 @@ impl UFuncArray {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let inner: usize =
                     fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
-                let outer: usize =
-                    fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
                 let axis_len = self.shape[ax];
                 let new_axis_len = axis_len * repeats;
 
@@ -17186,6 +17184,57 @@ impl UFuncArray {
         (values, source_indices)
     }
 
+    /// Scatter the source rows of a constant-pad into an already constant-filled
+    /// output. Each source row (the contiguous last-axis run) maps to a contiguous
+    /// run in the output offset by the per-axis "before" pad, so the fill walks the
+    /// OUTPUT rows (disjoint contiguous slices, parallel across the rayon pool):
+    /// rows whose outer coordinates all land inside the source region copy their
+    /// source row via `copy_from_slice`; rows in the pad border keep the constant
+    /// already written by the memset. Generic over `Copy` so the f64 value plane and
+    /// the i64/u64 sidecar share one kernel. A pure data move → bit-identical to the
+    /// old per-element coordinate-decomposition scatter.
+    fn pad_constant_scatter_rows<T: Copy + Send + Sync>(
+        out: &mut [T],
+        src: &[T],
+        out_shape: &[usize],
+        src_shape: &[usize],
+        pad_before: &[usize],
+    ) {
+        let ndim = out_shape.len();
+        let last = ndim - 1;
+        let row_len = src_shape[last];
+        let out_row_len = out_shape[last];
+        let pad_before_last = pad_before[last];
+        let out_outer_strides = c_strides_elems(&out_shape[..last]);
+        let src_outer_strides = c_strides_elems(&src_shape[..last]);
+        let fill = |(orow, out_row): (usize, &mut [T])| {
+            let mut rem = orow;
+            let mut in_region = true;
+            let mut srow = 0usize;
+            for d in 0..last {
+                let ocoord = rem / out_outer_strides[d];
+                rem %= out_outer_strides[d];
+                let before = pad_before[d];
+                if ocoord < before || ocoord >= before + src_shape[d] {
+                    in_region = false;
+                    break;
+                }
+                srow += (ocoord - before) * src_outer_strides[d];
+            }
+            if in_region {
+                let s = srow * row_len;
+                out_row[pad_before_last..pad_before_last + row_len]
+                    .copy_from_slice(&src[s..s + row_len]);
+            }
+        };
+        const PAD_PAR_MIN: usize = 1 << 15;
+        if out.len() >= PAD_PAR_MIN && rayon::current_num_threads() >= 2 {
+            out.par_chunks_mut(out_row_len).enumerate().for_each(fill);
+        } else {
+            out.chunks_mut(out_row_len).enumerate().for_each(fill);
+        }
+    }
+
     pub fn pad(&self, pad_width: &[(usize, usize)], constant: f64) -> Result<Self, UFuncError> {
         let ndim = self.shape.len();
         if pad_width.len() != ndim {
@@ -17217,27 +17266,56 @@ impl UFuncArray {
         let mut values = vec![constant; out_count];
         let mut sidecar_vals = self.constant_integer_sidecar(constant, out_count);
 
-        // Copy source values into the padded region
         let src_count: usize =
             fnp_ndarray::element_count(&self.shape).map_err(UFuncError::Shape)?;
-        for flat in 0..src_count {
-            let mut remainder = flat;
-            let mut out_flat = 0;
-            for d in 0..ndim {
-                let idx = remainder / src_strides[d];
-                remainder %= src_strides[d];
-                out_flat += (idx + pad_width[d].0) * out_strides[d];
-            }
-            values[out_flat] = self.values[flat];
+        let pad_before: Vec<usize> = pad_width.iter().map(|&(b, _)| b).collect();
+
+        if ndim >= 1 && src_count > 0 {
+            // Fast path: scatter contiguous source rows into the constant-filled
+            // output, parallel across output rows (see pad_constant_scatter_rows).
+            Self::pad_constant_scatter_rows(
+                &mut values,
+                &self.values,
+                &out_shape,
+                &self.shape,
+                &pad_before,
+            );
             if let Some(ref mut sidecar) = sidecar_vals {
                 match (sidecar, &self.integer_sidecar) {
                     (IntegerSidecar::I64(v_out), Some(IntegerSidecar::I64(v_in))) => {
-                        v_out[out_flat] = v_in[flat];
+                        Self::pad_constant_scatter_rows(
+                            v_out, v_in, &out_shape, &self.shape, &pad_before,
+                        );
                     }
                     (IntegerSidecar::U64(v_out), Some(IntegerSidecar::U64(v_in))) => {
-                        v_out[out_flat] = v_in[flat];
+                        Self::pad_constant_scatter_rows(
+                            v_out, v_in, &out_shape, &self.shape, &pad_before,
+                        );
                     }
                     _ => {}
+                }
+            }
+        } else {
+            // 0-d / empty-source fallback: per-element coordinate decomposition.
+            for flat in 0..src_count {
+                let mut remainder = flat;
+                let mut out_flat = 0;
+                for d in 0..ndim {
+                    let idx = remainder / src_strides[d];
+                    remainder %= src_strides[d];
+                    out_flat += (idx + pad_width[d].0) * out_strides[d];
+                }
+                values[out_flat] = self.values[flat];
+                if let Some(ref mut sidecar) = sidecar_vals {
+                    match (sidecar, &self.integer_sidecar) {
+                        (IntegerSidecar::I64(v_out), Some(IntegerSidecar::I64(v_in))) => {
+                            v_out[out_flat] = v_in[flat];
+                        }
+                        (IntegerSidecar::U64(v_out), Some(IntegerSidecar::U64(v_in))) => {
+                            v_out[out_flat] = v_in[flat];
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
@@ -50602,6 +50680,107 @@ print(json.dumps(payload))
             -1.0, -1.0, -1.0, -1.0,
         ];
         assert_eq!(r.values(), &expected);
+    }
+
+    #[test]
+    fn pad_constant_row_scatter_matches_naive_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The parallel row-scatter constant pad must be BIT-IDENTICAL to the old
+        // per-element coordinate-decomposition scatter, across 1-D / 2-D / 3-D,
+        // asymmetric and zero-on-one-side pad widths, non-tile-multiple dims, and
+        // sizes crossing the parallel threshold (1<<15). Pure data move => to_bits
+        // equality incl NaN / ±inf / -0.0 constants and data, plus identical
+        // i64-sidecar relocation.
+        fn naive(
+            values: &[f64],
+            shape: &[usize],
+            pad: &[(usize, usize)],
+            constant: f64,
+        ) -> (Vec<f64>, Vec<usize>, Vec<usize>) {
+            let ndim = shape.len();
+            let out_shape: Vec<usize> =
+                shape.iter().zip(pad).map(|(&s, &(b, a))| s + b + a).collect();
+            let mut src_strides = vec![1usize; ndim];
+            for d in (0..ndim.saturating_sub(1)).rev() {
+                src_strides[d] = src_strides[d + 1] * shape[d + 1];
+            }
+            let mut out_strides = vec![1usize; ndim];
+            for d in (0..ndim.saturating_sub(1)).rev() {
+                out_strides[d] = out_strides[d + 1] * out_shape[d + 1];
+            }
+            let total: usize = out_shape.iter().product();
+            let src_count: usize = shape.iter().product();
+            let mut out = vec![constant; total];
+            // index map: -1 sentinel for constant cells (encoded via usize::MAX).
+            let mut idx = vec![usize::MAX; total];
+            for flat in 0..src_count {
+                let mut rem = flat;
+                let mut of = 0usize;
+                for d in 0..ndim {
+                    let i = rem / src_strides[d];
+                    rem %= src_strides[d];
+                    of += (i + pad[d].0) * out_strides[d];
+                }
+                out[of] = values[flat];
+                idx[of] = flat;
+            }
+            (out, idx, out_shape)
+        }
+        let cases: &[(Vec<usize>, Vec<(usize, usize)>, f64)] = &[
+            (vec![400], vec![(7, 13)], -1.0),
+            (vec![200, 133], vec![(7, 5), (9, 3)], 0.0),
+            (vec![50, 41, 33], vec![(3, 2), (0, 4), (5, 0)], f64::NAN),
+            (vec![300, 280], vec![(13, 0), (0, 17)], f64::INFINITY),
+        ];
+        let mut seed = 0xc3d2_e1f0_5a6b_7c8du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            match (seed >> 9) % 17 {
+                0 => f64::NAN,
+                1 => f64::NEG_INFINITY,
+                2 => -0.0,
+                _ => (seed >> 11) as f64 / (1u64 << 53) as f64 * 20.0 - 10.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        for (shape, pad, constant) in cases {
+            let n: usize = shape.iter().product();
+            let data: Vec<f64> = (0..n).map(|_| next()).collect();
+            let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            let got = arr.pad(pad, *constant).unwrap();
+            let (want, idx, out_shape) = naive(&data, shape, pad, *constant);
+            assert_eq!(got.shape(), &out_shape[..], "shape {shape:?}");
+            for (g, w) in got.values().iter().zip(want.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "pad const {shape:?} {pad:?}");
+            }
+            for v in got.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+            // i64 sidecar: pad with an integer constant (37); borders take 37.
+            let ivals: Vec<i64> = (0..n as i64).map(|k| (k << 20) ^ (k * 11 + 5)).collect();
+            let iarr = UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(ivals.clone()))
+                .expect("from_storage");
+            let it = iarr.pad(pad, 37.0).expect("ipad");
+            let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
+                panic!("expected i64 storage");
+            };
+            let want_i: Vec<i64> = idx
+                .iter()
+                .map(|&i| if i == usize::MAX { 37 } else { ivals[i] })
+                .collect();
+            assert_eq!(got_i, want_i, "i64 pad const {shape:?} {pad:?}");
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "66e11cb522830e4ece8184c8797dc124edcd8f5098611b13bc90550d39e8ef4e",
+            "pad constant row-scatter golden digest drifted"
+        );
     }
 
     #[test]

@@ -70,3 +70,7 @@ harness = false
 [[bench]]
 name = "repeat"
 harness = false
+
+[[bench]]
+name = "pad_constant"
+harness = false
