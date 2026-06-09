@@ -16074,14 +16074,10 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
                     b.values(),
                     b_shape,
                     vector_rhs,
-                ) {
-                    if values.len() == expected {
-                        if let Ok(result) =
-                            UFuncArray::new(out_shape, values, DType::F64)
-                        {
-                            return build_numpy_array_from_ufunc(py, &result);
-                        }
-                    }
+                ) && values.len() == expected
+                    && let Ok(result) = UFuncArray::new(out_shape, values, DType::F64)
+                {
+                    return build_numpy_array_from_ufunc(py, &result);
                 }
             }
         }
@@ -19956,11 +19952,14 @@ fn median(
 // parallel row-dot-products (no transpose materialization, scale folded into the dot),
 // which removes those allocations. The dot reassociates the sum vs numpy's BLAS — cov
 // parity is tolerance-based (np.allclose), like the existing matmul path.
-fn try_zerocopy_cov_rowvar_f64(
+// Core: returns the (n_vars x n_vars) covariance matrix flat + n_vars for the eligible
+// rowvar=True / contiguous-float64 case, or None to defer. Shared by cov (builds the array)
+// and corrcoef (normalizes the matrix first).
+fn cov_gram_rowvar_f64(
     py: Python<'_>,
     m: &Bound<'_, PyAny>,
     ddof: usize,
-) -> PyResult<Option<Py<PyAny>>> {
+) -> PyResult<Option<(Vec<f64>, usize)>> {
     use rayon::prelude::*;
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
@@ -20019,8 +20018,17 @@ fn try_zerocopy_cov_rowvar_f64(
             result[i * n_vars + j] = result[j * n_vars + i];
         }
     }
+    Ok(Some((result, n_vars)))
+}
 
-    // Build output (n_vars x n_vars); numpy squeezes a 1-variable result to a 0-d scalar.
+// Build an (n_vars x n_vars) float64 numpy array from a flat row-major Vec; numpy squeezes
+// a single-variable covariance/correlation to a 0-d scalar.
+fn build_square_f64_matrix(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    values: Vec<f64>,
+    n_vars: usize,
+) -> PyResult<Option<Py<PyAny>>> {
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
     let flat = numpy.call_method("empty", (n_vars * n_vars,), Some(&kwargs))?;
@@ -20031,17 +20039,65 @@ fn try_zerocopy_cov_rowvar_f64(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, val) in output.iter().zip(result) {
+        for (slot, val) in output.iter().zip(values) {
             slot.set(val);
         }
     }
     if n_vars == 1 {
-        // 1-D input -> 0-d scalar variance.
         let scalar = flat.call_method1("reshape", (PyTuple::empty(py),))?;
         return Ok(Some(scalar.call_method0("squeeze")?.unbind()));
     }
     let reshaped = flat.call_method1("reshape", ((n_vars, n_vars),))?;
     Ok(Some(reshaped.unbind()))
+}
+
+fn try_zerocopy_cov_rowvar_f64(
+    py: Python<'_>,
+    m: &Bound<'_, PyAny>,
+    ddof: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((result, n_vars)) = cov_gram_rowvar_f64(py, m, ddof)? else {
+        return Ok(None);
+    };
+    let numpy = py.import("numpy")?;
+    build_square_f64_matrix(py, &numpy, result, n_vars)
+}
+
+// numpy.corrcoef normalizes the covariance by the outer product of the diagonal stddevs,
+// then clips to [-1, 1]: `c /= stddev[:,None]; c /= stddev[None,:]; clip`. ddof/bias are
+// ignored by numpy here (the normalization cancels them), so the underlying cov uses ddof=1.
+fn try_zerocopy_corrcoef_rowvar_f64(
+    py: Python<'_>,
+    m: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((mut cov, n_vars)) = cov_gram_rowvar_f64(py, m, 1)? else {
+        return Ok(None);
+    };
+    let mut stddev = Vec::with_capacity(n_vars);
+    for i in 0..n_vars {
+        let var = cov[i * n_vars + i];
+        if !var.is_finite() || var < 0.0 {
+            return Ok(None); // numpy warning/NaN surface: defer.
+        }
+        let sd = var.sqrt();
+        if sd == 0.0 {
+            return Ok(None); // zero-variance row: numpy yields NaN/inf — defer.
+        }
+        stddev.push(sd);
+    }
+    for row in 0..n_vars {
+        let row_scale = stddev[row];
+        for (col, &col_scale) in stddev.iter().enumerate().take(n_vars) {
+            let idx = row * n_vars + col;
+            // Two sequential divides, matching numpy's `c /= stddev[:,None]` then
+            // `/= stddev[None,:]` ULP order.
+            cov[idx] /= row_scale;
+            cov[idx] /= col_scale;
+            cov[idx] = cov[idx].clamp(-1.0, 1.0);
+        }
+    }
+    let numpy = py.import("numpy")?;
+    build_square_f64_matrix(py, &numpy, cov, n_vars)
 }
 
 fn native_cov_unweighted(
@@ -20296,6 +20352,14 @@ fn corrcoef(
     // regardless of the (deprecated) bias/ddof args passed in.
     let x_bound = x.bind(py);
     let y_binding = y.as_ref().map(|value| value.bind(py));
+    // Fast path: rowvar=True with no y maps to the zero-copy parallel-Gram cov + an
+    // in-place normalize, avoiding the cold-allocation UFuncArray chain (see cov).
+    if rowvar
+        && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
+        && let Some(out) = try_zerocopy_corrcoef_rowvar_f64(py, x_bound)?
+    {
+        return Ok(out);
+    }
     let cov_array = match native_cov_unweighted(py, x_bound, y_binding, rowvar, 1) {
         Ok(Some(value)) => value,
         _ => return fallback(py),
@@ -82427,8 +82491,11 @@ mod tests {
                     .call_method1("reshape", (shape_tuple,))
             };
 
+            type EinsumOperandCase<'a> = (i64, &'a [i64]);
+            type EinsumCase<'a> = (&'a str, &'a [EinsumOperandCase<'a>]);
+
             // (subscripts, operand (n, shape) list)
-            let cases: &[(&str, &[(i64, &[i64])])] = &[
+            let cases: &[EinsumCase<'_>] = &[
                 ("ij,jk,kl->il", &[(20, &[4, 5]), (30, &[5, 6]), (18, &[6, 3])]),
                 ("ij,jk,ki->", &[(35, &[5, 7]), (42, &[7, 6]), (30, &[6, 5])]),
                 ("ijk,jkl,kl->il", &[(24, &[2, 3, 4]), (24, &[3, 4, 2]), (8, &[4, 2])]),

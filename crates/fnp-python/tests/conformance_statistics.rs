@@ -492,7 +492,9 @@ fn cov_native_fast_path_matches_numpy_across_shape_ddof_bias() -> Result<(), Str
     // matmul path.)
     let script = fnp_script(
         r#"
+import hashlib
 ok = True
+proof = bytearray()
 rng = np.random.default_rng(3)
 for shape in [(50, 2000), (5, 30), (1, 100), (3, 3), (10, 11), (200, 500)]:
     X = rng.standard_normal(shape)
@@ -500,6 +502,43 @@ for shape in [(50, 2000), (5, 30), (1, 100), (3, 3), (10, 11), (200, 500)]:
         f = np.asarray(fnp.cov(X, **kw)); n = np.asarray(np.cov(X, **kw))
         if f.shape != n.shape or not np.allclose(f, n, rtol=1e-9, atol=1e-12, equal_nan=True):
             ok = False
+        proof.extend(str(f.shape).encode())
+        proof.extend(str(f.dtype).encode())
+        proof.extend(np.ascontiguousarray(f).view(np.uint8).tobytes())
+print(ok)
+print(hashlib.sha256(proof).hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().next().unwrap_or_default(),
+        "True",
+        "cov fast path must match numpy across shape/ddof/bias"
+    );
+    assert_eq!(
+        result.lines().nth(1).unwrap_or_default(),
+        "a66b74e96bcdedee32568901f3d95a6f21eda1781b7b7c5fae04fb16186b10f3",
+        "cov fast path golden sha256 drifted"
+    );
+    Ok(())
+}
+
+#[test]
+fn corrcoef_native_fast_path_matches_numpy_across_shapes() -> Result<(), String> {
+    // Locks the zero-copy parallel-Gram corrcoef fast path (rowvar=True, no y, f64):
+    // cov via the shared Gram core, then normalize by diagonal stddevs and clip to
+    // [-1, 1] — must match numpy.corrcoef within tolerance across variable/observation
+    // counts, including the 1-D (scalar 1.0) case.
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(5)
+for shape in [(50, 2000), (5, 30), (1, 100), (3, 3), (10, 11), (200, 500)]:
+    X = rng.standard_normal(shape)
+    f = np.asarray(fnp.corrcoef(X)); n = np.asarray(np.corrcoef(X))
+    if f.shape != n.shape or not np.allclose(f, n, rtol=1e-9, atol=1e-12, equal_nan=True):
+        ok = False
 print(ok)
 "#
         .into(),
@@ -508,7 +547,7 @@ print(ok)
     assert_eq!(
         result.trim(),
         "True",
-        "cov fast path must match numpy across shape/ddof/bias"
+        "corrcoef fast path must match numpy across shapes"
     );
     Ok(())
 }
