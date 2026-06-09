@@ -18736,6 +18736,12 @@ impl UFuncArray {
                 integer_sidecar: None,
             });
         }
+        if weights.is_none()
+            && let Some(result) = self.bincount_unweighted_small_range(minlength)?
+        {
+            return Ok(result);
+        }
+
         let mut max_val = 0usize;
         for &v in &self.values {
             if !v.is_finite() {
@@ -18788,6 +18794,92 @@ impl UFuncArray {
             dtype,
             integer_sidecar: None,
         })
+    }
+
+    fn bincount_unweighted_small_range(
+        &self,
+        minlength: usize,
+    ) -> Result<Option<Self>, UFuncError> {
+        const SMALL_RANGE_MAX_LEN: usize = 65_536;
+        const MAX_BINCOUNT_LEN: usize = isize::MAX as usize / 8;
+
+        fn count_index(counts: &mut [f64], max_seen: &mut usize, index: usize) -> bool {
+            if index >= counts.len() {
+                return false;
+            }
+            *max_seen = (*max_seen).max(index);
+            counts[index] += 1.0;
+            true
+        }
+
+        if minlength > SMALL_RANGE_MAX_LEN {
+            return Ok(None);
+        }
+
+        let mut counts = try_zeroed_f64(SMALL_RANGE_MAX_LEN, "bincount")?;
+        let mut max_seen = minlength.saturating_sub(1);
+        match (&self.integer_sidecar, self.dtype) {
+            (Some(IntegerSidecar::I64(values)), DType::I64) => {
+                for &value in values {
+                    let Ok(index) = usize::try_from(value) else {
+                        return Err(UFuncError::Msg(
+                            "bincount: input must be non-negative".to_string(),
+                        ));
+                    };
+                    if !count_index(&mut counts, &mut max_seen, index) {
+                        return Ok(None);
+                    }
+                }
+            }
+            (Some(IntegerSidecar::U64(values)), DType::U64) => {
+                for &value in values {
+                    if value > MAX_BINCOUNT_LEN as u64 {
+                        return Err(UFuncError::Msg(
+                            "bincount: input value is too large for memory allocation".to_string(),
+                        ));
+                    }
+                    if !count_index(&mut counts, &mut max_seen, value as usize) {
+                        return Ok(None);
+                    }
+                }
+            }
+            _ => {
+                let max_input = MAX_BINCOUNT_LEN as f64;
+                for &value in &self.values {
+                    if !value.is_finite() {
+                        return Err(UFuncError::Msg(
+                            "bincount: input must be finite".to_string(),
+                        ));
+                    }
+                    if value < 0.0 {
+                        return Err(UFuncError::Msg(
+                            "bincount: input must be non-negative".to_string(),
+                        ));
+                    }
+                    if value > max_input {
+                        return Err(UFuncError::Msg(
+                            "bincount: input value is too large for memory allocation".to_string(),
+                        ));
+                    }
+                    if !count_index(&mut counts, &mut max_seen, value as usize) {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+
+        let n = if self.values.is_empty() {
+            minlength
+        } else {
+            max_seen + 1
+        };
+        counts.truncate(n);
+        Ok(Some(Self {
+            shape: vec![n],
+            values: counts,
+            dtype: DType::I64,
+            integer_sidecar: None,
+        }))
     }
 
     /// One-dimensional linear interpolation (np.interp).
@@ -47180,7 +47272,11 @@ print(json.dumps(payload))
                 digest.update(v.to_bits().to_le_bytes());
             }
         }
-        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(
             hex, "6af7cd4e88f0310230d97549531653f46a233fbd6b53f1ed8e2806440ba8d4aa",
             "histogram_full golden digest drifted"
@@ -52348,6 +52444,102 @@ print(json.dumps(payload))
         assert!(
             err.to_string().contains("weights") && err.to_string().contains("length"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn bincount_unweighted_small_range_matches_reference_and_golden_sha256() {
+        fn reference(values: &[usize], minlength: usize) -> Vec<f64> {
+            let len = values
+                .iter()
+                .copied()
+                .max()
+                .map_or(minlength, |max| (max + 1).max(minlength));
+            let mut counts = vec![0.0; len];
+            for &value in values {
+                counts[value] += 1.0;
+            }
+            counts
+        }
+
+        fn hash_array(arr: &UFuncArray, digest: &mut Sha256) {
+            digest.update((arr.shape().len() as u64).to_le_bytes());
+            for &dim in arr.shape() {
+                digest.update((dim as u64).to_le_bytes());
+            }
+            for value in arr.values() {
+                digest.update(value.to_bits().to_le_bytes());
+            }
+        }
+
+        let cases: Vec<(UFuncArray, usize, Vec<usize>)> = vec![
+            (
+                UFuncArray::new(
+                    vec![9],
+                    vec![0.0, 1.0, 1.0, 5.0, 2.0, 5.0, 5.0, 0.0, 3.0],
+                    DType::I64,
+                )
+                .unwrap(),
+                0,
+                vec![0, 1, 1, 5, 2, 5, 5, 0, 3],
+            ),
+            (
+                UFuncArray::from_storage(vec![7], ArrayStorage::I64(vec![0, 2, 2, 3, 7, 7, 1]))
+                    .unwrap(),
+                10,
+                vec![0, 2, 2, 3, 7, 7, 1],
+            ),
+        ];
+
+        let mut digest = Sha256::new();
+        for (arr, minlength, values) in cases {
+            let got = arr.bincount_with(None, minlength).unwrap();
+            let expected = reference(&values, minlength);
+            assert_eq!(got.dtype(), DType::I64);
+            assert_eq!(got.values(), expected.as_slice());
+            hash_array(&got, &mut digest);
+        }
+
+        let mut sidecar_i64 =
+            UFuncArray::new(vec![6], vec![0.0, 4.0, 4.0, 9.0, 0.0, 9.0], DType::I64).unwrap();
+        sidecar_i64.integer_sidecar = Some(IntegerSidecar::I64(vec![0, 4, 4, 9, 0, 9]));
+        let got_i64 = sidecar_i64.bincount_with(None, 0).unwrap();
+        assert_eq!(
+            got_i64.values(),
+            reference(&[0, 4, 4, 9, 0, 9], 0).as_slice()
+        );
+        hash_array(&got_i64, &mut digest);
+
+        let mut sidecar_u64 =
+            UFuncArray::new(vec![5], vec![1.0, 6.0, 1.0, 2.0, 6.0], DType::U64).unwrap();
+        sidecar_u64.integer_sidecar = Some(IntegerSidecar::U64(vec![1, 6, 1, 2, 6]));
+        let got_u64 = sidecar_u64.bincount_with(None, 8).unwrap();
+        assert_eq!(got_u64.values(), reference(&[1, 6, 1, 2, 6], 8).as_slice());
+        hash_array(&got_u64, &mut digest);
+
+        let mut negative = UFuncArray::new(vec![2], vec![0.0, 0.0], DType::I64).unwrap();
+        negative.integer_sidecar = Some(IntegerSidecar::I64(vec![0, -1]));
+        assert!(
+            negative
+                .bincount()
+                .unwrap_err()
+                .to_string()
+                .contains("non-negative")
+        );
+
+        let mut huge = UFuncArray::new(vec![1], vec![0.0], DType::U64).unwrap();
+        huge.integer_sidecar = Some(IntegerSidecar::U64(vec![(isize::MAX as u64 / 8) + 1]));
+        assert!(
+            huge.bincount()
+                .unwrap_err()
+                .to_string()
+                .contains("too large")
+        );
+
+        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "fc28f9dc80351f18b98ebd5936e81ed30bb1fa16fc6f8b3d7ebcbde863433448",
+            "bincount small-range output golden SHA-256 changed"
         );
     }
 
