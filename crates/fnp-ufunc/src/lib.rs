@@ -17063,6 +17063,69 @@ impl UFuncArray {
 
     /// Pad an array with constant values (np.pad with mode='constant').
     /// `pad_width` is a list of (before, after) tuples, one per dimension.
+    /// Gather an `out_shape` output where the source coordinate along each axis
+    /// `d` is given by `axis_maps[d][out_idx]` (the per-mode pad map: edge clamp,
+    /// wrap, reflect, symmetric). Replaces the per-element coordinate-decomposition
+    /// gather shared by the gather-based pad modes: the mode's branchy index logic
+    /// is precomputed ONCE per axis into small 1-D maps, then the output is filled
+    /// row by row — each row decomposes its outer index once (amortized over the
+    /// contiguous last axis) and gathers the inner run via the reused last-axis
+    /// map. Rows are independent contiguous slices, so the fill runs across the
+    /// rayon pool. Returns `(values, source_indices)` for sidecar reindexing; the
+    /// gather is value-agnostic so it is bit-for-bit identical to the old scan.
+    fn pad_gather_by_axis_maps(
+        src_values: &[f64],
+        src_strides: &[usize],
+        out_shape: &[usize],
+        axis_maps: &[Vec<usize>],
+    ) -> (Vec<f64>, Vec<usize>) {
+        let ndim = out_shape.len();
+        let out_count: usize = out_shape.iter().product();
+        if out_count == 0 {
+            return (Vec::new(), Vec::new());
+        }
+        if ndim == 0 {
+            return (vec![src_values[0]], vec![0]);
+        }
+        let last = ndim - 1;
+        let out_last = out_shape[last];
+        let last_step = src_strides[last];
+        let last_map = &axis_maps[last];
+        let out_outer_strides = c_strides_elems(&out_shape[..last]);
+        let mut values = vec![0.0f64; out_count];
+        let mut source_indices = vec![0usize; out_count];
+        let fill_row = |(orow, (vrow, irow)): (usize, (&mut [f64], &mut [usize]))| {
+            // Decode this row's outer index into per-axis source contributions once.
+            let mut rem = orow;
+            let mut outer_base = 0usize;
+            for d in 0..last {
+                let c = rem / out_outer_strides[d];
+                rem %= out_outer_strides[d];
+                outer_base += axis_maps[d][c] * src_strides[d];
+            }
+            for jo in 0..out_last {
+                let src = outer_base + last_map[jo] * last_step;
+                vrow[jo] = src_values[src];
+                irow[jo] = src;
+            }
+        };
+        const PAD_PAR_MIN: usize = 1 << 15;
+        if out_count >= PAD_PAR_MIN && rayon::current_num_threads() >= 2 {
+            values
+                .par_chunks_mut(out_last)
+                .zip(source_indices.par_chunks_mut(out_last))
+                .enumerate()
+                .for_each(fill_row);
+        } else {
+            values
+                .chunks_mut(out_last)
+                .zip(source_indices.chunks_mut(out_last))
+                .enumerate()
+                .for_each(fill_row);
+        }
+        (values, source_indices)
+    }
+
     pub fn pad(&self, pad_width: &[(usize, usize)], constant: f64) -> Result<Self, UFuncError> {
         let ndim = self.shape.len();
         if pad_width.len() != ndim {
@@ -17153,29 +17216,27 @@ impl UFuncArray {
                     .ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
             })
             .collect::<Result<_, _>>()?;
-        let out_count = fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
+        fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
         let src_strides = c_strides_elems(&self.shape);
-        let out_strides = c_strides_elems(&out_shape);
-        let mut values = Vec::with_capacity(out_count);
-        let mut source_indices = Vec::with_capacity(out_count);
-        for out_flat in 0..out_count {
-            let mut remainder = out_flat;
-            let mut src_flat = 0;
-            for d in 0..ndim {
-                let out_idx = remainder / out_strides[d];
-                remainder %= out_strides[d];
-                let src_idx = if out_idx < pad_width[d].0 {
-                    0
-                } else if out_idx >= pad_width[d].0 + self.shape[d] {
-                    self.shape[d].saturating_sub(1)
-                } else {
-                    out_idx - pad_width[d].0
-                };
-                src_flat += src_idx * src_strides[d];
-            }
-            values.push(self.values[src_flat]);
-            source_indices.push(src_flat);
-        }
+        let axis_maps: Vec<Vec<usize>> = (0..ndim)
+            .map(|d| {
+                let before = pad_width[d].0;
+                let s = self.shape[d];
+                (0..out_shape[d])
+                    .map(|out_idx| {
+                        if out_idx < before {
+                            0
+                        } else if out_idx >= before + s {
+                            s.saturating_sub(1)
+                        } else {
+                            out_idx - before
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let (values, source_indices) =
+            Self::pad_gather_by_axis_maps(&self.values, &src_strides, &out_shape, &axis_maps);
         Ok(Self {
             shape: out_shape,
             values,
@@ -17211,27 +17272,23 @@ impl UFuncArray {
                     .ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
             })
             .collect::<Result<_, _>>()?;
-        let out_count = fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
+        fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
         let src_strides = c_strides_elems(&self.shape);
-        let out_strides = c_strides_elems(&out_shape);
-        let mut values = Vec::with_capacity(out_count);
-        let mut source_indices = Vec::with_capacity(out_count);
-        for out_flat in 0..out_count {
-            let mut remainder = out_flat;
-            let mut src_flat = 0;
-            for d in 0..ndim {
-                let out_idx = remainder / out_strides[d];
-                remainder %= out_strides[d];
-                let out_isize = isize::try_from(out_idx).unwrap_or(isize::MAX);
+        let axis_maps: Vec<Vec<usize>> = (0..ndim)
+            .map(|d| {
                 let pad_isize = isize::try_from(pad_width[d].0).unwrap_or(isize::MAX);
-                let shifted = out_isize.saturating_sub(pad_isize);
                 let dim_isize = isize::try_from(self.shape[d]).unwrap_or(isize::MAX);
-                let src_idx = shifted.rem_euclid(dim_isize) as usize;
-                src_flat += src_idx * src_strides[d];
-            }
-            values.push(self.values[src_flat]);
-            source_indices.push(src_flat);
-        }
+                (0..out_shape[d])
+                    .map(|out_idx| {
+                        let out_isize = isize::try_from(out_idx).unwrap_or(isize::MAX);
+                        let shifted = out_isize.saturating_sub(pad_isize);
+                        shifted.rem_euclid(dim_isize) as usize
+                    })
+                    .collect()
+            })
+            .collect();
+        let (values, source_indices) =
+            Self::pad_gather_by_axis_maps(&self.values, &src_strides, &out_shape, &axis_maps);
         Ok(Self {
             shape: out_shape,
             values,
@@ -17268,24 +17325,19 @@ impl UFuncArray {
                     .ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
             })
             .collect::<Result<_, _>>()?;
-        let out_count = fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
+        fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
         let src_strides = c_strides_elems(&self.shape);
-        let out_strides = c_strides_elems(&out_shape);
-        let mut values = Vec::with_capacity(out_count);
-        let mut source_indices = Vec::with_capacity(out_count);
-        for out_flat in 0..out_count {
-            let mut remainder = out_flat;
-            let mut src_flat = 0;
-            for d in 0..ndim {
-                let out_idx = remainder / out_strides[d];
-                remainder %= out_strides[d];
-                let shifted = out_idx as isize - pad_width[d].0 as isize;
-                let src_idx = reflect_index(shifted, self.shape[d]);
-                src_flat += src_idx * src_strides[d];
-            }
-            values.push(self.values[src_flat]);
-            source_indices.push(src_flat);
-        }
+        let axis_maps: Vec<Vec<usize>> = (0..ndim)
+            .map(|d| {
+                let before = pad_width[d].0 as isize;
+                let s = self.shape[d];
+                (0..out_shape[d])
+                    .map(|out_idx| reflect_index(out_idx as isize - before, s))
+                    .collect()
+            })
+            .collect();
+        let (values, source_indices) =
+            Self::pad_gather_by_axis_maps(&self.values, &src_strides, &out_shape, &axis_maps);
         Ok(Self {
             shape: out_shape,
             values,
@@ -17322,24 +17374,19 @@ impl UFuncArray {
                     .ok_or(UFuncError::Shape(fnp_ndarray::ShapeError::Overflow))
             })
             .collect::<Result<_, _>>()?;
-        let out_count = fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
+        fnp_ndarray::element_count(&out_shape).map_err(UFuncError::Shape)?;
         let src_strides = c_strides_elems(&self.shape);
-        let out_strides = c_strides_elems(&out_shape);
-        let mut values = Vec::with_capacity(out_count);
-        let mut source_indices = Vec::with_capacity(out_count);
-        for out_flat in 0..out_count {
-            let mut remainder = out_flat;
-            let mut src_flat = 0;
-            for d in 0..ndim {
-                let out_idx = remainder / out_strides[d];
-                remainder %= out_strides[d];
-                let shifted = out_idx as isize - pad_width[d].0 as isize;
-                let src_idx = symmetric_index(shifted, self.shape[d]);
-                src_flat += src_idx * src_strides[d];
-            }
-            values.push(self.values[src_flat]);
-            source_indices.push(src_flat);
-        }
+        let axis_maps: Vec<Vec<usize>> = (0..ndim)
+            .map(|d| {
+                let before = pad_width[d].0 as isize;
+                let s = self.shape[d];
+                (0..out_shape[d])
+                    .map(|out_idx| symmetric_index(out_idx as isize - before, s))
+                    .collect()
+            })
+            .collect();
+        let (values, source_indices) =
+            Self::pad_gather_by_axis_maps(&self.values, &src_strides, &out_shape, &axis_maps);
         Ok(Self {
             shape: out_shape,
             values,
@@ -55466,6 +55513,146 @@ print(json.dumps(payload))
         let a = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
         let err = a.pad_symmetric(&[(1, 1)]).unwrap_err();
         assert!(matches!(err, UFuncError::Msg(msg) if msg.contains("axis 0")));
+    }
+
+    #[test]
+    fn pad_gather_modes_match_naive_and_golden() {
+        use sha2::{Digest, Sha256};
+        use std::time::Instant;
+        // The shared parallel axis-map pad gather (edge/wrap/reflect/symmetric)
+        // must be BIT-IDENTICAL to the old per-element coordinate-decomposition
+        // scan, across 2-D and 3-D, asymmetric pad widths, non-tile-multiple dims,
+        // and sizes crossing the parallel threshold (1<<15). Pure gather => to_bits
+        // equality incl NaN / ±inf / -0.0, plus identical i64-sidecar relocation.
+        // The naive reference recomputes the exact per-axis index logic the old
+        // code used inline.
+        fn naive(
+            values: &[f64],
+            shape: &[usize],
+            pad: &[(usize, usize)],
+            mode: &str,
+        ) -> (Vec<f64>, Vec<usize>, Vec<usize>) {
+            let ndim = shape.len();
+            let out_shape: Vec<usize> = shape
+                .iter()
+                .zip(pad)
+                .map(|(&s, &(b, a))| s + b + a)
+                .collect();
+            let mut src_strides = vec![1usize; ndim];
+            for d in (0..ndim.saturating_sub(1)).rev() {
+                src_strides[d] = src_strides[d + 1] * shape[d + 1];
+            }
+            let mut out_strides = vec![1usize; ndim];
+            for d in (0..ndim.saturating_sub(1)).rev() {
+                out_strides[d] = out_strides[d + 1] * out_shape[d + 1];
+            }
+            let total: usize = out_shape.iter().product();
+            let mut out = vec![0.0f64; total];
+            let mut idx = vec![0usize; total];
+            for out_flat in 0..total {
+                let mut rem = out_flat;
+                let mut src = 0usize;
+                for d in 0..ndim {
+                    let oi = rem / out_strides[d];
+                    rem %= out_strides[d];
+                    let before = pad[d].0;
+                    let s = shape[d];
+                    let si = match mode {
+                        "edge" => {
+                            if oi < before {
+                                0
+                            } else if oi >= before + s {
+                                s - 1
+                            } else {
+                                oi - before
+                            }
+                        }
+                        "wrap" => ((oi as isize - before as isize).rem_euclid(s as isize)) as usize,
+                        "reflect" => super::reflect_index(oi as isize - before as isize, s),
+                        _ => super::symmetric_index(oi as isize - before as isize, s),
+                    };
+                    src += si * src_strides[d];
+                }
+                out[out_flat] = values[src];
+                idx[out_flat] = src;
+            }
+            (out, idx, out_shape)
+        }
+        let cases: &[(Vec<usize>, Vec<(usize, usize)>)] = &[
+            (vec![200, 133], vec![(7, 5), (9, 3)]),
+            (vec![50, 41, 33], vec![(3, 2), (4, 1), (5, 6)]),
+            (vec![300, 280], vec![(0, 17), (13, 0)]),
+        ];
+        let mut seed = 0x6d2b_79f5_1c3a_e007u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            match (seed >> 9) % 19 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => -0.0,
+                _ => (seed >> 11) as f64 / (1u64 << 53) as f64 * 20.0 - 10.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        let mut naive_ms = 0.0f64;
+        let mut fast_ms = 0.0f64;
+        for (shape, pad) in cases {
+            let n: usize = shape.iter().product();
+            let data: Vec<f64> = (0..n).map(|_| next()).collect();
+            let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            let ivals: Vec<i64> = (0..n as i64).map(|k| (k << 19) ^ (k * 7 + 3)).collect();
+            let iarr = UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(ivals.clone()))
+                .expect("from_storage");
+            for mode in ["edge", "wrap", "reflect", "symmetric"] {
+                let naive_elapsed = Instant::now();
+                let (want, idx, out_shape) = naive(&data, shape, pad, mode);
+                naive_ms += naive_elapsed.elapsed().as_secs_f64() * 1e3;
+                let fast_elapsed = Instant::now();
+                let got = match mode {
+                    "edge" => arr.pad_edge(pad),
+                    "wrap" => arr.pad_wrap(pad),
+                    "reflect" => arr.pad_reflect(pad),
+                    _ => arr.pad_symmetric(pad),
+                }
+                .unwrap();
+                fast_ms += fast_elapsed.elapsed().as_secs_f64() * 1e3;
+                assert_eq!(got.shape(), &out_shape[..], "shape {shape:?} {mode}");
+                for (g, w) in got.values().iter().zip(want.iter()) {
+                    assert_eq!(g.to_bits(), w.to_bits(), "pad {mode} {shape:?}");
+                }
+                for v in got.values() {
+                    digest.update(v.to_bits().to_le_bytes());
+                }
+                // i64 sidecar relocates identically.
+                let it = match mode {
+                    "edge" => iarr.pad_edge(pad),
+                    "wrap" => iarr.pad_wrap(pad),
+                    "reflect" => iarr.pad_reflect(pad),
+                    _ => iarr.pad_symmetric(pad),
+                }
+                .unwrap();
+                let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
+                    panic!("expected i64 storage");
+                };
+                let want_i: Vec<i64> = idx.iter().map(|&i| ivals[i]).collect();
+                assert_eq!(got_i, want_i, "i64 pad {mode} {shape:?}");
+            }
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "11f3f36f2d4e64dbd7ad090656072267b5875d1c5b0edb83350562914d216051",
+            "pad gather modes golden digest drifted"
+        );
+        println!(
+            "pad_gather_modes old_coordinate_decomp={naive_ms:.3}ms axis_map_gather={fast_ms:.3}ms speedup={:.2}x",
+            naive_ms / fast_ms
+        );
     }
 
     // ── index utility tests ────────

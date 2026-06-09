@@ -62,3 +62,7 @@ harness = false
 [[bench]]
 name = "broadcast"
 harness = false
+
+[[bench]]
+name = "pad"
+harness = false
