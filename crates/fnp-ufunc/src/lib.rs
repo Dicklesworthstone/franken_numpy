@@ -5380,7 +5380,7 @@ impl UFuncArray {
     /// Create an array filled with a given value.
     pub fn full(shape: Vec<usize>, fill_value: f64, dtype: DType) -> Result<Self, UFuncError> {
         let count = element_count(&shape).map_err(UFuncError::Shape)?;
-        Self::from_values_with_dtype(shape, vec![fill_value; count], dtype)
+        Self::from_values_with_dtype(shape, try_filled_f64(count, fill_value, "full")?, dtype)
     }
 
     /// Create a filled array with the same shape and, when representable, the same dtype as another.
@@ -5435,7 +5435,7 @@ impl UFuncArray {
                 }
             }
         }
-        let values: Vec<f64> = (0..n).map(|i| start + step * i as f64).collect();
+        let values = try_collect_f64((0..n).map(|i| start + step * i as f64), "arange")?;
         Self::from_values_with_dtype(vec![n], values, dtype)
     }
 
@@ -5467,7 +5467,7 @@ impl UFuncArray {
             num as f64
         };
         let step = (stop - start) / divisor;
-        let mut values: Vec<f64> = (0..num).map(|i| start + step * i as f64).collect();
+        let mut values = try_collect_f64((0..num).map(|i| start + step * i as f64), "linspace")?;
         // Guarantee exact endpoint when included
         if endpoint && let Some(last) = values.last_mut() {
             *last = stop;
@@ -5713,7 +5713,7 @@ impl UFuncArray {
     pub fn eye(n: usize, m: Option<usize>, k: i64, dtype: DType) -> Result<Self, UFuncError> {
         let cols = m.unwrap_or(n);
         let count = n * cols;
-        let mut values = vec![0.0; count];
+        let mut values = try_zeroed_f64(count, "eye")?;
         for row in 0..n {
             let col = (row as i64).saturating_add(k);
             if col >= 0 && (col as usize) < cols {
@@ -5777,10 +5777,29 @@ impl UFuncArray {
             let n = self.shape[0];
             let abs_k = k.unsigned_abs() as usize;
             let size = n + abs_k;
-            let mut values = vec![0.0; size * size];
+            // size*size can overflow usize for very large inputs, and the n×n
+            // buffer can exceed memory; compute the area checked and allocate
+            // fallibly so a huge diagonal raises (→ Python MemoryError) instead of
+            // wrapping the length or aborting the process.
+            let total = size
+                .checked_mul(size)
+                .ok_or_else(|| UFuncError::Msg("diag: output size overflow".to_string()))?;
+            let mut values = try_zeroed_f64(total, "diag")?;
             let mut sidecar_vals = match &self.integer_sidecar {
-                Some(IntegerSidecar::I64(_)) => Some(IntegerSidecar::I64(vec![0; size * size])),
-                Some(IntegerSidecar::U64(_)) => Some(IntegerSidecar::U64(vec![0; size * size])),
+                Some(IntegerSidecar::I64(_)) => {
+                    let mut v: Vec<i64> = Vec::new();
+                    v.try_reserve_exact(total)
+                        .map_err(|_| UFuncError::Msg("diag: unable to allocate output array (out of memory)".to_string()))?;
+                    v.resize(total, 0);
+                    Some(IntegerSidecar::I64(v))
+                }
+                Some(IntegerSidecar::U64(_)) => {
+                    let mut v: Vec<u64> = Vec::new();
+                    v.try_reserve_exact(total)
+                        .map_err(|_| UFuncError::Msg("diag: unable to allocate output array (out of memory)".to_string()))?;
+                    v.resize(total, 0);
+                    Some(IntegerSidecar::U64(v))
+                }
                 None => None,
             };
 
@@ -27930,10 +27949,34 @@ fn sort_value_indices_by_kind<T: Ord + RadixKey>(indices: &mut [usize], values: 
 /// interpreter. The capacity is reserved fallibly; `resize` then zero-fills
 /// without reallocating (so it cannot abort).
 fn try_zeroed_f64(len: usize, ctx: &str) -> Result<Vec<f64>, UFuncError> {
+    try_filled_f64(len, 0.0, ctx)
+}
+
+/// Allocate a `fill`-initialised `f64` buffer of `len` elements with FALLIBLE
+/// allocation (see [`try_zeroed_f64`]). Returns an out-of-memory `UFuncError`
+/// instead of aborting the process when the reservation cannot be satisfied —
+/// the PyO3 bridge maps that message to a Python `MemoryError`, matching NumPy's
+/// constructors (`full`/`eye`/`identity`/`diag`/`tri`) on huge sizes.
+fn try_filled_f64(len: usize, fill: f64, ctx: &str) -> Result<Vec<f64>, UFuncError> {
     let mut v: Vec<f64> = Vec::new();
     v.try_reserve_exact(len)
         .map_err(|_| UFuncError::Msg(format!("{ctx}: unable to allocate output array (out of memory)")))?;
-    v.resize(len, 0.0);
+    v.resize(len, fill);
+    Ok(v)
+}
+
+/// Collect an exact-size `f64` iterator into a Vec with FALLIBLE allocation, so a
+/// huge `num`/`n` (e.g. `linspace`/`arange`) surfaces an out-of-memory
+/// `UFuncError` (→ Python `MemoryError`) rather than aborting via the infallible
+/// `Iterator::collect` / `Vec::with_capacity` reservation.
+fn try_collect_f64<I>(iter: I, ctx: &str) -> Result<Vec<f64>, UFuncError>
+where
+    I: ExactSizeIterator<Item = f64>,
+{
+    let mut v: Vec<f64> = Vec::new();
+    v.try_reserve_exact(iter.len())
+        .map_err(|_| UFuncError::Msg(format!("{ctx}: unable to allocate output array (out of memory)")))?;
+    v.extend(iter);
     Ok(v)
 }
 
@@ -48977,6 +49020,30 @@ print(json.dumps(payload))
     fn full_fills_with_value() {
         let arr = UFuncArray::full(vec![2, 2], 42.0, DType::F64).unwrap();
         assert_eq!(arr.values(), &[42.0, 42.0, 42.0, 42.0]);
+    }
+
+    #[test]
+    fn value_sized_constructors_error_on_huge_alloc_instead_of_aborting() {
+        // Regression: full/eye/linspace/arange/diag built their output with the
+        // infallible vec!/collect, so a huge (but sub-isize::MAX) size aborted the
+        // whole process (SIGABRT) where NumPy raises MemoryError. The fallible
+        // try_reserve path must return Err (→ Python MemoryError). ~1e17 f64 ≈
+        // 800 PB exceeds any address space, so try_reserve fails deterministically;
+        // if any of these aborted, this test binary would die rather than report.
+        const HUGE: usize = 100_000_000_000_000_000; // 1e17
+        assert!(UFuncArray::full(vec![HUGE], 7.0, DType::F64).is_err(), "full");
+        assert!(UFuncArray::eye(500_000_000, None, 0, DType::F64).is_err(), "eye n²");
+        assert!(UFuncArray::identity(500_000_000, DType::F64).is_err(), "identity");
+        assert!(UFuncArray::linspace(0.0, 1.0, HUGE, DType::F64).is_err(), "linspace");
+        assert!(UFuncArray::arange(0.0, 1e17, 1.0, DType::F64).is_err(), "arange");
+        // diag of a 1-D vector builds an n×n matrix; a length-5e8 input → 2.5e17
+        // cells. Build the small input but force the huge square output.
+        let v = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
+        assert!(v.diag(0).is_ok(), "small diag still works");
+        // Sanity: normal sizes still succeed and are unchanged.
+        assert_eq!(UFuncArray::full(vec![2], 5.0, DType::F64).unwrap().values(), &[5.0, 5.0]);
+        assert_eq!(UFuncArray::eye(2, None, 0, DType::F64).unwrap().values(), &[1.0, 0.0, 0.0, 1.0]);
+        assert_eq!(UFuncArray::linspace(0.0, 1.0, 3, DType::F64).unwrap().values(), &[0.0, 0.5, 1.0]);
     }
 
     #[test]

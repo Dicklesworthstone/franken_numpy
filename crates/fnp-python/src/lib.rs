@@ -2472,7 +2472,16 @@ struct ParsedGridAxis {
 }
 
 fn map_ufunc_error(err: impl std::fmt::Display) -> PyErr {
-    PyValueError::new_err(err.to_string())
+    let msg = err.to_string();
+    // A fallible-allocation failure (try_reserve) for an enormous output buffer
+    // surfaces as an "out of memory" UFuncError; map it to MemoryError so native
+    // constructors (full/eye/identity/diag/linspace/arange/bincount/…) match
+    // NumPy, which raises MemoryError rather than aborting the process.
+    if msg.contains("out of memory") {
+        PyMemoryError::new_err(msg)
+    } else {
+        PyValueError::new_err(msg)
+    }
 }
 
 fn map_bit_generator_error(error: BitGeneratorError) -> PyErr {
@@ -13004,18 +13013,7 @@ fn bincount(
         .transpose()?;
     let result = x
         .bincount_with(weights.as_ref(), minlength as usize)
-        .map_err(|err| {
-            // A fallible allocation failure for an enormous (but sub-isize::MAX)
-            // counts array surfaces as MemoryError, matching numpy's bincount
-            // (which raises MemoryError when its calloc fails) rather than a
-            // process abort. Other errors keep their ValueError mapping.
-            let msg = err.to_string();
-            if msg.contains("out of memory") {
-                PyMemoryError::new_err(msg)
-            } else {
-                map_ufunc_error(err)
-            }
-        })?;
+        .map_err(map_ufunc_error)?;
     build_numpy_array_from_ufunc(py, &result)
 }
 
