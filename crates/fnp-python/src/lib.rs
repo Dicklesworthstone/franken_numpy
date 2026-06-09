@@ -21319,6 +21319,12 @@ fn nanstd(
         return fallback();
     }
 
+    // The native kernel computes in f64; defer float16/float32/complex inputs to
+    // numpy.nanstd so the narrow float dtype is preserved (NumPy returns float32 for
+    // float32 input, float16 for float16) instead of widening every result to float64.
+    if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
+        return fallback();
+    }
     // Integer input cannot contain NaN, so nannanstd == the plain reduction; route to
     // numpy's fast reduction (via fallback) instead of the slow native f64 path.
     if numpy_dtype_is_integer(py, a.bind(py))? {
@@ -21423,6 +21429,12 @@ fn nanvar(
         return fallback();
     }
 
+    // The native kernel computes in f64; defer float16/float32/complex inputs to
+    // numpy.nanvar so the narrow float dtype is preserved (NumPy returns float32 for
+    // float32 input, float16 for float16) instead of widening every result to float64.
+    if !native_f64_reduction_preserves_dtype(py, a.bind(py)) {
+        return fallback();
+    }
     // Integer input cannot contain NaN, so nannanvar == the plain reduction; route to
     // numpy's fast reduction (via fallback) instead of the slow native f64 path.
     if numpy_dtype_is_integer(py, a.bind(py))? {
@@ -69628,6 +69640,28 @@ mod tests {
             let ours_zero_ok: bool = isclose.call1((&ours_zero, 0.0_f64))?.extract()?;
             assert!(ours_zero_ok, "nanstd identical-input must return 0");
 
+            // Narrow-float inputs must PRESERVE their dtype (float32 -> float32,
+            // float16 -> float16), not widen to float64. The native kernel computes
+            // in f64, so these must defer to numpy.nanstd. Regression guard: a flat
+            // float32 nanstd previously returned a float64 scalar.
+            for narrow in ["float32", "float16"] {
+                let dtype_obj = numpy.getattr(narrow)?;
+                let base = numpy
+                    .getattr("array")?
+                    .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0, 8.0],))?;
+                let narrow_arr = base.call_method1("astype", (dtype_obj,))?;
+                let ours_n = nanstd_fn.call1((narrow_arr.clone(),))?;
+                let theirs_n = numpy_nanstd.call1((narrow_arr.clone(),))?;
+                let ours_n_dtype = ours_n.getattr("dtype")?.str()?.to_string();
+                let theirs_n_dtype = theirs_n.getattr("dtype")?.str()?.to_string();
+                assert_eq!(
+                    ours_n_dtype, theirs_n_dtype,
+                    "nanstd {narrow} result dtype must match numpy (no widen to float64)",
+                );
+                let ok_n: bool = isclose.call1((&ours_n, &theirs_n))?.extract()?;
+                assert!(ok_n, "nanstd {narrow} value mismatch");
+            }
+
             Ok(())
         });
     }
@@ -69761,6 +69795,28 @@ mod tests {
             assert!(ok_zero, "nanvar identical-input mismatch");
             let ours_zero_ok: bool = isclose.call1((&ours_zero, 0.0_f64))?.extract()?;
             assert!(ours_zero_ok, "nanvar identical-input must return 0");
+
+            // Narrow-float inputs must PRESERVE their dtype (float32 -> float32,
+            // float16 -> float16), not widen to float64. The native kernel computes
+            // in f64, so these must defer to numpy.nanvar. Regression guard: a flat
+            // float32 nanvar previously returned a float64 scalar.
+            for narrow in ["float32", "float16"] {
+                let dtype_obj = numpy.getattr(narrow)?;
+                let base = numpy
+                    .getattr("array")?
+                    .call1((vec![1.0_f64, 2.0, f64::NAN, 4.0, 8.0],))?;
+                let narrow_arr = base.call_method1("astype", (dtype_obj,))?;
+                let ours_n = nanvar_fn.call1((narrow_arr.clone(),))?;
+                let theirs_n = numpy_nanvar.call1((narrow_arr.clone(),))?;
+                let ours_n_dtype = ours_n.getattr("dtype")?.str()?.to_string();
+                let theirs_n_dtype = theirs_n.getattr("dtype")?.str()?.to_string();
+                assert_eq!(
+                    ours_n_dtype, theirs_n_dtype,
+                    "nanvar {narrow} result dtype must match numpy (no widen to float64)",
+                );
+                let ok_n: bool = isclose.call1((&ours_n, &theirs_n))?.extract()?;
+                assert!(ok_n, "nanvar {narrow} value mismatch");
+            }
 
             Ok(())
         });
