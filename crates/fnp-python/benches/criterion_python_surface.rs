@@ -2,7 +2,7 @@
 //!
 //! These target Python-boundary costs that the Rust engine benches do not see.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use fnp_python::fnp_python;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
 use pyo3::{PyResult, Python};
@@ -1076,6 +1076,69 @@ fn bench_statistics_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_einsum_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_einsum_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let n = 4000_usize;
+        let input = numpy
+            .call_method1("arange", (n * n,))
+            .expect("einsum raw input")
+            .call_method1("astype", ("float64",))
+            .expect("einsum f64 input")
+            .call_method1("reshape", ((n, n),))
+            .expect("einsum square input");
+        let fnp_einsum = module.getattr("einsum").expect("fnp_python.einsum");
+        let numpy_einsum = numpy.getattr("einsum").expect("numpy.einsum");
+
+        group.bench_function("fnp_einsum_trace_f64_4000", |bench| {
+            bench.iter(|| {
+                let result = fnp_einsum
+                    .call1(("ii", &input))
+                    .expect("fnp einsum trace benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_einsum_trace_f64_4000", |bench| {
+            bench.iter(|| {
+                let result = numpy_einsum
+                    .call1(("ii", &input))
+                    .expect("numpy einsum trace benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_einsum_diag_f64_4000", |bench| {
+            bench.iter(|| {
+                let result = fnp_einsum
+                    .call1(("ii->i", &input))
+                    .expect("fnp einsum diag benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_einsum_diag_f64_4000", |bench| {
+            bench.iter(|| {
+                let result = numpy_einsum
+                    .call1(("ii->i", &input))
+                    .expect("numpy einsum diag benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_linalg_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_linalg_boundary");
     group.sample_size(10);
@@ -1213,6 +1276,7 @@ criterion_group!(
     bench_average_nansum_axis_boundary,
     bench_histogram_boundary,
     bench_statistics_boundary,
+    bench_einsum_boundary,
     bench_linalg_boundary
 );
 criterion_main!(benches);
