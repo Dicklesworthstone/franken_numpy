@@ -9825,26 +9825,34 @@ impl UFuncArray {
         let new_shape: Vec<usize> = perm.iter().map(|&a| self.shape[a]).collect();
         let total = self.values.len();
 
-        // 2-D transpose fast path: a cache-tiled, parallel data move that replaces
-        // the per-element coordinate-decomposition gather below (which spends `ndim`
-        // integer divisions per element and reads strided through cache). Pure
-        // relocation, so it is bit-for-bit identical — values and the i64/u64
-        // sidecar are moved by the same kernel. Identity (perm == [0,1]) falls
-        // through to the generic copy path.
-        if ndim == 2 && perm[0] == 1 && perm[1] == 0 {
-            let r = self.shape[0];
-            let c = self.shape[1];
+        // Last-two-axes transpose fast path (the dominant matrix / batched-matrix
+        // transpose, perm == [0,1,…,ndim-3, ndim-1, ndim-2]): a cache-tiled,
+        // parallel data move that replaces the per-element coordinate-decomposition
+        // gather below (which spends `ndim` integer divisions per element and reads
+        // strided through cache). Each `r×c` plane becomes `c×r`; a stack of planes
+        // parallelizes across planes, a lone matrix parallelizes across row bands.
+        // Pure relocation, so bit-for-bit identical — values and the i64/u64 sidecar
+        // are moved by the same kernel. Identity and other permutations fall through
+        // to the generic copy path.
+        let is_last2_swap = ndim >= 2
+            && perm[ndim - 2] == ndim - 1
+            && perm[ndim - 1] == ndim - 2
+            && (0..ndim - 2).all(|k| perm[k] == k);
+        if is_last2_swap && total > 0 {
+            let r = self.shape[ndim - 2];
+            let c = self.shape[ndim - 1];
+            let batch = total / (r * c);
             let mut new_values = vec![0.0f64; total];
-            transpose_2d_par(&self.values, &mut new_values, r, c);
+            transpose_last2_par(&self.values, &mut new_values, batch, r, c);
             let new_sidecar = match &self.integer_sidecar {
                 Some(IntegerSidecar::I64(v)) => {
                     let mut out = vec![0i64; total];
-                    transpose_2d_par(v, &mut out, r, c);
+                    transpose_last2_par(v, &mut out, batch, r, c);
                     Some(IntegerSidecar::I64(out))
                 }
                 Some(IntegerSidecar::U64(v)) => {
                     let mut out = vec![0u64; total];
-                    transpose_2d_par(v, &mut out, r, c);
+                    transpose_last2_par(v, &mut out, batch, r, c);
                     Some(IntegerSidecar::U64(out))
                 }
                 None => None,
@@ -30544,6 +30552,55 @@ fn transpose_2d_par<T: Copy + Send + Sync>(src: &[T], dst: &mut [T], r: usize, c
     }
 }
 
+/// Batched last-two-axes transpose: `src` is `batch` planes each `r×c`
+/// row-major; `dst` is `batch` planes each `c×r`. Generic over any `Copy`
+/// element (shared by the f64 value plane and the i64/u64 sidecar). For a
+/// single plane (`batch <= 1`) it delegates to [`transpose_2d_par`] so the band
+/// parallelism within one matrix is preserved; for a stack it transposes each
+/// plane with a cache-tiled `TILE×TILE` block kernel and parallelizes across the
+/// disjoint contiguous planes (`#![forbid(unsafe_code)]`-clean). A pure data
+/// move, so bit-for-bit identical to the naive per-element gather.
+fn transpose_last2_par<T: Copy + Send + Sync>(
+    src: &[T],
+    dst: &mut [T],
+    batch: usize,
+    r: usize,
+    c: usize,
+) {
+    if batch <= 1 {
+        transpose_2d_par(src, dst, r, c);
+        return;
+    }
+    const TILE: usize = 32;
+    const PAR_MIN_ELEMS: usize = 1 << 14;
+    let plane = r * c;
+    let do_plane = |(sp, dp): (&[T], &mut [T])| {
+        let mut i0 = 0;
+        while i0 < r {
+            let i1 = (i0 + TILE).min(r);
+            let mut j0 = 0;
+            while j0 < c {
+                let j1 = (j0 + TILE).min(c);
+                for i in i0..i1 {
+                    let src_row = i * c;
+                    for j in j0..j1 {
+                        dp[j * r + i] = sp[src_row + j];
+                    }
+                }
+                j0 += TILE;
+            }
+            i0 += TILE;
+        }
+    };
+    if src.len() >= PAR_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+        src.par_chunks(plane)
+            .zip(dst.par_chunks_mut(plane))
+            .for_each(do_plane);
+    } else {
+        src.chunks(plane).zip(dst.chunks_mut(plane)).for_each(do_plane);
+    }
+}
+
 fn transpose_tiled(src: &[f64], dst: &mut [f64], r: usize, c: usize) {
     const T: usize = 32;
     let mut i0 = 0;
@@ -44584,6 +44641,102 @@ print(json.dumps(payload))
         assert_eq!(
             hex, "c2c9e3c895d562c1935fcc27745f1623e300ba403b85fb7cf8992c7ad191dc7f",
             "transpose 2-D tiled golden digest drifted"
+        );
+    }
+
+    #[test]
+    fn transpose_batched_last2_matches_naive_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The batched last-two-axes transpose (perm == [..,ndim-1,ndim-2], the
+        // matrix/swapaxes(-1,-2) pattern) must be BIT-IDENTICAL to the generic
+        // per-element coordinate-decomposition gather for stacks of matrices.
+        // Covers 3-D and 4-D, square + rectangular planes, and non-tile-multiple
+        // dims (TILE=32) so partial blocks are exercised. Verified via the array's
+        // OWN general fallback (transpose with an explicit middle-axis perm forces
+        // the slow path) and an independent naive reference, plus the i64 sidecar.
+        fn naive_last2(values: &[f64], dims: &[usize]) -> Vec<f64> {
+            let ndim = dims.len();
+            let r = dims[ndim - 2];
+            let c = dims[ndim - 1];
+            let batch: usize = dims[..ndim - 2].iter().product();
+            let plane = r * c;
+            let mut out = vec![0.0f64; values.len()];
+            for b in 0..batch {
+                let base = b * plane;
+                for i in 0..r {
+                    for j in 0..c {
+                        out[base + j * r + i] = values[base + i * c + j];
+                    }
+                }
+            }
+            out
+        }
+        let shapes: &[Vec<usize>] = &[
+            vec![8, 64, 48],
+            vec![64, 33, 65],
+            vec![4, 5, 130, 70],
+            vec![3, 100, 100],
+        ];
+        let mut seed = 0xabcd_1234_5678_9876u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            match (seed >> 9) % 19 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => -0.0,
+                _ => (seed >> 11) as f64 / (1u64 << 53) as f64 * 50.0 - 25.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        for dims in shapes {
+            let ndim = dims.len();
+            let n: usize = dims.iter().product();
+            let data: Vec<f64> = (0..n).map(|_| next()).collect();
+            let arr = UFuncArray::new(dims.clone(), data.clone(), DType::F64).unwrap();
+            // matrix_transpose builds the last-two-swap perm -> fast path.
+            let got = arr.matrix_transpose().unwrap();
+            let mut want_shape = dims.clone();
+            want_shape.swap(ndim - 2, ndim - 1);
+            assert_eq!(got.shape(), &want_shape[..], "shape {dims:?}");
+            let want = naive_last2(&data, dims);
+            for (g, w) in got.values().iter().zip(want.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "transpose batched {dims:?}");
+            }
+            for v in got.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+            // i64 sidecar relocates identically.
+            let ivals: Vec<i64> = (0..n as i64).map(|k| (k << 17) ^ (k * 5 + 3)).collect();
+            let iarr = UFuncArray::from_storage(dims.clone(), ArrayStorage::I64(ivals.clone()))
+                .expect("from_storage");
+            let it = iarr.matrix_transpose().expect("itranspose");
+            let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
+                panic!("expected i64 storage");
+            };
+            let r = dims[ndim - 2];
+            let c = dims[ndim - 1];
+            let batch: usize = dims[..ndim - 2].iter().product();
+            let mut want_i = vec![0i64; n];
+            for b in 0..batch {
+                let base = b * r * c;
+                for i in 0..r {
+                    for j in 0..c {
+                        want_i[base + j * r + i] = ivals[base + i * c + j];
+                    }
+                }
+            }
+            assert_eq!(got_i, want_i, "i64 batched transpose {dims:?}");
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "a4bda87845421536bd3861e063bf1fbc07200961a4e6006f42032fb9f271b816",
+            "transpose batched last-2 golden digest drifted"
         );
     }
 

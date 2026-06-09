@@ -58,5 +58,52 @@ fn bench_transpose(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_transpose);
+/// Previous kernel for the batched (N-D) last-two-swap: per-element index
+/// decomposition + strided gather over the whole flat array.
+fn old_batched_t(values: &[f64], dims: &[usize]) -> Vec<f64> {
+    let ndim = dims.len();
+    let r = dims[ndim - 2];
+    let c = dims[ndim - 1];
+    let batch: usize = dims[..ndim - 2].iter().product();
+    let plane = r * c;
+    let mut out = vec![0.0f64; values.len()];
+    // Mirror the generic transpose: out index (b, jo, io) <- in (b, io, jo).
+    for b in 0..batch {
+        let base = b * plane;
+        for io in 0..r {
+            let src_row = base + io * c;
+            for jo in 0..c {
+                out[base + jo * r + io] = values[src_row + jo];
+            }
+        }
+    }
+    out
+}
+
+fn bench_transpose_batched(c: &mut Criterion) {
+    // Batched matrix transpose (swapaxes(-1,-2) on a stack): the dominant N-D case.
+    for dims in [vec![64usize, 512, 512], vec![256, 256, 256], vec![1024, 128, 128]] {
+        let n: usize = dims.iter().product();
+        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.25 - 3.0).collect();
+        let arr = UFuncArray::new(dims.clone(), data.clone(), DType::F64).unwrap();
+        let got = arr.matrix_transpose().unwrap();
+        assert_eq!(
+            got.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            old_batched_t(&data, &dims)
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let mut group = c.benchmark_group(format!("transpose_batched_{dims:?}"));
+        group.bench_with_input(BenchmarkId::new("old_gather", n), &n, |b, _| {
+            b.iter(|| black_box(old_batched_t(black_box(&data), &dims)))
+        });
+        group.bench_with_input(BenchmarkId::new("tiled_par", n), &n, |b, _| {
+            b.iter(|| black_box(arr.matrix_transpose().unwrap()))
+        });
+        group.finish();
+    }
+}
+
+criterion_group!(benches, bench_transpose, bench_transpose_batched);
 criterion_main!(benches);
