@@ -109,5 +109,70 @@ fn bench_transpose_batched(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_transpose, bench_transpose_batched);
+/// Previous general kernel: per-element coordinate decomposition (ndim divisions)
+/// + strided gather, serial — the path arbitrary permutations used to take.
+fn old_general(values: &[f64], dims: &[usize], perm: &[usize]) -> Vec<f64> {
+    let ndim = dims.len();
+    let new_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
+    let mut old_strides = vec![1usize; ndim];
+    for d in (0..ndim - 1).rev() {
+        old_strides[d] = old_strides[d + 1] * dims[d + 1];
+    }
+    let mut new_strides = vec![1usize; ndim];
+    for d in (0..ndim - 1).rev() {
+        new_strides[d] = new_strides[d + 1] * new_shape[d + 1];
+    }
+    let total: usize = dims.iter().product();
+    let mut out = vec![0.0f64; total];
+    for (flat_new, slot) in out.iter_mut().enumerate() {
+        let mut rem = flat_new;
+        let mut flat_old = 0usize;
+        for (na, &ns) in new_strides.iter().enumerate() {
+            let i = rem / ns;
+            rem %= ns;
+            flat_old += i * old_strides[perm[na]];
+        }
+        *slot = values[flat_old];
+    }
+    out
+}
+
+fn bench_transpose_general(c: &mut Criterion) {
+    // Arbitrary permutations (rotations / non-adjacent moveaxis), the case the
+    // last-two-swap fast path does NOT cover.
+    let cases: &[(Vec<usize>, Vec<usize>)] = &[
+        (vec![256, 256, 256], vec![2, 0, 1]),
+        (vec![256, 256, 256], vec![1, 2, 0]),
+        (vec![64, 64, 64, 64], vec![3, 1, 0, 2]),
+    ];
+    for (dims, perm) in cases {
+        let n: usize = dims.iter().product();
+        let data: Vec<f64> = (0..n).map(|i| (i as f64) * 0.125 - 2.0).collect();
+        let arr = UFuncArray::new(dims.clone(), data.clone(), DType::F64).unwrap();
+        let pu: Vec<usize> = perm.clone();
+        let got = arr.transpose(Some(&pu)).unwrap();
+        assert_eq!(
+            got.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            old_general(&data, dims, perm)
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>()
+        );
+        let mut group = c.benchmark_group(format!("transpose_general_{dims:?}_{perm:?}"));
+        group.bench_with_input(BenchmarkId::new("old_gather", n), &n, |b, _| {
+            b.iter(|| black_box(old_general(black_box(&data), dims, perm)))
+        });
+        group.bench_with_input(BenchmarkId::new("odometer_par", n), &n, |b, _| {
+            b.iter(|| black_box(arr.transpose(Some(&pu)).unwrap()))
+        });
+        group.finish();
+    }
+}
+
+criterion_group!(
+    benches,
+    bench_transpose,
+    bench_transpose_batched,
+    bench_transpose_general
+);
 criterion_main!(benches);

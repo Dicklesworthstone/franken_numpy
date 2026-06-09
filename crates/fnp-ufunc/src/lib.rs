@@ -9865,26 +9865,68 @@ impl UFuncArray {
             });
         }
 
-        let mut new_values = vec![0.0f64; total];
-        let mut source_indices = Vec::with_capacity(total);
-
-        // Compute C-order strides (in elements) for old and new shapes
+        // General permutation gather: output position `f` maps to source offset
+        // `sum_d coord_d(f) * old_strides[perm[d]]`. The old loop spent `ndim`
+        // integer divisions + modulos per element and ran serially. Instead split
+        // the output into chunks across the rayon pool; each chunk decomposes only
+        // its FIRST index (one division set) and then ripples a multi-axis odometer
+        // counter forward — O(1) amortized per element, no per-element division — to
+        // emit the source offsets. A pure gather, so bit-for-bit identical; values
+        // and the i64/u64 sidecar are then gathered from the same index map.
         let old_strides = c_strides_elems(&self.shape);
         let new_strides = c_strides_elems(&new_shape);
-
-        for (flat_new, out_value) in new_values.iter_mut().enumerate() {
-            // Convert flat_new to multi-index in new shape
-            let mut remainder = flat_new;
-            let mut flat_old = 0usize;
-            for (new_axis, &new_stride) in new_strides.iter().enumerate() {
-                let idx = remainder / new_stride;
-                remainder %= new_stride;
-                // new_axis in new layout corresponds to perm[new_axis] in old layout
-                flat_old += idx * old_strides[perm[new_axis]];
+        // Source-offset increment when output axis `d` advances by one element.
+        let src_step: Vec<usize> = (0..ndim).map(|d| old_strides[perm[d]]).collect();
+        const TRANSPOSE_CHUNK: usize = 1 << 14;
+        const TRANSPOSE_PAR_MIN: usize = 1 << 15;
+        let mut source_indices = vec![0usize; total];
+        let fill_chunk = |(ci, chunk): (usize, &mut [usize])| {
+            if chunk.is_empty() {
+                return;
             }
-            *out_value = self.values[flat_old];
-            source_indices.push(flat_old);
+            let f0 = ci * TRANSPOSE_CHUNK;
+            // Decompose the chunk's first output index into per-axis coordinates.
+            let mut coord = vec![0usize; ndim];
+            let mut rem = f0;
+            for d in 0..ndim {
+                coord[d] = rem / new_strides[d];
+                rem %= new_strides[d];
+            }
+            let mut off: usize = (0..ndim).map(|d| coord[d] * src_step[d]).sum();
+            for slot in chunk.iter_mut() {
+                *slot = off;
+                // Odometer increment over the output shape (least-significant last).
+                let mut d = ndim;
+                while d > 0 {
+                    d -= 1;
+                    coord[d] += 1;
+                    off += src_step[d];
+                    if coord[d] < new_shape[d] {
+                        break;
+                    }
+                    coord[d] = 0;
+                    off -= new_shape[d] * src_step[d];
+                }
+            }
+        };
+        let parallel = total >= TRANSPOSE_PAR_MIN && rayon::current_num_threads() >= 2;
+        if parallel {
+            source_indices
+                .par_chunks_mut(TRANSPOSE_CHUNK)
+                .enumerate()
+                .for_each(fill_chunk);
+        } else {
+            source_indices
+                .chunks_mut(TRANSPOSE_CHUNK)
+                .enumerate()
+                .for_each(fill_chunk);
         }
+        let values_ref = &self.values;
+        let new_values: Vec<f64> = if parallel {
+            source_indices.par_iter().map(|&i| values_ref[i]).collect()
+        } else {
+            source_indices.iter().map(|&i| values_ref[i]).collect()
+        };
 
         Ok(Self {
             shape: new_shape,
@@ -44757,6 +44799,106 @@ print(json.dumps(payload))
         assert_eq!(
             hex, "a4bda87845421536bd3861e063bf1fbc07200961a4e6006f42032fb9f271b816",
             "transpose batched last-2 golden digest drifted"
+        );
+    }
+
+    #[test]
+    fn transpose_general_permute_matches_naive_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The parallel odometer general path (arbitrary permutations that are NOT
+        // the last-two-axes swap, e.g. rotations / moveaxis to non-adjacent slots)
+        // must be BIT-IDENTICAL to the naive per-element coordinate-decomposition
+        // gather it replaces. Covers 3-D and 4-D, non-tile-multiple dims, and sizes
+        // crossing the parallel threshold (1<<15). Pure gather => to_bits equality
+        // including NaN / ±inf / -0.0, plus identical i64 sidecar relocation.
+        fn naive_permute(values: &[f64], dims: &[usize], perm: &[usize]) -> (Vec<f64>, Vec<usize>) {
+            let ndim = dims.len();
+            let new_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
+            let old_strides = {
+                let mut s = vec![1usize; ndim];
+                for d in (0..ndim - 1).rev() {
+                    s[d] = s[d + 1] * dims[d + 1];
+                }
+                s
+            };
+            let new_strides = {
+                let mut s = vec![1usize; ndim];
+                for d in (0..ndim - 1).rev() {
+                    s[d] = s[d + 1] * new_shape[d + 1];
+                }
+                s
+            };
+            let total: usize = dims.iter().product();
+            let mut out = vec![0.0f64; total];
+            let mut idx = vec![0usize; total];
+            for (flat_new, slot) in out.iter_mut().enumerate() {
+                let mut rem = flat_new;
+                let mut flat_old = 0usize;
+                for (na, &ns) in new_strides.iter().enumerate() {
+                    let i = rem / ns;
+                    rem %= ns;
+                    flat_old += i * old_strides[perm[na]];
+                }
+                *slot = values[flat_old];
+                idx[flat_new] = flat_old;
+            }
+            (out, idx)
+        }
+        // (dims, perm) — every perm is a non-trivial, non-last-2-swap permutation.
+        let cases: &[(Vec<usize>, Vec<usize>)] = &[
+            (vec![40, 50, 33], vec![2, 0, 1]),
+            (vec![40, 50, 33], vec![1, 2, 0]),
+            (vec![33, 17, 19, 7], vec![3, 1, 0, 2]),
+            (vec![64, 64, 16], vec![1, 0, 2]),
+        ];
+        let mut seed = 0x51ed_270b_2e1f_a3c9u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            match (seed >> 9) % 21 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                3 => -0.0,
+                _ => (seed >> 11) as f64 / (1u64 << 53) as f64 * 80.0 - 40.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        for (dims, perm) in cases {
+            let n: usize = dims.iter().product();
+            let data: Vec<f64> = (0..n).map(|_| next()).collect();
+            let arr = UFuncArray::new(dims.clone(), data.clone(), DType::F64).unwrap();
+            let pu: Vec<usize> = perm.clone();
+            let got = arr.transpose(Some(&pu)).unwrap();
+            let want_shape: Vec<usize> = perm.iter().map(|&a| dims[a]).collect();
+            assert_eq!(got.shape(), &want_shape[..], "shape {dims:?} perm {perm:?}");
+            let (want, idx) = naive_permute(&data, dims, perm);
+            for (g, w) in got.values().iter().zip(want.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "permute {dims:?} {perm:?}");
+            }
+            for v in got.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+            // i64 sidecar relocates identically (gathered from the same index map).
+            let ivals: Vec<i64> = (0..n as i64).map(|k| (k << 13) ^ (k * 11 + 5)).collect();
+            let iarr = UFuncArray::from_storage(dims.clone(), ArrayStorage::I64(ivals.clone()))
+                .expect("from_storage");
+            let it = iarr.transpose(Some(&pu)).expect("itranspose");
+            let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
+                panic!("expected i64 storage");
+            };
+            let want_i: Vec<i64> = idx.iter().map(|&i| ivals[i]).collect();
+            assert_eq!(got_i, want_i, "i64 permute {dims:?} {perm:?}");
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "3030a54f70248fb5abaa925b0b1ae9d27b4edbcd69aedc0d7c2a22ad966beec7",
+            "transpose general permute golden digest drifted"
         );
     }
 
