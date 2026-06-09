@@ -12801,27 +12801,68 @@ impl UFuncArray {
                 let mut out_shape = self.shape.clone();
                 out_shape[ax] = new_axis_len;
                 let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
-                let mut values = vec![0.0f64; out_count];
-                let mut source_indices = vec![0usize; out_count];
-
-                for o in 0..outer {
-                    for k in 0..axis_len {
-                        for r in 0..repeats {
-                            for i in 0..inner {
-                                let src_idx = o * axis_len * inner + k * inner + i;
-                                let dst_idx =
-                                    o * new_axis_len * inner + (k * repeats + r) * inner + i;
-                                values[dst_idx] = self.values[src_idx];
-                                source_indices[dst_idx] = src_idx;
-                            }
-                        }
-                    }
+                if out_count == 0 || inner == 0 {
+                    return Ok(Self {
+                        shape: out_shape,
+                        values: vec![0.0f64; out_count],
+                        dtype: self.dtype,
+                        integer_sidecar: self.reindexed_integer_sidecar(&vec![0usize; out_count]),
+                    });
                 }
+
+                // Each output row is a contiguous `inner`-length slice that copies a
+                // contiguous source row verbatim (output row `orow` selects source
+                // axis index `k = (orow mod axis_len*repeats) / repeats` within outer
+                // block `o = orow / (axis_len*repeats)`). The old loop copied the run
+                // element-by-element; instead memcpy each row via copy_from_slice and
+                // run the independent rows across the rayon pool. A pure data move, so
+                // bit-for-bit identical. The i64/u64 sidecar reindex map is only built
+                // when a sidecar is present.
+                let akr = axis_len * repeats;
+                let src_ref = &self.values;
+                let mut values = vec![0.0f64; out_count];
+                let fill_row = |(orow, dst): (usize, &mut [f64])| {
+                    let o = orow / akr;
+                    let k = (orow % akr) / repeats;
+                    let src_base = o * axis_len * inner + k * inner;
+                    dst.copy_from_slice(&src_ref[src_base..src_base + inner]);
+                };
+                const REPEAT_PAR_MIN: usize = 1 << 15;
+                if out_count >= REPEAT_PAR_MIN && rayon::current_num_threads() >= 2 {
+                    values.par_chunks_mut(inner).enumerate().for_each(fill_row);
+                } else {
+                    values.chunks_mut(inner).enumerate().for_each(fill_row);
+                }
+                let integer_sidecar = if self.integer_sidecar.is_some() {
+                    let mut source_indices = vec![0usize; out_count];
+                    let fill_idx = |(orow, dst): (usize, &mut [usize])| {
+                        let o = orow / akr;
+                        let k = (orow % akr) / repeats;
+                        let src_base = o * axis_len * inner + k * inner;
+                        for (i, slot) in dst.iter_mut().enumerate() {
+                            *slot = src_base + i;
+                        }
+                    };
+                    if out_count >= REPEAT_PAR_MIN && rayon::current_num_threads() >= 2 {
+                        source_indices
+                            .par_chunks_mut(inner)
+                            .enumerate()
+                            .for_each(fill_idx);
+                    } else {
+                        source_indices
+                            .chunks_mut(inner)
+                            .enumerate()
+                            .for_each(fill_idx);
+                    }
+                    self.reindexed_integer_sidecar(&source_indices)
+                } else {
+                    None
+                };
                 Ok(Self {
                     shape: out_shape,
                     values,
                     dtype: self.dtype,
-                    integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                    integer_sidecar,
                 })
             }
         }
@@ -48810,6 +48851,99 @@ print(json.dumps(payload))
         assert_eq!(
             rep.values(),
             &[1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 3.0, 3.0, 3.0, 4.0, 4.0, 4.0]
+        );
+    }
+
+    #[test]
+    fn repeat_axis_copyslice_matches_naive_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The copy_from_slice + parallel repeat-axis must be BIT-IDENTICAL to the
+        // old element-by-element scatter, across 2-D and 3-D, every axis (incl the
+        // contiguous last axis where inner==1), non-tile-multiple dims, and sizes
+        // crossing the parallel threshold (1<<15). Pure data move => to_bits
+        // equality incl NaN / ±inf / -0.0, plus identical i64-sidecar relocation.
+        fn naive(
+            values: &[f64],
+            shape: &[usize],
+            ax: usize,
+            reps: usize,
+        ) -> (Vec<f64>, Vec<usize>, Vec<usize>) {
+            let inner: usize = shape[ax + 1..].iter().product();
+            let outer: usize = shape[..ax].iter().product();
+            let axis_len = shape[ax];
+            let new_axis_len = axis_len * reps;
+            let mut out_shape = shape.to_vec();
+            out_shape[ax] = new_axis_len;
+            let total: usize = out_shape.iter().product();
+            let mut out = vec![0.0f64; total];
+            let mut idx = vec![0usize; total];
+            for o in 0..outer {
+                for k in 0..axis_len {
+                    for r in 0..reps {
+                        for i in 0..inner {
+                            let src = o * axis_len * inner + k * inner + i;
+                            let dst = o * new_axis_len * inner + (k * reps + r) * inner + i;
+                            out[dst] = values[src];
+                            idx[dst] = src;
+                        }
+                    }
+                }
+            }
+            (out, idx, out_shape)
+        }
+        // (shape, axis, repeats)
+        let cases: &[(Vec<usize>, usize, usize)] = &[
+            (vec![257, 130], 0, 3),
+            (vec![130, 257], 1, 4),
+            (vec![41, 33, 29], 1, 3),
+            (vec![41, 33, 29], 2, 2),
+            (vec![200, 200], 0, 2),
+        ];
+        let mut seed = 0x84c2_1f9b_3de7_0a51u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            match (seed >> 9) % 17 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => -0.0,
+                _ => (seed >> 11) as f64 / (1u64 << 53) as f64 * 40.0 - 20.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        for (shape, ax, reps) in cases {
+            let n: usize = shape.iter().product();
+            let data: Vec<f64> = (0..n).map(|_| next()).collect();
+            let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            let got = arr.repeat(*reps, Some(*ax as isize)).unwrap();
+            let (want, idx, out_shape) = naive(&data, shape, *ax, *reps);
+            assert_eq!(got.shape(), &out_shape[..], "shape {shape:?} ax{ax} x{reps}");
+            for (g, w) in got.values().iter().zip(want.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "repeat {shape:?} ax{ax} x{reps}");
+            }
+            for v in got.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+            // i64 sidecar relocates identically.
+            let ivals: Vec<i64> = (0..n as i64).map(|k| (k << 18) ^ (k * 9 + 1)).collect();
+            let iarr = UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(ivals.clone()))
+                .expect("from_storage");
+            let it = iarr.repeat(*reps, Some(*ax as isize)).expect("irepeat");
+            let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
+                panic!("expected i64 storage");
+            };
+            let want_i: Vec<i64> = idx.iter().map(|&i| ivals[i]).collect();
+            assert_eq!(got_i, want_i, "i64 repeat {shape:?} ax{ax} x{reps}");
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "4e77f4cd57a3c8a786ccb35d42892f81530e1bccf17ea1c47a08d69964da3de4",
+            "repeat-axis copyslice golden digest drifted"
         );
     }
 
