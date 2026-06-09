@@ -10203,6 +10203,114 @@ fn try_zerocopy_f64_cumprod(
     Ok(Some(flat.unbind()))
 }
 
+// Zero-copy nan-aware flatten cumulative sum/product (np.nancumsum / np.nancumprod):
+// NaN is treated as the additive (0.0) / multiplicative (1.0) identity, then the running
+// accumulation is byte-identical to the cumsum/cumprod zero-copy path. Reading the existing
+// float64 ndarray buffer and writing a fresh float64 output buffer skips the cold extract
+// Vec (and its first-touch page faults), so it beats numpy's nan-cumulative the same way the
+// plain cumsum zero-copy path does. Only the flatten-equivalent case (axis=None any ndim, or
+// 1-D axis 0/-1); other layouts and non-float64 dtypes fall through to the caller's passthrough.
+fn try_zerocopy_f64_nancumsum(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let ndim = in_buffer.shape().len();
+    let flatten_ok = match axis {
+        None => true,
+        Some(ax) => ndim == 1 && (ax == 0 || ax == -1),
+    };
+    if !flatten_ok {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // NaN contributes 0 to the running sum; a non-NaN first element (incl. -0.0)
+        // carries through verbatim, matching np.nancumsum.
+        let first = input[0].get();
+        let mut acc = if first.is_nan() { 0.0 } else { first };
+        output[0].set(acc);
+        for i in 1..n {
+            let v = input[i].get();
+            if !v.is_nan() {
+                acc += v;
+            }
+            output[i].set(acc);
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
+fn try_zerocopy_f64_nancumprod(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let ndim = in_buffer.shape().len();
+    let flatten_ok = match axis {
+        None => true,
+        Some(ax) => ndim == 1 && (ax == 0 || ax == -1),
+    };
+    if !flatten_ok {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // NaN contributes 1 to the running product, matching np.nancumprod.
+        let first = input[0].get();
+        let mut acc = if first.is_nan() { 1.0 } else { first };
+        output[0].set(acc);
+        for i in 1..n {
+            let v = input[i].get();
+            if !v.is_nan() {
+                acc *= v;
+            }
+            output[i].set(acc);
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
 // Zero-copy np.cumsum / np.cumprod along an explicit axis of a multi-dim
 // C-contiguous float64 ndarray (the case the flatten cumulative helpers above
 // leave alone). Decomposing the layout into outer * axis_len * inner groups, the
@@ -39211,7 +39319,37 @@ fn isclose(
     build_numpy_scalar_or_array(py, &result)
 }
 
-// NaN-aware cumulative (2).
+// NaN-aware cumulative (2). np.nancumsum/nancumprod flatten on axis=None (any ndim,
+// unlike the Array-API cumulative_sum) and treat NaN as the additive/multiplicative
+// identity. Route the clean f64 / integer flatten case to the zero-copy native scan
+// (beating numpy's single-threaded nan-cumulative ~3x, like cumsum); defer explicit
+// dtype/out, per-axis multi-dim, float16/32, and positional axis/dtype/out to numpy.
+fn parse_nan_cumulative_args<'py>(
+    args: &Bound<'py, PyTuple>,
+    kwargs: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Option<(Bound<'py, PyAny>, Option<isize>)>> {
+    if args.len() != 1 {
+        return Ok(None);
+    }
+    let mut axis_val: Option<isize> = None;
+    if let Some(kw) = kwargs {
+        for (k, v) in kw.iter() {
+            match k.extract::<String>()?.as_str() {
+                "axis" => {
+                    if !v.is_none() {
+                        match v.extract::<isize>() {
+                            Ok(i) => axis_val = Some(i),
+                            Err(_) => return Ok(None),
+                        }
+                    }
+                }
+                _ => return Ok(None),
+            }
+        }
+    }
+    Ok(Some((args.get_item(0)?, axis_val)))
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn nancumprod(
@@ -39219,6 +39357,15 @@ fn nancumprod(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some((a, axis_val)) = parse_nan_cumulative_args(args, kwargs)? {
+        if let Some(out) = try_zerocopy_f64_nancumprod(py, &a, axis_val)? {
+            return Ok(out);
+        }
+        // Integers carry no NaN, so nancumprod == cumprod (int64/uint64 accumulator).
+        if let Some(out) = try_zerocopy_int_cumprod(py, &a, axis_val)? {
+            return Ok(out);
+        }
+    }
     core_numpy_passthrough(py, "nancumprod", args, kwargs)
 }
 
@@ -39229,6 +39376,15 @@ fn nancumsum(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some((a, axis_val)) = parse_nan_cumulative_args(args, kwargs)? {
+        if let Some(out) = try_zerocopy_f64_nancumsum(py, &a, axis_val)? {
+            return Ok(out);
+        }
+        // Integers carry no NaN, so nancumsum == cumsum (int64/uint64 accumulator).
+        if let Some(out) = try_zerocopy_int_cumsum(py, &a, axis_val)? {
+            return Ok(out);
+        }
+    }
     core_numpy_passthrough(py, "nancumsum", args, kwargs)
 }
 

@@ -644,3 +644,47 @@ print(all_pass)
     );
     Ok(())
 }
+
+#[test]
+fn nancumsum_nancumprod_match_numpy_across_dtype_axis_nan_and_edges() -> Result<(), String> {
+    // Locks the native zero-copy nan-aware scan wiring: NaN treated as the additive (0)
+    // / multiplicative (1) identity, flatten on axis=None (any ndim), integer == cum*,
+    // float32 / per-axis multi-dim defer to numpy. Covers leading-NaN, all-NaN, -0.0,
+    // and empty inputs.
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(0)
+for op in ["nancumsum", "nancumprod"]:
+    ffn = getattr(fnp, op); nfn = getattr(np, op)
+    for dt in [np.float64, np.float32, np.int8, np.int32, np.uint8, np.int64, np.bool_]:
+        for shape in [(20,), (6, 5)]:
+            if dt == np.bool_:
+                a = rng.integers(0, 2, shape).astype(dt)
+            elif np.issubdtype(dt, np.integer):
+                a = rng.integers(0, 4, shape).astype(dt)
+            else:
+                a = rng.standard_normal(shape).astype(dt)
+                a.flat[0] = np.nan; a.flat[3] = np.nan
+            axes = [None, 0] if len(shape) == 1 else [None, 0, 1]
+            for ax in axes:
+                kw = {} if ax is None else {"axis": ax}
+                f = np.asarray(ffn(a, **kw)); n = np.asarray(nfn(a, **kw))
+                if f.dtype != n.dtype or f.shape != n.shape or not np.allclose(f, n, rtol=1e-9, atol=1e-9, equal_nan=True):
+                    ok = False
+    for arr in [np.array([np.nan, np.nan]), np.array([-0.0, 1.0]), np.array([np.nan, 5.0, np.nan, 2.0]), np.array([])]:
+        f = np.asarray(ffn(arr)); n = np.asarray(nfn(arr))
+        if f.dtype != n.dtype or f.shape != n.shape or not np.array_equal(f, n, equal_nan=True):
+            ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nancumsum/nancumprod must match numpy across dtype/axis/NaN patterns and edges"
+    );
+    Ok(())
+}
