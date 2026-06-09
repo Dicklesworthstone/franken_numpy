@@ -57794,9 +57794,14 @@ mod tests {
             let square = numeric_array(py, vec![vec![1_i64, 2_i64], vec![3_i64, 4_i64]], "int64");
             let err = diagonal(py, square.unbind(), 0, 0, 0).unwrap_err();
             assert!(err.is_instance_of::<PyValueError>(py));
+            // NumPy's message for axis1 == axis2 is "axis1 and axis2 cannot be the
+            // same" (it was "must be different" in older releases). fnp mirrors the
+            // installed numpy's wording exactly, so assert against the current text.
+            let msg = err.to_string();
             assert!(
-                err.to_string()
-                    .contains("axis1 and axis2 must be different")
+                msg.contains("axis1 and axis2 cannot be the same")
+                    || msg.contains("axis1 and axis2 must be different"),
+                "unexpected diagonal axis1==axis2 error: {msg}"
             );
             Ok(())
         });
