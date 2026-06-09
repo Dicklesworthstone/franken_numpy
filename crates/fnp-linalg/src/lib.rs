@@ -1728,11 +1728,9 @@ pub fn tensorinv(
 /// QR decomposition via Householder reflections for NxN matrix.
 /// Returns (q, r) as flat row-major n*n buffers.
 // Blocked QR (compact-WY, GEMM trailing update) engages at this size; below it
-// the unblocked two-pass Householder loop wins. Measured crossover on two
-// independent rch workers: blocked beats the real cache-friendly serial path by
-// 2.22x (worker A) / 2.53x (worker B) at n=768 and grows from there, but is
-// <2x below ~704, so 768 is the margin-safe engage point.
-const QR_BLOCK_MIN: usize = 768;
+// the unblocked two-pass Householder loop wins. Current profile-backed crossover
+// includes n=512, where the compact-WY path amortizes panel/GEMM work.
+const QR_BLOCK_MIN: usize = 512;
 const QR_PANEL_NB: usize = 128;
 
 // Blocked Householder QR via the compact-WY representation (LAPACK dgeqrf +
@@ -9669,11 +9667,11 @@ mod tests {
 
         let n = 600;
         assert!(
-            n >= crate::LU_BLOCK_MIN && n < 896,
+            (crate::LU_BLOCK_MIN..896).contains(&n),
             "n must be inside the newly-blocked band"
         );
         let mut a = vec![0.0f64; n * n];
-        let mut state = 0xc0ffee_1234_5678u64;
+        let mut state = 0x00c0_ffee_1234_5678_u64;
         for v in a.iter_mut() {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
             *v = ((state >> 11) as f64 / (1u64 << 53) as f64) - 0.5;
@@ -11954,6 +11952,42 @@ mod tests {
         assert_eq!(
             digest, "95caa242da11e5c573d75f23419e994556fe06443af250f8dba1fc58c1af0227",
             "qr_nxn blocked-path golden digest drifted"
+        );
+    }
+
+    #[test]
+    fn qr_nxn_blocked_512_path_matches_serial_within_tolerance_and_golden_sha256() {
+        // n = 512 is the lowered compact-WY crossover. QR is not bit-reproducible
+        // across blockings, so the behavior proof is LAPACK-style tolerance
+        // equivalence to the serial Householder reference plus a golden lock on
+        // the exact blocked output bits for this newly routed size.
+        let n = 512usize;
+        let a = qr_rand(n, 0x53 + n as u64);
+        let (qb, rb) = super::qr_nxn(&a, n).expect("blocked qr via qr_nxn");
+        let (qref, rref) = qr_unblocked_ref(&a, n);
+        let mut max_q = 0.0f64;
+        let mut max_r = 0.0f64;
+        for (p, s) in qb.iter().zip(&qref) {
+            max_q = max_q.max((p - s).abs() / (1.0 + s.abs()));
+        }
+        for (p, s) in rb.iter().zip(&rref) {
+            max_r = max_r.max((p - s).abs() / (1.0 + s.abs()));
+        }
+        assert!(max_q < 1e-9, "blocked 512 Q vs serial ref err {max_q:e}");
+        assert!(max_r < 1e-9, "blocked 512 R vs serial ref err {max_r:e}");
+
+        let mut hasher = Sha256::new();
+        for v in qb.iter().chain(rb.iter()) {
+            hasher.update(v.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "a74134dcdca6dd5da9f40c65d41a6c726782524a7e4cc9266ffe6c40c1165219",
+            "qr_nxn blocked 512 golden digest drifted: {digest}"
         );
     }
 
