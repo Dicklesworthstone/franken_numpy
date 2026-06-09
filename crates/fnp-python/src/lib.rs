@@ -15621,6 +15621,34 @@ fn matrix_rank(
         Err(_) => return fallback(),
     };
     let shape = array.shape();
+    // Batched (stacked) square inputs: rank every lane natively via the parallel
+    // batch_matrix_rank instead of passing the whole stack through to numpy (whose
+    // batched matrix_rank is a serial per-lane SVD in C). rank is a deterministic
+    // integer (no sign/order ambiguity), output shape = batch dims. The default
+    // tolerance is rcond·max_sv per lane with rcond = max(M,N)·eps; for square
+    // lanes max(M,N) = n is identical across the stack, matching the (tested) 2-D
+    // path's rcond. Rectangular lanes / any Err fall back to numpy. (hermitian /
+    // tol / rtol are already excluded above.)
+    if shape.len() >= 3
+        && shape[shape.len() - 1] == shape[shape.len() - 2]
+        && !array.has_integer_sidecar()
+        && array.values().iter().all(|value| value.is_finite())
+    {
+        let n = shape[shape.len() - 1];
+        if let Some(rcond) = matrix_rank_default_rcond(array.dtype(), n) {
+            let owned_shape = shape.to_vec();
+            if let Ok(ranks) =
+                fnp_linalg::batch_matrix_rank(array.values(), &owned_shape, rcond)
+            {
+                let out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+                let vals: Vec<i64> = ranks.iter().map(|&r| r as i64).collect();
+                let result = UFuncArray::from_storage(out_shape, ArrayStorage::I64(vals))
+                    .map_err(map_ufunc_error)?;
+                return build_numpy_array_from_ufunc(py, &result);
+            }
+        }
+        return fallback();
+    }
     if shape.len() != 2
         || array.has_integer_sidecar()
         || array.values().iter().any(|value| !value.is_finite())

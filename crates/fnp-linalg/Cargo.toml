@@ -38,3 +38,7 @@ harness = false
 [[bench]]
 name = "batch_eigh"
 harness = false
+
+[[bench]]
+name = "batch_matrix_rank"
+harness = false
