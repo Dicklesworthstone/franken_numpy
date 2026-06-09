@@ -81657,6 +81657,63 @@ mod tests {
     }
 
     #[test]
+    fn einsum_multi_operand_values_match_numpy_within_tolerance() {
+        // The ≥3-operand structural fast path reassociates the contraction into
+        // pairwise GEMMs (O(n³)) instead of the full-Cartesian general loop
+        // (O(n^k)). einsum parity is tolerance-based, so the reassociated result
+        // must still match np.einsum (default optimize=False naive order) within
+        // allclose across chain / fully-contracted / batched / shared-index forms.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ours_fn = module.getattr("einsum")?;
+            let numpy = py.import("numpy")?;
+            let np_einsum = numpy.getattr("einsum")?;
+            let allclose = numpy.getattr("allclose")?;
+            let arange = numpy.getattr("arange")?;
+
+            // Build a moderate-valued float array of the given shape.
+            let mk = |n: i64, shape: &[i64]| -> PyResult<Bound<'_, PyAny>> {
+                let shape_tuple = PyTuple::new(py, shape)?;
+                arange
+                    .call1((n,))?
+                    .call_method1("astype", ("float64",))?
+                    .call_method1("__mul__", (0.013_f64,))?
+                    .call_method1("__sub__", (1.7_f64,))?
+                    .call_method1("reshape", (shape_tuple,))
+            };
+
+            // (subscripts, operand (n, shape) list)
+            let cases: &[(&str, &[(i64, &[i64])])] = &[
+                ("ij,jk,kl->il", &[(20, &[4, 5]), (30, &[5, 6]), (18, &[6, 3])]),
+                ("ij,jk,ki->", &[(35, &[5, 7]), (42, &[7, 6]), (30, &[6, 5])]),
+                ("ijk,jkl,kl->il", &[(24, &[2, 3, 4]), (24, &[3, 4, 2]), (8, &[4, 2])]),
+                ("bij,bjk,bkl->bil", &[(24, &[2, 3, 4]), (16, &[2, 4, 2]), (12, &[2, 2, 3])]),
+                ("ij,jk,kl,lm->im", &[(6, &[2, 3]), (6, &[3, 2]), (8, &[2, 4]), (8, &[4, 2])]),
+            ];
+            for (subs, ops) in cases {
+                let built: Vec<Bound<'_, PyAny>> =
+                    ops.iter().map(|(n, s)| mk(*n, s)).collect::<PyResult<_>>()?;
+                let subs_obj = pyo3::types::PyString::new(py, subs).into_any();
+                let mut args: Vec<Bound<'_, PyAny>> = vec![subs_obj];
+                for b in &built {
+                    args.push(b.clone());
+                }
+                let ours = ours_fn.call1(PyTuple::new(py, &args)?)?;
+                let theirs = np_einsum.call1(PyTuple::new(py, &args)?)?;
+                let close: bool = allclose
+                    .call1((ours, theirs))?
+                    .extract()?;
+                assert!(close, "einsum '{subs}' diverges from numpy beyond allclose");
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
     fn testing_assert_family_matches_numpy_across_pass_fail_and_surface() {
         with_python(|py| {
             if !numpy_available(py) {

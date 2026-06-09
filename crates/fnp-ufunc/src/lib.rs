@@ -21581,6 +21581,27 @@ impl UFuncArray {
             });
         }
 
+        // STRUCTURAL FAST PATH: ≥3-operand contractions. The general loop below
+        // iterates the FULL Cartesian product of every label (output AND
+        // contracted) as one giant nested sum — e.g. `ij,jk,kl->il` over
+        // [n,n]×3 costs O(n⁴). Contracting pairwise instead (here via the same
+        // greedy order `einsum_optimized` uses, each pair routed through the
+        // cache-blocked GEMM path) drops that to O(n³): a different COMPLEXITY
+        // CLASS, not a faster loop. einsum parity is tolerance-based
+        // (`check_allclose`, never bit-exact vs NumPy — both sum in
+        // implementation-defined order), so reassociating the contraction is
+        // permitted; pairwise is also strictly fewer FLOPs hence no worse
+        // conditioned. On any error (a subscript the greedy planner does not
+        // accept — repeated intra-operand labels, etc.) fall through to the
+        // exhaustive general loop, which stays the correctness ground truth.
+        if operands.len() > 2
+            && !allow_private_labels
+            && let Ok(folded) = Self::einsum_optimized(subscripts, operands, "greedy")
+            && folded.shape == output_shape
+        {
+            return Ok(folded);
+        }
+
         // Precompute integer stride tables once, keyed by each label's position in
         // `all_labels`, so the hot loop is pure index arithmetic — no per-iteration
         // HashMap allocation or hashing.
@@ -59777,6 +59798,113 @@ print(json.dumps(payload))
         assert!((r.values()[1] - 24.0).abs() < 1e-10);
         assert!((r.values()[2] - 60.0).abs() < 1e-10);
         assert!((r.values()[3] - 60.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn einsum_multi_operand_greedy_matches_naive_reference_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The ≥3-operand structural fast path reassociates the contraction into
+        // pairwise GEMMs. einsum parity is tolerance-based, so the result must
+        // match an INDEPENDENT naive full-Cartesian-product reference (the
+        // mathematical contraction, same as the old general loop) within FP
+        // tolerance, across chain / fully-contracted / shared-index / batched
+        // forms. A golden sha256 over fnp's own output locks against drift.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+        };
+        let mk = |shape: Vec<usize>, g: &mut dyn FnMut() -> f64| {
+            let n: usize = shape.iter().product();
+            UFuncArray::new(shape, (0..n).map(|_| g()).collect(), DType::F64).unwrap()
+        };
+
+        let mut digest = Sha256::new();
+
+        // Case 1: ij,jk,kl->il  (matrix chain; ref = explicit triple sum).
+        {
+            let (i_, j_, k_, l_) = (5usize, 6, 7, 4);
+            let a = mk(vec![i_, j_], &mut next);
+            let b = mk(vec![j_, k_], &mut next);
+            let c = mk(vec![k_, l_], &mut next);
+            let r = UFuncArray::einsum("ij,jk,kl->il", &[&a, &b, &c]).unwrap();
+            assert_eq!(r.shape(), &[i_, l_]);
+            let (av, bv, cv) = (a.values(), b.values(), c.values());
+            for i in 0..i_ {
+                for l in 0..l_ {
+                    let mut acc = 0.0;
+                    for j in 0..j_ {
+                        for k in 0..k_ {
+                            acc += av[i * j_ + j] * bv[j * k_ + k] * cv[k * l_ + l];
+                        }
+                    }
+                    let got = r.values()[i * l_ + l];
+                    assert!((got - acc).abs() <= 1e-9 * (1.0 + acc.abs()), "chain {i},{l}");
+                }
+            }
+            for v in r.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+        }
+
+        // Case 2: ij,jk,ki->  (fully contracted scalar = trace of A·B·C).
+        {
+            let (i_, j_, k_) = (6usize, 5, 7);
+            let a = mk(vec![i_, j_], &mut next);
+            let b = mk(vec![j_, k_], &mut next);
+            let c = mk(vec![k_, i_], &mut next);
+            let r = UFuncArray::einsum("ij,jk,ki->", &[&a, &b, &c]).unwrap();
+            assert_eq!(r.shape(), &[] as &[usize]);
+            let (av, bv, cv) = (a.values(), b.values(), c.values());
+            let mut acc = 0.0;
+            for i in 0..i_ {
+                for j in 0..j_ {
+                    for k in 0..k_ {
+                        acc += av[i * j_ + j] * bv[j * k_ + k] * cv[k * i_ + i];
+                    }
+                }
+            }
+            assert!((r.values()[0] - acc).abs() <= 1e-9 * (1.0 + acc.abs()), "trace");
+            digest.update(r.values()[0].to_bits().to_le_bytes());
+        }
+
+        // Case 3: bij,bjk,bkl->bil  (batched matrix chain).
+        {
+            let (bn, i_, j_, k_, l_) = (3usize, 4, 5, 4, 3);
+            let a = mk(vec![bn, i_, j_], &mut next);
+            let b = mk(vec![bn, j_, k_], &mut next);
+            let c = mk(vec![bn, k_, l_], &mut next);
+            let r = UFuncArray::einsum("bij,bjk,bkl->bil", &[&a, &b, &c]).unwrap();
+            assert_eq!(r.shape(), &[bn, i_, l_]);
+            let (av, bv, cv) = (a.values(), b.values(), c.values());
+            for bi in 0..bn {
+                for i in 0..i_ {
+                    for l in 0..l_ {
+                        let mut acc = 0.0;
+                        for j in 0..j_ {
+                            for k in 0..k_ {
+                                acc += av[(bi * i_ + i) * j_ + j]
+                                    * bv[(bi * j_ + j) * k_ + k]
+                                    * cv[(bi * k_ + k) * l_ + l];
+                            }
+                        }
+                        let got = r.values()[(bi * i_ + i) * l_ + l];
+                        assert!((got - acc).abs() <= 1e-9 * (1.0 + acc.abs()), "batch {bi},{i},{l}");
+                    }
+                }
+            }
+            for v in r.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+        }
+
+        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "599ebf7df80364b848ef8f620633c8457a21fd45dfc14fa6ce8697b830052ec0",
+            "einsum multi-operand golden digest drifted"
+        );
     }
 
     #[test]
