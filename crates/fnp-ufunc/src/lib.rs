@@ -13434,6 +13434,29 @@ impl UFuncArray {
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
 
         let dtype = promote(self.dtype, rhs.dtype);
+        const INNER_PARALLEL_MIN_FLOPS: usize = 1 << 18;
+        let work = a_batch_count
+            .saturating_mul(b_batch_count)
+            .saturating_mul(contract_len);
+
+        if work >= INNER_PARALLEL_MIN_FLOPS
+            && a_batch_count >= MATMUL_MR
+            && b_batch_count >= MATMUL_NR
+            && contract_len > 0
+            && self.values.iter().all(|v| v.is_finite())
+            && rhs.values.iter().all(|v| v.is_finite())
+        {
+            let mut out_values = vec![0.0f64; out_count];
+            inner_bt_accumulate(
+                &self.values,
+                &rhs.values,
+                a_batch_count,
+                contract_len,
+                b_batch_count,
+                &mut out_values,
+            );
+            return Self::from_values_with_dtype(out_shape, out_values, dtype);
+        }
 
         // Each output row (fixed a_idx) is an independent set of dot products
         // over all b batches, accumulating k in ascending order — independent
@@ -13451,12 +13474,8 @@ impl UFuncArray {
                 *cell = sum;
             }
         };
-        const INNER_PARALLEL_MIN_FLOPS: usize = 1 << 18;
         if a_batch_count >= 2
-            && a_batch_count
-                .saturating_mul(b_batch_count)
-                .saturating_mul(contract_len)
-                >= INNER_PARALLEL_MIN_FLOPS
+            && work >= INNER_PARALLEL_MIN_FLOPS
             && rayon::current_num_threads() >= 2
         {
             out_values
@@ -29213,6 +29232,114 @@ fn matmul_accumulate_serial(
     // Remainder rows (all columns).
     for i in m_full..m {
         matmul_row_tail(lhs, rhs, out, i, k, n, 0);
+    }
+}
+
+fn inner_bt_accumulate(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out: &mut [f64]) {
+    debug_assert_eq!(lhs.len(), m * k);
+    debug_assert_eq!(rhs.len(), n * k);
+    debug_assert_eq!(out.len(), m * n);
+
+    let flops = m.saturating_mul(k).saturating_mul(n);
+    let threads = rayon::current_num_threads();
+    if threads < 2 || flops < MATMUL_PARALLEL_MIN_FLOPS || m < 2 * MATMUL_MR {
+        inner_bt_accumulate_serial(lhs, rhs, m, k, n, out);
+        return;
+    }
+
+    let target_bands = threads * 4;
+    let band_rows = m.div_ceil(target_bands).div_ceil(MATMUL_MR).max(1) * MATMUL_MR;
+
+    out.par_chunks_mut(band_rows * n)
+        .zip(lhs.par_chunks(band_rows * k))
+        .for_each(|(out_band, lhs_band)| {
+            let band_m = out_band.len() / n;
+            inner_bt_accumulate_serial(lhs_band, rhs, band_m, k, n, out_band);
+        });
+}
+
+fn inner_bt_accumulate_serial(
+    lhs: &[f64],
+    rhs: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    out: &mut [f64],
+) {
+    debug_assert_eq!(lhs.len(), m * k);
+    debug_assert_eq!(rhs.len(), n * k);
+    debug_assert_eq!(out.len(), m * n);
+
+    let m_full = m - m % MATMUL_MR;
+    let n_full = n - n % MATMUL_NR;
+    let nc = {
+        const PANEL_BYTES: usize = 256 * 1024;
+        let cols = PANEL_BYTES / (k.max(1) * core::mem::size_of::<f64>());
+        (cols / MATMUL_NR).max(1) * MATMUL_NR
+    };
+
+    let mut bp = vec![0.0f64; k * MATMUL_NR];
+    let mut jc = 0;
+    while jc < n_full {
+        let jc_end = (jc + nc).min(n_full);
+        let mut j0 = jc;
+        while j0 < jc_end {
+            for kk in 0..k {
+                let dst = &mut bp[kk * MATMUL_NR..kk * MATMUL_NR + MATMUL_NR];
+                for (s, slot) in dst.iter_mut().enumerate() {
+                    *slot = rhs[(j0 + s) * k + kk];
+                }
+            }
+            let mut i0 = 0;
+            while i0 < m_full {
+                type InnerVec = std::simd::Simd<f64, MATMUL_NR>;
+                let mut acc = [InnerVec::splat(0.0); MATMUL_MR];
+                for kk in 0..k {
+                    let b = InnerVec::from_slice(&bp[kk * MATMUL_NR..kk * MATMUL_NR + MATMUL_NR]);
+                    for (ii, slot) in acc.iter_mut().enumerate() {
+                        let a_val = lhs[(i0 + ii) * k + kk];
+                        *slot += InnerVec::splat(a_val) * b;
+                    }
+                }
+                for (ii, &row) in acc.iter().enumerate() {
+                    let base = (i0 + ii) * n + j0;
+                    let o = &mut out[base..base + MATMUL_NR];
+                    let updated = InnerVec::from_slice(o) + row;
+                    updated.copy_to_slice(o);
+                }
+                i0 += MATMUL_MR;
+            }
+            j0 += MATMUL_NR;
+        }
+        jc += nc;
+    }
+
+    for i in 0..m_full {
+        inner_bt_row_tail(lhs, rhs, out, i, k, n, n_full);
+    }
+    for i in m_full..m {
+        inner_bt_row_tail(lhs, rhs, out, i, k, n, 0);
+    }
+}
+
+fn inner_bt_row_tail(
+    lhs: &[f64],
+    rhs: &[f64],
+    out: &mut [f64],
+    i: usize,
+    k: usize,
+    n: usize,
+    j0: usize,
+) {
+    let a_base = i * k;
+    let o_base = i * n;
+    for j in j0..n {
+        let b_base = j * k;
+        let mut s = 0.0f64;
+        for kk in 0..k {
+            s += lhs[a_base + kk] * rhs[b_base + kk];
+        }
+        out[o_base + j] += s;
     }
 }
 
@@ -58232,38 +58359,103 @@ print(json.dumps(payload))
 
     #[test]
     fn inner_parallel_matches_serial_reference_bits() {
-        // 256x256 inner contracts the shared last axis; a_batch*b_batch*K = 2^24
-        // crosses the inner parallel gate. The parallel per-row fill must equal
-        // a serial reference accumulating k ascending — bit-for-bit.
-        let n = 256usize;
-        let a_vals: Vec<f64> = (0..n * n).map(|i| ((i % 11) as f64) * 0.53 - 0.9).collect();
-        let b_vals: Vec<f64> = (0..n * n).map(|i| ((i % 19) as f64) * 0.27 + 0.2).collect();
-        let a = UFuncArray::new(vec![n, n], a_vals.clone(), DType::F64).unwrap();
-        let b = UFuncArray::new(vec![n, n], b_vals.clone(), DType::F64).unwrap();
+        use sha2::{Digest, Sha256};
 
-        let got = a.inner(&b).unwrap();
-        assert_eq!(got.shape, vec![n, n]);
+        let mut hasher = Sha256::new();
+        let cases: Vec<(Vec<usize>, Vec<usize>, Vec<f64>, Vec<f64>)> = {
+            let n = 256usize;
+            let square_a: Vec<f64> = (0..n * n).map(|i| ((i % 11) as f64) * 0.53 - 0.9).collect();
+            let square_b: Vec<f64> = (0..n * n).map(|i| ((i % 19) as f64) * 0.27 + 0.2).collect();
 
-        // Serial reference: out[i,j] = sum_k a[i,k]*b[j,k], k ascending.
-        let mut want = vec![0.0f64; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                let mut sum = 0.0;
-                for k in 0..n {
-                    sum += a_vals[i * n + k] * b_vals[j * n + k];
+            let rows = 64usize;
+            let rhs_rows = 32usize;
+            let k = 128usize;
+            let zero_a: Vec<f64> = (0..rows * k)
+                .map(|i| match i % 17 {
+                    0 | 4 | 9 => -0.0,
+                    1 | 5 | 10 => 0.0,
+                    _ => ((i % 23) as f64) * 0.25 - 1.0,
+                })
+                .collect();
+            let zero_b: Vec<f64> = (0..rhs_rows * k)
+                .map(|i| match i % 19 {
+                    0 | 7 => -0.0,
+                    1 | 8 => 0.0,
+                    _ => ((i % 31) as f64) * -0.125 + 1.5,
+                })
+                .collect();
+            let special_a: Vec<f64> = (0..rows * k)
+                .map(|i| match i % 29 {
+                    0 => f64::NAN,
+                    1 => f64::INFINITY,
+                    2 => f64::NEG_INFINITY,
+                    3 => -0.0,
+                    4 => 0.0,
+                    _ => ((i % 37) as f64) * 0.125 - 2.0,
+                })
+                .collect();
+            let special_b: Vec<f64> = (0..rhs_rows * k)
+                .map(|i| match i % 31 {
+                    0 => f64::NAN,
+                    1 => -0.0,
+                    2 => 0.0,
+                    3 => f64::INFINITY,
+                    _ => ((i % 41) as f64) * -0.0625 + 1.25,
+                })
+                .collect();
+
+            vec![
+                (vec![n, n], vec![n, n], square_a, square_b),
+                (vec![rows, k], vec![rhs_rows, k], zero_a, zero_b),
+                (vec![rows, k], vec![rhs_rows, k], special_a, special_b),
+            ]
+        };
+
+        for (a_shape, b_shape, a_vals, b_vals) in cases {
+            let contract_len = *a_shape.last().unwrap();
+            let a_batch_count: usize = a_shape[..a_shape.len() - 1].iter().product();
+            let b_batch_count: usize = b_shape[..b_shape.len() - 1].iter().product();
+            let a = UFuncArray::new(a_shape.clone(), a_vals.clone(), DType::F64).unwrap();
+            let b = UFuncArray::new(b_shape.clone(), b_vals.clone(), DType::F64).unwrap();
+
+            let got = a.inner(&b).unwrap();
+            assert_eq!(got.shape, vec![a_batch_count, b_batch_count]);
+
+            let mut want = vec![0.0f64; a_batch_count * b_batch_count];
+            for i in 0..a_batch_count {
+                for j in 0..b_batch_count {
+                    let mut sum = 0.0;
+                    for k in 0..contract_len {
+                        sum += a_vals[i * contract_len + k] * b_vals[j * contract_len + k];
+                    }
+                    want[i * b_batch_count + j] = sum;
                 }
-                want[i * n + j] = sum;
+            }
+
+            for (idx, (g, w)) in got.values.iter().zip(want.iter()).enumerate() {
+                assert_eq!(
+                    g.to_bits(),
+                    w.to_bits(),
+                    "parallel inner diverged from serial reference for {a_shape:?} x {b_shape:?} at index {idx}",
+                );
+            }
+            for &d in &got.shape {
+                hasher.update((d as u64).to_le_bytes());
+            }
+            hasher.update(b"|");
+            for &value in &got.values {
+                hasher.update(value.to_bits().to_le_bytes());
             }
         }
-
-        for (idx, (g, w)) in got.values.iter().zip(want.iter()).enumerate() {
-            assert_eq!(
-                g.to_bits(),
-                w.to_bits(),
-                "parallel inner diverged from serial reference at index {}",
-                idx
-            );
-        }
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            digest, "2f4b0ffc9655eff9fe6abad9c8d92dcdedbdf446c906831d7d5f8de471404458",
+            "inner output bit-pattern golden digest changed"
+        );
     }
 
     #[test]
