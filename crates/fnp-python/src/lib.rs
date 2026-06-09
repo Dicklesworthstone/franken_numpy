@@ -16822,6 +16822,15 @@ fn frexp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f64_frexp(py, x.bind(py))? {
         return Ok(out);
     }
+    // numpy.frexp preserves the input float width for the mantissa (float16->float16,
+    // float32->float32) and resolves integer inputs to float16 (int8/uint8),
+    // float32 (int16/uint16), or float64 (wider ints); the exponent is always int32.
+    // extract_numeric_array canonicalizes every narrow dtype to f64, so the native
+    // kernel only matches numpy for float64 input; defer all other dtypes to numpy.frexp.
+    if !numpy_dtype_is_f64(py, x.bind(py)) {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("frexp")?.call1((x.bind(py),))?.unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "frexp(x)")?;
     let is_scalar = x.shape().is_empty();
     let (mantissas, exponents) = ufunc_frexp(&x).map_err(map_ufunc_error)?;
@@ -16916,6 +16925,15 @@ fn try_zerocopy_f64_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
 fn modf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f64_modf(py, x.bind(py))? {
         return Ok(out);
+    }
+    // numpy.modf preserves the input float width for both outputs (float16->float16,
+    // float32->float32) and resolves integer inputs to float16 (int8/uint8),
+    // float32 (int16/uint16), or float64 (wider ints). extract_numeric_array
+    // canonicalizes every narrow dtype to f64, so the native kernel only matches
+    // numpy for float64 input; defer all other dtypes to numpy.modf for exact parity.
+    if !numpy_dtype_is_f64(py, x.bind(py)) {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("modf")?.call1((x.bind(py),))?.unbind());
     }
     let x = extract_numeric_array(py, x.bind(py), "modf(x)")?;
     let (fractional, integral) = ufunc_modf(&x).map_err(map_ufunc_error)?;
@@ -57751,6 +57769,71 @@ mod tests {
                 repr_string(&actual_integral.call_method0("tolist")?),
                 repr_string(&expected_integral.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn modf_and_frexp_preserve_input_dtype_like_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            // modf: both outputs follow numpy type resolution — float16->float16,
+            // float32->float32, float64->float64, and integer inputs map to
+            // float16 (int8/uint8), float32 (int16/uint16), float64 (wider ints).
+            for dtype in [
+                "float16", "float32", "float64", "int8", "uint8", "int16", "uint16", "int32",
+                "int64",
+            ] {
+                let x = numeric_array(py, vec![1.5_f64, 2.5, 3.0, 6.25], dtype);
+                let actual = modf(py, x.clone().unbind())?;
+                let expected = numpy.getattr("modf")?.call1((x,))?;
+                let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
+                let expected_tuple = expected.cast::<PyTuple>()?;
+                for idx in 0..2 {
+                    let a_item = actual_tuple.get_item(idx)?;
+                    let e_item = expected_tuple.get_item(idx)?;
+                    assert_eq!(
+                        a_item.getattr("dtype")?.str()?.extract::<String>()?,
+                        e_item.getattr("dtype")?.str()?.extract::<String>()?,
+                        "modf output {idx} dtype for input {dtype}"
+                    );
+                    assert!(
+                        numpy
+                            .call_method1("array_equal", (&a_item, &e_item))?
+                            .extract::<bool>()?,
+                        "modf output {idx} values for input {dtype}"
+                    );
+                }
+            }
+            // frexp: mantissa follows the same width resolution; exponent is int32.
+            for dtype in [
+                "float16", "float32", "float64", "int8", "uint8", "int16", "uint16", "int32",
+                "int64",
+            ] {
+                let x = numeric_array(py, vec![1.5_f64, 2.5, 3.0, 6.25], dtype);
+                let actual = frexp(py, x.clone().unbind())?;
+                let expected = numpy.getattr("frexp")?.call1((x,))?;
+                let actual_tuple = actual.bind(py).cast::<PyTuple>()?;
+                let expected_tuple = expected.cast::<PyTuple>()?;
+                for idx in 0..2 {
+                    let a_item = actual_tuple.get_item(idx)?;
+                    let e_item = expected_tuple.get_item(idx)?;
+                    assert_eq!(
+                        a_item.getattr("dtype")?.str()?.extract::<String>()?,
+                        e_item.getattr("dtype")?.str()?.extract::<String>()?,
+                        "frexp output {idx} dtype for input {dtype}"
+                    );
+                    assert!(
+                        numpy
+                            .call_method1("array_equal", (&a_item, &e_item))?
+                            .extract::<bool>()?,
+                        "frexp output {idx} values for input {dtype}"
+                    );
+                }
+            }
             Ok(())
         });
     }
