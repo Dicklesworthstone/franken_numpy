@@ -19947,6 +19947,103 @@ fn median(
 // reshape 1-D inputs to (1, n_obs), subtract the per-row mean, then
 // return (X @ X.T) / (n_obs - ddof). Returns Err(fallback) for shapes
 // that numpy handles via special-cases this path doesn't reproduce.
+// Zero-copy parallel covariance for the common case (rowvar=True, no y, contiguous
+// float64 1-D/2-D ndarray). numpy.cov here is X_centered @ X_centered.T / (n_obs - ddof)
+// with variables = rows. The existing UFuncArray path costs ~10x numpy NOT because of the
+// GEMM (which already matches numpy) but because of the chain of cold-mmap allocations
+// (extract Vec, centered copy, explicit transpose, full(n*n) scale matrix). Here we read
+// the numpy buffer directly, center into one buffer, and compute the symmetric Gram as
+// parallel row-dot-products (no transpose materialization, scale folded into the dot),
+// which removes those allocations. The dot reassociates the sum vs numpy's BLAS — cov
+// parity is tolerance-based (np.allclose), like the existing matmul path.
+fn try_zerocopy_cov_rowvar_f64(
+    py: Python<'_>,
+    m: &Bound<'_, PyAny>,
+    ddof: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    use rayon::prelude::*;
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !m.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = m.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(m) else {
+        return Ok(None);
+    };
+    let shape = in_buffer.shape();
+    let (n_vars, n_obs) = match shape.len() {
+        1 => (1usize, shape[0]),
+        2 => (shape[0], shape[1]),
+        _ => return Ok(None),
+    };
+    if n_vars == 0 || n_obs == 0 || n_obs <= ddof {
+        return Ok(None); // empty / DoF<=0 (numpy warns + returns NaN): defer.
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None); // non-contiguous
+    };
+
+    // Center each variable (row) by its mean.
+    let mut centered = vec![0.0f64; n_vars * n_obs];
+    for i in 0..n_vars {
+        let src = &input[i * n_obs..(i + 1) * n_obs];
+        let mean = src.iter().map(|c| c.get()).sum::<f64>() / n_obs as f64;
+        let dst = &mut centered[i * n_obs..(i + 1) * n_obs];
+        for (o, c) in dst.iter_mut().zip(src) {
+            *o = c.get() - mean;
+        }
+    }
+
+    let inv_fact = 1.0_f64 / (n_obs - ddof) as f64;
+    // Symmetric Gram: parallel over output rows, fill the lower triangle, then mirror.
+    let mut result = vec![0.0f64; n_vars * n_vars];
+    result
+        .par_chunks_mut(n_vars)
+        .enumerate()
+        .for_each(|(i, row_out)| {
+            let ci = &centered[i * n_obs..(i + 1) * n_obs];
+            for (j, slot) in row_out.iter_mut().enumerate().take(i + 1) {
+                let cj = &centered[j * n_obs..(j + 1) * n_obs];
+                let dot: f64 = ci.iter().zip(cj).map(|(a, b)| a * b).sum();
+                *slot = dot * inv_fact;
+            }
+        });
+    for i in 0..n_vars {
+        for j in (i + 1)..n_vars {
+            result[i * n_vars + j] = result[j * n_vars + i];
+        }
+    }
+
+    // Build output (n_vars x n_vars); numpy squeezes a 1-variable result to a 0-d scalar.
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n_vars * n_vars,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, val) in output.iter().zip(result) {
+            slot.set(val);
+        }
+    }
+    if n_vars == 1 {
+        // 1-D input -> 0-d scalar variance.
+        let scalar = flat.call_method1("reshape", (PyTuple::empty(py),))?;
+        return Ok(Some(scalar.call_method0("squeeze")?.unbind()));
+    }
+    let reshaped = flat.call_method1("reshape", ((n_vars, n_vars),))?;
+    Ok(Some(reshaped.unbind()))
+}
+
 fn native_cov_unweighted(
     py: Python<'_>,
     m: &Bound<'_, PyAny>,
@@ -20130,6 +20227,14 @@ fn cov(
         || y_binding.is_some_and(|y_val| !numpy_dtype_is_f64(py, y_val))
     {
         return fallback(py);
+    }
+    // Fast path: rowvar=True with no y is the common shape and maps to a single
+    // zero-copy parallel Gram (no transpose / extract / full-matrix allocations).
+    if rowvar
+        && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
+        && let Some(out) = try_zerocopy_cov_rowvar_f64(py, m_bound, resolved_ddof)?
+    {
+        return Ok(out);
     }
     let native = match native_cov_unweighted(py, m_bound, y_binding, rowvar, resolved_ddof) {
         Ok(Some(value)) => value,

@@ -483,3 +483,32 @@ print(np.allclose(fnp_result, np_result, equal_nan=True))
     );
     Ok(())
 }
+
+#[test]
+fn cov_native_fast_path_matches_numpy_across_shape_ddof_bias() -> Result<(), String> {
+    // Locks the zero-copy parallel-Gram fast path (rowvar=True, no y, contiguous f64):
+    // it must match numpy.cov within tolerance across variable/observation counts,
+    // ddof, and bias. (Reassociated dot sums -> allclose, not bit-exact, like the prior
+    // matmul path.)
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(3)
+for shape in [(50, 2000), (5, 30), (1, 100), (3, 3), (10, 11), (200, 500)]:
+    X = rng.standard_normal(shape)
+    for kw in [{}, {"bias": True}, {"ddof": 0}, {"ddof": 2}, {"rowvar": True}]:
+        f = np.asarray(fnp.cov(X, **kw)); n = np.asarray(np.cov(X, **kw))
+        if f.shape != n.shape or not np.allclose(f, n, rtol=1e-9, atol=1e-12, equal_nan=True):
+            ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "cov fast path must match numpy across shape/ddof/bias"
+    );
+    Ok(())
+}
