@@ -9824,6 +9824,39 @@ impl UFuncArray {
 
         let new_shape: Vec<usize> = perm.iter().map(|&a| self.shape[a]).collect();
         let total = self.values.len();
+
+        // 2-D transpose fast path: a cache-tiled, parallel data move that replaces
+        // the per-element coordinate-decomposition gather below (which spends `ndim`
+        // integer divisions per element and reads strided through cache). Pure
+        // relocation, so it is bit-for-bit identical — values and the i64/u64
+        // sidecar are moved by the same kernel. Identity (perm == [0,1]) falls
+        // through to the generic copy path.
+        if ndim == 2 && perm[0] == 1 && perm[1] == 0 {
+            let r = self.shape[0];
+            let c = self.shape[1];
+            let mut new_values = vec![0.0f64; total];
+            transpose_2d_par(&self.values, &mut new_values, r, c);
+            let new_sidecar = match &self.integer_sidecar {
+                Some(IntegerSidecar::I64(v)) => {
+                    let mut out = vec![0i64; total];
+                    transpose_2d_par(v, &mut out, r, c);
+                    Some(IntegerSidecar::I64(out))
+                }
+                Some(IntegerSidecar::U64(v)) => {
+                    let mut out = vec![0u64; total];
+                    transpose_2d_par(v, &mut out, r, c);
+                    Some(IntegerSidecar::U64(out))
+                }
+                None => None,
+            };
+            return Ok(Self {
+                shape: new_shape,
+                values: new_values,
+                dtype: self.dtype,
+                integer_sidecar: new_sidecar,
+            });
+        }
+
         let mut new_values = vec![0.0f64; total];
         let mut source_indices = Vec::with_capacity(total);
 
@@ -30475,6 +30508,42 @@ fn digamma_approx(mut x: f64) -> f64 {
 /// the strided side of the copy within a small working set, so each cache line is
 /// touched once instead of being evicted between strided accesses — the difference
 /// between a cache-resident and a cache-thrashing transpose on large matrices.
+/// Cache-tiled, parallel 2-D transpose of an `r×c` row-major `src` into a `c×r`
+/// row-major `dst` (`dst[j*r + i] = src[i*c + j]`). Generic over any `Copy`
+/// element so the f64 value plane and the i64/u64 integer sidecar share one
+/// kernel. Output rows are split into `TILE`-wide bands across the rayon pool
+/// (each band is a disjoint contiguous `dst` slice → `#![forbid(unsafe_code)]`
+/// clean), and each band is transposed in `TILE×TILE` blocks so the strided
+/// direction stays cache-resident. A pure data move, so it is bit-for-bit
+/// identical to the naive per-element gather for any thread count.
+fn transpose_2d_par<T: Copy + Send + Sync>(src: &[T], dst: &mut [T], r: usize, c: usize) {
+    const TILE: usize = 32;
+    const PAR_MIN_ELEMS: usize = 1 << 14;
+    let process_band = |(band, dst_band): (usize, &mut [T])| {
+        let j0 = band * TILE;
+        let j1 = (j0 + TILE).min(c);
+        let mut i0 = 0;
+        while i0 < r {
+            let i1 = (i0 + TILE).min(r);
+            for i in i0..i1 {
+                let src_row = i * c;
+                for j in j0..j1 {
+                    // Contiguous src read; strided dst write bounded to the TILE block.
+                    dst_band[(j - j0) * r + i] = src[src_row + j];
+                }
+            }
+            i0 += TILE;
+        }
+    };
+    if r * c >= PAR_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+        dst.par_chunks_mut(TILE * r)
+            .enumerate()
+            .for_each(process_band);
+    } else {
+        dst.chunks_mut(TILE * r).enumerate().for_each(process_band);
+    }
+}
+
 fn transpose_tiled(src: &[f64], dst: &mut [f64], r: usize, c: usize) {
     const T: usize = 32;
     let mut i0 = 0;
@@ -44442,6 +44511,79 @@ print(json.dumps(payload))
         assert_eq!(
             out.to_storage().expect("to_storage"),
             ArrayStorage::I64(vec![1, (1_i64 << 53) + 9, (1_i64 << 53) + 7, 5, 3, 6])
+        );
+    }
+
+    #[test]
+    fn transpose_2d_tiled_matches_naive_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The cache-tiled parallel 2-D transpose must be BIT-IDENTICAL to the naive
+        // per-element coordinate-decomposition gather, across square / tall / wide
+        // shapes and non-tile-multiple dims (TILE=32, so 33/65 exercise partial
+        // bands), and large enough (>=1<<14 elems) to cross the parallel threshold.
+        // Pure data move => to_bits equality including NaN / ±inf / -0.0. Also
+        // verifies the i64 sidecar is relocated identically.
+        fn naive_t(values: &[f64], r: usize, c: usize) -> Vec<f64> {
+            let mut out = vec![0.0f64; r * c];
+            for i in 0..r {
+                for j in 0..c {
+                    out[j * r + i] = values[i * c + j];
+                }
+            }
+            out
+        }
+        let shapes = [(64usize, 64usize), (128, 96), (33, 200), (200, 33), (257, 65)];
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            match (seed >> 9) % 23 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => f64::NEG_INFINITY,
+                3 => -0.0,
+                _ => (seed >> 11) as f64 / (1u64 << 53) as f64 * 200.0 - 100.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        for (r, c) in shapes {
+            let n = r * c;
+            let data: Vec<f64> = (0..n).map(|_| next()).collect();
+            let arr = UFuncArray::new(vec![r, c], data.clone(), DType::F64).unwrap();
+            let got = arr.transpose(None).unwrap();
+            assert_eq!(got.shape(), &[c, r], "shape {r}x{c}");
+            let want = naive_t(&data, r, c);
+            for (g, w) in got.values().iter().zip(want.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "transpose {r}x{c}");
+            }
+            for v in got.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+            // i64 sidecar relocates identically (compare to the same naive map).
+            let ivals: Vec<i64> = (0..n as i64).map(|k| (k << 20) ^ (k * 7 + 1)).collect();
+            let iarr = UFuncArray::from_storage(vec![r, c], ArrayStorage::I64(ivals.clone()))
+                .expect("from_storage");
+            let it = iarr.transpose(None).expect("itranspose");
+            let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
+                panic!("expected i64 storage");
+            };
+            let mut want_i = vec![0i64; n];
+            for i in 0..r {
+                for j in 0..c {
+                    want_i[j * r + i] = ivals[i * c + j];
+                }
+            }
+            assert_eq!(got_i, want_i, "i64 transpose {r}x{c}");
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "c2c9e3c895d562c1935fcc27745f1623e300ba403b85fb7cf8992c7ad191dc7f",
+            "transpose 2-D tiled golden digest drifted"
         );
     }
 

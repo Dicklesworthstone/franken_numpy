@@ -54,3 +54,7 @@ harness = false
 [[bench]]
 name = "cumminmax"
 harness = false
+
+[[bench]]
+name = "transpose"
+harness = false
