@@ -27195,7 +27195,12 @@ fn log(
     native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Log, "log", "log(x)")
 }
 
-// Passthrough to NumPy — our Rust→NumPy export is slower due to bridge overhead.
+// Passthrough to NumPy: numpy's exp is a fast SIMD-vectorized kernel (~15ms/4M-elem),
+// ~2x faster than fnp's rayon-parallel scalar-libm elementwise path (~30ms) — the
+// parallelism cannot overcome the per-element SIMD-vs-scalar gap. (fnp's native path
+// only wins for sin/tanh, where numpy's ufunc is the slow scalar one.) Closing this is
+// SIMD-bound: a std::arch AVX2 vectorized-polynomial exp — bead 8vdtg. Measured
+// 2026-06-09: numpy 15.2ms vs native 30.3ms @4M; do not re-wire to native without SIMD.
 #[pyfunction]
 #[pyo3(
     signature = (*args, **kwargs),
@@ -38917,6 +38922,55 @@ fn block(
     core_numpy_passthrough(py, "block", args, kwargs)
 }
 
+// numpy 2.0 Array-API `cumulative_sum`/`cumulative_prod` ARE the classic `cumsum`/`cumprod`
+// along an axis — identical accumulator dtype and values (verified) — except: (a)
+// `include_initial=True` prepends the reduction identity, and (b) `axis` is REQUIRED for
+// ndim>1 (axis=None raises a ValueError instead of flattening). Route the pure case to the
+// native parallel `cum{sum,prod}` (which beats numpy's single-threaded scan ~3.7x at 4M
+// f64), and defer `include_initial` / `dtype` / `out` / the axis=None-on-ND error to numpy.
+type CumulativeNative =
+    fn(Python<'_>, Py<PyAny>, Option<Py<PyAny>>, Option<Py<PyAny>>, Option<Py<PyAny>>) -> PyResult<Py<PyAny>>;
+
+fn cumulative_dispatch(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+    numpy_name: &str,
+    native: CumulativeNative,
+) -> PyResult<Py<PyAny>> {
+    let passthrough = || core_numpy_passthrough(py, numpy_name, args, kwargs);
+    // x is positional-only; anything else (extra positionals) is numpy's to error on.
+    if args.len() != 1 {
+        return passthrough();
+    }
+    let kw_get = |name: &str| -> Option<Bound<'_, PyAny>> {
+        kwargs.and_then(|k| k.get_item(name).ok().flatten())
+    };
+    // include_initial (identity prepend), explicit dtype (casting), out (buffer): defer.
+    if kw_get("include_initial").is_some_and(|v| v.is_truthy().unwrap_or(true))
+        || kw_get("dtype").is_some_and(|v| !v.is_none())
+        || kw_get("out").is_some_and(|v| !v.is_none())
+    {
+        return passthrough();
+    }
+    let x = args.get_item(0)?;
+    let axis = kw_get("axis").filter(|a| !a.is_none());
+    if axis.is_none() {
+        // axis=None: numpy requires ndim<=1 (else ValueError). Only the 1-D flatten case
+        // maps cleanly to the native path; defer 0-d/ND so numpy raises its exact error.
+        let ndim = py
+            .import("numpy")?
+            .call_method1("asarray", (&x,))?
+            .getattr("ndim")?
+            .extract::<usize>()
+            .unwrap_or(2);
+        if ndim != 1 {
+            return passthrough();
+        }
+    }
+    native(py, x.unbind(), axis.map(|a| a.unbind()), None, None)
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn cumulative_prod(
@@ -38924,7 +38978,7 @@ fn cumulative_prod(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "cumulative_prod", args, kwargs)
+    cumulative_dispatch(py, args, kwargs, "cumulative_prod", cumprod)
 }
 
 #[pyfunction]
@@ -38934,7 +38988,7 @@ fn cumulative_sum(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    core_numpy_passthrough(py, "cumulative_sum", args, kwargs)
+    cumulative_dispatch(py, args, kwargs, "cumulative_sum", cumsum)
 }
 
 #[pyfunction]
