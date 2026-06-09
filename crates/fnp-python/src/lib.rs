@@ -36834,15 +36834,171 @@ fn einsum(
     // back to numpy for anything our kernel can't reproduce identically: integer/
     // complex operands, out=/dtype=/order=/casting= kwargs, the interleaved-list
     // subscript form, or any kernel error. Behavior parity stays absolute.
-    if let Some(result) = einsum_native(py, args, kwargs)? {
-        return Ok(result);
+    // Our native kernel extracts every operand to f64, so its result is always float64.
+    // numpy.einsum keeps the (promoted) input dtype: float32->float32, int*->int*, etc.
+    // Decide from the ORIGINAL operand dtypes whether to (a) run native unchanged (all
+    // promote to float64), (b) run native then cast the result to float32, or (c) defer to
+    // numpy — for integer/bool (where einsum sums in the input dtype and WRAPS on overflow,
+    // which f64-then-cast cannot reproduce) and float16 (whose accumulation precision the
+    // f64 path would not match within tolerance).
+    match einsum_operand_dtype_policy(py, args)? {
+        EinsumDtypePolicy::Defer => {}
+        EinsumDtypePolicy::Native => {
+            if let Some(result) = einsum_native(py, args, kwargs)? {
+                return Ok(result);
+            }
+        }
+        EinsumDtypePolicy::CastFloat32 => {
+            if let Some(result) = einsum_native(py, args, kwargs)? {
+                return Ok(result
+                    .bind(py)
+                    .call_method1("astype", ("float32",))?
+                    .unbind());
+            }
+        }
     }
     core_numpy_passthrough(py, "einsum", args, kwargs)
+}
+
+#[derive(Clone, Copy)]
+enum EinsumDtypePolicy {
+    /// All operands promote to float64 — run the native kernel as-is.
+    Native,
+    /// Result is float32 — run native (computing in f64) then cast the result to float32.
+    CastFloat32,
+    /// Integer/bool/float16/complex result — defer to numpy for exact dtype + overflow.
+    Defer,
+}
+
+fn einsum_operand_dtype_policy(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+) -> PyResult<EinsumDtypePolicy> {
+    // Only the string-subscript form (`einsum("ij,jk->ik", a, b, ...)`) has operands at
+    // args[1..]; the interleaved-list form and empty calls fall through to einsum_native,
+    // which returns None for them, so leaving them Native is harmless.
+    if args.len() < 2 || args.get_item(0)?.extract::<String>().is_err() {
+        return Ok(EinsumDtypePolicy::Native);
+    }
+    let numpy = py.import("numpy")?;
+    let mut operand_arrays: Vec<Bound<'_, PyAny>> = Vec::with_capacity(args.len() - 1);
+    let mut all_float64 = true;
+    for i in 1..args.len() {
+        let arr = numpy.call_method1("asarray", (&args.get_item(i)?,))?;
+        let dtype = arr.getattr("dtype")?;
+        let kind: String = dtype.getattr("kind")?.extract()?;
+        let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+        if kind != "f" || itemsize != 8 {
+            all_float64 = false;
+        }
+        operand_arrays.push(arr);
+    }
+    if all_float64 {
+        return Ok(EinsumDtypePolicy::Native);
+    }
+    let result_dtype = numpy
+        .getattr("result_type")?
+        .call(PyTuple::new(py, &operand_arrays)?, None)?;
+    let kind: String = result_dtype.getattr("kind")?.extract()?;
+    let itemsize: usize = result_dtype.getattr("itemsize")?.extract()?;
+    Ok(match (kind.as_str(), itemsize) {
+        ("f", 8) => EinsumDtypePolicy::Native,
+        ("f", 4) => EinsumDtypePolicy::CastFloat32,
+        _ => EinsumDtypePolicy::Defer,
+    })
 }
 
 /// Native einsum fast path: returns `Some(result)` when the call is the common
 /// real-float, string-subscripts form our kernel handles, else `None` (caller
 /// falls back to numpy).
+#[derive(Clone, Copy)]
+enum EinsumSingleDiagonalKind {
+    Trace,
+    Diagonal,
+}
+
+fn parse_single_operand_diagonal_einsum(subscripts: &str) -> Option<EinsumSingleDiagonalKind> {
+    let compact = subscripts
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
+    if compact.contains(',') || compact.contains('.') {
+        return None;
+    }
+    let (input, output) = compact
+        .split_once("->")
+        .map_or((compact.as_str(), None), |(inp, out)| (inp, Some(out)));
+    let mut input_chars = input.chars();
+    let label = input_chars.next()?;
+    if !label.is_ascii_alphabetic()
+        || input_chars.next() != Some(label)
+        || input_chars.next().is_some()
+    {
+        return None;
+    }
+    match output {
+        None | Some("") => Some(EinsumSingleDiagonalKind::Trace),
+        Some(out) => {
+            let mut output_chars = out.chars();
+            if output_chars.next() == Some(label) && output_chars.next().is_none() {
+                Some(EinsumSingleDiagonalKind::Diagonal)
+            } else {
+                None
+            }
+        }
+    }
+}
+
+fn try_zerocopy_f64_einsum_single_diagonal(
+    py: Python<'_>,
+    subscripts: &str,
+    operand: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(kind) = parse_single_operand_diagonal_einsum(subscripts) else {
+        return Ok(None);
+    };
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !operand.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, operand) {
+        return Ok(None);
+    }
+    let Ok(shape) = operand
+        .getattr("shape")
+        .and_then(|shape| shape.extract::<Vec<usize>>())
+    else {
+        return Ok(None);
+    };
+    if shape.len() != 2 || shape[0] != shape[1] {
+        return Ok(None);
+    }
+    let Ok(diag_view) = operand.call_method0("diagonal") else {
+        return Ok(None);
+    };
+    match kind {
+        EinsumSingleDiagonalKind::Diagonal => {
+            let writeable = operand
+                .getattr("flags")?
+                .getattr("writeable")?
+                .extract::<bool>()?;
+            if writeable {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("write", true)?;
+                diag_view.call_method("setflags", (), Some(&kwargs))?;
+            }
+            Ok(Some(diag_view.unbind()))
+        }
+        EinsumSingleDiagonalKind::Trace => {
+            let diag_array = match extract_precise_numeric_array(py, &diag_view, "einsum(diagonal)")
+            {
+                Ok(array) => array,
+                Err(_) => return Ok(None),
+            };
+            let result = diag_array.sum_extracted_diagonal_to_scalar();
+            Ok(Some(build_numpy_scalar_or_array(py, &result)?))
+        }
+    }
+}
+
 fn einsum_native(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -36879,6 +37035,12 @@ fn einsum_native(
         Ok(s) => s,
         Err(_) => return Ok(None),
     };
+    if args.len() == 2
+        && let Some(result) =
+            try_zerocopy_f64_einsum_single_diagonal(py, &subscripts, &args.get_item(1)?)?
+    {
+        return Ok(Some(result));
+    }
     let mut operands: Vec<UFuncArray> = Vec::with_capacity(args.len() - 1);
     for i in 1..args.len() {
         let item = args.get_item(i)?;

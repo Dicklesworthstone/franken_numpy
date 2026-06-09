@@ -74,6 +74,50 @@ print(np.array_equal(result, expected) and np.array_equal(result, np.diag(a)))
 }
 
 #[test]
+fn einsum_f64_single_operand_diagonal_view_and_trace_golden_sha256() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+n = 32
+a = np.arange(n * n, dtype=np.float64).reshape(n, n)
+diag = fnp.einsum('ii->i', a)
+diag[0] = -123.5
+trace = fnp.einsum('ii', a)
+expected_diag = np.einsum('ii->i', a)
+expected_trace = np.einsum('ii', a)
+h = hashlib.sha256()
+h.update(np.asarray(trace).tobytes())
+h.update(np.asarray(diag).copy(order='C').tobytes())
+h.update(str(diag.strides).encode())
+parity = (
+    np.array_equal(diag, expected_diag)
+    and trace == expected_trace
+    and type(trace).__name__ == type(expected_trace).__name__
+    and np.shares_memory(a, diag)
+    and diag.flags.writeable
+    and a[0, 0] == -123.5
+)
+print(parity)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next(),
+        Some("True"),
+        "einsum f64 diagonal/trace parity failed: {result}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("9dc21300099f7dec79fc2a202b2c654f5785d714d7f56550904b001c1c64e72d"),
+        "einsum f64 diagonal/trace golden digest drifted: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn einsum_sum_all() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -105,6 +149,54 @@ print(np.array_equal(result, expected) and np.array_equal(result, np.sum(a, axis
         result.trim(),
         "True",
         "einsum sum axis 0 should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
+fn einsum_single_operand_reductions_preserve_numpy_dtype_and_golden_sha256() -> Result<(), String>
+{
+    let script = fnp_script(
+        r#"
+import hashlib
+cases = [
+    ('float32', np.array([[1.25, 2.5, 3.75], [4.5, 5.25, 6.0]], dtype=np.float32)),
+    ('int32', np.array([[2000000000, 2000000000, 2000000000], [1, 2, 3]], dtype=np.int32)),
+    ('int64', np.array([[10, 20, 30], [40, 50, 60]], dtype=np.int64)),
+]
+subs = ['ij->i', 'ij->j', 'ij->']
+h = hashlib.sha256()
+ok = True
+for name, a in cases:
+    for sub in subs:
+        ours = fnp.einsum(sub, a)
+        theirs = np.einsum(sub, a)
+        ours_arr = np.asarray(ours)
+        theirs_arr = np.asarray(theirs)
+        ok = ok and ours_arr.dtype == theirs_arr.dtype
+        ok = ok and ours_arr.shape == theirs_arr.shape
+        ok = ok and np.array_equal(ours_arr, theirs_arr)
+        h.update(name.encode())
+        h.update(sub.encode())
+        h.update(str(ours_arr.dtype).encode())
+        h.update(str(ours_arr.shape).encode())
+        h.update(ours_arr.tobytes())
+print(ok)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next(),
+        Some("True"),
+        "einsum reduction dtype/value parity failed: {result}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("f61b08086facbf414740fa48bc71fb1b7ac563be07ff1d40596bc511638a28ee"),
+        "einsum reduction dtype golden digest drifted: {result}"
     );
     Ok(())
 }
@@ -507,4 +599,40 @@ np.einsum('ij,jk->ik', a, b)
         fnp_err, np_err,
         "einsum dimension mismatch should raise same error as numpy"
     );
+}
+
+#[test]
+fn einsum_preserves_operand_dtype_like_numpy() -> Result<(), String> {
+    // Regression: the native kernel extracts operands to f64, so without the dtype policy
+    // every einsum result was float64. numpy keeps the promoted input dtype — float32 ->
+    // float32 (run native, cast result), and integer/bool/float16 -> defer to numpy (exact
+    // dtype + integer overflow wraparound). Covers reductions, permutations, trace, GEMM.
+    let script = fnp_script(
+        r#"
+ok = True
+rng = np.random.default_rng(0)
+for dt in (np.float64, np.float32, np.float16, np.int8, np.int32, np.int64, np.uint8, np.bool_):
+    if np.issubdtype(dt, np.floating):
+        A = (rng.standard_normal((40, 50)) * 3).astype(dt); B = (rng.standard_normal((50, 30)) * 3).astype(dt)
+        S = (rng.standard_normal((8, 8))).astype(dt)
+        rt = 1e-3 if dt == np.float16 else (1e-4 if dt == np.float32 else 1e-9)
+    elif dt == np.bool_:
+        A = rng.integers(0, 2, (40, 50)).astype(dt); B = rng.integers(0, 2, (50, 30)).astype(dt)
+        S = rng.integers(0, 2, (8, 8)).astype(dt); rt = 0
+    else:
+        A = rng.integers(0, 30, (40, 50)).astype(dt); B = rng.integers(0, 30, (50, 30)).astype(dt)
+        S = rng.integers(0, 9, (8, 8)).astype(dt); rt = 0
+    cases = [("ij->i", (A,)), ("ij->j", (A,)), ("ij->", (A,)), ("ji->ij", (A,)),
+             ("ij->ij", (A,)), ("ii", (S,)), ("ij,jk->ik", (A, B))]
+    for p, ops in cases:
+        f = np.asarray(fnp.einsum(p, *ops)); n = np.asarray(np.einsum(p, *ops))
+        if f.dtype != n.dtype or f.shape != n.shape or not np.allclose(f, n, rtol=rt, atol=1e-3, equal_nan=True):
+            ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(result.trim(), "True", "einsum must preserve operand dtype like numpy");
+    Ok(())
 }
