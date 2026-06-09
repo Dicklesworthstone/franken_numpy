@@ -14046,6 +14046,81 @@ impl UFuncArray {
         let a_steps = aligned_broadcast_axis_steps(out_batch.len(), a_batch, &a_batch_strides);
         let b_steps = aligned_broadcast_axis_steps(out_batch.len(), b_batch, &b_batch_strides);
 
+        // Integer fast path: NumPy computes the cross product in the promoted
+        // INTEGER result dtype (preserved, not widened — e.g. int32 × int32 → int32)
+        // with two's-complement wraparound. The f64 path below loses precision once
+        // a component product (a·b) exceeds 2^53, so int32/uint32 wraparound came
+        // out wrong. By the modular-arithmetic identity, evaluating the 2×2
+        // determinants in i64/u64 with wrapping ops and then narrowing to the result
+        // width reproduces NumPy's per-op wrapping exactly. (Mixed/u64-with-signed
+        // inputs promote to float in NumPy and stay on the f64 path.)
+        if matches!(
+            dtype,
+            DType::I8 | DType::I16 | DType::I32 | DType::I64
+        ) {
+            let av = cross_as_i64(self);
+            let bv = cross_as_i64(other);
+            let mut comps: Vec<i64> = Vec::with_capacity(out_len);
+            for flat in 0..out_batch_count {
+                let (a_base, b_base) =
+                    cross_bases(flat, &out_batch, &out_strides, &a_steps, &b_steps, a_len, b_len);
+                let ax = av[a_base];
+                let ay = av[a_base + 1];
+                let az = if a_len == 3 { av[a_base + 2] } else { 0 };
+                let bx = bv[b_base];
+                let by = bv[b_base + 1];
+                let bz = if b_len == 3 { bv[b_base + 2] } else { 0 };
+                let cz = ax.wrapping_mul(by).wrapping_sub(ay.wrapping_mul(bx));
+                if vector_output {
+                    let cx = ay.wrapping_mul(bz).wrapping_sub(az.wrapping_mul(by));
+                    let cy = az.wrapping_mul(bx).wrapping_sub(ax.wrapping_mul(bz));
+                    comps.extend_from_slice(&[cx, cy, cz]);
+                } else {
+                    comps.push(cz);
+                }
+            }
+            let storage = match dtype {
+                DType::I8 => ArrayStorage::I8(comps.iter().map(|&c| c as i8).collect()),
+                DType::I16 => ArrayStorage::I16(comps.iter().map(|&c| c as i16).collect()),
+                DType::I32 => ArrayStorage::I32(comps.iter().map(|&c| c as i32).collect()),
+                _ => ArrayStorage::I64(comps),
+            };
+            return Self::from_storage(out_shape, storage);
+        }
+        if matches!(
+            dtype,
+            DType::U8 | DType::U16 | DType::U32 | DType::U64
+        ) {
+            let av = cross_as_u64(self);
+            let bv = cross_as_u64(other);
+            let mut comps: Vec<u64> = Vec::with_capacity(out_len);
+            for flat in 0..out_batch_count {
+                let (a_base, b_base) =
+                    cross_bases(flat, &out_batch, &out_strides, &a_steps, &b_steps, a_len, b_len);
+                let ax = av[a_base];
+                let ay = av[a_base + 1];
+                let az = if a_len == 3 { av[a_base + 2] } else { 0 };
+                let bx = bv[b_base];
+                let by = bv[b_base + 1];
+                let bz = if b_len == 3 { bv[b_base + 2] } else { 0 };
+                let cz = ax.wrapping_mul(by).wrapping_sub(ay.wrapping_mul(bx));
+                if vector_output {
+                    let cx = ay.wrapping_mul(bz).wrapping_sub(az.wrapping_mul(by));
+                    let cy = az.wrapping_mul(bx).wrapping_sub(ax.wrapping_mul(bz));
+                    comps.extend_from_slice(&[cx, cy, cz]);
+                } else {
+                    comps.push(cz);
+                }
+            }
+            let storage = match dtype {
+                DType::U8 => ArrayStorage::U8(comps.iter().map(|&c| c as u8).collect()),
+                DType::U16 => ArrayStorage::U16(comps.iter().map(|&c| c as u16).collect()),
+                DType::U32 => ArrayStorage::U32(comps.iter().map(|&c| c as u32).collect()),
+                _ => ArrayStorage::U64(comps),
+            };
+            return Self::from_storage(out_shape, storage);
+        }
+
         for flat in 0..out_batch_count {
             let mut a_vector_index = 0usize;
             let mut b_vector_index = 0usize;
@@ -28019,6 +28094,48 @@ where
         .map_err(|_| UFuncError::Msg(format!("{ctx}: unable to allocate output array (out of memory)")))?;
     v.extend(iter);
     Ok(v)
+}
+
+/// Reinterpret a cross-product operand's elements as exact i64 values (for a
+/// signed integer result). Wide I64/U64 inputs read from their sidecar; narrow
+/// ints are exact f64 integers in range, so `as i64` is lossless.
+fn cross_as_i64(arr: &UFuncArray) -> Vec<i64> {
+    match &arr.integer_sidecar {
+        Some(IntegerSidecar::I64(v)) => v.clone(),
+        Some(IntegerSidecar::U64(v)) => v.iter().map(|&x| x as i64).collect(),
+        None => arr.values.iter().map(|&f| f as i64).collect(),
+    }
+}
+
+/// Reinterpret a cross-product operand's elements as exact u64 values (for an
+/// unsigned integer result).
+fn cross_as_u64(arr: &UFuncArray) -> Vec<u64> {
+    match &arr.integer_sidecar {
+        Some(IntegerSidecar::U64(v)) => v.clone(),
+        Some(IntegerSidecar::I64(v)) => v.iter().map(|&x| x as u64).collect(),
+        None => arr.values.iter().map(|&f| f as u64).collect(),
+    }
+}
+
+/// Decode the broadcast batch index `flat` into the flat element offsets of the
+/// two cross-product operand vectors (each `a_len`/`b_len` elements long).
+fn cross_bases(
+    flat: usize,
+    out_batch: &[usize],
+    out_strides: &[usize],
+    a_steps: &[usize],
+    b_steps: &[usize],
+    a_len: usize,
+    b_len: usize,
+) -> (usize, usize) {
+    let mut a_vector_index = 0usize;
+    let mut b_vector_index = 0usize;
+    for axis in 0..out_batch.len() {
+        let coord = (flat / out_strides[axis]) % out_batch[axis];
+        a_vector_index += coord * a_steps[axis];
+        b_vector_index += coord * b_steps[axis];
+    }
+    (a_vector_index * a_len, b_vector_index * b_len)
 }
 
 /// Compute C-order strides in elements (not bytes) for a given shape.
@@ -52583,6 +52700,43 @@ print(json.dumps(payload))
         for (x, y) in ab.values().iter().zip(ba.values()) {
             assert!((x + y).abs() < 1e-10);
         }
+    }
+
+    #[test]
+    fn cross_integer_preserves_dtype_and_wraps() {
+        // Regression: cross was computed in f64, so int32/uint32 component products
+        // exceeding 2^53 wrapped WRONG when cast back. NumPy computes in the promoted
+        // integer result dtype (preserved, not widened) with two's-complement
+        // wraparound; the i64/u64 wrapping path must reproduce that bit-exactly.
+        // uint32 [max,1,2] × [3,max,1]: z = max*max - 1*3 = (2^32-1)^2 - 3 ≡ 2^32-2.
+        let u = u32::MAX as i64;
+        let a = UFuncArray::new(vec![3], vec![u as f64, 1.0, 2.0], DType::U32).unwrap();
+        let b = UFuncArray::new(vec![3], vec![3.0, u as f64, 1.0], DType::U32).unwrap();
+        let r = a.cross(&b).unwrap();
+        assert_eq!(r.dtype, DType::U32);
+        // Cross-check against the i64/u64 modular reference (== numpy).
+        let (ax, ay, az) = (u as u64, 1u64, 2u64);
+        let (bx, by, bz) = (3u64, u as u64, 1u64);
+        let cx = ay.wrapping_mul(bz).wrapping_sub(az.wrapping_mul(by));
+        let cy = az.wrapping_mul(bx).wrapping_sub(ax.wrapping_mul(bz));
+        let cz = ax.wrapping_mul(by).wrapping_sub(ay.wrapping_mul(bx));
+        assert_eq!(
+            r.to_storage().unwrap(),
+            ArrayStorage::U32(vec![cx as u32, cy as u32, cz as u32])
+        );
+        assert_eq!(cz as u32, u32::MAX - 1, "z component must wrap to 2^32-2");
+
+        // int32 dtype is preserved with signed wraparound, and a small int8 case is
+        // unchanged.
+        let ai = UFuncArray::new(vec![3], vec![100000.0, 200000.0, 3.0], DType::I32).unwrap();
+        let bi = UFuncArray::new(vec![3], vec![4.0, 50000.0, 6.0], DType::I32).unwrap();
+        let ri = ai.cross(&bi).unwrap();
+        assert_eq!(ri.dtype, DType::I32);
+        let small_a = UFuncArray::new(vec![3], vec![1.0, 0.0, 0.0], DType::I8).unwrap();
+        let small_b = UFuncArray::new(vec![3], vec![0.0, 1.0, 0.0], DType::I8).unwrap();
+        let rs = small_a.cross(&small_b).unwrap();
+        assert_eq!(rs.dtype, DType::I8);
+        assert_eq!(rs.to_storage().unwrap(), ArrayStorage::I8(vec![0, 0, 1]));
     }
 
     #[test]
