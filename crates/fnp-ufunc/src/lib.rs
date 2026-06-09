@@ -5842,29 +5842,16 @@ impl UFuncArray {
             return Err(UFuncError::Msg("triu requires 2-D input".to_string()));
         }
         let (rows, cols) = (self.shape[0], self.shape[1]);
-        let mut values = vec![0.0; rows * cols];
-        let mut sidecar_vals = match &self.integer_sidecar {
-            Some(IntegerSidecar::I64(v)) => Some(IntegerSidecar::I64(v.clone())),
-            Some(IntegerSidecar::U64(v)) => Some(IntegerSidecar::U64(v.clone())),
+        let values = triangle_build(&self.values, rows, cols, k, /*upper=*/ true);
+        let sidecar_vals = match &self.integer_sidecar {
+            Some(IntegerSidecar::I64(v)) => {
+                Some(IntegerSidecar::I64(triangle_build(v, rows, cols, k, true)))
+            }
+            Some(IntegerSidecar::U64(v)) => {
+                Some(IntegerSidecar::U64(triangle_build(v, rows, cols, k, true)))
+            }
             None => None,
         };
-
-        for r in 0..rows {
-            for c in 0..cols {
-                let idx = r * cols + c;
-                if c as i64 >= (r as i64).saturating_add(k) {
-                    values[idx] = self.values[idx];
-                } else {
-                    values[idx] = 0.0;
-                    if let Some(ref mut sidecar) = sidecar_vals {
-                        match sidecar {
-                            IntegerSidecar::I64(v) => v[idx] = 0,
-                            IntegerSidecar::U64(v) => v[idx] = 0,
-                        }
-                    }
-                }
-            }
-        }
         Ok(Self {
             shape: self.shape.clone(),
             values,
@@ -5879,29 +5866,16 @@ impl UFuncArray {
             return Err(UFuncError::Msg("tril requires 2-D input".to_string()));
         }
         let (rows, cols) = (self.shape[0], self.shape[1]);
-        let mut values = vec![0.0; rows * cols];
-        let mut sidecar_vals = match &self.integer_sidecar {
-            Some(IntegerSidecar::I64(v)) => Some(IntegerSidecar::I64(v.clone())),
-            Some(IntegerSidecar::U64(v)) => Some(IntegerSidecar::U64(v.clone())),
+        let values = triangle_build(&self.values, rows, cols, k, /*upper=*/ false);
+        let sidecar_vals = match &self.integer_sidecar {
+            Some(IntegerSidecar::I64(v)) => {
+                Some(IntegerSidecar::I64(triangle_build(v, rows, cols, k, false)))
+            }
+            Some(IntegerSidecar::U64(v)) => {
+                Some(IntegerSidecar::U64(triangle_build(v, rows, cols, k, false)))
+            }
             None => None,
         };
-
-        for r in 0..rows {
-            for c in 0..cols {
-                let idx = r * cols + c;
-                if c as i64 <= (r as i64).saturating_add(k) {
-                    values[idx] = self.values[idx];
-                } else {
-                    values[idx] = 0.0;
-                    if let Some(ref mut sidecar) = sidecar_vals {
-                        match sidecar {
-                            IntegerSidecar::I64(v) => v[idx] = 0,
-                            IntegerSidecar::U64(v) => v[idx] = 0,
-                        }
-                    }
-                }
-            }
-        }
         Ok(Self {
             shape: self.shape.clone(),
             values,
@@ -31208,6 +31182,48 @@ fn digamma_approx(mut x: f64) -> f64 {
 /// row-major `dst` (`dst[j*r + i] = src[i*c + j]`). Generic over any `Copy`
 /// element so the f64 value plane and the i64/u64 integer sidecar share one
 /// kernel. Output rows are split into `TILE`-wide bands across the rayon pool
+/// Build the upper (`upper=true`) or lower triangle of a `rows × cols` C-order
+/// matrix into a fresh zero-filled buffer. Each output row has a single
+/// contiguous "kept" span — for `triu(k)` columns `[r+k, cols)`, for `tril(k)`
+/// columns `[0, r+k]` — so the kept span is one `copy_from_slice` (a vectorized
+/// memcpy) and the masked-out span is left at the free `alloc_zeroed` default.
+/// Rows are mutually independent and disjoint, so the parallel fill over
+/// `cols`-sized chunks is bit-for-bit identical to the serial per-element mask
+/// for any thread count. Memory-bound, so the parallel path is gated at the L3
+/// cache cliff (below it the serial copy wins; above it parallelism hides the
+/// DRAM latency).
+fn triangle_build<T: Copy + Default + Send + Sync>(
+    src: &[T],
+    rows: usize,
+    cols: usize,
+    k: i64,
+    upper: bool,
+) -> Vec<T> {
+    let mut out = vec![T::default(); rows * cols];
+    if cols == 0 || rows == 0 {
+        return out;
+    }
+    let fill = |(r, dst_row): (usize, &mut [T])| {
+        let src_row = &src[r * cols..(r + 1) * cols];
+        if upper {
+            // keep columns c >= r+k
+            let start = (r as i64 + k).clamp(0, cols as i64) as usize;
+            dst_row[start..].copy_from_slice(&src_row[start..]);
+        } else {
+            // keep columns c <= r+k
+            let end = (r as i64 + k + 1).clamp(0, cols as i64) as usize;
+            dst_row[..end].copy_from_slice(&src_row[..end]);
+        }
+    };
+    const TRI_PARALLEL_MIN_ELEMS: usize = 1 << 23;
+    if rows >= 2 && rows * cols >= TRI_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+        out.par_chunks_mut(cols).enumerate().for_each(fill);
+    } else {
+        out.chunks_mut(cols).enumerate().for_each(fill);
+    }
+    out
+}
+
 /// (each band is a disjoint contiguous `dst` slice → `#![forbid(unsafe_code)]`
 /// clean), and each band is transposed in `TILE×TILE` blocks so the strided
 /// direction stays cache-resident. A pure data move, so it is bit-for-bit
@@ -49187,6 +49203,120 @@ print(json.dumps(payload))
             assert_eq!(m.triu(k).unwrap().values(), exp_u.as_slice(), "triu k={k}");
             assert_eq!(m.tril(k).unwrap().values(), exp_l.as_slice(), "tril k={k}");
         }
+    }
+
+    #[test]
+    fn triu_tril_parallel_matches_naive_and_golden_sha256() {
+        // Crosses the 1<<23 parallel gate (4096*2049 = 8_392_704 elems) so the
+        // rayon row-band path of triangle_build is exercised — not just the serial
+        // fallback the small offsets test hits. Data carries NaN / ±inf / -0.0 to
+        // pin that the kept span is a verbatim copy (no arithmetic, no canon of the
+        // sign bit) and the masked span is the exact +0.0 default. Both the f64
+        // values and an i64 + u64 sidecar are relocated through the same kernel.
+        let (rows, cols) = (4096usize, 2049usize);
+        let n = rows * cols;
+        assert!(n >= (1usize << 23), "shape must cross the parallel gate");
+        let mut data = Vec::with_capacity(n);
+        let mut si: Vec<i64> = Vec::with_capacity(n);
+        let mut su: Vec<u64> = Vec::with_capacity(n);
+        for idx in 0..n {
+            let cell = match idx % 37 {
+                0 => f64::NAN,
+                7 => f64::INFINITY,
+                11 => f64::NEG_INFINITY,
+                13 => -0.0,
+                _ => (idx as f64) * 0.25 - 1000.0,
+            };
+            data.push(cell);
+            si.push((idx as i64) * 3 - 17);
+            su.push((idx as u64).wrapping_mul(2_654_435_761) | 1);
+        }
+
+        let naive = |upper: bool, k: i64| -> Vec<u64> {
+            let mut out = vec![0.0f64; n];
+            for r in 0..rows {
+                for c in 0..cols {
+                    let i = r * cols + c;
+                    let keep = if upper {
+                        c as i64 >= r as i64 + k
+                    } else {
+                        c as i64 <= r as i64 + k
+                    };
+                    if keep {
+                        out[i] = data[i];
+                    }
+                }
+            }
+            out.iter().map(|v| v.to_bits()).collect()
+        };
+
+        let f = UFuncArray::new(vec![rows, cols], data.clone(), DType::F64).unwrap();
+        let mut fi = UFuncArray::new(vec![rows, cols], data.clone(), DType::I64).unwrap();
+        fi.integer_sidecar = Some(IntegerSidecar::I64(si.clone()));
+        let mut fu = UFuncArray::new(vec![rows, cols], data.clone(), DType::U64).unwrap();
+        fu.integer_sidecar = Some(IntegerSidecar::U64(su.clone()));
+
+        for k in [-5000i64, -1, 0, 1, 5000] {
+            for upper in [true, false] {
+                let got = if upper { f.triu(k) } else { f.tril(k) }.unwrap();
+                let got_bits: Vec<u64> = got.values().iter().map(|v| v.to_bits()).collect();
+                assert_eq!(got_bits, naive(upper, k), "f64 upper={upper} k={k}");
+
+                // Sidecar relocation: the masked span zeros the integer sidecar, the
+                // kept span carries the original integer through (same mask as f64).
+                let gi = if upper { fi.triu(k) } else { fi.tril(k) }.unwrap();
+                let gu = if upper { fu.triu(k) } else { fu.tril(k) }.unwrap();
+                let exp_si: Vec<i64> = (0..n)
+                    .map(|i| {
+                        let (r, c) = (i / cols, i % cols);
+                        let keep = if upper {
+                            c as i64 >= r as i64 + k
+                        } else {
+                            c as i64 <= r as i64 + k
+                        };
+                        if keep { si[i] } else { 0 }
+                    })
+                    .collect();
+                match gi.integer_sidecar.as_ref().unwrap() {
+                    IntegerSidecar::I64(v) => assert_eq!(v, &exp_si, "i64 sidecar k={k}"),
+                    _ => panic!("expected i64 sidecar"),
+                }
+                let exp_su: Vec<u64> = (0..n)
+                    .map(|i| {
+                        let (r, c) = (i / cols, i % cols);
+                        let keep = if upper {
+                            c as i64 >= r as i64 + k
+                        } else {
+                            c as i64 <= r as i64 + k
+                        };
+                        if keep { su[i] } else { 0 }
+                    })
+                    .collect();
+                match gu.integer_sidecar.as_ref().unwrap() {
+                    IntegerSidecar::U64(v) => assert_eq!(v, &exp_su, "u64 sidecar k={k}"),
+                    _ => panic!("expected u64 sidecar"),
+                }
+            }
+        }
+
+        // Byte-exact golden digest over triu(0) ++ tril(0) f64 outputs.
+        let digest_of = |arr: &UFuncArray| -> Sha256 {
+            let mut d = Sha256::new();
+            for v in arr.values() {
+                d.update(v.to_bits().to_le_bytes());
+            }
+            d
+        };
+        let mut d = Sha256::new();
+        let u0 = digest_of(&f.triu(0).unwrap()).finalize();
+        let l0 = digest_of(&f.tril(0).unwrap()).finalize();
+        d.update(u0);
+        d.update(l0);
+        let golden: String = d.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            golden, "2b4068311f8979b3ed68027e44320ac48df95786a4bb96cf05b15d9086ce27fd",
+            "triu(0)|tril(0) golden digest drift"
+        );
     }
 
     #[test]

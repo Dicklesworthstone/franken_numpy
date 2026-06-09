@@ -102,3 +102,7 @@ harness = false
 [[bench]]
 name = "meshgrid"
 harness = false
+
+[[bench]]
+name = "triangle"
+harness = false
