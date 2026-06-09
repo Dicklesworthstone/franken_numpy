@@ -86,3 +86,7 @@ harness = false
 [[bench]]
 name = "take_axis"
 harness = false
+
+[[bench]]
+name = "take_along_axis"
+harness = false

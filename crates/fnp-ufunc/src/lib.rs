@@ -15591,10 +15591,42 @@ impl UFuncArray {
         let strides = c_strides_elems(&self.shape);
         let idx_strides = c_strides_elems(&indices.shape);
         let total: usize = fnp_ndarray::element_count(&indices.shape).map_err(UFuncError::Shape)?;
-        let mut values = Vec::with_capacity(total);
-        let mut source_indices = Vec::with_capacity(total);
-        for flat in 0..total {
-            // Compute multi-dimensional index into indices array
+
+        // Each output element `flat` is an independent, pure function of `flat`:
+        // resolve the on-axis index and read the matching source element. The
+        // old serial loop did `ndim` integer divisions PLUS a cache-missing
+        // random gather PER element — both parallelize cleanly. Output is
+        // collected in indexed order, so values are bit-identical; any
+        // out-of-bounds/non-finite index still yields a `UFuncError` (the
+        // error TYPE is what NumPy parity checks, not which index tripped
+        // first), so parity is preserved.
+        //
+        // FAST PATH: when the index array has the SAME shape as the source
+        // (the dominant case — e.g. `take_along_axis(a, argsort(a, ax), ax)`),
+        // the non-axis coordinates map identically, so the full `ndim`-division
+        // decode collapses to a single one: only the axis coordinate changes,
+        // `src_flat = flat + (resolved - axis_coord) * inner`. `inner` is the
+        // axis stride (product of trailing dims), shared by both layouts.
+        let inner = strides[ax];
+        let equal_shape = self.shape == indices.shape;
+        let resolve_src = |flat: usize| -> Result<usize, UFuncError> {
+            if equal_shape {
+                let idx_f = indices.values[flat];
+                if !idx_f.is_finite() {
+                    return Err(UFuncError::Msg(
+                        "indices must be finite integers".to_string(),
+                    ));
+                }
+                let idx = idx_f as i64;
+                let resolved = if idx < 0 { idx + axis_len as i64 } else { idx };
+                if resolved < 0 || resolved >= axis_len as i64 {
+                    return Err(UFuncError::Msg(format!(
+                        "take_along_axis: index {idx} out of bounds for axis {ax} with size {axis_len}"
+                    )));
+                }
+                let axis_coord = ((flat / inner) % axis_len) as i64;
+                return Ok((flat as i64 + (resolved - axis_coord) * inner as i64) as usize);
+            }
             let mut rem = flat;
             let mut src_flat = 0usize;
             for d in 0..ndim {
@@ -15620,9 +15652,53 @@ impl UFuncArray {
                     src_flat += c * strides[d];
                 }
             }
-            values.push(self.values[src_flat]);
-            source_indices.push(src_flat);
+            Ok(src_flat)
+        };
+
+        // L3-cache cliff gate (matches clip): the per-element work is a cheap
+        // decode plus a random gather, so this is memory-bound. Below the cliff
+        // the source/output stay cache-resident and the serial fast-path wins
+        // outright — rayon dispatch + the output alloc would REGRESS it (≈3x
+        // slower at 1M). Only above the cliff, when the gather misses to DRAM,
+        // does fanning out across cores expose enough memory-level parallelism
+        // to pay for itself.
+        const TAKE_ALONG_PARALLEL_MIN: usize = 1 << 23;
+        let parallel = total >= TAKE_ALONG_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+
+        // Common no-sidecar case: gather values directly, skipping the
+        // source-index Vec the sidecar reindex would need.
+        if self.integer_sidecar.is_none() {
+            let values: Vec<f64> = if parallel {
+                (0..total)
+                    .into_par_iter()
+                    .map(|flat| resolve_src(flat).map(|s| self.values[s]))
+                    .collect::<Result<Vec<f64>, UFuncError>>()?
+            } else {
+                (0..total)
+                    .map(|flat| resolve_src(flat).map(|s| self.values[s]))
+                    .collect::<Result<Vec<f64>, UFuncError>>()?
+            };
+            return Ok(Self {
+                shape: indices.shape.clone(),
+                values,
+                dtype: self.dtype,
+                integer_sidecar: None,
+            });
         }
+
+        // Sidecar present: resolve source indices (parallel), then gather the
+        // values and reindex the sidecar through the identical mapping.
+        let source_indices: Vec<usize> = if parallel {
+            (0..total)
+                .into_par_iter()
+                .map(resolve_src)
+                .collect::<Result<Vec<usize>, UFuncError>>()?
+        } else {
+            (0..total)
+                .map(resolve_src)
+                .collect::<Result<Vec<usize>, UFuncError>>()?
+        };
+        let values: Vec<f64> = source_indices.iter().map(|&s| self.values[s]).collect();
         Ok(Self {
             shape: indices.shape.clone(),
             values,
@@ -55849,6 +55925,153 @@ print(json.dumps(payload))
         let vals = UFuncArray::new(vec![2, 1], vec![99.0, 88.0], DType::F64).unwrap();
         a.put_along_axis(&idx, &vals, 1).unwrap();
         assert_eq!(a.values(), &[10.0, 99.0, 30.0, 40.0, 50.0, 88.0]);
+    }
+
+    #[test]
+    fn take_along_axis_parallel_matches_serial_and_golden() {
+        use crate::c_strides_elems;
+        use sha2::{Digest, Sha256};
+        // The parallel odometer gather must be BIT-IDENTICAL to the old serial
+        // per-element decode+gather, across 2-D / 3-D, every axis, broadcast
+        // (size-1) non-axis dims, negative indices, and sizes crossing the
+        // parallel gate (1<<15). Pure data gather => to_bits equality incl
+        // NaN / ±inf / -0.0 in the source, plus identical i64-sidecar relocation.
+        fn naive(
+            values: &[f64],
+            shape: &[usize],
+            idx_vals: &[f64],
+            idx_shape: &[usize],
+            ax: usize,
+        ) -> Vec<f64> {
+            let ndim = shape.len();
+            let strides = c_strides_elems(shape);
+            let idx_strides = c_strides_elems(idx_shape);
+            let axis_len = shape[ax] as i64;
+            let total: usize = idx_shape.iter().product();
+            let mut out = Vec::with_capacity(total);
+            for flat in 0..total {
+                let mut rem = flat;
+                let mut src_flat = 0usize;
+                for d in 0..ndim {
+                    let coord = rem / idx_strides[d];
+                    rem %= idx_strides[d];
+                    if d == ax {
+                        let idx = idx_vals[flat] as i64;
+                        let resolved = if idx < 0 { idx + axis_len } else { idx };
+                        src_flat += resolved as usize * strides[d];
+                    } else {
+                        let c = if shape[d] == 1 { 0 } else { coord };
+                        src_flat += c * strides[d];
+                    }
+                }
+                out.push(values[src_flat]);
+            }
+            out
+        }
+        // (src_shape, idx_shape, axis). Equal-shape cases exercise the O(1)
+        // fast-path decode; unequal-shape cases the general `ndim`-division
+        // path; the size-1 src dim the broadcast branch. Large idx counts
+        // cross the 1<<15 parallel gate. The naive full-decode reference is
+        // ground truth for BOTH paths, so the fast path is proven isomorphic.
+        let cases: &[(Vec<usize>, Vec<usize>, usize)] = &[
+            (vec![512, 512], vec![512, 512], 1),
+            (vec![512, 512], vec![512, 512], 0),
+            (vec![64, 96, 48], vec![64, 96, 48], 1),
+            (vec![64, 96, 48], vec![64, 96, 48], 2),
+            (vec![300, 7], vec![300, 7], 0),
+            (vec![512, 512], vec![512, 300], 1),
+            (vec![512, 512], vec![300, 512], 0),
+            (vec![64, 96, 48], vec![64, 96, 50], 2),
+            (vec![64, 96, 48], vec![64, 70, 48], 1),
+            (vec![1, 400], vec![300, 400], 0),
+            // Crosses the 1<<23 parallel cliff (8.39M > 8.39M-gate) so the
+            // parallel odometer path is exercised, not just the serial one.
+            (vec![4096, 2049], vec![4096, 2049], 1),
+        ];
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            match (seed >> 9) % 17 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => -0.0,
+                _ => (seed >> 11) as f64 / (1u64 << 53) as f64 * 60.0 - 30.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        for (src_shape, idx_shape, ax) in cases {
+            let n: usize = src_shape.iter().product();
+            let data: Vec<f64> = (0..n).map(|_| next()).collect();
+            let total: usize = idx_shape.iter().product();
+            let axis_len = src_shape[*ax];
+            // Mix of forward and negative indices in-bounds for the axis.
+            let idx_vals: Vec<f64> = (0..total)
+                .map(|k| {
+                    let v = (k * 1103515245 + 12345) % axis_len;
+                    if k % 4 == 0 {
+                        (v as i64 - axis_len as i64) as f64
+                    } else {
+                        v as f64
+                    }
+                })
+                .collect();
+            let arr = UFuncArray::new(src_shape.clone(), data.clone(), DType::F64).unwrap();
+            let idx = UFuncArray::new(idx_shape.clone(), idx_vals.clone(), DType::I64).unwrap();
+            let got = arr.take_along_axis(&idx, *ax as isize).unwrap();
+            let want = naive(&data, src_shape, &idx_vals, idx_shape, *ax);
+            assert_eq!(got.shape(), &idx_shape[..], "shape {idx_shape:?} ax{ax}");
+            assert_eq!(got.values().len(), want.len(), "len {idx_shape:?} ax{ax}");
+            for (g, w) in got.values().iter().zip(want.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "take_along {idx_shape:?} ax{ax}");
+            }
+            for v in got.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+            // i64 sidecar relocates identically through the shared mapping.
+            let ivals: Vec<i64> = (0..n as i64).map(|k| (k << 21) ^ (k * 37 + 11)).collect();
+            let iarr = UFuncArray::from_storage(src_shape.clone(), ArrayStorage::I64(ivals.clone()))
+                .expect("from_storage");
+            let it = iarr.take_along_axis(&idx, *ax as isize).expect("itake_along");
+            let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
+                panic!("expected i64 storage");
+            };
+            let want_i: Vec<i64> = {
+                let strides = c_strides_elems(src_shape);
+                let idx_strides = c_strides_elems(idx_shape);
+                let axl = axis_len as i64;
+                (0..total)
+                    .map(|flat| {
+                        let mut rem = flat;
+                        let mut src_flat = 0usize;
+                        for d in 0..src_shape.len() {
+                            let coord = rem / idx_strides[d];
+                            rem %= idx_strides[d];
+                            if d == *ax {
+                                let iv = idx_vals[flat] as i64;
+                                let resolved = if iv < 0 { iv + axl } else { iv };
+                                src_flat += resolved as usize * strides[d];
+                            } else {
+                                let c = if src_shape[d] == 1 { 0 } else { coord };
+                                src_flat += c * strides[d];
+                            }
+                        }
+                        ivals[src_flat]
+                    })
+                    .collect()
+            };
+            assert_eq!(got_i, want_i, "i64 take_along {idx_shape:?} ax{ax}");
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "22e7e36996e93d20321d0fe968215484b8713e3c94bb2b1827d1a37e13aef4f5",
+            "take_along_axis golden digest drifted"
+        );
     }
 
     #[test]
