@@ -78,3 +78,7 @@ harness = false
 [[bench]]
 name = "flip"
 harness = false
+
+[[bench]]
+name = "clip"
+harness = false
