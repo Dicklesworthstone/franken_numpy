@@ -42,13 +42,33 @@ fn median(mut xs: Vec<f64>) -> f64 {
 
 fn main() {
     println!("threads = {}", rayon::current_num_threads());
-    for &n in &[512usize, 768, 1024, 1536, 2048] {
+    let sizes: Vec<usize> = {
+        let parsed: Vec<usize> = std::env::args()
+            .skip(1)
+            .map(|arg| {
+                arg.parse::<usize>()
+                    .unwrap_or_else(|err| panic!("invalid size '{arg}': {err}"))
+            })
+            .collect();
+        if parsed.is_empty() {
+            vec![512, 768, 1024, 1536, 2048]
+        } else {
+            parsed
+        }
+    };
+    for &n in &sizes {
         let a = build(n, 0x1234_5678);
         let b = build(n, 0x9abc_def0);
         // warm
         let c0 = a.matmul(&b).unwrap();
         let checksum = fnv1a(c0.values());
-        let iters = if n <= 768 { 5 } else { 3 };
+        let iters = if n >= 4096 {
+            2
+        } else if n <= 768 {
+            5
+        } else {
+            3
+        };
         let mut times = Vec::new();
         for _ in 0..iters {
             let t = Instant::now();
