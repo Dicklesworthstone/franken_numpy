@@ -15309,6 +15309,58 @@ impl UFuncArray {
 
     // ── Fancy / boolean indexing ──────────────────────────────────
 
+    /// Gather output for `take` along an axis: each output block `o` collects
+    /// the source lanes `resolved[..]` of outer block `o`, each lane a contiguous
+    /// `inner`-length copy. Output blocks/rows are disjoint and their source
+    /// slices are pure functions of the (block, lane) index, so the parallel
+    /// walk is bit-for-bit identical to the serial nested loop for any thread
+    /// count. Generic over `T: Copy` so the same kernel serves the f64 values
+    /// and the i64/u64 integer sidecar lanes (no source-index array needed).
+    fn take_axis_build<T: Copy + Default + Send + Sync>(
+        src: &[T],
+        resolved: &[usize],
+        outer: usize,
+        src_axis_len: usize,
+        inner: usize,
+    ) -> Vec<T> {
+        let num_idx = resolved.len();
+        let n = outer * num_idx * inner;
+        let mut out = vec![T::default(); n];
+        if n == 0 {
+            return out;
+        }
+        let src_stride = src_axis_len * inner;
+        let out_block = num_idx * inner;
+        let do_block = |out_blk: &mut [T], o: usize| {
+            let src_base = o * src_stride;
+            for (j, &ri) in resolved.iter().enumerate() {
+                let sbase = src_base + ri * inner;
+                out_blk[j * inner..j * inner + inner].copy_from_slice(&src[sbase..sbase + inner]);
+            }
+        };
+        // Strided block gather — parallelizing exposes memory-level parallelism
+        // across the (cache-missing) source lanes. Mirrors the flip(axis) gate.
+        const TAKE_PAR_MIN: usize = 1 << 15;
+        if outer >= 2 && n >= TAKE_PAR_MIN && rayon::current_num_threads() >= 2 {
+            out.par_chunks_mut(out_block)
+                .enumerate()
+                .for_each(|(o, out_blk)| do_block(out_blk, o));
+        } else if n >= TAKE_PAR_MIN && rayon::current_num_threads() >= 2 {
+            // Single outer block (e.g. take along axis 0): parallelize over rows.
+            out.par_chunks_mut(inner.max(1))
+                .enumerate()
+                .for_each(|(j, out_row)| {
+                    let sbase = resolved[j] * inner;
+                    out_row.copy_from_slice(&src[sbase..sbase + inner]);
+                });
+        } else {
+            out.chunks_mut(out_block)
+                .enumerate()
+                .for_each(|(o, out_blk)| do_block(out_blk, o));
+        }
+        out
+    }
+
     /// Select elements by integer indices along an axis (np.take).
     /// Negative indices are supported (wrap around).
     pub fn take(&self, indices: &[i64], axis: Option<isize>) -> Result<Self, UFuncError> {
@@ -15400,24 +15452,26 @@ impl UFuncArray {
                     fnp_ndarray::element_count(&self.shape[..ax]).map_err(UFuncError::Shape)?;
                 let inner: usize =
                     fnp_ndarray::element_count(&self.shape[ax + 1..]).map_err(UFuncError::Shape)?;
-                let src_stride = self.shape[ax] * inner;
+                let src_axis_len = self.shape[ax];
 
-                let mut values = Vec::with_capacity(outer * resolved.len() * inner);
-                let mut source_indices = Vec::with_capacity(outer * resolved.len() * inner);
-                for o in 0..outer {
-                    for &ri in &resolved {
-                        let base = o * src_stride + ri * inner;
-                        values.extend_from_slice(&self.values[base..base + inner]);
-                        for i in 0..inner {
-                            source_indices.push(base + i);
-                        }
-                    }
-                }
+                let values =
+                    Self::take_axis_build(&self.values, &resolved, outer, src_axis_len, inner);
+                // Relocate the integer sidecar lanes with the identical kernel
+                // (same gather order ⇒ bit-identical dtype-preserving reindex).
+                let integer_sidecar = match &self.integer_sidecar {
+                    Some(IntegerSidecar::I64(v)) => Some(IntegerSidecar::I64(
+                        Self::take_axis_build(v, &resolved, outer, src_axis_len, inner),
+                    )),
+                    Some(IntegerSidecar::U64(v)) => Some(IntegerSidecar::U64(
+                        Self::take_axis_build(v, &resolved, outer, src_axis_len, inner),
+                    )),
+                    None => None,
+                };
                 Ok(Self {
                     shape: out_shape,
                     values,
                     dtype: self.dtype,
-                    integer_sidecar: self.reindexed_integer_sidecar(&source_indices),
+                    integer_sidecar,
                 })
             }
         }
@@ -50344,6 +50398,113 @@ print(json.dumps(payload))
         let a = UFuncArray::new(vec![3], vec![10.0, 20.0, 30.0], DType::F64).unwrap();
         let r = a.take(&[1, 1, 1], None).unwrap();
         assert_eq!(r.values(), &[20.0, 20.0, 20.0]);
+    }
+
+    #[test]
+    fn take_axis_parallel_matches_naive_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The parallel copy_from_slice take(axis) must be BIT-IDENTICAL to the
+        // old serial nested gather loop, across 2-D / 3-D, every axis (incl the
+        // contiguous last axis where inner==1 and the axis-0 single-outer-block
+        // regime), with duplicate / negative / reordered indices, and sizes
+        // crossing the parallel threshold (1<<15) in both the multi-outer-block
+        // and single-outer-block paths. Pure data move => to_bits equality incl
+        // NaN / ±inf / -0.0, plus identical i64-sidecar relocation.
+        fn naive(values: &[f64], shape: &[usize], ax: usize, idx: &[i64]) -> Vec<f64> {
+            let inner: usize = shape[ax + 1..].iter().product();
+            let outer: usize = shape[..ax].iter().product();
+            let axis_len = shape[ax] as i64;
+            let resolved: Vec<usize> = idx
+                .iter()
+                .map(|&i| (if i < 0 { i + axis_len } else { i }) as usize)
+                .collect();
+            let src_stride = shape[ax] * inner;
+            let mut out = Vec::with_capacity(outer * resolved.len() * inner);
+            for o in 0..outer {
+                for &ri in &resolved {
+                    let base = o * src_stride + ri * inner;
+                    out.extend_from_slice(&values[base..base + inner]);
+                }
+            }
+            out
+        }
+        // (shape, axis, indices) — axis 0 exercises the single-outer-block path,
+        // duplicates/negatives/reorders exercise the gather index map, and the
+        // large shapes cross the 1<<15 parallel gate.
+        let cases: &[(Vec<usize>, usize, Vec<i64>)] = &[
+            (vec![300, 256], 0, vec![299, 0, 150, 150, -1, 7]),
+            (vec![256, 300], 1, vec![0, 299, -1, 128, 128]),
+            (vec![70, 33, 49], 1, vec![32, 0, -1, 15, 15]),
+            (vec![70, 33, 49], 2, vec![48, 0, 24, -1]),
+            (vec![70, 33, 49], 0, vec![69, 0, 35, -1, 35]),
+            (vec![4, 5], 1, vec![4, 3, 2, 1, 0, 0]),
+        ];
+        let mut seed = 0x51a3_c7e9_2b4d_6f08u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            match (seed >> 9) % 17 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => -0.0,
+                _ => (seed >> 11) as f64 / (1u64 << 53) as f64 * 30.0 - 15.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        for (shape, ax, idx) in cases {
+            let n: usize = shape.iter().product();
+            let data: Vec<f64> = (0..n).map(|_| next()).collect();
+            let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
+            let got = arr.take(idx, Some(*ax as isize)).unwrap();
+            let want = naive(&data, shape, *ax, idx);
+            let mut want_shape = shape.clone();
+            want_shape[*ax] = idx.len();
+            assert_eq!(got.shape(), &want_shape[..], "shape {shape:?} ax{ax}");
+            assert_eq!(got.values().len(), want.len(), "len {shape:?} ax{ax}");
+            for (g, w) in got.values().iter().zip(want.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "take {shape:?} ax{ax}");
+            }
+            for v in got.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+            // i64 sidecar relocates identically through the shared kernel.
+            let ivals: Vec<i64> = (0..n as i64).map(|k| (k << 19) ^ (k * 31 + 5)).collect();
+            let iarr = UFuncArray::from_storage(shape.clone(), ArrayStorage::I64(ivals.clone()))
+                .expect("from_storage");
+            let it = iarr.take(idx, Some(*ax as isize)).expect("itake");
+            let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
+                panic!("expected i64 storage");
+            };
+            let want_i = {
+                let inner: usize = shape[*ax + 1..].iter().product();
+                let outer: usize = shape[..*ax].iter().product();
+                let axis_len = shape[*ax] as i64;
+                let resolved: Vec<usize> = idx
+                    .iter()
+                    .map(|&i| (if i < 0 { i + axis_len } else { i }) as usize)
+                    .collect();
+                let src_stride = shape[*ax] * inner;
+                let mut out = Vec::with_capacity(outer * resolved.len() * inner);
+                for o in 0..outer {
+                    for &ri in &resolved {
+                        let base = o * src_stride + ri * inner;
+                        out.extend_from_slice(&ivals[base..base + inner]);
+                    }
+                }
+                out
+            };
+            assert_eq!(got_i, want_i, "i64 take {shape:?} ax{ax}");
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "0a45583b666f7909442375ece264eeee2bca158a4eae8fbab4976ae93f73a4db",
+            "take axis build golden digest drifted"
+        );
     }
 
     #[test]

@@ -82,3 +82,7 @@ harness = false
 [[bench]]
 name = "clip"
 harness = false
+
+[[bench]]
+name = "take_axis"
+harness = false
