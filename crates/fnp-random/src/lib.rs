@@ -2068,6 +2068,65 @@ fn random_f64_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64
     (0..size).map(|_| rng.ziggurat_next_f64()).collect()
 }
 
+/// PCG-family cores that support O(log n) jump-ahead, enabling parallel
+/// fixed-consumption fills (one `next_u64` per output) with an identical stream.
+trait PcgAdvanceFill: Clone + Send + Sync {
+    fn advance_by(&mut self, delta: u128);
+    fn fill_uniform_f64(&mut self, out: &mut [f64]);
+}
+
+macro_rules! impl_pcg_advance_fill {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl PcgAdvanceFill for $ty {
+            #[inline]
+            fn advance_by(&mut self, delta: u128) {
+                self.advance(delta);
+            }
+            #[inline]
+            fn fill_uniform_f64(&mut self, out: &mut [f64]) {
+                for slot in out.iter_mut() {
+                    *slot = self.next_f64();
+                }
+            }
+        }
+    )+};
+}
+impl_pcg_advance_fill!(Pcg64Rng, Pcg64DxsmRng);
+
+/// Minimum element count before parallelizing a PCG uniform fill. PCG step is a
+/// real 128-bit multiply + rotate per element (≈10 ns), so the rayon dispatch
+/// pays off well before the L3 cliff that gates pure memory-bound ops.
+const PCG_PARALLEL_MIN_LEN: usize = 1 << 16;
+
+/// Generate `size` uniform `[0,1)` doubles, parallelizing PCG/PCG-DXSM cores via
+/// jump-ahead. NumPy's RNG is single-threaded, so this both closes the serial gap
+/// and beats NumPy: the output [start..start+L) chunk is produced by a clone whose
+/// state is advanced by `start` draws, which is bit-for-bit identical to the serial
+/// fold (each f64 consumes exactly one `next_u64`). The original generator is then
+/// advanced by `size` so subsequent draws continue exactly where serial would.
+fn parallel_pcg_random_f64<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
+    use rayon::prelude::*;
+    let threads = rayon::current_num_threads();
+    let mut out = vec![0.0f64; size];
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        // Serial fold advances `rng` by `size` draws naturally.
+        rng.fill_uniform_f64(&mut out);
+        return out;
+    }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+        });
+    // Position the master state exactly where `size` serial draws would leave it.
+    rng.advance_by(size as u128);
+    out
+}
+
 #[inline]
 fn uniform_from_core<R: ZigguratRngCore>(
     rng: &mut R,
@@ -3535,8 +3594,10 @@ impl Generator {
         self.u32_buf_ready = false;
         match &mut self.bit_generator.rng {
             RngBackend::Deterministic(rng) => random_f64_from_core(rng, size),
-            RngBackend::Pcg64(rng) => random_f64_from_core(rng, size),
-            RngBackend::Pcg64Dxsm(rng) => random_f64_from_core(rng, size),
+            // PCG64 / PCG64-DXSM support jump-ahead, so a large uniform fill runs
+            // in parallel with a bit-identical stream (see parallel_pcg_random_f64).
+            RngBackend::Pcg64(rng) => parallel_pcg_random_f64(rng, size),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_random_f64(rng, size),
             RngBackend::Mt19937(rng) => random_f64_from_core(rng, size),
             RngBackend::Philox(rng) => random_f64_from_core(rng, size),
             RngBackend::Sfc64(rng) => random_f64_from_core(rng, size),
@@ -13295,5 +13356,52 @@ for child in rng.spawn(n_children):
             let expected = numpy_oracle_permuted(&[3, 4], axis);
             assert_eq!(actual, expected, "axis={axis:?}");
         }
+    }
+
+    #[test]
+    fn parallel_pcg_random_matches_serial_stream_state_and_golden() {
+        // The parallel jump-ahead uniform fill (PCG64 / PCG64-DXSM) must be
+        // BYTE-IDENTICAL to the serial stream, and must leave the generator state
+        // exactly where `size` serial draws would. n crosses PCG_PARALLEL_MIN_LEN
+        // so random(n) takes the parallel path; random(1) stays serial and is the
+        // independent reference.
+        let n = 70_000usize; // > 1<<16
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        for dxsm in [false, true] {
+            let mk = |s: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(s).unwrap()
+                } else {
+                    Generator::from_pcg64(s).unwrap()
+                }
+            };
+            // Parallel: two back-to-back fills (exercises post-call advance too).
+            let mut g_par = mk(42);
+            let mut combined = g_par.random(n);
+            combined.extend(g_par.random(n));
+            // Serial reference: 2n single draws, each below the parallel gate.
+            let mut g_ser = mk(42);
+            let serial: Vec<f64> = (0..2 * n).map(|_| g_ser.random(1)[0]).collect();
+            assert_eq!(combined.len(), serial.len());
+            for (i, (p, s)) in combined.iter().zip(&serial).enumerate() {
+                assert_eq!(
+                    p.to_bits(),
+                    s.to_bits(),
+                    "dxsm={dxsm}: parallel stream diverged from serial at index {i}"
+                );
+            }
+        }
+        // Golden digest locks the exact PCG64 uniform bytes for a fixed seed.
+        let mut g = Generator::from_pcg64(12345).unwrap();
+        let vals = g.random(n);
+        let mut hasher = Sha256::new();
+        for v in &vals {
+            hasher.update(v.to_bits().to_le_bytes());
+        }
+        let digest: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            digest, "e1c8d1e42f6c0539cb9abf781bc22c7c87dd6cca8ed14723488479cd2d3e6d0c",
+            "PCG64 uniform random golden stream changed"
+        );
     }
 }

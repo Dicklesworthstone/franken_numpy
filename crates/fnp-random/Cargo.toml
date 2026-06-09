@@ -17,6 +17,9 @@ description = "NumPy-parity RNG: PCG64DXSM, distributions, oracle-verified deter
 # contracts to build correctly-strided output arrays.
 fnp-ndarray = { version = "0.1.0", path = "../fnp-ndarray" }
 getrandom.workspace = true
+# rayon: data-parallel jump-ahead fills for PCG/PCG-DXSM uniform generation
+# (bit-identical stream via per-chunk advance; NumPy's RNG is single-threaded).
+rayon = { workspace = true }
 
 [dev-dependencies]
 criterion.workspace = true
