@@ -23507,6 +23507,18 @@ fn positive(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn reciprocal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Integer reciprocal is exact only for ±1: numpy yields 0 for |n|>1 and the
+    // platform integer-minimum (with a divide-by-zero RuntimeWarning) for n==0. The
+    // native integer path returns 0 for n==0 instead, diverging from numpy. Defer all
+    // integer dtypes to numpy.reciprocal for exact parity including the div-by-zero
+    // wart; float/complex keep the native fast path.
+    if numpy_dtype_is_integer(py, x.bind(py))? {
+        return Ok(py
+            .import("numpy")?
+            .getattr("reciprocal")?
+            .call1((x.bind(py),))?
+            .unbind());
+    }
     native_unary_elementwise(
         py,
         x.bind(py),
@@ -81280,6 +81292,24 @@ mod tests {
                 ours_i.getattr("dtype")?.str()?.to_string(),
                 theirs_i.getattr("dtype")?.str()?.to_string()
             );
+
+            // Integer reciprocal of ZERO: numpy yields the platform integer-minimum
+            // (e.g. int32 -> -2147483648) with a divide-by-zero RuntimeWarning, NOT 0.
+            // Regression guard: the native integer path returned 0 here, diverging.
+            // (The expected RuntimeWarning is harmless to these assertions.)
+            for dt in ["int32", "int64", "uint8", "int16"] {
+                let dtype_obj = numpy.getattr(dt)?;
+                let base = array_fn.call1((vec![0_i64, 1, 2, 0, 7],))?;
+                let zarr = base.call_method1("astype", (dtype_obj,))?;
+                let ours_z = rc_fn.call1((zarr.clone(),))?;
+                let theirs_z = numpy_rc.call1((zarr.clone(),))?;
+                assert_array_matches_numpy(&ours_z, &theirs_z)?;
+                assert_eq!(
+                    ours_z.getattr("dtype")?.str()?.to_string(),
+                    theirs_z.getattr("dtype")?.str()?.to_string(),
+                    "reciprocal {dt} zero-divisor dtype must match numpy",
+                );
+            }
 
             // 2-D array.
             let two_d = array_fn.call1((vec![vec![1.0_f64, 2.0], vec![4.0, 8.0]],))?;
