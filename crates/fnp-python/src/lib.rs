@@ -31616,6 +31616,56 @@ fn eigh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
         Err(_) => return fallback(),
     };
     let shape = array.shape();
+    let real_f64_finite = matches!(array.dtype(), DType::F64)
+        && !array.has_integer_sidecar()
+        && array.values().iter().all(|value| value.is_finite())
+        && matches!(UPLO, "L" | "U");
+    // Batched (stacked) symmetric inputs: eigendecompose every lane natively via the
+    // parallel batch_eigh instead of passing the whole stack through to numpy's LAPACK
+    // (a no-gaps violation — and numpy's batched eigh is a serial per-lane C loop).
+    // Eigenvalues are ascending (NumPy convention) and conformance compares
+    // |eigenvectors| (a column's sign is non-deterministic across LAPACK builds), so
+    // the per-lane sign choice is parity-safe. Symmetrize each lane from the selected
+    // UPLO triangle (matching the 2-D path), then run batch_eigh. On any Err
+    // (non-convergence / shape) fall back to numpy. Mirrors the eigvalsh batched path.
+    if shape.len() >= 3 && shape[shape.len() - 1] == shape[shape.len() - 2] && real_f64_finite {
+        let n = shape[shape.len() - 1];
+        let mat_size = n * n;
+        let vals = array.values();
+        let batch = vals.len() / mat_size;
+        let mut sym = vec![0.0f64; vals.len()];
+        for b in 0..batch {
+            let base = b * mat_size;
+            if UPLO == "L" {
+                for row in 0..n {
+                    for col in 0..=row {
+                        let v = vals[base + row * n + col];
+                        sym[base + row * n + col] = v;
+                        sym[base + col * n + row] = v;
+                    }
+                }
+            } else {
+                for row in 0..n {
+                    for col in row..n {
+                        let v = vals[base + row * n + col];
+                        sym[base + row * n + col] = v;
+                        sym[base + col * n + row] = v;
+                    }
+                }
+            }
+        }
+        let owned_shape = shape.to_vec();
+        if let Ok((eigenvalues, eigenvectors)) = fnp_linalg::batch_eigh(&sym, &owned_shape) {
+            let mut val_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+            val_shape.push(n);
+            let eval_arr =
+                UFuncArray::new(val_shape, eigenvalues, DType::F64).map_err(map_ufunc_error)?;
+            let evec_arr = UFuncArray::new(owned_shape, eigenvectors, DType::F64)
+                .map_err(map_ufunc_error)?;
+            return build_numpy_eigh_result(py, &eval_arr, &evec_arr);
+        }
+        return fallback();
+    }
     if shape.len() != 2
         || shape[0] != shape[1]
         || !matches!(array.dtype(), DType::F64)

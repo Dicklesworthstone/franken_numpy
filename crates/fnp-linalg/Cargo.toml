@@ -34,3 +34,7 @@ harness = false
 [[bench]]
 name = "kron"
 harness = false
+
+[[bench]]
+name = "batch_eigh"
+harness = false
