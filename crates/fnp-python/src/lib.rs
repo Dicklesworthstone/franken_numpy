@@ -15915,14 +15915,65 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
     let a_shape = a.shape();
     let b_shape = b.shape();
+    let real_f64_finite = matches!(a.dtype(), DType::F64)
+        && matches!(b.dtype(), DType::F64)
+        && !a.has_integer_sidecar()
+        && !b.has_integer_sidecar()
+        && a.values().iter().all(|value| value.is_finite())
+        && b.values().iter().all(|value| value.is_finite());
+
+    // Batched (stacked) square inputs: solve every lane natively via the parallel
+    // batch_solve instead of passing the whole stack through to numpy (whose batched
+    // solve is a serial per-lane LU in C). The solution is mathematically UNIQUE (no
+    // sign/order ambiguity), so per-lane parity is identical to the 2-D path. NumPy's
+    // signature picks vector-RHS when b.ndim == a.ndim-1, else matrix-RHS; the output
+    // batch dims are the numpy broadcast of a's and b's batch dims, with tail [n] /
+    // [n, k]. A defensive element-count check + Err fall back to numpy for any case
+    // batch_solve does not accept (non-trivial broadcast, singular, etc.). Mirrors the
+    // det/inv/eigh/matrix_rank batched wirings.
+    if a_shape.len() >= 3 && a_shape[a_shape.len() - 1] == a_shape[a_shape.len() - 2] && real_f64_finite
+    {
+        let n = a_shape[a_shape.len() - 1];
+        // NumPy 2.0+ treats `b` as a single vector ONLY when b.ndim == 1; any
+        // b.ndim >= 2 is a (stack of) matrix RHS (the pre-2.0 `b.ndim ==
+        // a.ndim-1` vector heuristic was removed). The 2-D path above follows the
+        // same rule (1-D b -> solve, 2-D b -> solve_multi).
+        let vector_rhs = b_shape.len() == 1;
+        let a_batch_dims = &a_shape[..a_shape.len() - 2];
+        // b's batch dims: drop the trailing [n] (vector) or [n, k] (matrix).
+        let b_tail = if vector_rhs { 1 } else { 2 };
+        if b_shape.len() >= b_tail {
+            let b_batch_dims = &b_shape[..b_shape.len() - b_tail];
+            if let Ok(out_batch) = fnp_ndarray::broadcast_shape(a_batch_dims, b_batch_dims) {
+                let mut out_shape = out_batch;
+                out_shape.push(n);
+                if !vector_rhs {
+                    out_shape.push(b_shape[b_shape.len() - 1]);
+                }
+                let expected: usize = out_shape.iter().product();
+                if let Ok(values) = fnp_linalg::batch_solve(
+                    a.values(),
+                    a_shape,
+                    b.values(),
+                    b_shape,
+                    vector_rhs,
+                ) {
+                    if values.len() == expected {
+                        if let Ok(result) =
+                            UFuncArray::new(out_shape, values, DType::F64)
+                        {
+                            return build_numpy_array_from_ufunc(py, &result);
+                        }
+                    }
+                }
+            }
+        }
+        return fallback();
+    }
+
     if a_shape.len() != 2
         || a_shape[0] != a_shape[1]
-        || !matches!(a.dtype(), DType::F64)
-        || !matches!(b.dtype(), DType::F64)
-        || a.has_integer_sidecar()
-        || b.has_integer_sidecar()
-        || a.values().iter().any(|value| !value.is_finite())
-        || b.values().iter().any(|value| !value.is_finite())
+        || !real_f64_finite
     {
         return fallback();
     }
@@ -52593,6 +52644,51 @@ mod tests {
                     .call1((&actual_batch, &expected_batch))?
                     .extract::<bool>()?,
                 "solve batched diverged"
+            );
+
+            // Vector-RHS broadcast: stack of three 2x2 with a single 1-D b
+            // (NumPy 2.0 vector rule: b.ndim == 1). Output shape (3, 2).
+            let stack3 = numpy.getattr("array")?.call1((vec![
+                vec![vec![2.0_f64, 0.0], vec![0.0, 4.0]],
+                vec![vec![1.0_f64, 1.0], vec![0.0, 1.0]],
+                vec![vec![3.0_f64, 0.0], vec![1.0, 2.0]],
+            ],))?;
+            let vec_b = numpy.getattr("array")?.call1((vec![6.0_f64, 8.0],))?;
+            assert!(
+                allclose
+                    .call1((
+                        &solve_fn.call1((stack3.clone(), vec_b.clone()))?,
+                        &numpy_solve.call1((stack3.clone(), vec_b.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "solve batched vector-RHS broadcast diverged"
+            );
+
+            // Matched-batch matrix RHS: a (2,3,3), b (2,3,2). Output (2,3,2).
+            let np_arange = numpy.getattr("arange")?;
+            let np_eye = numpy.getattr("eye")?;
+            let a_stack = np_eye
+                .call1((3_i64,))?
+                .call_method1("__mul__", (2.0_f64,))?
+                .call_method1("__add__", (np_arange.call1((9_i64,))?.call_method1(
+                    "reshape",
+                    ((3_i64, 3_i64),),
+                )?.call_method1("__mul__", (0.1_f64,))?,))?;
+            let a_batched2 = numpy
+                .getattr("stack")?
+                .call1((vec![a_stack.clone(), a_stack.clone()],))?;
+            let b_batched2 = np_arange
+                .call1((12_i64,))?
+                .call_method1("astype", ("float64",))?
+                .call_method1("reshape", ((2_i64, 3_i64, 2_i64),))?;
+            assert!(
+                allclose
+                    .call1((
+                        &solve_fn.call1((a_batched2.clone(), b_batched2.clone()))?,
+                        &numpy_solve.call1((a_batched2.clone(), b_batched2.clone()))?,
+                    ))?
+                    .extract::<bool>()?,
+                "solve matched-batch matrix-RHS diverged"
             );
 
             // Complex 2x2 solve.
