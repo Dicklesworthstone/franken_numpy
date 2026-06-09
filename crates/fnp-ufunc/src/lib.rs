@@ -25207,21 +25207,66 @@ impl UFuncArray {
         let out_strides = c_strides_elems(target_shape);
         let out_count: usize =
             fnp_ndarray::element_count(target_shape).map_err(UFuncError::Shape)?;
-        let mut values = Vec::with_capacity(out_count);
-        let mut source_indices = Vec::with_capacity(out_count);
-        for flat in 0..out_count {
-            let mut remainder = flat;
-            let mut src_flat = 0;
+
+        // Broadcast is a pure gather: output position `f` reads source offset
+        // `sum_d coord_d(f) * (padded[d]>1 ? src_strides[d] : 0)` (broadcast axes
+        // contribute stride 0). The old loop spent `ndim` integer divisions per
+        // output element and ran serially over an often-huge output. Instead split
+        // the output into chunks across the rayon pool; each chunk decomposes only
+        // its FIRST index (one division set) then ripples a multi-axis odometer
+        // forward — O(1) amortized per element, no per-element division. Bit-for-bit
+        // identical; values and the i64/u64 sidecar gather from the same index map.
+        let src_step: Vec<usize> = (0..ndim)
+            .map(|d| if padded[d] > 1 { src_strides[d] } else { 0 })
+            .collect();
+        const BROADCAST_CHUNK: usize = 1 << 14;
+        const BROADCAST_PAR_MIN: usize = 1 << 15;
+        let mut source_indices = vec![0usize; out_count];
+        let fill_chunk = |(ci, chunk): (usize, &mut [usize])| {
+            if chunk.is_empty() {
+                return;
+            }
+            let f0 = ci * BROADCAST_CHUNK;
+            let mut coord = vec![0usize; ndim];
+            let mut rem = f0;
             for d in 0..ndim {
-                let coord = remainder / out_strides[d];
-                remainder %= out_strides[d];
-                if padded[d] > 1 {
-                    src_flat += coord * src_strides[d];
+                coord[d] = rem / out_strides[d];
+                rem %= out_strides[d];
+            }
+            let mut off: usize = (0..ndim).map(|d| coord[d] * src_step[d]).sum();
+            for slot in chunk.iter_mut() {
+                *slot = off;
+                let mut d = ndim;
+                while d > 0 {
+                    d -= 1;
+                    coord[d] += 1;
+                    off += src_step[d];
+                    if coord[d] < target_shape[d] {
+                        break;
+                    }
+                    coord[d] = 0;
+                    off -= target_shape[d] * src_step[d];
                 }
             }
-            values.push(self.values[src_flat]);
-            source_indices.push(src_flat);
+        };
+        let parallel = out_count >= BROADCAST_PAR_MIN && rayon::current_num_threads() >= 2;
+        if parallel {
+            source_indices
+                .par_chunks_mut(BROADCAST_CHUNK)
+                .enumerate()
+                .for_each(fill_chunk);
+        } else {
+            source_indices
+                .chunks_mut(BROADCAST_CHUNK)
+                .enumerate()
+                .for_each(fill_chunk);
         }
+        let values_ref = &self.values;
+        let values: Vec<f64> = if parallel {
+            source_indices.par_iter().map(|&i| values_ref[i]).collect()
+        } else {
+            source_indices.iter().map(|&i| values_ref[i]).collect()
+        };
         Ok(Self {
             shape: target_shape.to_vec(),
             values,
@@ -55887,6 +55932,104 @@ print(json.dumps(payload))
         let r = a.broadcast_to(&[2, 3]).unwrap();
         assert_eq!(r.shape(), &[2, 3]);
         assert_eq!(r.values(), &[5.0; 6]);
+    }
+
+    #[test]
+    fn broadcast_to_parallel_odometer_matches_naive_and_golden() {
+        use sha2::{Digest, Sha256};
+        // The parallel odometer broadcast_to must be BIT-IDENTICAL to the naive
+        // per-element coordinate-decomposition gather it replaces, across leading,
+        // trailing, and interior size-1 axes, non-tile-multiple dims, and output
+        // sizes crossing the parallel threshold (1<<15). Pure gather => to_bits
+        // equality incl NaN / ±inf / -0.0, plus identical i64-sidecar replication.
+        fn naive_bcast(
+            values: &[f64],
+            src_shape: &[usize],
+            target: &[usize],
+        ) -> (Vec<f64>, Vec<usize>) {
+            let ndim = target.len();
+            let mut padded = vec![1usize; ndim - src_shape.len()];
+            padded.extend_from_slice(src_shape);
+            let mut src_strides = vec![1usize; ndim];
+            for d in (0..ndim - 1).rev() {
+                src_strides[d] = src_strides[d + 1] * padded[d + 1];
+            }
+            let mut out_strides = vec![1usize; ndim];
+            for d in (0..ndim - 1).rev() {
+                out_strides[d] = out_strides[d + 1] * target[d + 1];
+            }
+            let total: usize = target.iter().product();
+            let mut out = vec![0.0f64; total];
+            let mut idx = vec![0usize; total];
+            for f in 0..total {
+                let mut rem = f;
+                let mut src = 0usize;
+                for d in 0..ndim {
+                    let coord = rem / out_strides[d];
+                    rem %= out_strides[d];
+                    if padded[d] > 1 {
+                        src += coord * src_strides[d];
+                    }
+                }
+                out[f] = values[src];
+                idx[f] = src;
+            }
+            (out, idx)
+        }
+        // (src_shape, target) — leading / trailing / interior broadcast axes.
+        let cases: &[(Vec<usize>, Vec<usize>)] = &[
+            (vec![1, 130], vec![257, 130]),     // leading axis broadcast
+            (vec![130, 1], vec![130, 257]),     // trailing axis broadcast
+            (vec![17, 1, 19], vec![17, 41, 19]), // interior axis broadcast
+            (vec![1], vec![400, 1, 333]),       // scalar-ish into 3-D
+            (vec![5, 1, 1], vec![5, 64, 64]),   // two interior/trailing axes
+        ];
+        let mut seed = 0x2f1b_9e4d_77a3_c0e5u64;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            match (seed >> 9) % 17 {
+                0 => f64::NAN,
+                1 => f64::INFINITY,
+                2 => -0.0,
+                _ => (seed >> 11) as f64 / (1u64 << 53) as f64 * 30.0 - 15.0,
+            }
+        };
+        let mut digest = Sha256::new();
+        for (src_shape, target) in cases {
+            let sn: usize = src_shape.iter().product();
+            let data: Vec<f64> = (0..sn).map(|_| next()).collect();
+            let arr = UFuncArray::new(src_shape.clone(), data.clone(), DType::F64).unwrap();
+            let got = arr.broadcast_to(target).unwrap();
+            assert_eq!(got.shape(), &target[..], "shape {src_shape:?}->{target:?}");
+            let (want, idx) = naive_bcast(&data, src_shape, target);
+            for (g, w) in got.values().iter().zip(want.iter()) {
+                assert_eq!(g.to_bits(), w.to_bits(), "bcast {src_shape:?}->{target:?}");
+            }
+            for v in got.values() {
+                digest.update(v.to_bits().to_le_bytes());
+            }
+            // i64 sidecar replicates identically.
+            let ivals: Vec<i64> = (0..sn as i64).map(|k| (k << 21) ^ (k * 13 + 7)).collect();
+            let iarr = UFuncArray::from_storage(src_shape.clone(), ArrayStorage::I64(ivals.clone()))
+                .expect("from_storage");
+            let it = iarr.broadcast_to(target).expect("ibcast");
+            let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
+                panic!("expected i64 storage");
+            };
+            let want_i: Vec<i64> = idx.iter().map(|&i| ivals[i]).collect();
+            assert_eq!(got_i, want_i, "i64 bcast {src_shape:?}->{target:?}");
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "184933eab809b627593db0b9848a07ca3be52495ab9e4242c04897dc4aba595d",
+            "broadcast_to parallel odometer golden digest drifted"
+        );
     }
 
     // ── tensor operation tests ────────

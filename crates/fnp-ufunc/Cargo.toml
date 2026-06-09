@@ -58,3 +58,7 @@ harness = false
 [[bench]]
 name = "transpose"
 harness = false
+
+[[bench]]
+name = "broadcast"
+harness = false
