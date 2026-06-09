@@ -80,7 +80,11 @@ fn bench_solve(c: &mut Criterion) {
 fn bench_det(c: &mut Criterion) {
     let mut group = c.benchmark_group("det_nxn");
 
-    for n in [16, 64, 128, 256, 512, 768] {
+    // Through n=1024: the factorizations route the trailing update through the
+    // blocked packed GEMM there, so this is the regime where the remaining gap to
+    // OpenBLAS getrf (the AVX2-no-FMA microkernel, bead 8vdtg) and any future
+    // sub-cubic GEMM (Strassen, crossover ~n>=4096) actually show up.
+    for n in [16, 64, 128, 256, 512, 768, 1024] {
         let a = generate_random_matrix(n, 42);
 
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
@@ -97,7 +101,7 @@ fn bench_det(c: &mut Criterion) {
 fn bench_inv(c: &mut Criterion) {
     let mut group = c.benchmark_group("inv_nxn");
 
-    for n in [16, 32, 64, 128, 256, 512, 768] {
+    for n in [16, 32, 64, 128, 256, 512, 768, 1024] {
         let a = generate_invertible_matrix(n);
 
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
@@ -114,7 +118,10 @@ fn bench_inv(c: &mut Criterion) {
 fn bench_cholesky(c: &mut Criterion) {
     let mut group = c.benchmark_group("cholesky_nxn");
 
-    for n in [16, 32, 64, 128, 256] {
+    // Add 512/768: above CHOL_MID_MIN the blocked Cholesky's serial diagonal/panel
+    // factorization dominates (the trailing GEMM is already a small fraction), the
+    // regime that bounds the gap to OpenBLAS potrf.
+    for n in [16, 32, 64, 128, 256, 512, 768] {
         let a = generate_spd_matrix(n);
 
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
