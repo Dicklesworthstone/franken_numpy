@@ -80,7 +80,7 @@ fn bench_solve(c: &mut Criterion) {
 fn bench_det(c: &mut Criterion) {
     let mut group = c.benchmark_group("det_nxn");
 
-    for n in [16, 32, 64, 128, 256] {
+    for n in [16, 64, 128, 256, 512, 768] {
         let a = generate_random_matrix(n, 42);
 
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
@@ -97,7 +97,7 @@ fn bench_det(c: &mut Criterion) {
 fn bench_inv(c: &mut Criterion) {
     let mut group = c.benchmark_group("inv_nxn");
 
-    for n in [16, 32, 64, 128, 256] {
+    for n in [16, 32, 64, 128, 256, 512, 768] {
         let a = generate_invertible_matrix(n);
 
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {

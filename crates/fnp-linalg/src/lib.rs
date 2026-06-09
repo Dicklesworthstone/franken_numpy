@@ -543,11 +543,20 @@ fn lu_factor_unblocked_into(
     Ok(sign)
 }
 
-// Engage blocked LU only once the parallel trailing GEMM clearly beats the
-// unblocked sweep. Measured same-process crossover is ~768; 896 keeps a safe
-// margin against worker noise: 896 ~1.3x, 1024 ~1.3x, 1536 ~3.1x, 2048 ~6.0x.
-// Below this the unblocked rank-1 loop wins (less panel/extraction overhead).
-const LU_BLOCK_MIN: usize = 896;
+// Engage blocked LU once the parallel trailing GEMM beats the unblocked rank-1 sweep.
+// Fresh same-load Criterion A/B (RAYON_NUM_THREADS=16, det_nxn) shows the blocked
+// level-3 path already wins from n=512 — the old 896 cutoff left the whole 512..896
+// band on the memory-bound serial sweep:
+//   n=512  serial 8.77ms -> blocked 6.35ms  (1.38x)
+//   n=640  serial 16.67  -> blocked 11.01   (1.51x)
+//   n=768  serial 28.82  -> blocked 16.51   (1.75x)
+//   n=896  serial 45.75  -> blocked 23.76   (1.93x)
+// The win grows with n (the trailing GEMM amortizes the serial panel/extraction
+// overhead). Cut over at 512, where the margin (1.38x) is already well clear of
+// worker noise; below 512 the panel overhead makes the unblocked sweep competitive
+// (n=384 was only ~1.15x). Pivot sequence is identical, so results match within
+// tolerance (LU is not bit-reproducible — conformance is tolerance-based like LAPACK).
+const LU_BLOCK_MIN: usize = 512;
 // Panel width >= the GEMM parallel gate (128) so the trailing-update GEMM
 // (trail × nb × trail) clears packed_gemm's k>=128 threshold and runs parallel.
 const LU_PANEL_NB: usize = 128;
@@ -9605,6 +9614,97 @@ mod tests {
         let (sign, log_abs) = slogdet_nxn(&a_sing, 3).expect("singular slogdet");
         assert_eq!(sign, 0.0);
         assert_eq!(log_abs, f64::NEG_INFINITY);
+    }
+
+    #[test]
+    fn blocked_lu_band_matches_serial_reference_within_tolerance() {
+        // n in [LU_BLOCK_MIN, 896) now routes det/inv/slogdet/solve through the blocked
+        // level-3 LU (was the serial unblocked sweep before the threshold was lowered to
+        // 512). The blocked path re-associates the trailing update via GEMM, so it matches
+        // the serial reference within tolerance (not bit-exact) — exactly numpy/LAPACK's
+        // own contract. Verify at n=600 (mid-band): the determinant matches an independent
+        // serial LU, and inv reconstructs the identity.
+        // Serial reference returns (sign, log|det|) — det itself overflows f64 at n=600.
+        fn serial_slogdet_reference(a: &[f64], n: usize) -> (f64, f64) {
+            let mut lu = a.to_vec();
+            let mut sign = 1.0_f64;
+            let max_abs = a.iter().map(|v| v.abs()).fold(0.0, f64::max);
+            let thr = (n as f64) * f64::EPSILON * max_abs;
+            for k in 0..n {
+                let mut max_val = lu[k * n + k].abs();
+                let mut max_row = k;
+                for i in (k + 1)..n {
+                    let v = lu[i * n + k].abs();
+                    if v > max_val {
+                        max_val = v;
+                        max_row = i;
+                    }
+                }
+                assert!(max_val > thr, "reference singular pivot");
+                if max_row != k {
+                    for j in 0..n {
+                        lu.swap(k * n + j, max_row * n + j);
+                    }
+                    sign = -sign;
+                }
+                let pivot = lu[k * n + k];
+                for i in (k + 1)..n {
+                    let factor = lu[i * n + k] / pivot;
+                    for j in (k + 1)..n {
+                        let u = lu[k * n + j];
+                        lu[i * n + j] -= factor * u;
+                    }
+                }
+            }
+            let mut log_abs = 0.0;
+            for i in 0..n {
+                let d = lu[i * n + i];
+                if d < 0.0 {
+                    sign = -sign;
+                }
+                log_abs += d.abs().ln();
+            }
+            (sign, log_abs)
+        }
+
+        let n = 600;
+        assert!(
+            n >= crate::LU_BLOCK_MIN && n < 896,
+            "n must be inside the newly-blocked band"
+        );
+        let mut a = vec![0.0f64; n * n];
+        let mut state = 0xc0ffee_1234_5678u64;
+        for v in a.iter_mut() {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *v = ((state >> 11) as f64 / (1u64 << 53) as f64) - 0.5;
+        }
+        for i in 0..n {
+            a[i * n + i] += n as f64; // diagonally dominant → well-conditioned
+        }
+
+        let (blocked_sign, blocked_log) = slogdet_nxn(&a, n).expect("blocked slogdet");
+        let (ref_sign, ref_log) = serial_slogdet_reference(&a, n);
+        assert_eq!(blocked_sign, ref_sign, "slogdet sign must match reference");
+        let rel = (blocked_log - ref_log).abs() / ref_log.abs().max(1.0);
+        assert!(
+            rel < 1e-9,
+            "blocked log|det| {blocked_log} vs serial reference {ref_log} (rel {rel:e})"
+        );
+
+        // inv · A ≈ I (max abs deviation tiny).
+        let inv = inv_nxn(&a, n).expect("blocked inv");
+        let mut max_dev = 0.0f64;
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for k in 0..n {
+                    s += inv[i * n + k] * a[k * n + j];
+                }
+                let expected = if i == j { 1.0 } else { 0.0 };
+                max_dev = max_dev.max((s - expected).abs());
+            }
+        }
+        assert!(max_dev < 1e-9, "inv·A deviates from I by {max_dev:e}");
     }
 
     #[test]
