@@ -18589,7 +18589,7 @@ impl UFuncArray {
             }
             return Ok(Self {
                 shape: vec![minlength],
-                values: vec![0.0; minlength],
+                values: try_zeroed_f64(minlength, "bincount")?,
                 dtype,
                 integer_sidecar: None,
             });
@@ -18626,7 +18626,7 @@ impl UFuncArray {
                     .to_string(),
             ));
         }
-        let mut counts = vec![0.0f64; len];
+        let mut counts = try_zeroed_f64(len, "bincount")?;
         match weights {
             None => {
                 for &v in &self.values {
@@ -27916,6 +27916,25 @@ fn sort_value_indices_by_kind<T: Ord + RadixKey>(indices: &mut [usize], values: 
     } else {
         sort_indices_by_kind_ord(indices, values, kind);
     }
+}
+
+/// Allocate a zero-filled `f64` buffer of `len` elements with FALLIBLE allocation.
+///
+/// `vec![0.0f64; len]` calls the infallible global allocator: when it cannot
+/// reserve the request (e.g. a multi-petabyte size that exceeds the process
+/// address space) it invokes `handle_alloc_error`, which ABORTS the whole
+/// process (SIGABRT). NumPy instead raises a catchable `MemoryError`. Using
+/// `try_reserve_exact` turns the reservation failure into a recoverable
+/// `UFuncError` that the PyO3 bridge maps to a Python `MemoryError`, so a merely
+/// huge (but sub-`isize::MAX`) `bincount`/`minlength` size never crashes the host
+/// interpreter. The capacity is reserved fallibly; `resize` then zero-fills
+/// without reallocating (so it cannot abort).
+fn try_zeroed_f64(len: usize, ctx: &str) -> Result<Vec<f64>, UFuncError> {
+    let mut v: Vec<f64> = Vec::new();
+    v.try_reserve_exact(len)
+        .map_err(|_| UFuncError::Msg(format!("{ctx}: unable to allocate output array (out of memory)")))?;
+    v.resize(len, 0.0);
+    Ok(v)
 }
 
 /// Compute C-order strides in elements (not bytes) for a given shape.
@@ -52009,6 +52028,26 @@ print(json.dumps(payload))
     fn bincount_rejects_negative() {
         let a = UFuncArray::new(vec![2], vec![-1.0, 0.0], DType::I64).unwrap();
         assert!(a.bincount().is_err());
+    }
+
+    #[test]
+    fn bincount_huge_allocation_errors_instead_of_aborting() {
+        // Regression for the process-abort bug: a value of 1e17 sizes the counts
+        // array at ~1e17 elements (8e17 bytes ≈ 800 PB) — below the isize::MAX/8
+        // guard so it reaches the allocation, but far beyond any process address
+        // space. `vec![0.0; len]` would call handle_alloc_error -> SIGABRT (crashing
+        // the whole test binary). The fallible try_reserve path must return Err
+        // (which the bridge maps to a Python MemoryError, matching numpy) — if it
+        // aborted, this test process would die rather than report a failure.
+        let a = UFuncArray::new(vec![2], vec![0.0, 1e17], DType::I64).unwrap();
+        let r = a.bincount();
+        assert!(r.is_err(), "huge bincount must return Err, not allocate/abort");
+        // A merely-large minlength on empty input must also fail gracefully.
+        let empty = UFuncArray::new(vec![0], Vec::new(), DType::I64).unwrap();
+        assert!(empty.bincount_with(None, (1e17) as usize).is_err());
+        // Sanity: a normal-sized bincount still succeeds and is unchanged.
+        let ok = UFuncArray::new(vec![4], vec![0.0, 1.0, 1.0, 3.0], DType::I64).unwrap();
+        assert_eq!(ok.bincount().unwrap().values(), &[1.0, 2.0, 0.0, 1.0]);
     }
 
     #[test]

@@ -57,7 +57,7 @@ use fnp_ufunc::{
 };
 use pyo3::buffer::PyBuffer;
 use pyo3::exceptions::{
-    PyDeprecationWarning, PyOSError, PyOverflowError, PyTypeError, PyValueError,
+    PyDeprecationWarning, PyMemoryError, PyOSError, PyOverflowError, PyTypeError, PyValueError,
     PyZeroDivisionError,
 };
 use pyo3::prelude::*;
@@ -13004,7 +13004,18 @@ fn bincount(
         .transpose()?;
     let result = x
         .bincount_with(weights.as_ref(), minlength as usize)
-        .map_err(map_ufunc_error)?;
+        .map_err(|err| {
+            // A fallible allocation failure for an enormous (but sub-isize::MAX)
+            // counts array surfaces as MemoryError, matching numpy's bincount
+            // (which raises MemoryError when its calloc fails) rather than a
+            // process abort. Other errors keep their ValueError mapping.
+            let msg = err.to_string();
+            if msg.contains("out of memory") {
+                PyMemoryError::new_err(msg)
+            } else {
+                map_ufunc_error(err)
+            }
+        })?;
     build_numpy_array_from_ufunc(py, &result)
 }
 
