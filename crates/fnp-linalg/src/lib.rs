@@ -42,6 +42,9 @@ pub const SVD_QR_ITERATION_COEFF: usize = 100;
 const SVD_RECONSTRUCT_LEFT_MIN_DIM: usize = 128;
 #[cfg(test)]
 const SVD_RECONSTRUCT_LEFT_MIN_DIM: usize = 32;
+/// Minimum remaining trailing width for the fused two-sided SVD update. Below
+/// this size the simpler scalar sweeps win by avoiding the extra branch surface.
+const SVD_FUSED_TWO_SIDED_MIN_TRAIL: usize = 16;
 /// Iteration limit coefficient for eigenvalue/Schur QR convergence: max_iters = coeff * n * n.
 pub const EIGEN_QR_ITERATION_COEFF: usize = 60;
 /// Maximum iterations for matrix square root (Denman-Beavers).
@@ -2492,6 +2495,7 @@ fn svd_bidiag_qr_full(
     };
 
     for j in 0..n {
+        let mut fused_two_sided = false;
         // Left Householder: zero out column j below diagonal
         let col_norm = {
             let mut s = 0.0;
@@ -2512,32 +2516,150 @@ fn svd_bidiag_qr_full(
             let v_norm_sq: f64 = v_house[j..].iter().map(|x| x * x).sum();
             if v_norm_sq > 0.0 {
                 let scale = 2.0 / v_norm_sq;
-                // Apply to work (left) as two row-contiguous passes (bit-exact)
-                // instead of striding work[i*n+col] down each column: pass 1 sums
-                // lh_dot[col] = Σ_i v_house[i]·work[i][col] in i-ascending order,
-                // pass 2 applies the identical (scale·lh_dot[col])·v_house[i]
-                // product per element.
-                for x in lh_dot[j..n].iter_mut() {
-                    *x = 0.0;
-                }
-                for i in j..m {
-                    let vi = v_house[i];
-                    let row = &work[i * n + j..i * n + n];
-                    for (x, &w) in lh_dot[j..n].iter_mut().zip(row.iter()) {
-                        *x += vi * w;
+                let can_fuse_two_sided = reconstruct_left
+                    && j + 2 <= n
+                    && m - j >= SVD_FUSED_TWO_SIDED_MIN_TRAIL
+                    && n - j > SVD_FUSED_TWO_SIDED_MIN_TRAIL;
+                if can_fuse_two_sided {
+                    // Large full-SVD reconstructs U from A*V/S, so the left
+                    // reflector only has to update the active work panel. Fuse
+                    // the left and right trailing updates: materialize the pivot
+                    // row to build the right reflector, then write rows j+1..m
+                    // directly to their post-left/post-right state. Each scalar
+                    // `left_value` is computed with the same multiply/subtract
+                    // sequence and each right-dot still walks columns ascending.
+                    for x in lh_dot[j..n].iter_mut() {
+                        *x = 0.0;
+                    }
+                    for i in j..m {
+                        let vi = v_house[i];
+                        let row = &work[i * n + j..i * n + n];
+                        for (x, &w) in lh_dot[j..n].iter_mut().zip(row.iter()) {
+                            *x += vi * w;
+                        }
+                    }
+                    for (fc, &dc) in lh_f[j..n].iter_mut().zip(lh_dot[j..n].iter()) {
+                        *fc = scale * dc;
+                    }
+
+                    let pivot_base = j * n;
+                    let pivot_vi = v_house[j];
+                    for (w, &fc) in work[pivot_base + j..pivot_base + n]
+                        .iter_mut()
+                        .zip(lh_f[j..n].iter())
+                    {
+                        *w -= fc * pivot_vi;
+                    }
+                    d[j] = work[pivot_base + j];
+
+                    let row_norm = {
+                        let mut s = 0.0;
+                        for col in (j + 1)..n {
+                            s += work[pivot_base + col] * work[pivot_base + col];
+                        }
+                        s.sqrt()
+                    };
+                    if row_norm > 0.0 {
+                        let sign = if work[pivot_base + j + 1] >= 0.0 {
+                            1.0
+                        } else {
+                            -1.0
+                        };
+                        for wi in &mut w_house[..=j] {
+                            *wi = 0.0;
+                        }
+                        for (idx, wi) in w_house[(j + 1)..n].iter_mut().enumerate() {
+                            *wi = work[pivot_base + j + 1 + idx];
+                        }
+                        w_house[j + 1] += sign * row_norm;
+                        let w_norm_sq: f64 = w_house[(j + 1)..].iter().map(|x| x * x).sum();
+                        if w_norm_sq > 0.0 {
+                            let right_scale = 2.0 / w_norm_sq;
+                            let mut pivot_dot = 0.0;
+                            for col in (j + 1)..n {
+                                pivot_dot += work[pivot_base + col] * w_house[col];
+                            }
+                            let pivot_f = right_scale * pivot_dot;
+                            for col in (j + 1)..n {
+                                work[pivot_base + col] -= pivot_f * w_house[col];
+                            }
+                            e[j] = work[pivot_base + j + 1];
+
+                            for (row, &vi) in v_house.iter().enumerate().take(m).skip(j + 1) {
+                                let row_base = row * n;
+                                let mut dot = 0.0;
+                                for col in (j + 1)..n {
+                                    let left_value = work[row_base + col] - lh_f[col] * vi;
+                                    dot += left_value * w_house[col];
+                                }
+                                let f = right_scale * dot;
+                                for col in (j + 1)..n {
+                                    let left_value = work[row_base + col] - lh_f[col] * vi;
+                                    work[row_base + col] = left_value - f * w_house[col];
+                                }
+                            }
+
+                            // Accumulate into Vt: Vt = (I - scale*w*w^T) * Vt.
+                            for x in rh_dot.iter_mut() {
+                                *x = 0.0;
+                            }
+                            for row in (j + 1)..n {
+                                let wr = w_house[row];
+                                let vt_row = &vt[row * n..row * n + n];
+                                for (dot, &value) in rh_dot.iter_mut().zip(vt_row.iter()) {
+                                    *dot += wr * value;
+                                }
+                            }
+                            for (fc, &dot) in rh_f.iter_mut().zip(rh_dot.iter()) {
+                                *fc = right_scale * dot;
+                            }
+                            for row in (j + 1)..n {
+                                let wr = w_house[row];
+                                let vt_row = &mut vt[row * n..row * n + n];
+                                for (value, &fc) in vt_row.iter_mut().zip(rh_f.iter()) {
+                                    *value -= fc * wr;
+                                }
+                            }
+                            fused_two_sided = true;
+                        }
+                    }
+
+                    if !fused_two_sided {
+                        for (i, &vi) in v_house.iter().enumerate().take(m).skip(j + 1) {
+                            let row = &mut work[i * n + j + 1..i * n + n];
+                            for (w, &fc) in row.iter_mut().zip(lh_f[(j + 1)..n].iter()) {
+                                *w -= fc * vi;
+                            }
+                        }
+                    }
+                } else {
+                    // Apply to work (left) as two row-contiguous passes (bit-exact)
+                    // instead of striding work[i*n+col] down each column: pass 1 sums
+                    // lh_dot[col] = Σ_i v_house[i]·work[i][col] in i-ascending order,
+                    // pass 2 applies the identical (scale·lh_dot[col])·v_house[i]
+                    // product per element.
+                    for x in lh_dot[j..n].iter_mut() {
+                        *x = 0.0;
+                    }
+                    for i in j..m {
+                        let vi = v_house[i];
+                        let row = &work[i * n + j..i * n + n];
+                        for (x, &w) in lh_dot[j..n].iter_mut().zip(row.iter()) {
+                            *x += vi * w;
+                        }
+                    }
+                    for (fc, &dc) in lh_f[j..n].iter_mut().zip(lh_dot[j..n].iter()) {
+                        *fc = scale * dc;
+                    }
+                    for i in j..m {
+                        let vi = v_house[i];
+                        let row = &mut work[i * n + j..i * n + n];
+                        for (w, &fc) in row.iter_mut().zip(lh_f[j..n].iter()) {
+                            *w -= fc * vi;
+                        }
                     }
                 }
-                for (fc, &dc) in lh_f[j..n].iter_mut().zip(lh_dot[j..n].iter()) {
-                    *fc = scale * dc;
-                }
-                for i in j..m {
-                    let vi = v_house[i];
-                    let row = &mut work[i * n + j..i * n + n];
-                    for (w, &fc) in row.iter_mut().zip(lh_f[j..n].iter()) {
-                        *w -= fc * vi;
-                    }
-                }
-                if !reconstruct_left {
+                if !reconstruct_left && !fused_two_sided {
                     // Accumulate into U^T: U^T = (I - scale*v*v^T) * U^T.
                     // This is the exact transpose of U = U * H. For each output
                     // element the dot still runs reflector indices in ascending
@@ -2566,10 +2688,12 @@ fn svd_bidiag_qr_full(
                 }
             }
         }
-        d[j] = work[j * n + j];
+        if !fused_two_sided {
+            d[j] = work[j * n + j];
+        }
 
         // Right Householder: zero out row j to the right of superdiagonal
-        if j + 2 <= n {
+        if !fused_two_sided && j + 2 <= n {
             let row_norm = {
                 let mut s = 0.0;
                 for col in (j + 1)..n {
@@ -2632,7 +2756,7 @@ fn svd_bidiag_qr_full(
             if j < n - 1 {
                 e[j] = work[j * n + j + 1];
             }
-        } else if j < n - 1 {
+        } else if !fused_two_sided && j < n - 1 {
             e[j] = work[j * n + j + 1];
         }
     }
