@@ -16357,6 +16357,15 @@ fn isfinite(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn spacing(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // NumPy's spacing returns a float result whose width follows numpy's type
+    // resolution: float32 -> float32, float16 -> float16, and integer inputs map to
+    // float16 (int8/uint8), float32 (int16/uint16), or float64 (wider ints).
+    // extract_numeric_array canonicalizes every narrow width to f64, so the native
+    // kernel only matches numpy for float64 input; defer all other dtypes to numpy.
+    if !numpy_dtype_is_f64(py, x.bind(py)) {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("spacing")?.call1((x.bind(py),))?.unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "spacing(x)")?;
     let result = ufunc_spacing(&x).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
@@ -56052,6 +56061,37 @@ mod tests {
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn spacing_preserves_input_dtype_like_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            // NumPy's spacing result width follows its type resolution; the native
+            // kernel computes in f64, so narrow floats and integers must defer to
+            // numpy. Regression guard: spacing previously widened everything to
+            // float64 (float32 -> float64, int8 -> float64, ...).
+            for dt in ["float64", "float32", "int8", "int16", "uint8", "int32"] {
+                let values = numeric_array(py, vec![1.0, 2.0, 3.0], dt);
+                let ours = spacing(py, values.clone().unbind())?;
+                let theirs = numpy.call_method1("spacing", (values,))?;
+                let ours_dtype = ours.bind(py).getattr("dtype")?.str()?.to_string();
+                let theirs_dtype = theirs.getattr("dtype")?.str()?.to_string();
+                assert_eq!(
+                    ours_dtype, theirs_dtype,
+                    "spacing {dt} result dtype must match numpy (no widen to float64)",
+                );
+                assert_eq!(
+                    repr_string(&ours.bind(py).call_method0("tolist")?),
+                    repr_string(&theirs.call_method0("tolist")?),
+                    "spacing {dt} values must match numpy",
+                );
+            }
             Ok(())
         });
     }
