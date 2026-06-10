@@ -1174,6 +1174,7 @@ impl UnaryOp {
                 | Self::Log2
                 | Self::Log10
                 | Self::Log1p
+                | Self::Sqrt
                 | Self::Sin
                 | Self::Cos
                 | Self::Tan
@@ -41211,6 +41212,7 @@ print(json.dumps(payload))
             UnaryOp::Sin,
             UnaryOp::Cos,
             UnaryOp::Log,
+            UnaryOp::Sqrt,
             UnaryOp::Tanh,
             UnaryOp::Cbrt,
         ] {
@@ -41226,6 +41228,17 @@ print(json.dumps(payload))
                 serial.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 "{op:?}: parallel path diverged from serial"
             );
+            if op == UnaryOp::Sqrt {
+                let mut digest = Sha256::new();
+                for value in parallel.values() {
+                    digest.update(value.to_bits().to_le_bytes());
+                }
+                let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+                assert_eq!(
+                    hex, "bf1b4c47dcb7b1778f4d40780139b61a654c6eb2f7da60966456d8a7d27609e6",
+                    "sqrt large-array golden SHA-256 changed"
+                );
+            }
         }
     }
 
@@ -41234,19 +41247,22 @@ print(json.dumps(payload))
         // A domain error in any chunk must still trap in raise mode (per-chunk
         // flags are unioned before dispatch).
         let n = (1usize << 15) + 1;
-        let mut data = vec![1.0f64; n];
-        data[n - 3] = -1.0; // log(-1) -> NaN (Invalid) in the last chunk
-        let arr = UFuncArray::new(vec![n], data, DType::F64).expect("arr");
-        let err = {
-            let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
-            arr.try_elementwise_unary(UnaryOp::Log)
-                .expect_err("raise mode must trap log domain error in the parallel path")
-        };
-        match err {
-            UFuncError::FloatingPoint { kind, .. } => {
-                assert_eq!(kind, FloatErrorKind::Invalid);
+        for op in [UnaryOp::Log, UnaryOp::Sqrt] {
+            let mut data = vec![1.0f64; n];
+            data[n - 3] = -1.0; // domain error -> NaN (Invalid) in the last chunk
+            let arr = UFuncArray::new(vec![n], data, DType::F64).expect("arr");
+            let err = {
+                let _guard = errstate(Some(FloatErrorMode::Raise), None, None, None, None);
+                arr.try_elementwise_unary(op)
+                    .expect_err("raise mode must trap domain error in the parallel path")
+            };
+            match err {
+                UFuncError::FloatingPoint { kind, detail } => {
+                    assert_eq!(kind, FloatErrorKind::Invalid);
+                    assert!(detail.contains(op.name()));
+                }
+                other => panic!("unexpected error: {other:?}"),
             }
-            other => panic!("unexpected error: {other:?}"),
         }
     }
 
