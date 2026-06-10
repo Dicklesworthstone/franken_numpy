@@ -2213,21 +2213,32 @@ fn reconstruct_u_from_vt(
     let tol = f64::EPSILON * (m.max(n) as f64) * sigma_max.max(1.0) * 8.0;
     let mut u = vec![0.0; m * m];
     let mut seed = vec![0.0; m];
+    let mut candidate_norm_sq = vec![0.0; k];
+    for row in 0..m {
+        let av_row = &av[row * k..row * k + k];
+        let u_row = &mut u[row * m..row * m + k];
+        for col in 0..k {
+            let sigma = sigmas[col];
+            if sigma > tol {
+                let candidate = av_row[col] / sigma;
+                u_row[col] = candidate;
+                candidate_norm_sq[col] += candidate * candidate;
+            }
+        }
+    }
     for col in 0..k {
         seed.fill(0.0);
         let sigma = sigmas[col];
         if sigma > tol {
-            let mut norm_sq = 0.0;
-            for row in 0..m {
-                seed[row] = av[row * k + col] / sigma;
-                norm_sq += seed[row] * seed[row];
-            }
-            let norm = norm_sq.sqrt();
+            let norm = candidate_norm_sq[col].sqrt();
             if norm.is_finite() && norm > tol {
                 for row in 0..m {
-                    u[row * m + col] = seed[row] / norm;
+                    u[row * m + col] /= norm;
                 }
                 continue;
+            }
+            for row in 0..m {
+                seed[row] = u[row * m + col];
             }
         }
         store_orthonormal_column(&mut u, m, col, &seed, tol)?;
