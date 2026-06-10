@@ -781,13 +781,7 @@ fn lu_forward_back_multi_blocked(
             for i in 0..bw {
                 xb[i * m..i * m + m].copy_from_slice(&x[(ib + i) * m..(ib + i) * m + m]);
             }
-            let g = packed_gemm(&l21, &xb, trail, bw, m);
-            for i in 0..trail {
-                let dst = (be + i) * m;
-                for (cell, &gij) in x[dst..dst + m].iter_mut().zip(&g[i * m..i * m + m]) {
-                    *cell -= gij;
-                }
-            }
+            packed_gemm_sub_assign(&l21, &xb, trail, bw, m, &mut x[be * m..n * m]);
         }
         ib = be;
     }
@@ -824,13 +818,7 @@ fn lu_forward_back_multi_blocked(
             for i in 0..bw {
                 xb[i * m..i * m + m].copy_from_slice(&x[(ib + i) * m..(ib + i) * m + m]);
             }
-            let g = packed_gemm(&u12, &xb, ib, bw, m);
-            for i in 0..ib {
-                let dst = i * m;
-                for (cell, &gij) in x[dst..dst + m].iter_mut().zip(&g[i * m..i * m + m]) {
-                    *cell -= gij;
-                }
-            }
+            packed_gemm_sub_assign(&u12, &xb, ib, bw, m, &mut x[..ib * m]);
         }
         be = ib;
     }
@@ -5534,6 +5522,105 @@ fn packed_gemm(a: &[f64], b: &[f64], m: usize, k: usize, n: usize) -> Vec<f64> {
     c
 }
 
+fn packed_gemm_sub_assign(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, target: &mut [f64]) {
+    debug_assert_eq!(target.len(), m * n);
+    let parallel = m >= MATMUL_PARALLEL_MIN_DIM
+        && k >= MATMUL_PARALLEL_MIN_DIM
+        && n >= MATMUL_PARALLEL_MIN_DIM
+        && rayon::current_num_threads() >= 2;
+    if parallel {
+        let threads = rayon::current_num_threads();
+        let band_rows = (m.div_ceil(threads * 4).div_ceil(PACKED_MR).max(1)) * PACKED_MR;
+        target
+            .par_chunks_mut(band_rows * n)
+            .enumerate()
+            .for_each(|(bi, target_band)| {
+                let row_start = bi * band_rows;
+                let rows = target_band.len() / n;
+                let a_band = &a[row_start * k..row_start * k + rows * k];
+                packed_gemm_sub_assign_serial(a_band, b, rows, k, n, target_band);
+            });
+    } else {
+        packed_gemm_sub_assign_serial(a, b, m, k, n, target);
+    }
+}
+
+fn packed_gemm_sub_assign_serial(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    target: &mut [f64],
+) {
+    let m_full = m - m % PACKED_MR;
+    let n_full = n - n % PACKED_NR;
+    let nc = {
+        let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
+        (cols / PACKED_NR).max(1) * PACKED_NR
+    };
+    let mut bp = vec![0.0f64; k * PACKED_NR];
+    let mut jc = 0;
+    while jc < n_full {
+        let jc_end = (jc + nc).min(n_full);
+        let mut j0 = jc;
+        while j0 < jc_end {
+            for kk in 0..k {
+                bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]
+                    .copy_from_slice(&b[kk * n + j0..kk * n + j0 + PACKED_NR]);
+            }
+            let mut i0 = 0;
+            while i0 < m_full {
+                let mut acc = [[0.0f64; PACKED_NR]; PACKED_MR];
+                for kk in 0..k {
+                    let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
+                    for (ii, row) in acc.iter_mut().enumerate() {
+                        let av = a[(i0 + ii) * k + kk];
+                        for (slot, &bv) in row.iter_mut().zip(brow) {
+                            *slot += av * bv;
+                        }
+                    }
+                }
+                for (ii, row) in acc.iter().enumerate() {
+                    let base = (i0 + ii) * n + j0;
+                    for (slot, &v) in target[base..base + PACKED_NR].iter_mut().zip(row) {
+                        *slot -= v;
+                    }
+                }
+                i0 += PACKED_MR;
+            }
+            j0 += PACKED_NR;
+        }
+        jc += nc;
+    }
+    for i in 0..m_full {
+        packed_row_tail_sub_assign(a, b, target, i, k, n, n_full);
+    }
+    for i in m_full..m {
+        packed_row_tail_sub_assign(a, b, target, i, k, n, 0);
+    }
+}
+
+fn packed_row_tail_sub_assign(
+    a: &[f64],
+    b: &[f64],
+    target: &mut [f64],
+    i: usize,
+    k: usize,
+    n: usize,
+    j0: usize,
+) {
+    let a_base = i * k;
+    let o_base = i * n;
+    for j in j0..n {
+        let mut s = 0.0f64;
+        for kk in 0..k {
+            s += a[a_base + kk] * b[kk * n + j];
+        }
+        target[o_base + j] -= s;
+    }
+}
+
 fn mat_mul_flat(a: &[f64], b: &[f64], n: usize) -> Vec<f64> {
     // Square GEMM via the cache-blocked, B-packed kernel (band-parallel over
     // output rows). Bit-identical to the previous ikj kernel — same ascending-k
@@ -7918,6 +8005,61 @@ mod tests {
         assert_eq!(
             digest, "99adb17b3a1e6490bc5d3dc5d19e0ec5fd5bfb185384bd3e75f1647061f5920e",
             "mat_mul_flat parallel golden digest drifted"
+        );
+    }
+
+    #[test]
+    fn packed_gemm_sub_assign_matches_materialized_product_sha256() {
+        let (m, k, n) = (137usize, 130usize, 139usize);
+        let mut state: u64 = 0xB10C_AB1E_5EED_0101;
+        let mut fill = |len: usize| -> Vec<f64> {
+            (0..len)
+                .map(|_| {
+                    state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+                })
+                .collect()
+        };
+        let a = fill(m * k);
+        let b = fill(k * n);
+        let seed_target = fill(m * n);
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("build local rayon pool");
+        let product = pool.install(|| super::packed_gemm(&a, &b, m, k, n));
+        let mut materialized = seed_target.clone();
+        for (cell, &value) in materialized.iter_mut().zip(&product) {
+            *cell -= value;
+        }
+
+        let mut fused = seed_target;
+        pool.install(|| super::packed_gemm_sub_assign(&a, &b, m, k, n, &mut fused));
+        assert_eq!(fused.len(), materialized.len());
+        for (fused_value, materialized_value) in fused.iter().zip(&materialized) {
+            assert_eq!(
+                fused_value.to_bits(),
+                materialized_value.to_bits(),
+                "fused GEMM subtract changed materialized-product bits"
+            );
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(m.to_le_bytes());
+        hasher.update(k.to_le_bytes());
+        hasher.update(n.to_le_bytes());
+        for value in &fused {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "3042ee3757dbb9aec00c16b0932ea42dd3501b500a773675a142dd3709fe310f",
+            "packed_gemm_sub_assign golden digest drifted: {digest}"
         );
     }
 
@@ -12267,6 +12409,46 @@ mod tests {
             }
             assert!(max_recon < 1e-7, "A·X=I reconstruction err {max_recon:e} (n={n})");
         }
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn inv_nxn_1024_blocked_trsm_reconstructs_and_hashes() {
+        let n = 1024usize;
+        let a = lu_spd_like(n, 0x5A17_1024);
+        let inverse = super::inv_nxn(&a, n).expect("1024 inverse");
+
+        let mut max_recon = 0.0f64;
+        for row in 0..n {
+            for col in 0..n {
+                let mut sum = 0.0f64;
+                for k in 0..n {
+                    sum += a[row * n + k] * inverse[k * n + col];
+                }
+                let target = if row == col { 1.0 } else { 0.0 };
+                max_recon = max_recon.max((sum - target).abs());
+            }
+        }
+        assert!(
+            max_recon < 1e-7,
+            "1024 inverse reconstruction drift {max_recon:e}"
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(n.to_le_bytes());
+        for value in &inverse {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        hasher.update(max_recon.to_bits().to_le_bytes());
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "4461d094b8ddfc931913f52e1b4216022c99b269b9a1ee02fb9d4c7d2d77c3c9",
+            "1024 inverse blocked-TRSM golden digest drifted: {digest}"
+        );
     }
 
     #[test]
