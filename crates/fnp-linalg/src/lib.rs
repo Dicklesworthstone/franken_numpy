@@ -652,14 +652,8 @@ fn lu_decompose_blocked(
             let src = (jb + i) * n + panel_end;
             u12[i * trail..i * trail + trail].copy_from_slice(&lu[src..src + trail]);
         }
-        let prod = packed_gemm(&l21, &u12, trail, bw, trail);
-        for i in 0..trail {
-            let dst = (panel_end + i) * n + panel_end;
-            let prow = &prod[i * trail..i * trail + trail];
-            for (cell, &p) in lu[dst..dst + trail].iter_mut().zip(prow.iter()) {
-                *cell -= p;
-            }
-        }
+        let target_start = panel_end * n + panel_end;
+        packed_gemm_sub_assign_strided(&l21, &u12, trail, bw, trail, n, &mut lu[target_start..]);
 
         jb = panel_end;
     }
@@ -5556,6 +5550,52 @@ fn packed_gemm_sub_assign(a: &[f64], b: &[f64], m: usize, k: usize, n: usize, ta
     }
 }
 
+fn packed_gemm_sub_assign_strided(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    row_stride: usize,
+    target: &mut [f64],
+) {
+    if m == 0 || n == 0 {
+        return;
+    }
+    debug_assert!(row_stride >= n);
+    debug_assert!(target.len() >= (m - 1) * row_stride + n);
+    let parallel = m >= MATMUL_PARALLEL_MIN_DIM
+        && k >= MATMUL_PARALLEL_MIN_DIM
+        && n >= MATMUL_PARALLEL_MIN_DIM
+        && rayon::current_num_threads() >= 2;
+    if parallel {
+        let threads = rayon::current_num_threads();
+        let band_rows = (m.div_ceil(threads * 4).div_ceil(PACKED_MR).max(1)) * PACKED_MR;
+        target
+            .par_chunks_mut(band_rows * row_stride)
+            .enumerate()
+            .for_each(|(bi, target_band)| {
+                let row_start = bi * band_rows;
+                if row_start >= m {
+                    return;
+                }
+                let rows = (m - row_start).min(band_rows);
+                let a_band = &a[row_start * k..row_start * k + rows * k];
+                packed_gemm_sub_assign_strided_serial(
+                    a_band,
+                    b,
+                    rows,
+                    k,
+                    n,
+                    row_stride,
+                    target_band,
+                );
+            });
+    } else {
+        packed_gemm_sub_assign_strided_serial(a, b, m, k, n, row_stride, target);
+    }
+}
+
 fn packed_gemm_sub_assign_serial(
     a: &[f64],
     b: &[f64],
@@ -5629,6 +5669,79 @@ fn packed_row_tail_sub_assign(
             s += a[a_base + kk] * b[kk * n + j];
         }
         target[o_base + j] -= s;
+    }
+}
+
+fn packed_gemm_sub_assign_strided_serial(
+    a: &[f64],
+    b: &[f64],
+    m: usize,
+    k: usize,
+    n: usize,
+    row_stride: usize,
+    target: &mut [f64],
+) {
+    let m_full = m - m % PACKED_MR;
+    let n_full = n - n % PACKED_NR;
+    let nc = {
+        let cols = (256 * 1024) / (k.max(1) * core::mem::size_of::<f64>());
+        (cols / PACKED_NR).max(1) * PACKED_NR
+    };
+    let mut bp = vec![0.0f64; k * PACKED_NR];
+    let mut jc = 0;
+    while jc < n_full {
+        let jc_end = (jc + nc).min(n_full);
+        let mut j0 = jc;
+        while j0 < jc_end {
+            for kk in 0..k {
+                bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR]
+                    .copy_from_slice(&b[kk * n + j0..kk * n + j0 + PACKED_NR]);
+            }
+            let mut i0 = 0;
+            while i0 < m_full {
+                let mut acc = [[0.0f64; PACKED_NR]; PACKED_MR];
+                for kk in 0..k {
+                    let brow = &bp[kk * PACKED_NR..kk * PACKED_NR + PACKED_NR];
+                    for (ii, row) in acc.iter_mut().enumerate() {
+                        let av = a[(i0 + ii) * k + kk];
+                        for (slot, &bv) in row.iter_mut().zip(brow) {
+                            *slot += av * bv;
+                        }
+                    }
+                }
+                for (ii, row) in acc.iter().enumerate() {
+                    let base = (i0 + ii) * row_stride + j0;
+                    for (slot, &v) in target[base..base + PACKED_NR].iter_mut().zip(row) {
+                        *slot -= v;
+                    }
+                }
+                i0 += PACKED_MR;
+            }
+            j0 += PACKED_NR;
+        }
+        jc += nc;
+    }
+    for i in 0..m_full {
+        let a_base = i * k;
+        let o_base = i * row_stride;
+        for j in n_full..n {
+            let mut s = 0.0f64;
+            for kk in 0..k {
+                s += a[a_base + kk] * b[kk * n + j];
+            }
+            target[o_base + j] -= s;
+        }
+    }
+    for i in m_full..m {
+        let a_base = i * k;
+        let o_base = i * row_stride;
+        for j in 0..n {
+            let mut s = 0.0f64;
+            for kk in 0..k {
+                s += a[a_base + kk] * b[kk * n + j];
+            }
+            target[o_base + j] -= s;
+        }
     }
 }
 
@@ -8071,6 +8184,73 @@ mod tests {
         assert_eq!(
             digest, "3042ee3757dbb9aec00c16b0932ea42dd3501b500a773675a142dd3709fe310f",
             "packed_gemm_sub_assign golden digest drifted: {digest}"
+        );
+    }
+
+    #[test]
+    fn packed_gemm_sub_assign_strided_matches_materialized_product_sha256() {
+        let (m, k, n, row_stride) = (137usize, 130usize, 139usize, 173usize);
+        let mut state: u64 = 0x5172_1DED_5EED_0101;
+        let mut fill = |len: usize| -> Vec<f64> {
+            (0..len)
+                .map(|_| {
+                    state = state
+                        .wrapping_mul(2862933555777941757)
+                        .wrapping_add(3037000493);
+                    ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+                })
+                .collect()
+        };
+        let a = fill(m * k);
+        let b = fill(k * n);
+        let target_len = (m - 1) * row_stride + n;
+        let seed_target = fill(target_len);
+
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(2)
+            .build()
+            .expect("build local rayon pool");
+        let product = pool.install(|| super::packed_gemm(&a, &b, m, k, n));
+        let mut materialized = seed_target.clone();
+        for i in 0..m {
+            let dst = i * row_stride;
+            let prod_row = &product[i * n..i * n + n];
+            for (cell, &value) in materialized[dst..dst + n].iter_mut().zip(prod_row) {
+                *cell -= value;
+            }
+        }
+
+        let mut fused = seed_target;
+        pool.install(|| {
+            super::packed_gemm_sub_assign_strided(&a, &b, m, k, n, row_stride, &mut fused)
+        });
+        assert_eq!(fused.len(), materialized.len());
+        for (idx, (fused_value, materialized_value)) in
+            fused.iter().zip(&materialized).enumerate()
+        {
+            assert_eq!(
+                fused_value.to_bits(),
+                materialized_value.to_bits(),
+                "strided fused GEMM subtract changed materialized-product bits at index {idx}"
+            );
+        }
+
+        let mut hasher = Sha256::new();
+        hasher.update(m.to_le_bytes());
+        hasher.update(k.to_le_bytes());
+        hasher.update(n.to_le_bytes());
+        hasher.update(row_stride.to_le_bytes());
+        for value in &fused {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "8ec7fce06fab4782db37a4e023dae9f750e5f454d2a33e2363bb3de542973c9b",
+            "packed_gemm_sub_assign_strided golden digest drifted: {digest}"
         );
     }
 
