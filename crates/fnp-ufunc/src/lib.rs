@@ -26030,6 +26030,61 @@ impl UFuncArray {
         let out_strides = c_strides_elems(target_shape);
         let out_count: usize =
             fnp_ndarray::element_count(target_shape).map_err(UFuncError::Shape)?;
+        const BROADCAST_CHUNK: usize = 1 << 14;
+        const BROADCAST_PAR_MIN: usize = 1 << 15;
+
+        if self.integer_sidecar.is_none() {
+            let mut broadcast_axis = None;
+            for d in 0..ndim {
+                let is_broadcast_axis = padded[d] == 1 && target_shape[d] != 1;
+                if is_broadcast_axis && broadcast_axis.replace(d).is_some() {
+                    broadcast_axis = None;
+                    break;
+                }
+            }
+
+            if let Some(axis) = broadcast_axis {
+                let reps = target_shape[axis];
+                let inner: usize = target_shape[axis + 1..].iter().product();
+                let mut values = vec![0.0f64; out_count];
+                if out_count == 0 {
+                    return Ok(Self {
+                        shape: target_shape.to_vec(),
+                        values,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
+                }
+
+                if inner > 1 {
+                    let fill_row = |(row_idx, row): (usize, &mut [f64])| {
+                        let src_row = row_idx / reps;
+                        let src_base = src_row * inner;
+                        row.copy_from_slice(&self.values[src_base..src_base + inner]);
+                    };
+                    if out_count >= BROADCAST_PAR_MIN && rayon::current_num_threads() >= 2 {
+                        values.par_chunks_mut(inner).enumerate().for_each(fill_row);
+                    } else {
+                        values.chunks_mut(inner).enumerate().for_each(fill_row);
+                    }
+                } else {
+                    let fill_block = |(src_row, row): (usize, &mut [f64])| {
+                        row.fill(self.values[src_row]);
+                    };
+                    if out_count >= BROADCAST_PAR_MIN && rayon::current_num_threads() >= 2 {
+                        values.par_chunks_mut(reps).enumerate().for_each(fill_block);
+                    } else {
+                        values.chunks_mut(reps).enumerate().for_each(fill_block);
+                    }
+                }
+                return Ok(Self {
+                    shape: target_shape.to_vec(),
+                    values,
+                    dtype: self.dtype,
+                    integer_sidecar: None,
+                });
+            }
+        }
 
         // Broadcast is a pure gather: output position `f` reads source offset
         // `sum_d coord_d(f) * (padded[d]>1 ? src_strides[d] : 0)` (broadcast axes
@@ -26042,8 +26097,6 @@ impl UFuncArray {
         let src_step: Vec<usize> = (0..ndim)
             .map(|d| if padded[d] > 1 { src_strides[d] } else { 0 })
             .collect();
-        const BROADCAST_CHUNK: usize = 1 << 14;
-        const BROADCAST_PAR_MIN: usize = 1 << 15;
         let mut source_indices = vec![0usize; out_count];
         let fill_chunk = |(ci, chunk): (usize, &mut [usize])| {
             if chunk.is_empty() {
