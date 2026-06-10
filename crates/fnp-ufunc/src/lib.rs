@@ -1192,6 +1192,28 @@ impl UnaryOp {
         )
     }
 
+    const fn tracks_float_errors(self) -> bool {
+        matches!(
+            self,
+            Self::Reciprocal
+                | Self::Log
+                | Self::Log2
+                | Self::Log10
+                | Self::Log1p
+                | Self::Sqrt
+                | Self::Arcsin
+                | Self::Arccos
+                | Self::Arctanh
+                | Self::Arccosh
+                | Self::Exp
+                | Self::Exp2
+                | Self::Expm1
+                | Self::Sinh
+                | Self::Cosh
+                | Self::Square
+        )
+    }
+
     #[inline]
     #[must_use]
     pub fn apply(self, x: f64) -> f64 {
@@ -7807,6 +7829,17 @@ impl UFuncArray {
             && rayon::current_num_threads() >= 2
         {
             let mut values = vec![0.0f64; n];
+            if !op.tracks_float_errors() {
+                values
+                    .par_chunks_mut(UNARY_PARALLEL_CHUNK)
+                    .zip(self.values.par_chunks(UNARY_PARALLEL_CHUNK))
+                    .for_each(|(out_chunk, in_chunk)| {
+                        for (out_slot, &value) in out_chunk.iter_mut().zip(in_chunk.iter()) {
+                            *out_slot = op.apply(value);
+                        }
+                    });
+                return Self::from_values_with_dtype(self.shape.clone(), values, dtype);
+            }
             let flags = values
                 .par_chunks_mut(UNARY_PARALLEL_CHUNK)
                 .zip(self.values.par_chunks(UNARY_PARALLEL_CHUNK))
@@ -41228,15 +41261,31 @@ print(json.dumps(payload))
                 serial.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 "{op:?}: parallel path diverged from serial"
             );
-            if op == UnaryOp::Sqrt {
+            let expected_sha = match op {
+                UnaryOp::Sin => {
+                    Some("4d98d896f3baad6013cc88b820136a2a2e7c9882a2535af9153ed2b329f9836a")
+                }
+                UnaryOp::Cos => {
+                    Some("d90720b63d18453247992f17f298f88dc47885f5f6bf483d86bab6c9177d4ee6")
+                }
+                UnaryOp::Sqrt => {
+                    Some("bf1b4c47dcb7b1778f4d40780139b61a654c6eb2f7da60966456d8a7d27609e6")
+                }
+                _ => None,
+            };
+            if let Some(expected_sha) = expected_sha {
                 let mut digest = Sha256::new();
                 for value in parallel.values() {
                     digest.update(value.to_bits().to_le_bytes());
                 }
-                let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+                let hex: String = digest
+                    .finalize()
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
                 assert_eq!(
-                    hex, "bf1b4c47dcb7b1778f4d40780139b61a654c6eb2f7da60966456d8a7d27609e6",
-                    "sqrt large-array golden SHA-256 changed"
+                    hex, expected_sha,
+                    "{op:?} large-array golden SHA-256 changed"
                 );
             }
         }
