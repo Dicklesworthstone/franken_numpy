@@ -12915,17 +12915,31 @@ impl UFuncArray {
                 let akr = axis_len * repeats;
                 let src_ref = &self.values;
                 let mut values = vec![0.0f64; out_count];
-                let fill_row = |(orow, dst): (usize, &mut [f64])| {
-                    let o = orow / akr;
-                    let k = (orow % akr) / repeats;
-                    let src_base = o * axis_len * inner + k * inner;
-                    dst.copy_from_slice(&src_ref[src_base..src_base + inner]);
-                };
                 const REPEAT_PAR_MIN: usize = 1 << 15;
-                if out_count >= REPEAT_PAR_MIN && rayon::current_num_threads() >= 2 {
-                    values.par_chunks_mut(inner).enumerate().for_each(fill_row);
+                if inner == 1 {
+                    let fill_block = |(src_idx, dst): (usize, &mut [f64])| {
+                        dst.fill(src_ref[src_idx]);
+                    };
+                    if out_count >= REPEAT_PAR_MIN && rayon::current_num_threads() >= 2 {
+                        values
+                            .par_chunks_mut(repeats)
+                            .enumerate()
+                            .for_each(fill_block);
+                    } else {
+                        values.chunks_mut(repeats).enumerate().for_each(fill_block);
+                    }
                 } else {
-                    values.chunks_mut(inner).enumerate().for_each(fill_row);
+                    let fill_row = |(orow, dst): (usize, &mut [f64])| {
+                        let o = orow / akr;
+                        let k = (orow % akr) / repeats;
+                        let src_base = o * axis_len * inner + k * inner;
+                        dst.copy_from_slice(&src_ref[src_base..src_base + inner]);
+                    };
+                    if out_count >= REPEAT_PAR_MIN && rayon::current_num_threads() >= 2 {
+                        values.par_chunks_mut(inner).enumerate().for_each(fill_row);
+                    } else {
+                        values.chunks_mut(inner).enumerate().for_each(fill_row);
+                    }
                 }
                 let integer_sidecar = if self.integer_sidecar.is_some() {
                     let mut source_indices = vec![0usize; out_count];
