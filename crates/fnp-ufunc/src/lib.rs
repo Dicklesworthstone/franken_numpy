@@ -9975,6 +9975,58 @@ impl UFuncArray {
         let src_step: Vec<usize> = (0..ndim).map(|d| old_strides[perm[d]]).collect();
         const TRANSPOSE_CHUNK: usize = 1 << 14;
         const TRANSPOSE_PAR_MIN: usize = 1 << 15;
+        let parallel = total >= TRANSPOSE_PAR_MIN && rayon::current_num_threads() >= 2;
+        if self.integer_sidecar.is_none() {
+            let values_ref = &self.values;
+            let mut new_values = vec![0.0f64; total];
+            let fill_values = |(ci, chunk): (usize, &mut [f64])| {
+                if chunk.is_empty() {
+                    return;
+                }
+                let f0 = ci * TRANSPOSE_CHUNK;
+                // Decompose the chunk's first output index into per-axis coordinates.
+                let mut coord = vec![0usize; ndim];
+                let mut rem = f0;
+                for d in 0..ndim {
+                    coord[d] = rem / new_strides[d];
+                    rem %= new_strides[d];
+                }
+                let mut off: usize = (0..ndim).map(|d| coord[d] * src_step[d]).sum();
+                for slot in chunk.iter_mut() {
+                    *slot = values_ref[off];
+                    // Odometer increment over the output shape (least-significant last).
+                    let mut d = ndim;
+                    while d > 0 {
+                        d -= 1;
+                        coord[d] += 1;
+                        off += src_step[d];
+                        if coord[d] < new_shape[d] {
+                            break;
+                        }
+                        coord[d] = 0;
+                        off -= new_shape[d] * src_step[d];
+                    }
+                }
+            };
+            if parallel {
+                new_values
+                    .par_chunks_mut(TRANSPOSE_CHUNK)
+                    .enumerate()
+                    .for_each(fill_values);
+            } else {
+                new_values
+                    .chunks_mut(TRANSPOSE_CHUNK)
+                    .enumerate()
+                    .for_each(fill_values);
+            }
+            return Ok(Self {
+                shape: new_shape,
+                values: new_values,
+                dtype: self.dtype,
+                integer_sidecar: None,
+            });
+        }
+
         let mut source_indices = vec![0usize; total];
         let fill_chunk = |(ci, chunk): (usize, &mut [usize])| {
             if chunk.is_empty() {
@@ -10005,7 +10057,6 @@ impl UFuncArray {
                 }
             }
         };
-        let parallel = total >= TRANSPOSE_PAR_MIN && rayon::current_num_threads() >= 2;
         if parallel {
             source_indices
                 .par_chunks_mut(TRANSPOSE_CHUNK)
