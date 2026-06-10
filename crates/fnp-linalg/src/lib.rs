@@ -45,6 +45,10 @@ const SVD_RECONSTRUCT_LEFT_MIN_DIM: usize = 32;
 /// Minimum remaining trailing width for the fused two-sided SVD update. Below
 /// this size the simpler scalar sweeps win by avoiding the extra branch surface.
 const SVD_FUSED_TWO_SIDED_MIN_TRAIL: usize = 16;
+/// Large-square full-SVD threshold where phase-1 right reflectors are accumulated
+/// into Vt by compact-WY panels instead of one scalar reflector at a time.
+const SVD_RIGHT_VT_BLOCK_MIN_DIM: usize = 512;
+const SVD_RIGHT_VT_PANEL_NB: usize = 128;
 /// Iteration limit coefficient for eigenvalue/Schur QR convergence: max_iters = coeff * n * n.
 pub const EIGEN_QR_ITERATION_COEFF: usize = 60;
 /// Maximum iterations for matrix square root (Denman-Beavers).
@@ -2249,6 +2253,133 @@ fn reconstruct_u_from_vt(
     Ok(u)
 }
 
+struct SvdRightVtPanel {
+    start: usize,
+    len: usize,
+    v: Vec<f64>,
+    taus: Vec<f64>,
+}
+
+impl SvdRightVtPanel {
+    fn new(n: usize) -> Self {
+        Self {
+            start: 0,
+            len: 0,
+            v: vec![0.0f64; n * SVD_RIGHT_VT_PANEL_NB],
+            taus: vec![0.0f64; SVD_RIGHT_VT_PANEL_NB],
+        }
+    }
+
+    fn push(&mut self, vt: &mut [f64], n: usize, reflector_col: usize, w_house: &[f64], tau: f64) {
+        if self.len == SVD_RIGHT_VT_PANEL_NB {
+            self.flush(vt, n);
+        }
+        if self.len == 0 {
+            self.start = reflector_col;
+            self.v.fill(0.0);
+            self.taus.fill(0.0);
+        }
+
+        let slot = self.len;
+        self.taus[slot] = tau;
+        for (row, &value) in w_house
+            .iter()
+            .enumerate()
+            .take(n)
+            .skip(reflector_col + 1)
+        {
+            self.v[(row - self.start) * SVD_RIGHT_VT_PANEL_NB + slot] = value;
+        }
+        self.len += 1;
+    }
+
+    fn flush(&mut self, vt: &mut [f64], n: usize) {
+        if self.len == 0 {
+            return;
+        }
+        flush_svd_right_vt_panel(vt, n, self.start, self.len, &self.v, &self.taus);
+        self.len = 0;
+    }
+}
+
+fn flush_svd_right_vt_panel(
+    vt: &mut [f64],
+    n: usize,
+    panel_start: usize,
+    panel_len: usize,
+    panel_v: &[f64],
+    panel_taus: &[f64],
+) {
+    if panel_len == 0 {
+        return;
+    }
+
+    let h = n - panel_start;
+    let mut vv = vec![0.0f64; h * panel_len];
+    for row in 0..h {
+        for col in 0..panel_len {
+            vv[row * panel_len + col] = panel_v[row * SVD_RIGHT_VT_PANEL_NB + col];
+        }
+    }
+
+    let mut tm = vec![0.0f64; panel_len * panel_len];
+    for t in 0..panel_len {
+        let tau = panel_taus[t];
+        tm[t * panel_len + t] = tau;
+        if tau == 0.0 {
+            continue;
+        }
+        let mut col = vec![0.0f64; t];
+        for (i, ci) in col.iter_mut().enumerate() {
+            let mut dot = 0.0;
+            for row in 0..h {
+                dot += vv[row * panel_len + i] * vv[row * panel_len + t];
+            }
+            *ci = -tau * dot;
+        }
+        for i in 0..t {
+            let mut s = 0.0;
+            for l in i..t {
+                s += tm[i * panel_len + l] * col[l];
+            }
+            tm[i * panel_len + t] = s;
+        }
+    }
+
+    let mut vtrans = vec![0.0f64; panel_len * h];
+    for row in 0..h {
+        for col in 0..panel_len {
+            vtrans[col * h + row] = vv[row * panel_len + col];
+        }
+    }
+
+    let mut tmt = vec![0.0f64; panel_len * panel_len];
+    for i in 0..panel_len {
+        for j in 0..panel_len {
+            tmt[i * panel_len + j] = tm[j * panel_len + i];
+        }
+    }
+
+    let mut vt_active = vec![0.0f64; h * n];
+    for row in 0..h {
+        let src = (panel_start + row) * n;
+        vt_active[row * n..row * n + n].copy_from_slice(&vt[src..src + n]);
+    }
+
+    let w1 = packed_gemm(&vtrans, &vt_active, panel_len, h, n);
+    let w2 = packed_gemm(&tmt, &w1, panel_len, panel_len, n);
+    let update = packed_gemm(&vv, &w2, h, panel_len, n);
+    for row in 0..h {
+        let dst = (panel_start + row) * n;
+        for (cell, &delta) in vt[dst..dst + n]
+            .iter_mut()
+            .zip(&update[row * n..row * n + n])
+        {
+            *cell -= delta;
+        }
+    }
+}
+
 fn svd_via_jacobi_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAlgError> {
     let k = m.min(n);
     let mut b = a.to_vec();
@@ -2462,6 +2593,8 @@ fn svd_bidiag_qr_full(
     let mut d = vec![0.0; n]; // diagonal
     let mut e = vec![0.0; n.saturating_sub(1)]; // superdiagonal
     let reconstruct_left = m >= SVD_RECONSTRUCT_LEFT_MIN_DIM && n >= SVD_RECONSTRUCT_LEFT_MIN_DIM;
+    let block_right_vt =
+        reconstruct_left && m == n && n >= SVD_RIGHT_VT_BLOCK_MIN_DIM && max_iter > 0;
 
     // U1^T = transpose of the product of left Householder reflections. Keeping
     // this accumulator transposed makes both Householder and QR left rotations
@@ -2480,6 +2613,11 @@ fn svd_bidiag_qr_full(
     for i in 0..n {
         vt[i * n + i] = 1.0;
     }
+    let mut right_vt_panel = if block_right_vt {
+        Some(SvdRightVtPanel::new(n))
+    } else {
+        None
+    };
 
     let mut v_house = vec![0.0; m];
     let mut w_house = vec![0.0; n];
@@ -2606,25 +2744,31 @@ fn svd_bidiag_qr_full(
                                 }
                             }
 
-                            // Accumulate into Vt: Vt = (I - scale*w*w^T) * Vt.
-                            for x in rh_dot.iter_mut() {
-                                *x = 0.0;
-                            }
-                            for row in (j + 1)..n {
-                                let wr = w_house[row];
-                                let vt_row = &vt[row * n..row * n + n];
-                                for (dot, &value) in rh_dot.iter_mut().zip(vt_row.iter()) {
-                                    *dot += wr * value;
+                            if block_right_vt {
+                                if let Some(panel) = right_vt_panel.as_mut() {
+                                    panel.push(&mut vt, n, j, &w_house, right_scale);
                                 }
-                            }
-                            for (fc, &dot) in rh_f.iter_mut().zip(rh_dot.iter()) {
-                                *fc = right_scale * dot;
-                            }
-                            for row in (j + 1)..n {
-                                let wr = w_house[row];
-                                let vt_row = &mut vt[row * n..row * n + n];
-                                for (value, &fc) in vt_row.iter_mut().zip(rh_f.iter()) {
-                                    *value -= fc * wr;
+                            } else {
+                                // Accumulate into Vt: Vt = (I - scale*w*w^T) * Vt.
+                                for x in rh_dot.iter_mut() {
+                                    *x = 0.0;
+                                }
+                                for row in (j + 1)..n {
+                                    let wr = w_house[row];
+                                    let vt_row = &vt[row * n..row * n + n];
+                                    for (dot, &value) in rh_dot.iter_mut().zip(vt_row.iter()) {
+                                        *dot += wr * value;
+                                    }
+                                }
+                                for (fc, &dot) in rh_f.iter_mut().zip(rh_dot.iter()) {
+                                    *fc = right_scale * dot;
+                                }
+                                for row in (j + 1)..n {
+                                    let wr = w_house[row];
+                                    let vt_row = &mut vt[row * n..row * n + n];
+                                    for (value, &fc) in vt_row.iter_mut().zip(rh_f.iter()) {
+                                        *value -= fc * wr;
+                                    }
                                 }
                             }
                             fused_two_sided = true;
@@ -2735,27 +2879,33 @@ fn svd_bidiag_qr_full(
                             work[row * n + col] -= f * w_house[col];
                         }
                     }
-                    // Accumulate into Vt: Vt = (I - scale*w*w^T) * Vt.
-                    // Keep each column's row-ascending dot order, but compute and
-                    // apply all columns through row-contiguous Vt slices.
-                    for x in rh_dot.iter_mut() {
-                        *x = 0.0;
-                    }
-                    for row in (j + 1)..n {
-                        let wr = w_house[row];
-                        let vt_row = &vt[row * n..row * n + n];
-                        for (dot, &value) in rh_dot.iter_mut().zip(vt_row.iter()) {
-                            *dot += wr * value;
+                    if block_right_vt {
+                        if let Some(panel) = right_vt_panel.as_mut() {
+                            panel.push(&mut vt, n, j, &w_house, scale);
                         }
-                    }
-                    for (fc, &dot) in rh_f.iter_mut().zip(rh_dot.iter()) {
-                        *fc = scale * dot;
-                    }
-                    for row in (j + 1)..n {
-                        let wr = w_house[row];
-                        let vt_row = &mut vt[row * n..row * n + n];
-                        for (value, &fc) in vt_row.iter_mut().zip(rh_f.iter()) {
-                            *value -= fc * wr;
+                    } else {
+                        // Accumulate into Vt: Vt = (I - scale*w*w^T) * Vt.
+                        // Keep each column's row-ascending dot order, but compute and
+                        // apply all columns through row-contiguous Vt slices.
+                        for x in rh_dot.iter_mut() {
+                            *x = 0.0;
+                        }
+                        for row in (j + 1)..n {
+                            let wr = w_house[row];
+                            let vt_row = &vt[row * n..row * n + n];
+                            for (dot, &value) in rh_dot.iter_mut().zip(vt_row.iter()) {
+                                *dot += wr * value;
+                            }
+                        }
+                        for (fc, &dot) in rh_f.iter_mut().zip(rh_dot.iter()) {
+                            *fc = scale * dot;
+                        }
+                        for row in (j + 1)..n {
+                            let wr = w_house[row];
+                            let vt_row = &mut vt[row * n..row * n + n];
+                            for (value, &fc) in vt_row.iter_mut().zip(rh_f.iter()) {
+                                *value -= fc * wr;
+                            }
                         }
                     }
                 }
@@ -2766,6 +2916,9 @@ fn svd_bidiag_qr_full(
         } else if !fused_two_sided && j < n - 1 {
             e[j] = work[j * n + j + 1];
         }
+    }
+    if let Some(panel) = right_vt_panel.as_mut() {
+        panel.flush(&mut vt, n);
     }
 
     // Phase 2: Golub-Reinsch implicit QR iteration directly on the bidiagonal.
@@ -13136,6 +13289,59 @@ mod tests {
         assert_eq!(
             digest, "ed1ac139dac59fe907b7dd9d2a1dccd2ecbbbede840868afe2c9e9e1d41ed793",
             "reconstructed-U full SVD digest must remain fixed: {digest}"
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn svd_full_512_right_vt_panel_reconstructs_and_hashes() {
+        let n = 512usize;
+        let mut state = 0x5A1D_B10D_5120_0001u64;
+        let a: Vec<f64> = (0..(n * n))
+            .map(|_| {
+                state = state
+                    .wrapping_mul(6_364_136_223_846_793_005)
+                    .wrapping_add(1);
+                ((state >> 33) as f64) / (u32::MAX as f64) - 0.5
+            })
+            .collect();
+
+        let (u, s, vt) = svd_mxn_full(&a, n, n).expect("512 full svd");
+        for pair in s.windows(2) {
+            assert!(pair[0] >= pair[1], "singular values must remain descending");
+        }
+
+        let mut us = u.clone();
+        for row in 0..n {
+            for col in 0..n {
+                us[row * n + col] *= s[col];
+            }
+        }
+        let recon = super::packed_gemm(&us, &vt, n, n, n);
+        let mut max_recon = 0.0f64;
+        for (actual, expected) in recon.iter().zip(&a) {
+            max_recon = max_recon.max((actual - expected).abs());
+        }
+        assert!(
+            max_recon < 1e-8,
+            "512 full SVD reconstruction drift {max_recon:e}"
+        );
+
+        let mut hasher = Sha256::new();
+        for part in [&u[..], &s[..], &vt[..]] {
+            hasher.update(part.len().to_le_bytes());
+            for value in part {
+                hasher.update(value.to_bits().to_le_bytes());
+            }
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "9e9810981185bb50c0626e61c076ec7bd9ebbde9f6404838a450df81813b6139",
+            "512 full SVD right-Vt panel digest drifted: {digest}"
         );
     }
 
