@@ -2732,15 +2732,19 @@ fn svd_bidiag_qr_full(
 
                             for (row, &vi) in v_house.iter().enumerate().take(m).skip(j + 1) {
                                 let row_base = row * n;
+                                let row_tail = &mut work[row_base + j + 1..row_base + n];
+                                let lh_tail = &lh_f[j + 1..n];
+                                let w_tail = &w_house[j + 1..n];
                                 let mut dot = 0.0;
-                                for col in (j + 1)..n {
-                                    let left_value = work[row_base + col] - lh_f[col] * vi;
-                                    dot += left_value * w_house[col];
+                                for ((cell, &left_scale), &right_value) in
+                                    row_tail.iter_mut().zip(lh_tail).zip(w_tail)
+                                {
+                                    *cell -= left_scale * vi;
+                                    dot += *cell * right_value;
                                 }
                                 let f = right_scale * dot;
-                                for col in (j + 1)..n {
-                                    let left_value = work[row_base + col] - lh_f[col] * vi;
-                                    work[row_base + col] = left_value - f * w_house[col];
+                                for (cell, &right_value) in row_tail.iter_mut().zip(w_tail) {
+                                    *cell -= f * right_value;
                                 }
                             }
 
