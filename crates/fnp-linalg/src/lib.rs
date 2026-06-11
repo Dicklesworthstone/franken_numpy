@@ -45,6 +45,7 @@ const SVD_RECONSTRUCT_LEFT_MIN_DIM: usize = 32;
 /// Minimum remaining trailing width for the fused two-sided SVD update. Below
 /// this size the simpler scalar sweeps win by avoiding the extra branch surface.
 const SVD_FUSED_TWO_SIDED_MIN_TRAIL: usize = 16;
+const SVD_FUSED_TWO_SIDED_REGISTER_BLOCK: usize = 4;
 /// Large-square full-SVD threshold where phase-1 right reflectors are accumulated
 /// into Vt by compact-WY panels instead of one scalar reflector at a time.
 const SVD_RIGHT_VT_BLOCK_MIN_DIM: usize = 512;
@@ -2538,6 +2539,72 @@ fn svd_bidiag_full(a: &[f64], m: usize, n: usize) -> Result<SvdFullResult, LinAl
     svd_bidiag_full_with_max_iters(a, m, n, SVD_QR_ITERATION_COEFF * k * k)
 }
 
+#[inline]
+fn svd_apply_fused_two_sided_row_pair(
+    row0_tail: &mut [f64],
+    row1_tail: &mut [f64],
+    vi0: f64,
+    vi1: f64,
+    lh_tail: &[f64],
+    w_tail: &[f64],
+    right_scale: f64,
+) {
+    debug_assert_eq!(row0_tail.len(), row1_tail.len());
+    debug_assert_eq!(row0_tail.len(), lh_tail.len());
+    debug_assert_eq!(row0_tail.len(), w_tail.len());
+
+    let tail_len = row0_tail.len();
+    let blocked_len =
+        (tail_len / SVD_FUSED_TWO_SIDED_REGISTER_BLOCK) * SVD_FUSED_TWO_SIDED_REGISTER_BLOCK;
+    let mut dot0 = 0.0;
+    let mut dot1 = 0.0;
+    let mut offset = 0;
+    while offset < blocked_len {
+        row0_tail[offset] -= lh_tail[offset] * vi0;
+        dot0 += row0_tail[offset] * w_tail[offset];
+        row1_tail[offset] -= lh_tail[offset] * vi1;
+        dot1 += row1_tail[offset] * w_tail[offset];
+        row0_tail[offset + 1] -= lh_tail[offset + 1] * vi0;
+        dot0 += row0_tail[offset + 1] * w_tail[offset + 1];
+        row1_tail[offset + 1] -= lh_tail[offset + 1] * vi1;
+        dot1 += row1_tail[offset + 1] * w_tail[offset + 1];
+        row0_tail[offset + 2] -= lh_tail[offset + 2] * vi0;
+        dot0 += row0_tail[offset + 2] * w_tail[offset + 2];
+        row1_tail[offset + 2] -= lh_tail[offset + 2] * vi1;
+        dot1 += row1_tail[offset + 2] * w_tail[offset + 2];
+        row0_tail[offset + 3] -= lh_tail[offset + 3] * vi0;
+        dot0 += row0_tail[offset + 3] * w_tail[offset + 3];
+        row1_tail[offset + 3] -= lh_tail[offset + 3] * vi1;
+        dot1 += row1_tail[offset + 3] * w_tail[offset + 3];
+        offset += SVD_FUSED_TWO_SIDED_REGISTER_BLOCK;
+    }
+    for offset in blocked_len..tail_len {
+        row0_tail[offset] -= lh_tail[offset] * vi0;
+        dot0 += row0_tail[offset] * w_tail[offset];
+        row1_tail[offset] -= lh_tail[offset] * vi1;
+        dot1 += row1_tail[offset] * w_tail[offset];
+    }
+
+    let f0 = right_scale * dot0;
+    let f1 = right_scale * dot1;
+    let mut offset = 0;
+    while offset < blocked_len {
+        row0_tail[offset] -= f0 * w_tail[offset];
+        row1_tail[offset] -= f1 * w_tail[offset];
+        row0_tail[offset + 1] -= f0 * w_tail[offset + 1];
+        row1_tail[offset + 1] -= f1 * w_tail[offset + 1];
+        row0_tail[offset + 2] -= f0 * w_tail[offset + 2];
+        row1_tail[offset + 2] -= f1 * w_tail[offset + 2];
+        row0_tail[offset + 3] -= f0 * w_tail[offset + 3];
+        row1_tail[offset + 3] -= f1 * w_tail[offset + 3];
+        offset += SVD_FUSED_TWO_SIDED_REGISTER_BLOCK;
+    }
+    for offset in blocked_len..tail_len {
+        row0_tail[offset] -= f0 * w_tail[offset];
+        row1_tail[offset] -= f1 * w_tail[offset];
+    }
+}
+
 fn svd_bidiag_values_with_max_iters(
     a: &[f64],
     m: usize,
@@ -2669,12 +2736,35 @@ fn svd_bidiag_qr_full(
                     for x in lh_dot[j..n].iter_mut() {
                         *x = 0.0;
                     }
-                    for i in j..m {
-                        let vi = v_house[i];
-                        let row = &work[i * n + j..i * n + n];
-                        for (x, &w) in lh_dot[j..n].iter_mut().zip(row.iter()) {
-                            *x += vi * w;
+                    let lh_tail_len = n - j;
+                    let lh_blocked_len = (lh_tail_len / SVD_FUSED_TWO_SIDED_REGISTER_BLOCK)
+                        * SVD_FUSED_TWO_SIDED_REGISTER_BLOCK;
+                    let mut lh_offset = 0;
+                    while lh_offset < lh_blocked_len {
+                        let col = j + lh_offset;
+                        let mut dot0 = 0.0;
+                        let mut dot1 = 0.0;
+                        let mut dot2 = 0.0;
+                        let mut dot3 = 0.0;
+                        for (i, &vi) in v_house.iter().enumerate().take(m).skip(j) {
+                            let row_base = i * n + col;
+                            dot0 += vi * work[row_base];
+                            dot1 += vi * work[row_base + 1];
+                            dot2 += vi * work[row_base + 2];
+                            dot3 += vi * work[row_base + 3];
                         }
+                        lh_dot[col] = dot0;
+                        lh_dot[col + 1] = dot1;
+                        lh_dot[col + 2] = dot2;
+                        lh_dot[col + 3] = dot3;
+                        lh_offset += SVD_FUSED_TWO_SIDED_REGISTER_BLOCK;
+                    }
+                    for col in (j + lh_blocked_len)..n {
+                        let mut dot = 0.0;
+                        for (i, &vi) in v_house.iter().enumerate().take(m).skip(j) {
+                            dot += vi * work[i * n + col];
+                        }
+                        lh_dot[col] = dot;
                     }
                     for (fc, &dc) in lh_f[j..n].iter_mut().zip(lh_dot[j..n].iter()) {
                         *fc = scale * dc;
@@ -2723,21 +2813,61 @@ fn svd_bidiag_qr_full(
                             }
                             e[j] = work[pivot_base + j + 1];
 
-                            for (row, &vi) in v_house.iter().enumerate().take(m).skip(j + 1) {
+                            let lh_tail = &lh_f[j + 1..n];
+                            let w_tail = &w_house[j + 1..n];
+                            let mut row = j + 1;
+                            while row + 1 < m {
+                                let row0_base = row * n;
+                                let row1_base = (row + 1) * n;
+                                let (head, tail) = work.split_at_mut(row1_base);
+                                let row0_tail = &mut head[row0_base + j + 1..row0_base + n];
+                                let row1_tail = &mut tail[j + 1..n];
+                                svd_apply_fused_two_sided_row_pair(
+                                    row0_tail,
+                                    row1_tail,
+                                    v_house[row],
+                                    v_house[row + 1],
+                                    lh_tail,
+                                    w_tail,
+                                    right_scale,
+                                );
+                                row += 2;
+                            }
+                            if row < m {
+                                let vi = v_house[row];
                                 let row_base = row * n;
                                 let row_tail = &mut work[row_base + j + 1..row_base + n];
-                                let lh_tail = &lh_f[j + 1..n];
-                                let w_tail = &w_house[j + 1..n];
+                                let tail_len = row_tail.len();
+                                let blocked_len = (tail_len / SVD_FUSED_TWO_SIDED_REGISTER_BLOCK)
+                                    * SVD_FUSED_TWO_SIDED_REGISTER_BLOCK;
                                 let mut dot = 0.0;
-                                for ((cell, &left_scale), &right_value) in
-                                    row_tail.iter_mut().zip(lh_tail).zip(w_tail)
-                                {
-                                    *cell -= left_scale * vi;
-                                    dot += *cell * right_value;
+                                let mut offset = 0;
+                                while offset < blocked_len {
+                                    row_tail[offset] -= lh_tail[offset] * vi;
+                                    dot += row_tail[offset] * w_tail[offset];
+                                    row_tail[offset + 1] -= lh_tail[offset + 1] * vi;
+                                    dot += row_tail[offset + 1] * w_tail[offset + 1];
+                                    row_tail[offset + 2] -= lh_tail[offset + 2] * vi;
+                                    dot += row_tail[offset + 2] * w_tail[offset + 2];
+                                    row_tail[offset + 3] -= lh_tail[offset + 3] * vi;
+                                    dot += row_tail[offset + 3] * w_tail[offset + 3];
+                                    offset += SVD_FUSED_TWO_SIDED_REGISTER_BLOCK;
+                                }
+                                for offset in blocked_len..tail_len {
+                                    row_tail[offset] -= lh_tail[offset] * vi;
+                                    dot += row_tail[offset] * w_tail[offset];
                                 }
                                 let f = right_scale * dot;
-                                for (cell, &right_value) in row_tail.iter_mut().zip(w_tail) {
-                                    *cell -= f * right_value;
+                                let mut offset = 0;
+                                while offset < blocked_len {
+                                    row_tail[offset] -= f * w_tail[offset];
+                                    row_tail[offset + 1] -= f * w_tail[offset + 1];
+                                    row_tail[offset + 2] -= f * w_tail[offset + 2];
+                                    row_tail[offset + 3] -= f * w_tail[offset + 3];
+                                    offset += SVD_FUSED_TWO_SIDED_REGISTER_BLOCK;
+                                }
+                                for offset in blocked_len..tail_len {
+                                    row_tail[offset] -= f * w_tail[offset];
                                 }
                             }
 
