@@ -722,7 +722,7 @@ fn lu_forward_back(lu: &[f64], perm: &[usize], b: &[f64], n: usize) -> Vec<f64> 
 
 /// Forward-substitution then back-substitution for multiple right-hand sides.
 // Engage blocked TRSM at this size; below it the row-by-row substitution wins.
-const TRSM_BLOCK_MIN: usize = 896;
+const TRSM_BLOCK_MIN: usize = 768;
 const TRSM_PANEL_NB: usize = 128;
 
 // Blocked multi-RHS forward+back substitution (LAPACK dtrsm shape) for A·X = B
@@ -12639,6 +12639,46 @@ mod tests {
         assert_eq!(
             digest, "4461d094b8ddfc931913f52e1b4216022c99b269b9a1ee02fb9d4c7d2d77c3c9",
             "1024 inverse blocked-TRSM golden digest drifted: {digest}"
+        );
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn inv_nxn_768_blocked_trsm_reconstructs_and_hashes() {
+        let n = 768usize;
+        let a = lu_spd_like(n, 0x5A17_0768);
+        let inverse = super::inv_nxn(&a, n).expect("768 inverse");
+
+        let mut max_recon = 0.0f64;
+        for row in 0..n {
+            for col in 0..n {
+                let mut sum = 0.0f64;
+                for k in 0..n {
+                    sum += a[row * n + k] * inverse[k * n + col];
+                }
+                let target = if row == col { 1.0 } else { 0.0 };
+                max_recon = max_recon.max((sum - target).abs());
+            }
+        }
+        assert!(
+            max_recon < 1e-7,
+            "768 inverse reconstruction drift {max_recon:e}"
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(n.to_le_bytes());
+        for value in &inverse {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        hasher.update(max_recon.to_bits().to_le_bytes());
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "76ba9ec0322feb3f598ae2aef3ee95c7783a4c0b56524863de2d90ec7dabaf5b",
+            "768 inverse blocked-TRSM golden digest drifted: {digest}"
         );
     }
 
