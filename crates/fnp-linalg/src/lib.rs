@@ -3676,12 +3676,13 @@ fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>,
         let mut vv = vec![0.0f64; h * nb]; // vv[(i-jb)*nb + t] = v_{jb+t}[i]
         let mut ww = vec![0.0f64; h * nb];
         let mut taus = vec![0.0f64; nb];
+        let mut col = vec![0.0f64; n];
+        let mut u = vec![0.0f64; n];
 
         for t in 0..nb {
             let j = jb + t;
             let jr = j - jb;
             // Corrected column j (apply prior panel reflectors locally).
-            let mut col = vec![0.0f64; n];
             for i in j..n {
                 let ir = i - jb;
                 let mut s = work[i * n + j];
@@ -3718,7 +3719,6 @@ fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>,
             taus[t] = tau;
             e[j] = -sign * col_norm;
             // u = A_current·v (rows [j+1,n)): A_ps·v − V·(Wᵀv) − W·(Vᵀv).
-            let mut u = vec![0.0f64; n];
             for i in (j + 1)..n {
                 let mut s = 0.0;
                 for l in (j + 1)..n {
