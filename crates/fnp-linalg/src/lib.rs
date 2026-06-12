@@ -1348,6 +1348,18 @@ const CHOL_PANEL_NB: usize = 128;
 const CHOL_MID_MIN: usize = 128;
 const CHOL_MID_PANEL: usize = 64;
 
+// Column-block width for the block-triangular SYRK trailing update. A multiple of
+// PACKED_NR so each block stays on the register-tiled GEMM path; >= 128 so the
+// strided sub-assign GEMM clears its parallel threshold on the leading (tall)
+// blocks. The per-diagonal-block upper-triangle waste is ~SYRK_COL_BLOCK/trail of
+// the update flops, so a moderate width keeps the triangular saving near 2x.
+const SYRK_COL_BLOCK: usize = 256;
+
+// Minimum trailing-panel height for the parallel dtrsm panel solve. Below this the
+// rayon dispatch + L11 packing cost exceeds the per-row solve work, so the small
+// trailing panels (and every panel of a small matrix) keep the serial row scan.
+const PAR_TRSM_MIN_TRAIL: usize = 384;
+
 // Right-looking blocked Cholesky (LAPACK dpotrf shape). For each width-nb column
 // panel: factor the nb×nb diagonal block (unblocked), solve the panel below it
 // (L21 = A21·L11^{-T}), then update the trailing block A22 -= L21·L21^T with the
@@ -1387,38 +1399,114 @@ fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, Li
             break;
         }
 
-        // (2) Panel below the diagonal: L21 = A21·L11^{-T} (forward substitution
-        // per row over the panel columns).
-        for i in pend..n {
-            for j in jb..pend {
-                let mut sum = work[i * n + j];
-                for k in jb..j {
-                    sum -= l[i * n + k] * l[j * n + k];
+        // (2) Panel below the diagonal: L21 = A21·L11^{-T} (a triangular solve /
+        // dtrsm). Each trailing row solves independently against the finalized
+        // diagonal block L11, so for a tall trailing panel the rows run in parallel
+        // (the old serial row scan was the dominant cost vs numpy's dtrsm). L11 (bw×bw
+        // lower) and the reciprocal of its diagonal are packed once into small
+        // cache-resident buffers so the hot inner dot reads contiguous, read-only
+        // memory instead of striding across `l` by n per term. For a short trailing
+        // panel the rayon dispatch + packing cost exceeds the work, so we keep the
+        // original serial scan (no small-matrix regression).
+        if trail >= PAR_TRSM_MIN_TRAIL {
+            let mut l11 = vec![0.0f64; bw * bw];
+            let mut inv_diag = vec![0.0f64; bw];
+            for r in 0..bw {
+                let row = (jb + r) * n + jb;
+                l11[r * bw..r * bw + r + 1].copy_from_slice(&l[row..row + r + 1]);
+                inv_diag[r] = 1.0 / l[(jb + r) * n + (jb + r)];
+            }
+            l[pend * n..n * n]
+                .par_chunks_mut(n)
+                .enumerate()
+                .for_each(|(ti, lrow)| {
+                    let i = pend + ti;
+                    let wrow = &work[i * n..i * n + n];
+                    for r in 0..bw {
+                        let j = jb + r;
+                        let mut sum = wrow[j];
+                        let solved = &lrow[jb..jb + r]; // this row's solved L21 entries
+                        let l11r = &l11[r * bw..r * bw + r];
+                        for (&a, &b) in solved.iter().zip(l11r) {
+                            sum -= a * b;
+                        }
+                        lrow[j] = sum * inv_diag[r];
+                    }
+                });
+        } else {
+            for i in pend..n {
+                for j in jb..pend {
+                    let mut sum = work[i * n + j];
+                    for k in jb..j {
+                        sum -= l[i * n + k] * l[j * n + k];
+                    }
+                    l[i * n + j] = sum / l[j * n + j];
                 }
-                l[i * n + j] = sum / l[j * n + j];
             }
         }
 
-        // (3) Trailing update A22 -= L21·L21^T via the packed GEMM.
+        // (3) Trailing update A22 -= L21·L21^T. This is a symmetric rank-bw update
+        // (SYRK): only A22's LOWER triangle is needed, since Cholesky never reads the
+        // strict upper triangle of `work` (steps 1 and 2 only touch work[i*n+j] with
+        // j <= i). We exploit this by tiling A22 into column blocks and updating only
+        // the rows at or below each block: a lower cell (i,j), i >= j, lands in exactly
+        // one column block (whose columns contain j) whose row range (>= the block's
+        // first column >= ... actually >= c0 <= j <= i) contains i, so every lower cell
+        // gets its full bw-deep update exactly once. This halves the trailing-update
+        // flops versus a full trail×trail GEMM (matching LAPACK dpotrf's dsyrk) and
+        // subtracts directly into `work` with no product buffer, transpose, or subtract
+        // pass. Strict-upper entries inside diagonal blocks are written stale but never
+        // read. Only worthwhile when the trailing GEMM is itself parallel-eligible
+        // (k = bw >= the GEMM parallel threshold); otherwise the block split just adds
+        // repack + dispatch overhead, so the small-panel path keeps the plain GEMM.
         let mut l21 = vec![0.0f64; trail * bw];
         for i in 0..trail {
             let src = (pend + i) * n + jb;
             l21[i * bw..i * bw + bw].copy_from_slice(&l[src..src + bw]);
         }
-        let mut l21t = vec![0.0f64; bw * trail];
-        for i in 0..trail {
-            for k in 0..bw {
-                l21t[k * trail + i] = l21[i * bw + k];
+        if bw >= MATMUL_PARALLEL_MIN_DIM && trail >= SYRK_COL_BLOCK {
+            let mut bblk = vec![0.0f64; bw * SYRK_COL_BLOCK];
+            let mut c0 = 0;
+            while c0 < trail {
+                let cbw = SYRK_COL_BLOCK.min(trail - c0);
+                let rows = trail - c0; // rows c0..trail (lower-triangular: i >= c0)
+                // b-block = (l21[c0..c0+cbw, :])^T, shape bw×cbw row-major.
+                for r in 0..cbw {
+                    let arow = (c0 + r) * bw;
+                    for k in 0..bw {
+                        bblk[k * cbw + r] = l21[arow + k];
+                    }
+                }
+                let a_block = &l21[c0 * bw..trail * bw]; // rows c0..trail, shape rows×bw
+                let dst = (pend + c0) * n + (pend + c0);
+                packed_gemm_sub_assign_strided(
+                    a_block,
+                    &bblk[..bw * cbw],
+                    rows,
+                    bw,
+                    cbw,
+                    n,
+                    &mut work[dst..],
+                );
+                c0 += cbw;
             }
-        }
-        let g = packed_gemm(&l21, &l21t, trail, bw, trail);
-        for i in 0..trail {
-            let dst = (pend + i) * n + pend;
-            for (cell, &gij) in work[dst..dst + trail]
-                .iter_mut()
-                .zip(&g[i * trail..i * trail + trail])
-            {
-                *cell -= gij;
+        } else {
+            // Small-panel path: full trail×trail GEMM, subtract into the lower triangle.
+            let mut l21t = vec![0.0f64; bw * trail];
+            for i in 0..trail {
+                for k in 0..bw {
+                    l21t[k * trail + i] = l21[i * bw + k];
+                }
+            }
+            let g = packed_gemm(&l21, &l21t, trail, bw, trail);
+            for i in 0..trail {
+                let dst = (pend + i) * n + pend;
+                for (cell, &gij) in work[dst..dst + trail]
+                    .iter_mut()
+                    .zip(&g[i * trail..i * trail + trail])
+                {
+                    *cell -= gij;
+                }
             }
         }
 
@@ -12886,11 +12974,17 @@ mod tests {
 
     #[test]
     fn blocked_cholesky_reconstructs_and_matches_unblocked() {
-        // n below CHOL_BLOCK_MIN, so call the blocked kernel directly. Verify
-        // L·L^T = A and that blocked agrees with the unblocked reference (tol).
-        for &n in &[160usize, 200, 256] {
+        // Exercise every blocked path through the public entry `cholesky_nxn`, which
+        // selects the kernel by n: 160/200/256 use the serial mid path (trail < the
+        // parallel-dtrsm threshold); 512 uses the mid panel but its tall leading
+        // panels cross the parallel-dtrsm threshold; 960/1024 use the large panel
+        // (so the trailing update runs the block-triangular SYRK). Verify L·L^T = A
+        // and that the blocked result agrees with the unblocked reference (tol —
+        // Cholesky is not bit-reproducible, the parallel dtrsm uses a reciprocal-
+        // multiply and the SYRK re-associates the trailing update).
+        for &n in &[160usize, 200, 256, 512, 960, 1024] {
             let a = chol_spd(n, 0x71 + n as u64);
-            let lb = super::cholesky_blocked(&a, n, super::CHOL_MID_PANEL).expect("blocked chol");
+            let lb = super::cholesky_nxn(&a, n).expect("blocked chol");
             let lr = cholesky_unblocked_ref(&a, n);
             let mut max_recon = 0.0f64;
             let mut max_diff = 0.0f64;
