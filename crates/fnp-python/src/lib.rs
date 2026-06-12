@@ -16628,21 +16628,16 @@ fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-fn copysign(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
-    if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
-        return Ok(numpy
-            .getattr("copysign")?
-            .call1((x1.bind(py), x2.bind(py)))?
-            .unbind());
-    }
-    if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Copysign)? {
-        return Ok(out);
-    }
-    let x1 = extract_numeric_array(py, x1.bind(py), "copysign(x1)")?;
-    let x2 = extract_numeric_array(py, x2.bind(py), "copysign(x2)")?;
-    let result = ufunc_copysign(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array(py, &result)
+#[pyo3(signature = (*args, **kwargs))]
+fn copysign(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough: the native scalar copysign (even the zero-copy f64 path) was
+    // 3.7-4.7x slower than numpy's SIMD bit-twiddle at every size (2026-06-12).
+    // Byte-identical (a pure sign-bit copy). SIMD-bound, bead 8vdtg.
+    core_numpy_passthrough(py, "copysign", args, kwargs)
 }
 
 #[pyfunction]
@@ -23797,22 +23792,15 @@ fn blackman(py: Python<'_>, m: i64) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x1, x2))]
-fn heaviside(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
-    if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
-        return Ok(numpy
-            .getattr("heaviside")?
-            .call1((x1.bind(py), x2.bind(py)))?
-            .unbind());
-    }
-    if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Heaviside)? {
-        return Ok(out);
-    }
-    let x1 = extract_numeric_array(py, x1.bind(py), "heaviside(x1)")?;
-    let x2 = extract_numeric_array(py, x2.bind(py), "heaviside(x2)")?;
-    let result = ufunc_heaviside(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array(py, &result)
+#[pyo3(signature = (*args, **kwargs))]
+fn heaviside(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough: native scalar heaviside was ~2x slower than numpy's SIMD at
+    // every size (2026-06-12). Byte-identical. SIMD-bound, bead 8vdtg.
+    core_numpy_passthrough(py, "heaviside", args, kwargs)
 }
 
 #[pyfunction]
@@ -23880,33 +23868,17 @@ fn conjugate(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x1, x2))]
-fn fmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
-        return Ok(py
-            .import("numpy")?
-            .getattr("fmod")?
-            .call1((x1.bind(py), x2.bind(py)))?
-            .unbind());
-    }
-    // Zero-copy fast path for same-shape f64 ndarrays with no zero divisor
-    // (zero divisors must defer to numpy for the "invalid value" warning).
-    if !f64_ndarray_contains_zero(py, x2.bind(py))?
-        && let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Fmod)?
-    {
-        return Ok(out);
-    }
-    let x1_array = extract_numeric_array(py, x1.bind(py), "fmod(x1)")?;
-    let x2_array = extract_numeric_array(py, x2.bind(py), "fmod(x2)")?;
-    if contains_zero_divisor(&x2_array) {
-        return Ok(py
-            .import("numpy")?
-            .getattr("fmod")?
-            .call1((x1.bind(py), x2.bind(py)))?
-            .unbind());
-    }
-    let result = ufunc_fmod(&x1_array, &x2_array).map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array(py, &result)
+#[pyo3(signature = (*args, **kwargs))]
+fn fmod(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough: native fmod (even the zero-copy f64 path) was 1.6-2.3x slower
+    // than numpy's SIMD at every size, and the native path also had to scan for
+    // zero divisors and defer to numpy for the divide warning anyway. numpy's
+    // result is byte-identical and handles the warning/dtype surface exactly.
+    core_numpy_passthrough(py, "fmod", args, kwargs)
 }
 
 #[pyfunction]
@@ -24132,6 +24104,10 @@ fn native_binary_arctan2_or_passthrough(
     }
 }
 
+// Retained for reference / potential reuse once a SIMD f64 path exists (bead
+// 8vdtg); the python `fmax` binding now passes straight through to numpy because
+// this native path was 60-72x slower. Matches the maximum/minimum convention below.
+#[allow(dead_code)]
 fn native_binary_fmax_or_passthrough(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -24168,6 +24144,7 @@ fn native_binary_fmax_or_passthrough(
     }
 }
 
+#[allow(dead_code)]
 fn native_binary_fmin_or_passthrough(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -37509,9 +37486,18 @@ fn log2(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn log10(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Log10, "log10", "log10(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn log10(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough: native scalar-libm log10 was 1.85-2.29x slower than numpy's
+    // SIMD at every size (2026-06-12). Byte-identical. SIMD-bound, bead 8vdtg.
+    core_numpy_passthrough(py, "log10", args, kwargs)
 }
 
 #[pyfunction]
@@ -37901,7 +37887,11 @@ fn fmax(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_binary_fmax_or_passthrough(py, args, kwargs)
+    // Passthrough: the native f64 path (asarray + dtype-kind reflection + two
+    // array extractions + rebuild) was 60-72x SLOWER than numpy's in-place SIMD
+    // fmax for zero benefit — numpy preserves the input dtype exactly too
+    // (measured 2026-06-12: numpy 43us vs native 3109us @131k). Byte-identical.
+    core_numpy_passthrough(py, "fmax", args, kwargs)
 }
 
 #[pyfunction]
@@ -37911,7 +37901,9 @@ fn fmin(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_binary_fmin_or_passthrough(py, args, kwargs)
+    // Passthrough: native f64 path was 59-61x SLOWER than numpy's in-place SIMD
+    // fmin for zero benefit (numpy 43us vs native 3081us @131k). Byte-identical.
+    core_numpy_passthrough(py, "fmin", args, kwargs)
 }
 
 #[allow(dead_code)]
