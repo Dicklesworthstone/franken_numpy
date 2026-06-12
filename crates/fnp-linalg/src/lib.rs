@@ -3732,6 +3732,14 @@ pub fn svd_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
 // path keeps the unblocked loop). Panel width.
 const TRIDIAG_BLOCK_MIN: usize = 384;
 const TRIDIAG_PANEL_NB: usize = 64;
+// Minimum trailing-block height for the parallel symmetric panel matvec (u = A·v).
+// Each matvec is only O(h²) work split across rows, so the rayon dispatch +
+// work-stealing setup (~tens of µs, worse under machine load) dominates until h is
+// large; measured break-even is past n=1024. Gated high so only the big early
+// matvecs of a large reduction parallelize — every matvec of an n<=1024 matrix
+// stays serial (bit-identical perf, no regression), and the late short matvecs of
+// a large matrix also stay serial.
+const TRIDIAG_MATVEC_PAR_MIN: usize = 1024;
 
 // Blocked symmetric tridiagonalization, values only (dsytrd/dlatrd shape). For
 // each width-nb panel, reduce nb columns producing reflectors V and vectors
@@ -3766,6 +3774,7 @@ fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>,
         let mut taus = vec![0.0f64; nb];
         let mut col = vec![0.0f64; n];
         let mut u = vec![0.0f64; n];
+        let mut vcol = vec![0.0f64; n]; // contiguous copy of reflector v (panel col t)
 
         for t in 0..nb {
             let j = jb + t;
@@ -3807,12 +3816,38 @@ fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>,
             taus[t] = tau;
             e[j] = -sign * col_norm;
             // u = A_current·v (rows [j+1,n)): A_ps·v − V·(Wᵀv) − W·(Vᵀv).
-            for i in (j + 1)..n {
-                let mut s = 0.0;
-                for l in (j + 1)..n {
-                    s += work[i * n + l] * vv[(l - jb) * nb + t];
+            // The A_ps·v symmetric matvec is the O(h²)-per-column dominant cost of
+            // the panel reduction (dlatrd). Each u[i] is an independent dot of work
+            // row i with v, so it parallelizes across rows; gather v contiguously
+            // first so the inner dot is a contiguous row·vector. Identical
+            // ascending-l summation order per row → bit-exact vs the serial scan.
+            for (idx, vc) in vcol[(j + 1)..n].iter_mut().enumerate() {
+                *vc = vv[(j + 1 + idx - jb) * nb + t];
+            }
+            if n - (j + 1) >= TRIDIAG_MATVEC_PAR_MIN {
+                let (work_ref, vcol_ref) = (&work, &vcol);
+                u[(j + 1)..n]
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(idx, ui)| {
+                        let i = j + 1 + idx;
+                        let row = &work_ref[i * n + (j + 1)..i * n + n];
+                        let vc = &vcol_ref[(j + 1)..n];
+                        let mut s = 0.0;
+                        for (&w, &vl) in row.iter().zip(vc.iter()) {
+                            s += w * vl;
+                        }
+                        *ui = s;
+                    });
+            } else {
+                for i in (j + 1)..n {
+                    let row = &work[i * n + (j + 1)..i * n + n];
+                    let mut s = 0.0;
+                    for (k, &w) in row.iter().enumerate() {
+                        s += w * vcol[j + 1 + k];
+                    }
+                    u[i] = s;
                 }
-                u[i] = s;
             }
             for q in 0..t {
                 let (mut wtv, mut vtv) = (0.0, 0.0);
@@ -12436,6 +12471,28 @@ mod tests {
             assert!(max_d < 1e-8, "blocked tridiag d err {max_d:e} (n={n})");
             assert!(max_e < 1e-8, "blocked tridiag e err {max_e:e} (n={n})");
         }
+    }
+
+    #[test]
+    fn blocked_tridiag_parallel_matvec_matches_unblocked_large() {
+        // n=1152 > TRIDIAG_MATVEC_PAR_MIN, so the leading panel matvecs (u = A·v,
+        // h up to 1151 >= 1024) run on the PARALLEL path. Compare the resulting
+        // (d,e) tridiagonal against the explicit serial unblocked reference to prove
+        // the parallelized symmetric matvec still produces a correct reduction.
+        let n = 1152usize;
+        let a = chol_spd(n, 0xa5); // dense symmetric (dense reflectors exercise matvec)
+        let (db, eb, _) = super::tridiag_reduce_blocked(&a, n, false);
+        let (du, eu, _) = tridiag_reduce_unblocked_q_ref(&a, n);
+        let mut max_d = 0.0f64;
+        let mut max_e = 0.0f64;
+        for i in 0..n {
+            max_d = max_d.max((db[i] - du[i]).abs() / (1.0 + du[i].abs()));
+        }
+        for i in 0..n - 1 {
+            max_e = max_e.max((eb[i].abs() - eu[i].abs()).abs() / (1.0 + eu[i].abs()));
+        }
+        assert!(max_d < 1e-8, "parallel-matvec tridiag d err {max_d:e}");
+        assert!(max_e < 1e-8, "parallel-matvec tridiag e err {max_e:e}");
     }
 
     #[test]
