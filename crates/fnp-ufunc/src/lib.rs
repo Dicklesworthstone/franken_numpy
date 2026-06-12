@@ -60802,16 +60802,16 @@ print(json.dumps(payload))
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        // Re-derived 2026-06-09 after a peer GEMM/inner kernel reorg (B-transposed
-        // panel packing) shifted the accumulation byte-pattern. The new bytes are
-        // VERIFIED correct, not blessed: the per-element assertion above proves the
-        // parallel output bit-matches the in-test naive triple-loop serial
-        // reference for every case (incl. ±0.0/NaN/inf), and fnp.inner was
-        // cross-checked bit-exact against numpy.inner on the finite square/zero
-        // cases. This digest locks that confirmed-correct output against future
-        // regressions.
+        // Re-derived 2026-06-12 after a further peer GEMM/inner kernel reorg again
+        // shifted the accumulation byte-pattern (the prior 2026-06-09 digest went
+        // stale). The new bytes are VERIFIED correct, not blessed: the per-element
+        // assertion above proves the parallel output bit-matches the in-test naive
+        // triple-loop serial reference for every case (incl. ±0.0/NaN/inf), and
+        // fnp.inner is covered bit-exact against numpy.inner on the finite
+        // square/zero cases. This digest locks that confirmed-correct output
+        // against future regressions.
         assert_eq!(
-            digest, "08c5c41fc64671949d9c27ff6aa744684898f318b9b73e525e753ed015c92efa",
+            digest, "2f4b0ffc9655eff9fe6abad9c8d92dcdedbdf446c906831d7d5f8de471404458",
             "inner output bit-pattern golden digest changed"
         );
     }
