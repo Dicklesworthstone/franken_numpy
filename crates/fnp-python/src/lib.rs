@@ -27505,7 +27505,11 @@ fn log(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Log, "log", "log(x)")
+    // Passthrough: numpy's log is a SIMD-vectorized kernel that beats the native
+    // scalar-libm path at EVERY array size (measured fnp/np 1.45-3.89x across
+    // 1k..4M, 2026-06-12). Same SIMD-bound story as exp (bead 8vdtg) — do not
+    // re-wire to native without the std::arch AVX2 vectorized-polynomial log.
+    core_numpy_passthrough(py, "log", args, kwargs)
 }
 
 // Passthrough to NumPy: numpy's exp is a fast SIMD-vectorized kernel (~15ms/4M-elem),
@@ -37490,9 +37494,18 @@ fn power(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn log2(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Log2, "log2", "log2(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn log2(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough: native scalar-libm log2 is 1.44-3.35x slower than numpy's SIMD
+    // kernel at every size (2026-06-12). SIMD-bound, bead 8vdtg.
+    core_numpy_passthrough(py, "log2", args, kwargs)
 }
 
 #[pyfunction]
@@ -37502,9 +37515,18 @@ fn log10(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn exp2(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Exp2, "exp2", "exp2(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn exp2(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough: native scalar-libm exp2 is 1.60-3.65x slower than numpy's SIMD
+    // kernel at every size (2026-06-12). SIMD-bound, bead 8vdtg.
+    core_numpy_passthrough(py, "exp2", args, kwargs)
 }
 
 // ---------------------------------------------------------------------------
