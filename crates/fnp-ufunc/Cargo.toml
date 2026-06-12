@@ -114,3 +114,7 @@ harness = false
 [[bench]]
 name = "set_ops"
 harness = false
+
+[[bench]]
+name = "cov"
+harness = false

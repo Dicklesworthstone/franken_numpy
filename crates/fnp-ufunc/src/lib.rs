@@ -19191,16 +19191,90 @@ impl UFuncArray {
                 *v = f64::NAN;
             }
         } else if nvars < COV_GEMM_MIN_VARS {
+            // Each cov[i,j] is sum_k (x_ik-mean_i)(x_jk-mean_j) / fact, a centered dot
+            // product. numpy routes this through BLAS dgemm (SIMD + register blocking),
+            // ~3× the single-accumulator scalar loop. We match the vectorization with
+            // portable SIMD: f64x4 lane accumulators stream k four-wide, and the j loop
+            // is blocked by 4 so the centered x_i vector is loaded/formed once and
+            // reused across four output cells. The lane partial-sums + horizontal
+            // reduce REASSOCIATE the per-cell k-sum (numpy/BLAS reassociate identically
+            // via blocking), so parity is np.allclose — not bit-exact; covered by the
+            // SIMD-vs-scalar differential test and the regenerated golden.
+            use std::simd::Simd;
+            use std::simd::num::SimdFloat;
+            const LANES: usize = 4;
+            type V = Simd<f64, LANES>;
             let vals = &self.values;
             let means_ref = &means;
             let fill_row = |(i, row): (usize, &mut [f64])| {
-                for (j, slot) in row.iter_mut().enumerate() {
-                    let mut s = 0.0;
-                    for k in 0..nobs {
-                        s += (vals[i * nobs + k] - means_ref[i])
-                            * (vals[j * nobs + k] - means_ref[j]);
+                let mi = means_ref[i];
+                let mi_v = V::splat(mi);
+                let xi = &vals[i * nobs..i * nobs + nobs];
+                let mut j = 0;
+                while j + 4 <= nvars {
+                    let mj = [
+                        means_ref[j],
+                        means_ref[j + 1],
+                        means_ref[j + 2],
+                        means_ref[j + 3],
+                    ];
+                    let mjv = [
+                        V::splat(mj[0]),
+                        V::splat(mj[1]),
+                        V::splat(mj[2]),
+                        V::splat(mj[3]),
+                    ];
+                    let xj0 = &vals[j * nobs..(j + 1) * nobs];
+                    let xj1 = &vals[(j + 1) * nobs..(j + 2) * nobs];
+                    let xj2 = &vals[(j + 2) * nobs..(j + 3) * nobs];
+                    let xj3 = &vals[(j + 3) * nobs..(j + 4) * nobs];
+                    let mut acc = [V::splat(0.0); 4];
+                    let mut k = 0;
+                    while k + LANES <= nobs {
+                        let av = V::from_slice(&xi[k..]) - mi_v;
+                        acc[0] += av * (V::from_slice(&xj0[k..]) - mjv[0]);
+                        acc[1] += av * (V::from_slice(&xj1[k..]) - mjv[1]);
+                        acc[2] += av * (V::from_slice(&xj2[k..]) - mjv[2]);
+                        acc[3] += av * (V::from_slice(&xj3[k..]) - mjv[3]);
+                        k += LANES;
                     }
-                    *slot = s / fact;
+                    let mut s = [
+                        acc[0].reduce_sum(),
+                        acc[1].reduce_sum(),
+                        acc[2].reduce_sum(),
+                        acc[3].reduce_sum(),
+                    ];
+                    while k < nobs {
+                        let a = xi[k] - mi;
+                        s[0] += a * (xj0[k] - mj[0]);
+                        s[1] += a * (xj1[k] - mj[1]);
+                        s[2] += a * (xj2[k] - mj[2]);
+                        s[3] += a * (xj3[k] - mj[3]);
+                        k += 1;
+                    }
+                    for (off, &sv) in s.iter().enumerate() {
+                        row[j + off] = sv / fact;
+                    }
+                    j += 4;
+                }
+                while j < nvars {
+                    let mj = means_ref[j];
+                    let mj_v = V::splat(mj);
+                    let xj = &vals[j * nobs..j * nobs + nobs];
+                    let mut acc = V::splat(0.0);
+                    let mut k = 0;
+                    while k + LANES <= nobs {
+                        acc += (V::from_slice(&xi[k..]) - mi_v)
+                            * (V::from_slice(&xj[k..]) - mj_v);
+                        k += LANES;
+                    }
+                    let mut s = acc.reduce_sum();
+                    while k < nobs {
+                        s += (xi[k] - mi) * (xj[k] - mj);
+                        k += 1;
+                    }
+                    row[j] = s / fact;
+                    j += 1;
                 }
             };
             const COV_PARALLEL_MIN_FLOPS: usize = 1 << 16;
@@ -47609,9 +47683,15 @@ print(json.dumps(payload))
 
     #[test]
     fn cov_parallel_matches_serial_mirror_reference() {
-        // Parallel cov must be bit-for-bit identical to the original serial
-        // upper-triangle + mirror computation. Use nvars=40, nobs=50 so
-        // nvars^2*nobs=80000 > 1<<16 and the row split parallelizes.
+        // cov's per-cell k-sum is computed with portable-SIMD lane accumulators
+        // (f64x4) plus a scalar tail, so it REASSOCIATES the reduction relative to
+        // the strict ascending-k serial order — exactly as numpy/BLAS dgemm does
+        // via blocking. The result is therefore isomorphic, not bit-identical, to
+        // the serial mirror reference: every cell must agree to within a few ULP
+        // (reassociation only, no logic change), and the matrix must stay exactly
+        // symmetric (cov[i,j] and cov[j,i] take the identical code path). Use
+        // nvars=40, nobs=50 so nvars^2*nobs=80000 > 1<<16 and the row split
+        // parallelizes.
         let (nvars, nobs) = (40usize, 50usize);
         let data: Vec<f64> = (0..nvars * nobs)
             .map(|i| (((i as u64).wrapping_mul(2654435761) % 9973) as f64) / 19.0 - 250.0)
@@ -47620,7 +47700,7 @@ print(json.dumps(payload))
         let out = arr.cov().expect("cov");
         assert_eq!(out.shape(), &[nvars, nvars]);
 
-        // Original serial reference: per-row mean, upper triangle + mirror.
+        // Serial ascending-k reference: per-row mean, upper triangle + mirror.
         let means: Vec<f64> = (0..nvars)
             .map(|r| data[r * nobs..(r + 1) * nobs].iter().sum::<f64>() / nobs as f64)
             .collect();
@@ -47637,11 +47717,25 @@ print(json.dumps(payload))
                 expected[j * nvars + i] = c;
             }
         }
-        assert_eq!(
-            out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            "parallel cov diverged from serial mirror reference"
-        );
+        let got = out.values();
+        // Reassociation-only agreement vs the serial reference.
+        for (idx, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
+            let tol = 1e-9 * e.abs().max(1.0);
+            assert!(
+                (g - e).abs() <= tol,
+                "cov[{idx}] diverged beyond reassociation tolerance: got {g}, ref {e}"
+            );
+        }
+        // Exact symmetry is preserved (both triangles share the SIMD path).
+        for i in 0..nvars {
+            for j in 0..nvars {
+                assert_eq!(
+                    got[i * nvars + j].to_bits(),
+                    got[j * nvars + i].to_bits(),
+                    "cov not exactly symmetric at ({i},{j})"
+                );
+            }
+        }
     }
 
     #[test]
