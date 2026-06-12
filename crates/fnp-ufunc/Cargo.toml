@@ -118,3 +118,7 @@ harness = false
 [[bench]]
 name = "cov"
 harness = false
+
+[[bench]]
+name = "convolve"
+harness = false

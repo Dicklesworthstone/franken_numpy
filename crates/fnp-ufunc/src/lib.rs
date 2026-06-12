@@ -19803,15 +19803,25 @@ impl UFuncArray {
         let k = &kernel.values;
 
         // FFT-based linear convolution: O((n+m) log) vs the direct O(n*m) scatter.
-        // numpy.convolve is ALWAYS direct, so this beats numpy for large kernels. The
-        // result matches the direct sum to FFT round-off (~1e-12 rel), and convolve
-        // parity vs NumPy is tolerance-based; the gate sits ABOVE every bit-exact
-        // internal small-kernel case (m <= 33), so those keep the exact scatter path.
+        // numpy.convolve is ALWAYS direct; our direct path is a PARALLEL autovectorized
+        // SAXPY that already beats numpy, so FFT only pays off when its true cost
+        // undercuts direct. Cost-model gate: direct work ≈ n*m MACs; FFT work ≈
+        // fft_len*log2(fft_len) butterflies (3 transforms + pointwise, fft_len =
+        // next_pow2(n+m-1)). Measured constants put the crossover at n*m ≈ 400 *
+        // fft_work (verified: 200000⊗4000 n*m/fft_work=170 → direct 7.6ms beats FFT
+        // 20ms; 100000⊗20000 ratio=898 → FFT 15ms beats direct 67ms). The OLD gate
+        // (n*m >= 2^18) was ~2000x too low — it sent every medium correlate/convolve
+        // (e.g. 5000⊗200 = 1M MACs) to the ~1ms-fixed-cost FFT, running 5-10x slower
+        // than the direct path. The result matches the direct sum to FFT round-off
+        // (~1e-12 rel); convolve parity vs NumPy is tolerance-based, so either path is
+        // valid. The gate stays ABOVE every bit-exact internal small-kernel case.
         const CONVOLVE_FFT_MIN_MINDIM: usize = 64;
-        const CONVOLVE_FFT_MIN_FLOPS: usize = 1 << 18;
+        const CONVOLVE_FFT_COST_FACTOR: usize = 400;
         const CONVOLVE_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+        let fft_len_pow2 = full_len.next_power_of_two();
+        let fft_work = fft_len_pow2.saturating_mul(fft_len_pow2.trailing_zeros() as usize);
         let full: Vec<f64> = if n.min(m) >= CONVOLVE_FFT_MIN_MINDIM
-            && n.saturating_mul(m) >= CONVOLVE_FFT_MIN_FLOPS
+            && n.saturating_mul(m) >= CONVOLVE_FFT_COST_FACTOR.saturating_mul(fft_work)
         {
             fft_linear_convolve(a, k, full_len)
         } else if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
