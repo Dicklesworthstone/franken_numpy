@@ -2790,21 +2790,20 @@ fn svd_bidiag_qr_full(
     for j in 0..n {
         let mut fused_two_sided = false;
         // Left Householder: zero out column j below diagonal
+        for vi in &mut v_house[..j] {
+            *vi = 0.0;
+        }
         let col_norm = {
             let mut s = 0.0;
-            for i in j..m {
-                s += work[i * n + j] * work[i * n + j];
+            for (i, vi) in v_house.iter_mut().enumerate().take(m).skip(j) {
+                let value = work[i * n + j];
+                *vi = value;
+                s += value * value;
             }
             s.sqrt()
         };
         if col_norm > 0.0 {
             let sign = if work[j * n + j] >= 0.0 { 1.0 } else { -1.0 };
-            for vi in &mut v_house[..j] {
-                *vi = 0.0;
-            }
-            for (i, vi) in v_house[j..m].iter_mut().enumerate() {
-                *vi = work[(i + j) * n + j];
-            }
             v_house[j] += sign * col_norm;
             let v_norm_sq: f64 = v_house[j..].iter().map(|x| x * x).sum();
             if v_norm_sq > 0.0 {
@@ -2868,10 +2867,15 @@ fn svd_bidiag_qr_full(
                     }
                     d[j] = work[pivot_base + j];
 
+                    for wi in &mut w_house[..=j] {
+                        *wi = 0.0;
+                    }
                     let row_norm = {
                         let mut s = 0.0;
-                        for col in (j + 1)..n {
-                            s += work[pivot_base + col] * work[pivot_base + col];
+                        for (col, wi) in w_house.iter_mut().enumerate().take(n).skip(j + 1) {
+                            let value = work[pivot_base + col];
+                            *wi = value;
+                            s += value * value;
                         }
                         s.sqrt()
                     };
@@ -2881,12 +2885,6 @@ fn svd_bidiag_qr_full(
                         } else {
                             -1.0
                         };
-                        for wi in &mut w_house[..=j] {
-                            *wi = 0.0;
-                        }
-                        for (idx, wi) in w_house[(j + 1)..n].iter_mut().enumerate() {
-                            *wi = work[pivot_base + j + 1 + idx];
-                        }
                         w_house[j + 1] += sign * row_norm;
                         let w_norm_sq: f64 = w_house[(j + 1)..].iter().map(|x| x * x).sum();
                         if w_norm_sq > 0.0 {
@@ -3060,10 +3058,15 @@ fn svd_bidiag_qr_full(
 
         // Right Householder: zero out row j to the right of superdiagonal
         if !fused_two_sided && j + 2 <= n {
+            for wi in &mut w_house[..=j] {
+                *wi = 0.0;
+            }
             let row_norm = {
                 let mut s = 0.0;
-                for col in (j + 1)..n {
-                    s += work[j * n + col] * work[j * n + col];
+                for (col, wi) in w_house.iter_mut().enumerate().take(n).skip(j + 1) {
+                    let value = work[j * n + col];
+                    *wi = value;
+                    s += value * value;
                 }
                 s.sqrt()
             };
@@ -3073,12 +3076,6 @@ fn svd_bidiag_qr_full(
                 } else {
                     -1.0
                 };
-                for wi in &mut w_house[..=j] {
-                    *wi = 0.0;
-                }
-                for (idx, wi) in w_house[(j + 1)..n].iter_mut().enumerate() {
-                    *wi = work[j * n + (j + 1 + idx)];
-                }
                 w_house[j + 1] += sign * row_norm;
                 let w_norm_sq: f64 = w_house[(j + 1)..].iter().map(|x| x * x).sum();
                 if w_norm_sq > 0.0 {
@@ -3300,21 +3297,20 @@ fn svd_bidiag_qr_values(
     let mut lh_f = vec![0.0; n];
 
     for j in 0..n {
+        for vi in &mut v_house[..j] {
+            *vi = 0.0;
+        }
         let col_norm = {
             let mut s = 0.0;
-            for i in j..m {
-                s += work[i * n + j] * work[i * n + j];
+            for (i, vi) in v_house.iter_mut().enumerate().take(m).skip(j) {
+                let value = work[i * n + j];
+                *vi = value;
+                s += value * value;
             }
             s.sqrt()
         };
         if col_norm > 0.0 {
             let sign = if work[j * n + j] >= 0.0 { 1.0 } else { -1.0 };
-            for vi in &mut v_house[..j] {
-                *vi = 0.0;
-            }
-            for (i, vi) in v_house[j..m].iter_mut().enumerate() {
-                *vi = work[(i + j) * n + j];
-            }
             v_house[j] += sign * col_norm;
             let v_norm_sq: f64 = v_house[j..].iter().map(|x| x * x).sum();
             if v_norm_sq > 0.0 {
@@ -3349,10 +3345,15 @@ fn svd_bidiag_qr_values(
         d[j] = work[j * n + j];
 
         if j + 2 <= n {
+            for wi in &mut w_house[..=j] {
+                *wi = 0.0;
+            }
             let row_norm = {
                 let mut s = 0.0;
-                for col in (j + 1)..n {
-                    s += work[j * n + col] * work[j * n + col];
+                for (col, wi) in w_house.iter_mut().enumerate().take(n).skip(j + 1) {
+                    let value = work[j * n + col];
+                    *wi = value;
+                    s += value * value;
                 }
                 s.sqrt()
             };
@@ -3362,12 +3363,6 @@ fn svd_bidiag_qr_values(
                 } else {
                     -1.0
                 };
-                for wi in &mut w_house[..=j] {
-                    *wi = 0.0;
-                }
-                for (idx, wi) in w_house[(j + 1)..n].iter_mut().enumerate() {
-                    *wi = work[j * n + (j + 1 + idx)];
-                }
                 w_house[j + 1] += sign * row_norm;
                 let w_norm_sq: f64 = w_house[(j + 1)..].iter().map(|x| x * x).sum();
                 if w_norm_sq > 0.0 {
