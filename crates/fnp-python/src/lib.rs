@@ -35015,6 +35015,17 @@ fn try_zerocopy_f64_minmax(
         }
         return Ok(F64MinMaxFastPath::NotApplicable);
     };
+    // numpy's SIMD min/max beats this scalar cell-by-cell fold at EVERY size past a
+    // few KiB (measured fnp-native/numpy 1.5x@1k → 2.5x@8k → 4x@64k → 5x@1M, and the
+    // axis paths 3.9-4.8x); it is genuinely SIMD-bound (a NaN-propagating,
+    // signed-zero-ordered reduction the compiler can't vectorize in safe Rust — bead
+    // 8vdtg). Delegate large f64 reductions to numpy (which also fixes any large-array
+    // signed-zero divergence: the result is now numpy's exact bits). Tiny arrays keep
+    // the native path — numpy's per-call dispatch isn't worth it below the crossover.
+    const ZEROCOPY_MINMAX_NUMPY_MIN_LEN: usize = 4096;
+    if input.len() >= ZEROCOPY_MINMAX_NUMPY_MIN_LEN {
+        return Ok(F64MinMaxFastPath::DelegateToNumpy);
+    }
     let ndim = shape.len();
 
     let (outer, axis_len, inner, out_shape): (usize, usize, usize, Vec<usize>) = match axis {
