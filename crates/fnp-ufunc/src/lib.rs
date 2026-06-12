@@ -19835,7 +19835,16 @@ impl UFuncArray {
             // order). Blocks never share an output index, so this is conflict-free
             // and identical for any thread/chunk count.
             let threads = rayon::current_num_threads();
-            let chunk = (full_len / (threads * 2)).max(m).max(1);
+            // Target ~2 blocks per thread for load balance. The old `.max(m)` floor
+            // forced chunk >= kernel length, which for a LARGE kernel (m comparable to
+            // full_len) collapsed the split to a handful of blocks and left most cores
+            // idle (e.g. m=20000, full_len=120000 -> only 6 blocks on a 16-thread box).
+            // Chunk size never affects the result (each output index is owned by exactly
+            // one block and keeps its ascending-i accumulation, per the comment above),
+            // so drop the m floor; a small constant floor avoids degenerate tiny blocks.
+            // Small/medium kernels are unchanged because full_len/(threads*2) already
+            // meets or exceeds them, so the floor never binds there.
+            let chunk = (full_len / (threads * 2)).max(64);
             full.par_chunks_mut(chunk).enumerate().for_each(|(c, out)| {
                 let lo = c * chunk;
                 let hi = lo + out.len();
