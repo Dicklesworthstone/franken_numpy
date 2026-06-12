@@ -33171,7 +33171,7 @@ fn fft_shift_impl(
     py: Python<'_>,
     x: Py<PyAny>,
     axes: Option<Py<PyAny>>,
-    inverse: bool,
+    _inverse: bool,
     numpy_name: &'static str,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
@@ -33188,92 +33188,14 @@ fn fft_shift_impl(
             .unbind())
     };
 
-    let array = match extract_precise_numeric_array(py, x.bind(py), numpy_name) {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let shape = array.shape();
-    let ndim = shape.len() as isize;
-    // Determine the axes list and per-axis shift counts.
-    let (shifts, ax_list): (Vec<isize>, Vec<isize>) = match axes.as_ref() {
-        None => {
-            let list: Vec<isize> = (0..ndim).collect();
-            let shifts: Vec<isize> = shape
-                .iter()
-                .map(|&d| {
-                    let mut s = (d / 2) as isize;
-                    if inverse {
-                        s = -s;
-                    }
-                    s
-                })
-                .collect();
-            (shifts, list)
-        }
-        Some(value) => {
-            let bound = value.bind(py);
-            if bound.is_none() {
-                let list: Vec<isize> = (0..ndim).collect();
-                let shifts: Vec<isize> = shape
-                    .iter()
-                    .map(|&d| {
-                        let mut s = (d / 2) as isize;
-                        if inverse {
-                            s = -s;
-                        }
-                        s
-                    })
-                    .collect();
-                (shifts, list)
-            } else if let Ok(single) = bound.extract::<i64>() {
-                let ax = single as isize;
-                let normalized = if ax < 0 { ax + ndim } else { ax };
-                if normalized < 0 || normalized >= ndim {
-                    return fallback();
-                }
-                let dim = shape[normalized as usize];
-                let mut s = (dim / 2) as isize;
-                if inverse {
-                    s = -s;
-                }
-                (vec![s], vec![ax])
-            } else if let Ok(multi) = bound.extract::<Vec<i64>>() {
-                let mut shifts = Vec::with_capacity(multi.len());
-                for &ax in &multi {
-                    let normalized = if ax < 0 {
-                        ax as isize + ndim
-                    } else {
-                        ax as isize
-                    };
-                    if normalized < 0 || normalized >= ndim {
-                        return fallback();
-                    }
-                    let dim = shape[normalized as usize];
-                    let mut s = (dim / 2) as isize;
-                    if inverse {
-                        s = -s;
-                    }
-                    shifts.push(s);
-                }
-                (shifts, multi.into_iter().map(|a| a as isize).collect())
-            } else {
-                return fallback();
-            }
-        }
-    };
-
-    let result = if ax_list.len() == 1 {
-        match array.roll(shifts[0], Some(ax_list[0])) {
-            Ok(result) => result,
-            Err(_) => return fallback(),
-        }
-    } else {
-        match array.roll_multi(&shifts, &ax_list) {
-            Ok(result) => result,
-            Err(_) => return fallback(),
-        }
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // Passthrough to np.fft.{i}fftshift. The native roll-based path
+    // (UFuncArray::roll/roll_multi) matches numpy's algorithm — a circular shift is
+    // a pure data move — but pays the Py<->Rust bridge's per-call full-size
+    // allocations (extracted Vec + rolled buffer + exported buffer), running
+    // 14-72x slower on non-trivial arrays (1M f64: native 13.1ms vs numpy 0.18ms;
+    // even N=1000 is 1.24x). A circular shift can at best tie numpy, so route to
+    // numpy — same rationale as sort/norm/partition. Parity is exact (it IS numpy).
+    fallback()
 }
 
 #[pyfunction]
