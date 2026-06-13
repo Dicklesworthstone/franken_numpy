@@ -40,10 +40,10 @@ use fnp_ufunc::{
     FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError, MaskedArray, UFuncArray, UnaryOp,
     arctan2 as ufunc_arctan2, bitwise_and as ufunc_bitwise_and,
     bitwise_count as ufunc_bitwise_count, bitwise_or as ufunc_bitwise_or,
-    bitwise_xor as ufunc_bitwise_xor, copysign as ufunc_copysign, divide as ufunc_divide,
+    bitwise_xor as ufunc_bitwise_xor, divide as ufunc_divide,
     divmod_arrays as ufunc_divmod, equal as ufunc_equal, float_power as ufunc_float_power,
-    fmax as ufunc_fmax, fmin as ufunc_fmin, fmod as ufunc_fmod, frexp as ufunc_frexp,
-    greater as ufunc_greater, greater_equal as ufunc_greater_equal, heaviside as ufunc_heaviside,
+    fmax as ufunc_fmax, fmin as ufunc_fmin, frexp as ufunc_frexp,
+    greater as ufunc_greater, greater_equal as ufunc_greater_equal,
     hypot as ufunc_hypot, invert as ufunc_invert, isneginf as ufunc_isneginf,
     isposinf as ufunc_isposinf, ldexp as ufunc_ldexp, left_shift as ufunc_left_shift,
     less as ufunc_less, less_equal as ufunc_less_equal, logaddexp as ufunc_logaddexp,
@@ -36145,6 +36145,17 @@ fn try_zerocopy_f64_argextreme(
     if cells.is_empty() {
         return Ok(None);
     }
+    // numpy's argmin/argmax is a single fused SIMD pass; this path copies the whole
+    // buffer into an owned Vec and THEN scans it (two passes over memory), ~2.5x
+    // behind numpy past a few KiB (measured fnp/numpy 2.48x@16k, 2.63x@1M). Delegate
+    // large arrays to numpy — same first-occurrence tie-break and first-NaN
+    // semantics (the scalar path also defers to numpy on NaN). Tiny arrays keep the
+    // native scan (numpy's per-call dispatch isn't worth it below the crossover).
+    const ARGEXTREME_NUMPY_MIN_LEN: usize = 4096;
+    if cells.len() >= ARGEXTREME_NUMPY_MIN_LEN {
+        let fname = if take_max { "argmax" } else { "argmin" };
+        return Ok(Some(numpy.getattr(fname)?.call1((a,))?.unbind()));
+    }
     // Tight contiguous read of the buffer into an owned f64 Vec (a memcpy-shaped
     // loop the compiler vectorizes), so the SIMD kernel gets real aligned vector
     // loads instead of per-element cell reads.
@@ -38783,6 +38794,21 @@ fn ptp(
         && let Some(result) = try_zerocopy_int_ptp_axis(py, a.bind(py), ax)?
     {
         return Ok(result);
+    }
+
+    // Large f64 full reduction: the native max−min over an owned f64 Vec is ~3.8x
+    // behind numpy's fused SIMD ptp (measured 2.82x@16k, 3.79x@1M). Delegate to numpy
+    // — byte-identical result. Tiny arrays and the per-axis/int cases keep native.
+    if axis_val.is_none() {
+        let ab = a.bind(py);
+        let size = ab
+            .getattr("size")
+            .ok()
+            .and_then(|s| s.extract::<usize>().ok())
+            .unwrap_or(0);
+        if size >= 4096 && numpy_dtype_is_f64(py, ab) {
+            return fallback();
+        }
     }
 
     // Extract input array
