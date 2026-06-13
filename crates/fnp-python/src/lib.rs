@@ -36675,6 +36675,109 @@ fn try_zerocopy_lastaxis_argextreme(
     Ok(Some(reshaped.unbind()))
 }
 
+// Zero-copy NON-last-axis argmin/argmax over a C-contiguous f64 ndarray (e.g.
+// argmin(M, axis=0)). Runs a per-inner (best value, best index) accumulator DOWN
+// the axis, reading rows sequentially off the borrowed buffer (cache-friendly vs
+// the strided per-column scan the native path does, and skipping the whole-array
+// extract). The strict `<` (argmin) / `>` (argmax) keeps the FIRST occurrence on
+// ties — matching numpy, and correct for signed zeros (compared equal). The
+// branchless select lets the per-inner value/index update autovectorize. NaN
+// cannot be ordered this way (numpy has its own first-NaN-wins arg semantics), so
+// any NaN defers the whole call. The contiguous last axis is handled elsewhere.
+fn try_zerocopy_f64_argextreme_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(ax) = axis else {
+        return Ok(None);
+    };
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len();
+    if ndim < 2 {
+        return Ok(None);
+    }
+    let norm = if ax < 0 { ax + ndim as isize } else { ax };
+    if norm < 0 || norm as usize >= ndim - 1 {
+        return Ok(None); // non-last axis only; the last axis is handled separately
+    }
+    let k = norm as usize;
+    let axis_len = shape[k];
+    if axis_len == 0 {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let outer: usize = shape[..k].iter().product();
+    let inner: usize = shape[k + 1..].iter().product();
+    let lane = axis_len * inner;
+    let mut indices = vec![0i64; outer * inner];
+    let mut best_val = vec![0.0f64; inner];
+    let mut any_nan = false;
+    for o in 0..outer {
+        let base = o * lane;
+        // Seed from row 0 (its index is already 0 in `indices`).
+        for (bv, c) in best_val.iter_mut().zip(cells[base..base + inner].iter()) {
+            let v = c.get();
+            *bv = v;
+            any_nan |= v != v;
+        }
+        let idx_out = &mut indices[o * inner..o * inner + inner];
+        for r in 1..axis_len {
+            let row = &cells[base + r * inner..base + r * inner + inner];
+            let ri = r as i64;
+            if take_max {
+                for ((bv, oi), c) in best_val.iter_mut().zip(idx_out.iter_mut()).zip(row) {
+                    let v = c.get();
+                    any_nan |= v != v;
+                    let better = v > *bv;
+                    *oi = if better { ri } else { *oi };
+                    *bv = if better { v } else { *bv };
+                }
+            } else {
+                for ((bv, oi), c) in best_val.iter_mut().zip(idx_out.iter_mut()).zip(row) {
+                    let v = c.get();
+                    any_nan |= v != v;
+                    let better = v < *bv;
+                    *oi = if better { ri } else { *oi };
+                    *bv = if better { v } else { *bv };
+                }
+            }
+        }
+    }
+    if any_nan {
+        return Ok(None);
+    }
+    let mut out_shape: Vec<usize> = shape[..k].to_vec();
+    out_shape.extend_from_slice(&shape[k + 1..]);
+    let flat = numpy_array_from_slice(py, &numpy, &indices, "intp")?;
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let reshaped = flat.call_method1("reshape", (&output_shape,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
+}
+
 // Arg reductions
 // Native Rust argmax with fallback for unsupported parameters.
 #[pyfunction]
@@ -36752,6 +36855,10 @@ fn argmax(
     // per-axis extract_precise → reduce_argmax path was ~3x (f64) to ~50x (int64)
     // slower than numpy.
     if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a.bind(py), axis_val, true)? {
+        return Ok(out);
+    }
+    // Zero-copy non-last-axis f64 fast path (e.g. argmax(M, axis=0)): see argmin.
+    if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a.bind(py), axis_val, true)? {
         return Ok(out);
     }
 
@@ -36850,6 +36957,12 @@ fn argmin(
     // per-axis extract_precise → reduce_argmin path was ~3x (f64) to ~50x (int64)
     // slower than numpy.
     if let Some(out) = try_zerocopy_lastaxis_argextreme(py, a.bind(py), axis_val, false)? {
+        return Ok(out);
+    }
+    // Zero-copy non-last-axis f64 fast path (e.g. argmin(M, axis=0)): the per-axis
+    // extract_precise → reduce_argmin path copies the whole array then scans
+    // strided per-column (~2.8x numpy on a 1000x1000). Defers NaN to numpy.
+    if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a.bind(py), axis_val, false)? {
         return Ok(out);
     }
 

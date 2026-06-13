@@ -380,3 +380,57 @@ print(fnp_raised == np_raised == True)
     );
     Ok(())
 }
+
+/// Locks the zero-copy NON-LAST-AXIS argmin/argmax (try_zerocopy_f64_argextreme_axis):
+/// deterministic 2-D and 3-D f64 arrays argmin/argmax'd over axis 0 (and a middle
+/// axis), with ties, signed zeros, and +-inf, byte-identical to numpy plus a sha256
+/// golden over the index bytes. Strict < / > keeps the first occurrence (numpy).
+#[test]
+fn argextreme_nonlast_axis_matches_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_argmin_script(
+        r#"
+import hashlib
+s = 0x9E3779B97F4A7C15
+def nxt():
+    global s
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    return s
+A = np.empty((130, 71), dtype=np.float64)
+for i in range(130):
+    for j in range(71):
+        A[i, j] = ((nxt() >> 11) / (1 << 53)) * 10.0 - 5.0
+A[3:9, 4] = 0.0      # ties (first occurrence wins)
+A[20, ::7] = -0.0
+A[40, ::11] = np.inf
+A[60, ::13] = -np.inf
+B = np.empty((11, 13, 9), dtype=np.float64)
+for x in np.ndindex(11, 13, 9):
+    B[x] = ((nxt() >> 11) / (1 << 53)) * 6.0 - 3.0
+h = hashlib.sha256()
+allmatch = True
+for (arr, ax) in ((A, 0), (B, 0), (B, 1)):
+    for fn, nf in ((fnp.argmin, np.argmin), (fnp.argmax, np.argmax)):
+        r = np.asarray(fn(arr, axis=ax))
+        e = np.asarray(nf(arr, axis=ax))
+        if r.shape != e.shape or r.dtype != e.dtype or r.tobytes() != e.tobytes():
+            allmatch = False
+        h.update(r.tobytes())
+print(allmatch)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "non-last-axis argmin/argmax must be byte-identical to numpy"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "436e581a3c34495e239c10ccffb40f1e00bfa370817878ac05dacac96726b0e0",
+        "argextreme non-last-axis golden sha256 drifted"
+    );
+    Ok(())
+}
