@@ -4441,41 +4441,70 @@ fn hessenberg_qr_iter(h: &mut [f64], mut z: Option<&mut [f64]>, n: usize) {
 
                 // Left: P·H on rows k..k+nr, columns [colstart, n).
                 let colstart = if k > lo { k - 1 } else { lo };
-                for j in colstart..n {
-                    let w0 = h[k * n + j];
-                    let w1 = h[(k + 1) * n + j];
-                    let w2 = if nr == 3 { h[(k + 2) * n + j] } else { 0.0 };
-                    let td = tau * (w0 + v1 * w1 + v2 * w2);
-                    h[k * n + j] = w0 - td;
-                    h[(k + 1) * n + j] = w1 - td * v1;
-                    if nr == 3 {
-                        h[(k + 2) * n + j] = w2 - td * v2;
+                if nr == 3 {
+                    let row0_base = k * n;
+                    let row1_base = (k + 1) * n;
+                    let row2_base = (k + 2) * n;
+                    let (before_row2, from_row2) = h.split_at_mut(row2_base);
+                    let row2 = &mut from_row2[..n];
+                    let (before_row1, from_row1) = before_row2.split_at_mut(row1_base);
+                    let row1 = &mut from_row1[..n];
+                    let row0 = &mut before_row1[row0_base..row0_base + n];
+                    for j in colstart..n {
+                        let w0 = row0[j];
+                        let w1 = row1[j];
+                        let w2 = row2[j];
+                        let td = tau * (w0 + v1 * w1 + v2 * w2);
+                        row0[j] = w0 - td;
+                        row1[j] = w1 - td * v1;
+                        row2[j] = w2 - td * v2;
+                    }
+                } else {
+                    let row0_base = k * n;
+                    let row1_base = (k + 1) * n;
+                    let (before_row1, from_row1) = h.split_at_mut(row1_base);
+                    let row1 = &mut from_row1[..n];
+                    let row0 = &mut before_row1[row0_base..row0_base + n];
+                    for j in colstart..n {
+                        let w0 = row0[j];
+                        let w1 = row1[j];
+                        let td = tau * (w0 + v1 * w1);
+                        row0[j] = w0 - td;
+                        row1[j] = w1 - td * v1;
                     }
                 }
                 // Right: H·P on columns k..k+nr, rows [0, rowend).
                 let rowend = (k + nr + 1).min(p);
-                for i in 0..rowend {
-                    let w0 = h[i * n + k];
-                    let w1 = h[i * n + k + 1];
-                    let w2 = if nr == 3 { h[i * n + k + 2] } else { 0.0 };
-                    let td = tau * (w0 + v1 * w1 + v2 * w2);
-                    h[i * n + k] = w0 - td;
-                    h[i * n + k + 1] = w1 - td * v1;
+                for row in h.chunks_mut(n).take(rowend) {
+                    let w0 = row[k];
+                    let w1 = row[k + 1];
                     if nr == 3 {
-                        h[i * n + k + 2] = w2 - td * v2;
+                        let w2 = row[k + 2];
+                        let td = tau * (w0 + v1 * w1 + v2 * w2);
+                        row[k] = w0 - td;
+                        row[k + 1] = w1 - td * v1;
+                        row[k + 2] = w2 - td * v2;
+                    } else {
+                        let td = tau * (w0 + v1 * w1);
+                        row[k] = w0 - td;
+                        row[k + 1] = w1 - td * v1;
                     }
                 }
                 // Schur-vector accumulation: Z·P on columns k..k+nr, all rows.
                 if let Some(ref mut z) = z {
-                    for i in 0..n {
-                        let w0 = z[i * n + k];
-                        let w1 = z[i * n + k + 1];
-                        let w2 = if nr == 3 { z[i * n + k + 2] } else { 0.0 };
-                        let td = tau * (w0 + v1 * w1 + v2 * w2);
-                        z[i * n + k] = w0 - td;
-                        z[i * n + k + 1] = w1 - td * v1;
+                    for row in z.chunks_mut(n) {
+                        let w0 = row[k];
+                        let w1 = row[k + 1];
                         if nr == 3 {
-                            z[i * n + k + 2] = w2 - td * v2;
+                            let w2 = row[k + 2];
+                            let td = tau * (w0 + v1 * w1 + v2 * w2);
+                            row[k] = w0 - td;
+                            row[k + 1] = w1 - td * v1;
+                            row[k + 2] = w2 - td * v2;
+                        } else {
+                            let td = tau * (w0 + v1 * w1);
+                            row[k] = w0 - td;
+                            row[k + 1] = w1 - td * v1;
                         }
                     }
                 }
@@ -11038,6 +11067,41 @@ mod tests {
             "not conjugate: im0={}, im1={}",
             eigs[1],
             eigs[3]
+        );
+    }
+
+    #[test]
+    fn eig_nxn_general_output_matches_golden_sha256() {
+        let n = 24usize;
+        let mut seed = 0x58d4_9017_2ad3_6cabu64;
+        let matrix: Vec<f64> = (0..n * n)
+            .map(|idx| {
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                let random = ((seed >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0;
+                let row = idx / n;
+                let col = idx % n;
+                if row == col {
+                    random + (row as f64 + 1.0) * 0.03125
+                } else {
+                    random
+                }
+            })
+            .collect();
+        let eigenvalues = eig_nxn(&matrix, n).expect("eig_nxn deterministic general matrix");
+        let mut digest = Sha256::new();
+        for value in &eigenvalues {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "b18b30e93428dc2b8d8fad2a4c97893b7ee9eeec595acab6e5d4c82bee703b33",
+            "eig_nxn general-matrix golden digest drifted"
         );
     }
 
