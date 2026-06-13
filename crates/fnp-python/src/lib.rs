@@ -13934,7 +13934,7 @@ fn take(
 // SIMD-popcount gap. Count is order-independent ⇒ bit-identical. `a_u8` must be the
 // contiguous uint8 view; `input` its byte slice (for the < 8 tail). Returns None to
 // fall back if the uint64 view (alignment / non-contiguity) fails.
-fn swar_count_nonzero_bool(
+fn swar_count_nonzero_byte(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a_u8: &Bound<'_, PyAny>,
@@ -13955,9 +13955,18 @@ fn swar_count_nonzero_bool(
         let Some(words) = buf.as_slice(py) else {
             return Ok(None);
         };
-        const ONES: u64 = 0x0101_0101_0101_0101;
+        // Set the 0x80 bit of every NONZERO byte, then popcount. A byte is nonzero
+        // iff its high bit is set OR its low 7 bits are nonzero; (low7 + 0x7F) sets
+        // the byte's high bit exactly when low7 != 0 and cannot carry into the next
+        // byte (low7 <= 0x7F, so low7 + 0x7F <= 0xFE). Exact for every 1-byte dtype
+        // (bool/int8/uint8), unlike the subtract-based has-zero trick whose borrow
+        // can falsely flag an adjacent byte.
+        const LOW7: u64 = 0x7F7F_7F7F_7F7F_7F7F;
+        const HIGH: u64 = 0x8080_8080_8080_8080;
         for w in words.iter() {
-            count += (w.get().wrapping_mul(ONES) >> 56) as usize;
+            let x = w.get();
+            let nz = (x & HIGH) | (((x & LOW7).wrapping_add(LOW7)) & HIGH);
+            count += nz.count_ones() as usize;
         }
     }
     for c in &input[main..] {
@@ -14002,7 +14011,7 @@ fn try_zerocopy_count_nonzero(
             const SWAR_MIN: usize = 1 << 16;
             if axis.is_none()
                 && input.len() >= SWAR_MIN
-                && let Some(count) = swar_count_nonzero_bool(py, &numpy, &a_u8, input)?
+                && let Some(count) = swar_count_nonzero_byte(py, &numpy, &a_u8, input)?
             {
                 return Ok(Some(
                     numpy.getattr("int64")?.call1((count as i64,))?.unbind(),
@@ -14036,6 +14045,15 @@ fn try_zerocopy_count_nonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
+            const SWAR_MIN: usize = 1 << 16;
+            if axis.is_none()
+                && input.len() >= SWAR_MIN
+                && let Some(count) = swar_count_nonzero_byte(py, &numpy, &view, input)?
+            {
+                return Ok(Some(
+                    numpy.getattr("int64")?.call1((count as i64,))?.unbind(),
+                ));
+            }
             count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u8| v != 0)
         }
         ("i" | "u", 2) => {
