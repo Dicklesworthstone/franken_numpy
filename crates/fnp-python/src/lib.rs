@@ -38675,6 +38675,143 @@ fn try_zerocopy_int_ptp_axis(
     Ok(Some(output))
 }
 
+// Zero-copy per-axis float64 ptp (explicit axis). f64 is not Ord, so it cannot
+// use ptp_axis_typed; this mirrors it with the native ptp's NaN-propagating,
+// keep-2nd min/max so the result is byte-identical to numpy. The whole point is
+// to skip extract_precise_numeric_array, which copies the ENTIRE input into an
+// owned Vec<f64> (an ~8MB memcpy at [1000,1000] — measured ~3x the kernel cost);
+// here the reduction runs straight off the borrowed PyBuffer. ptp's value is
+// invariant to signed-zero tie order (mx - mn is never -0.0: that needs
+// mx=-0.0 AND mn=+0.0 at once, impossible since mx>=mn; and x-(±0)=x), so the
+// running keep-1st accumulators below produce the same f64 bits as the keep-2nd
+// scalar reference. Returns None (caller falls through) for non-f64, f32/f16,
+// 0-d / out-of-range / zero-length axis, non-contiguous, or non-ndarray input.
+fn try_zerocopy_f64_ptp_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let ndim = shape.len() as isize;
+    if ndim == 0 {
+        return Ok(None);
+    }
+    let norm = if axis < 0 { axis + ndim } else { axis };
+    if norm < 0 || norm >= ndim {
+        return Ok(None);
+    }
+    let ax = norm as usize;
+    let axis_len = shape[ax];
+    if axis_len == 0 {
+        return Ok(None); // numpy raises on a zero-length reduction axis; defer
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let outer: usize = shape[..ax].iter().product();
+    let inner: usize = shape[ax + 1..].iter().product();
+    let mut out_shape = shape.clone();
+    out_shape.remove(ax);
+    let out_elems = outer * inner;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (out_elems,), Some(&kwargs))?;
+    if out_elems > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let lane = axis_len * inner;
+        if inner == 1 {
+            // Last axis: each output cell reduces a contiguous run.
+            for (o, slot) in output.iter().enumerate().take(outer) {
+                let l = &input[o * lane..o * lane + axis_len];
+                let first = l[0].get();
+                let (mut mn, mut mx) = (first, first);
+                let mut any_nan = first.is_nan();
+                for c in &l[1..] {
+                    let v = c.get();
+                    any_nan |= v.is_nan();
+                    if v < mn {
+                        mn = v;
+                    }
+                    if v > mx {
+                        mx = v;
+                    }
+                }
+                slot.set(if any_nan { f64::NAN } else { mx - mn });
+            }
+        } else {
+            // Strided (non-last axis): per-inner running max/min/nan accumulators so
+            // the slab update vectorizes ACROSS inner.
+            let mut mxv = vec![0.0f64; inner];
+            let mut mnv = vec![0.0f64; inner];
+            let mut nanv = vec![false; inner];
+            for o in 0..outer {
+                let obase = o * lane;
+                for (i, c) in input[obase..obase + inner].iter().enumerate() {
+                    let v = c.get();
+                    mxv[i] = v;
+                    mnv[i] = v;
+                    nanv[i] = v.is_nan();
+                }
+                for a_idx in 1..axis_len {
+                    let slab = &input[obase + a_idx * inner..obase + a_idx * inner + inner];
+                    for (((m, n), nf), c) in mxv
+                        .iter_mut()
+                        .zip(mnv.iter_mut())
+                        .zip(nanv.iter_mut())
+                        .zip(slab.iter())
+                    {
+                        let v = c.get();
+                        *nf |= v.is_nan();
+                        if v > *m {
+                            *m = v;
+                        }
+                        if v < *n {
+                            *n = v;
+                        }
+                    }
+                }
+                let outl = &output[o * inner..o * inner + inner];
+                for (((slot, &m), &n), &nf) in outl
+                    .iter()
+                    .zip(mxv.iter())
+                    .zip(mnv.iter())
+                    .zip(nanv.iter())
+                {
+                    slot.set(if nf { f64::NAN } else { m - n });
+                }
+            }
+        }
+    }
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if out_shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Peak-to-peak reduction (max - min) with native Rust fast path.
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=false))]
@@ -38737,6 +38874,15 @@ fn ptp(
     // wrapping difference, dtype-preserving. Bit-identical; skips the f64 extract.
     if let Some(ax) = axis_val
         && let Some(result) = try_zerocopy_int_ptp_axis(py, a.bind(py), ax)?
+    {
+        return Ok(result);
+    }
+    // Zero-copy per-axis float64 ptp (explicit axis): the native kernel is already
+    // at numpy parity, but extract_precise_numeric_array copies the whole input
+    // first (~8MB memcpy at [1000,1000] ≈ 3x the kernel). Reduce straight off the
+    // borrowed PyBuffer instead — byte-identical (ptp value is signed-zero invariant).
+    if let Some(ax) = axis_val
+        && let Some(result) = try_zerocopy_f64_ptp_axis(py, a.bind(py), ax)?
     {
         return Ok(result);
     }
