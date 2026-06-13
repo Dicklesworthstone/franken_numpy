@@ -8265,26 +8265,63 @@ fn try_zerocopy_f64_where(
         return Ok(None);
     }
     let cond_u8 = condition.call_method1("view", (numpy.getattr("uint8")?,))?;
-    let (Ok(cond_buffer), Ok(x_buffer), Ok(y_buffer)) = (
-        PyBuffer::<u8>::get(&cond_u8),
-        PyBuffer::<f64>::get(x),
-        PyBuffer::<f64>::get(y),
-    ) else {
+    let Ok(cond_buffer) = PyBuffer::<u8>::get(&cond_u8) else {
         return Ok(None);
     };
-    let (Some(cond_in), Some(x_in), Some(y_in)) = (
-        cond_buffer.as_slice(py),
-        x_buffer.as_slice(py),
-        y_buffer.as_slice(py),
-    ) else {
+    let Some(cond_in) = cond_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // No broadcasting: all three identical shapes so flat index i aligns.
-    if cond_buffer.shape() != x_buffer.shape() || x_buffer.shape() != y_buffer.shape() {
+    let shape: Vec<usize> = cond_buffer.shape().to_vec();
+    let n = cond_in.len();
+
+    // Each of x, y is either a same-shape f64 ndarray (zero-copy buffer) or an
+    // f64-extractable scalar (so `np.where(cond, arr, 0.0)` / scalar branches keep
+    // the single-pass path instead of falling back to numpy). Buffers are held in
+    // locals to keep them alive for the slice borrows.
+    let x_buffer = PyBuffer::<f64>::get(x)
+        .ok()
+        .filter(|b| b.shape() == shape.as_slice());
+    let y_buffer = PyBuffer::<f64>::get(y)
+        .ok()
+        .filter(|b| b.shape() == shape.as_slice());
+    let x_scalar = if x_buffer.is_none() {
+        x.extract::<f64>().ok()
+    } else {
+        None
+    };
+    let y_scalar = if y_buffer.is_none() {
+        y.extract::<f64>().ok()
+    } else {
+        None
+    };
+    // Every operand must be classified (array or f64 scalar).
+    if (x_buffer.is_none() && x_scalar.is_none()) || (y_buffer.is_none() && y_scalar.is_none()) {
         return Ok(None);
     }
-    let shape: Vec<usize> = x_buffer.shape().to_vec();
-    let n = x_in.len();
+    // numpy's result dtype must be float64: an f64 array, or a FLOAT (not integer)
+    // scalar, on either side. Two integer scalars (np.where(c, 1, 0)) promote to
+    // int64, so defer those to numpy.
+    let x_is_float = x_buffer.is_some() || x.is_instance_of::<pyo3::types::PyFloat>();
+    let y_is_float = y_buffer.is_some() || y.is_instance_of::<pyo3::types::PyFloat>();
+    if !x_is_float && !y_is_float {
+        return Ok(None);
+    }
+    let x_in = match &x_buffer {
+        Some(b) => match b.as_slice(py) {
+            Some(s) => Some(s),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    let y_in = match &y_buffer {
+        Some(b) => match b.as_slice(py) {
+            Some(s) => Some(s),
+            None => return Ok(None),
+        },
+        None => None,
+    };
+    let xs = x_scalar.unwrap_or(0.0);
+    let ys = y_scalar.unwrap_or(0.0);
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
     let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
@@ -8295,17 +8332,31 @@ fn try_zerocopy_f64_where(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (((slot, cond_cell), x_cell), y_cell) in output
-            .iter()
-            .zip(cond_in.iter())
-            .zip(x_in.iter())
-            .zip(y_in.iter())
-        {
-            slot.set(if cond_cell.get() != 0 {
-                x_cell.get()
-            } else {
-                y_cell.get()
-            });
+        // Branch once on the operand shapes so each loop is a tight, bounds-check-free
+        // zipped blend (the arr/arr case is identical to the original fast path).
+        match (x_in, y_in) {
+            (Some(xa), Some(ya)) => {
+                for (((slot, c), xv), yv) in
+                    output.iter().zip(cond_in).zip(xa.iter()).zip(ya.iter())
+                {
+                    slot.set(if c.get() != 0 { xv.get() } else { yv.get() });
+                }
+            }
+            (Some(xa), None) => {
+                for ((slot, c), xv) in output.iter().zip(cond_in).zip(xa.iter()) {
+                    slot.set(if c.get() != 0 { xv.get() } else { ys });
+                }
+            }
+            (None, Some(ya)) => {
+                for ((slot, c), yv) in output.iter().zip(cond_in).zip(ya.iter()) {
+                    slot.set(if c.get() != 0 { xs } else { yv.get() });
+                }
+            }
+            (None, None) => {
+                for (slot, c) in output.iter().zip(cond_in) {
+                    slot.set(if c.get() != 0 { xs } else { ys });
+                }
+            }
         }
     }
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
@@ -51943,6 +51994,53 @@ mod tests {
             let expected = numpy.call_method("trapezoid", (y,), Some(&kwargs))?;
 
             assert_eq!(repr_string(actual.bind(py)), repr_string(&expected));
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn where_f64_scalar_branch_matches_numpy_value_and_dtype() {
+        // The single-pass where must accept scalar x/y (not just same-shape f64
+        // arrays) and match numpy's value AND result dtype — including the int/int
+        // scalar case that promotes to int64 (must defer, not coerce to f64).
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let np_where = numpy.getattr("where")?;
+            let fnp_where = module.getattr("where")?;
+            let array_equal = numpy.getattr("array_equal")?;
+            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((8_u64,))?;
+            let v = rng.getattr("standard_normal")?.call1((4096_i64,))?;
+            let cond = v.call_method1("__gt__", (0.0,))?;
+            // (description, x, y) where x/y are arbitrary python objects.
+            let f = |x: f64| -> Py<PyAny> { x.into_pyobject(py).unwrap().into_any().unbind() };
+            let i = |x: i64| -> Py<PyAny> { x.into_pyobject(py).unwrap().into_any().unbind() };
+            let arr = || v.clone().unbind();
+            let cases: Vec<(Py<PyAny>, Py<PyAny>)> = vec![
+                (arr(), f(0.0)),       // arr, float scalar -> f64
+                (f(5.0), arr()),       // float scalar, arr -> f64
+                (arr(), i(0)),         // arr, int scalar -> f64 (array dominates)
+                (f(1.0), f(0.0)),      // float, float -> f64
+                (f(1.0), i(0)),        // float, int -> f64
+                (i(1), i(0)),          // int, int -> int64 (MUST defer / match numpy)
+                (arr(), f(f64::NAN)),  // nan scalar
+            ];
+            for (x, y) in cases {
+                let ours = fnp_where.call1((cond.clone(), x.bind(py), y.bind(py)))?;
+                let theirs = np_where.call1((cond.clone(), x.bind(py), y.bind(py)))?;
+                let eq: bool = array_equal
+                    .call1((&ours, &theirs, true))
+                    .or_else(|_| array_equal.call1((&ours, &theirs)))?
+                    .extract()?;
+                assert!(eq, "where scalar branch value mismatch");
+                let od: String = ours.getattr("dtype")?.getattr("name")?.extract()?;
+                let td: String = theirs.getattr("dtype")?.getattr("name")?.extract()?;
+                assert_eq!(od, td, "where scalar branch dtype mismatch");
+            }
             Ok(())
         });
     }
