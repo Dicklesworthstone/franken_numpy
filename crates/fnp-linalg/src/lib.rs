@@ -3736,6 +3736,32 @@ const TRIDIAG_PANEL_NB: usize = 64;
 // a large matrix also stay serial.
 const TRIDIAG_MATVEC_PAR_MIN: usize = 1024;
 
+fn tridiag_symmetric_matvec_serial(
+    work: &[f64],
+    n: usize,
+    start: usize,
+    v: &[f64],
+    u: &mut [f64],
+) {
+    debug_assert_eq!(work.len(), n * n);
+    debug_assert_eq!(v.len(), n);
+    debug_assert_eq!(u.len(), n);
+    for ui in &mut u[start..n] {
+        *ui = 0.0;
+    }
+    for i in start..n {
+        let vi = v[i];
+        let row = &work[i * n..i * n + n];
+        let mut ui = u[i] + row[i] * vi;
+        for l in (i + 1)..n {
+            let a = row[l];
+            ui += a * v[l];
+            u[l] += a * vi;
+        }
+        u[i] = ui;
+    }
+}
+
 // Blocked symmetric tridiagonalization, values only (dsytrd/dlatrd shape). For
 // each width-nb panel, reduce nb columns producing reflectors V and vectors
 // W (w = tau·A·v − (tau²·vᵀAv/2)·v), computed from symmetric matvecs against the
@@ -3835,14 +3861,7 @@ fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>,
                         *ui = s;
                     });
             } else {
-                for i in (j + 1)..n {
-                    let row = &work[i * n + (j + 1)..i * n + n];
-                    let mut s = 0.0;
-                    for (k, &w) in row.iter().enumerate() {
-                        s += w * vcol[j + 1 + k];
-                    }
-                    u[i] = s;
-                }
+                tridiag_symmetric_matvec_serial(&work, n, j + 1, &vcol, &mut u);
             }
             for q in 0..t {
                 let (mut wtv, mut vtv) = (0.0, 0.0);
@@ -12444,6 +12463,42 @@ mod tests {
             }
             assert!(max_recon < 1e-9, "Q·T·Q^T=A err {max_recon:e} (n={n})");
             assert!(max_orth < 1e-9, "Q orthogonality err {max_orth:e} (n={n})");
+        }
+    }
+
+    #[test]
+    fn tridiag_symmetric_matvec_serial_matches_full_row_dot_bits() {
+        let n = 96usize;
+        let start = 13usize;
+        let mut a = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in i..n {
+                let value = if i == j {
+                    (n + i + 1) as f64
+                } else {
+                    ((i * 131 + j * 17 + 7) % 97) as f64 / 97.0 - 0.5
+                };
+                a[i * n + j] = value;
+                a[j * n + i] = value;
+            }
+        }
+        let mut v = vec![0.0f64; n];
+        for (i, vi) in v.iter_mut().enumerate().skip(start) {
+            *vi = ((i * 19 + 3) % 43) as f64 / 23.0 - 0.8;
+        }
+        let mut half = vec![123.0f64; n];
+        let mut full = vec![123.0f64; n];
+        super::tridiag_symmetric_matvec_serial(&a, n, start, &v, &mut half);
+        for i in start..n {
+            let row = &a[i * n + start..i * n + n];
+            let mut s = 0.0;
+            for (offset, &entry) in row.iter().enumerate() {
+                s += entry * v[start + offset];
+            }
+            full[i] = s;
+        }
+        for i in start..n {
+            assert_eq!(half[i].to_bits(), full[i].to_bits(), "row {i} drifted");
         }
     }
 
