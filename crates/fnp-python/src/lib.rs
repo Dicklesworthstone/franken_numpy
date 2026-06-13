@@ -26091,7 +26091,7 @@ fn array_equal(
     // the whole `a1 == a2` boolean array then reduces, and our extract path copies
     // both inputs first; reading the buffers directly and bailing on the first
     // mismatch skips both. Different shapes are not equal (no broadcast).
-    if let Some(verdict) = try_zerocopy_f64_array_equal(py, a1.bind(py), a2.bind(py), equal_nan)? {
+    if let Some(verdict) = try_zerocopy_array_equal(py, a1.bind(py), a2.bind(py), equal_nan)? {
         return Ok(pyo3::types::PyBool::new(py, verdict)
             .to_owned()
             .into_any()
@@ -26119,26 +26119,65 @@ fn array_equal(
         .unbind())
 }
 
-// Zero-copy np.array_equal for two f64 ndarrays. Returns Some(verdict) when both
-// are f64 buffers (the fast path applies), else None to fall through. Mismatched
-// shapes => Some(false). Early-exits on the first unequal pair; with equal_nan,
-// NaN positions count as equal only if both are NaN.
-fn try_zerocopy_f64_array_equal(
+// Early-exit `all(x == y)` over two same-shape f64 buffers, with equal_nan.
+fn f64_buffers_all_equal(
     py: Python<'_>,
+    b1: &PyBuffer<f64>,
+    b2: &PyBuffer<f64>,
+    equal_nan: bool,
+) -> Option<bool> {
+    if b1.shape() != b2.shape() {
+        return Some(false);
+    }
+    let (s1, s2) = (b1.as_slice(py)?, b2.as_slice(py)?);
+    Some(if equal_nan {
+        s1.iter().zip(s2.iter()).all(|(x, y)| {
+            let (x, y) = (x.get(), y.get());
+            x == y || (x.is_nan() && y.is_nan())
+        })
+    } else {
+        s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get())
+    })
+}
+
+// Early-exit `all(x == y)` over two same-shape f32 buffers, with equal_nan.
+fn f32_buffers_all_equal(
+    py: Python<'_>,
+    b1: &PyBuffer<f32>,
+    b2: &PyBuffer<f32>,
+    equal_nan: bool,
+) -> Option<bool> {
+    if b1.shape() != b2.shape() {
+        return Some(false);
+    }
+    let (s1, s2) = (b1.as_slice(py)?, b2.as_slice(py)?);
+    Some(if equal_nan {
+        s1.iter().zip(s2.iter()).all(|(x, y)| {
+            let (x, y) = (x.get(), y.get());
+            x == y || (x.is_nan() && y.is_nan())
+        })
+    } else {
+        s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get())
+    })
+}
+
+// Early-exit byte equality of two same-shape ndarrays viewed as uint8. For
+// integer / bool dtypes value equality IS bit equality, so this is exact (and
+// NaN/signed-zero — the only cases where bytes and values disagree — cannot occur).
+// Different shapes (after the uint8 view, which scales the last axis by itemsize)
+// => not equal. A non-contiguous view that numpy rejects returns None to defer.
+fn int_bytes_all_equal(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
     a1: &Bound<'_, PyAny>,
     a2: &Bound<'_, PyAny>,
-    equal_nan: bool,
 ) -> PyResult<Option<bool>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a1.is_exact_instance(&ndarray_type)
-        || !a2.is_exact_instance(&ndarray_type)
-        || !numpy_dtype_is_f64(py, a1)
-        || !numpy_dtype_is_f64(py, a2)
-    {
+    let u8t = numpy.getattr("uint8")?;
+    let (Ok(v1), Ok(v2)) = (a1.call_method1("view", (&u8t,)), a2.call_method1("view", (&u8t,)))
+    else {
         return Ok(None);
-    }
-    let (Ok(b1), Ok(b2)) = (PyBuffer::<f64>::get(a1), PyBuffer::<f64>::get(a2)) else {
+    };
+    let (Ok(b1), Ok(b2)) = (PyBuffer::<u8>::get(&v1), PyBuffer::<u8>::get(&v2)) else {
         return Ok(None);
     };
     if b1.shape() != b2.shape() {
@@ -26147,15 +26186,51 @@ fn try_zerocopy_f64_array_equal(
     let (Some(s1), Some(s2)) = (b1.as_slice(py), b2.as_slice(py)) else {
         return Ok(None);
     };
-    let verdict = if equal_nan {
-        s1.iter().zip(s2.iter()).all(|(x, y)| {
-            let (x, y) = (x.get(), y.get());
-            x == y || (x.is_nan() && y.is_nan())
-        })
-    } else {
-        s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get())
-    };
-    Ok(Some(verdict))
+    Ok(Some(s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get())))
+}
+
+// Zero-copy np.array_equal for two SAME-dtype numeric ndarrays (int/uint/bool of
+// any width via a byte compare, plus f32/f64 with equal_nan). Returns Some(verdict)
+// when the fast path applies, else None to fall through. Mismatched shapes =>
+// Some(false). Early-exits on the first unequal pair.
+fn try_zerocopy_array_equal(
+    py: Python<'_>,
+    a1: &Bound<'_, PyAny>,
+    a2: &Bound<'_, PyAny>,
+    equal_nan: bool,
+) -> PyResult<Option<bool>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a1.is_exact_instance(&ndarray_type) || !a2.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let d1 = a1.getattr("dtype")?;
+    let d2 = a2.getattr("dtype")?;
+    let k1 = d1.getattr("kind")?.extract::<String>()?;
+    let k2 = d2.getattr("kind")?.extract::<String>()?;
+    let i1 = d1.getattr("itemsize")?.extract::<usize>()?;
+    let i2 = d2.getattr("itemsize")?.extract::<usize>()?;
+    // Require identical dtypes; mixed dtypes promote (numpy compares after a cast),
+    // so defer those to the numpy/native path.
+    if k1 != k2 || i1 != i2 {
+        return Ok(None);
+    }
+    match k1.as_str() {
+        "i" | "u" | "b" => int_bytes_all_equal(py, &numpy, a1, a2),
+        "f" if i1 == 8 => {
+            let (Ok(b1), Ok(b2)) = (PyBuffer::<f64>::get(a1), PyBuffer::<f64>::get(a2)) else {
+                return Ok(None);
+            };
+            Ok(f64_buffers_all_equal(py, &b1, &b2, equal_nan))
+        }
+        "f" if i1 == 4 => {
+            let (Ok(b1), Ok(b2)) = (PyBuffer::<f32>::get(a1), PyBuffer::<f32>::get(a2)) else {
+                return Ok(None);
+            };
+            Ok(f32_buffers_all_equal(py, &b1, &b2, equal_nan))
+        }
+        _ => Ok(None),
+    }
 }
 
 // Zero-copy early-exit np.array_equiv for f64: same-shape f64 ndarrays, or an f64
@@ -26163,34 +26238,43 @@ fn try_zerocopy_f64_array_equal(
 // equal_nan, so NaN never equals anything (a plain `==` fold bails on the first
 // mismatch). Different-shape array pairs (genuine broadcasting like (N,1) vs (N,))
 // and all other dtypes return None to defer to numpy / the native path.
-fn try_zerocopy_f64_array_equiv(
+fn try_zerocopy_array_equiv(
     py: Python<'_>,
     a1: &Bound<'_, PyAny>,
     a2: &Bound<'_, PyAny>,
 ) -> PyResult<Option<bool>> {
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
-    let a1_arr = a1.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, a1);
-    let a2_arr = a2.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, a2);
-    if a1_arr && a2_arr {
-        let (Ok(b1), Ok(b2)) = (PyBuffer::<f64>::get(a1), PyBuffer::<f64>::get(a2)) else {
-            return Ok(None);
-        };
-        if b1.shape() != b2.shape() {
-            // Equal-or-broadcastable shapes (and the broadcast verdict) are left to
-            // numpy; only the identical-shape case is a straight element compare.
+    let a1_nd = a1.is_exact_instance(&ndarray_type);
+    let a2_nd = a2.is_exact_instance(&ndarray_type);
+    if a1_nd && a2_nd {
+        // Same dtype + SAME shape: a straight element/byte compare (array_equiv has
+        // no equal_nan). Different (possibly broadcastable) shapes are deferred to
+        // numpy, which decides the broadcast verdict. Pre-checking the shapes here
+        // means try_zerocopy_array_equal's own mismatch case (Some(false)) is never
+        // reached, so its result is the genuine verdict.
+        let d1 = a1.getattr("dtype")?;
+        let d2 = a2.getattr("dtype")?;
+        if d1.getattr("kind")?.extract::<String>()? != d2.getattr("kind")?.extract::<String>()?
+            || d1.getattr("itemsize")?.extract::<usize>()?
+                != d2.getattr("itemsize")?.extract::<usize>()?
+        {
             return Ok(None);
         }
-        let (Some(s1), Some(s2)) = (b1.as_slice(py), b2.as_slice(py)) else {
+        let sh1 = a1.getattr("shape")?.extract::<Vec<usize>>()?;
+        let sh2 = a2.getattr("shape")?.extract::<Vec<usize>>()?;
+        if sh1 != sh2 {
             return Ok(None);
-        };
-        return Ok(Some(s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get())));
+        }
+        return try_zerocopy_array_equal(py, a1, a2, false);
     }
     // f64 ndarray vs an f64-extractable scalar (broadcast the scalar): all elements
     // must equal it. A NaN scalar makes the result false, matching numpy.
-    let (arr, scalar) = if a1_arr {
+    let a1_f64 = a1_nd && numpy_dtype_is_f64(py, a1);
+    let a2_f64 = a2_nd && numpy_dtype_is_f64(py, a2);
+    let (arr, scalar) = if a1_f64 {
         (a1, a2.extract::<f64>().ok())
-    } else if a2_arr {
+    } else if a2_f64 {
         (a2, a1.extract::<f64>().ok())
     } else {
         return Ok(None);
@@ -26224,7 +26308,7 @@ fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAn
     // Zero-copy early-exit for same-shape f64 arrays or f64-array-vs-scalar, before
     // the cold extract + broadcast-compare. numpy's array_equiv builds the full
     // comparison too, so the differ case returns almost immediately.
-    if let Some(verdict) = try_zerocopy_f64_array_equiv(py, a1.bind(py), a2.bind(py))? {
+    if let Some(verdict) = try_zerocopy_array_equiv(py, a1.bind(py), a2.bind(py))? {
         return Ok(pyo3::types::PyBool::new(py, verdict)
             .to_owned()
             .into_any()
