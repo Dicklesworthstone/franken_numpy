@@ -3753,10 +3753,27 @@ fn tridiag_symmetric_matvec_serial(
         let vi = v[i];
         let row = &work[i * n..i * n + n];
         let mut ui = u[i] + row[i] * vi;
-        for l in (i + 1)..n {
+        let mut l = i + 1;
+        while l + 4 <= n {
             let a = row[l];
             ui += a * v[l];
             u[l] += a * vi;
+            let a = row[l + 1];
+            ui += a * v[l + 1];
+            u[l + 1] += a * vi;
+            let a = row[l + 2];
+            ui += a * v[l + 2];
+            u[l + 2] += a * vi;
+            let a = row[l + 3];
+            ui += a * v[l + 3];
+            u[l + 3] += a * vi;
+            l += 4;
+        }
+        while l < n {
+            let a = row[l];
+            ui += a * v[l];
+            u[l] += a * vi;
+            l += 1;
         }
         u[i] = ui;
     }
