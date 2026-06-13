@@ -4297,25 +4297,29 @@ fn hessenberg_reduce(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
             }
         }
         // Right: H = H * P
-        for row in 0..n {
+        for row in h.chunks_mut(n) {
+            let row_tail = &mut row[(j + 1)..n];
+            let v_tail = &v[(j + 1)..n];
             let mut dot = 0.0;
-            for i in (j + 1)..n {
-                dot += v[i] * h[row * n + i];
+            for (&vi, &hi) in v_tail.iter().zip(row_tail.iter()) {
+                dot += vi * hi;
             }
             let f = scale * dot;
-            for i in (j + 1)..n {
-                h[row * n + i] -= f * v[i];
+            for (hi, &vi) in row_tail.iter_mut().zip(v_tail.iter()) {
+                *hi -= f * vi;
             }
         }
         // Q = Q * P
-        for row in 0..n {
+        for row in q.chunks_mut(n) {
+            let row_tail = &mut row[(j + 1)..n];
+            let v_tail = &v[(j + 1)..n];
             let mut dot = 0.0;
-            for i in (j + 1)..n {
-                dot += v[i] * q[row * n + i];
+            for (&vi, &qi) in v_tail.iter().zip(row_tail.iter()) {
+                dot += vi * qi;
             }
             let f = scale * dot;
-            for i in (j + 1)..n {
-                q[row * n + i] -= f * v[i];
+            for (qi, &vi) in row_tail.iter_mut().zip(v_tail.iter()) {
+                *qi -= f * vi;
             }
         }
     }
@@ -4382,14 +4386,16 @@ fn hessenberg_reduce_values(a: &[f64], n: usize) -> Vec<f64> {
             }
         }
         // Right: H = H * P
-        for row in 0..n {
+        for row in h.chunks_mut(n) {
+            let row_tail = &mut row[(j + 1)..n];
+            let v_tail = &v[(j + 1)..n];
             let mut dot = 0.0;
-            for i in (j + 1)..n {
-                dot += v[i] * h[row * n + i];
+            for (&vi, &hi) in v_tail.iter().zip(row_tail.iter()) {
+                dot += vi * hi;
             }
             let f = scale * dot;
-            for i in (j + 1)..n {
-                h[row * n + i] -= f * v[i];
+            for (hi, &vi) in row_tail.iter_mut().zip(v_tail.iter()) {
+                *hi -= f * vi;
             }
         }
     }
