@@ -17157,9 +17157,31 @@ fn nan_to_num(
     )? {
         return Ok(out);
     }
-    let x = extract_precise_numeric_array(py, x.bind(py), "nan_to_num(x)")?;
-    let (default_posinf, default_neginf) = x.nan_to_num_default_inf_replacements();
-    let result = x.nan_to_num(
+    let x_arr = match extract_precise_numeric_array(py, x.bind(py), "nan_to_num(x)") {
+        Ok(arr) => arr,
+        Err(_) => {
+            // Complex (and any other dtype the native real kernel cannot represent)
+            // is handled by numpy.nan_to_num — it replaces NaN/+-inf in BOTH the real
+            // and imaginary parts, applying nan/posinf/neginf to each. Delegate with
+            // the same args so the result is exact; genuinely invalid input (e.g. a
+            // string array) reproduces numpy's own error.
+            let numpy = py.import("numpy")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("nan", nan)?;
+            if let Some(p) = posinf {
+                kwargs.set_item("posinf", p)?;
+            }
+            if let Some(n) = neginf {
+                kwargs.set_item("neginf", n)?;
+            }
+            return Ok(numpy
+                .getattr("nan_to_num")?
+                .call((x.bind(py),), Some(&kwargs))?
+                .unbind());
+        }
+    };
+    let (default_posinf, default_neginf) = x_arr.nan_to_num_default_inf_replacements();
+    let result = x_arr.nan_to_num(
         nan,
         posinf.unwrap_or(default_posinf),
         neginf.unwrap_or(default_neginf),

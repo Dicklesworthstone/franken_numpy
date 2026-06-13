@@ -495,3 +495,59 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
 
     Ok(())
 }
+
+/// Locks nan_to_num on COMPLEX input (the parity fix that delegates complex to
+/// numpy): complex128/complex64 with NaN/+-inf in real and/or imag parts, default
+/// and custom nan/posinf/neginf, must be BYTE-identical to numpy.nan_to_num plus a
+/// sha256 golden over the result bytes.
+#[test]
+fn nan_to_num_complex_matches_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+c128 = np.array([1+np.nan*1j, np.inf+2j, -np.inf-np.inf*1j, 3+4j,
+                 np.nan+np.nan*1j, 5-6j], dtype=np.complex128)
+c64 = c128.astype(np.complex64)
+big = np.empty((40, 30), dtype=np.complex128)
+s = 0x2545F4914F6CDD1D
+for x in np.ndindex(40, 30):
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    re = ((s >> 11) / (1 << 53)) * 8.0 - 4.0
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    im = ((s >> 11) / (1 << 53)) * 8.0 - 4.0
+    big[x] = complex(re, im)
+big.flat[::53] = np.nan
+big.flat[7::101] = np.inf + 1j * np.nan
+big.flat[11::97] = (-np.inf) * (1 + 1j)
+h = hashlib.sha256()
+allmatch = True
+specs = [
+    (c128, {}), (c128, dict(nan=7.0, posinf=100.0, neginf=-100.0)), (c128, dict(nan=-1.5)),
+    (c64, {}), (c64, dict(nan=2.0, posinf=9.0)),
+    (big, dict(nan=0.5)), (big, {}),
+]
+for arr, kw in specs:
+    r = np.asarray(fnp.nan_to_num(arr, **kw))
+    e = np.asarray(np.nan_to_num(arr, **kw))
+    if r.shape != e.shape or r.dtype != e.dtype or r.tobytes() != e.tobytes():
+        allmatch = False
+    h.update(r.tobytes())
+print(allmatch)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "complex nan_to_num must be byte-identical to numpy.nan_to_num"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "afec0558d929a14467c727f8aa576d4156f88a360e19e32d3725157550ba94a9",
+        "complex nan_to_num golden sha256 drifted"
+    );
+    Ok(())
+}
