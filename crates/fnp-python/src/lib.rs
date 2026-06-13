@@ -13927,6 +13927,45 @@ fn take(
 // uint8 first. Returns Ok(None) — caller falls through — for keepdims, a tuple /
 // out-of-range axis, a 0-d array, or any other dtype / non-contiguous / non-ndarray
 // input.
+// SWAR flat (axis=None) count_nonzero for a BOOL ndarray. Each byte is exactly
+// 0x00 or 0x01, so a uint64 view reads 8 booleans per word and the byte-sum trick
+// `(w * 0x01..01) >> 56` yields their popcount exactly (sum <= 8, no inter-byte
+// carry) — 8x fewer per-element reads than the byte loop, which closed numpy's
+// SIMD-popcount gap. Count is order-independent ⇒ bit-identical. `a_u8` must be the
+// contiguous uint8 view; `input` its byte slice (for the < 8 tail). Returns None to
+// fall back if the uint64 view (alignment / non-contiguity) fails.
+fn swar_count_nonzero_bool(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a_u8: &Bound<'_, PyAny>,
+    input: &[pyo3::buffer::ReadOnlyCell<u8>],
+) -> PyResult<Option<usize>> {
+    let n = input.len();
+    let main = (n / 8) * 8;
+    let mut count = 0usize;
+    if main >= 8 {
+        let flat = a_u8.call_method0("ravel")?;
+        let sub = flat.get_item(pyo3::types::PySlice::new(py, 0, main as isize, 1))?;
+        let Ok(u64_view) = sub.call_method1("view", (numpy.getattr("uint64")?,)) else {
+            return Ok(None);
+        };
+        let Ok(buf) = PyBuffer::<u64>::get(&u64_view) else {
+            return Ok(None);
+        };
+        let Some(words) = buf.as_slice(py) else {
+            return Ok(None);
+        };
+        const ONES: u64 = 0x0101_0101_0101_0101;
+        for w in words.iter() {
+            count += (w.get().wrapping_mul(ONES) >> 56) as usize;
+        }
+    }
+    for c in &input[main..] {
+        count += usize::from(c.get() != 0);
+    }
+    Ok(Some(count))
+}
+
 fn try_zerocopy_count_nonzero(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -13960,6 +13999,15 @@ fn try_zerocopy_count_nonzero(
             let Some(input) = buffer.as_slice(py) else {
                 return Ok(None);
             };
+            const SWAR_MIN: usize = 1 << 16;
+            if axis.is_none()
+                && input.len() >= SWAR_MIN
+                && let Some(count) = swar_count_nonzero_bool(py, &numpy, &a_u8, input)?
+            {
+                return Ok(Some(
+                    numpy.getattr("int64")?.call1((count as i64,))?.unbind(),
+                ));
+            }
             count_nonzero_typed(py, &numpy, input, &shape, axis, |v: u8| v != 0)
         }
         ("f", 8) => {
