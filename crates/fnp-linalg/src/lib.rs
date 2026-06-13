@@ -4323,6 +4323,80 @@ fn hessenberg_reduce(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
     (h, q)
 }
 
+/// Reduce a general n x n matrix to upper Hessenberg form when Schur vectors
+/// are not needed. The H updates intentionally match `hessenberg_reduce`; only
+/// the independent Q accumulation is skipped.
+fn hessenberg_reduce_values(a: &[f64], n: usize) -> Vec<f64> {
+    let mut h = a.to_vec();
+
+    let mut v = vec![0.0; n];
+    // Scratch for the cache-friendly two-pass left Householder transform.
+    let mut dbuf = vec![0.0; n];
+    let mut f_vec = vec![0.0; n];
+    for j in 0..n.saturating_sub(2) {
+        // Householder to zero column j below row j+1 (entries j+2..n)
+        let col_norm = {
+            let mut s = 0.0;
+            for i in (j + 1)..n {
+                s += h[i * n + j] * h[i * n + j];
+            }
+            s.sqrt()
+        };
+        if col_norm < f64::EPSILON {
+            continue;
+        }
+
+        let sign = if h[(j + 1) * n + j] >= 0.0 { 1.0 } else { -1.0 };
+        for vi in &mut v[..=j] {
+            *vi = 0.0;
+        }
+        for (i, vi) in v[(j + 1)..n].iter_mut().enumerate() {
+            *vi = h[(i + j + 1) * n + j];
+        }
+        v[j + 1] += sign * col_norm;
+
+        let v_norm_sq: f64 = v[(j + 1)..].iter().map(|x| x * x).sum();
+        if v_norm_sq == 0.0 {
+            continue;
+        }
+        let scale = 2.0 / v_norm_sq;
+
+        for dc in dbuf.iter_mut() {
+            *dc = 0.0;
+        }
+        for i in (j + 1)..n {
+            let vi = v[i];
+            let row = &h[i * n..i * n + n];
+            for (dc, &hv) in dbuf.iter_mut().zip(row.iter()) {
+                *dc += vi * hv;
+            }
+        }
+        for (fc, &dc) in f_vec.iter_mut().zip(dbuf.iter()) {
+            *fc = scale * dc;
+        }
+        for i in (j + 1)..n {
+            let vi = v[i];
+            let row = &mut h[i * n..i * n + n];
+            for (hv, &fc) in row.iter_mut().zip(f_vec.iter()) {
+                *hv -= fc * vi;
+            }
+        }
+        // Right: H = H * P
+        for row in 0..n {
+            let mut dot = 0.0;
+            for i in (j + 1)..n {
+                dot += v[i] * h[row * n + i];
+            }
+            let f = scale * dot;
+            for i in (j + 1)..n {
+                h[row * n + i] -= f * v[i];
+            }
+        }
+    }
+
+    h
+}
+
 /// Explicit single-shift QR iteration on upper Hessenberg form with deflation.
 /// Converges to quasi-upper-triangular (real Schur) form.
 /// If `z` is `Some`, accumulates the Schur vectors.
@@ -4640,7 +4714,7 @@ pub fn eig_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     }
 
     // Hessenberg reduction + implicit shifted QR
-    let (mut h, _q) = hessenberg_reduce(a, n);
+    let mut h = hessenberg_reduce_values(a, n);
     hessenberg_qr_iter(&mut h, None, n);
 
     // Extract eigenvalues from quasi-upper-triangular (real Schur) form
@@ -11130,6 +11204,44 @@ mod tests {
             hex, "b18b30e93428dc2b8d8fad2a4c97893b7ee9eeec595acab6e5d4c82bee703b33",
             "eig_nxn general-matrix golden digest drifted"
         );
+    }
+
+    #[test]
+    fn hessenberg_reduce_values_matches_full_hessenberg_bits() {
+        for &(n, seed0) in &[
+            (1usize, 0x12ab_34cd_55aa_0000u64),
+            (2usize, 0x12ab_34cd_55aa_0004u64),
+            (3usize, 0x12ab_34cd_55aa_0001u64),
+            (8usize, 0x12ab_34cd_55aa_0002u64),
+            (24usize, 0x12ab_34cd_55aa_0003u64),
+        ] {
+            let mut seed = seed0;
+            let matrix: Vec<f64> = (0..n * n)
+                .map(|idx| {
+                    seed = seed
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let random = ((seed >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0;
+                    let row = idx / n;
+                    let col = idx % n;
+                    if row == col {
+                        random + (row as f64 + 1.0) * 0.0625
+                    } else {
+                        random + ((row as isize - col as isize) as f64) * 0.001
+                    }
+                })
+                .collect();
+            let (full_h, _q) = super::hessenberg_reduce(&matrix, n);
+            let values_h = super::hessenberg_reduce_values(&matrix, n);
+            assert_eq!(values_h.len(), full_h.len());
+            for (idx, (full, values)) in full_h.iter().zip(&values_h).enumerate() {
+                assert_eq!(
+                    values.to_bits(),
+                    full.to_bits(),
+                    "H bit drift at n={n} flat index {idx}"
+                );
+            }
+        }
     }
 
     #[test]
