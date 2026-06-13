@@ -57134,7 +57134,7 @@ mod tests {
 
             let x1 = numeric_array(py, vec![1.0, -2.5, 3.0], "float64");
             let x2 = numeric_array(py, vec![-4.0, 5.0, -6.0], "float64");
-            let actual = copysign(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = copysign(py, &PyTuple::new(py, [&x1, &x2])?, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("copysign")?.call1((x1, x2))?;
@@ -57159,7 +57159,7 @@ mod tests {
 
             let x1 = numeric_array(py, vec![vec![1.0, -1.0], vec![0.0, -0.0]], "float64");
             let x2 = numeric_array(py, vec![-0.0, 0.0], "float64");
-            let actual = copysign(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = copysign(py, &PyTuple::new(py, [&x1, &x2])?, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("copysign")?.call1((x1, x2))?;
