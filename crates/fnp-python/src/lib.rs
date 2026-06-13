@@ -34932,8 +34932,35 @@ fn try_zerocopy_unravel_c(
 #[pyfunction]
 #[pyo3(signature = (n, ndim=2))]
 fn diag_indices(py: Python<'_>, n: usize, ndim: usize) -> PyResult<Py<PyAny>> {
-    let (arrays, _) = UFuncArray::diag_indices(n, ndim);
-    build_numpy_tuple_from_ufuncs(py, &arrays)
+    build_diag_indices_tuple(py, n, ndim)
+}
+
+fn build_diag_indices_tuple(py: Python<'_>, n: usize, ndim: usize) -> PyResult<Py<PyAny>> {
+    if n > i64::MAX as usize {
+        return Err(PyOverflowError::new_err(
+            "diag_indices n is too large for int64 indices",
+        ));
+    }
+
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "int64")?;
+    let idx = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let buffer = PyBuffer::<i64>::get(&idx)?;
+        let slice = buffer
+            .as_mut_slice(py)
+            .ok_or_else(|| PyValueError::new_err("diag_indices output buffer is not writable"))?;
+        for (i, cell) in slice.iter().enumerate() {
+            cell.set(i as i64);
+        }
+    }
+
+    let mut outputs = Vec::with_capacity(ndim);
+    for _ in 0..ndim {
+        outputs.push(idx.clone());
+    }
+    Ok(PyTuple::new(py, outputs)?.into_any().unbind())
 }
 
 #[pyfunction]
@@ -34950,8 +34977,7 @@ fn diag_indices_from(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
         ));
     }
 
-    let (arrays, _) = UFuncArray::diag_indices(n, shape.len());
-    build_numpy_tuple_from_ufuncs(py, &arrays)
+    build_diag_indices_tuple(py, n, shape.len())
 }
 
 #[pyfunction]
@@ -60976,8 +61002,35 @@ mod tests {
             let expected_default = numpy.call_method1("diag_indices", (4,))?;
             let expected_ndim = numpy.call_method1("diag_indices", (2, 3))?;
 
-            assert_index_tuple_matches_numpy(actual_default.bind(py), &expected_default)?;
-            assert_index_tuple_matches_numpy(actual_ndim.bind(py), &expected_ndim)?;
+            let actual_default = actual_default.bind(py);
+            let actual_ndim = actual_ndim.bind(py);
+
+            assert_index_tuple_matches_numpy(actual_default, &expected_default)?;
+            assert_index_tuple_matches_numpy(actual_ndim, &expected_ndim)?;
+
+            let actual_default_tuple = actual_default.cast::<PyTuple>()?;
+            let expected_default_tuple = expected_default.cast::<PyTuple>()?;
+            let actual_first = actual_default_tuple.get_item(0)?;
+            let actual_second = actual_default_tuple.get_item(1)?;
+            let expected_first = expected_default_tuple.get_item(0)?;
+            let expected_second = expected_default_tuple.get_item(1)?;
+            assert_eq!(
+                actual_first.is(&actual_second),
+                expected_first.is(&expected_second)
+            );
+
+            let mut proof_bytes = Vec::new();
+            for tuple in [actual_default, actual_ndim] {
+                let tuple = tuple.cast::<PyTuple>()?;
+                for item in tuple.try_iter()? {
+                    append_numpy_array_bytes(py, &item?, &mut proof_bytes)?;
+                }
+            }
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest,
+                "f362e73836d5463b91e46d3a479aca143971b6b25c642508c484421670d28cb3"
+            );
             Ok(())
         });
     }

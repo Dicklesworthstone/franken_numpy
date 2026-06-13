@@ -758,6 +758,47 @@ fn bench_concat_hstack_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_indices_construction_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_indices_construction_boundary");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(2));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_diag_indices = module
+            .getattr("diag_indices")
+            .expect("fnp_python.diag_indices");
+        let numpy_diag_indices = numpy.getattr("diag_indices").expect("numpy.diag_indices");
+
+        for n in [64_i64, 4096_i64] {
+            group.bench_function(format!("fnp_diag_indices_{n}_2d"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_diag_indices
+                        .call1((n,))
+                        .expect("fnp diag_indices benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_diag_indices_{n}_2d"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_diag_indices
+                        .call1((n,))
+                        .expect("numpy diag_indices benchmark call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_char_ascii_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_char_ascii_boundary");
     group.sample_size(10);
@@ -1272,6 +1313,7 @@ criterion_group!(
     bench_putmask_boundary,
     bench_shift_boundary,
     bench_concat_hstack_boundary,
+    bench_indices_construction_boundary,
     bench_char_ascii_boundary,
     bench_average_nansum_axis_boundary,
     bench_histogram_boundary,
