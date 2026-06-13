@@ -24462,24 +24462,40 @@ impl UFuncArray {
                 integer_sidecar: Some(IntegerSidecar::U64(result)),
             };
         }
-        let mut a = self.values.clone();
-        a.sort_by(nan_last_cmp);
-        Self::dedup_sorted_float_set_values(&mut a);
-        let mut b = other.values.clone();
-        b.sort_by(nan_last_cmp);
-        Self::dedup_sorted_float_set_values(&mut b);
-
-        // Elements in a but not b, plus elements in b but not a
-        let mut result: Vec<f64> = a
-            .iter()
-            .filter(|v| v.is_nan() || !Self::float_membership_contains(&b, **v))
-            .chain(
-                b.iter()
-                    .filter(|v| v.is_nan() || !Self::float_membership_contains(&a, **v)),
-            )
-            .copied()
-            .collect();
-        result.sort_by(nan_last_cmp);
+        // Integer-key sort-unique both operands, then a single linear two-pointer
+        // merge emits the symmetric difference already in sorted order — replacing
+        // the prior THREE comparator-closure sorts plus two per-element binary-search
+        // passes (the ~5x-vs-numpy hot spot). Each side's NaN (≤1 after dedup) is
+        // unique to that side (NaN ≠ NaN), so it is appended once per side that had
+        // one, matching numpy (np.setxor1d([nan],[nan]) == [nan, nan]).
+        let (a, a_nan) = sorted_dedup_float_set(&self.values);
+        let (b, b_nan) = sorted_dedup_float_set(&other.values);
+        let mut result: Vec<f64> = Vec::with_capacity(a.len() + b.len());
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < a.len() && j < b.len() {
+            match Self::float_membership_cmp(a[i], b[j]) {
+                std::cmp::Ordering::Less => {
+                    result.push(a[i]);
+                    i += 1;
+                }
+                std::cmp::Ordering::Greater => {
+                    result.push(b[j]);
+                    j += 1;
+                }
+                std::cmp::Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        result.extend_from_slice(&a[i..]);
+        result.extend_from_slice(&b[j..]);
+        if a_nan {
+            result.push(f64::NAN);
+        }
+        if b_nan {
+            result.push(f64::NAN);
+        }
         let n = result.len();
         Self {
             shape: vec![n],
