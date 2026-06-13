@@ -15393,6 +15393,12 @@ fn try_zerocopy_bytes_concatenate(
     if items.is_empty() {
         return Ok(None);
     }
+    // items[0].dtype is read up front to pick the mover width; guard that it is an
+    // ndarray first, else array_like inputs (Python lists) raise AttributeError
+    // here instead of falling through to the general extract / numpy path.
+    if !items[0].is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
     let dt0 = items[0].getattr("dtype")?;
     let kind = dt0.getattr("kind")?.extract::<String>()?;
     let itemsize = dt0.getattr("itemsize")?.extract::<usize>()?;
@@ -81273,6 +81279,20 @@ mod tests {
                 .call1((&ours_i, &theirs_i))?
                 .extract()?;
             assert!(eq_i, "convolve int lists must match numpy (int dtype)");
+
+            // concatenate must accept array_like (Python list) elements, not just
+            // ndarrays — the bytes fast path used to read items[0].dtype unguarded.
+            let seq = PyList::new(
+                py,
+                [
+                    PyList::new(py, [1.0_f64, 2.0, 3.0])?,
+                    PyList::new(py, [4.0_f64, 5.0, 6.0])?,
+                ],
+            )?;
+            let ours_c = module.getattr("concatenate")?.call1((seq.clone(),))?;
+            let theirs_c = numpy.getattr("concatenate")?.call1((seq.clone(),))?;
+            let okc: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
+            assert!(okc, "concatenate(list-of-lists) must match numpy");
 
             Ok(())
         });
