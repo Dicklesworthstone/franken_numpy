@@ -38170,6 +38170,125 @@ fn try_zerocopy_f64_argextreme_axis(
     Ok(Some(reshaped.unbind()))
 }
 
+// Generic typed core for integer argmax/argmin over a NON-last axis. Mirrors the
+// f64 non-last-axis path but for total-order integer types (no NaN): row 0 seeds
+// each column's running best, later rows update on a STRICT improvement so the
+// FIRST occurrence wins (numpy's tie rule). Walking rows sequentially with a
+// branchless per-column update vectorizes and is cache-friendly, replacing the
+// cold extract_precise -> reduce_argmax strided scan (~2.6x slower for int ax0).
+fn argextreme_axis_int_typed<T>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    shape: &[usize],
+    k: usize,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + PartialOrd,
+{
+    let axis_len = shape[k];
+    if axis_len == 0 {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.is_empty() {
+        return Ok(None);
+    }
+    let outer: usize = shape[..k].iter().product();
+    let inner: usize = shape[k + 1..].iter().product();
+    let lane = axis_len * inner;
+    let mut indices = vec![0i64; outer * inner];
+    let mut best_val: Vec<T> = vec![cells[0].get(); inner];
+    for o in 0..outer {
+        let base = o * lane;
+        for (bv, c) in best_val.iter_mut().zip(cells[base..base + inner].iter()) {
+            *bv = c.get();
+        }
+        let idx_out = &mut indices[o * inner..o * inner + inner];
+        for r in 1..axis_len {
+            let row = &cells[base + r * inner..base + r * inner + inner];
+            let ri = r as i64;
+            if take_max {
+                for ((bv, oi), c) in best_val.iter_mut().zip(idx_out.iter_mut()).zip(row) {
+                    let v = c.get();
+                    let better = v > *bv;
+                    *oi = if better { ri } else { *oi };
+                    *bv = if better { v } else { *bv };
+                }
+            } else {
+                for ((bv, oi), c) in best_val.iter_mut().zip(idx_out.iter_mut()).zip(row) {
+                    let v = c.get();
+                    let better = v < *bv;
+                    *oi = if better { ri } else { *oi };
+                    *bv = if better { v } else { *bv };
+                }
+            }
+        }
+    }
+    let mut out_shape: Vec<usize> = shape[..k].to_vec();
+    out_shape.extend_from_slice(&shape[k + 1..]);
+    let flat = numpy_array_from_slice(py, numpy, &indices, "intp")?;
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let reshaped = flat.call_method1("reshape", (&output_shape,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
+}
+
+// Dispatch the integer non-last-axis argmax/argmin by dtype width.
+fn try_zerocopy_int_argextreme_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(ax) = axis else {
+        return Ok(None);
+    };
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len();
+    if ndim < 2 {
+        return Ok(None);
+    }
+    let norm = if ax < 0 { ax + ndim as isize } else { ax };
+    if norm < 0 || norm as usize >= ndim - 1 {
+        return Ok(None); // non-last axis only; the last axis is handled separately
+    }
+    let k = norm as usize;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize) {
+        ("i", 1) => argextreme_axis_int_typed::<i8>(py, &numpy, a, &shape, k, take_max),
+        ("i", 2) => argextreme_axis_int_typed::<i16>(py, &numpy, a, &shape, k, take_max),
+        ("i", 4) => argextreme_axis_int_typed::<i32>(py, &numpy, a, &shape, k, take_max),
+        ("i", 8) => argextreme_axis_int_typed::<i64>(py, &numpy, a, &shape, k, take_max),
+        ("u", 1) => argextreme_axis_int_typed::<u8>(py, &numpy, a, &shape, k, take_max),
+        ("u", 2) => argextreme_axis_int_typed::<u16>(py, &numpy, a, &shape, k, take_max),
+        ("u", 4) => argextreme_axis_int_typed::<u32>(py, &numpy, a, &shape, k, take_max),
+        ("u", 8) => argextreme_axis_int_typed::<u64>(py, &numpy, a, &shape, k, take_max),
+        _ => Ok(None),
+    }
+}
+
 // Arg reductions
 // Native Rust argmax with fallback for unsupported parameters.
 #[pyfunction]
@@ -38251,6 +38370,10 @@ fn argmax(
     }
     // Zero-copy non-last-axis f64 fast path (e.g. argmax(M, axis=0)): see argmin.
     if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a.bind(py), axis_val, true)? {
+        return Ok(out);
+    }
+    // Zero-copy non-last-axis integer fast path (e.g. argmax(int_M, axis=0)).
+    if let Some(out) = try_zerocopy_int_argextreme_axis(py, a.bind(py), axis_val, true)? {
         return Ok(out);
     }
 
@@ -38355,6 +38478,10 @@ fn argmin(
     // extract_precise → reduce_argmin path copies the whole array then scans
     // strided per-column (~2.8x numpy on a 1000x1000). Defers NaN to numpy.
     if let Some(out) = try_zerocopy_f64_argextreme_axis(py, a.bind(py), axis_val, false)? {
+        return Ok(out);
+    }
+    // Zero-copy non-last-axis integer fast path (e.g. argmin(int_M, axis=0)).
+    if let Some(out) = try_zerocopy_int_argextreme_axis(py, a.bind(py), axis_val, false)? {
         return Ok(out);
     }
 
