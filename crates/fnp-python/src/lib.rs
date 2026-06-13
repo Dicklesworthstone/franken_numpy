@@ -36624,6 +36624,166 @@ fn try_zerocopy_f64_minmax(
     Ok(F64MinMaxFastPath::Output(output))
 }
 
+// Generic typed core for zero-copy integer np.min/np.max (axis=None or one axis,
+// keepdims). Unlike the f64 path — which delegates to numpy because its
+// NaN-propagating, signed-zero-ordered fold can't autovectorize in safe Rust —
+// integer min/max is a TOTAL-ORDER reduction (no NaN, no signed zero), so
+// `acc.min/max(v)` is branchless and autovectorizes, hitting memory bandwidth.
+// The cold fallback widened ints to an f64 Vec and ran reduce_min/max's strided
+// per-column scan (~22-50x slower for an int axis reduction). inner==1 (last
+// axis / full reduction) folds each contiguous lane with a register accumulator;
+// inner>1 (non-last axis) folds ROW-WISE into a cache-resident per-column array.
+// min/max preserves the INPUT dtype and is order-independent, so the result is
+// bit-identical to numpy. C-contiguous gated; empty axis defers.
+fn minmax_int_typed<'py, T>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    axis: Option<isize>,
+    keepdims: bool,
+    take_min: bool,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + Ord + IntoPyObject<'py>,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let ndim = shape.len();
+    let fold = |acc: T, v: T| -> T {
+        if take_min {
+            if v < acc { v } else { acc }
+        } else if v > acc {
+            v
+        } else {
+            acc
+        }
+    };
+
+    let (outer, axis_len, inner, out_shape): (usize, usize, usize, Vec<usize>) = match axis {
+        None => {
+            let out_shape = if keepdims { vec![1; ndim] } else { Vec::new() };
+            (1, input.len(), 1, out_shape)
+        }
+        Some(ax) => {
+            let ndim_i = ndim as isize;
+            let norm = if ax < 0 { ax + ndim_i } else { ax };
+            if norm < 0 || norm >= ndim_i {
+                return Ok(None);
+            }
+            let axu = norm as usize;
+            let outer: usize = shape[..axu].iter().product();
+            let inner: usize = shape[axu + 1..].iter().product();
+            let mut out_shape = shape.clone();
+            if keepdims {
+                out_shape[axu] = 1;
+            } else {
+                out_shape.remove(axu);
+            }
+            (outer, shape[axu], inner, out_shape)
+        }
+    };
+    if axis_len == 0 || input.is_empty() {
+        // numpy raises on an empty min/max — let it produce the error.
+        return Ok(None);
+    }
+
+    let out_elems = outer * inner;
+    let dt = a.getattr("dtype")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", &dt)?;
+    let flat = numpy.call_method("empty", (out_elems,), Some(&kwargs))?;
+    if out_elems > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        if inner == 1 {
+            for (o, slot) in output.iter().enumerate() {
+                let base = o * axis_len;
+                let mut acc = input[base].get();
+                for k in 1..axis_len {
+                    acc = fold(acc, input[base + k].get());
+                }
+                slot.set(acc);
+            }
+        } else {
+            let lane = axis_len * inner;
+            let mut accs: Vec<T> = vec![input[0].get(); out_elems];
+            for o in 0..outer {
+                let obase = o * inner;
+                let ibase = o * lane;
+                let arow = &mut accs[obase..obase + inner];
+                for (i, ac) in arow.iter_mut().enumerate() {
+                    *ac = input[ibase + i].get();
+                }
+                for k in 1..axis_len {
+                    let in_a = ibase + k * inner;
+                    let arow = &mut accs[obase..obase + inner];
+                    for (i, ac) in arow.iter_mut().enumerate() {
+                        *ac = fold(*ac, input[in_a + i].get());
+                    }
+                }
+            }
+            for (slot, &v) in output.iter().zip(accs.iter()) {
+                slot.set(v);
+            }
+        }
+    }
+    if out_shape.is_empty() {
+        let zerod = flat.call_method1("reshape", (PyTuple::empty(py),))?;
+        return Ok(Some(zerod.get_item(())?.unbind()));
+    }
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
+// Dispatch zero-copy integer np.min/np.max by dtype width. Non-integer / non-
+// ndarray inputs return None so the caller's f64 fast path or numpy fallback runs.
+fn try_zerocopy_int_minmax(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    keepdims: bool,
+    take_min: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind != "i" && kind != "u" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize) {
+        ("i", 1) => minmax_int_typed::<i8>(py, &numpy, a, axis, keepdims, take_min),
+        ("i", 2) => minmax_int_typed::<i16>(py, &numpy, a, axis, keepdims, take_min),
+        ("i", 4) => minmax_int_typed::<i32>(py, &numpy, a, axis, keepdims, take_min),
+        ("i", 8) => minmax_int_typed::<i64>(py, &numpy, a, axis, keepdims, take_min),
+        ("u", 1) => minmax_int_typed::<u8>(py, &numpy, a, axis, keepdims, take_min),
+        ("u", 2) => minmax_int_typed::<u16>(py, &numpy, a, axis, keepdims, take_min),
+        ("u", 4) => minmax_int_typed::<u32>(py, &numpy, a, axis, keepdims, take_min),
+        ("u", 8) => minmax_int_typed::<u64>(py, &numpy, a, axis, keepdims, take_min),
+        _ => Ok(None),
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false, initial=None, **kwargs))]
 #[allow(clippy::too_many_arguments)]
@@ -36913,6 +37073,12 @@ fn py_min(
         F64MinMaxFastPath::NotApplicable => {}
     }
 
+    // Zero-copy integer min: total-order autovectorizing fold (the f64 path
+    // delegates to numpy, but native int min/max beats numpy's strided reduce).
+    if let Some(out) = try_zerocopy_int_minmax(py, a.bind(py), axis_val, keepdims, true)? {
+        return Ok(out);
+    }
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "min(a)") {
         Ok(arr) => arr,
@@ -37001,6 +37167,12 @@ fn py_max(
         F64MinMaxFastPath::Output(out) => return Ok(out),
         F64MinMaxFastPath::DelegateToNumpy => return fallback(),
         F64MinMaxFastPath::NotApplicable => {}
+    }
+
+    // Zero-copy integer max: total-order autovectorizing fold (the f64 path
+    // delegates to numpy, but native int min/max beats numpy's strided reduce).
+    if let Some(out) = try_zerocopy_int_minmax(py, a.bind(py), axis_val, keepdims, false)? {
+        return Ok(out);
     }
 
     // Extract input array
