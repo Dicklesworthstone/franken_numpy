@@ -22500,10 +22500,6 @@ fn percentile(
         Ok(array) => array,
         Err(_) => return fallback(),
     };
-    let q = match q.bind(py).extract::<f64>() {
-        Ok(value) => value,
-        Err(_) => return fallback(),
-    };
     let axis = match extract_axis_spec(py, axis_for_parse, "percentile") {
         Ok(None) => None,
         Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
@@ -22516,15 +22512,38 @@ fn percentile(
     if a.values().is_empty() {
         return fallback();
     }
-    let result = match a.percentile(q, axis) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
+    // Scalar q: one native percentile (parallel radix-select for large n).
+    if let Ok(q) = q.bind(py).extract::<f64>() {
+        let result = match a.percentile(q, axis) {
+            Ok(result) => result,
+            Err(_) => return fallback(),
+        };
+        let output = build_numpy_array_from_ufunc(py, &result)?;
+        if result.shape().is_empty() {
+            return Ok(output.bind(py).get_item(())?.unbind());
+        }
+        return Ok(output);
     }
-    Ok(output)
+    // 1-D array q with axis=None: numpy returns a (len(q),) array. Run one native
+    // percentile per q on the same in-memory array — each a parallel radix-select —
+    // instead of deferring the whole stack to numpy's serial multi-partition. (2-D q
+    // or q with an axis falls through: extract::<Vec<f64>> only matches a flat float
+    // sequence, and per-axis array-q output shaping is left to numpy.)
+    if axis.is_none() {
+        if let Ok(qs) = q.bind(py).extract::<Vec<f64>>() {
+            let mut vals = Vec::with_capacity(qs.len());
+            for &qi in &qs {
+                match a.percentile(qi, None) {
+                    Ok(result) if result.values().len() == 1 => vals.push(result.values()[0]),
+                    _ => return fallback(),
+                }
+            }
+            let result =
+                UFuncArray::new(vec![qs.len()], vals, DType::F64).map_err(map_ufunc_error)?;
+            return build_numpy_array_from_ufunc(py, &result);
+        }
+    }
+    fallback()
 }
 
 #[pyfunction]
