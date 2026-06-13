@@ -419,3 +419,51 @@ print(fnp_result == np_result and fnp_result == False)
     );
     Ok(())
 }
+
+/// Locks the block-folded full-reduction any/all fast path (block_any/all_u8/f64):
+/// a battery of bool and float64 arrays — all-false, all-true, scattered-true,
+/// NaN (truthy), -0.0 (falsy), single-element, large — with both any() and all(),
+/// each result must equal numpy. The concatenated truth string is sha256-pinned.
+#[test]
+fn any_all_block_fold_full_reduction_matches_numpy_and_golden() -> Result<(), String> {
+    let script = fnp_any_script(
+        r#"
+import hashlib
+def mk(kind):
+    if kind == 'b_allfalse': return np.zeros(70001, bool)
+    if kind == 'b_alltrue':  return np.ones(70001, bool)
+    if kind == 'b_scatter':  a=np.zeros(70001,bool); a[40000]=True; return a
+    if kind == 'b_early':    a=np.zeros(70001,bool); a[3]=True; return a
+    if kind == 'f_allzero':  return np.zeros(70001)
+    if kind == 'f_nan':      a=np.zeros(70001); a[50000]=np.nan; return a
+    if kind == 'f_negzero':  a=np.full(70001,-0.0); a[10]=1.0; return a
+    if kind == 'f_mixed':    a=np.zeros(70001); a[12345]=2.5; return a
+    if kind == 'one_true':   return np.array([True])
+    if kind == 'one_zero':   return np.array([0.0])
+bits = []
+for kind in ('b_allfalse','b_alltrue','b_scatter','b_early','f_allzero','f_nan','f_negzero','f_mixed','one_true','one_zero'):
+    a = mk(kind)
+    for fn, nf in ((fnp.any, np.any), (fnp.all, np.all)):
+        r = bool(fn(a)); e = bool(nf(a))
+        bits.append('1' if r == e else '0')
+        bits.append('T' if r else 'F')
+s = ''.join(bits)
+print(s.count('0') == 0)        # every fnp result matched numpy
+print(hashlib.sha256(s.encode()).hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "block-folded any/all must match numpy on every case"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "197f8d6fd5d3fab69542db049a4bfd91d454a35cdb964cbdbdd3142788eecc73",
+        "any/all block-fold golden sha256 drifted"
+    );
+    Ok(())
+}

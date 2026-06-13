@@ -13937,6 +13937,67 @@ fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
 // the short-circuit result is bit-identical to numpy; the f64 predicate x != 0.0
 // excludes +-0.0 and treats NaN as truthy, matching numpy. Skips the cold extract
 // Vec that the fallback path allocates.
+// Block-folded truthiness scan for a full reduction. A plain `iter().any()` /
+// `all()` SHORT-CIRCUITS, which blocks autovectorization — so the common all-False
+// `any` / all-True `all` case (e.g. `any(isnan)` returning False) degrades to a
+// scalar ~1-byte/cycle scan vs numpy's SIMD block scan. Folding each fixed block
+// with an OR / zero-OR (both autovectorize) and only branching once per block
+// keeps SIMD throughput AND a coarse early-exit. Truthiness is order-independent,
+// so the result is identical to the short-circuit form.
+const ANY_ALL_BLK: usize = 8192;
+
+fn block_any_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
+    for chunk in input.chunks(ANY_ALL_BLK) {
+        let mut acc = 0u8;
+        for c in chunk {
+            acc |= c.get();
+        }
+        if acc != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+fn block_all_u8(input: &[pyo3::buffer::ReadOnlyCell<u8>]) -> bool {
+    for chunk in input.chunks(ANY_ALL_BLK) {
+        let mut zero = 0u8;
+        for c in chunk {
+            zero |= (c.get() == 0) as u8;
+        }
+        if zero != 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn block_any_f64(input: &[pyo3::buffer::ReadOnlyCell<f64>]) -> bool {
+    for chunk in input.chunks(ANY_ALL_BLK) {
+        let mut acc = false;
+        for c in chunk {
+            acc |= c.get() != 0.0;
+        }
+        if acc {
+            return true;
+        }
+    }
+    false
+}
+
+fn block_all_f64(input: &[pyo3::buffer::ReadOnlyCell<f64>]) -> bool {
+    for chunk in input.chunks(ANY_ALL_BLK) {
+        let mut zero = false;
+        for c in chunk {
+            zero |= c.get() == 0.0;
+        }
+        if zero {
+            return false;
+        }
+    }
+    true
+}
+
 fn try_zerocopy_any_all(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -13966,9 +14027,9 @@ fn try_zerocopy_any_all(
                     return Ok(None);
                 }
                 let value = if is_all {
-                    input.iter().all(|c| c.get() != 0)
+                    block_all_u8(input)
                 } else {
-                    input.iter().any(|c| c.get() != 0)
+                    block_any_u8(input)
                 };
                 let scalar = numpy.getattr("bool_")?.call1((value,))?;
                 return Ok(Some(scalar.unbind()));
@@ -13989,9 +14050,9 @@ fn try_zerocopy_any_all(
                     return Ok(None);
                 }
                 let value = if is_all {
-                    input.iter().all(|c| c.get() != 0.0)
+                    block_all_f64(input)
                 } else {
-                    input.iter().any(|c| c.get() != 0.0)
+                    block_any_f64(input)
                 };
                 let scalar = numpy.getattr("bool_")?.call1((value,))?;
                 return Ok(Some(scalar.unbind()));
