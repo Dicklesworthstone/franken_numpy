@@ -27674,6 +27674,71 @@ fn true_divide(
     core_numpy_passthrough(py, "true_divide", args, kwargs)
 }
 
+// Per-element np.isclose predicate: finite values use the asymmetric tolerance
+// |a-b| <= atol + rtol*|b|; otherwise (inf/nan) equality, with NaN==NaN only under
+// equal_nan. Matches numpy.isclose exactly.
+#[inline]
+fn allclose_pair(x: f64, y: f64, rtol: f64, atol: f64, equal_nan: bool) -> bool {
+    if x.is_finite() && y.is_finite() {
+        (x - y).abs() <= atol + rtol * y.abs()
+    } else {
+        x == y || (equal_nan && x.is_nan() && y.is_nan())
+    }
+}
+
+// Zero-copy early-exit np.allclose for f64: same-shape f64 ndarrays, or an f64
+// ndarray vs an f64 scalar (broadcast against the scalar). numpy builds the whole
+// isclose array then reduces; bailing on the first not-close pair skips that and
+// the extract copies. Genuine broadcasting / other dtypes return None to defer.
+fn try_zerocopy_f64_allclose(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    rtol: f64,
+    atol: f64,
+    equal_nan: bool,
+) -> PyResult<Option<bool>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let a_arr = a.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, a);
+    let b_arr = b.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, b);
+    let a_buf = if a_arr { PyBuffer::<f64>::get(a).ok() } else { None };
+    let b_buf = if b_arr { PyBuffer::<f64>::get(b).ok() } else { None };
+    let a_sc = if a_buf.is_none() { a.extract::<f64>().ok() } else { None };
+    let b_sc = if b_buf.is_none() { b.extract::<f64>().ok() } else { None };
+    let verdict = match (&a_buf, &b_buf) {
+        (Some(ab), Some(bb)) => {
+            if ab.shape() != bb.shape() {
+                return Ok(None); // broadcasting left to numpy
+            }
+            let (Some(sa), Some(sb)) = (ab.as_slice(py), bb.as_slice(py)) else {
+                return Ok(None);
+            };
+            sa.iter()
+                .zip(sb.iter())
+                .all(|(x, y)| allclose_pair(x.get(), y.get(), rtol, atol, equal_nan))
+        }
+        (Some(ab), None) => {
+            let Some(bs) = b_sc else { return Ok(None) };
+            let Some(sa) = ab.as_slice(py) else {
+                return Ok(None);
+            };
+            sa.iter()
+                .all(|x| allclose_pair(x.get(), bs, rtol, atol, equal_nan))
+        }
+        (None, Some(bb)) => {
+            let Some(as_) = a_sc else { return Ok(None) };
+            let Some(sb) = bb.as_slice(py) else {
+                return Ok(None);
+            };
+            sb.iter()
+                .all(|y| allclose_pair(as_, y.get(), rtol, atol, equal_nan))
+        }
+        (None, None) => return Ok(None),
+    };
+    Ok(Some(verdict))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b, rtol=1e-5, atol=1e-8, equal_nan=false))]
 fn allclose(
@@ -27705,6 +27770,12 @@ fn allclose(
             .unbind())
     };
 
+    // Zero-copy early-exit for same-shape f64 arrays or f64-array-vs-scalar.
+    if let Some(verdict) =
+        try_zerocopy_f64_allclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
+    {
+        return Ok(numpy.getattr("bool_")?.call1((verdict,))?.unbind());
+    }
     let array_a = match extract_precise_numeric_array(py, a.bind(py), "allclose(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
