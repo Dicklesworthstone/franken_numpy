@@ -21426,8 +21426,8 @@ fn try_zerocopy_f64_nanextreme_axis(
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
     let ndim = shape.len() as i64;
     let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
-    if ax < 0 || ax != ndim - 1 {
-        return Ok(None); // only the contiguous last axis (inner == 1)
+    if ax < 0 || ax >= ndim {
+        return Ok(None);
     }
     let ax = ax as usize;
     let axis_len = shape[ax];
@@ -21444,24 +21444,84 @@ fn try_zerocopy_f64_nanextreme_axis(
         return Ok(None);
     };
     let outer: usize = shape[..ax].iter().product();
-    let mut out: Vec<f64> = Vec::with_capacity(outer);
+    let inner: usize = shape[ax + 1..].iter().product();
     let mut any_all_nan = false;
-    // One reused buffer across all lanes (no per-lane allocation).
-    let mut buf = vec![0.0f64; NANEXTREME_BLK.min(axis_len.max(1))];
-    for lane in cells.chunks_exact(axis_len) {
-        let (m, saw) = simd_nanextreme_raw(lane, take_max, &mut buf);
-        if !saw {
-            // All-NaN lane: numpy returns NaN for this lane (and one warning for
-            // the whole reduction). f64::NAN is numpy's np.nan bit pattern.
-            out.push(f64::NAN);
-            any_all_nan = true;
-        } else if m == 0.0 {
-            // ±0 extreme: numpy's returned sign is position-dependent
-            // (bead franken_numpy-u89e0) — defer the whole call (rare).
-            return Ok(None);
-        } else {
-            out.push(m);
+    let mut deferred = false;
+    let out: Vec<f64> = if inner == 1 {
+        // Contiguous last axis: each lane is a contiguous run, reduced with the
+        // existing SIMD nan-extreme kernel.
+        let mut out: Vec<f64> = Vec::with_capacity(outer);
+        let mut buf = vec![0.0f64; NANEXTREME_BLK.min(axis_len.max(1))];
+        for lane in cells.chunks_exact(axis_len) {
+            let (m, saw) = simd_nanextreme_raw(lane, take_max, &mut buf);
+            if !saw {
+                out.push(f64::NAN);
+                any_all_nan = true;
+            } else if m == 0.0 {
+                deferred = true;
+                break;
+            } else {
+                out.push(m);
+            }
         }
+        out
+    } else {
+        // Non-last axis (e.g. axis=0): the output is one (outer×inner) plane, and
+        // the reduction runs DOWN the axis with a per-inner running extreme +
+        // saw-nonnan accumulator. Walking the input row-by-row keeps it cache
+        // sequential (vs the strided per-column scan the native path does), and the
+        // inner update autovectorizes. NaN values are skipped (never update the
+        // accumulator), matching numpy's nanmax/nanmin. max/min are order-
+        // independent, so the result is bit-identical except the ±0-sign case,
+        // which (like the last-axis path) defers the whole call.
+        let lane = axis_len * inner;
+        let init = if take_max { f64::NEG_INFINITY } else { f64::INFINITY };
+        let mut out = vec![init; outer * inner];
+        let mut saw = vec![false; outer * inner];
+        for o in 0..outer {
+            let base = o * lane;
+            let acc = &mut out[o * inner..o * inner + inner];
+            let sw = &mut saw[o * inner..o * inner + inner];
+            for r in 0..axis_len {
+                let row = &cells[base + r * inner..base + r * inner + inner];
+                // BRANCHLESS, vectorizable: f64::max/min already skip NaN — they
+                // return the OTHER argument when one is NaN, so `acc = acc.max(v)`
+                // leaves `acc` unchanged for a NaN `v` (exactly nan-skipping). The
+                // saw-nonnan flag updates via `v == v` (false only for NaN), an OR
+                // with no branch. This lets the compiler emit packed compares/blends
+                // instead of the ~unpredictable per-element NaN branch.
+                if take_max {
+                    for ((a_acc, a_sw), c) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
+                        let v = c.get();
+                        *a_acc = a_acc.max(v);
+                        *a_sw |= v == v;
+                    }
+                } else {
+                    for ((a_acc, a_sw), c) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
+                        let v = c.get();
+                        *a_acc = a_acc.min(v);
+                        *a_sw |= v == v;
+                    }
+                }
+            }
+            for (slot, &seen) in acc.iter_mut().zip(sw.iter()) {
+                if !seen {
+                    *slot = f64::NAN;
+                    any_all_nan = true;
+                } else if *slot == 0.0 {
+                    deferred = true;
+                }
+            }
+            if deferred {
+                break;
+            }
+        }
+        out
+    };
+    if deferred {
+        // ±0 extreme: numpy's returned sign is position-dependent
+        // (bead franken_numpy-u89e0) — defer the whole call (rare).
+        return Ok(None);
     }
     if any_all_nan {
         // Reproduce numpy's single "All-NaN slice encountered" RuntimeWarning.
@@ -21470,7 +21530,8 @@ fn try_zerocopy_f64_nanextreme_axis(
         warnings.call_method1("warn", ("All-NaN slice encountered", &category))?;
     }
     let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
-    let out_shape: Vec<usize> = shape[..ax].to_vec();
+    let mut out_shape: Vec<usize> = shape[..ax].to_vec();
+    out_shape.extend_from_slice(&shape[ax + 1..]);
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {
         return Ok(Some(reshaped.get_item(())?.unbind()));

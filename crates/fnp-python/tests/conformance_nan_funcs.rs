@@ -688,3 +688,59 @@ print(ok)
     );
     Ok(())
 }
+
+/// Locks the zero-copy NON-LAST-AXIS nanmax/nanmin reduction (the branchless
+/// f64::max/min + saw-OR strided path). A deterministic 2-D and 3-D f64 array with
+/// scattered NaN / +-inf / an all-NaN slice, reduced over axis 0 (and a middle
+/// axis), must be byte-identical to numpy nanmax/nanmin plus a sha256 golden.
+#[test]
+fn nanextreme_nonlast_axis_matches_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib, warnings
+warnings.filterwarnings("ignore")
+s = 0x9E3779B97F4A7C15
+def nxt():
+    global s
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    return s
+A = np.empty((130, 71), dtype=np.float64)
+for i in range(130):
+    for j in range(71):
+        A[i, j] = ((nxt() >> 11) / (1 << 53)) * 10.0 - 5.0
+A[::13, 4] = np.nan
+A[7, ::9] = np.inf
+A[9, ::11] = -np.inf
+A[:, 20] = np.nan          # all-NaN column -> NaN (axis 0)
+B = np.empty((11, 13, 9), dtype=np.float64)
+for x in np.ndindex(11, 13, 9):
+    B[x] = ((nxt() >> 11) / (1 << 53)) * 6.0 - 3.0
+B[:, 4, :] = np.nan        # all-NaN slab over axis 1
+h = hashlib.sha256()
+allmatch = True
+for (arr, ax) in ((A, 0), (B, 0), (B, 1)):
+    for fn, nf in ((fnp.nanmax, np.nanmax), (fnp.nanmin, np.nanmin)):
+        r = np.asarray(fn(arr, axis=ax))
+        e = np.asarray(nf(arr, axis=ax))
+        if r.shape != e.shape or r.dtype != e.dtype or r.tobytes() != e.tobytes():
+            allmatch = False
+        h.update(r.tobytes())
+print(allmatch)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "non-last-axis nanmax/nanmin must be byte-identical to numpy"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "6f715e77a90ef5083737c8ef7e03aa02a8cda84c6354328b16b66ccefd5fe908",
+        "nanextreme non-last-axis golden sha256 drifted"
+    );
+    Ok(())
+}
