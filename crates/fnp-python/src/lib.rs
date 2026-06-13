@@ -9105,6 +9105,100 @@ fn try_zerocopy_f64_compress(
     Ok(Some(flat.unbind()))
 }
 
+// Zero-copy np.compress(condition, a, axis=k) for a C-contiguous float64 ndarray:
+// select the slabs along `axis` where `condition` is True, in order. The slab at
+// index j (a[.., j, ..]) is `inner` contiguous f64, so each kept slab is a
+// contiguous block copy off the borrowed buffer into numpy.empty — no whole-array
+// extract, no native rebuild. Elements move verbatim, so the result is
+// bit-identical to numpy.compress. Defers (returns None) for non-f64, bool, a
+// condition longer than the axis (numpy errors), non-contiguous, or non-ndarray.
+fn try_zerocopy_f64_compress_axis(
+    py: Python<'_>,
+    condition: &Bound<'_, PyAny>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !condition.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let a_dtype = a.getattr("dtype")?;
+    if a_dtype.getattr("kind")?.extract::<String>()? != "f"
+        || a_dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    if condition.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as isize;
+    let ax = if axis < 0 { axis + ndim } else { axis };
+    if ax < 0 || ax >= ndim {
+        return Ok(None);
+    }
+    let ax = ax as usize;
+    let axis_len = shape[ax];
+    let Ok(arr_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    if !arr_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let cond_u8 = condition.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let (Ok(cond_buffer), Some(arr_in)) = (PyBuffer::<u8>::get(&cond_u8), arr_buffer.as_slice(py))
+    else {
+        return Ok(None);
+    };
+    let Some(cond_in) = cond_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let m = cond_in.len();
+    if m > axis_len {
+        return Ok(None); // numpy raises when condition is longer than the axis; defer
+    }
+    // Selected indices along the axis, in order (positions m..axis_len are dropped).
+    let sel: Vec<usize> = (0..m).filter(|&j| cond_in[j].get() != 0).collect();
+    let count = sel.len();
+    let outer: usize = shape[..ax].iter().product();
+    let inner: usize = shape[ax + 1..].iter().product();
+    let mut out_shape = shape.clone();
+    out_shape[ax] = count;
+    let out_elems = outer * count * inner;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (out_elems,), Some(&kwargs))?;
+    if out_elems > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let in_lane = axis_len * inner;
+        let out_lane = count * inner;
+        // Each kept slab is a contiguous `inner`-element block (a full row for
+        // axis 0). Sequential-write + gather of the selected blocks; the contiguous
+        // inner copy autovectorizes. (A branchless per-row store-advance was tried
+        // for the last axis but regressed — its data-dependent write index does not
+        // vectorize for f64.)
+        for o in 0..outer {
+            let in_base = o * in_lane;
+            let out_base = o * out_lane;
+            for (si, &j) in sel.iter().enumerate() {
+                let src = &arr_in[in_base + j * inner..in_base + j * inner + inner];
+                let dst = &output[out_base + si * inner..out_base + si * inner + inner];
+                for (d, s) in dst.iter().zip(src) {
+                    d.set(s.get());
+                }
+            }
+        }
+    }
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    Ok(Some(flat.call_method1("reshape", (&output_shape,))?.unbind()))
+}
+
 // Generic typed core for boolean-mask stream compaction (np.compress / np.extract
 // flat case). Counts the True positions in the first `cond.len()` elements (must
 // be <= arr length), then gathers arr[i] (read as `T`) where cond[i] into a fresh
@@ -17111,6 +17205,14 @@ fn compress(
     // Remaining flat float64 cases (e.g. when the generic path declines) and any
     // residue keep the dedicated f64 helper before the cold extract path.
     if let Some(out) = try_zerocopy_f64_compress(py, condition.bind(py), a.bind(py), axis)? {
+        return Ok(out);
+    }
+    // Per-axis float64 compress: select slabs along the axis with contiguous block
+    // copies off the borrowed buffer, skipping the whole-array extract + native
+    // rebuild (which was ~17x numpy on a 1000x1000 axis-0 compress).
+    if let Some(axis) = axis
+        && let Some(out) = try_zerocopy_f64_compress_axis(py, condition.bind(py), a.bind(py), axis)?
+    {
         return Ok(out);
     }
     let condition = match extract_condition_mask(py, condition.bind(py), "compress(condition)") {

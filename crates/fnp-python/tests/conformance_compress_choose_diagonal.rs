@@ -485,3 +485,61 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+/// Locks the zero-copy f64 per-axis compress (try_zerocopy_f64_compress_axis):
+/// deterministic 2-D and 3-D float64 arrays compressed along several axes with
+/// full / shorter / all-true / all-false conditions, byte-identical to
+/// numpy.compress plus a sha256 golden. Elements move verbatim, so it is
+/// bit-identical to numpy and the prior extract path.
+#[test]
+fn compress_f64_axis_matches_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+s = 0x2545F4914F6CDD1D
+def nxt():
+    global s
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    return s
+A = np.empty((130, 71), dtype=np.float64)
+for i in range(130):
+    for j in range(71):
+        A[i, j] = ((nxt() >> 11) / (1 << 53)) * 8.0 - 4.0
+B = np.empty((11, 13, 9), dtype=np.float64)
+for x in np.ndindex(11, 13, 9):
+    B[x] = ((nxt() >> 11) / (1 << 53)) * 6.0 - 3.0
+def mask(n, kind):
+    if kind == 'half':  return (np.arange(n) % 2 == 0)
+    if kind == 'short': return (np.arange(n * 2 // 3) % 3 != 0)
+    if kind == 'all':   return np.ones(n, bool)
+    if kind == 'none':  return np.zeros(n, bool)
+h = hashlib.sha256()
+allmatch = True
+specs = [(A, 0), (A, 1), (B, 0), (B, 1), (B, 2)]
+for (arr, ax) in specs:
+    for kind in ('half', 'short', 'all', 'none'):
+        c = mask(arr.shape[ax], kind)
+        r = np.asarray(fnp.compress(c, arr, axis=ax))
+        e = np.compress(c, arr, axis=ax)
+        if r.shape != e.shape or r.dtype != e.dtype or r.tobytes() != e.tobytes():
+            allmatch = False
+        h.update(r.tobytes())
+print(allmatch)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "per-axis f64 compress must be byte-identical to numpy.compress"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "699d33622306a9a32dbcf94b5596dffe824018d6d06f9b8c94c4a65375e9f770",
+        "per-axis f64 compress golden sha256 drifted"
+    );
+    Ok(())
+}
