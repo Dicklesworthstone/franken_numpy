@@ -33844,6 +33844,78 @@ fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny
     Ok(cond_fn.call((x.bind(py),), Some(&kwargs))?.unbind())
 }
 
+/// Maps an `ord` value to the SVD-derived matrix-norm reduction mode, or `None`
+/// for the cheap (non-SVD) orders. 0 = spectral (sigma_max), 1 = neg-spectral
+/// (sigma_min), 2 = nuclear (sum of singular values).
+fn svd_matrix_norm_mode(py: Python<'_>, ord: &Py<PyAny>) -> Option<u8> {
+    let bound = ord.bind(py);
+    if let Ok(text) = bound.extract::<String>() {
+        if text == "nuc" {
+            Some(2)
+        } else {
+            None
+        }
+    } else if let Ok(f) = bound.extract::<f64>() {
+        if f == 2.0 {
+            Some(0)
+        } else if f == -2.0 {
+            Some(1)
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
+/// Batched SVD-derived matrix norm on the trailing two axes. Returns
+/// `Ok(Some(result))` when the fast path applies (real-finite-f64, ndim >= 3),
+/// else `Ok(None)` to signal the caller should fall back to numpy. The singular
+/// values are deterministic so this is parity-safe at the allclose level.
+fn try_batched_svd_matrix_norm(
+    py: Python<'_>,
+    array: &UFuncArray,
+    mode: u8,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let shape = array.shape();
+    if shape.len() < 3
+        || !matches!(array.dtype(), DType::F64)
+        || array.has_integer_sidecar()
+        || !array.values().iter().all(|v| v.is_finite())
+    {
+        return Ok(None);
+    }
+    let m_dim = shape[shape.len() - 2];
+    let n_dim = shape[shape.len() - 1];
+    let k = m_dim.min(n_dim);
+    if k < 1 {
+        return Ok(None);
+    }
+    let owned_shape = shape.to_vec();
+    let sigmas = match fnp_linalg::batch_svd(array.values(), &owned_shape) {
+        Ok(sigmas) => sigmas,
+        Err(_) => return Ok(None),
+    };
+    let batch = sigmas.len() / k;
+    let mut out = Vec::with_capacity(batch);
+    for b in 0..batch {
+        let lane = &sigmas[b * k..b * k + k];
+        out.push(match mode {
+            0 => lane[0],
+            1 => lane[k - 1],
+            _ => lane.iter().sum(),
+        });
+    }
+    let mut out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+    if keepdims {
+        out_shape.push(1);
+        out_shape.push(1);
+    }
+    let result = UFuncArray::new(out_shape, out, DType::F64).map_err(map_ufunc_error)?;
+    Ok(Some(build_numpy_array_from_ufunc(py, &result)?))
+}
+
 #[pyfunction]
 #[pyo3(signature = (x, ord=None, axis=None, keepdims=false))]
 fn norm(
@@ -33853,6 +33925,39 @@ fn norm(
     axis: Option<Py<PyAny>>,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
+    // np.linalg.norm with an SVD-derived matrix order (ord in {2, -2, 'nuc'})
+    // over the trailing two axes (axis a 2-tuple resolving to {ndim-2, ndim-1})
+    // on a batched real-finite-f64 stack is the same parallel batch_svd win as
+    // matrix_norm — numpy runs a serial-C per-lane SVD. Spectral/nuclear norms
+    // are transpose-invariant, so axis order within the pair is irrelevant.
+    // Everything else (vector norms, other orders, non-trailing axes, complex,
+    // non-finite, 2-D) stays on the numpy passthrough.
+    if let (Some(ord_val), Some(axis_val)) = (ord.as_ref(), axis.as_ref()) {
+        if let Some(mode) = svd_matrix_norm_mode(py, ord_val) {
+            if let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>() {
+                if let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)") {
+                    let nd = array.shape().len() as i64;
+                    let resolve = |a: i64| if a < 0 { a + nd } else { a };
+                    let (r0, r1) = (resolve(ax0), resolve(ax1));
+                    let mut pair = [r0, r1];
+                    pair.sort_unstable();
+                    let trailing = nd >= 3
+                        && r0 >= 0
+                        && r1 >= 0
+                        && r0 < nd
+                        && r1 < nd
+                        && pair == [nd - 2, nd - 1];
+                    if trailing {
+                        if let Some(result) =
+                            try_batched_svd_matrix_norm(py, &array, mode, keepdims)?
+                        {
+                            return Ok(result);
+                        }
+                    }
+                }
+            }
+        }
+    }
     // Passthrough to np.linalg.norm so ord (None/fro/nuc/int/inf/-inf/real),
     // axis (None/int/tuple), keepdims, and 1-D vector vs 2-D matrix vs
     // batched (..., M, N) broadcasting semantics all match numpy exactly.
@@ -81253,6 +81358,69 @@ mod tests {
     enum PyOrd {
         Int(i64),
         Str(&'static str),
+    }
+
+    #[test]
+    fn norm_batched_matrix_spectral_nuclear_matches_numpy_via_batch_svd() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let norm_fn = module.getattr("linalg")?.getattr("norm")?;
+            let numpy = py.import("numpy")?;
+            let numpy_norm = numpy.getattr("linalg")?.getattr("norm")?;
+            let allclose = numpy.getattr("allclose")?;
+            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((57_u64,))?;
+
+            // ord 2 / -2 / 'nuc' over the trailing two axes, both axis orders.
+            for shp in [vec![32_i64, 6, 6], vec![16, 7, 4], vec![2, 3, 5, 5]] {
+                let a = rng.getattr("standard_normal")?.call1((shp.clone(),))?;
+                for ord in [PyOrd::Int(2), PyOrd::Int(-2), PyOrd::Str("nuc")] {
+                    for axis in [(-2_i64, -1_i64), (-1, -2)] {
+                        let kw = PyDict::new(py);
+                        match ord {
+                            PyOrd::Int(v) => kw.set_item("ord", v)?,
+                            PyOrd::Str(s) => kw.set_item("ord", s)?,
+                        }
+                        kw.set_item("axis", axis)?;
+                        let ours = norm_fn.call((a.clone(),), Some(&kw))?;
+                        let theirs = numpy_norm.call((a.clone(),), Some(&kw))?;
+                        let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                        assert!(ok, "norm ord={ord:?} axis={axis:?} mismatch for {shp:?}");
+                    }
+                }
+            }
+
+            // keepdims preserves the reduced trailing axes as (1, 1).
+            let a = rng.getattr("standard_normal")?.call1((vec![4_i64, 3, 5, 5],))?;
+            let kw = PyDict::new(py);
+            kw.set_item("ord", 2_i64)?;
+            kw.set_item("axis", (-2_i64, -1_i64))?;
+            kw.set_item("keepdims", true)?;
+            let ours_k = norm_fn.call((a.clone(),), Some(&kw))?;
+            let theirs_k = numpy_norm.call((a.clone(),), Some(&kw))?;
+            let ok_k: bool = allclose.call1((&ours_k, &theirs_k))?.extract()?;
+            assert!(ok_k, "norm keepdims mismatch");
+            let ks: Vec<usize> = ours_k.getattr("shape")?.extract()?;
+            assert_eq!(ks, vec![4, 3, 1, 1], "norm keepdims shape");
+
+            // Frobenius matrix norm and a vector norm stay on the passthrough.
+            let kw_f = PyDict::new(py);
+            kw_f.set_item("axis", (-2_i64, -1_i64))?;
+            let ours_f = norm_fn.call((a.clone(),), Some(&kw_f))?;
+            let theirs_f = numpy_norm.call((a.clone(),), Some(&kw_f))?;
+            let ok_f: bool = allclose.call1((&ours_f, &theirs_f))?.extract()?;
+            assert!(ok_f, "norm frobenius passthrough mismatch");
+            let v = rng.getattr("standard_normal")?.call1((vec![100_i64],))?;
+            let ours_v = norm_fn.call1((v.clone(),))?;
+            let theirs_v = numpy_norm.call1((v.clone(),))?;
+            let ok_v: bool = allclose.call1((&ours_v, &theirs_v))?.extract()?;
+            assert!(ok_v, "norm vector passthrough mismatch");
+
+            Ok(())
+        });
     }
 
     #[test]
