@@ -14367,6 +14367,77 @@ fn axis_any_all_fold<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
     Ok(Some(reshaped.unbind()))
 }
 
+// Generic block-folded truthiness scan for a full any/all reduction over any
+// element type (the bool/f64 block_* fns specialized; this serves the integer
+// widths). Folds each fixed block with an OR (any) / falsy-OR (all) so the
+// no-early-exit case (any over all-zero, all over all-nonzero) still
+// autovectorizes, then branches once per block for a coarse short-circuit.
+fn block_any_all<T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
+    input: &[pyo3::buffer::ReadOnlyCell<T>],
+    is_all: bool,
+    truthy: F,
+) -> bool {
+    for chunk in input.chunks(ANY_ALL_BLK) {
+        let mut hit = 0u8;
+        if is_all {
+            for c in chunk {
+                hit |= u8::from(!truthy(c.get()));
+            }
+            if hit != 0 {
+                return false;
+            }
+        } else {
+            for c in chunk {
+                hit |= u8::from(truthy(c.get()));
+            }
+            if hit != 0 {
+                return true;
+            }
+        }
+    }
+    is_all
+}
+
+// Zero-copy any/all over a C-contiguous numeric buffer of element type T, reusing
+// the shared block fold (axis=None), the row-wise axis fold, and the generic
+// finish path. `truthy` maps an element to its numpy truthiness (v != 0).
+fn zerocopy_any_all_buf<'py, T, F>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    axis: Option<isize>,
+    is_all: bool,
+    shape: &[usize],
+    truthy: F,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy,
+    F: Fn(T) -> bool + Copy,
+{
+    let Ok(buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    let Some(input) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if axis.is_none() {
+        if shape.is_empty() {
+            return Ok(None);
+        }
+        let value = block_any_all(input, is_all, truthy);
+        let scalar = numpy.getattr("bool_")?.call1((value,))?;
+        return Ok(Some(scalar.unbind()));
+    }
+    if let Some(ax) = axis
+        && let Some(out) = axis_any_all_fold(py, numpy, input, shape, ax, is_all, truthy)?
+    {
+        return Ok(Some(out));
+    }
+    finish_any_all(py, numpy, input.len(), shape, axis, is_all, |i| {
+        truthy(input[i].get())
+    })
+}
+
 fn try_zerocopy_any_all(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -14441,6 +14512,24 @@ fn try_zerocopy_any_all(
             finish_any_all(py, &numpy, input.len(), &shape, axis, is_all, |i| {
                 input[i].get() != 0.0
             })
+        }
+        "i" | "u" => {
+            // Integer any/all: truthiness is v != 0 (a total nonzero test, no NaN
+            // hazard), so the shared block / row-wise folds autovectorize. The
+            // fallback widened ints to an f64 Vec and ran the strided reduce
+            // (~17-23x slower). Dispatch by width to the right buffer element type.
+            let itemsize = a.getattr("dtype")?.getattr("itemsize")?.extract::<usize>()?;
+            match (kind.as_str(), itemsize) {
+                ("i", 1) => zerocopy_any_all_buf::<i8, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+                ("i", 2) => zerocopy_any_all_buf::<i16, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+                ("i", 4) => zerocopy_any_all_buf::<i32, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+                ("i", 8) => zerocopy_any_all_buf::<i64, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+                ("u", 1) => zerocopy_any_all_buf::<u8, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+                ("u", 2) => zerocopy_any_all_buf::<u16, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+                ("u", 4) => zerocopy_any_all_buf::<u32, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+                ("u", 8) => zerocopy_any_all_buf::<u64, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0),
+                _ => Ok(None),
+            }
         }
         _ => Ok(None),
     }
