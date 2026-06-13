@@ -16880,12 +16880,26 @@ impl UFuncArray {
                 if n == 0 {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
-                // NumPy propagates NaN in median
-                if self.values.iter().any(|v| v.is_nan()) {
+                // NumPy propagates NaN in median. For large inputs the parallel
+                // radix-select beats the serial introselect (numpy's algorithm) by
+                // using every core for the count passes; parallelise the NaN scan too.
+                const MEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 17;
+                let parallel =
+                    n >= MEDIAN_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+                let has_nan = if parallel {
+                    self.values.par_iter().any(|v| v.is_nan())
+                } else {
+                    self.values.iter().any(|v| v.is_nan())
+                };
+                if has_nan {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
-                let mut data = self.values.clone();
-                let med = select_median(&mut data);
+                let med = if parallel {
+                    par_select_median(&self.values)
+                } else {
+                    let mut data = self.values.clone();
+                    select_median(&mut data)
+                };
                 Ok(Self::scalar(med, DType::F64))
             }
             Some(ax) => {
@@ -28201,6 +28215,110 @@ fn select_median(data: &mut [f64]) -> f64 {
         let hi = *kth;
         let lo = left.iter().copied().fold(f64::NEG_INFINITY, f64::max);
         (lo + hi) / 2.0
+    }
+}
+
+/// Total-order-preserving u64 key for an f64 in the NaN-free domain: negatives are
+/// bit-inverted and positives get their sign bit set, so the unsigned key sorts
+/// identically to `f64::total_cmp` (including -0.0 < +0.0). A bijection on bit
+/// patterns, so distinct keys ⇔ distinct bit patterns.
+#[inline]
+fn f64_sortable_key(x: f64) -> u64 {
+    let b = x.to_bits();
+    if b >> 63 == 1 {
+        !b
+    } else {
+        b | (1u64 << 63)
+    }
+}
+
+/// Parallel global median of a large NaN-free slice via MSD radix-select on the
+/// sortable keys. Each pass builds a parallel privatized 256-bucket histogram of
+/// the next key byte over the elements still in the live prefix range (count-only,
+/// NO per-round data movement / reallocation — that is what sank the naive
+/// filter-collect quickselect, which is memory-bound), narrows to the byte holding
+/// the n/2 rank, and once the survivor set is small collects it and finishes
+/// serially. Returns the bit-identical value to `select_median`: the `(n-1)/2` and
+/// `n/2` order statistics by total order, averaged as `(lo + hi) / 2.0`. Caller
+/// guarantees no NaNs.
+fn par_select_median(data: &[f64]) -> f64 {
+    let n = data.len();
+    let lo_k = (n - 1) / 2;
+    let hi_k = n / 2;
+    const RBITS: u32 = 8;
+    const NB: usize = 1 << RBITS;
+    const CUT: usize = 1 << 16;
+    const HIST_CHUNK: usize = 1 << 14;
+    let mut prefix: u64 = 0; // fixed high bits, left-aligned (low `remaining` bits zero)
+    let mut fixed: u32 = 0; // number of fixed high bits
+    let mut below: usize = 0; // count of elements whose key is strictly below the live range
+    loop {
+        let remaining = 64 - fixed;
+        let pref_top = if fixed == 0 { 0 } else { prefix >> remaining };
+        let shift = remaining - RBITS;
+        let counts = data
+            .par_chunks(HIST_CHUNK)
+            .map(|chunk| {
+                let mut local = [0usize; NB];
+                for &x in chunk {
+                    let k = f64_sortable_key(x);
+                    if fixed == 0 || (k >> remaining) == pref_top {
+                        local[((k >> shift) & (NB as u64 - 1)) as usize] += 1;
+                    }
+                }
+                local
+            })
+            .reduce(
+                || [0usize; NB],
+                |mut a, b| {
+                    for i in 0..NB {
+                        a[i] += b[i];
+                    }
+                    a
+                },
+            );
+        // Bucket holding the hi_k rank (cumulative counts from `below`).
+        let mut cum = below;
+        let mut bucket = NB - 1;
+        for (b, &c) in counts.iter().enumerate() {
+            if cum + c > hi_k {
+                bucket = b;
+                break;
+            }
+            cum += c;
+        }
+        let new_below = cum;
+        let bucket_count = counts[bucket];
+        let new_prefix = (pref_top << RBITS) | bucket as u64; // right-aligned, new_fixed bits
+        let new_fixed = fixed + RBITS;
+        let new_remaining = 64 - new_fixed;
+        if bucket_count <= CUT || new_remaining == 0 {
+            // Collect the survivor set (elements whose key matches the new prefix),
+            // sort by total order, and read both median order statistics.
+            let np = new_prefix;
+            let mut surv: Vec<f64> = data
+                .par_iter()
+                .copied()
+                .filter(|&x| (f64_sortable_key(x) >> new_remaining) == np)
+                .collect();
+            surv.sort_unstable_by(|a, b| a.total_cmp(b));
+            let hi = surv[hi_k - new_below];
+            let lo = if lo_k >= new_below {
+                surv[lo_k - new_below]
+            } else {
+                // Even-n straddle: lo_k is the largest element below the survivor
+                // range — matches select_median's `f64::max` fold over the lower half.
+                let range_start = np << new_remaining;
+                data.par_iter()
+                    .copied()
+                    .filter(|&x| f64_sortable_key(x) < range_start)
+                    .reduce(|| f64::NEG_INFINITY, f64::max)
+            };
+            return (lo + hi) / 2.0;
+        }
+        prefix = new_prefix << new_remaining;
+        fixed = new_fixed;
+        below = new_below;
     }
 }
 
@@ -47232,6 +47350,47 @@ print(json.dumps(payload))
             assert!(
                 perm[kth + 1..].iter().all(|&i| lane[i] >= pivot),
                 "lane {r} right side"
+            );
+        }
+    }
+
+    #[test]
+    fn par_select_median_matches_serial_across_distributions() {
+        // The parallel radix-select median must be BIT-identical to the serial
+        // select_median (the (n-1)/2 and n/2 order statistics are unique values),
+        // across odd/even sizes, heavy duplicates, sorted/reverse, signed zeros,
+        // and infinities — for any input order.
+        let cases: Vec<Vec<f64>> = vec![
+            (0..100001).map(|i| ((i * 2654435761u64 as usize) % 97) as f64).collect(),
+            (0..100000).map(|i| ((i * 40503) % 131) as f64 - 60.0).collect(),
+            (0..200003).map(|i| i as f64).collect(),
+            (0..200000).map(|i| (200000 - i) as f64).collect(),
+            vec![5.0; 150000],
+            {
+                let mut v: Vec<f64> = (0..160000).map(|i| (i % 7) as f64).collect();
+                v[0] = f64::INFINITY;
+                v[1] = f64::NEG_INFINITY;
+                v
+            },
+            {
+                let mut v = vec![0.0_f64; 130000];
+                for (i, x) in v.iter_mut().enumerate() {
+                    *x = if i % 2 == 0 { -0.0 } else { 0.0 };
+                }
+                v
+            },
+            (0..131072).map(|i| ((i * 2246822519u32 as usize) % 100003) as f64 * 1e-3 - 50.0).collect(),
+            (0..262145).map(|i| (((i * 1103515245 + 12345) % 1000) as f64) - 500.0).collect(),
+        ];
+        for data in &cases {
+            let mut serial = data.clone();
+            let expected = super::select_median(&mut serial);
+            let got = super::par_select_median(data);
+            assert_eq!(
+                got.to_bits(),
+                expected.to_bits(),
+                "par_select_median diverged for len {}",
+                data.len()
             );
         }
     }
