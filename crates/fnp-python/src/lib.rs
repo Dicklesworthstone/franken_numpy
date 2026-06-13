@@ -40879,6 +40879,11 @@ fn histogram2d_native(
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
+    // numpy.histogram2d always returns float64 counts (unlike 1-D np.histogram
+    // which is int). Our native count array carries the counts as f64 values but
+    // is tagged I64, which would export int64; re-tag as F64 to match numpy.
+    let h = UFuncArray::new(h.shape().to_vec(), h.values().to_vec(), DType::F64)
+        .map_err(map_ufunc_error)?;
     let h_py = build_numpy_array_from_ufunc(py, &h)?;
     let xe_py = build_numpy_array_from_ufunc(py, &xedges)?;
     let ye_py = build_numpy_array_from_ufunc(py, &yedges)?;
@@ -40971,6 +40976,10 @@ fn histogramdd_native(
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
+    // numpy.histogramdd always returns float64 counts (unlike 1-D np.histogram);
+    // re-tag the I64-typed count array as F64 to match.
+    let h = UFuncArray::new(h.shape().to_vec(), h.values().to_vec(), DType::F64)
+        .map_err(map_ufunc_error)?;
     let h_py = build_numpy_array_from_ufunc(py, &h)?;
     let mut edge_objs: Vec<Py<PyAny>> = Vec::with_capacity(edges.len());
     for e in &edges {
@@ -81209,6 +81218,51 @@ mod tests {
             let theirs_c = numpy_sv.call1((complex_matrix.clone(),))?;
             let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
             assert!(ok_c, "svdvals complex mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn histogram2d_and_dd_return_float64_counts_like_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let allclose = numpy.getattr("allclose")?;
+            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((9_u64,))?;
+            let x = rng.getattr("standard_normal")?.call1((300_i64,))?;
+            let y = rng.getattr("standard_normal")?.call1((300_i64,))?;
+
+            // histogram2d: numpy returns float64 counts even unweighted.
+            let h2 = module.getattr("histogram2d")?.call((x.clone(), y.clone(), 7_i64), None)?;
+            let our_h = h2.get_item(0)?;
+            let np_h = numpy
+                .getattr("histogram2d")?
+                .call((x.clone(), y.clone(), 7_i64), None)?
+                .get_item(0)?;
+            let dt: String = our_h.getattr("dtype")?.getattr("name")?.extract()?;
+            assert_eq!(dt, "float64", "histogram2d counts must be float64");
+            let ok2: bool = allclose.call1((&our_h, &np_h))?.extract()?;
+            assert!(ok2, "histogram2d counts must match numpy");
+
+            // histogramdd: same float64 contract.
+            let sample = numpy
+                .getattr("column_stack")?
+                .call1((PyList::new(py, [&x, &y])?,))?;
+            let hdd = module.getattr("histogramdd")?.call((sample.clone(), 6_i64), None)?;
+            let our_hdd = hdd.get_item(0)?;
+            let np_hdd = numpy
+                .getattr("histogramdd")?
+                .call((sample.clone(), 6_i64), None)?
+                .get_item(0)?;
+            let dtd: String = our_hdd.getattr("dtype")?.getattr("name")?.extract()?;
+            assert_eq!(dtd, "float64", "histogramdd counts must be float64");
+            let okd: bool = allclose.call1((&our_hdd, &np_hdd))?.extract()?;
+            assert!(okd, "histogramdd counts must match numpy");
 
             Ok(())
         });
