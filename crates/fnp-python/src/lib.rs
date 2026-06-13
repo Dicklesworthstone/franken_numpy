@@ -26087,6 +26087,16 @@ fn array_equal(
             )?
             .unbind())
     };
+    // Zero-copy early-exit for two f64 ndarrays: numpy's array_equal materialises
+    // the whole `a1 == a2` boolean array then reduces, and our extract path copies
+    // both inputs first; reading the buffers directly and bailing on the first
+    // mismatch skips both. Different shapes are not equal (no broadcast).
+    if let Some(verdict) = try_zerocopy_f64_array_equal(py, a1.bind(py), a2.bind(py), equal_nan)? {
+        return Ok(pyo3::types::PyBool::new(py, verdict)
+            .to_owned()
+            .into_any()
+            .unbind());
+    }
     let array_a = match extract_precise_numeric_array(py, a1.bind(py), "array_equal(a1)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -26107,6 +26117,45 @@ fn array_equal(
         .to_owned()
         .into_any()
         .unbind())
+}
+
+// Zero-copy np.array_equal for two f64 ndarrays. Returns Some(verdict) when both
+// are f64 buffers (the fast path applies), else None to fall through. Mismatched
+// shapes => Some(false). Early-exits on the first unequal pair; with equal_nan,
+// NaN positions count as equal only if both are NaN.
+fn try_zerocopy_f64_array_equal(
+    py: Python<'_>,
+    a1: &Bound<'_, PyAny>,
+    a2: &Bound<'_, PyAny>,
+    equal_nan: bool,
+) -> PyResult<Option<bool>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a1.is_exact_instance(&ndarray_type)
+        || !a2.is_exact_instance(&ndarray_type)
+        || !numpy_dtype_is_f64(py, a1)
+        || !numpy_dtype_is_f64(py, a2)
+    {
+        return Ok(None);
+    }
+    let (Ok(b1), Ok(b2)) = (PyBuffer::<f64>::get(a1), PyBuffer::<f64>::get(a2)) else {
+        return Ok(None);
+    };
+    if b1.shape() != b2.shape() {
+        return Ok(Some(false));
+    }
+    let (Some(s1), Some(s2)) = (b1.as_slice(py), b2.as_slice(py)) else {
+        return Ok(None);
+    };
+    let verdict = if equal_nan {
+        s1.iter().zip(s2.iter()).all(|(x, y)| {
+            let (x, y) = (x.get(), y.get());
+            x == y || (x.is_nan() && y.is_nan())
+        })
+    } else {
+        s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get())
+    };
+    Ok(Some(verdict))
 }
 
 #[pyfunction]
