@@ -40564,7 +40564,13 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
     // `np.convolve(float32, float32)` must stay float32, not become float64. Defer
     // any non-f64 result dtype to numpy so the output dtype matches exactly.
     // (Integer inputs already fall back via `convolve_mode` returning Err.)
-    let result_dtype = numpy.getattr("result_type")?.call1((a.bind(py), v.bind(py)))?;
+    // Compute result_type on asarray'd inputs: numpy.result_type interprets a raw
+    // Python list as a structured-dtype descriptor (list of field tuples) and
+    // raises, so array_like list inputs (np.convolve([1,2,3],[0,1,.5])) must be
+    // materialised to arrays first — matching numpy's own internal asarray.
+    let a_as = numpy.call_method1("asarray", (a.bind(py),))?;
+    let v_as = numpy.call_method1("asarray", (v.bind(py),))?;
+    let result_dtype = numpy.getattr("result_type")?.call1((&a_as, &v_as))?;
     if !result_dtype.eq(numpy.getattr("float64")?)? {
         return fallback();
     }
@@ -40623,7 +40629,13 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
     // numpy promotes correlate's result to `result_type(a, v)`; our native kernel
     // canonicalises to f64, so defer any non-f64 result dtype (float32/float16) to
     // numpy to keep the output dtype exact. (See convolve for the full rationale.)
-    let result_dtype = numpy.getattr("result_type")?.call1((a.bind(py), v.bind(py)))?;
+    // Compute result_type on asarray'd inputs: numpy.result_type interprets a raw
+    // Python list as a structured-dtype descriptor (list of field tuples) and
+    // raises, so array_like list inputs (np.convolve([1,2,3],[0,1,.5])) must be
+    // materialised to arrays first — matching numpy's own internal asarray.
+    let a_as = numpy.call_method1("asarray", (a.bind(py),))?;
+    let v_as = numpy.call_method1("asarray", (v.bind(py),))?;
+    let result_dtype = numpy.getattr("result_type")?.call1((&a_as, &v_as))?;
     if !result_dtype.eq(numpy.getattr("float64")?)? {
         return fallback();
     }
@@ -81218,6 +81230,49 @@ mod tests {
             let theirs_c = numpy_sv.call1((complex_matrix.clone(),))?;
             let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
             assert!(ok_c, "svdvals complex mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn convolve_correlate_accept_python_list_inputs_like_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let allclose = numpy.getattr("allclose")?;
+
+            // Mixed int/float Python lists: result_type promotes to float64, so the
+            // native fast path applies and must not raise on the raw list inputs.
+            let a = PyList::new(py, [1.0_f64, 2.0, 3.0])?; // use floats to stay on fast path
+            let v = PyList::new(py, [0.0_f64, 1.0, 0.5])?;
+            for (fname, np_name) in [("convolve", "convolve"), ("correlate", "correlate")] {
+                let ours = module
+                    .getattr(fname)?
+                    .call((a.clone(), v.clone(), "full"), None)?;
+                let kw = PyDict::new(py);
+                kw.set_item("mode", "full")?;
+                let theirs = numpy
+                    .getattr(np_name)?
+                    .call((a.clone(), v.clone()), Some(&kw))?;
+                let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "{fname} on list inputs must match numpy");
+            }
+
+            // Integer lists must defer to numpy (int result dtype) and still work.
+            let ai = PyList::new(py, [1_i64, 2, 3])?;
+            let vi = PyList::new(py, [0_i64, 1, 2])?;
+            let ours_i = module.getattr("convolve")?.call((ai.clone(), vi.clone(), "full"), None)?;
+            let theirs_i = numpy.getattr("convolve")?.call1((ai.clone(), vi.clone()))?;
+            let eq_i: bool = numpy
+                .getattr("array_equal")?
+                .call1((&ours_i, &theirs_i))?
+                .extract()?;
+            assert!(eq_i, "convolve int lists must match numpy (int dtype)");
 
             Ok(())
         });
