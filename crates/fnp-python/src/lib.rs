@@ -20076,19 +20076,40 @@ fn cov_gram_rowvar_f64(
     }
 
     let inv_fact = 1.0_f64 / (n_obs - ddof) as f64;
-    // Symmetric Gram: parallel over output rows, fill the lower triangle, then mirror.
+    // Symmetric Gram: fill the lower triangle (each cell is one independent dot),
+    // then mirror. Each cell's dot order is fixed regardless of scheduling, so the
+    // serial and parallel forms are BIT-IDENTICAL. The triangle costs ~n_vars²·n_obs/2
+    // multiply-adds; below ~1<<18 that is microseconds and the rayon dispatch is pure
+    // overhead (numpy never parallelizes a small Gram), so e.g. cov([10,100]) was ~5x
+    // numpy. Gate the fan-out on the work estimate; keep small Grams serial.
+    let row_dot = |i: usize, row_out: &mut [f64]| {
+        let ci = &centered[i * n_obs..(i + 1) * n_obs];
+        for (j, slot) in row_out.iter_mut().enumerate().take(i + 1) {
+            let cj = &centered[j * n_obs..(j + 1) * n_obs];
+            let dot: f64 = ci.iter().zip(cj).map(|(a, b)| a * b).sum();
+            *slot = dot * inv_fact;
+        }
+    };
     let mut result = vec![0.0f64; n_vars * n_vars];
-    result
-        .par_chunks_mut(n_vars)
-        .enumerate()
-        .for_each(|(i, row_out)| {
-            let ci = &centered[i * n_obs..(i + 1) * n_obs];
-            for (j, slot) in row_out.iter_mut().enumerate().take(i + 1) {
-                let cj = &centered[j * n_obs..(j + 1) * n_obs];
-                let dot: f64 = ci.iter().zip(cj).map(|(a, b)| a * b).sum();
-                *slot = dot * inv_fact;
-            }
-        });
+    // For a SMALL Gram the rayon dispatch dwarfs the work — cov([10,100]) was ~5x
+    // numpy purely from fanning out microseconds of compute. Gate on total work
+    // (~n_vars²·n_obs multiply-adds): below the threshold stay serial (no dispatch),
+    // above it fan out. Even at large few-variable shapes (e.g. cov([10,20000])) the
+    // dots exceed L2 and parallelism aggregates memory bandwidth, so the gate keys on
+    // work, NOT row count. Serial and parallel are bit-identical (each cell is one
+    // independent dot), so this is a pure overhead removal.
+    let work = (n_vars as u64) * (n_vars as u64) * (n_obs as u64);
+    if work >= (1 << 18) && rayon::current_num_threads() >= 2 {
+        result
+            .par_chunks_mut(n_vars)
+            .enumerate()
+            .for_each(|(i, row_out)| row_dot(i, row_out));
+    } else {
+        result
+            .chunks_mut(n_vars)
+            .enumerate()
+            .for_each(|(i, row_out)| row_dot(i, row_out));
+    }
     for i in 0..n_vars {
         for j in (i + 1)..n_vars {
             result[i * n_vars + j] = result[j * n_vars + i];
