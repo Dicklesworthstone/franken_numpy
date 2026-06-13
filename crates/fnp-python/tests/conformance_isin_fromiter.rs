@@ -129,6 +129,55 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+/// Locks the dense-table integer isin path (and the hash fallback for wide ranges):
+/// deterministic int64 arrays — one small-range (table) and one huge-range (hash) —
+/// across invert, with the bool result BYTE-IDENTICAL to numpy.isin plus a sha256
+/// golden over the fnp bytes. Membership is exact either way, so the table path is
+/// bit-identical to both numpy and the prior hash path.
+#[test]
+fn isin_int_table_and_hash_paths_match_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+s = 0x2545F4914F6CDD1D
+def nxt():
+    global s
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    return s
+n = 4000
+small = np.array([nxt() % 1500 for _ in range(n)], dtype=np.int64)
+small_t = np.array([nxt() % 1500 for _ in range(700)], dtype=np.int64)
+wide = np.array([(nxt() % (1 << 60)) - (1 << 59) for _ in range(n)], dtype=np.int64)
+wide_t = np.array([(nxt() % (1 << 60)) - (1 << 59) for _ in range(700)], dtype=np.int64)
+h = hashlib.sha256()
+allmatch = True
+for (a, t) in ((small, small_t), (wide, wide_t)):
+    for inv in (False, True):
+        r = np.asarray(fnp.isin(a, t, invert=inv))
+        e = np.isin(a, t, invert=inv)
+        if r.shape != e.shape or r.dtype != e.dtype or r.tobytes() != e.tobytes():
+            allmatch = False
+        h.update(r.tobytes())
+print(allmatch)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "isin int table/hash paths must be byte-identical to numpy.isin"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "eba11167d3d5a8caeacb2d36cfd75cd01615590af5ffc635dba3b586e23bc9a1",
+        "isin int table/hash golden sha256 drifted"
+    );
+    Ok(())
+}
+
 // ────────────────────────────────────────���────────────────────────────────────
 // frombuffer
 // ─────────────────────────────────────────────────────────────────────────────

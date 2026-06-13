@@ -22821,7 +22821,17 @@ impl core::hash::BuildHasher for FastIntBuildHasher {
 // bit-equality IS value-equality (no NaN/-0.0 hazards), so this is bit-exact.
 // Result is XORed with `invert` to honour numpy's invert kwarg. Returns None if a
 // buffer is non-contiguous (as_slice fails) so the caller defers to numpy.
-fn isin_typed<'py, T: pyo3::buffer::Element + Copy + core::hash::Hash + Eq>(
+// Lossless widening of every fixed-width integer key to i128 so isin can index a
+// dense membership TABLE by `value - min`. i128 holds the full i64/u64 range.
+trait IntKey: Copy + Ord {
+    fn to_i128(self) -> i128;
+}
+macro_rules! impl_intkey {
+    ($($t:ty),*) => { $(impl IntKey for $t { #[inline] fn to_i128(self) -> i128 { self as i128 } })* };
+}
+impl_intkey!(i8, i16, i32, i64, u8, u16, u32, u64);
+
+fn isin_typed<'py, T: pyo3::buffer::Element + Copy + core::hash::Hash + Eq + IntKey>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     element: &Bound<'py, PyAny>,
@@ -22833,22 +22843,67 @@ fn isin_typed<'py, T: pyo3::buffer::Element + Copy + core::hash::Hash + Eq>(
     let (Some(e_s), Some(t_s)) = (e_buf.as_slice(py), t_buf.as_slice(py)) else {
         return Ok(None);
     };
-    let mut set: std::collections::HashSet<T, FastIntBuildHasher> =
-        std::collections::HashSet::with_capacity_and_hasher(t_s.len(), FastIntBuildHasher);
-    for c in t_s.iter() {
-        set.insert(c.get());
-    }
     let n = e_s.len();
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "uint8")?;
     let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
-    if n > 0 {
-        let Ok(o_buf) = PyBuffer::<u8>::get(&flat) else {
-            return Ok(None);
-        };
-        let Some(output) = o_buf.as_mut_slice(py) else {
-            return Ok(None);
-        };
+    if n == 0 {
+        return Ok(Some(flat.call_method1("view", (numpy.getattr("bool_")?,))?));
+    }
+    let Ok(o_buf) = PyBuffer::<u8>::get(&flat) else {
+        return Ok(None);
+    };
+    let Some(output) = o_buf.as_mut_slice(py) else {
+        return Ok(None);
+    };
+
+    // Dense-table membership when the test value range is small relative to the
+    // work — numpy's own 'table' heuristic. A bool[range] keyed by `v - min` is a
+    // single direct-indexed load per element (no hashing, cache-friendly), ~3x the
+    // hash set on integer id-membership. Same exact membership → bit-identical
+    // result. Range too wide (sparse keys / would-be huge table) falls to the hash
+    // set, which is range-independent.
+    let table_built = if !t_s.is_empty() {
+        let mut lo = t_s[0].get().to_i128();
+        let mut hi = lo;
+        for c in t_s.iter() {
+            let v = c.get().to_i128();
+            if v < lo {
+                lo = v;
+            }
+            if v > hi {
+                hi = v;
+            }
+        }
+        let span = (hi - lo) as u128 + 1; // fits: i128 diff of two ints is < 2^65
+        let budget = (6u128).saturating_mul((e_s.len() + t_s.len()) as u128);
+        if span <= budget.max(1 << 20) && span <= (1 << 31) {
+            let mut table = vec![false; span as usize];
+            for c in t_s.iter() {
+                table[(c.get().to_i128() - lo) as usize] = true;
+            }
+            for (o, c) in output.iter().zip(e_s.iter()) {
+                let v = c.get().to_i128();
+                let hit = v >= lo && v <= hi && table[(v - lo) as usize];
+                o.set(hit as u8);
+            }
+            true
+        } else {
+            false
+        }
+    } else {
+        // Empty test set: nothing is a member.
+        for o in output.iter() {
+            o.set(0);
+        }
+        true
+    };
+    if !table_built {
+        let mut set: std::collections::HashSet<T, FastIntBuildHasher> =
+            std::collections::HashSet::with_capacity_and_hasher(t_s.len(), FastIntBuildHasher);
+        for c in t_s.iter() {
+            set.insert(c.get());
+        }
         for (o, c) in output.iter().zip(e_s.iter()) {
             o.set(set.contains(&c.get()) as u8);
         }
