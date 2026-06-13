@@ -467,3 +467,62 @@ print(hashlib.sha256(s.encode()).hexdigest())
     );
     Ok(())
 }
+
+/// Locks the per-axis any/all fast path (axis_any_all_fold): bool and float64
+/// arrays reduced over axis 0 (non-last, row-sequential accumulator) and the
+/// contiguous last axis (per-lane block-fold), 2-D and 3-D, with all-false /
+/// all-true / scattered / NaN (truthy) / -0.0 (falsy) — each result byte-identical
+/// to numpy plus a sha256 golden over all the result bytes.
+#[test]
+fn any_all_axis_fast_path_matches_numpy_bytes_and_golden() -> Result<(), String> {
+    let script = fnp_any_script(
+        r#"
+import hashlib
+s = 0x9E3779B97F4A7C15
+def nxt():
+    global s
+    s = (s * 6364136223846793005 + 1) & 0xFFFFFFFFFFFFFFFF
+    return s
+F = np.empty((130, 71), dtype=np.float64)
+for i in range(130):
+    for j in range(71):
+        F[i, j] = ((nxt() >> 11) / (1 << 53)) * 8.0 - 4.0
+F[::13, 4] = 0.0        # falsy column
+F[7, ::9] = np.nan      # nan (truthy)
+F[9, ::11] = -0.0       # falsy
+B = (F > 0)
+B[:, 20] = False        # all-false column (axis 0)
+B[40, :] = True         # all-true row (axis 1)
+T3 = np.empty((11, 13, 9), dtype=np.float64)
+for x in np.ndindex(11, 13, 9):
+    T3[x] = ((nxt() >> 11) / (1 << 53)) * 4.0 - 2.0
+B3 = (T3 > 0)
+h = hashlib.sha256()
+allmatch = True
+for arr in (F, B, T3, B3):
+    for ax in range(arr.ndim):
+        for fn, nf in ((fnp.any, np.any), (fnp.all, np.all)):
+            r = np.asarray(fn(arr, axis=ax))
+            e = np.asarray(nf(arr, axis=ax))
+            if r.shape != e.shape or r.dtype != e.dtype or r.tobytes() != e.tobytes():
+                allmatch = False
+            h.update(r.tobytes())
+print(allmatch)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "True",
+        "per-axis any/all must be byte-identical to numpy"
+    );
+    assert_eq!(
+        lines.next().unwrap_or("").trim(),
+        "1d2281e04ffe332c20dec574941526b2aa0fc20c49a20880684df650a84a9b55",
+        "per-axis any/all golden sha256 drifted"
+    );
+    Ok(())
+}

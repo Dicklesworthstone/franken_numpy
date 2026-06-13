@@ -13998,6 +13998,124 @@ fn block_all_f64(input: &[pyo3::buffer::ReadOnlyCell<f64>]) -> bool {
     true
 }
 
+// Per-axis any/all over a C-contiguous borrowed buffer. The generic
+// finish_any_all path folds each output cell DOWN the axis with a short-circuit
+// `iter().any()/all()` over STRIDED indices (cache-pessimal for axis 0, and the
+// short-circuit blocks autovectorization). This walks the input ROW-SEQUENTIALLY
+// instead, OR-accumulating per-inner truthiness into a small accumulator: for
+// `any`, acc[i] = "saw a truthy"; for `all`, acc[i] = "saw a falsy" (output is
+// !acc). The inner accumulate is branchless and autovectorizes; reading rows in
+// order is cache-friendly. Order-independent fold, so identical to the
+// short-circuit form (NaN truthy, -0.0 falsy preserved). axis_len==0 yields
+// any=False / all=True (matching numpy). Returns None for shape/axis edges that
+// the generic path should handle.
+fn axis_any_all_fold<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    input: &[pyo3::buffer::ReadOnlyCell<T>],
+    shape: &[usize],
+    axis: isize,
+    is_all: bool,
+    truthy: F,
+) -> PyResult<Option<Py<PyAny>>> {
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let ndim = shape.len() as isize;
+    let norm = if axis < 0 { axis + ndim } else { axis };
+    if norm < 0 || norm >= ndim {
+        return Ok(None);
+    }
+    let axu = norm as usize;
+    let axis_len = shape[axu];
+    let outer: usize = shape[..axu].iter().product();
+    let inner: usize = shape[axu + 1..].iter().product();
+    let out_elems = outer * inner;
+    // `result[c]` holds the final 0/1 truth value for each output cell.
+    let mut result = vec![0u8; out_elems];
+    if inner == 1 {
+        // Contiguous last axis: each output cell folds a contiguous lane. Block-fold
+        // it (OR for any / falsy-OR for all) — vectorizes AND early-exits per block,
+        // unlike the generic short-circuit scan which goes scalar when there is no
+        // early exit (e.g. any() over an all-False lane).
+        const BLK: usize = 4096;
+        for (o, slot) in result.iter_mut().enumerate() {
+            let lane = &input[o * axis_len..o * axis_len + axis_len];
+            let mut value = is_all; // any over empty => false; all over empty => true
+            'lane: for chunk in lane.chunks(BLK) {
+                let mut hit = 0u8;
+                if is_all {
+                    for c in chunk {
+                        hit |= u8::from(!truthy(c.get()));
+                    }
+                    if hit != 0 {
+                        value = false;
+                        break 'lane;
+                    }
+                } else {
+                    for c in chunk {
+                        hit |= u8::from(truthy(c.get()));
+                    }
+                    if hit != 0 {
+                        value = true;
+                        break 'lane;
+                    }
+                }
+            }
+            *slot = u8::from(value);
+        }
+    } else {
+        // Non-last axis: walk rows SEQUENTIALLY, OR-accumulating per-inner truthiness
+        // (`any`: saw-truthy; `all`: saw-falsy). The inner accumulate is branchless
+        // and vectorizes; row-sequential reads are cache-friendly (vs the strided
+        // per-column scan). axis_len==0 leaves `acc` all-0 => any=False / all=True.
+        let mut acc = vec![0u8; out_elems];
+        if axis_len > 0 {
+            let lane = axis_len * inner;
+            for o in 0..outer {
+                let abase = o * inner;
+                let ibase = o * lane;
+                let block = &mut acc[abase..abase + inner];
+                for r in 0..axis_len {
+                    let row = &input[ibase + r * inner..ibase + r * inner + inner];
+                    if is_all {
+                        for (a, c) in block.iter_mut().zip(row) {
+                            *a |= u8::from(!truthy(c.get()));
+                        }
+                    } else {
+                        for (a, c) in block.iter_mut().zip(row) {
+                            *a |= u8::from(truthy(c.get()));
+                        }
+                    }
+                }
+            }
+        }
+        for (r, &a) in result.iter_mut().zip(acc.iter()) {
+            *r = if is_all { u8::from(a == 0) } else { a };
+        }
+    }
+    let mut out_shape = shape.to_vec();
+    out_shape.remove(axu);
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let flat_u8 = numpy.call_method("empty", (out_elems,), Some(&kwargs))?;
+    if out_elems > 0 {
+        let Ok(out_buffer) = PyBuffer::<u8>::get(&flat_u8) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (o, &r) in output.iter().zip(result.iter()) {
+            o.set(r);
+        }
+    }
+    let flat_bool = flat_u8.call_method1("view", (numpy.getattr("bool_")?,))?;
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let reshaped = flat_bool.call_method1("reshape", (&output_shape,))?;
+    Ok(Some(reshaped.unbind()))
+}
+
 fn try_zerocopy_any_all(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -14034,6 +14152,12 @@ fn try_zerocopy_any_all(
                 let scalar = numpy.getattr("bool_")?.call1((value,))?;
                 return Ok(Some(scalar.unbind()));
             }
+            if let Some(ax) = axis
+                && let Some(out) =
+                    axis_any_all_fold(py, &numpy, input, &shape, ax, is_all, |v: u8| v != 0)?
+            {
+                return Ok(Some(out));
+            }
             finish_any_all(py, &numpy, input.len(), &shape, axis, is_all, |i| {
                 input[i].get() != 0
             })
@@ -14056,6 +14180,12 @@ fn try_zerocopy_any_all(
                 };
                 let scalar = numpy.getattr("bool_")?.call1((value,))?;
                 return Ok(Some(scalar.unbind()));
+            }
+            if let Some(ax) = axis
+                && let Some(out) =
+                    axis_any_all_fold(py, &numpy, input, &shape, ax, is_all, |v: f64| v != 0.0)?
+            {
+                return Ok(Some(out));
             }
             finish_any_all(py, &numpy, input.len(), &shape, axis, is_all, |i| {
                 input[i].get() != 0.0
