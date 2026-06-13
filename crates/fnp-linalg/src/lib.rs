@@ -7318,6 +7318,33 @@ pub fn batch_svd_full(data: &[f64], shape: &[usize]) -> Result<SvdFullResult, Li
     Ok((all_u, all_s, all_vt))
 }
 
+/// Batched pseudoinverse: pinv on (..., m, n) → (..., n, m), one parallel lane
+/// per stacked matrix. The Moore-Penrose pseudoinverse is unique (independent of
+/// the SVD sign/phase convention), so this is parity-safe at allclose level.
+pub fn batch_pinv(
+    data: &[f64],
+    shape: &[usize],
+    rcond: Option<f64>,
+    rtol: Option<Option<f64>>,
+) -> Result<Vec<f64>, LinAlgError> {
+    let (batch, m, n) = parse_batched_shape(shape)?;
+    let mat_size = m * n;
+    if Some(data.len()) != batch.checked_mul(mat_size) {
+        return Err(LinAlgError::ShapeContractViolation(
+            "batch_pinv: data length does not match shape",
+        ));
+    }
+    let resolved_rcond = resolve_pinv_tolerance_aliases(rcond, rtol)?;
+    let lanes = batch_map_lanes(batch, mat_size, |b| {
+        pinv_mxn(&data[b * mat_size..(b + 1) * mat_size], m, n, resolved_rcond)
+    })?;
+    let mut result = Vec::with_capacity(batch * n * m);
+    for lane in &lanes {
+        result.extend_from_slice(lane);
+    }
+    Ok(result)
+}
+
 /// Batched QR: qr on (..., m, n) → (Q (..., m, m), R (..., m, n)).
 pub fn batch_qr(data: &[f64], shape: &[usize]) -> Result<(Vec<f64>, Vec<f64>), LinAlgError> {
     let (batch, m, n) = parse_batched_shape(shape)?;

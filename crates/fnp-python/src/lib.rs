@@ -16025,6 +16025,33 @@ fn pinv(
         return build_numpy_array_from_ufunc(py, &result);
     }
 
+    // Batched (..., M, N), non-hermitian: one parallel pinv per lane via
+    // fnp_linalg::batch_pinv. The Moore-Penrose pseudoinverse is unique
+    // (SVD-sign-independent), so this is parity-safe at the allclose level that
+    // pinv's oracle already uses. numpy runs a serial-C per-lane SVD/pinv, so
+    // this closes the batched no-gaps gap. Output shape = batch dims + [N, M].
+    // Complex/empty handled above; non-finite or any Err falls back to numpy.
+    if shape.len() >= 3
+        && !hermitian
+        && matches!(array.dtype(), DType::F64)
+        && !array.has_integer_sidecar()
+        && array.values().iter().all(|v| v.is_finite())
+    {
+        let m = shape[shape.len() - 2];
+        let n = shape[shape.len() - 1];
+        let owned_shape = shape.to_vec();
+        if let Ok(values) =
+            fnp_linalg::batch_pinv(array.values(), &owned_shape, rcond.as_rcond(), rtol.as_rtol())
+        {
+            let mut out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+            out_shape.push(n);
+            out_shape.push(m);
+            let result =
+                UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
+            return build_numpy_array_from_ufunc(py, &result);
+        }
+    }
+
     let pinv_fn = numpy.getattr("linalg")?.getattr("pinv")?;
     let kw = PyDict::new(py);
     rcond.set_on_kwargs(&kw, "rcond")?;
@@ -81052,6 +81079,50 @@ mod tests {
             let theirs_f = numpy_cond.call1((sq.clone(), "fro"))?;
             let ok_f: bool = allclose.call1((&ours_f, &theirs_f))?.extract()?;
             assert!(ok_f, "cond(p=fro) batched passthrough mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn pinv_batched_matches_numpy_via_batch_pinv() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let pinv_fn = module.getattr("pinv")?;
+            let numpy = py.import("numpy")?;
+            let numpy_pinv = numpy.getattr("linalg")?.getattr("pinv")?;
+            let allclose = numpy.getattr("allclose")?;
+            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((23_u64,))?;
+
+            // Square / tall / wide / 4-D batched. Output is (..., N, M).
+            for (shp, out) in [
+                (vec![32_i64, 6, 6], vec![32_usize, 6, 6]),
+                (vec![16, 7, 4], vec![16, 4, 7]),
+                (vec![16, 4, 7], vec![16, 7, 4]),
+                (vec![2, 3, 5, 5], vec![2, 3, 5, 5]),
+            ] {
+                let a = rng.getattr("standard_normal")?.call1((shp.clone(),))?;
+                let ours = pinv_fn.call1((a.clone(),))?;
+                let theirs = numpy_pinv.call1((a.clone(),))?;
+                let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "pinv batched mismatch for shape {shp:?}");
+                let got: Vec<usize> = ours.getattr("shape")?.extract()?;
+                assert_eq!(got, out, "pinv batched shape for {shp:?}");
+                // pinv(pinv(A)) ~ A for full-rank lanes => sanity on the values.
+            }
+
+            // hermitian=True batched stays on the numpy passthrough but must match.
+            let sq = rng.getattr("standard_normal")?.call1((vec![8_i64, 5, 5],))?;
+            let kw = PyDict::new(py);
+            kw.set_item("hermitian", true)?;
+            let ours_h = pinv_fn.call((sq.clone(),), Some(&kw))?;
+            let theirs_h = numpy_pinv.call((sq.clone(),), Some(&kw))?;
+            let ok_h: bool = allclose.call1((&ours_h, &theirs_h))?.extract()?;
+            assert!(ok_h, "pinv(hermitian) batched passthrough mismatch");
 
             Ok(())
         });
