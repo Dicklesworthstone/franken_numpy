@@ -37168,6 +37168,13 @@ fn py_min(
         return Ok(out);
     }
 
+    // f32 min: numpy's SIMD reduction beats a widening native fold (8vdtg ceiling,
+    // same as f64); delegate instead of paying the cold extract->f64-widen scan
+    // (~20x slower than numpy).
+    if numpy_dtype_is_f32(a.bind(py)) {
+        return fallback();
+    }
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "min(a)") {
         Ok(arr) => arr,
@@ -37262,6 +37269,13 @@ fn py_max(
     // delegates to numpy, but native int min/max beats numpy's strided reduce).
     if let Some(out) = try_zerocopy_int_minmax(py, a.bind(py), axis_val, keepdims, false)? {
         return Ok(out);
+    }
+
+    // f32 max: numpy's SIMD reduction beats a widening native fold (8vdtg ceiling,
+    // same as f64); delegate instead of paying the cold extract->f64-widen scan
+    // (~20x slower than numpy).
+    if numpy_dtype_is_f32(a.bind(py)) {
+        return fallback();
     }
 
     // Extract input array
@@ -39983,6 +39997,16 @@ fn numpy_dtype_is_f64(py: Python<'_>, value: &Bound<'_, PyAny>) -> bool {
     probe().unwrap_or(false)
 }
 
+fn numpy_dtype_is_f32(value: &Bound<'_, PyAny>) -> bool {
+    let probe = || -> PyResult<bool> {
+        let dtype = value.getattr("dtype")?;
+        let kind: String = dtype.getattr("kind")?.extract()?;
+        let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+        Ok(kind == "f" && itemsize == 4)
+    };
+    probe().unwrap_or(false)
+}
+
 fn try_zerocopy_unicode_ascii_case(
     py: Python<'_>,
     input: &Bound<'_, PyAny>,
@@ -41022,6 +41046,13 @@ fn ptp(
         if size >= 4096 && numpy_dtype_is_f64(py, ab) {
             return fallback();
         }
+    }
+
+    // f32 ptp (any axis): numpy's fused SIMD ptp beats a widening native max−min
+    // (8vdtg ceiling, same as f64); delegate instead of the cold extract->f64-widen
+    // path (~12x slower than numpy).
+    if numpy_dtype_is_f32(a.bind(py)) {
+        return fallback();
     }
 
     // Extract input array
