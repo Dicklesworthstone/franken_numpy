@@ -7583,6 +7583,90 @@ fn zerocopy_f64_isclose_flat<'py>(
     Ok(Some((flat, shape)))
 }
 
+// float32 counterpart of zerocopy_f64_isclose_flat: read two same-shape f32 buffers,
+// WIDEN each element to f64, and apply the identical isclose predicate. numpy
+// promotes the f32 comparison to float64 (python-float tolerances), so this is
+// bit-identical to the extract path it replaces. Both operands must be f32 ndarrays.
+fn zerocopy_f32_isclose_flat<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    b: &Bound<'py, PyAny>,
+    rtol: f64,
+    atol: f64,
+    equal_nan: bool,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.get_type().is(&ndarray_type) || !b.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    let is_f32 = |o: &Bound<'_, PyAny>| -> PyResult<bool> {
+        let dt = o.getattr("dtype")?;
+        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
+            && dt.getattr("itemsize")?.extract::<usize>()? == 4)
+    };
+    if !is_f32(a)? || !is_f32(b)? {
+        return Ok(None);
+    }
+    let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<f32>::get(a), PyBuffer::<f32>::get(b)) else {
+        return Ok(None);
+    };
+    let (Some(a_in), Some(b_in)) = (a_buffer.as_slice(py), b_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    if a_buffer.shape() != b_buffer.shape() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a_buffer.shape().to_vec();
+    let n = a_in.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let bytes = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<u8>::get(&bytes) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
+            let x = a_cell.get() as f64;
+            let y = b_cell.get() as f64;
+            let close = if x.is_finite() && y.is_finite() {
+                (x - y).abs() <= atol + rtol * y.abs()
+            } else if equal_nan && x.is_nan() && y.is_nan() {
+                true
+            } else {
+                x == y
+            };
+            slot.set(u8::from(close));
+        }
+    }
+    let flat = bytes.call_method1("view", (numpy.getattr("bool_")?,))?;
+    Ok(Some((flat, shape)))
+}
+
+fn try_zerocopy_f32_isclose(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    rtol: f64,
+    atol: f64,
+    equal_nan: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some((flat, shape)) = zerocopy_f32_isclose_flat(py, &numpy, a, b, rtol, atol, equal_nan)?
+    else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 // Wrap zerocopy_f64_isclose_flat with the shared reshape / 0-d scalar handling.
 fn try_zerocopy_f64_isclose(
     py: Python<'_>,
@@ -41153,6 +41237,10 @@ fn isclose(
     // both buffers and write the predicate straight to the output, skipping the
     // three cold extract/build Vecs. Bit-identical; all else falls through.
     if let Some(out) = try_zerocopy_f64_isclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
+    {
+        return Ok(out);
+    }
+    if let Some(out) = try_zerocopy_f32_isclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
     {
         return Ok(out);
     }
