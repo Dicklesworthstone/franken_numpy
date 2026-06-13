@@ -14140,15 +14140,38 @@ fn count_nonzero_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
                     return Ok(None);
                 };
                 let lane = axis_len * inner;
-                for o in 0..outer {
-                    let obase = o * inner;
-                    let ibase = o * lane;
-                    for i in 0..inner {
+                if inner == 1 {
+                    // Last axis: each lane is contiguous, so scan it with a register
+                    // accumulator (already optimal).
+                    for o in 0..outer {
+                        let ibase = o * lane;
                         let mut cnt = 0i64;
                         for a in 0..axis_len {
-                            cnt += i64::from(pred(input[ibase + a * inner + i].get()));
+                            cnt += i64::from(pred(input[ibase + a].get()));
                         }
-                        output[obase + i].set(cnt);
+                        output[o].set(cnt);
+                    }
+                } else {
+                    // Non-last axis (e.g. axis=0 of a 2-D array): scanning each output
+                    // column along the axis strides through `input` by `inner` and
+                    // thrashes cache (~5x). Instead accumulate ROW-WISE — walk the
+                    // input sequentially and add each contiguous `inner`-run into the
+                    // per-column counters, which stay cache-resident. Counting is
+                    // order-independent, so the result is identical.
+                    let mut counts = vec![0i64; out_elems];
+                    for o in 0..outer {
+                        let obase = o * inner;
+                        let ibase = o * lane;
+                        for a in 0..axis_len {
+                            let abase = ibase + a * inner;
+                            let crow = &mut counts[obase..obase + inner];
+                            for (i, c) in crow.iter_mut().enumerate() {
+                                *c += i64::from(pred(input[abase + i].get()));
+                            }
+                        }
+                    }
+                    for (slot, &c) in output.iter().zip(counts.iter()) {
+                        slot.set(c);
                     }
                 }
             }
