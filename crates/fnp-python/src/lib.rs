@@ -33694,11 +33694,58 @@ fn masked_greater(
 #[pyfunction]
 #[pyo3(signature = (x, p=None))]
 fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.linalg.cond so the seven valid p values
-    // (None, 1, -1, 2, -2, 'fro', inf, -inf) and batched (..., M, N)
-    // broadcasting match numpy exactly across real and complex inputs.
+    // 2-norm condition number (p in {None, 2, -2}) is purely svd-derived:
+    // sigma_max/sigma_min (or its reciprocal for -2). For batched (..., M, N)
+    // inputs numpy runs a serial-C per-lane SVD, whereas fnp_linalg::batch_svd
+    // does the same per-lane svd_mxn in parallel (rayon) — a no-gaps win in the
+    // same parity-safe class as batched svdvals/eigvalsh (singular values are
+    // deterministic; cond's allclose-level result tolerates the ~2-ULP delta).
+    // The other p values (1, -1, 'fro', inf, -inf) use matrix-inverse norms and
+    // every 2-D case stay on the numpy passthrough so all eight semantics and
+    // complex inputs match exactly.
     let numpy = py.import("numpy")?;
     let cond_fn = numpy.getattr("linalg")?.getattr("cond")?;
+    // p_mode: Some(2) -> sigma_max/sigma_min, Some(-2) -> sigma_min/sigma_max,
+    // None -> not a 2-norm selector (fall back to numpy).
+    let p_mode: Option<i8> = match &p {
+        None => Some(2),
+        Some(value) => match value.bind(py).extract::<f64>() {
+            Ok(f) if f == 2.0 => Some(2),
+            Ok(f) if f == -2.0 => Some(-2),
+            _ => None,
+        },
+    };
+    if let Some(mode) = p_mode {
+        if let Ok(array) = extract_numeric_array(py, x.bind(py), "cond(x)") {
+            let shape = array.shape();
+            if shape.len() >= 3
+                && matches!(array.dtype(), DType::F64)
+                && !array.has_integer_sidecar()
+                && array.values().iter().all(|v| v.is_finite())
+            {
+                let m = shape[shape.len() - 2];
+                let n = shape[shape.len() - 1];
+                let k = m.min(n);
+                let owned_shape = shape.to_vec();
+                if k >= 1 {
+                    if let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape) {
+                        let batch = sigmas.len() / k;
+                        let mut out = Vec::with_capacity(batch);
+                        for b in 0..batch {
+                            let smax = sigmas[b * k];
+                            let smin = sigmas[b * k + k - 1];
+                            out.push(if mode == 2 { smax / smin } else { smin / smax });
+                        }
+                        let out_shape: Vec<usize> =
+                            owned_shape[..owned_shape.len() - 2].to_vec();
+                        let result = UFuncArray::new(out_shape, out, DType::F64)
+                            .map_err(map_ufunc_error)?;
+                        return build_numpy_array_from_ufunc(py, &result);
+                    }
+                }
+            }
+        }
+    }
     let kwargs = PyDict::new(py);
     if let Some(value) = p {
         kwargs.set_item("p", value.bind(py))?;
@@ -80957,6 +81004,54 @@ mod tests {
             let theirs_c = numpy_sv.call1((complex_matrix.clone(),))?;
             let ok_c: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
             assert!(ok_c, "svdvals complex mismatch");
+
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn cond_batched_two_norm_matches_numpy_via_batch_svd() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let cond_fn = module.getattr("cond")?;
+            let numpy = py.import("numpy")?;
+            let numpy_cond = numpy.getattr("linalg")?.getattr("cond")?;
+            let allclose = numpy.getattr("allclose")?;
+            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((11_u64,))?;
+
+            // Batched square / rectangular / 4-D, default p (None==2-norm).
+            for shp in [
+                vec![64_i64, 4, 4],
+                vec![5, 4, 3],
+                vec![3, 3, 5],
+                vec![2, 3, 6, 6],
+            ] {
+                let a = rng.getattr("standard_normal")?.call1((shp.clone(),))?;
+                let ours = cond_fn.call1((a.clone(),))?;
+                let theirs = numpy_cond.call1((a.clone(),))?;
+                let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "cond(default) batched mismatch for shape {shp:?}");
+            }
+
+            // Explicit p=2 and p=-2 selectors must also hit the native path.
+            let a = rng.getattr("standard_normal")?.call1((vec![32_i64, 8, 8],))?;
+            for p in [2_i64, -2] {
+                let ours = cond_fn.call1((a.clone(), p))?;
+                let theirs = numpy_cond.call1((a.clone(), p))?;
+                let ok: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "cond(p={p}) batched mismatch");
+            }
+
+            // Non-2-norm p stays on numpy passthrough (p='fro', square only).
+            let sq = rng.getattr("standard_normal")?.call1((vec![16_i64, 5, 5],))?;
+            let ours_f = cond_fn.call1((sq.clone(), "fro"))?;
+            let theirs_f = numpy_cond.call1((sq.clone(), "fro"))?;
+            let ok_f: bool = allclose.call1((&ours_f, &theirs_f))?.extract()?;
+            assert!(ok_f, "cond(p=fro) batched passthrough mismatch");
 
             Ok(())
         });
