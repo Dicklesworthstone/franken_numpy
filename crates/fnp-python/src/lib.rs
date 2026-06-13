@@ -13355,6 +13355,119 @@ fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Op
     }
 }
 
+// Build np.argwhere output ((count, ndim) int64 coordinate rows in C order) from a
+// borrowed buffer in ONE pass: count nonzeros, then re-scan writing each nonzero's
+// coordinates via a running odometer (advance one flat step per element, carry
+// across dims). Matches numpy.argwhere == transpose(nonzero) exactly — same
+// C-order flat scan, same coordinate decomposition — so the int64 result is
+// byte-identical. Requires a C-contiguous buffer (the flat index maps to logical
+// C order only then).
+fn argwhere_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T) -> bool>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    input: &[pyo3::buffer::ReadOnlyCell<T>],
+    shape: &[usize],
+    pred: F,
+) -> PyResult<Option<Py<PyAny>>> {
+    let ndim = shape.len();
+    let count = input.iter().filter(|cell| pred(cell.get())).count();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "int64")?;
+    let out = numpy
+        .call_method("empty", ((count, ndim),), Some(&kwargs))?
+        .unbind();
+    if count > 0 && ndim > 0 {
+        let Ok(out_buffer) = PyBuffer::<i64>::get(out.bind(py)) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let mut coords = vec![0i64; ndim];
+        let mut w = 0usize;
+        for cell in input.iter() {
+            if pred(cell.get()) {
+                let base = w * ndim;
+                for (d, &c) in coords.iter().enumerate() {
+                    output[base + d].set(c);
+                }
+                w += 1;
+            }
+            let mut d = ndim;
+            while d > 0 {
+                d -= 1;
+                coords[d] += 1;
+                if (coords[d] as usize) < shape[d] {
+                    break;
+                }
+                coords[d] = 0;
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
+// Zero-copy np.argwhere for a C-contiguous bool/int/uint/float64/float32 ndarray.
+// argwhere() otherwise copies the input through extract_numeric_array AND copies
+// the index array back through build_numpy_array_from_ufunc (~4.5x numpy even
+// though fnp's own nonzero is at parity). Returns None (caller falls through) for
+// complex/other dtypes, 0-d, or non-contiguous / non-ndarray input.
+fn try_zerocopy_argwhere(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract::<Vec<usize>>()?;
+    if shape.is_empty() {
+        return Ok(None); // 0-d: numpy's (1,0)/(0,0) shaping — defer
+    }
+    let flags = a.getattr("flags")?;
+    if !flags.getattr("c_contiguous")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    macro_rules! via_uint {
+        ($view_dt:literal, $T:ty) => {{
+            let view = a.call_method1("view", (numpy.getattr($view_dt)?,))?;
+            let Ok(buffer) = PyBuffer::<$T>::get(&view) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            argwhere_typed(py, &numpy, input, &shape, |v: $T| v != 0)
+        }};
+    }
+    match (kind.as_str(), itemsize) {
+        ("b", _) | ("i" | "u", 1) => via_uint!("uint8", u8),
+        ("i" | "u", 2) => via_uint!("uint16", u16),
+        ("i" | "u", 4) => via_uint!("uint32", u32),
+        ("i" | "u", 8) => via_uint!("uint64", u64),
+        ("f", 8) => {
+            let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            argwhere_typed(py, &numpy, input, &shape, |v: f64| v != 0.0)
+        }
+        ("f", 4) => {
+            let Ok(buffer) = PyBuffer::<f32>::get(a) else {
+                return Ok(None);
+            };
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            argwhere_typed(py, &numpy, input, &shape, |v: f32| v != 0.0)
+        }
+        _ => Ok(None),
+    }
+}
+
 #[pyfunction]
 fn flatnonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // Zero-copy index scan for C-contiguous bool / f64 ndarrays (the common case,
@@ -13380,6 +13493,11 @@ fn flatnonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Zero-copy coordinate scan off the borrowed buffer (C-contiguous numeric
+    // ndarray) — byte-identical to numpy.argwhere; skips the extract+build copies.
+    if let Some(out) = try_zerocopy_argwhere(py, a.bind(py))? {
+        return Ok(out);
+    }
     let a_for_fallback = a.clone_ref(py);
     let a = match extract_numeric_array(py, a.bind(py), "argwhere(a)") {
         Ok(array) => array,
@@ -51010,6 +51128,59 @@ mod tests {
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn argwhere_zerocopy_matches_numpy_bytes_and_golden() {
+        // Locks the zero-copy try_zerocopy_argwhere path: a large bool mask + a 3-D
+        // int array, output (count, ndim) int64 coords must be BYTE-IDENTICAL to
+        // numpy.argwhere (numpy is the oracle), plus an FNV-1a golden for drift.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let np = py.import("numpy")?;
+            let locals = PyDict::new(py);
+            locals.set_item("np", &np)?;
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as _np\n\
+                     s=0x2545F4914F6CDD1D\n\
+                     def nxt():\n\
+                     \x20 global s\n\
+                     \x20 s=(s*6364136223846793005+1)&0xFFFFFFFFFFFFFFFF\n\
+                     \x20 return s\n\
+                     A=_np.empty((131,57),dtype=_np.bool_)\n\
+                     for i in range(131):\n\
+                     \x20 for j in range(57):\n\
+                     \x20  A[i,j]=(nxt()>>40)&1\n\
+                     B=_np.empty((9,11,7),dtype=_np.int64)\n\
+                     for x in _np.ndindex(9,11,7):\n\
+                     \x20 B[x]=(nxt()>>50)%3-1\n",
+                )?
+                .as_c_str(),
+                None,
+                Some(&locals),
+            )?;
+            let mut h: u64 = 0xcbf29ce484222325;
+            for name in ["A", "B"] {
+                let arr = locals.get_item(name)?.unwrap();
+                let actual = argwhere(py, arr.clone().unbind())?;
+                let expected = np.getattr("argwhere")?.call1((&arr,))?;
+                let ab: Vec<u8> = actual
+                    .bind(py)
+                    .call_method0("tobytes")?
+                    .extract::<Vec<u8>>()?;
+                let eb: Vec<u8> = expected.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+                assert_eq!(ab, eb, "argwhere({name}) must be byte-identical to numpy");
+                for b in &ab {
+                    h ^= u64::from(*b);
+                    h = h.wrapping_mul(0x100000001b3);
+                }
+            }
+            assert_eq!(h, 0x9c25806588f3a004, "argwhere zero-copy golden FNV drifted");
             Ok(())
         });
     }
