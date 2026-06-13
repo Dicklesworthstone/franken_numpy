@@ -22170,6 +22170,61 @@ impl UFuncArray {
             });
         }
 
+        // Fast path: 2-operand elementwise (Hadamard) product. Both operands carry
+        // the SAME label sequence with no repeats, the output is exactly that
+        // sequence, and nothing is contracted — so `out[flat] = a[flat] * b[flat]`
+        // with identical row-major strides on every operand. The general loop below
+        // handles this with contracted_size == 1 (one product per cell) but pays a
+        // full odometer decode plus per-operand flat-index recompute on EVERY cell
+        // (e.g. `ij,ij->ij` over [200,200] is ~38x slower than the flat multiply).
+        // The lone product per cell is bit-identical to that path; only the
+        // index bookkeeping is removed. The inner stream `a[i]*b[i]` autovectorizes
+        // and fans out across the rayon pool. Repeated intra-operand labels, label
+        // permutations between operands (`ij,ji->ij`), broadcasting (dim 1 vs n),
+        // and any reduction fall through to the general path.
+        if operands.len() == 2
+            && contracted.is_empty()
+            && !einsum_has_dup_label(&input_chars[0])
+            && !einsum_has_dup_label(&input_chars[1])
+            && input_chars[0] == input_chars[1]
+            && output_labels == input_chars[0]
+            && operands[0].shape == operands[1].shape
+        {
+            let a_vals = &operands[0].values;
+            let b_vals = &operands[1].values;
+            // This is a pure elementwise multiply: 2 reads + 1 write per cell, no
+            // reuse — MEMORY-BANDWIDTH-BOUND, not compute-bound. Below the L3 cliff
+            // the data fits cache and a serial single-pass `collect` (one allocation,
+            // no zero-init) beats rayon dispatch; the general path's mistake here is
+            // parallelizing at 1<<14, paying dispatch overhead on cache-resident
+            // arrays (e.g. the 200x200 case from the perf sweep). Only past the cliff
+            // does fanning out across cores hide DRAM latency. Same lesson as clip,
+            // but the cliff is LOWER: Hadamard streams 3 buffers (2 read + 1 write)
+            // vs clip's 2, so it saturates DRAM sooner — measured crossover sits
+            // between 1M (serial 2.06x) and 4M (parallel) elements, so gate at 2M.
+            const EINSUM_HADAMARD_PAR_MIN: usize = 1 << 21;
+            let values: Vec<f64> =
+                if a_vals.len() >= EINSUM_HADAMARD_PAR_MIN && rayon::current_num_threads() >= 2 {
+                    a_vals
+                        .par_iter()
+                        .zip(b_vals.par_iter())
+                        .map(|(&av, &bv)| av * bv)
+                        .collect()
+                } else {
+                    a_vals
+                        .iter()
+                        .zip(b_vals.iter())
+                        .map(|(&av, &bv)| av * bv)
+                        .collect()
+                };
+            return Ok(Self {
+                shape: output_shape,
+                values,
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
+
         // STRUCTURAL FAST PATH: ≥3-operand contractions. The general loop below
         // iterates the FULL Cartesian product of every label (output AND
         // contracted) as one giant nested sum — e.g. `ij,jk,kl->il` over
@@ -61015,6 +61070,131 @@ print(json.dumps(payload))
             digest, "f3dbddb67e61ffb0e415e30a83d9c0168318424027db17a6e054c548a5348ae0",
             "einsum outer fast-path golden digest drifted"
         );
+    }
+
+    #[test]
+    fn einsum_hadamard_fast_path_matches_reference_bits_and_golden_sha256() {
+        // The 2-operand elementwise (Hadamard) fast path must be BYTE-IDENTICAL to
+        // the single-multiply reference out[k] = a[k] * b[k] — which is exactly what
+        // the general scatter computes for these subscripts with contracted_size == 1.
+        // Cover 1-D ('i,i->i'), 2-D ('ij,ij->ij'), and 3-D ('ijk,ijk->ijk') shapes,
+        // with the 2-D/3-D cases above the 1<<15 parallel gate so the rayon path runs.
+        let lcg = |seed: u64, n: usize| -> Vec<f64> {
+            let mut s = seed;
+            (0..n)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((s >> 33) as f64) / (u32::MAX as f64) - 0.5
+                })
+                .collect()
+        };
+        let mut hasher = Sha256::new();
+        let cases: &[(&str, Vec<usize>)] = &[
+            ("i,i->i", vec![7]),
+            ("ij,ij->ij", vec![257, 131]),
+            ("ijk,ijk->ijk", vec![29, 13, 97]),
+        ];
+        for (subs, shape) in cases {
+            let n: usize = shape.iter().product::<usize>().max(1);
+            let a = UFuncArray::new(shape.clone(), lcg(0x71 + n as u64, n), DType::F64).unwrap();
+            let b = UFuncArray::new(shape.clone(), lcg(0xC5 + n as u64, n), DType::F64).unwrap();
+            let c = UFuncArray::einsum(subs, &[&a, &b]).unwrap();
+            assert_eq!(&c.shape, shape, "{subs} shape");
+            assert_eq!(c.values.len(), n, "{subs} size");
+            for k in 0..n {
+                let expect = a.values[k] * b.values[k];
+                assert_eq!(
+                    c.values[k].to_bits(),
+                    expect.to_bits(),
+                    "{subs} hadamard drifted at {k}"
+                );
+            }
+            for v in &c.values {
+                hasher.update(v.to_bits().to_le_bytes());
+            }
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "698aebd8a90a2d9bdb4489fd9efadbe2f6e66a7eb94e6021e2f97d436af39ff0",
+            "einsum hadamard fast-path golden digest drifted"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --release -- --ignored --nocapture"]
+    fn einsum_hadamard_fast_path_speedup_report() {
+        use rayon::prelude::*;
+        use std::time::Instant;
+        // Same-process A/B: the new Hadamard fast path vs a FAITHFUL replica of the
+        // real general path that 'ij,ij->ij' used to hit — parallel above the
+        // 1<<14 gate, alloc-hoisted per-thread via map_init, odometer decode +
+        // per-operand flat-index recompute. The win is largest at small/medium
+        // sizes where the general path needlessly dispatches rayon on a
+        // cache-resident, memory-bound multiply; at large sizes both sit near the
+        // DRAM bandwidth floor (the fast path stays neutral, not a regression).
+        for &n in &[200usize, 500, 1000, 2000] {
+            let a: Vec<f64> = (0..n * n).map(|i| (i as f64) * 1e-4 - 0.5).collect();
+            let b: Vec<f64> = (0..n * n).map(|i| (i as f64) * 2e-4 - 0.5).collect();
+            let av = UFuncArray::new(vec![n, n], a.clone(), DType::F64).unwrap();
+            let bv = UFuncArray::new(vec![n, n], b.clone(), DType::F64).unwrap();
+            let it = 9;
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|p: &f64, q: &f64| p.partial_cmp(q).unwrap());
+                xs[xs.len() / 2]
+            };
+            // Faithful replica of einsum_impl's general loop for 'ij,ij->ij':
+            // output_size == total_iters == n*n, contracted_size == 1, two operands
+            // with op_terms = [(0,n),(1,1)] (row-major strides). Parallel above the
+            // same 1<<14 gate with per-thread label_vals via map_init.
+            let slow = |a: &[f64], b: &[f64], n: usize| -> Vec<f64> {
+                let dims = [n, n];
+                let terms = [[(0usize, n), (1usize, 1usize)], [(0usize, n), (1usize, 1usize)]];
+                let cell = |lv: &mut [usize], o: usize| -> f64 {
+                    let mut rem = o;
+                    for i in (0..2).rev() {
+                        lv[i] = rem % dims[i];
+                        rem /= dims[i];
+                    }
+                    let mut product = 1.0f64;
+                    for (oi, opv) in [a, b].iter().enumerate() {
+                        let mut flat = 0usize;
+                        for &(pos, stride) in &terms[oi] {
+                            flat += lv[pos] * stride;
+                        }
+                        product *= opv[flat];
+                    }
+                    product
+                };
+                if n * n >= (1 << 14) && rayon::current_num_threads() >= 2 {
+                    (0..n * n)
+                        .into_par_iter()
+                        .map_init(|| vec![0usize; 2], |lv, o| cell(lv, o))
+                        .collect()
+                } else {
+                    let mut lv = vec![0usize; 2];
+                    (0..n * n).map(|o| cell(&mut lv, o)).collect()
+                }
+            };
+            let mut ts = Vec::new();
+            let mut tf = Vec::new();
+            for _ in 0..it {
+                let t = Instant::now();
+                std::hint::black_box(slow(&a, &b, n));
+                ts.push(t.elapsed().as_secs_f64() * 1e3);
+                let t = Instant::now();
+                std::hint::black_box(UFuncArray::einsum("ij,ij->ij", &[&av, &bv]).unwrap());
+                tf.push(t.elapsed().as_secs_f64() * 1e3);
+            }
+            let (s, f) = (med(ts), med(tf));
+            println!(
+                "einsum ij,ij->ij {n}x{n}: oldpath={s:8.3}ms fastpath={f:8.3}ms speedup={:.2}x",
+                s / f
+            );
+        }
     }
 
     #[test]
