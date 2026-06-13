@@ -24294,24 +24294,14 @@ impl UFuncArray {
                 integer_sidecar: Some(IntegerSidecar::U64(result)),
             };
         }
-        let mut a = self.values.clone();
-        a.sort_by(nan_last_cmp);
-        Self::dedup_sorted_float_set_values(&mut a);
-        let mut b = other.values.clone();
-        b.sort_by(nan_last_cmp);
-        Self::dedup_sorted_float_set_values(&mut b);
+        // Integer-key sort-unique (NaN excluded — np.intersect1d never contains NaN
+        // since NaN ≠ NaN), then the existing linear merge keeps shared values.
+        let (a, _) = sorted_dedup_float_set(&self.values);
+        let (b, _) = sorted_dedup_float_set(&other.values);
 
         let mut result = Vec::new();
         let (mut i, mut j) = (0, 0);
         while i < a.len() && j < b.len() {
-            if a[i].is_nan() {
-                i += 1;
-                continue;
-            }
-            if b[j].is_nan() {
-                j += 1;
-                continue;
-            }
             match Self::float_membership_cmp(a[i], b[j]) {
                 std::cmp::Ordering::Equal => {
                     result.push(a[i]);
@@ -24379,18 +24369,36 @@ impl UFuncArray {
                 integer_sidecar: Some(IntegerSidecar::U64(result)),
             };
         }
-        let mut b = other.values.clone();
-        b.sort_by(nan_last_cmp);
-        Self::dedup_sorted_float_set_values(&mut b);
-
-        let mut a = self.values.clone();
-        a.sort_by(nan_last_cmp);
-        Self::dedup_sorted_float_set_values(&mut a);
-
-        let result: Vec<f64> = a
-            .into_iter()
-            .filter(|v| v.is_nan() || !Self::float_membership_contains(&b, *v))
-            .collect();
+        // Both operands are sorted-unique via the integer-key sort, then a single
+        // linear two-pointer merge emits a-elements not present in b — O(|a|+|b|)
+        // instead of the per-element binary search (O(|a|·log|b|)) over a
+        // comparator-closure-sorted vec. a's NaN (≤1 after dedup) is never in b, so
+        // it is always kept and, being sorted last, appended at the end.
+        let (a, a_nan) = sorted_dedup_float_set(&self.values);
+        let (b, _) = sorted_dedup_float_set(&other.values);
+        let mut result: Vec<f64> = Vec::with_capacity(a.len());
+        let (mut i, mut j) = (0usize, 0usize);
+        while i < a.len() {
+            if j >= b.len() {
+                result.push(a[i]);
+                i += 1;
+                continue;
+            }
+            match Self::float_membership_cmp(a[i], b[j]) {
+                std::cmp::Ordering::Less => {
+                    result.push(a[i]);
+                    i += 1;
+                }
+                std::cmp::Ordering::Greater => j += 1,
+                std::cmp::Ordering::Equal => {
+                    i += 1;
+                    j += 1;
+                }
+            }
+        }
+        if a_nan {
+            result.push(f64::NAN);
+        }
         let n = result.len();
         Self {
             shape: vec![n],
@@ -28174,6 +28182,58 @@ fn nan_last_cmp(a: &f64, b: &f64) -> std::cmp::Ordering {
         (false, true) => std::cmp::Ordering::Less,
         (false, false) => a.total_cmp(b),
     }
+}
+
+/// Monotonic f64 → u64 key: `f64::total_cmp` order maps to plain unsigned-integer
+/// ascending order. Lets a set of non-NaN f64 be sorted with a branch-free integer
+/// `sort_unstable` (radix-friendly, no per-comparison comparator closure) instead
+/// of `sort_by(nan_last_cmp)`. Bijective on bit patterns, so it round-trips exactly.
+#[inline]
+fn f64_total_order_key(x: f64) -> u64 {
+    let b = x.to_bits();
+    if b & (1u64 << 63) != 0 {
+        !b
+    } else {
+        b | (1u64 << 63)
+    }
+}
+
+#[inline]
+fn f64_from_total_order_key(k: u64) -> f64 {
+    let b = if k & (1u64 << 63) != 0 {
+        k & !(1u64 << 63)
+    } else {
+        !k
+    };
+    f64::from_bits(b)
+}
+
+/// Sort + dedup a float "set" exactly as the set-op f64 paths did with
+/// `sort_by(nan_last_cmp)` + `dedup_sorted_float_set_values`, but via the integer
+/// key sort above. NaN is partitioned out and reported separately (the callers
+/// special-case it); +0.0/-0.0 dedup to the first in total order (-0.0), matching
+/// the prior behaviour and numpy. Returns (sorted unique non-NaN values, had_nan).
+fn sorted_dedup_float_set(values: &[f64]) -> (Vec<f64>, bool) {
+    let mut keys: Vec<u64> = Vec::with_capacity(values.len());
+    let mut had_nan = false;
+    for &x in values {
+        if x.is_nan() {
+            had_nan = true;
+        } else {
+            keys.push(f64_total_order_key(x));
+        }
+    }
+    keys.sort_unstable();
+    let mut out: Vec<f64> = Vec::with_capacity(keys.len());
+    for &k in &keys {
+        let v = f64_from_total_order_key(k);
+        match out.last() {
+            // identical values, or +0.0 vs -0.0 (adjacent keys), collapse to the first.
+            Some(&last) if last == v || (last == 0.0 && v == 0.0) => continue,
+            _ => out.push(v),
+        }
+    }
+    (out, had_nan)
 }
 
 fn partition_nan_tail(data: &mut [f64]) -> usize {
