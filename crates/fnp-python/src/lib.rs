@@ -33825,7 +33825,16 @@ fn cond(py: Python<'_>, x: Py<PyAny>, p: Option<Py<PyAny>>) -> PyResult<Py<PyAny
                         for b in 0..batch {
                             let smax = sigmas[b * k];
                             let smin = sigmas[b * k + k - 1];
-                            out.push(if mode == 2 { smax / smin } else { smin / smax });
+                            let ratio = if mode == 2 { smax / smin } else { smin / smax };
+                            // numpy.linalg.cond converts a NaN result (0/0 from an
+                            // all-zero / fully singular matrix) to +Inf whenever the
+                            // input had no NaN entries. Our gate already requires
+                            // all-finite input, so every NaN here becomes Inf.
+                            out.push(if ratio.is_nan() {
+                                f64::INFINITY
+                            } else {
+                                ratio
+                            });
                         }
                         let out_shape: Vec<usize> =
                             owned_shape[..owned_shape.len() - 2].to_vec();
@@ -81248,6 +81257,23 @@ mod tests {
             let theirs_f = numpy_cond.call1((sq.clone(), "fro"))?;
             let ok_f: bool = allclose.call1((&ours_f, &theirs_f))?.extract()?;
             assert!(ok_f, "cond(p=fro) batched passthrough mismatch");
+
+            // Fully singular lanes (zero matrices) must give +Inf, matching numpy's
+            // NaN->Inf conversion, not a raw 0/0 = NaN.
+            let zeros = numpy.getattr("zeros")?.call1(((3_i64, 4, 4),))?;
+            let ours_z = cond_fn.call1((zeros.clone(),))?;
+            let theirs_z = numpy_cond.call1((zeros.clone(),))?;
+            let isinf = numpy.getattr("isinf")?;
+            let all_inf_ours: bool = isinf
+                .call1((&ours_z,))?
+                .call_method0("all")?
+                .extract()?;
+            assert!(all_inf_ours, "cond(zeros) must be +Inf, got non-inf");
+            let eq_z: bool = numpy
+                .getattr("array_equal")?
+                .call1((&ours_z, &theirs_z))?
+                .extract()?;
+            assert!(eq_z, "cond(zeros) batched must match numpy (+Inf)");
 
             Ok(())
         });
