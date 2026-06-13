@@ -22735,6 +22735,31 @@ fn isin(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+// np.in1d is the 1-D form of np.isin: it FLATTENS ar1 and always returns a 1-D
+// boolean array of length ar1.size (True where the element is in ar2). It is
+// deprecated since NumPy 2.0 (isin is the generalization) but remains in
+// numpy.__all__, so fnp must expose it for full-surface coverage. Route it
+// through our native isin on a raveled ar1: isin preserves the operand shape, so
+// a 1-D input yields the exact 1-D in1d result while reusing isin's fast paths.
+#[pyfunction]
+#[pyo3(signature = (ar1, ar2, assume_unique=false, invert=false, kind=None))]
+fn in1d(
+    py: Python<'_>,
+    ar1: Py<PyAny>,
+    ar2: Py<PyAny>,
+    assume_unique: bool,
+    invert: bool,
+    kind: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let ar1_flat = numpy
+        .getattr("asarray")?
+        .call1((ar1.bind(py),))?
+        .call_method0("ravel")?
+        .unbind();
+    isin(py, ar1_flat, ar2, assume_unique, invert, kind)
+}
+
 // A fast multiply-shift hasher for integer keys: std's default SipHash is far too
 // slow for the millions of single-int lookups np.isin performs. For a single
 // integer key Rust calls write_u64/write_i64 (etc.) exactly once, so a Fibonacci
@@ -40804,6 +40829,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(setdiff1d, m)?)?;
     m.add_function(wrap_pyfunction!(setxor1d, m)?)?;
     m.add_function(wrap_pyfunction!(isin, m)?)?;
+    m.add_function(wrap_pyfunction!(in1d, m)?)?;
     m.add_function(wrap_pyfunction!(vander, m)?)?;
     m.add_function(wrap_pyfunction!(arange, m)?)?;
     m.add_function(wrap_pyfunction!(linspace, m)?)?;
