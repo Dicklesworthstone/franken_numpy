@@ -21901,19 +21901,42 @@ impl UFuncArray {
         let distinct = (0..ndim).all(|i| (i + 1..ndim).all(|j| input_chars[i] != input_chars[j]));
 
         if distinct {
-            // Pure permutation: output reorders ALL input labels (no contraction). A
-            // shorter output is an axis reduction; defer.
-            if output_labels.len() != ndim {
-                return Ok(None);
+            // Output is a permutation of ALL input labels (no contraction) → transpose.
+            if output_labels.len() == ndim {
+                let mut perm = Vec::with_capacity(ndim);
+                for &oc in output_labels {
+                    match input_chars.iter().position(|&c| c == oc) {
+                        Some(p) => perm.push(p),
+                        None => return Ok(None),
+                    }
+                }
+                return Ok(Some(op.transpose(Some(&perm))?));
             }
-            let mut perm = Vec::with_capacity(ndim);
+            // Output is a strict, IN-ORDER subsequence of the input labels → a pure
+            // axis reduction over the dropped axes. The general path handles this by
+            // iterating the full output×contracted Cartesian product with a per-cell
+            // odometer decode + per-axis flat-index recompute (O(n^d) decodes); the
+            // same sum routed through reduce_sum_axes drops the decode entirely and
+            // reduces each contiguous fiber directly (vectorized + parallel). einsum
+            // reduction parity is tolerance-based (both sum in an implementation-
+            // defined order), so the reassociation is permitted — same as the multi-
+            // operand greedy and Hadamard levers. A REORDERED kept-label subsequence
+            // (e.g. 'ijk->ki') would need a trailing transpose, so defer it.
+            let mut out_pos = Vec::with_capacity(output_labels.len());
             for &oc in output_labels {
                 match input_chars.iter().position(|&c| c == oc) {
-                    Some(p) => perm.push(p),
+                    Some(p) => out_pos.push(p),
                     None => return Ok(None),
                 }
             }
-            return Ok(Some(op.transpose(Some(&perm))?));
+            if out_pos.windows(2).all(|w| w[0] < w[1]) {
+                let dropped: Vec<isize> = (0..ndim)
+                    .filter(|i| !out_pos.contains(i))
+                    .map(|i| i as isize)
+                    .collect();
+                return Ok(Some(op.reduce_sum_axes(&dropped, false)?));
+            }
+            return Ok(None);
         }
 
         // Repeated label: only the canonical 2-D square 'ii' (trace) / 'ii->i' (diagonal).
@@ -61122,6 +61145,175 @@ print(json.dumps(payload))
             digest, "698aebd8a90a2d9bdb4489fd9efadbe2f6e66a7eb94e6021e2f97d436af39ff0",
             "einsum hadamard fast-path golden digest drifted"
         );
+    }
+
+    #[test]
+    fn einsum_single_operand_reduction_fast_path_matches_reference_and_golden_sha256() {
+        // Single-operand pure axis reductions ('ij->i', 'ij->j', 'ijk->ik', 'ij->')
+        // now route to reduce_sum_axes instead of the general odometer loop. einsum
+        // reduction parity is tolerance-based, so assert allclose vs an INDEPENDENT
+        // naive nested-sum reference (sequential, defined order) rather than bit
+        // equality, plus a golden sha256 over the deterministic fast-path bits.
+        let lcg = |seed: u64, n: usize| -> Vec<f64> {
+            let mut s = seed;
+            (0..n)
+                .map(|_| {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((s >> 33) as f64) / (u32::MAX as f64) - 0.5
+                })
+                .collect()
+        };
+        let close = |a: f64, b: f64| (a - b).abs() <= 1e-9 + 1e-9 * b.abs();
+        let mut hasher = Sha256::new();
+
+        // 'ij->i' (sum over last axis) and 'ij->j' (sum over first axis).
+        let (r, c) = (37usize, 53usize);
+        let m = UFuncArray::new(vec![r, c], lcg(0x11, r * c), DType::F64).unwrap();
+        let out_i = UFuncArray::einsum("ij->i", &[&m]).unwrap();
+        assert_eq!(out_i.shape, vec![r]);
+        for i in 0..r {
+            let mut acc = 0.0;
+            for j in 0..c {
+                acc += m.values[i * c + j];
+            }
+            assert!(close(out_i.values[i], acc), "ij->i row {i}");
+        }
+        let out_j = UFuncArray::einsum("ij->j", &[&m]).unwrap();
+        assert_eq!(out_j.shape, vec![c]);
+        for j in 0..c {
+            let mut acc = 0.0;
+            for i in 0..r {
+                acc += m.values[i * c + j];
+            }
+            assert!(close(out_j.values[j], acc), "ij->j col {j}");
+        }
+        // 'ij->' full reduction to scalar.
+        let out_s = UFuncArray::einsum("ij->", &[&m]).unwrap();
+        assert_eq!(out_s.shape, Vec::<usize>::new());
+        let total: f64 = m.values.iter().sum();
+        assert!(close(out_s.values[0], total), "ij-> scalar");
+        // 'ijk->ik' (drop the middle axis).
+        let (d0, d1, d2) = (11usize, 17usize, 13usize);
+        let t = UFuncArray::new(vec![d0, d1, d2], lcg(0x22, d0 * d1 * d2), DType::F64).unwrap();
+        let out_ik = UFuncArray::einsum("ijk->ik", &[&t]).unwrap();
+        assert_eq!(out_ik.shape, vec![d0, d2]);
+        for i in 0..d0 {
+            for k in 0..d2 {
+                let mut acc = 0.0;
+                for j in 0..d1 {
+                    acc += t.values[(i * d1 + j) * d2 + k];
+                }
+                assert!(close(out_ik.values[i * d2 + k], acc), "ijk->ik ({i},{k})");
+            }
+        }
+        for arr in [&out_i, &out_j, &out_s, &out_ik] {
+            for v in &arr.values {
+                hasher.update(v.to_bits().to_le_bytes());
+            }
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "7aea8f52341606af3d23819ecb16448970de450adc3dd1ed77772025b03e3e5f",
+            "einsum single-operand reduction golden digest drifted"
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B; run with --release -- --ignored --nocapture"]
+    fn einsum_single_operand_reduction_speedup_report() {
+        use std::time::Instant;
+        // A/B: the new reduce_sum_axes route vs a faithful replica of the general
+        // odometer loop for 'ij->i' (output_size=n, contracted_size=n, per-cell
+        // decode + per-operand flat recompute, parallel above the 1<<14 gate).
+        use rayon::prelude::*;
+        for &n in &[1000usize, 2000, 4000] {
+            let data: Vec<f64> = (0..n * n).map(|i| (i as f64) * 1e-5 - 0.5).collect();
+            let av = UFuncArray::new(vec![n, n], data.clone(), DType::F64).unwrap();
+            let it = 7;
+            let med = |mut xs: Vec<f64>| {
+                xs.sort_by(|p: &f64, q: &f64| p.partial_cmp(q).unwrap());
+                xs[xs.len() / 2]
+            };
+            // Faithful 'ij->i' general loop: out[i] = sum_j a[i*n+j], but computed
+            // via the same per-cell odometer the general path used.
+            let slow = |a: &[f64], n: usize| -> Vec<f64> {
+                let dims = [n, n]; // all_dims = [output i, contracted j]
+                let cell = |lv: &mut [usize], o: usize| -> f64 {
+                    let mut sum = 0.0;
+                    for cc in 0..n {
+                        let mut rem = o * n + cc;
+                        for i in (0..2).rev() {
+                            lv[i] = rem % dims[i];
+                            rem /= dims[i];
+                        }
+                        sum += a[lv[0] * n + lv[1]];
+                    }
+                    sum
+                };
+                if n * n >= (1 << 14) && rayon::current_num_threads() >= 2 {
+                    (0..n)
+                        .into_par_iter()
+                        .map_init(|| vec![0usize; 2], |lv, o| cell(lv, o))
+                        .collect()
+                } else {
+                    let mut lv = vec![0usize; 2];
+                    (0..n).map(|o| cell(&mut lv, o)).collect()
+                }
+            };
+            // 'ij->j' general loop: output j (size n), contracted i — reads a column
+            // (stride n) per output cell = cache-pessimal, which reduce_sum_axes
+            // avoids by accumulating row-wise.
+            let slow_j = |a: &[f64], n: usize| -> Vec<f64> {
+                let dims = [n, n]; // all_dims = [output j, contracted i]
+                let cell = |lv: &mut [usize], o: usize| -> f64 {
+                    let mut sum = 0.0;
+                    for cc in 0..n {
+                        let mut rem = o * n + cc;
+                        for i in (0..2).rev() {
+                            lv[i] = rem % dims[i];
+                            rem /= dims[i];
+                        }
+                        // output label j is most-significant, contracted i next:
+                        // lv = [j, i] -> a[i*n + j]
+                        sum += a[lv[1] * n + lv[0]];
+                    }
+                    sum
+                };
+                if n * n >= (1 << 14) && rayon::current_num_threads() >= 2 {
+                    (0..n)
+                        .into_par_iter()
+                        .map_init(|| vec![0usize; 2], |lv, o| cell(lv, o))
+                        .collect()
+                } else {
+                    let mut lv = vec![0usize; 2];
+                    (0..n).map(|o| cell(&mut lv, o)).collect()
+                }
+            };
+            for (subs, slowfn) in [
+                ("ij->i", &slow as &dyn Fn(&[f64], usize) -> Vec<f64>),
+                ("ij->j", &slow_j as &dyn Fn(&[f64], usize) -> Vec<f64>),
+            ] {
+                let mut ts = Vec::new();
+                let mut tf = Vec::new();
+                for _ in 0..it {
+                    let t = Instant::now();
+                    std::hint::black_box(slowfn(&data, n));
+                    ts.push(t.elapsed().as_secs_f64() * 1e3);
+                    let t = Instant::now();
+                    std::hint::black_box(UFuncArray::einsum(subs, &[&av]).unwrap());
+                    tf.push(t.elapsed().as_secs_f64() * 1e3);
+                }
+                let (s, f) = (med(ts), med(tf));
+                println!(
+                    "einsum {subs} {n}x{n}: oldpath={s:8.3}ms fastpath={f:8.3}ms speedup={:.2}x",
+                    s / f
+                );
+            }
+        }
     }
 
     #[test]
