@@ -17740,6 +17740,11 @@ fn try_zerocopy_int_choose(
         return Ok(None);
     }
     // All choices must be ndarrays of a's shape and one shared integer dtype.
+    // Guard items[0] before reading its dtype, else array_like (Python list)
+    // choices raise AttributeError here instead of deferring to numpy.
+    if !items[0].is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
     let c0_dtype = items[0].getattr("dtype")?;
     let kind = c0_dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = c0_dtype.getattr("itemsize")?.extract::<usize>()?;
@@ -81293,6 +81298,25 @@ mod tests {
             let theirs_c = numpy.getattr("concatenate")?.call1((seq.clone(),))?;
             let okc: bool = allclose.call1((&ours_c, &theirs_c))?.extract()?;
             assert!(okc, "concatenate(list-of-lists) must match numpy");
+
+            // choose must accept array_like (Python list) choices, not just ndarrays
+            // — the int fast path used to read items[0].dtype unguarded.
+            let idx = numpy.getattr("array")?.call1((PyList::new(py, [0_i64, 1, 2, 0])?,))?;
+            let choices = PyList::new(
+                py,
+                [
+                    PyList::new(py, [10_i64, 11, 12, 13])?,
+                    PyList::new(py, [20_i64, 21, 22, 23])?,
+                    PyList::new(py, [30_i64, 31, 32, 33])?,
+                ],
+            )?;
+            let ours_ch = module.getattr("choose")?.call1((idx.clone(), choices.clone()))?;
+            let theirs_ch = numpy.getattr("choose")?.call1((idx.clone(), choices.clone()))?;
+            let okch: bool = numpy
+                .getattr("array_equal")?
+                .call1((&ours_ch, &theirs_ch))?
+                .extract()?;
+            assert!(okch, "choose(list-of-lists) must match numpy");
 
             Ok(())
         });
