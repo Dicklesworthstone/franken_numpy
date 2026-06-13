@@ -7649,7 +7649,23 @@ fn zerocopy_f64_binary_flat<'py>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        if matches!(op, BinaryOp::FloatPower) && n >= FLOAT_POWER_PARALLEL_MIN_LEN {
+        // Compute-bound binary transcendentals (powf/atan2/logaddexp): numpy runs
+        // these single-threaded (SIMD), so copying the two borrowed buffers into
+        // Vecs and fanning the expensive scalar libm op across the rayon pool beats
+        // the serial op.apply loop. `op.apply` is the SAME per-element function, so
+        // the result is bit-identical to the serial path. PyBuffer cells are !Sync
+        // (cannot be read from rayon threads), hence the one-time Vec copy.
+        let parallelizable = matches!(
+            op,
+            BinaryOp::FloatPower
+                | BinaryOp::Arctan2
+                | BinaryOp::Logaddexp
+                | BinaryOp::Logaddexp2
+        );
+        if parallelizable
+            && n >= FLOAT_POWER_PARALLEL_MIN_LEN
+            && rayon::current_num_threads() >= 2
+        {
             use rayon::prelude::*;
 
             let lhs: Vec<f64> = a_in.iter().map(|cell| cell.get()).collect();
@@ -7657,7 +7673,7 @@ fn zerocopy_f64_binary_flat<'py>(
             let values: Vec<f64> = lhs
                 .par_iter()
                 .zip(rhs.par_iter())
-                .map(|(&base, &exp)| base.powf(exp))
+                .map(|(&x, &y)| op.apply(x, y))
                 .collect();
             for (slot, value) in output.iter().zip(values) {
                 slot.set(value);
@@ -16765,6 +16781,11 @@ fn logaddexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
             .call1((x1.bind(py), x2.bind(py)))?
             .unbind());
     }
+    if let Some(out) =
+        try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp)?
+    {
+        return Ok(out);
+    }
     let x1 = extract_numeric_array(py, x1.bind(py), "logaddexp(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "logaddexp(x2)")?;
     let result = ufunc_logaddexp(&x1, &x2).map_err(map_ufunc_error)?;
@@ -16779,6 +16800,11 @@ fn logaddexp2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny
             .getattr("logaddexp2")?
             .call1((x1.bind(py), x2.bind(py)))?
             .unbind());
+    }
+    if let Some(out) =
+        try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp2)?
+    {
+        return Ok(out);
     }
     let x1 = extract_numeric_array(py, x1.bind(py), "logaddexp2(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "logaddexp2(x2)")?;
@@ -24258,6 +24284,15 @@ fn native_binary_arctan2_or_passthrough(
             || !numpy_dtype_is_f64(py, &args.get_item(1)?)
         {
             return core_numpy_passthrough(py, "arctan2", args, kwargs);
+        }
+        // Zero-copy parallel path for same-shape C-contiguous f64 ndarrays: reduce
+        // straight off the borrowed buffers with a rayon-parallel atan2, skipping the
+        // extract_numeric_array copies (the serial extract+build marshalling, not the
+        // atan2, dominated the old path — ~26ms of a 47ms 1M call).
+        if let Some(out) =
+            try_zerocopy_f64_binary(py, &args.get_item(0)?, &args.get_item(1)?, BinaryOp::Arctan2)?
+        {
+            return Ok(out);
         }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "arctan2(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "arctan2(x2)")?;
