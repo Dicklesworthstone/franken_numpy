@@ -17014,12 +17014,25 @@ impl UFuncArray {
                 if n == 0 {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
-                // NumPy propagates NaN in percentile
-                if self.values.iter().any(|v| v.is_nan()) {
+                // NumPy propagates NaN in percentile. Large inputs use the parallel
+                // radix-select (same primitive as median); the NaN scan parallelises too.
+                const PERCENTILE_GLOBAL_PARALLEL_MIN: usize = 1 << 17;
+                let parallel =
+                    n >= PERCENTILE_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+                let has_nan = if parallel {
+                    self.values.par_iter().any(|v| v.is_nan())
+                } else {
+                    self.values.iter().any(|v| v.is_nan())
+                };
+                if has_nan {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
-                let mut data = self.values.clone();
-                let val = select_percentile_method(&mut data, fraction, QuantileInterp::Linear);
+                let val = if parallel {
+                    par_select_percentile(&self.values, fraction, QuantileInterp::Linear)
+                } else {
+                    let mut data = self.values.clone();
+                    select_percentile_method(&mut data, fraction, QuantileInterp::Linear)
+                };
                 Ok(Self::scalar(val, DType::F64))
             }
             Some(ax) => {
@@ -17200,16 +17213,30 @@ impl UFuncArray {
                 if self.values.is_empty() {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
-                // NumPy propagates NaN in percentile
-                if self.values.iter().any(|v| v.is_nan()) {
+                let n = self.values.len();
+                // NumPy propagates NaN in percentile. Large inputs use the parallel
+                // radix-select; the NaN scan parallelises too.
+                const PERCENTILE_M_GLOBAL_PARALLEL_MIN: usize = 1 << 17;
+                let parallel = n >= PERCENTILE_M_GLOBAL_PARALLEL_MIN
+                    && rayon::current_num_threads() >= 2;
+                let has_nan = if parallel {
+                    self.values.par_iter().any(|v| v.is_nan())
+                } else {
+                    self.values.iter().any(|v| v.is_nan())
+                };
+                if has_nan {
                     return Ok(Self::scalar(f64::NAN, DType::F64));
                 }
-                // O(n) quickselect instead of an O(n log n) full sort — bit-identical
-                // for every QuantileInterp method (it reads only the order statistics at
-                // floor/ceil(pos), exactly as the axis path below already does and as
-                // NumPy's introselect-based np.percentile does).
-                let mut buf = self.values.clone();
-                let val = select_percentile_method(&mut buf, fraction, method);
+                // O(n) select (radix-select when parallel) instead of an O(n log n)
+                // full sort — bit-identical for every QuantileInterp method (reads only
+                // the order statistics at floor/ceil(pos), exactly as the axis path
+                // below and NumPy's introselect-based np.percentile do).
+                let val = if parallel {
+                    par_select_percentile(&self.values, fraction, method)
+                } else {
+                    let mut buf = self.values.clone();
+                    select_percentile_method(&mut buf, fraction, method)
+                };
                 Ok(Self::scalar(val, DType::F64))
             }
             Some(ax) => {
@@ -28241,10 +28268,13 @@ fn f64_sortable_key(x: f64) -> u64 {
 /// serially. Returns the bit-identical value to `select_median`: the `(n-1)/2` and
 /// `n/2` order statistics by total order, averaged as `(lo + hi) / 2.0`. Caller
 /// guarantees no NaNs.
-fn par_select_median(data: &[f64]) -> f64 {
-    let n = data.len();
-    let lo_k = (n - 1) / 2;
-    let hi_k = n / 2;
+/// Core radix-select: returns `(sorted[lo_k], sorted[hi_k])` by total order, where
+/// `lo_k <= hi_k` and `hi_k - lo_k <= 1` (equal, or adjacent). Narrows the prefix
+/// range to the byte holding `hi_k` via count-only parallel histograms, then
+/// collects the small survivor set and reads both order statistics. `f64::max` is
+/// used for the even-n straddle so the values match the serial select paths
+/// bit-for-bit. Caller guarantees `data` is NaN-free and `hi_k < data.len()`.
+fn par_select_two(data: &[f64], lo_k: usize, hi_k: usize) -> (f64, f64) {
     const RBITS: u32 = 8;
     const NB: usize = 1 << RBITS;
     const CUT: usize = 1 << 16;
@@ -28294,7 +28324,7 @@ fn par_select_median(data: &[f64]) -> f64 {
         let new_remaining = 64 - new_fixed;
         if bucket_count <= CUT || new_remaining == 0 {
             // Collect the survivor set (elements whose key matches the new prefix),
-            // sort by total order, and read both median order statistics.
+            // sort by total order, and read both order statistics.
             let np = new_prefix;
             let mut surv: Vec<f64> = data
                 .par_iter()
@@ -28306,19 +28336,63 @@ fn par_select_median(data: &[f64]) -> f64 {
             let lo = if lo_k >= new_below {
                 surv[lo_k - new_below]
             } else {
-                // Even-n straddle: lo_k is the largest element below the survivor
-                // range — matches select_median's `f64::max` fold over the lower half.
+                // Straddle (hi_k is first of this bucket, lo_k = hi_k-1 is the
+                // largest element below the survivor range) — `f64::max` over the
+                // lower half matches the serial select paths' fold.
                 let range_start = np << new_remaining;
                 data.par_iter()
                     .copied()
                     .filter(|&x| f64_sortable_key(x) < range_start)
                     .reduce(|| f64::NEG_INFINITY, f64::max)
             };
-            return (lo + hi) / 2.0;
+            return (lo, hi);
         }
         prefix = new_prefix << new_remaining;
         fixed = new_fixed;
         below = new_below;
+    }
+}
+
+/// Parallel global median via the radix-select core. Bit-identical to
+/// `select_median`: the `(n-1)/2` and `n/2` order statistics averaged as
+/// `(lo + hi) / 2.0`. Caller guarantees no NaNs.
+fn par_select_median(data: &[f64]) -> f64 {
+    let n = data.len();
+    let (lo, hi) = par_select_two(data, (n - 1) / 2, n / 2);
+    (lo + hi) / 2.0
+}
+
+/// Parallel global percentile/quantile via the radix-select core. Bit-identical to
+/// `select_percentile_method`: same `idx = fraction*(n-1)`, `lo = floor(idx)`
+/// bracket, and per-method interpolation between `sorted[lo]` and `sorted[lo+1]`.
+/// Caller guarantees no NaNs and `n >= 1`.
+fn par_select_percentile(data: &[f64], fraction: f64, method: QuantileInterp) -> f64 {
+    let n = data.len();
+    if n == 1 {
+        return data[0];
+    }
+    let idx = fraction * (n - 1) as f64;
+    let lo = idx.floor() as usize;
+    let frac = idx - lo as f64;
+    if frac == 0.0 || lo >= n - 1 {
+        let k = lo.min(n - 1);
+        let (v, _) = par_select_two(data, k, k);
+        return v;
+    }
+    let hi = lo + 1;
+    let (v_lo, v_hi) = par_select_two(data, lo, hi);
+    match method {
+        QuantileInterp::Linear => v_lo * (1.0 - frac) + v_hi * frac,
+        QuantileInterp::Lower => v_lo,
+        QuantileInterp::Higher => v_hi,
+        QuantileInterp::Nearest => {
+            if frac < 0.5 || (frac == 0.5 && lo.is_multiple_of(2)) {
+                v_lo
+            } else {
+                v_hi
+            }
+        }
+        QuantileInterp::Midpoint => (v_lo + v_hi) / 2.0,
     }
 }
 
@@ -47351,6 +47425,55 @@ print(json.dumps(payload))
                 perm[kth + 1..].iter().all(|&i| lane[i] >= pivot),
                 "lane {r} right side"
             );
+        }
+    }
+
+    #[test]
+    fn par_select_percentile_matches_serial_across_fractions_and_methods() {
+        // par_select_percentile must be BIT-identical to the serial
+        // select_percentile_method for every fraction × interpolation method ×
+        // distribution (order statistics + interpolation are deterministic).
+        let cases: Vec<Vec<f64>> = vec![
+            (0..200003).map(|i| ((i * 2654435761u64 as usize) % 100003) as f64 * 1e-2 - 500.0).collect(),
+            (0..200000).map(|i| ((i * 40503) % 977) as f64 - 488.0).collect(),
+            (0..150001).map(|i| i as f64).collect(),
+            (0..150000).map(|i| (150000 - i) as f64).collect(),
+            vec![7.0; 140000],
+            {
+                let mut v: Vec<f64> = (0..160000).map(|i| (i % 11) as f64).collect();
+                v[3] = f64::INFINITY;
+                v[5] = f64::NEG_INFINITY;
+                v
+            },
+            // Real values straddling zero (some exact +0.0): order statistics are
+            // well-defined, so the percentile is bit-stable. (The pure ±0.0 case is
+            // excluded: select_percentile_method's `left.fold(f64::max)` gives an
+            // order-dependent sign of zero there — an implementation artifact, not a
+            // defined value; the conformance oracle vs numpy is allclose.)
+            (0..131072).map(|i| (i as f64 % 200.0) - 100.0).collect(),
+        ];
+        let methods = [
+            super::QuantileInterp::Linear,
+            super::QuantileInterp::Lower,
+            super::QuantileInterp::Higher,
+            super::QuantileInterp::Nearest,
+            super::QuantileInterp::Midpoint,
+        ];
+        let fracs = [0.0, 0.01, 0.1, 0.25, 0.333333, 0.5, 0.75, 0.9, 0.99, 1.0];
+        for data in &cases {
+            for &method in &methods {
+                for &f in &fracs {
+                    let mut serial = data.clone();
+                    let expected = super::select_percentile_method(&mut serial, f, method);
+                    let got = super::par_select_percentile(data, f, method);
+                    assert_eq!(
+                        got.to_bits(),
+                        expected.to_bits(),
+                        "par_select_percentile diverged: len {} frac {f} method {method:?}",
+                        data.len()
+                    );
+                }
+            }
         }
     }
 
