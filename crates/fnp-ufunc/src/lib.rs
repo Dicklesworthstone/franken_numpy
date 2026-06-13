@@ -23351,23 +23351,62 @@ impl UFuncArray {
                             integer_sidecar: None,
                         });
                     }
-                    // Last axis (inner == 1): each lane is a contiguous run; the per-
-                    // lane scan over the flattened output index is bit-for-bit identical
-                    // to the serial loop and parallelizes across the independent lanes.
+                    // Last axis (inner == 1): each output cell's lane is a CONTIGUOUS
+                    // run of `axis_len` values, so the min/max reduction vectorizes
+                    // horizontally. Accumulate mn/mx/nan across LANES-wide tiles of the
+                    // row with the accumulators held in SIMD registers, then fold the
+                    // lanes. `simd_lt(mn,v).select(mn,v)` is the lane-wise keep-2nd form
+                    // of the scalar `if mn<v {mn} else {v}`. The cross-lane fold uses
+                    // IEEE reduce_min/reduce_max: for ptp this is BIT-IDENTICAL to the
+                    // scalar keep-2nd reference because the result mx - mn is invariant
+                    // to signed-zero tie order — a -0.0 result needs mx=-0.0 AND mn=+0.0
+                    // simultaneously, impossible since reduce_max >= reduce_min (max
+                    // folds toward +0.0, min toward -0.0); and when one of mn/mx is zero
+                    // while the other is nonzero, x-(±0)=x and (±0)-x=-x are sign-of-zero
+                    // independent. NaN is tracked separately and forces a NaN result,
+                    // so the discarded mn/mx of a NaN row never reaches the subtraction.
+                    use std::simd::cmp::SimdPartialOrd;
+                    use std::simd::num::SimdFloat;
+                    use std::simd::{Select, Simd};
+                    const LANES: usize = 8;
+                    type V = Simd<f64, LANES>;
+                    let nan_v = V::splat(f64::NAN);
                     let lane_ptp = |of: usize| -> f64 {
-                        let mut off = of * axis_len;
-                        let first = values[off];
-                        let (mut mn, mut mx) = (first, first);
-                        let mut any_nan = first.is_nan();
-                        off += 1;
-                        for _ in 1..axis_len {
-                            let v = values[off];
-                            any_nan |= v.is_nan();
-                            mn = if mn < v { mn } else { v };
-                            mx = if mx > v { mx } else { v };
-                            off += 1;
+                        let row = &values[of * axis_len..of * axis_len + axis_len];
+                        if axis_len >= LANES {
+                            let mut mn = V::from_slice(row);
+                            let mut mx = mn;
+                            let mut nan = mn;
+                            let mut i = LANES;
+                            while i + LANES <= axis_len {
+                                let v = V::from_slice(&row[i..]);
+                                mn = mn.simd_lt(v).select(mn, v);
+                                mx = mx.simd_gt(v).select(mx, v);
+                                nan = v.is_nan().select(nan_v, nan);
+                                i += LANES;
+                            }
+                            let mut hmn = mn.reduce_min();
+                            let mut hmx = mx.reduce_max();
+                            let mut any_nan = nan.is_nan().any();
+                            while i < axis_len {
+                                let v = row[i];
+                                any_nan |= v.is_nan();
+                                hmn = if hmn < v { hmn } else { v };
+                                hmx = if hmx > v { hmx } else { v };
+                                i += 1;
+                            }
+                            if any_nan { f64::NAN } else { hmx - hmn }
+                        } else {
+                            let mut mn = row[0];
+                            let mut mx = row[0];
+                            let mut any_nan = row[0].is_nan();
+                            for &v in &row[1..] {
+                                any_nan |= v.is_nan();
+                                mn = if mn < v { mn } else { v };
+                                mx = if mx > v { mx } else { v };
+                            }
+                            if any_nan { f64::NAN } else { mx - mn }
                         }
-                        if any_nan { f64::NAN } else { mx - mn }
                     };
                     let out: Vec<f64> = if parallel {
                         (0..out_count).into_par_iter().map(lane_ptp).collect()
