@@ -8516,16 +8516,24 @@ fn try_zerocopy_f64_select(
         return Ok(None);
     }
 
-    // numpy's default is the scalar 0; only a scalar float default keeps the fast
-    // path (array-like defaults broadcast and are deferred to numpy).
-    let default_val: f64 = match default {
-        None => 0.0,
+    // numpy's default is the scalar 0. A scalar float default, or an f64 ndarray
+    // default of the same shape (no broadcast), keeps the fast path; broadcasting
+    // array defaults are deferred to numpy.
+    let mut default_scalar: f64 = 0.0;
+    let default_buffer: Option<PyBuffer<f64>> = match default {
+        None => None,
         Some(d) => {
             let bound = d.bind(py);
             if bound.is_none() {
-                0.0
+                None
             } else if let Ok(value) = bound.extract::<f64>() {
-                value
+                default_scalar = value;
+                None
+            } else if bound.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, bound) {
+                match PyBuffer::<f64>::get(bound) {
+                    Ok(buffer) => Some(buffer),
+                    Err(_) => return Ok(None),
+                }
             } else {
                 return Ok(None);
             }
@@ -8590,6 +8598,20 @@ fn try_zerocopy_f64_select(
         choice_slices.push(slice);
     }
 
+    // An array default must match the common shape exactly (no broadcast).
+    let default_slice: Option<&[pyo3::buffer::ReadOnlyCell<f64>]> = match &default_buffer {
+        None => None,
+        Some(buffer) => {
+            if buffer.shape() != shape.as_slice() {
+                return Ok(None);
+            }
+            match buffer.as_slice(py) {
+                Some(slice) => Some(slice),
+                None => return Ok(None),
+            }
+        }
+    };
+
     let n = choice_slices[0].len();
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
@@ -8602,7 +8624,12 @@ fn try_zerocopy_f64_select(
             return Ok(None);
         };
         for (i, slot) in output.iter().enumerate() {
-            let mut value = default_val;
+            // First true condition wins (numpy.select picks the earliest match);
+            // otherwise the per-element default (or scalar default).
+            let mut value = match default_slice {
+                Some(d) => d[i].get(),
+                None => default_scalar,
+            };
             for j in 0..k {
                 if cond_slices[j][i].get() != 0 {
                     value = choice_slices[j][i].get();
@@ -62325,6 +62352,54 @@ mod tests {
                 err.to_string().contains("unsupported mode"),
                 "unexpected error: {err}"
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn select_f64_array_default_single_pass_matches_numpy() {
+        // The single-pass zero-copy select must take an f64 ARRAY default (not just
+        // a scalar) and match numpy bit-for-bit, including the first-match rule and
+        // multi-condition / no-overlap cases.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let np_select = numpy.getattr("select")?;
+            let fnp_select = module.getattr("select")?;
+            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((4_u64,))?;
+            let v = rng.getattr("standard_normal")?.call1((5000_i64,))?;
+            // conditions and choices and the array default are all derived from v.
+            let lt = |t: f64| -> PyResult<Bound<'_, PyAny>> {
+                Ok(v.call_method1("__lt__", (t,))?)
+            };
+            let scaled = |s: f64| -> PyResult<Bound<'_, PyAny>> {
+                Ok(v.call_method1("__mul__", (s,))?)
+            };
+            let array_equal = numpy.getattr("array_equal")?;
+            for (conds, choices) in [
+                (vec![lt(-1.0)?, lt(1.0)?], vec![scaled(2.0)?, scaled(3.0)?]),
+                (
+                    vec![lt(-2.0)?, lt(-1.0)?, lt(0.0)?, lt(1.0)?],
+                    vec![scaled(1.0)?, scaled(2.0)?, scaled(3.0)?, scaled(4.0)?],
+                ),
+                // no condition ever true → pure array default.
+                (vec![lt(-100.0)?], vec![scaled(9.0)?]),
+            ] {
+                let cl = PyList::new(py, &conds)?;
+                let chl = PyList::new(py, &choices)?;
+                let kw = PyDict::new(py);
+                kw.set_item("default", &v)?;
+                let ours = fnp_select.call((cl.clone(), chl.clone()), Some(&kw))?;
+                let theirs = np_select.call((cl, chl), Some(&kw))?;
+                let ok: bool = array_equal.call1((&ours, &theirs))?.extract()?;
+                assert!(ok, "select with f64 array default diverged from numpy");
+                let dt: String = ours.getattr("dtype")?.getattr("name")?.extract()?;
+                assert_eq!(dt, "float64", "array-default select must stay float64");
+            }
             Ok(())
         });
     }
