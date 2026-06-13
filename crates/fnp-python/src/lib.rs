@@ -39965,6 +39965,100 @@ where
     Ok(Some(scalar.unbind()))
 }
 
+// Zero-copy integer prod along a single axis (keepdims=False), promoted to the
+// int64/uint64 accumulator like the full reduction. The fallback for this case
+// widens to an f64 Vec and runs reduce_prod's strided per-column scan (~41x
+// slower for int axis=0 of a wide 2-D array). For inner==1 (last axis) each lane
+// is contiguous, so multiply it with a register accumulator. For inner>1
+// (non-last axis) scanning each output column strides by `inner` and thrashes
+// cache — instead accumulate ROW-WISE into a per-column accumulator array kept
+// cache-resident. Each column multiplies factors in ascending axis order, the
+// same order numpy uses, so wrapping integer products are bit-identical. Gated
+// to a C-contiguous buffer (memory order == reduction order) and ndim>=2.
+fn prod_axis_typed<'py, T, A, FC, FM>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    out_dtype_name: &str,
+    identity: A,
+    convert: FC,
+    mul: FM,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy,
+    A: pyo3::buffer::Element + Copy + IntoPyObject<'py>,
+    FC: Fn(T) -> A,
+    FM: Fn(A, A) -> A,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    if shape.len() < 2 {
+        return Ok(None);
+    }
+    let ndim = shape.len() as isize;
+    let norm = if axis < 0 { axis + ndim } else { axis };
+    if norm < 0 || norm >= ndim {
+        return Ok(None);
+    }
+    let axu = norm as usize;
+    let outer: usize = shape[..axu].iter().product();
+    let axis_len = shape[axu];
+    let inner: usize = shape[axu + 1..].iter().product();
+    let mut out_shape = shape.clone();
+    out_shape.remove(axu);
+    let out_elems = outer * inner;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", out_dtype_name)?;
+    let flat = numpy.call_method("empty", (out_elems,), Some(&kwargs))?;
+    if out_elems > 0 {
+        let Ok(out_buffer) = PyBuffer::<A>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let lane = axis_len * inner;
+        if inner == 1 {
+            for o in 0..outer {
+                let ibase = o * lane;
+                let mut acc = identity;
+                for k in 0..axis_len {
+                    acc = mul(acc, convert(input[ibase + k].get()));
+                }
+                output[o].set(acc);
+            }
+        } else {
+            let mut accs = vec![identity; out_elems];
+            for o in 0..outer {
+                let obase = o * inner;
+                let ibase = o * lane;
+                for k in 0..axis_len {
+                    let abase = ibase + k * inner;
+                    let arow = &mut accs[obase..obase + inner];
+                    for (i, ac) in arow.iter_mut().enumerate() {
+                        *ac = mul(*ac, convert(input[abase + i].get()));
+                    }
+                }
+            }
+            for (slot, &v) in output.iter().zip(accs.iter()) {
+                slot.set(v);
+            }
+        }
+    }
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy integer prod for the full reduction (axis=None), all widths, with
 // numpy's accumulator promotion (signed -> int64, unsigned -> uint64). Otherwise
 // these extracted to an f64 Vec (~45x slower, lossy for wide ints). Returns None
@@ -39974,9 +40068,6 @@ fn try_zerocopy_int_prod(
     a: &Bound<'_, PyAny>,
     axis: Option<isize>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if axis.is_some() {
-        return Ok(None);
-    }
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type) {
@@ -39988,73 +40079,42 @@ fn try_zerocopy_int_prod(
         return Ok(None);
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    // Dispatch each (input type T, accumulator type A) pair to either the full
+    // reduction (prod_typed) or the per-axis row-wise path (prod_axis_typed).
+    macro_rules! dispatch {
+        ($t:ty, $a:ty, $dt:literal, $conv:expr) => {
+            match axis {
+                None => prod_typed::<$t, $a, _, _>(
+                    py,
+                    &numpy,
+                    a,
+                    $dt,
+                    1,
+                    $conv,
+                    |x: $a, y: $a| x.wrapping_mul(y),
+                ),
+                Some(ax) => prod_axis_typed::<$t, $a, _, _>(
+                    py,
+                    &numpy,
+                    a,
+                    $dt,
+                    1,
+                    $conv,
+                    |x: $a, y: $a| x.wrapping_mul(y),
+                    ax,
+                ),
+            }
+        };
+    }
     match (kind.as_str(), itemsize) {
-        ("i", 1) => prod_typed::<i8, i64, _, _>(
-            py,
-            &numpy,
-            a,
-            "int64",
-            1,
-            |v| v as i64,
-            |x, y| x.wrapping_mul(y),
-        ),
-        ("i", 2) => prod_typed::<i16, i64, _, _>(
-            py,
-            &numpy,
-            a,
-            "int64",
-            1,
-            |v| v as i64,
-            |x, y| x.wrapping_mul(y),
-        ),
-        ("i", 4) => prod_typed::<i32, i64, _, _>(
-            py,
-            &numpy,
-            a,
-            "int64",
-            1,
-            |v| v as i64,
-            |x, y| x.wrapping_mul(y),
-        ),
-        ("i", 8) => {
-            prod_typed::<i64, i64, _, _>(py, &numpy, a, "int64", 1, |v| v, |x, y| x.wrapping_mul(y))
-        }
-        ("u", 1) => prod_typed::<u8, u64, _, _>(
-            py,
-            &numpy,
-            a,
-            "uint64",
-            1,
-            |v| v as u64,
-            |x, y| x.wrapping_mul(y),
-        ),
-        ("u", 2) => prod_typed::<u16, u64, _, _>(
-            py,
-            &numpy,
-            a,
-            "uint64",
-            1,
-            |v| v as u64,
-            |x, y| x.wrapping_mul(y),
-        ),
-        ("u", 4) => prod_typed::<u32, u64, _, _>(
-            py,
-            &numpy,
-            a,
-            "uint64",
-            1,
-            |v| v as u64,
-            |x, y| x.wrapping_mul(y),
-        ),
-        ("u", 8) => prod_typed::<u64, u64, _, _>(
-            py,
-            &numpy,
-            a,
-            "uint64",
-            1,
-            |v| v,
-            |x, y| x.wrapping_mul(y),
-        ),
+        ("i", 1) => dispatch!(i8, i64, "int64", |v| v as i64),
+        ("i", 2) => dispatch!(i16, i64, "int64", |v| v as i64),
+        ("i", 4) => dispatch!(i32, i64, "int64", |v| v as i64),
+        ("i", 8) => dispatch!(i64, i64, "int64", |v| v),
+        ("u", 1) => dispatch!(u8, u64, "uint64", |v| v as u64),
+        ("u", 2) => dispatch!(u16, u64, "uint64", |v| v as u64),
+        ("u", 4) => dispatch!(u32, u64, "uint64", |v| v as u64),
+        ("u", 8) => dispatch!(u64, u64, "uint64", |v| v),
         _ => Ok(None),
     }
 }
