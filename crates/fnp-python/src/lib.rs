@@ -26158,6 +26158,55 @@ fn try_zerocopy_f64_array_equal(
     Ok(Some(verdict))
 }
 
+// Zero-copy early-exit np.array_equiv for f64: same-shape f64 ndarrays, or an f64
+// ndarray vs an f64 scalar (the broadcast-against-scalar case). array_equiv has no
+// equal_nan, so NaN never equals anything (a plain `==` fold bails on the first
+// mismatch). Different-shape array pairs (genuine broadcasting like (N,1) vs (N,))
+// and all other dtypes return None to defer to numpy / the native path.
+fn try_zerocopy_f64_array_equiv(
+    py: Python<'_>,
+    a1: &Bound<'_, PyAny>,
+    a2: &Bound<'_, PyAny>,
+) -> PyResult<Option<bool>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let a1_arr = a1.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, a1);
+    let a2_arr = a2.is_exact_instance(&ndarray_type) && numpy_dtype_is_f64(py, a2);
+    if a1_arr && a2_arr {
+        let (Ok(b1), Ok(b2)) = (PyBuffer::<f64>::get(a1), PyBuffer::<f64>::get(a2)) else {
+            return Ok(None);
+        };
+        if b1.shape() != b2.shape() {
+            // Equal-or-broadcastable shapes (and the broadcast verdict) are left to
+            // numpy; only the identical-shape case is a straight element compare.
+            return Ok(None);
+        }
+        let (Some(s1), Some(s2)) = (b1.as_slice(py), b2.as_slice(py)) else {
+            return Ok(None);
+        };
+        return Ok(Some(s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get())));
+    }
+    // f64 ndarray vs an f64-extractable scalar (broadcast the scalar): all elements
+    // must equal it. A NaN scalar makes the result false, matching numpy.
+    let (arr, scalar) = if a1_arr {
+        (a1, a2.extract::<f64>().ok())
+    } else if a2_arr {
+        (a2, a1.extract::<f64>().ok())
+    } else {
+        return Ok(None);
+    };
+    let Some(sc) = scalar else {
+        return Ok(None);
+    };
+    let Ok(buf) = PyBuffer::<f64>::get(arr) else {
+        return Ok(None);
+    };
+    let Some(s) = buf.as_slice(py) else {
+        return Ok(None);
+    };
+    Ok(Some(s.iter().all(|x| x.get() == sc)))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a1, a2))]
 fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -26172,6 +26221,15 @@ fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAn
             .call1((a1.bind(py), a2.bind(py)))?
             .unbind())
     };
+    // Zero-copy early-exit for same-shape f64 arrays or f64-array-vs-scalar, before
+    // the cold extract + broadcast-compare. numpy's array_equiv builds the full
+    // comparison too, so the differ case returns almost immediately.
+    if let Some(verdict) = try_zerocopy_f64_array_equiv(py, a1.bind(py), a2.bind(py))? {
+        return Ok(pyo3::types::PyBool::new(py, verdict)
+            .to_owned()
+            .into_any()
+            .unbind());
+    }
     let array_a = match extract_precise_numeric_array(py, a1.bind(py), "array_equiv(a1)") {
         Ok(value) => value,
         Err(_) => return fallback(py),
