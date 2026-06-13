@@ -27823,6 +27823,72 @@ fn try_zerocopy_f64_allclose(
     Ok(Some(verdict))
 }
 
+// Zero-copy np.allclose for f32 arrays (same-shape f32 pair, or f32 array vs an
+// f64-extractable scalar). numpy promotes the f32 isclose comparison to float64
+// (the tolerances are python floats), which is exactly what our extract path
+// already does — so widening each f32 element to f64 and reusing allclose_pair is
+// bit-identical to the (conformance-passing) extract path, just without the copies.
+// Mixed f32/f64 and other dtypes defer.
+fn try_zerocopy_f32_allclose(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    rtol: f64,
+    atol: f64,
+    equal_nan: bool,
+) -> PyResult<Option<bool>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let is_f32 = |o: &Bound<'_, PyAny>| -> PyResult<bool> {
+        if !o.is_exact_instance(&ndarray_type) {
+            return Ok(false);
+        }
+        let dt = o.getattr("dtype")?;
+        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
+            && dt.getattr("itemsize")?.extract::<usize>()? == 4)
+    };
+    let a_arr = is_f32(a)?;
+    let b_arr = is_f32(b)?;
+    if !a_arr && !b_arr {
+        return Ok(None); // need at least one f32 array
+    }
+    let a_buf = if a_arr { PyBuffer::<f32>::get(a).ok() } else { None };
+    let b_buf = if b_arr { PyBuffer::<f32>::get(b).ok() } else { None };
+    let a_sc = if a_buf.is_none() { a.extract::<f64>().ok() } else { None };
+    let b_sc = if b_buf.is_none() { b.extract::<f64>().ok() } else { None };
+    let verdict = match (&a_buf, &b_buf) {
+        (Some(ab), Some(bb)) => {
+            if ab.shape() != bb.shape() {
+                return Ok(None);
+            }
+            let (Some(sa), Some(sb)) = (ab.as_slice(py), bb.as_slice(py)) else {
+                return Ok(None);
+            };
+            sa.iter().zip(sb.iter()).all(|(x, y)| {
+                allclose_pair(x.get() as f64, y.get() as f64, rtol, atol, equal_nan)
+            })
+        }
+        (Some(ab), None) => {
+            let Some(bs) = b_sc else { return Ok(None) };
+            let Some(sa) = ab.as_slice(py) else {
+                return Ok(None);
+            };
+            sa.iter()
+                .all(|x| allclose_pair(x.get() as f64, bs, rtol, atol, equal_nan))
+        }
+        (None, Some(bb)) => {
+            let Some(as_) = a_sc else { return Ok(None) };
+            let Some(sb) = bb.as_slice(py) else {
+                return Ok(None);
+            };
+            sb.iter()
+                .all(|y| allclose_pair(as_, y.get() as f64, rtol, atol, equal_nan))
+        }
+        (None, None) => return Ok(None),
+    };
+    Ok(Some(verdict))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b, rtol=1e-5, atol=1e-8, equal_nan=false))]
 fn allclose(
@@ -27857,6 +27923,11 @@ fn allclose(
     // Zero-copy early-exit for same-shape f64 arrays or f64-array-vs-scalar.
     if let Some(verdict) =
         try_zerocopy_f64_allclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
+    {
+        return Ok(numpy.getattr("bool_")?.call1((verdict,))?.unbind());
+    }
+    if let Some(verdict) =
+        try_zerocopy_f32_allclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
     {
         return Ok(numpy.getattr("bool_")?.call1((verdict,))?.unbind());
     }
