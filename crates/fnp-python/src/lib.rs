@@ -31161,6 +31161,32 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         Ok(array) => array,
         Err(_) => return fallback(),
     };
+    // Batched (stacked) inputs (..., M, N): svdvals returns the singular values per
+    // lane in descending order — deterministic, with no sign/phase ambiguity — so the
+    // parallel batch_svd (rayon across lanes) is parity-safe (the allclose oracle
+    // tolerates the ~2-ULP delta vs LAPACK). NumPy's batched svdvals is a serial
+    // C per-lane loop, so this closes the no-gaps batched-SVD gap. Output shape =
+    // batch dims + [min(M,N)]. Real finite f64 only; complex / non-finite / any Err
+    // falls back to numpy.
+    let shape = x.shape();
+    if shape.len() >= 3
+        && matches!(x.dtype(), DType::F64)
+        && !x.has_integer_sidecar()
+        && x.values().iter().all(|v| v.is_finite())
+    {
+        let m = shape[shape.len() - 2];
+        let n = shape[shape.len() - 1];
+        let k = m.min(n);
+        let owned_shape = shape.to_vec();
+        if let Ok(values) = fnp_linalg::batch_svd(x.values(), &owned_shape) {
+            let mut out_shape: Vec<usize> = owned_shape[..owned_shape.len() - 2].to_vec();
+            out_shape.push(k);
+            let result =
+                UFuncArray::new(out_shape, values, DType::F64).map_err(map_ufunc_error)?;
+            return build_numpy_array_from_ufunc(py, &result);
+        }
+        return fallback();
+    }
     let result = match x.svdvals() {
         Ok(result) => result,
         Err(_) => return fallback(),
@@ -80884,6 +80910,26 @@ mod tests {
             let theirs_b = numpy_sv.call1((batched.clone(),))?;
             let ok_b: bool = allclose.call1((&ours_b, &theirs_b))?.extract()?;
             assert!(ok_b, "svdvals batched 3-D mismatch");
+
+            // Rectangular batched (5, 4, 3): exercises the parallel batch_svd path on
+            // tall lanes; output shape must be (5, 3) = batch dims + min(M,N).
+            let rng = numpy.getattr("random")?.getattr("default_rng")?.call1((7_u64,))?;
+            let rect = rng.getattr("standard_normal")?.call1(((5_i64, 4_i64, 3_i64),))?;
+            let ours_r = sv_fn.call1((rect.clone(),))?;
+            let theirs_r = numpy_sv.call1((rect.clone(),))?;
+            let ok_r: bool = allclose.call1((&ours_r, &theirs_r))?.extract()?;
+            assert!(ok_r, "svdvals rectangular batched mismatch");
+            let r_shape: Vec<usize> = ours_r.getattr("shape")?.extract()?;
+            assert_eq!(r_shape, vec![5, 3], "svdvals(5,4,3) shape must be (5,3)");
+
+            // 4-D batched (2, 3, 6, 6): nested batch dims through the same path.
+            let big = rng.getattr("standard_normal")?.call1(((2_i64, 3_i64, 6_i64, 6_i64),))?;
+            let ours_g = sv_fn.call1((big.clone(),))?;
+            let theirs_g = numpy_sv.call1((big.clone(),))?;
+            let ok_g: bool = allclose.call1((&ours_g, &theirs_g))?.extract()?;
+            assert!(ok_g, "svdvals 4-D batched mismatch");
+            let g_shape: Vec<usize> = ours_g.getattr("shape")?.extract()?;
+            assert_eq!(g_shape, vec![2, 3, 6], "svdvals(2,3,6,6) shape must be (2,3,6)");
 
             // Complex input stays on the numpy fallback path but must still
             // match exactly.
