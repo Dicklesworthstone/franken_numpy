@@ -9020,60 +9020,6 @@ fn try_zerocopy_f64_roll_2d_multi(
 // PyBuffer::<u8>, so condition is viewed as uint8 first. Returns Ok(None) —
 // caller falls through — for a non-bool condition, a length mismatch, or any
 // non-f64 / non-contiguous / non-ndarray input.
-fn try_zerocopy_f64_extract(
-    py: Python<'_>,
-    condition: &Bound<'_, PyAny>,
-    arr: &Bound<'_, PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !arr.is_exact_instance(&ndarray_type) || !condition.is_exact_instance(&ndarray_type) {
-        return Ok(None);
-    }
-    if condition
-        .getattr("dtype")?
-        .getattr("kind")?
-        .extract::<String>()?
-        != "b"
-    {
-        return Ok(None);
-    }
-    let cond_u8 = condition.call_method1("view", (numpy.getattr("uint8")?,))?;
-    let (Ok(cond_buffer), Ok(arr_buffer)) =
-        (PyBuffer::<u8>::get(&cond_u8), PyBuffer::<f64>::get(arr))
-    else {
-        return Ok(None);
-    };
-    let (Some(cond_in), Some(arr_in)) = (cond_buffer.as_slice(py), arr_buffer.as_slice(py)) else {
-        return Ok(None);
-    };
-    // numpy.extract flattens both operands; require equal total length so the
-    // flat index aligns (shorter/longer conditions are left to the general path).
-    if cond_in.len() != arr_in.len() {
-        return Ok(None);
-    }
-    let count = cond_in.iter().filter(|cell| cell.get() != 0).count();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
-    let flat = numpy.call_method("empty", (count,), Some(&kwargs))?;
-    if count > 0 {
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
-            return Ok(None);
-        };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
-            return Ok(None);
-        };
-        let mut w = 0usize;
-        for (cond_cell, arr_cell) in cond_in.iter().zip(arr_in.iter()) {
-            if cond_cell.get() != 0 {
-                output[w].set(arr_cell.get());
-                w += 1;
-            }
-        }
-    }
-    Ok(Some(flat.unbind()))
-}
-
 // Zero-copy np.compress(condition, a, axis=None) for a bool condition ndarray and
 // a float64 a ndarray: numpy flattens a and returns a.flat[i] for the first
 // len(condition) positions where condition is True (condition may be shorter than
@@ -17054,16 +17000,15 @@ fn extract(py: Python<'_>, condition: Py<PyAny>, arr: Py<PyAny>) -> PyResult<Py<
     if !numpy_dtype_native_roundtrip_preserves(py, arr.bind(py)) {
         return fallback();
     }
-    // Zero-copy gather for the common case (bool condition + f64 arr of equal
-    // flattened length); skips the cold extract/build Vecs. Bit-identical;
-    // non-bool conditions, length mismatches, and other dtypes fall through.
-    if let Some(out) = try_zerocopy_f64_extract(py, condition.bind(py), arr.bind(py))? {
-        return Ok(out);
-    }
-    // Typed compaction (extract == compress over the raveled operands); skips the
-    // cold, for-wide-ints lossy extract Vec. Narrow ints/float32 are already
-    // deferred to NumPy by the dtype-roundtrip guard above, so this engages for
-    // the canonical widths (int64/uint64/float64/bool) that reach here.
+    // Typed BRANCHLESS compaction (extract == compress over the raveled
+    // operands); skips the cold, for-wide-ints lossy extract Vec. This is the
+    // same path compress uses — it handles every canonical width (int64/uint64/
+    // float64/bool) that reaches here (narrow ints/float32 are already deferred
+    // to NumPy by the dtype-roundtrip guard above) and a condition equal-or-
+    // shorter than arr (numpy.extract == compress(ravel(cond), ravel(arr))). It
+    // replaces the old f64-only `if cond { store; w+=1 }` extract loop, whose
+    // ~50% branch-mispredict on a balanced mask made extract ~4-5x slower than
+    // compress for identical inputs. Bit-identical (elements move verbatim).
     if let Some(out) = try_zerocopy_any_compact(py, condition.bind(py), arr.bind(py))? {
         return Ok(out);
     }
@@ -60773,6 +60718,69 @@ mod tests {
             assert_eq!(
                 repr_string(&actual.bind(py).call_method0("tolist")?),
                 repr_string(&expected.call_method0("tolist")?)
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn extract_f64_bool_mask_branchless_matches_numpy_bytes_and_golden() {
+        // Exercises the exact path rerouted to the branchless try_zerocopy_any_compact:
+        // a BOOL condition + canonical-width f64 array, balanced (~50%) mask so the
+        // old `if cond { store; w+=1 }` loop's branch mispredict was worst-case.
+        // np.extract is the golden oracle — assert BYTE-IDENTICAL output (verbatim
+        // element moves), plus an FNV-1a digest over the fnp bytes for drift.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let np = py.import("numpy")?;
+            // Deterministic LCG f64 array + balanced bool mask, large enough to clear
+            // any fixed overhead and cross cache (5_000 elements, ~half selected).
+            let locals = PyDict::new(py);
+            locals.set_item("np", &np)?;
+            py.run(
+                std::ffi::CString::new(
+                    "import numpy as _np\n\
+                     s=0x243F6A88\n\
+                     n=5000\n\
+                     vals=_np.empty(n,dtype=_np.float64)\n\
+                     msk=_np.empty(n,dtype=_np.bool_)\n\
+                     for i in range(n):\n\
+                     \x20 s=(s*6364136223846793005+1)&0xFFFFFFFFFFFFFFFF\n\
+                     \x20 vals[i]=((s>>33)/4294967295.0)-0.5\n\
+                     \x20 msk[i]=((s>>40)&1)==1\n",
+                )?
+                .as_c_str(),
+                None,
+                Some(&locals),
+            )?;
+            let vals = locals.get_item("vals")?.unwrap();
+            let msk = locals.get_item("msk")?.unwrap();
+
+            let actual = extract(py, msk.clone().unbind(), vals.clone().unbind())?;
+            let expected = np.call_method1("extract", (&msk, &vals))?;
+
+            let actual_bytes: Vec<u8> = actual
+                .bind(py)
+                .call_method0("tobytes")?
+                .extract::<Vec<u8>>()?;
+            let expected_bytes: Vec<u8> = expected.call_method0("tobytes")?.extract::<Vec<u8>>()?;
+            assert_eq!(
+                actual_bytes, expected_bytes,
+                "extract f64 branchless output must be byte-identical to numpy.extract"
+            );
+
+            // FNV-1a over the fnp output bytes — drift guard independent of numpy.
+            let mut h: u64 = 0xcbf29ce484222325;
+            for b in &actual_bytes {
+                h ^= u64::from(*b);
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            assert_eq!(
+                h, 0x2a9a4ef553c1d16c,
+                "extract f64 branchless golden FNV drifted (len={})",
+                actual_bytes.len()
             );
             Ok(())
         });
