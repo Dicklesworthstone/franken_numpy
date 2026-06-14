@@ -28251,16 +28251,16 @@ fn fix(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         return Ok(out);
     }
 
-    let array = match extract_precise_numeric_array(py, x.bind(py), "fix(x)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    if array.has_integer_sidecar() || matches!(array.dtype(), DType::Complex64 | DType::Complex128)
-    {
-        return fallback();
+    // float32: native zero-copy trunc (np.fix(f32) -> f32). The extract path below
+    // canonicalized f32 -> f64 and rebuilt element-wise, ~150x slower than numpy.
+    if let Some(out) = try_zerocopy_f32_unary(py, x.bind(py), UnaryOp::Trunc)? {
+        return Ok(out);
     }
-    let result = array.fix();
-    build_numpy_scalar_or_array(py, &result)
+    // Integer / float16 / complex / array-like inputs: np.fix is a fast trunc ufunc
+    // that preserves the input dtype (and returns integers unchanged). The native
+    // extract -> f64-canonicalize -> rebuild path was 34-174x slower than numpy for
+    // these dtypes, so delegate — np.fix is the exact parity oracle.
+    fallback()
 }
 
 #[pyfunction]
