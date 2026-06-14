@@ -24128,6 +24128,7 @@ fn parse_shape_override(shape: &Bound<'_, PyAny>, context: &str) -> PyResult<Vec
     }
 }
 
+#[allow(dead_code)]
 enum LikeFill<'py> {
     Zeros,
     Ones,
@@ -24142,6 +24143,12 @@ enum LikeFill<'py> {
 // callers fall back to numpy in that case so the full numpy surface is still
 // exercised. Shape and dtype inheritance, dtype overrides, shape overrides,
 // and zero-sized inputs are handled natively.
+//
+// NOTE: currently unused — the *_like callers delegate to numpy because this
+// UFuncArray-build-then-convert path was catastrophically slow (empty_like ~240000x,
+// zeros/ones_like ~90x for narrow ints). Retained for a future fast native rewrite
+// (np.empty/zeros/ones/full of the resolved dtype directly, no UFuncArray).
+#[allow(dead_code)]
 #[allow(clippy::too_many_arguments)]
 fn native_like_array(
     py: Python<'_>,
@@ -24298,19 +24305,11 @@ fn zeros_like(
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
     let shape_bound = shape.as_ref().map(|value| value.bind(py));
     let device_bound = device.as_ref().map(|value| value.bind(py));
-    if let Some(native) = native_like_array(
-        py,
-        a_bound,
-        dtype_bound,
-        order,
-        subok,
-        shape_bound,
-        device_bound,
-        &LikeFill::Zeros,
-        "zeros_like(shape)",
-    )? {
-        return Ok(native);
-    }
+    // np.zeros_like returns lazily-zeroed (calloc) memory; the old native path
+    // eagerly built an f64 UFuncArray and converted it element-wise to the target
+    // dtype — 90x slower for int8 even when fully materialized (and empty_like was
+    // ~240000x: it built+zeroed instead of returning np.empty). Delegate the
+    // creation memset/calloc to numpy.
     let numpy = py.import("numpy")?;
     let zeros_like_fn = numpy.getattr("zeros_like")?;
     let kwargs = PyDict::new(py);
@@ -24343,19 +24342,8 @@ fn ones_like(
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
     let shape_bound = shape.as_ref().map(|value| value.bind(py));
     let device_bound = device.as_ref().map(|value| value.bind(py));
-    if let Some(native) = native_like_array(
-        py,
-        a_bound,
-        dtype_bound,
-        order,
-        subok,
-        shape_bound,
-        device_bound,
-        &LikeFill::Ones,
-        "ones_like(shape)",
-    )? {
-        return Ok(native);
-    }
+    // The old native path built an f64 UFuncArray then converted element-wise to the
+    // target dtype (~90x slower than numpy's empty+memset for int8). Delegate.
     let numpy = py.import("numpy")?;
     let ones_like_fn = numpy.getattr("ones_like")?;
     let kwargs = PyDict::new(py);
@@ -24388,19 +24376,9 @@ fn empty_like(
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
     let shape_bound = shape.as_ref().map(|value| value.bind(py));
     let device_bound = device.as_ref().map(|value| value.bind(py));
-    if let Some(native) = native_like_array(
-        py,
-        prototype_bound,
-        dtype_bound,
-        order,
-        subok,
-        shape_bound,
-        device_bound,
-        &LikeFill::Empty,
-        "empty_like(shape)",
-    )? {
-        return Ok(native);
-    }
+    // np.empty_like returns UNINITIALIZED memory (instant); the old native path
+    // built+zeroed an f64 UFuncArray and converted it — ~240000x slower for int8.
+    // Delegate.
     let numpy = py.import("numpy")?;
     let empty_like_fn = numpy.getattr("empty_like")?;
     let kwargs = PyDict::new(py);
