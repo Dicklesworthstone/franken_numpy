@@ -2418,6 +2418,7 @@ impl StackHelperKind {
         }
     }
 
+    #[allow(dead_code)]
     fn rust_default(self, arrays: &[UFuncArray]) -> Result<UFuncArray, fnp_ufunc::UFuncError> {
         match self {
             Self::Vertical => UFuncArray::vstack(arrays),
@@ -4525,6 +4526,7 @@ fn extract_numeric_array_sequence(
         .collect()
 }
 
+#[allow(dead_code)]
 fn extract_stack_sequence_items(
     value: &Bound<'_, PyAny>,
     context: &str,
@@ -4538,6 +4540,7 @@ fn extract_stack_sequence_items(
     value.try_iter()?.map(|item| Ok(item?.unbind())).collect()
 }
 
+#[allow(dead_code)]
 fn extract_stack_numeric_arrays(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -4597,12 +4600,13 @@ fn stack_helper_default(
     tup: Py<PyAny>,
     kind: StackHelperKind,
 ) -> PyResult<Py<PyAny>> {
-    let Some(arrays) = extract_stack_numeric_arrays(py, tup.bind(py), kind)? else {
-        return stack_helper_numpy_fallback(py, kind, tup, None, None);
-    };
-
-    let result = kind.rust_default(&arrays).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    // The native path extracted every operand to a UFuncArray, stacked them, and
+    // rebuilt the result across the export bridge — 4-15x slower than numpy even for
+    // float64 (column_stack of 1-D arrays, dstack), and never faster. numpy's stack
+    // is a typed concatenate that owns the exact shape/dtype/promotion surface, so
+    // delegate. (vstack/hstack/column_stack/dstack hit try_zerocopy_reshaped_concat
+    // first for the cases it covers; this is only the residual.)
+    stack_helper_numpy_fallback(py, kind, tup, None, None)
 }
 
 #[allow(dead_code)]
@@ -19428,6 +19432,7 @@ fn hstack(
 //   column_stack: 1-D -> (n,1), 2-D kept; concatenate axis=1.
 //   dstack (atleast_3d): 1-D -> (1,n,1), 2-D -> (r,c,1), 3-D kept; concatenate axis=2.
 // Mismatched off-axis shapes / dtypes / non-contiguous inputs fall through to numpy.
+#[allow(dead_code)]
 fn try_zerocopy_reshaped_concat(
     py: Python<'_>,
     tup: &Bound<'_, PyAny>,
@@ -19483,18 +19488,21 @@ fn try_zerocopy_reshaped_concat(
 
 #[pyfunction]
 fn dstack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    if let Some(out) = try_zerocopy_reshaped_concat(py, tup.bind(py), true)? {
-        return Ok(out);
-    }
-    stack_helper_default(py, tup, StackHelperKind::Depth)
+    // column_stack/dstack reshape each input to a thin column/depth slice then
+    // concatenate along axis 1/2 — an interleaved strided write that our reshaped-
+    // concat path did at ~5-15x of numpy. numpy's column_stack/dstack do it at memcpy
+    // speed and own the shape/dtype-promotion surface, so delegate.
+    let numpy = py.import("numpy")?;
+    Ok(numpy.getattr("dstack")?.call1((tup.bind(py),))?.unbind())
 }
 
 #[pyfunction]
 fn column_stack(py: Python<'_>, tup: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    if let Some(out) = try_zerocopy_reshaped_concat(py, tup.bind(py), false)? {
-        return Ok(out);
-    }
-    stack_helper_default(py, tup, StackHelperKind::Column)
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("column_stack")?
+        .call1((tup.bind(py),))?
+        .unbind())
 }
 
 #[pyfunction]
