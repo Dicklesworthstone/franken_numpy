@@ -1054,6 +1054,171 @@ fn bench_histogram_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_setops_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_setops_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+
+        let n = 1_000_000_i64;
+        let raw = numpy.call_method1("arange", (n,)).expect("raw arange");
+        let left_i32 = raw
+            .call_method1("__mod__", (4096_i64,))
+            .expect("left i32 modulo")
+            .call_method1("__sub__", (2048_i64,))
+            .expect("left i32 center")
+            .call_method1("astype", ("int32",))
+            .expect("left int32");
+        let right_i32 = raw
+            .call_method1("__mul__", (3_i64,))
+            .expect("right i32 mul")
+            .call_method1("__mod__", (4096_i64,))
+            .expect("right i32 modulo")
+            .call_method1("__sub__", (1024_i64,))
+            .expect("right i32 center")
+            .call_method1("astype", ("int32",))
+            .expect("right int32");
+        let left_i64 = raw
+            .call_method1("__mod__", (8192_i64,))
+            .expect("left i64 modulo")
+            .call_method1("__sub__", (4096_i64,))
+            .expect("left i64 center")
+            .call_method1("astype", ("int64",))
+            .expect("left int64");
+        let right_i64 = raw
+            .call_method1("__mul__", (5_i64,))
+            .expect("right i64 mul")
+            .call_method1("__mod__", (8192_i64,))
+            .expect("right i64 modulo")
+            .call_method1("__sub__", (2048_i64,))
+            .expect("right i64 center")
+            .call_method1("astype", ("int64",))
+            .expect("right int64");
+        let left_f64 = raw
+            .call_method1("__mod__", (65536_i64,))
+            .expect("left f64 modulo")
+            .call_method1("__truediv__", (16.0_f64,))
+            .expect("left f64 scale")
+            .call_method1("astype", ("float64",))
+            .expect("left float64");
+        let right_f64 = raw
+            .call_method1("__mul__", (7_i64,))
+            .expect("right f64 mul")
+            .call_method1("__mod__", (65536_i64,))
+            .expect("right f64 modulo")
+            .call_method1("__truediv__", (16.0_f64,))
+            .expect("right f64 scale")
+            .call_method1("astype", ("float64",))
+            .expect("right float64");
+        let left_f32 = raw
+            .call_method1("__mod__", (32768_i64,))
+            .expect("left f32 modulo")
+            .call_method1("__truediv__", (8.0_f64,))
+            .expect("left f32 scale")
+            .call_method1("astype", ("float32",))
+            .expect("left float32");
+        let right_f32 = raw
+            .call_method1("__mul__", (11_i64,))
+            .expect("right f32 mul")
+            .call_method1("__mod__", (32768_i64,))
+            .expect("right f32 modulo")
+            .call_method1("__truediv__", (8.0_f64,))
+            .expect("right f32 scale")
+            .call_method1("astype", ("float32",))
+            .expect("right float32");
+
+        let fnp_setdiff1d = module.getattr("setdiff1d").expect("fnp setdiff1d");
+        let numpy_setdiff1d = numpy.getattr("setdiff1d").expect("numpy setdiff1d");
+        let fnp_intersect1d = module.getattr("intersect1d").expect("fnp intersect1d");
+        let numpy_intersect1d = numpy.getattr("intersect1d").expect("numpy intersect1d");
+
+        group.bench_function("fnp_setdiff1d_i32_smallrange_1m", |bench| {
+            bench.iter(|| {
+                let result = fnp_setdiff1d
+                    .call1((&left_i32, &right_i32))
+                    .expect("fnp setdiff1d i32 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_setdiff1d_i32_smallrange_1m", |bench| {
+            bench.iter(|| {
+                let result = numpy_setdiff1d
+                    .call1((&left_i32, &right_i32))
+                    .expect("numpy setdiff1d i32 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_intersect1d_i64_smallrange_1m", |bench| {
+            bench.iter(|| {
+                let result = fnp_intersect1d
+                    .call1((&left_i64, &right_i64))
+                    .expect("fnp intersect1d i64 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_intersect1d_i64_smallrange_1m", |bench| {
+            bench.iter(|| {
+                let result = numpy_intersect1d
+                    .call1((&left_i64, &right_i64))
+                    .expect("numpy intersect1d i64 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_intersect1d_f64_repeated_1m", |bench| {
+            bench.iter(|| {
+                let result = fnp_intersect1d
+                    .call1((&left_f64, &right_f64))
+                    .expect("fnp intersect1d f64 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_intersect1d_f64_repeated_1m", |bench| {
+            bench.iter(|| {
+                let result = numpy_intersect1d
+                    .call1((&left_f64, &right_f64))
+                    .expect("numpy intersect1d f64 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_setxor1d_f32_repeated_1m", |bench| {
+            bench.iter(|| {
+                let result = module
+                    .getattr("setxor1d")
+                    .expect("fnp setxor1d")
+                    .call1((&left_f32, &right_f32))
+                    .expect("fnp setxor1d f32 benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_setxor1d_f32_repeated_1m", |bench| {
+            bench.iter(|| {
+                let result = numpy
+                    .getattr("setxor1d")
+                    .expect("numpy setxor1d")
+                    .call1((&left_f32, &right_f32))
+                    .expect("numpy setxor1d f32 benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_statistics_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_statistics_boundary");
     group.sample_size(10);
@@ -1317,6 +1482,7 @@ criterion_group!(
     bench_char_ascii_boundary,
     bench_average_nansum_axis_boundary,
     bench_histogram_boundary,
+    bench_setops_boundary,
     bench_statistics_boundary,
     bench_einsum_boundary,
     bench_linalg_boundary

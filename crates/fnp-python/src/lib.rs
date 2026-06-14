@@ -75422,7 +75422,7 @@ mod tests {
             let digest = py_sha256_hex(py, &proof_bytes)?;
             assert_eq!(
                 digest,
-                "FLOAT_SETOPS_GOLDEN_SHA256_PLACEHOLDER",
+                "ec0d35d19fdfc33accacb0c9a96cfd020ccd007989c970f193948b449a5a1e4b",
                 "float set-op numpy passthrough golden sha256 changed",
             );
             Ok(())
