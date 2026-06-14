@@ -41,8 +41,8 @@ use fnp_ufunc::{
     arctan2 as ufunc_arctan2, bitwise_and as ufunc_bitwise_and,
     bitwise_count as ufunc_bitwise_count, bitwise_or as ufunc_bitwise_or,
     bitwise_xor as ufunc_bitwise_xor, divide as ufunc_divide,
-    divmod_arrays as ufunc_divmod, equal as ufunc_equal, float_power as ufunc_float_power,
-    fmax as ufunc_fmax, fmin as ufunc_fmin, frexp as ufunc_frexp,
+    divmod_arrays as ufunc_divmod, equal as ufunc_equal, fmax as ufunc_fmax,
+    fmin as ufunc_fmin, frexp as ufunc_frexp,
     greater as ufunc_greater, greater_equal as ufunc_greater_equal,
     hypot as ufunc_hypot, invert as ufunc_invert, isneginf as ufunc_isneginf,
     isposinf as ufunc_isposinf, left_shift as ufunc_left_shift,
@@ -25285,19 +25285,13 @@ fn native_binary_float_power_or_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
-        let x1_arg = args.get_item(0)?;
-        let x2_arg = args.get_item(1)?;
-        if let Some(out) = try_zerocopy_f64_binary(py, &x1_arg, &x2_arg, BinaryOp::FloatPower)? {
-            return Ok(out);
-        }
-        let x1 = extract_numeric_array(py, &x1_arg, "float_power(x1)")?;
-        let x2 = extract_numeric_array(py, &x2_arg, "float_power(x2)")?;
-        let result = ufunc_float_power(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
-    } else {
-        core_numpy_passthrough(py, "float_power", args, kwargs)
-    }
+    // float_power is element-wise pow promoted to float64 — a transcendental whose
+    // cost is dominated by the scalar libm pow. Both the f64 zero-copy path
+    // (scalar pow, measured 0.07-0.87x of numpy, ~14x slower at 100K) and the
+    // extract path for f32 (~3.5x slower) lose to numpy's vectorized f64 pow, so
+    // delegate every shape to numpy (the exact oracle: f64 result, NaN for negative
+    // base with non-integer exponent, same broadcasting/error surface).
+    core_numpy_passthrough(py, "float_power", args, kwargs)
 }
 
 fn native_binary_remainder_or_passthrough(
