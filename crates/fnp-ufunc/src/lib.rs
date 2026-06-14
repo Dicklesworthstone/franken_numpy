@@ -17132,6 +17132,71 @@ impl UFuncArray {
         }
     }
 
+    /// Compute multiple percentiles over the flattened array.
+    ///
+    /// This is the vector-`q`, `axis=None` fast path used by the Python surface.
+    /// It preserves the scalar percentile contract for every q while sharing the
+    /// NaN scan and large-input rank selection across the whole q set.
+    pub fn percentiles_axis_none(&self, qs: &[f64]) -> Result<Self, UFuncError> {
+        for &q in qs {
+            if !(0.0..=100.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "percentile: q={q} must be in [0, 100]"
+                )));
+            }
+        }
+        let n = self.values.len();
+        if n == 0 {
+            return Ok(Self {
+                shape: vec![qs.len()],
+                values: vec![f64::NAN; qs.len()],
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
+        if qs.is_empty() {
+            return Ok(Self {
+                shape: vec![0],
+                values: Vec::new(),
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
+        const PERCENTILE_MULTI_Q_GLOBAL_PARALLEL_MIN: usize = 1 << 17;
+        let parallel = n >= PERCENTILE_MULTI_Q_GLOBAL_PARALLEL_MIN
+            && qs.len() >= 2
+            && rayon::current_num_threads() >= 2;
+        let has_nan = if parallel {
+            self.values.par_iter().any(|v| v.is_nan())
+        } else {
+            self.values.iter().any(|v| v.is_nan())
+        };
+        if has_nan {
+            return Ok(Self {
+                shape: vec![qs.len()],
+                values: vec![f64::NAN; qs.len()],
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
+        let values = if parallel {
+            par_select_percentiles_linear(&self.values, qs)
+        } else {
+            qs.iter()
+                .map(|&q| {
+                    let mut buf = self.values.clone();
+                    select_percentile_method(&mut buf, q / 100.0, QuantileInterp::Linear)
+                })
+                .collect()
+        };
+        Ok(Self {
+            shape: vec![qs.len()],
+            values,
+            dtype: DType::F64,
+            integer_sidecar: None,
+        })
+    }
+
     /// Percentile with keepdims support (`np.percentile(keepdims=True)`).
     pub fn percentile_keepdims(
         &self,
@@ -19117,6 +19182,19 @@ impl UFuncArray {
     /// Mimics `np.quantile(a, q)`. Like `percentile` but q is in [0, 1] instead of [0, 100].
     pub fn quantile(&self, q: f64, axis: Option<isize>) -> Result<Self, UFuncError> {
         self.percentile(q * 100.0, axis)
+    }
+
+    /// Compute multiple quantiles over the flattened array.
+    pub fn quantiles_axis_none(&self, qs: &[f64]) -> Result<Self, UFuncError> {
+        for &q in qs {
+            if !(0.0..=1.0).contains(&q) {
+                return Err(UFuncError::Msg(format!(
+                    "quantile: q={q} must be in [0, 1]"
+                )));
+            }
+        }
+        let percentiles: Vec<f64> = qs.iter().map(|&q| q * 100.0).collect();
+        self.percentiles_axis_none(&percentiles)
     }
 
     /// Weighted average of array elements.
@@ -28073,6 +28151,7 @@ fn interpolate_percentile(sorted: &[f64], fraction: f64) -> f64 {
     interpolate_percentile_method(sorted, fraction, QuantileInterp::Linear)
 }
 
+#[cfg(test)]
 fn interpolate_percentile_method(sorted: &[f64], fraction: f64, method: QuantileInterp) -> f64 {
     let n = sorted.len();
     if n == 0 {
@@ -28393,6 +28472,215 @@ fn par_select_percentile(data: &[f64], fraction: f64, method: QuantileInterp) ->
             }
         }
         QuantileInterp::Midpoint => (v_lo + v_hi) / 2.0,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct RankBucketSpan {
+    bucket: usize,
+    start: usize,
+    end: usize,
+    below: usize,
+    count: usize,
+}
+
+#[inline]
+fn key_matches_prefix(key: u64, prefix: u64, fixed: u32) -> bool {
+    fixed == 0 || (key >> (64 - fixed)) == prefix
+}
+
+fn percentile_linear_plan(n: usize, q: f64) -> (usize, usize, f64) {
+    let idx = (q / 100.0) * (n - 1) as f64;
+    let lo = idx.floor() as usize;
+    let frac = idx - lo as f64;
+    if frac == 0.0 || lo >= n - 1 {
+        let k = lo.min(n - 1);
+        (k, k, 0.0)
+    } else {
+        (lo, lo + 1, frac)
+    }
+}
+
+fn par_select_percentiles_linear(data: &[f64], qs: &[f64]) -> Vec<f64> {
+    let n = data.len();
+    debug_assert!(n > 0);
+    if n == 1 {
+        return vec![data[0]; qs.len()];
+    }
+
+    let plans: Vec<(usize, usize, f64)> =
+        qs.iter().map(|&q| percentile_linear_plan(n, q)).collect();
+    let mut ranks: Vec<usize> = plans.iter().flat_map(|&(lo, hi, _)| [lo, hi]).collect();
+    ranks.sort_unstable();
+    ranks.dedup();
+
+    let selected = par_select_ranks(data, &ranks);
+    plans
+        .iter()
+        .map(|&(lo, hi, frac)| {
+            let v_lo = selected[ranks.binary_search(&lo).expect("planned lo rank")];
+            if lo == hi {
+                v_lo
+            } else {
+                let v_hi = selected[ranks.binary_search(&hi).expect("planned hi rank")];
+                v_lo * (1.0 - frac) + v_hi * frac
+            }
+        })
+        .collect()
+}
+
+fn par_select_ranks(data: &[f64], ranks: &[usize]) -> Vec<f64> {
+    debug_assert!(!ranks.is_empty());
+    let mut out = vec![0.0; ranks.len()];
+    par_select_ranks_node(data, ranks, &mut out, 0, 0, 0, data.len());
+    out
+}
+
+fn par_select_ranks_node(
+    data: &[f64],
+    ranks: &[usize],
+    out: &mut [f64],
+    prefix: u64,
+    fixed: u32,
+    below: usize,
+    live_count: usize,
+) {
+    const RBITS: u32 = 8;
+    const NB: usize = 1 << RBITS;
+    const CUT: usize = 1 << 16;
+    const HIST_CHUNK: usize = 1 << 14;
+
+    debug_assert_eq!(ranks.len(), out.len());
+    debug_assert!(!ranks.is_empty());
+    debug_assert!(ranks[0] >= below);
+    debug_assert!(ranks[ranks.len() - 1] < below + live_count);
+
+    if live_count <= CUT || fixed == 64 {
+        let mut survivor: Vec<f64> = data
+            .par_iter()
+            .copied()
+            .filter(|&x| key_matches_prefix(f64_sortable_key(x), prefix, fixed))
+            .collect();
+        survivor.sort_unstable_by(|a, b| a.total_cmp(b));
+        for (slot, &rank) in out.iter_mut().zip(ranks.iter()) {
+            *slot = survivor[rank - below];
+        }
+        return;
+    }
+
+    let remaining = 64 - fixed;
+    let shift = remaining - RBITS;
+    let counts = data
+        .par_chunks(HIST_CHUNK)
+        .map(|chunk| {
+            let mut local = [0usize; NB];
+            for &x in chunk {
+                let key = f64_sortable_key(x);
+                if key_matches_prefix(key, prefix, fixed) {
+                    local[((key >> shift) & (NB as u64 - 1)) as usize] += 1;
+                }
+            }
+            local
+        })
+        .reduce(
+            || [0usize; NB],
+            |mut a, b| {
+                for i in 0..NB {
+                    a[i] += b[i];
+                }
+                a
+            },
+        );
+
+    let mut spans = Vec::new();
+    let mut rank_pos = 0usize;
+    let mut cum = below;
+    for (bucket, &count) in counts.iter().enumerate() {
+        if count == 0 {
+            continue;
+        }
+        let bucket_below = cum;
+        let bucket_end = cum + count;
+        while rank_pos < ranks.len() && ranks[rank_pos] < bucket_below {
+            rank_pos += 1;
+        }
+        let start = rank_pos;
+        while rank_pos < ranks.len() && ranks[rank_pos] < bucket_end {
+            rank_pos += 1;
+        }
+        if start != rank_pos {
+            spans.push(RankBucketSpan {
+                bucket,
+                start,
+                end: rank_pos,
+                below: bucket_below,
+                count,
+            });
+        }
+        cum = bucket_end;
+        if rank_pos == ranks.len() {
+            break;
+        }
+    }
+
+    let new_fixed = fixed + RBITS;
+    let terminal: Vec<RankBucketSpan> = spans
+        .iter()
+        .copied()
+        .filter(|span| span.count <= CUT || new_fixed == 64)
+        .collect();
+    if !terminal.is_empty() {
+        let mut bucket_to_terminal = [usize::MAX; NB];
+        for (idx, span) in terminal.iter().enumerate() {
+            bucket_to_terminal[span.bucket] = idx;
+        }
+        let survivors = data
+            .par_chunks(HIST_CHUNK)
+            .map(|chunk| {
+                let mut local: Vec<Vec<f64>> = (0..terminal.len()).map(|_| Vec::new()).collect();
+                for &x in chunk {
+                    let key = f64_sortable_key(x);
+                    if key_matches_prefix(key, prefix, fixed) {
+                        let bucket = ((key >> shift) & (NB as u64 - 1)) as usize;
+                        let slot = bucket_to_terminal[bucket];
+                        if slot != usize::MAX {
+                            local[slot].push(x);
+                        }
+                    }
+                }
+                local
+            })
+            .reduce(
+                || (0..terminal.len()).map(|_| Vec::new()).collect(),
+                |mut a, b| {
+                    for (dst, mut src) in a.iter_mut().zip(b) {
+                        dst.append(&mut src);
+                    }
+                    a
+                },
+            );
+        for (span, mut survivor) in terminal.iter().zip(survivors) {
+            survivor.sort_unstable_by(|a, b| a.total_cmp(b));
+            for idx in span.start..span.end {
+                out[idx] = survivor[ranks[idx] - span.below];
+            }
+        }
+    }
+
+    for span in spans {
+        if span.count <= CUT || new_fixed == 64 {
+            continue;
+        }
+        let new_prefix = (prefix << RBITS) | span.bucket as u64;
+        par_select_ranks_node(
+            data,
+            &ranks[span.start..span.end],
+            &mut out[span.start..span.end],
+            new_prefix,
+            new_fixed,
+            span.below,
+            span.count,
+        );
     }
 }
 
@@ -52751,6 +53039,72 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn percentiles_axis_none_matches_repeated_scalar_and_golden_sha256() {
+        let qs = [
+            0.0, 1.0, 5.0, 10.0, 25.0, 37.5, 50.0, 63.0, 75.0, 90.0, 99.0, 100.0,
+        ];
+        let cases: Vec<Vec<f64>> = vec![
+            (0..200003)
+                .map(|i| {
+                    let x = ((i as u64).wrapping_mul(2_654_435_761) % 100_003) as f64;
+                    x.mul_add(1.0 / 11.0, -500.0)
+                })
+                .collect(),
+            (0..180000)
+                .map(|i| ((i as u64).wrapping_mul(40_503) % 977) as f64 - 488.0)
+                .collect(),
+            (0..150001).map(|i| i as f64).collect(),
+            (0..150000).map(|i| (150000 - i) as f64).collect(),
+            vec![7.0; 140000],
+            {
+                let mut v: Vec<f64> = (0..160000).map(|i| (i % 11) as f64 - 5.0).collect();
+                v[3] = f64::INFINITY;
+                v[5] = f64::NEG_INFINITY;
+                v
+            },
+        ];
+        let mut digest = Sha256::new();
+        for data in cases {
+            let arr = UFuncArray::new(vec![data.len()], data, DType::F64).unwrap();
+            let got = arr.percentiles_axis_none(&qs).unwrap();
+            assert_eq!(got.shape(), &[qs.len()]);
+            for (idx, &q) in qs.iter().enumerate() {
+                let expected = arr.percentile(q, None).unwrap().values()[0];
+                assert_eq!(
+                    got.values()[idx].to_bits(),
+                    expected.to_bits(),
+                    "percentiles_axis_none diverged at q={q}"
+                );
+                digest.update(got.values()[idx].to_bits().to_le_bytes());
+            }
+            let quant_qs: Vec<f64> = qs.iter().map(|&q| q / 100.0).collect();
+            let got_quant = arr.quantiles_axis_none(&quant_qs).unwrap();
+            for (pct, quant) in got.values().iter().zip(got_quant.values()) {
+                assert_eq!(pct.to_bits(), quant.to_bits());
+            }
+        }
+        let nan_arr = UFuncArray::new(vec![3], vec![1.0, f64::NAN, 3.0], DType::F64).unwrap();
+        let nan_out = nan_arr.percentiles_axis_none(&[25.0, 50.0, 75.0]).unwrap();
+        assert!(nan_out.values().iter().all(|v| v.is_nan()));
+        let empty_q = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64)
+            .unwrap()
+            .percentiles_axis_none(&[])
+            .unwrap();
+        assert_eq!(empty_q.shape(), &[0]);
+        assert!(empty_q.values().is_empty());
+
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert_eq!(
+            hex, "233d772184799df965a4237b5eea7ac3951ed90f9c6336e42c3b313871ab839f",
+            "many-q percentile golden digest drifted"
+        );
+    }
+
+    #[test]
     fn percentile_out_of_range() {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         assert!(a.percentile(101.0, None).is_err());
@@ -63392,6 +63746,70 @@ print(json.dumps(payload))
         println!(
             "PERCENTILE_NONE new={new_ms:.3}ms old_sort={old_ms:.3}ms speedup={:.2}x",
             old_ms / new_ms
+        );
+    }
+
+    #[test]
+    #[ignore = "perf A/B: many-q percentile(None) shared rank selector vs repeated scalar selects; run --release -- --ignored --nocapture"]
+    fn percentile_many_q_independent_select_baseline_bench() {
+        use std::time::Instant;
+        let n = 4_000_000usize;
+        let qs = [
+            1.0, 5.0, 10.0, 25.0, 37.0, 50.0, 63.0, 75.0, 90.0, 95.0, 99.0,
+        ];
+        let data: Vec<f64> = (0..n)
+            .map(|i| {
+                let x = ((i as u64).wrapping_mul(2_654_435_761) % 1_000_003) as f64;
+                x.mul_add(1.0 / 7.0, -5000.0)
+            })
+            .collect();
+        let arr = UFuncArray::new(vec![n], data, DType::F64).unwrap();
+        let iters = 3;
+        std::hint::black_box(arr.percentiles_axis_none(&qs).unwrap());
+        let t0 = Instant::now();
+        let mut new_bits = Vec::new();
+        for _ in 0..iters {
+            let vals: Vec<u64> = arr
+                .percentiles_axis_none(&qs)
+                .unwrap()
+                .values()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect();
+            new_bits = vals.clone();
+            std::hint::black_box(vals);
+        }
+        let shared_ms = t0.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        let t1 = Instant::now();
+        let mut old_bits = Vec::new();
+        for _ in 0..iters {
+            let vals: Vec<u64> = qs
+                .iter()
+                .map(|&q| {
+                    arr.percentile_method(q, None, QuantileInterp::Linear)
+                        .unwrap()
+                        .values()[0]
+                        .to_bits()
+                })
+                .collect();
+            old_bits = vals.clone();
+            std::hint::black_box(vals);
+        }
+        let independent_ms = t1.elapsed().as_secs_f64() * 1e3 / iters as f64;
+        assert_eq!(new_bits, old_bits);
+        let mut digest = Sha256::new();
+        for bits in &new_bits {
+            digest.update(bits.to_le_bytes());
+        }
+        let sha: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        println!(
+            "PERCENTILE_MANY_Q n={n} q_count={} shared={shared_ms:.3}ms independent_scalar={independent_ms:.3}ms speedup={:.2}x sha256={sha}",
+            qs.len(),
+            independent_ms / shared_ms
         );
     }
 
