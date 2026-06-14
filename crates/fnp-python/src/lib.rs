@@ -14531,6 +14531,17 @@ fn try_zerocopy_any_all(
                 _ => Ok(None),
             }
         }
+        "f" => {
+            // float32 any/all (the f64 arm above is guarded): truthiness is v != 0.0
+            // (NaN truthy, -0.0 falsy, matching numpy). The fallback widened to an
+            // f64 Vec and ran the strided reduce (~28-40x slower).
+            let itemsize = a.getattr("dtype")?.getattr("itemsize")?.extract::<usize>()?;
+            if itemsize == 4 {
+                zerocopy_any_all_buf::<f32, _>(py, &numpy, a, axis, is_all, &shape, |v| v != 0.0)
+            } else {
+                Ok(None)
+            }
+        }
         _ => Ok(None),
     }
 }
@@ -36959,6 +36970,13 @@ fn prod(
         return Ok(out);
     }
 
+    // f32 prod: numpy's SIMD product beats a widening native fold and avoids any
+    // f32->f64->f32 reassociation risk; delegate instead of the cold extract->f64
+    // widen path (~10-52x slower than numpy).
+    if numpy_dtype_is_f32(a.bind(py)) {
+        return fallback();
+    }
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "prod(a)") {
         Ok(arr) => arr,
@@ -38390,6 +38408,11 @@ fn argmax(
     if let Some(out) = try_zerocopy_int_argextreme_axis(py, a.bind(py), axis_val, true)? {
         return Ok(out);
     }
+    // f32 argmax: numpy's SIMD argextreme beats a widening native scan; delegate
+    // instead of the cold extract->f64-widen path (~35x slower than numpy).
+    if numpy_dtype_is_f32(a.bind(py)) {
+        return fallback();
+    }
 
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "argmax(a)") {
@@ -38497,6 +38520,11 @@ fn argmin(
     // Zero-copy non-last-axis integer fast path (e.g. argmin(int_M, axis=0)).
     if let Some(out) = try_zerocopy_int_argextreme_axis(py, a.bind(py), axis_val, false)? {
         return Ok(out);
+    }
+    // f32 argmin: numpy's SIMD argextreme beats a widening native scan; delegate
+    // instead of the cold extract->f64-widen path (~34x slower than numpy).
+    if numpy_dtype_is_f32(a.bind(py)) {
+        return fallback();
     }
 
     // Extract input array
