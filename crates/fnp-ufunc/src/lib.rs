@@ -22244,6 +22244,62 @@ impl UFuncArray {
             });
         }
 
+        // Fast path: 2-operand BATCHED reduction — both operands carry the SAME
+        // labels in the SAME order, the output labels are the leading prefix (the
+        // batch) and the contracted labels are the trailing suffix, e.g.
+        // `ij,ij->i`, `ijk,ijk->ij`, `ijk,ijk->i`. Row-major layout then makes each
+        // output cell the dot of a contiguous length-`csize` chunk:
+        // out[b] = Σ_c a[b*csize + c] * b[b*csize + c], ascending c — exactly the
+        // general path's accumulation order, so bit-identical. Without this the
+        // batched dot falls to the O(out·contract) odometer-scatter path (which
+        // re-decodes indices and allocs per cell): `ij,ij->i` at 2000² was ~26x
+        // numpy. Disjoint output rows fan out across rayon; the inner dot is a
+        // contiguous stream that autovectorizes. (Output-empty is the full
+        // contraction above; GEMM-shaped free dims are the plan below.)
+        if operands.len() == 2
+            && !output_labels.is_empty()
+            && input_chars[0] == input_chars[1]
+            && operands[0].shape == operands[1].shape
+            && operands[0].values.len() == operands[1].values.len()
+            && !einsum_has_dup_label(&input_chars[0])
+            && output_labels.len() < input_chars[0].len()
+            && input_chars[0][..output_labels.len()] == output_labels[..]
+            && input_chars[0][output_labels.len()..] == contracted[..]
+            && output_size > 0
+        {
+            let batch = output_size;
+            let total = operands[0].values.len();
+            let csize = total / batch;
+            let (a_vals, b_vals) = (&operands[0].values, &operands[1].values);
+            let mut values = vec![0.0f64; batch];
+            let row_dot = |(bi, slot): (usize, &mut f64)| {
+                let a = &a_vals[bi * csize..(bi + 1) * csize];
+                let b = &b_vals[bi * csize..(bi + 1) * csize];
+                let mut s = 0.0f64;
+                for (&x, &y) in a.iter().zip(b.iter()) {
+                    s += x * y;
+                }
+                *slot = s;
+            };
+            if total >= (1 << 15) && rayon::current_num_threads() >= 2 {
+                values
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(bi, slot)| row_dot((bi, slot)));
+            } else {
+                values
+                    .iter_mut()
+                    .enumerate()
+                    .for_each(|(bi, slot)| row_dot((bi, slot)));
+            }
+            return Ok(Self {
+                shape: output_shape,
+                values,
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
+
         // Fast path: a 2-operand contraction that is a (possibly batched) GEMM
         // after normalizing operand layout. Plain layouts use slices directly:
         // op0 = [batch..., free0..., k...], op1 = [batch..., k..., free1...].
@@ -61545,6 +61601,66 @@ print(json.dumps(payload))
         let got3 = UFuncArray::einsum("ijk,ijk->", &[&a3, &b3]).unwrap();
         assert_eq!(got3.shape, Vec::<usize>::new());
         assert_eq!(got3.values[0].to_bits(), dot_bits(&a3_vals, &b3_vals));
+    }
+
+    #[test]
+    fn einsum_batched_reduction_fast_path_matches_reference_bits() {
+        // out[batch] = Σ_contract a[batch,contract]*b[batch,contract], ascending
+        // contract — the contiguous per-row dot the fast path computes must be
+        // bit-identical to a manual ascending reference, including a large case
+        // that crosses the parallel gate (batch >= 1<<15 elements).
+        fn seq(n: usize, scale: f64, bias: f64) -> Vec<f64> {
+            (0..n)
+                .map(|i| (((i % 37) as f64) * scale + bias).copysign(if i % 5 == 0 { -1.0 } else { 1.0 }))
+                .collect()
+        }
+        fn ref_batched(a: &[f64], b: &[f64], batch: usize, csize: usize) -> Vec<u64> {
+            (0..batch)
+                .map(|bi| {
+                    let mut s = 0.0f64;
+                    for c in 0..csize {
+                        s += a[bi * csize + c] * b[bi * csize + c];
+                    }
+                    s.to_bits()
+                })
+                .collect()
+        }
+        // ij,ij->i (small, serial)
+        let (m, k) = (6usize, 9usize);
+        let av = seq(m * k, 0.125, -1.5);
+        let bv = seq(m * k, -0.375, 2.25);
+        let a = UFuncArray::new(vec![m, k], av.clone(), DType::F64).unwrap();
+        let b = UFuncArray::new(vec![m, k], bv.clone(), DType::F64).unwrap();
+        let got = UFuncArray::einsum("ij,ij->i", &[&a, &b]).unwrap();
+        assert_eq!(got.shape, vec![m]);
+        let want = ref_batched(&av, &bv, m, k);
+        assert_eq!(got.values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want);
+
+        // ijk,ijk->ij (batch = i*j, contract = k)
+        let (i, j, kk) = (4usize, 5usize, 7usize);
+        let av3 = seq(i * j * kk, 0.0625, -0.75);
+        let bv3 = seq(i * j * kk, 0.5, 1.25);
+        let a3 = UFuncArray::new(vec![i, j, kk], av3.clone(), DType::F64).unwrap();
+        let b3 = UFuncArray::new(vec![i, j, kk], bv3.clone(), DType::F64).unwrap();
+        let got3 = UFuncArray::einsum("ijk,ijk->ij", &[&a3, &b3]).unwrap();
+        assert_eq!(got3.shape, vec![i, j]);
+        assert_eq!(
+            got3.values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            ref_batched(&av3, &bv3, i * j, kk)
+        );
+
+        // Large ij,ij->i to exercise the parallel branch (batch*csize >= 1<<15).
+        let (mb, kb) = (512usize, 256usize);
+        let avb = seq(mb * kb, 0.01, 0.3);
+        let bvb = seq(mb * kb, -0.02, -0.4);
+        let ab = UFuncArray::new(vec![mb, kb], avb.clone(), DType::F64).unwrap();
+        let bb = UFuncArray::new(vec![mb, kb], bvb.clone(), DType::F64).unwrap();
+        let gotb = UFuncArray::einsum("ij,ij->i", &[&ab, &bb]).unwrap();
+        assert_eq!(gotb.shape, vec![mb]);
+        assert_eq!(
+            gotb.values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            ref_batched(&avb, &bvb, mb, kb)
+        );
     }
 
     #[test]
