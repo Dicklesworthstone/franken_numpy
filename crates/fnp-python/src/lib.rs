@@ -19933,6 +19933,37 @@ fn putmask(
         return Ok(py.None());
     }
 
+    // Scalar / list / tuple `values` (e.g. the common `putmask(a, mask, 0)`): the
+    // zero-copy paths above require an ndarray `values`, so a scalar fell to the cold
+    // extract -> copy-back path (4.7-9.4x slower than numpy). numpy casts `values` to
+    // a's dtype and cycles it by flat position, so materialize a small a-dtype array
+    // (numpy performs the exact unsafe cast) and re-enter the in-place scatter. A
+    // scalar becomes a 1-element array (v=1 -> constant fill). Only non-ndarray
+    // `values` are normalized; ndarray inputs already went through the paths above.
+    {
+        let numpy = py.import("numpy")?;
+        let ndarray_type = numpy.getattr("ndarray")?;
+        if !values.bind(py).is_exact_instance(&ndarray_type) {
+            // np.array(values, dtype=a.dtype) reproduces numpy.putmask's scalar cast
+            // EXACTLY, including raising OverflowError on an out-of-range Python int
+            // for a narrow dtype (numpy 2.x) — astype() would silently wrap instead.
+            let a_dtype = a.getattr("dtype")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", a_dtype)?;
+            let vals_arr = numpy
+                .call_method("array", (values.bind(py),), Some(&kwargs))?
+                .call_method1("ravel", ())?;
+            if vals_arr.call_method0("__len__")?.extract::<usize>()? > 0 {
+                if try_zerocopy_f64_putmask(py, a, mask.bind(py), &vals_arr)? {
+                    return Ok(py.None());
+                }
+                if try_zerocopy_any_putmask(py, a, mask.bind(py), &vals_arr)? {
+                    return Ok(py.None());
+                }
+            }
+        }
+    }
+
     let mut array = extract_numeric_array(py, a, "putmask(a)")?;
     let mask = extract_numeric_array(py, mask.bind(py), "putmask(mask)")?;
     let values = extract_numeric_array(py, values.bind(py), "putmask(values)")?;
