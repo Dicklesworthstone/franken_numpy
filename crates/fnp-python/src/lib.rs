@@ -35092,9 +35092,10 @@ fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     {
         return Ok(out);
     }
-    let v = extract_precise_numeric_array(py, v.bind(py), "diag(v)")?;
-    let result = v.diag(k).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    // Non-f64 1-D construct: the native path materialized the WHOLE n² output Vec
+    // (mostly zeros) then converted it across the bridge — ~573x slower for int8 at
+    // n=2000. numpy uses lazy calloc + writes only the n diagonal cells. Delegate.
+    Ok(numpy.getattr("diag")?.call1((arr, k))?.unbind())
 }
 
 // Zero-copy np.diagflat(v, k) for a C-contiguous float64 ndarray: numpy flattens
@@ -35161,9 +35162,10 @@ fn diagflat(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     if let Some(result) = try_zerocopy_f64_diagflat(py, v.bind(py), k)? {
         return Ok(result);
     }
-    let v = extract_precise_numeric_array(py, v.bind(py), "diagflat(v)")?;
-    let result = v.diagflat(k);
-    build_numpy_array_from_ufunc(py, &result)
+    // Non-f64: the native path materialized the whole s² output then converted it
+    // across the bridge (~34x slower). numpy writes only the diagonal into lazy
+    // calloc memory. Delegate.
+    Ok(numpy.getattr("diagflat")?.call1((arr, k))?.unbind())
 }
 
 #[pyfunction]
