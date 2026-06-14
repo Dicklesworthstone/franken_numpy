@@ -22218,6 +22218,32 @@ impl UFuncArray {
 
         let input_chars: Vec<Vec<char>> = input_subs.iter().map(|s| s.chars().collect()).collect();
 
+        // Fast path: 2-operand full contraction with identical row-major label order,
+        // e.g. `ij,ij->` or `ijk,ijk->`. The general path has output_size == 1
+        // and accumulates contracted labels in row-major flat order, so this is the
+        // same left-to-right `sum += a[i] * b[i]` without per-element odometer decode.
+        // Repeated labels, broadcasting, and label permutations (`ij,ji->`) stay on
+        // the general path where diagonal/stride semantics are already proven.
+        if operands.len() == 2
+            && output_labels.is_empty()
+            && input_chars[0] == input_chars[1]
+            && contracted == input_chars[0]
+            && !einsum_has_dup_label(&input_chars[0])
+            && operands[0].shape == operands[1].shape
+            && operands[0].values.len() == operands[1].values.len()
+        {
+            let mut sum = 0.0f64;
+            for (&a, &b) in operands[0].values.iter().zip(operands[1].values.iter()) {
+                sum += a * b;
+            }
+            return Ok(Self {
+                shape: output_shape,
+                values: vec![sum],
+                dtype: DType::F64,
+                integer_sidecar: None,
+            });
+        }
+
         // Fast path: a 2-operand contraction that is a (possibly batched) GEMM
         // after normalizing operand layout. Plain layouts use slices directly:
         // op0 = [batch..., free0..., k...], op1 = [batch..., k..., free1...].
@@ -61480,6 +61506,45 @@ print(json.dumps(payload))
             digest, "d4a2b5137fd48c9f2ebaae51760bb8ccd357c09ea3482eba833f750248946918",
             "einsum output bit pattern changed"
         );
+    }
+
+    #[test]
+    fn einsum_full_contraction_flat_fast_path_matches_reference_bits() {
+        fn seq(n: usize, scale: f64, bias: f64) -> Vec<f64> {
+            (0..n)
+                .map(|i| {
+                    (((i % 31) as f64) * scale + bias).copysign(if i % 7 == 0 {
+                        -1.0
+                    } else {
+                        1.0
+                    })
+                })
+                .collect()
+        }
+
+        fn dot_bits(lhs: &[f64], rhs: &[f64]) -> u64 {
+            let mut sum = 0.0f64;
+            for (&a, &b) in lhs.iter().zip(rhs.iter()) {
+                sum += a * b;
+            }
+            sum.to_bits()
+        }
+
+        let a2_vals = seq(5 * 7, 0.125, -2.0);
+        let b2_vals = seq(5 * 7, -0.25, 3.5);
+        let a2 = UFuncArray::new(vec![5, 7], a2_vals.clone(), DType::F64).unwrap();
+        let b2 = UFuncArray::new(vec![5, 7], b2_vals.clone(), DType::F64).unwrap();
+        let got2 = UFuncArray::einsum("ij,ij->", &[&a2, &b2]).unwrap();
+        assert_eq!(got2.shape, Vec::<usize>::new());
+        assert_eq!(got2.values[0].to_bits(), dot_bits(&a2_vals, &b2_vals));
+
+        let a3_vals = seq(3 * 4 * 5, 0.0625, -1.25);
+        let b3_vals = seq(3 * 4 * 5, 0.5, 0.75);
+        let a3 = UFuncArray::new(vec![3, 4, 5], a3_vals.clone(), DType::F64).unwrap();
+        let b3 = UFuncArray::new(vec![3, 4, 5], b3_vals.clone(), DType::F64).unwrap();
+        let got3 = UFuncArray::einsum("ijk,ijk->", &[&a3, &b3]).unwrap();
+        assert_eq!(got3.shape, Vec::<usize>::new());
+        assert_eq!(got3.values[0].to_bits(), dot_bits(&a3_vals, &b3_vals));
     }
 
     #[test]
