@@ -38893,6 +38893,75 @@ fn dot(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, out: Option<Py<PyAny>>) -> Py
     }
 }
 
+// np.einsum('ij->ji', a) and any single-operand PURE PERMUTATION of all (distinct)
+// input labels — 'ijk->kij', 'ab->ba', … — is a transpose: numpy returns a
+// writable VIEW (stride permutation, zero data movement), but our native kernel
+// materialized a full copy (np.einsum('ij->ji') on 1000² was ~4600x numpy AND
+// np.shares_memory disagreed). Return a.transpose(perm) — exactly numpy's view —
+// for the permutation case. Dtype-agnostic (no arithmetic), so this runs before
+// the float/int dtype policy. Repeated labels (diagonal 'ii->i'), dropped labels
+// (reduction 'ij->i'), implicit mode, ellipsis, and out=/dtype= kwargs fall
+// through to the existing paths.
+fn try_einsum_transpose_view(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if args.len() != 2 {
+        return Ok(None);
+    }
+    // Only `optimize` is harmless for a transpose; out=/dtype=/order=/casting= change
+    // the result, so defer those.
+    if let Some(kw) = kwargs {
+        for key in kw.keys() {
+            if key.extract::<String>().map(|k| k != "optimize").unwrap_or(true) {
+                return Ok(None);
+            }
+        }
+    }
+    let Ok(subscripts) = args.get_item(0)?.extract::<String>() else {
+        return Ok(None);
+    };
+    let Some((inp, outp)) = subscripts.split_once("->") else {
+        return Ok(None);
+    };
+    let inb: Vec<char> = inp.trim().chars().collect();
+    let oub: Vec<char> = outp.trim().chars().collect();
+    let distinct = |s: &[char]| {
+        s.iter().collect::<std::collections::HashSet<_>>().len() == s.len()
+    };
+    // Must be a permutation of ALL labels: same length, all alphabetic, both sides
+    // distinct, and same label set.
+    if inb.is_empty()
+        || inb.len() != oub.len()
+        || !inb.iter().all(|c| c.is_ascii_alphabetic())
+        || !oub.iter().all(|c| c.is_ascii_alphabetic())
+        || !distinct(&inb)
+        || !distinct(&oub)
+        || !oub.iter().all(|c| inb.contains(c))
+    {
+        return Ok(None);
+    }
+    let operand = args.get_item(1)?;
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !operand.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let ndim = operand.getattr("ndim")?.extract::<usize>()?;
+    if ndim != inb.len() {
+        return Ok(None);
+    }
+    // perm[k] = axis of `operand` that supplies output axis k.
+    let perm: Vec<usize> = oub
+        .iter()
+        .map(|c| inb.iter().position(|x| x == c).unwrap())
+        .collect();
+    Ok(Some(
+        operand.call_method1("transpose", (perm,))?.unbind(),
+    ))
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn einsum(
@@ -38900,6 +38969,12 @@ fn einsum(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // A single-operand pure label permutation is a transpose — numpy returns a
+    // zero-copy writable view; match that exactly (and skip the materializing
+    // kernel) before anything else.
+    if let Some(view) = try_einsum_transpose_view(py, args, kwargs)? {
+        return Ok(view);
+    }
     // Route the common case (string subscripts, real-float operands, no special
     // kwargs) through our native UFuncArray::einsum — which sends GEMM-shaped
     // contractions through the cache-blocked, register-tiled matmul_accumulate —
