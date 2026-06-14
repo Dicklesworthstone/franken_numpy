@@ -17193,6 +17193,13 @@ fn isnan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f32_predicate(py, x.bind(py), f32::is_nan)? {
         return Ok(out);
     }
+    // Complex: numpy applies the predicate per-component (isnan(z)=isnan(re)|isnan(im)).
+    // extract_numeric_array can't push a complex array through the real-valued Isnan
+    // kernel and raises TypeError, so delegate complex inputs to numpy (the oracle).
+    if numpy_dtype_is_complex(x.bind(py)) {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("isnan")?.call1((x.bind(py),))?.unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "isnan(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isnan))
 }
@@ -17205,6 +17212,12 @@ fn isinf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f32_predicate(py, x.bind(py), f32::is_infinite)? {
         return Ok(out);
     }
+    // Complex: numpy applies the predicate per-component (isinf(z)=isinf(re)|isinf(im)).
+    // The real-valued kernel raises TypeError on complex, so delegate to numpy.
+    if numpy_dtype_is_complex(x.bind(py)) {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("isinf")?.call1((x.bind(py),))?.unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "isinf(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isinf))
 }
@@ -17216,6 +17229,12 @@ fn isfinite(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     }
     if let Some(out) = try_zerocopy_f32_predicate(py, x.bind(py), f32::is_finite)? {
         return Ok(out);
+    }
+    // Complex: numpy ANDs the components (isfinite(z)=isfinite(re)&isfinite(im)).
+    // The real-valued kernel raises TypeError on complex, so delegate to numpy.
+    if numpy_dtype_is_complex(x.bind(py)) {
+        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("isfinite")?.call1((x.bind(py),))?.unbind());
     }
     let x = extract_numeric_array(py, x.bind(py), "isfinite(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isfinite))
@@ -40173,6 +40192,17 @@ fn numpy_dtype_is_f16(value: &Bound<'_, PyAny>) -> bool {
         let kind: String = dtype.getattr("kind")?.extract()?;
         let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
         Ok(kind == "f" && itemsize == 2)
+    };
+    probe().unwrap_or(false)
+}
+
+// True for a complex64/complex128 ndarray (dtype kind 'c'). Any extraction error
+// (non-ndarray, missing dtype) is treated as "not complex".
+fn numpy_dtype_is_complex(value: &Bound<'_, PyAny>) -> bool {
+    let probe = || -> PyResult<bool> {
+        let dtype = value.getattr("dtype")?;
+        let kind: String = dtype.getattr("kind")?.extract()?;
+        Ok(kind == "c")
     };
     probe().unwrap_or(false)
 }
