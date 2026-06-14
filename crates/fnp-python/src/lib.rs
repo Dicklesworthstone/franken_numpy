@@ -23342,6 +23342,25 @@ fn wide_int_table_bounds(
     Ok(Some((lo, hi)))
 }
 
+/// True when both set-op inputs are floating point. The native float path
+/// extract-widens (f16/f32 -> f64), sorts, then casts back — pure overhead on
+/// top of numpy's own native float sort, so it loses 1.7-3.2x with no way to
+/// win (a sort can at best tie). Delegating to numpy is exact parity, including
+/// numpy's NaN/signed-zero set semantics. Checked via dtype.kind so it covers
+/// f16/f32/f64 and mixed float widths (numpy promotes those itself).
+fn setop_inputs_are_float(
+    py: Python<'_>,
+    ar1: &Bound<'_, PyAny>,
+    ar2: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let numpy = py.import("numpy")?;
+    let a = numpy.call_method1("asarray", (ar1,))?;
+    let b = numpy.call_method1("asarray", (ar2,))?;
+    let ak = a.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    let bk = b.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    Ok(ak == "f" && bk == "f")
+}
+
 /// Run a set op via the narrow-int presence bitmap when both inputs are the same
 /// narrow integer dtype (i8/u8/i16/u16). Reads each side's native-width buffer
 /// directly — bypassing the f64-widening extract — then builds the sorted-unique
@@ -23505,6 +23524,9 @@ fn intersect1d(
     {
         return Ok(r);
     }
+    if setop_inputs_are_float(py, ar1.bind(py), ar2.bind(py))? {
+        return fallback();
+    }
     let a = match extract_precise_numeric_array(py, ar1.bind(py), "intersect1d(ar1)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -23545,6 +23567,9 @@ fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>
         try_narrow_int_setop_native(py, ar1.bind(py), ar2.bind(py), NarrowSetOp::Union)?
     {
         return Ok(r);
+    }
+    if setop_inputs_are_float(py, ar1.bind(py), ar2.bind(py))? {
+        return fallback();
     }
     let a = match extract_precise_numeric_array(py, ar1.bind(py), "union1d(ar1)") {
         Ok(array) => array,
@@ -23599,6 +23624,9 @@ fn setdiff1d(
     {
         return Ok(r);
     }
+    if setop_inputs_are_float(py, ar1.bind(py), ar2.bind(py))? {
+        return fallback();
+    }
     let a = match extract_precise_numeric_array(py, ar1.bind(py), "setdiff1d(ar1)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -23651,6 +23679,9 @@ fn setxor1d(
         try_narrow_int_setop_native(py, ar1.bind(py), ar2.bind(py), NarrowSetOp::Setxor)?
     {
         return Ok(r);
+    }
+    if setop_inputs_are_float(py, ar1.bind(py), ar2.bind(py))? {
+        return fallback();
     }
     let a = match extract_precise_numeric_array(py, ar1.bind(py), "setxor1d(ar1)") {
         Ok(array) => array,
@@ -75228,6 +75259,96 @@ mod tests {
                 digest,
                 "acd30f91b7d4d0a28e13171ea131ce4f34cd24693be4b30372fd7329f4e05f0b",
                 "wide-int range bitmap set-op golden sha256 changed",
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn float_setops_delegate_to_numpy_golden_sha256() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array = numpy.getattr("array")?;
+            let ops = ["intersect1d", "union1d", "setdiff1d", "setxor1d"];
+            let cases: &[(&str, &str, &str, &[f64], &[f64])] = &[
+                (
+                    "f64-nan-signed-zero",
+                    "float64",
+                    "float64",
+                    &[1.5, f64::NAN, -0.0, 2.5, 1.5],
+                    &[2.5, f64::NAN, 0.0, 3.5],
+                ),
+                (
+                    "f32-duplicates",
+                    "float32",
+                    "float32",
+                    &[0.25, 0.5, 0.5, 2.0, 4096.0],
+                    &[0.5, 1.0, 2.0, 2.0, 8192.0],
+                ),
+                (
+                    "mixed-float-widths",
+                    "float32",
+                    "float64",
+                    &[-2.0, -0.0, 1.25, 1.25, 3.5],
+                    &[-0.0, 1.25, 4.5],
+                ),
+            ];
+
+            let mut proof_bytes = Vec::new();
+            for &(case, left_dtype, right_dtype, left, right) in cases {
+                let left_arr = array.call(
+                    (left.to_vec(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("dtype", numpy.getattr(left_dtype)?)?;
+                        kw
+                    }),
+                )?;
+                let right_arr = array.call(
+                    (right.to_vec(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("dtype", numpy.getattr(right_dtype)?)?;
+                        kw
+                    }),
+                )?;
+                for op_name in ops {
+                    let ours = module
+                        .getattr(op_name)?
+                        .call1((left_arr.clone(), right_arr.clone()))?;
+                    let theirs = numpy
+                        .getattr(op_name)?
+                        .call1((left_arr.clone(), right_arr.clone()))?;
+                    assert_array_matches_numpy(&ours, &theirs)?;
+                    proof_bytes.extend_from_slice(case.as_bytes());
+                    proof_bytes.push(0);
+                    proof_bytes.extend_from_slice(op_name.as_bytes());
+                    proof_bytes.push(0);
+                    proof_bytes.extend_from_slice(
+                        ours.getattr("dtype")?.str()?.to_string().as_bytes(),
+                    );
+                    proof_bytes.push(0);
+                    proof_bytes.extend_from_slice(
+                        ours.getattr("shape")?.str()?.to_string().as_bytes(),
+                    );
+                    proof_bytes.push(0);
+                    let raw: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+                    proof_bytes.extend_from_slice(&raw);
+                    proof_bytes.push(0xff);
+                }
+            }
+
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest,
+                "FLOAT_SETOPS_GOLDEN_SHA256_PLACEHOLDER",
+                "float set-op numpy passthrough golden sha256 changed",
             );
             Ok(())
         });
