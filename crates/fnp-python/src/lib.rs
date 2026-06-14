@@ -37969,13 +37969,15 @@ fn try_zerocopy_f64_argextreme(
 }
 
 // Per-lane integer argmax/argmin over the contiguous last axis: each lane is L
-// consecutive elements of the typed buffer. A tight scalar scan tracks the
-// running extreme and the FIRST index achieving it (strict compare → first
-// occurrence, numpy's tie-break). Integer order is total, so this is exact. The
-// loop reads the buffer cells directly (no widening to f64, no large temp Vec),
-// replacing the cold extract_precise → reduce_argmax path that was ~50x slower
-// for int64 over an axis.
-fn lastaxis_argextreme_int<T: pyo3::buffer::Element + Copy + PartialOrd>(
+// consecutive elements of the typed buffer. A single scan that tracks the running
+// extreme AND its index can't vectorize (the index carries a loop-dependency), so
+// it was element-bound (~10x behind numpy's SIMD argmax on narrow ints). Instead
+// run TWO vectorizable passes per lane: pass 1 folds the extreme VALUE with a
+// branchless max/min (lowers to pmaxs/pmins); pass 2 finds the FIRST index equal
+// to it (short-circuits — for narrow ints the extreme recurs early so this is
+// nearly free). First-equal == numpy's first-occurrence tie rule, and integer
+// order is total, so the result is identical to the sequential scan.
+fn lastaxis_argextreme_int<T: pyo3::buffer::Element + Copy + PartialOrd + PartialEq>(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     outer: usize,
@@ -37991,14 +37993,25 @@ fn lastaxis_argextreme_int<T: pyo3::buffer::Element + Copy + PartialOrd>(
     for o in 0..outer {
         let base = o * lane;
         let row = &cells[base..base + lane];
-        let mut best_v = row[0].get();
+        // Pass 1: extreme value (branchless fold autovectorizes).
+        let mut ext = row[0].get();
+        if take_max {
+            for c in &row[1..] {
+                let v = c.get();
+                ext = if v > ext { v } else { ext };
+            }
+        } else {
+            for c in &row[1..] {
+                let v = c.get();
+                ext = if v < ext { v } else { ext };
+            }
+        }
+        // Pass 2: first index achieving it (numpy's first-occurrence tie-break).
         let mut best_i = 0usize;
-        for (j, c) in row.iter().enumerate().skip(1) {
-            let v = c.get();
-            let better = if take_max { v > best_v } else { v < best_v };
-            if better {
-                best_v = v;
+        for (j, c) in row.iter().enumerate() {
+            if c.get() == ext {
                 best_i = j;
+                break;
             }
         }
         out.push(best_i as i64);
