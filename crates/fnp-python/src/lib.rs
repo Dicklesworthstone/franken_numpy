@@ -45,7 +45,7 @@ use fnp_ufunc::{
     fmax as ufunc_fmax, fmin as ufunc_fmin, frexp as ufunc_frexp,
     greater as ufunc_greater, greater_equal as ufunc_greater_equal,
     hypot as ufunc_hypot, invert as ufunc_invert, isneginf as ufunc_isneginf,
-    isposinf as ufunc_isposinf, ldexp as ufunc_ldexp, left_shift as ufunc_left_shift,
+    isposinf as ufunc_isposinf, left_shift as ufunc_left_shift,
     less as ufunc_less, less_equal as ufunc_less_equal, logaddexp as ufunc_logaddexp,
     logaddexp2 as ufunc_logaddexp2, logical_and as ufunc_logical_and,
     logical_not as ufunc_logical_not, logical_or as ufunc_logical_or,
@@ -17440,18 +17440,21 @@ fn hypot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn ldexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // Fast path covers the common (float64 mantissa, int32 exponent) case.
     if let Some(out) = try_zerocopy_f64_i32_ldexp(py, x1.bind(py), x2.bind(py))? {
         return Ok(out);
     }
-    let x1 = extract_numeric_array(py, x1.bind(py), "ldexp(x1)")?;
-    let x2 = extract_numeric_array(py, x2.bind(py), "ldexp(x2)")?;
-    if matches!(x2.dtype(), DType::F16 | DType::F32 | DType::F64) {
-        return Err(PyTypeError::new_err(
-            "ufunc 'ldexp' not supported for non-integer exponent dtype",
-        ));
-    }
-    let result = ufunc_ldexp(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array(py, &result)
+    // Everything else the fast path missed went through extract -> ufunc_ldexp,
+    // which (a) canonicalized a float32 mantissa to an f64 Vec and returned
+    // float64 — a dtype-parity BUG (numpy preserves f32 -> f32), and (b) ran
+    // ~7-10x slower than numpy for non-int32 exponents (float64+int64/int8).
+    // numpy.ldexp is the exact oracle (right dtype, fast, same float-exponent
+    // TypeError), so delegate the residual.
+    let numpy = py.import("numpy")?;
+    Ok(numpy
+        .getattr("ldexp")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
 }
 
 #[pyfunction]
