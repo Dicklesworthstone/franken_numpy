@@ -40789,12 +40789,11 @@ where
                     let slab = &input[obase + a_idx * inner..obase + a_idx * inner + inner];
                     for ((m, n), c) in mxv.iter_mut().zip(mnv.iter_mut()).zip(slab.iter()) {
                         let v = c.get();
-                        if v > *m {
-                            *m = v;
-                        }
-                        if v < *n {
-                            *n = v;
-                        }
+                        // Branchless max/min so LLVM lowers to vectorized pmaxs/pmins
+                        // (the `if v > *m { *m = v }` mutation form did NOT vectorize,
+                        // leaving narrow-int ptp element-bound ~19x behind numpy's SIMD).
+                        *m = if v > *m { v } else { *m };
+                        *n = if v < *n { v } else { *n };
                     }
                 }
                 let outl = &output[o * inner..o * inner + inner];
