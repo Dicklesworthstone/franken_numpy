@@ -19036,53 +19036,13 @@ fn roll(
         return Ok(result);
     }
 
-    let array = match extract_precise_numeric_array(py, a.bind(py), "roll(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-
-    // Scalar shift path.
-    if let Ok(shift_scalar) = shift.bind(py).extract::<i64>() {
-        let axis_scalar: Option<isize> = match axis.as_ref() {
-            None => None,
-            Some(value) => {
-                let bound = value.bind(py);
-                if bound.is_none() {
-                    None
-                } else if let Ok(axis_int) = bound.extract::<i64>() {
-                    Some(axis_int as isize)
-                } else {
-                    return fallback();
-                }
-            }
-        };
-        let result = match array.roll(shift_scalar as isize, axis_scalar) {
-            Ok(result) => result,
-            Err(_) => return fallback(),
-        };
-        return build_numpy_array_from_ufunc(py, &result);
-    }
-
-    // Tuple/list shift path — requires explicit axis tuple of matching length.
-    let Ok(shifts) = shift.bind(py).extract::<Vec<i64>>() else {
-        return fallback();
-    };
-    let Some(axis_obj) = axis.as_ref() else {
-        return fallback();
-    };
-    let Ok(axes) = axis_obj.bind(py).extract::<Vec<i64>>() else {
-        return fallback();
-    };
-    if axes.len() != shifts.len() {
-        return fallback();
-    }
-    let shifts_isize: Vec<isize> = shifts.iter().map(|&s| s as isize).collect();
-    let axes_isize: Vec<isize> = axes.iter().map(|&a| a as isize).collect();
-    let result = match array.roll_multi(&shifts_isize, &axes_isize) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // Everything the zero-copy paths above missed — most importantly NON-f64
+    // tuple-axis rolls (roll(M, (5,7), axis=(0,1))) — went through extract_precise
+    // -> UFuncArray::roll(_multi) -> export-bridge rebuild, which was 37-355x slower
+    // than numpy (int8 2-D tuple roll 355x). roll is a pure element relocation
+    // (sequential 1-D rotations) that numpy does at memcpy speed, so delegate the
+    // residual. (The f64 flatten / per-axis / 2-D-tuple fast paths above are kept.)
+    fallback()
 }
 
 #[pyfunction]
