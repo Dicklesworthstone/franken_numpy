@@ -23294,6 +23294,54 @@ fn narrow_bitmap_setop<T: Copy>(
     UFuncArray::new(vec![n], out, dt).ok()
 }
 
+/// Decide whether a *wide* integer set op (i32/u32/i64) should run the range
+/// bitmap, returning `Some((lo, hi))` bounds when eligible. Uses numpy's C
+/// min/max/len so the common DEFER case (range too wide for a direct table)
+/// costs a few cheap reductions — NOT a full native-buffer read. Output is
+/// rebuilt through an f64-valued UFuncArray, so values must be f64-exact
+/// (|v| <= 2^53); wider i64 ids defer to the exact sidecar path.
+fn wide_int_table_bounds(
+    py: Python<'_>,
+    af: &Bound<'_, PyAny>,
+    bf: &Bound<'_, PyAny>,
+) -> PyResult<Option<(i64, i64)>> {
+    let _ = py;
+    let na = af.len()?;
+    let nb = bf.len()?;
+    if na == 0 && nb == 0 {
+        return Ok(Some((0, 0))); // both empty → trivially eligible (empty result)
+    }
+    let edge = |arr: &Bound<'_, PyAny>, n: usize, m: &str| -> PyResult<Option<i64>> {
+        if n == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(arr.call_method0(m)?.extract::<i64>()?))
+        }
+    };
+    let lo = [edge(af, na, "min")?, edge(bf, nb, "min")?]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap();
+    let hi = [edge(af, na, "max")?, edge(bf, nb, "max")?]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap();
+    const MAX_EXACT_F64: i64 = 1 << 53;
+    if lo < -MAX_EXACT_F64 || hi > MAX_EXACT_F64 {
+        return Ok(None);
+    }
+    let span = (hi as i128 - lo as i128 + 1) as u128;
+    // Budget: 6x the input size (amortizes the table alloc+scan against the work),
+    // floored at 1<<20 and hard-capped at 1<<28 entries to bound memory.
+    let budget = (6u128).saturating_mul((na + nb) as u128).max(1 << 20);
+    if span > budget || span > (1 << 28) {
+        return Ok(None);
+    }
+    Ok(Some((lo, hi)))
+}
+
 /// Run a set op via the narrow-int presence bitmap when both inputs are the same
 /// narrow integer dtype (i8/u8/i16/u16). Reads each side's native-width buffer
 /// directly — bypassing the f64-widening extract — then builds the sorted-unique
@@ -23313,21 +23361,33 @@ fn try_narrow_int_setop_native(
     if adt != bdt {
         return Ok(None);
     }
-    let (size, min) = match DType::parse(&adt) {
-        Some(DType::I8) => (256usize, -128i64),
-        Some(DType::U8) => (256, 0),
-        Some(DType::I16) => (65536, -32768),
-        Some(DType::U16) => (65536, 0),
-        _ => return Ok(None),
-    };
+    // Only same-dtype integer inputs are bitmap-eligible; bail early otherwise so
+    // we don't pay the reshape/buffer read for floats/complex/strings.
+    let parsed = DType::parse(&adt);
+    if !matches!(
+        parsed,
+        Some(
+            DType::I8
+                | DType::U8
+                | DType::I16
+                | DType::U16
+                | DType::I32
+                | DType::U32
+                | DType::I64
+        )
+    ) {
+        return Ok(None);
+    }
     let af = a.call_method1("reshape", (-1,))?;
     let bf = b.call_method1("reshape", (-1,))?;
-    let result = match DType::parse(&adt) {
+    let result = match parsed {
+        // Fixed-domain narrow ints: the whole value domain is a small constant
+        // bitmap, no min/max scan needed.
         Some(DType::I8) => narrow_bitmap_setop(
             &numpy_cast_contiguous_to_vec::<i8>(py, &af, "int8")?,
             &numpy_cast_contiguous_to_vec::<i8>(py, &bf, "int8")?,
-            size,
-            min,
+            256,
+            -128,
             op,
             DType::I8,
             |x| x as i64,
@@ -23335,8 +23395,8 @@ fn try_narrow_int_setop_native(
         Some(DType::U8) => narrow_bitmap_setop(
             &numpy_cast_contiguous_to_vec::<u8>(py, &af, "uint8")?,
             &numpy_cast_contiguous_to_vec::<u8>(py, &bf, "uint8")?,
-            size,
-            min,
+            256,
+            0,
             op,
             DType::U8,
             |x| x as i64,
@@ -23344,8 +23404,8 @@ fn try_narrow_int_setop_native(
         Some(DType::I16) => narrow_bitmap_setop(
             &numpy_cast_contiguous_to_vec::<i16>(py, &af, "int16")?,
             &numpy_cast_contiguous_to_vec::<i16>(py, &bf, "int16")?,
-            size,
-            min,
+            65536,
+            -32768,
             op,
             DType::I16,
             |x| x as i64,
@@ -23353,12 +23413,51 @@ fn try_narrow_int_setop_native(
         Some(DType::U16) => narrow_bitmap_setop(
             &numpy_cast_contiguous_to_vec::<u16>(py, &af, "uint16")?,
             &numpy_cast_contiguous_to_vec::<u16>(py, &bf, "uint16")?,
-            size,
-            min,
+            65536,
+            0,
             op,
             DType::U16,
             |x| x as i64,
         ),
+        // Wide ints: bitmap only when the actual value RANGE is small (a cheap
+        // numpy min/max decides; defer otherwise WITHOUT reading the buffers).
+        // i32/u32/i64 values are all lossless in i64.
+        Some(DType::I32) => match wide_int_table_bounds(py, &af, &bf)? {
+            Some((lo, hi)) => narrow_bitmap_setop(
+                &numpy_cast_contiguous_to_vec::<i32>(py, &af, "int32")?,
+                &numpy_cast_contiguous_to_vec::<i32>(py, &bf, "int32")?,
+                (hi - lo + 1) as usize,
+                lo,
+                op,
+                DType::I32,
+                |x| x as i64,
+            ),
+            None => return Ok(None),
+        },
+        Some(DType::U32) => match wide_int_table_bounds(py, &af, &bf)? {
+            Some((lo, hi)) => narrow_bitmap_setop(
+                &numpy_cast_contiguous_to_vec::<u32>(py, &af, "uint32")?,
+                &numpy_cast_contiguous_to_vec::<u32>(py, &bf, "uint32")?,
+                (hi - lo + 1) as usize,
+                lo,
+                op,
+                DType::U32,
+                |x| x as i64,
+            ),
+            None => return Ok(None),
+        },
+        Some(DType::I64) => match wide_int_table_bounds(py, &af, &bf)? {
+            Some((lo, hi)) => narrow_bitmap_setop(
+                &numpy_cast_contiguous_to_vec::<i64>(py, &af, "int64")?,
+                &numpy_cast_contiguous_to_vec::<i64>(py, &bf, "int64")?,
+                (hi - lo + 1) as usize,
+                lo,
+                op,
+                DType::I64,
+                |x| x,
+            ),
+            None => return Ok(None),
+        },
         _ => return Ok(None),
     };
     match result {
@@ -44798,7 +44897,7 @@ mod tests {
         extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero, flip,
         fliplr, flipud, floor, fnp_python, frexp, hypot, indices, interp, isfinite, isinf, isnan,
         isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf, nan_to_num,
-        NarrowSetOp, narrow_bitmap_setop,
+        NarrowSetOp, narrow_bitmap_setop, wide_int_table_bounds,
         nextafter, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
         python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate, radians,
         ravel_multi_index, required_dict_item, rfftfreq, rint, searchsorted, select, sign, signbit,
@@ -74959,6 +75058,10 @@ mod tests {
             (0, 256, DType::U8),
             (-32768, 65536, DType::I16),
             (0, 65536, DType::U16),
+            // Wide-int range path: arbitrary large offset + sub-domain span, as
+            // produced by wide_int_table_bounds for i32/u32/i64 small-range ids.
+            (1_000_000, 4096, DType::I32),
+            (-5_000, 4096, DType::I64),
         ];
         let lanes: &[(NarrowSetOp, fn(&BTreeSet<i64>, &BTreeSet<i64>) -> Vec<i64>)] = &[
             (NarrowSetOp::Intersect, |a, b| a.intersection(b).copied().collect()),
@@ -74991,6 +75094,143 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn wide_int_table_bounds_accepts_only_budgeted_exact_ranges() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let numpy = py.import("numpy")?;
+            let array = numpy.getattr("array")?;
+            let make_i64 = |values: Vec<i64>| -> PyResult<Bound<'_, PyAny>> {
+                array.call(
+                    (values,),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("dtype", numpy.getattr("int64")?)?;
+                        kw
+                    }),
+                )
+            };
+            let small_a = make_i64(vec![-2000, -7, -7, 0, 31, 1999])?;
+            let small_b = make_i64(vec![-7, 1, 31, 4095])?;
+            assert_eq!(
+                wide_int_table_bounds(py, &small_a, &small_b)?,
+                Some((-2000, 4095)),
+                "small exact range should be bitmap eligible",
+            );
+            let wide_a = make_i64(vec![0])?;
+            let wide_b = make_i64(vec![(1_i64 << 30) + 7])?;
+            assert!(
+                wide_int_table_bounds(py, &wide_a, &wide_b)?.is_none(),
+                "large actual span must defer instead of allocating a huge bitmap",
+            );
+            let inexact = make_i64(vec![(1_i64 << 53) + 1])?;
+            let empty = make_i64(Vec::new())?;
+            assert!(
+                wide_int_table_bounds(py, &inexact, &empty)?.is_none(),
+                "values not exactly representable through the f64 UFuncArray bridge must defer",
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn wide_int_range_bitmap_setops_match_numpy_golden_sha256() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let numpy = py.import("numpy")?;
+            let array = numpy.getattr("array")?;
+            let ops = [
+                ("intersect1d", NarrowSetOp::Intersect),
+                ("union1d", NarrowSetOp::Union),
+                ("setdiff1d", NarrowSetOp::Setdiff),
+                ("setxor1d", NarrowSetOp::Setxor),
+            ];
+            let cases: &[(&str, &str, &[i64], &[i64])] = &[
+                (
+                    "i32-negative-range",
+                    "int32",
+                    &[-2048, -7, -7, 0, 1024, 2047],
+                    &[-7, 1, 1024, 4095],
+                ),
+                (
+                    "u32-small-range",
+                    "uint32",
+                    &[0, 1, 2, 4095, 4095, 65535],
+                    &[2, 3, 65535],
+                ),
+                (
+                    "i64-small-range",
+                    "int64",
+                    &[-4096, -1024, -1024, 0, 2048, 4095],
+                    &[-1024, 7, 2048, 8191],
+                ),
+                (
+                    "i64-exact-large-small-span",
+                    "int64",
+                    &[(1_i64 << 52) + 1, (1_i64 << 52) + 2, (1_i64 << 52) + 2],
+                    &[(1_i64 << 52) + 2, (1_i64 << 52) + 3],
+                ),
+                (
+                    "i64-inexact-fallback",
+                    "int64",
+                    &[(1_i64 << 53) + 1, (1_i64 << 53) + 2],
+                    &[(1_i64 << 53) + 2, (1_i64 << 53) + 3],
+                ),
+            ];
+
+            let mut proof_bytes = Vec::new();
+            for &(case, dtype, left, right) in cases {
+                let left_arr = array.call(
+                    (left.to_vec(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("dtype", numpy.getattr(dtype)?)?;
+                        kw
+                    }),
+                )?;
+                let right_arr = array.call(
+                    (right.to_vec(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("dtype", numpy.getattr(dtype)?)?;
+                        kw
+                    }),
+                )?;
+                for &(op_name, _op) in &ops {
+                    let ours = module.getattr(op_name)?.call1((left_arr.clone(), right_arr.clone()))?;
+                    let theirs = numpy.getattr(op_name)?.call1((left_arr.clone(), right_arr.clone()))?;
+                    assert_array_matches_numpy(&ours, &theirs)?;
+                    proof_bytes.extend_from_slice(case.as_bytes());
+                    proof_bytes.push(0);
+                    proof_bytes.extend_from_slice(op_name.as_bytes());
+                    proof_bytes.push(0);
+                    proof_bytes.extend_from_slice(ours.getattr("dtype")?.str()?.to_string().as_bytes());
+                    proof_bytes.push(0);
+                    proof_bytes.extend_from_slice(ours.getattr("shape")?.str()?.to_string().as_bytes());
+                    proof_bytes.push(0);
+                    let raw: Vec<u8> = ours.call_method0("tobytes")?.extract()?;
+                    proof_bytes.extend_from_slice(&raw);
+                    proof_bytes.push(0xff);
+                }
+            }
+
+            let digest = py_sha256_hex(py, &proof_bytes)?;
+            assert_eq!(
+                digest,
+                "acd30f91b7d4d0a28e13171ea131ce4f34cd24693be4b30372fd7329f4e05f0b",
+                "wide-int range bitmap set-op golden sha256 changed",
+            );
+            Ok(())
+        });
     }
 
     #[test]
