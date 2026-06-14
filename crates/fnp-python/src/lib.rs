@@ -2448,6 +2448,7 @@ impl SplitHelperKind {
         }
     }
 
+    #[allow(dead_code)]
     fn rust_sections(
         self,
         array: &UFuncArray,
@@ -4604,6 +4605,7 @@ fn stack_helper_default(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+#[allow(dead_code)]
 fn extract_split_sections(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Option<usize>> {
     let numpy = py.import("numpy")?;
     let array = numpy.call_method1("asarray", (value,))?;
@@ -4669,29 +4671,13 @@ fn split_helper_default(
     kind: SplitHelperKind,
     axis: Option<isize>,
 ) -> PyResult<Py<PyAny>> {
-    let Some(sections) = extract_split_sections(py, indices_or_sections.bind(py))? else {
-        return split_helper_numpy_fallback(py, kind, ary, indices_or_sections, axis);
-    };
-
-    if sections == 0 {
-        return match kind {
-            SplitHelperKind::Flexible => Err(PyValueError::new_err(
-                "number sections must be larger than 0.",
-            )),
-            _ => Err(PyZeroDivisionError::new_err("integer modulo by zero")),
-        };
-    }
-
-    let array = match extract_precise_numeric_array(py, ary.bind(py), kind.context()) {
-        Ok(array) => array,
-        Err(_) => return split_helper_numpy_fallback(py, kind, ary, indices_or_sections, axis),
-    };
-
-    let result = match kind.rust_sections(&array, sections, axis.unwrap_or(0)) {
-        Ok(value) => value,
-        Err(_) => return split_helper_numpy_fallback(py, kind, ary, indices_or_sections, axis),
-    };
-    build_numpy_list_from_ufuncs(py, &result)
+    // np.split / array_split / hsplit / vsplit / dsplit return VIEWS into the input
+    // (O(1), strided slices that SHARE memory with the source). The native path
+    // copied the whole array to a UFuncArray, sliced it into independent COPIES, and
+    // rebuilt each across the export bridge — ~1300-2100x slower AND semantically
+    // wrong (numpy's results share memory with the input; the copies did not).
+    // Delegate to numpy for the exact zero-copy views + error surface.
+    split_helper_numpy_fallback(py, kind, ary, indices_or_sections, axis)
 }
 
 fn extract_axis_spec(
@@ -11993,6 +11979,7 @@ fn build_numpy_scalar_or_array_tuple(py: Python<'_>, arrays: &[UFuncArray]) -> P
         .unbind())
 }
 
+#[allow(dead_code)]
 fn build_numpy_list_from_ufuncs(py: Python<'_>, arrays: &[UFuncArray]) -> PyResult<Py<PyAny>> {
     let arrays = arrays
         .iter()
