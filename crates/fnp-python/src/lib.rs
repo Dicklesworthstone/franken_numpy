@@ -4810,6 +4810,7 @@ fn require_numpy_ndarray(py: Python<'_>, value: &Bound<'_, PyAny>, context: &str
     }
 }
 
+#[allow(dead_code)]
 fn reshape_with_leading_singletons(
     array: UFuncArray,
     target_ndim: usize,
@@ -36033,62 +36034,13 @@ fn put_along_axis(
         return Ok(py.None());
     }
 
-    let original_shape = arr.getattr("shape")?.extract::<Vec<usize>>()?;
-    let mut array = extract_numeric_array(py, arr, "put_along_axis(arr)")?;
-
-    let indices_obj = indices.bind(py);
-    let _ = indices_obj.getattr("ndim")?;
-    let indices = extract_integer_array(py, indices_obj, "put_along_axis(indices)")?;
-    let values = extract_numeric_array(py, values.bind(py), "put_along_axis(values)")?;
-
-    // numpy.put_along_axis raises IndexError (not ValueError) on
-    // out-of-bounds indices. Our ufunc layer returns Msg which
-    // map_ufunc_error flattens to PyValueError — fall back to numpy so
-    // the exception type matches. The fallback re-runs the full op
-    // through numpy including the in-place write, which is a no-op
-    // when numpy also errors.
-    match axis {
-        Some(axis) => {
-            let values = reshape_with_leading_singletons(
-                values,
-                array.shape().len(),
-                "put_along_axis(values)",
-            )?;
-            if array.put_along_axis(&indices, &values, axis).is_err() {
-                return invoke_fallback();
-            }
-        }
-        None => {
-            if indices.shape().len() != 1 {
-                return Err(PyValueError::new_err(
-                    "when axis=None, `indices` must have a single dimension.",
-                ));
-            }
-
-            let values = values.flatten();
-            let mut flattened = array.flatten();
-            if flattened.put_along_axis(&indices, &values, 0).is_err() {
-                return invoke_fallback();
-            }
-
-            let reshaped_shape = original_shape
-                .iter()
-                .map(|&dim| {
-                    isize::try_from(dim).map_err(|_| {
-                        PyValueError::new_err(format!(
-                            "put_along_axis(arr): dimension {dim} exceeds signed pointer range",
-                        ))
-                    })
-                })
-                .collect::<PyResult<Vec<_>>>()?;
-            array = flattened
-                .reshape(&reshaped_shape)
-                .map_err(map_ufunc_error)?;
-        }
-    }
-
-    copy_result_into_numpy_array(py, arr, &array)?;
-    Ok(py.None())
+    // Residual (most importantly SCALAR/broadcast `values` — the common
+    // put_along_axis(arr, idx, 0, axis=0) idiom): the old path extracted the WHOLE
+    // array to a UFuncArray, scattered, and copied it ALL back — 18-576x slower than
+    // numpy even though only the indexed cells change (int8 scatter 576x). numpy
+    // writes only the indexed elements in place and owns the IndexError surface, so
+    // delegate. (The zero-copy in-place same-dtype-array fast path above is kept.)
+    invoke_fallback()
 }
 
 // Generic per-axis gather core for take_along_axis, parameterized by a mover type
