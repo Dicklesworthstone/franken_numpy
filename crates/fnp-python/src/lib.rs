@@ -32531,21 +32531,11 @@ fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<P
             emit_fortran = true;
         }
     }
-    let native = match extract_precise_numeric_array(py, a_bound, "copy(a)") {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    if native.has_integer_sidecar() {
-        return fallback(py);
-    }
-    if !dtype_supported_by_numpy_export_bridge(native.dtype()) {
-        return fallback(py);
-    }
-    if emit_fortran {
-        build_numpy_array_from_ufunc_fortran(py, &native)
-    } else {
-        build_numpy_array_from_ufunc(py, &native)
-    }
+    // np.copy is a pure typed memcpy. The native extract -> UFuncArray -> export-bridge
+    // rebuild was 20-205x slower than numpy (copy(int8 4M) 205x), and never faster.
+    // Delegate (numpy owns the exact order/subok/dtype surface).
+    let _ = emit_fortran;
+    fallback(py)
 }
 
 #[pyfunction]
