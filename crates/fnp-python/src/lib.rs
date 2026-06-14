@@ -19889,6 +19889,32 @@ fn place(py: Python<'_>, arr: Py<PyAny>, mask: Py<PyAny>, vals: Py<PyAny>) -> Py
         return Ok(py.None());
     }
 
+    // Scalar / list / tuple `vals` (e.g. place(a, mask, [0])): the zero-copy paths
+    // require an ndarray, so a scalar/small list fell to the cold extract path
+    // (2-5x slower than numpy). numpy casts vals to arr's dtype and cycles it, so
+    // materialize an arr-dtype array via np.array(vals, dtype=arr.dtype) (the exact
+    // cast incl. OverflowError parity) and re-enter the in-place scatter.
+    {
+        let numpy = py.import("numpy")?;
+        let ndarray_type = numpy.getattr("ndarray")?;
+        if !vals.bind(py).is_exact_instance(&ndarray_type) {
+            let arr_dtype = arr.getattr("dtype")?;
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("dtype", arr_dtype)?;
+            let vals_arr = numpy
+                .call_method("array", (vals.bind(py),), Some(&kwargs))?
+                .call_method1("ravel", ())?;
+            if vals_arr.call_method0("__len__")?.extract::<usize>()? > 0 {
+                if try_zerocopy_f64_place(py, arr, mask.bind(py), &vals_arr)? {
+                    return Ok(py.None());
+                }
+                if try_zerocopy_any_place(py, arr, mask.bind(py), &vals_arr)? {
+                    return Ok(py.None());
+                }
+            }
+        }
+    }
+
     let mut array = extract_numeric_array(py, arr, "place(arr)")?;
     let mask = extract_numeric_array(py, mask.bind(py), "place(mask)")?;
     let values = extract_numeric_array(py, vals.bind(py), "place(vals)")?;
