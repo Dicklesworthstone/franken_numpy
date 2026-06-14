@@ -5368,6 +5368,7 @@ fn extract_python_dtype(
         .ok_or_else(|| PyTypeError::new_err(format!("{context}: unsupported dtype {name}")))
 }
 
+#[allow(dead_code)]
 fn collect_fromiter_values<T, F>(
     source: &Bound<'_, PyAny>,
     scalar_type: &Bound<'_, PyAny>,
@@ -14852,105 +14853,16 @@ fn fromiter(
             .unbind());
     }
 
-    let dtype_obj = numpy.getattr("dtype")?.call1((dtype.bind(py),))?;
-    let dtype_name = dtype_obj.getattr("name")?.extract::<String>()?;
-    let parsed_dtype = DType::parse(&dtype_name).ok_or_else(|| {
-        PyTypeError::new_err(format!("fromiter(dtype): unsupported dtype {dtype_name}"))
-    })?;
-    let scalar_type = dtype_obj.getattr("type")?;
-
-    let storage = match parsed_dtype {
-        DType::Bool => ArrayStorage::Bool(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<bool>(),
-        )?),
-        DType::I8 => ArrayStorage::I8(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<i8>(),
-        )?),
-        DType::I16 => ArrayStorage::I16(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<i16>(),
-        )?),
-        DType::I32 => ArrayStorage::I32(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<i32>(),
-        )?),
-        DType::I64 => ArrayStorage::I64(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<i64>(),
-        )?),
-        DType::U8 => ArrayStorage::U8(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<u8>(),
-        )?),
-        DType::U16 => ArrayStorage::U16(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<u16>(),
-        )?),
-        DType::U32 => ArrayStorage::U32(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<u32>(),
-        )?),
-        DType::U64 => ArrayStorage::U64(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<u64>(),
-        )?),
-        DType::F16 => ArrayStorage::F16(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<f32>().map(f16::from_f32),
-        )?),
-        DType::F32 => ArrayStorage::F32(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<f32>(),
-        )?),
-        DType::F64 => ArrayStorage::F64(collect_fromiter_values(
-            iter.bind(py),
-            &scalar_type,
-            count,
-            |value| value.extract::<f64>(),
-        )?),
-        DType::Complex64
-        | DType::Complex128
-        | DType::Str
-        | DType::Structured
-        | DType::DateTime64
-        | DType::TimeDelta64 => {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("count", count)?;
-            return Ok(numpy
-                .getattr("fromiter")?
-                .call((iter.bind(py), dtype.bind(py)), Some(&kwargs))?
-                .unbind());
-        }
-    };
-
-    // Rust-owned path for builtin scalar numeric dtypes. This preserves
-    // numpy's iterator consumption and short-iterator error surface while
-    // materializing through our native dtype/storage layer.
-    build_numpy_array_from_storage(py, &[storage.len()], storage)
+    // np.fromiter consumes the iterator element-by-element. Our per-element PyO3
+    // extract loop was ~13x slower than numpy's C coercion loop and cannot beat it
+    // (each element is a Python round-trip either way), so delegate. numpy owns the
+    // exact dtype-coercion, count, and short-iterator (ValueError) surface.
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("count", count)?;
+    Ok(numpy
+        .getattr("fromiter")?
+        .call((iter.bind(py), dtype.bind(py)), Some(&kwargs))?
+        .unbind())
 }
 
 #[pyfunction]
