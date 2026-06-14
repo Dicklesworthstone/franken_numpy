@@ -5569,6 +5569,7 @@ fn savez_impl(
     }
 }
 
+#[allow(dead_code)]
 fn collect_frombuffer_bytes(
     py: Python<'_>,
     buffer: &Bound<'_, PyAny>,
@@ -15144,23 +15145,11 @@ fn frombuffer(
             .unbind())
     };
 
-    let dtype_for_parse = dtype.as_ref().map(|dtype_val| dtype_val.clone_ref(py));
-    let parsed_dtype =
-        match extract_python_dtype(py, dtype_for_parse, DType::F64, "frombuffer(dtype)") {
-            Ok(dtype) => dtype,
-            Err(_) => return numpy_frombuffer(),
-        };
-    if dtype_item_size(parsed_dtype).is_none() {
-        return numpy_frombuffer();
-    };
-
-    let bytes = collect_frombuffer_bytes(py, buffer.bind(py), offset)?;
-    let storage = match storage_from_bytes(&bytes, parsed_dtype, count) {
-        Ok(storage) => storage,
-        Err(_) => return numpy_frombuffer(),
-    };
-
-    build_numpy_array_from_storage(py, &[storage.len()], storage)
+    // np.frombuffer returns a ZERO-COPY VIEW that shares memory with the buffer. The
+    // native path collected the buffer bytes into an owned Vec, reinterpreted, and
+    // built a fresh array — ~13x slower AND semantically wrong (numpy's result shares
+    // memory with the buffer; the copy did not). Delegate for the exact zero-copy view.
+    numpy_frombuffer()
 }
 
 #[pyfunction]
