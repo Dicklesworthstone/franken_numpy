@@ -1346,7 +1346,7 @@ const CHOL_PANEL_NB: usize = 128;
 // vectorized, band-parallel trailing-update GEMM. Large-n behaviour is unchanged
 // (it keeps CHOL_PANEL_NB), so the shipped n>=896 path is bit-identical.
 const CHOL_MID_MIN: usize = 128;
-const CHOL_MID_PANEL: usize = 64;
+const CHOL_MID_PANEL: usize = 32;
 
 // Column-block width for the block-triangular SYRK trailing update. A multiple of
 // PACKED_NR so each block stays on the register-tiled GEMM path; >= 128 so the
@@ -13353,6 +13353,45 @@ mod tests {
             assert!(max_recon < 1e-9, "blocked L·L^T=A err {max_recon:e} (n={n})");
             assert!(max_diff < 1e-9, "blocked vs unblocked err {max_diff:e} (n={n})");
         }
+    }
+
+    #[test]
+    fn cholesky_mid_panel_256_output_golden_sha256() {
+        let n = 256usize;
+        assert_eq!(super::CHOL_MID_PANEL, 32);
+        let a = chol_spd(n, 0x5A5A_5A5A);
+        let l = super::cholesky_nxn(&a, n).expect("mid-panel cholesky");
+        let mut max_recon = 0.0f64;
+        for i in 0..n {
+            for j in 0..=i {
+                let mut s = 0.0f64;
+                for k in 0..=j {
+                    s += l[i * n + k] * l[j * n + k];
+                }
+                max_recon =
+                    max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+            }
+        }
+        assert!(
+            max_recon < 1e-9,
+            "mid-panel reconstruction drifted: {max_recon:e}"
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(n.to_le_bytes());
+        hasher.update(super::CHOL_MID_PANEL.to_le_bytes());
+        for value in &l {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "5677abe4016141dfb737c906dc28a8d667526c7e96c5161771033e568c9a0e4e",
+            "mid-panel cholesky golden digest drifted: {digest}"
+        );
     }
 
     #[test]
