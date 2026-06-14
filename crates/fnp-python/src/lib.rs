@@ -4425,6 +4425,7 @@ fn symmetric_matrix_from_selected_triangle(
     UFuncArray::new(vec![n, n], values, DType::F64)
 }
 
+#[allow(dead_code)]
 fn extract_condition_mask(
     py: Python<'_>,
     value: &Bound<'_, PyAny>,
@@ -17839,19 +17840,13 @@ fn compress(
     {
         return Ok(out);
     }
-    let condition = match extract_condition_mask(py, condition.bind(py), "compress(condition)") {
-        Ok(condition) => condition,
-        Err(_) => return fallback(),
-    };
-    let a = match extract_numeric_array(py, a.bind(py), "compress(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let result = match a.compress(&condition, axis) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // Residual — most importantly NON-f64 per-axis compress (the f64-only axis fast
+    // path above misses it): the old path extracted the WHOLE array to a UFuncArray,
+    // selected slabs, and rebuilt across the export bridge. This both WIDENED the
+    // dtype (compress(int8, axis) returned int64 — a dtype-parity BUG; numpy keeps
+    // int8) and ran 73-1124x slower than numpy (int8 axis-0 1124x). numpy selects the
+    // kept slabs in one strided pass and preserves the dtype, so delegate.
+    fallback()
 }
 
 #[pyfunction]
