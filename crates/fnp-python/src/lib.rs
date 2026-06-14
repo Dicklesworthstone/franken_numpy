@@ -24091,41 +24091,13 @@ fn full(
         return fallback(py);
     }
 
-    let target_shape = match parse_shape_override(shape.bind(py), "full(shape)") {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-
-    let fill_bound = fill_value.bind(py);
-    let fill_float = match fill_bound.extract::<f64>() {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-
-    let resolved_dtype = match dtype.as_ref() {
-        Some(dtype_val) if !dtype_val.bind(py).is_none() => {
-            let parsed = numpy.getattr("dtype")?.call1((dtype_val.bind(py),))?;
-            let name = parsed.getattr("name")?.extract::<String>()?;
-            match DType::parse(&name) {
-                Some(value) if dtype_supported_by_numpy_export_bridge(value) => value,
-                _ => return fallback(py),
-            }
-        }
-        _ => {
-            // numpy infers dtype from fill_value: integer → int, float → float64.
-            if fill_bound.extract::<i64>().is_ok() {
-                DType::I64
-            } else {
-                DType::F64
-            }
-        }
-    };
-
-    let result = match UFuncArray::full(target_shape, fill_float, resolved_dtype) {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // np.full is a pure typed MEMSET (np.empty + fill). The old native path built an
+    // f64 UFuncArray then converted it element-wise through the export bridge, which
+    // is catastrophic for non-f64 results: full(4M, int8) was ~1200x slower than
+    // numpy, float32/int32 150-250x, even float64 ~19x. numpy's fill is a C-level
+    // memset that cannot be beaten in safe Rust without unsafe (and it handles the
+    // exact dtype inference / scalar cast / OverflowError surface), so delegate.
+    fallback(py)
 }
 
 fn parse_shape_override(shape: &Bound<'_, PyAny>, context: &str) -> PyResult<Vec<usize>> {
@@ -24286,19 +24258,12 @@ fn full_like(
     let dtype_bound = dtype.as_ref().map(|value| value.bind(py));
     let shape_bound = shape.as_ref().map(|value| value.bind(py));
     let device_bound = device.as_ref().map(|value| value.bind(py));
-    if let Some(native) = native_like_array(
-        py,
-        a_bound,
-        dtype_bound,
-        order,
-        subok,
-        shape_bound,
-        device_bound,
-        &LikeFill::Full(fill_bound),
-        "full_like(shape)",
-    )? {
-        return Ok(native);
-    }
+    // np.full_like is np.empty_like + a typed MEMSET fill. The native_like_array
+    // path built an f64 UFuncArray then converted it element-wise through the export
+    // bridge — catastrophic for non-f64 (full_like(4M, int8) was ~1300x slower than
+    // numpy, float32 ~200x). numpy's fill is an unbeatable C-level memset that also
+    // owns the exact dtype/cast surface, so delegate (zeros_like/ones_like keep the
+    // native path — calloc/memset of 0/1 is already fast there).
     let numpy = py.import("numpy")?;
     let full_like_fn = numpy.getattr("full_like")?;
     let kwargs = PyDict::new(py);
