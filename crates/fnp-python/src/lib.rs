@@ -36237,32 +36237,13 @@ fn take_along_axis(
         return Ok(out);
     }
 
-    let arr = extract_numeric_array(py, arr.bind(py), "take_along_axis(arr)")?;
-    let indices = extract_integer_array(py, indices.bind(py), "take_along_axis(indices)")?;
-
-    // numpy.take_along_axis raises IndexError (not ValueError) on
-    // out-of-bounds indices. Our ufunc layer returns Msg which
-    // map_ufunc_error flattens to PyValueError — fall back to numpy so
-    // the exception type, message, and traceback match verbatim.
-    let result = match axis {
-        Some(axis) => match arr.take_along_axis(&indices, axis) {
-            Ok(result) => result,
-            Err(_) => return fallback(),
-        },
-        None => {
-            if indices.shape().len() != 1 {
-                return Err(PyValueError::new_err(
-                    "take_along_axis: when axis=None, indices must have a single dimension",
-                ));
-            }
-            match arr.flatten().take_along_axis(&indices, 0) {
-                Ok(result) => result,
-                Err(_) => return fallback(),
-            }
-        }
-    };
-
-    build_numpy_array_from_ufunc(py, &result)
+    // Residual (most importantly a BROADCAST index — idx (n,1) / (1,m) that does not
+    // match arr's non-axis dims, e.g. argsort/argmax-style gathers): the old path
+    // extracted the WHOLE array to a UFuncArray, gathered, and rebuilt the result
+    // across the export bridge — 2.5-5.3x slower than numpy. numpy's take_along_axis
+    // is a strided gather that owns the exact broadcast + IndexError surface, so
+    // delegate. (The zero-copy equal-non-axis-dim fast path above is kept.)
+    fallback()
 }
 
 // ---------------------------------------------------------------------------
