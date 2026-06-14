@@ -25000,6 +25000,35 @@ fn native_unary_promoting(
         }
         return Ok(output);
     }
+    // float32 SIMD-transcendentals: numpy's vectorized f32 libm beats our scalar
+    // per-element f32 libm 2-12x (sin/cos/tanh ~10x) — and the scalar path even
+    // diverged from numpy in the last ULP for sin/cos/tanh, so delegating both
+    // speeds them up AND makes them bit-exact. Only f32 inputs and only these
+    // expensive ops route here; f64 keeps its tuned native path, and cheap f32
+    // ops (trunc/abs/square/…) keep the zero-copy path below.
+    if numpy_dtype_is_f32(x)
+        && matches!(
+            op,
+            UnaryOp::Sin
+                | UnaryOp::Cos
+                | UnaryOp::Tan
+                | UnaryOp::Arcsin
+                | UnaryOp::Arccos
+                | UnaryOp::Arctan
+                | UnaryOp::Sinh
+                | UnaryOp::Cosh
+                | UnaryOp::Tanh
+                | UnaryOp::Arcsinh
+                | UnaryOp::Arccosh
+                | UnaryOp::Arctanh
+                | UnaryOp::Cbrt
+                | UnaryOp::Expm1
+                | UnaryOp::Log1p
+                | UnaryOp::Sqrt
+        )
+    {
+        return fallback(py);
+    }
     // float32 input is float-preserving here (only integers promote to f64), so
     // the zero-copy float32 path applies to the ops it supports (e.g. sqrt).
     if let Some((flat, shape)) = zerocopy_f32_unary_flat(py, &numpy, x, op)? {
