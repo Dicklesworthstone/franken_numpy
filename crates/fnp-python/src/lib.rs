@@ -17167,6 +17167,19 @@ fn signbit(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f32_predicate(py, x.bind(py), f32::is_sign_negative)? {
         return Ok(out);
     }
+    // Integer ndarrays: extract_numeric_array canonicalizes to an f64 Vec
+    // element-wise (~49x slower than numpy for int32). np.signbit(int) = (x < 0)
+    // (unsigned -> all False) is the exact oracle, so delegate instead.
+    {
+        let xb = x.bind(py);
+        let numpy = py.import("numpy")?;
+        if xb.is_exact_instance(&numpy.getattr("ndarray")?) {
+            let kind: String = xb.getattr("dtype")?.getattr("kind")?.extract()?;
+            if kind == "i" || kind == "u" {
+                return Ok(numpy.getattr("signbit")?.call1((xb,))?.unbind());
+            }
+        }
+    }
     let x = extract_numeric_array(py, x.bind(py), "signbit(x)")?;
     let result = ufunc_signbit(&x).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
