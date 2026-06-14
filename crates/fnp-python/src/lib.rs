@@ -23242,6 +23242,131 @@ fn fliplr(py: Python<'_>, m: Py<PyAny>) -> PyResult<Py<PyAny>> {
     Ok(build_flip_view(py, &arr, &mask)?.unbind())
 }
 
+/// Which set operation a narrow-int bitmap kernel computes.
+#[derive(Clone, Copy)]
+enum NarrowSetOp {
+    Intersect,
+    Union,
+    Setdiff,
+    Setxor,
+}
+
+/// Presence-bitmap set operation over two native narrow-int slices.
+///
+/// numpy's set ops sort the ~2N concatenated values (O(N log N)); but a narrow
+/// integer's whole value domain fits a tiny fixed bitmap (≤64 KiB), so we mark
+/// presence in one O(N) pass per side and scan the domain in order — the output
+/// is sorted-ascending and unique by construction, matching numpy's contract
+/// with no sort at all. `to_idx` maps each native value to its `[0, size)`
+/// bucket. Reading the inputs at their *native* width (i8/i16, not the f64 the
+/// general extract path widens to) keeps memory traffic identical to numpy's,
+/// so the missing sort is a pure win regardless of memory-bandwidth pressure.
+fn narrow_bitmap_setop<T: Copy>(
+    a: &[T],
+    b: &[T],
+    size: usize,
+    min: i64,
+    op: NarrowSetOp,
+    dt: DType,
+    to_i64: impl Fn(T) -> i64,
+) -> Option<UFuncArray> {
+    let mut pa = vec![false; size];
+    let mut pb = vec![false; size];
+    for &v in a {
+        pa[(to_i64(v) - min) as usize] = true;
+    }
+    for &v in b {
+        pb[(to_i64(v) - min) as usize] = true;
+    }
+    let mut out: Vec<f64> = Vec::new();
+    for idx in 0..size {
+        let take = match op {
+            NarrowSetOp::Intersect => pa[idx] && pb[idx],
+            NarrowSetOp::Union => pa[idx] || pb[idx],
+            NarrowSetOp::Setdiff => pa[idx] && !pb[idx],
+            NarrowSetOp::Setxor => pa[idx] ^ pb[idx],
+        };
+        if take {
+            out.push((idx as i64 + min) as f64);
+        }
+    }
+    let n = out.len();
+    UFuncArray::new(vec![n], out, dt).ok()
+}
+
+/// Run a set op via the narrow-int presence bitmap when both inputs are the same
+/// narrow integer dtype (i8/u8/i16/u16). Reads each side's native-width buffer
+/// directly — bypassing the f64-widening extract — then builds the sorted-unique
+/// result. Returns `Ok(None)` for any other dtype/mismatch so the caller keeps
+/// its existing path. Bit-identical to numpy (pure integer membership).
+fn try_narrow_int_setop_native(
+    py: Python<'_>,
+    ar1: &Bound<'_, PyAny>,
+    ar2: &Bound<'_, PyAny>,
+    op: NarrowSetOp,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let a = numpy.call_method1("asarray", (ar1,))?;
+    let b = numpy.call_method1("asarray", (ar2,))?;
+    let adt = a.getattr("dtype")?.str()?.extract::<String>()?;
+    let bdt = b.getattr("dtype")?.str()?.extract::<String>()?;
+    if adt != bdt {
+        return Ok(None);
+    }
+    let (size, min) = match DType::parse(&adt) {
+        Some(DType::I8) => (256usize, -128i64),
+        Some(DType::U8) => (256, 0),
+        Some(DType::I16) => (65536, -32768),
+        Some(DType::U16) => (65536, 0),
+        _ => return Ok(None),
+    };
+    let af = a.call_method1("reshape", (-1,))?;
+    let bf = b.call_method1("reshape", (-1,))?;
+    let result = match DType::parse(&adt) {
+        Some(DType::I8) => narrow_bitmap_setop(
+            &numpy_cast_contiguous_to_vec::<i8>(py, &af, "int8")?,
+            &numpy_cast_contiguous_to_vec::<i8>(py, &bf, "int8")?,
+            size,
+            min,
+            op,
+            DType::I8,
+            |x| x as i64,
+        ),
+        Some(DType::U8) => narrow_bitmap_setop(
+            &numpy_cast_contiguous_to_vec::<u8>(py, &af, "uint8")?,
+            &numpy_cast_contiguous_to_vec::<u8>(py, &bf, "uint8")?,
+            size,
+            min,
+            op,
+            DType::U8,
+            |x| x as i64,
+        ),
+        Some(DType::I16) => narrow_bitmap_setop(
+            &numpy_cast_contiguous_to_vec::<i16>(py, &af, "int16")?,
+            &numpy_cast_contiguous_to_vec::<i16>(py, &bf, "int16")?,
+            size,
+            min,
+            op,
+            DType::I16,
+            |x| x as i64,
+        ),
+        Some(DType::U16) => narrow_bitmap_setop(
+            &numpy_cast_contiguous_to_vec::<u16>(py, &af, "uint16")?,
+            &numpy_cast_contiguous_to_vec::<u16>(py, &bf, "uint16")?,
+            size,
+            min,
+            op,
+            DType::U16,
+            |x| x as i64,
+        ),
+        _ => return Ok(None),
+    };
+    match result {
+        Some(arr) => Ok(Some(build_numpy_array_from_ufunc(py, &arr)?)),
+        None => Ok(None),
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (ar1, ar2, assume_unique=false, return_indices=false))]
 fn intersect1d(
@@ -23275,6 +23400,11 @@ fn intersect1d(
     };
     if assume_unique || return_indices {
         return fallback();
+    }
+    if let Some(r) =
+        try_narrow_int_setop_native(py, ar1.bind(py), ar2.bind(py), NarrowSetOp::Intersect)?
+    {
+        return Ok(r);
     }
     let a = match extract_precise_numeric_array(py, ar1.bind(py), "intersect1d(ar1)") {
         Ok(array) => array,
@@ -23312,6 +23442,11 @@ fn union1d(py: Python<'_>, ar1: Py<PyAny>, ar2: Py<PyAny>) -> PyResult<Py<PyAny>
             .call1((ar1_for_fallback.bind(py), ar2_for_fallback.bind(py)))?
             .unbind())
     };
+    if let Some(r) =
+        try_narrow_int_setop_native(py, ar1.bind(py), ar2.bind(py), NarrowSetOp::Union)?
+    {
+        return Ok(r);
+    }
     let a = match extract_precise_numeric_array(py, ar1.bind(py), "union1d(ar1)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -23360,6 +23495,11 @@ fn setdiff1d(
     if assume_unique {
         return fallback();
     }
+    if let Some(r) =
+        try_narrow_int_setop_native(py, ar1.bind(py), ar2.bind(py), NarrowSetOp::Setdiff)?
+    {
+        return Ok(r);
+    }
     let a = match extract_precise_numeric_array(py, ar1.bind(py), "setdiff1d(ar1)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -23407,6 +23547,11 @@ fn setxor1d(
     };
     if assume_unique {
         return fallback();
+    }
+    if let Some(r) =
+        try_narrow_int_setop_native(py, ar1.bind(py), ar2.bind(py), NarrowSetOp::Setxor)?
+    {
+        return Ok(r);
     }
     let a = match extract_precise_numeric_array(py, ar1.bind(py), "setxor1d(ar1)") {
         Ok(array) => array,
@@ -44653,6 +44798,7 @@ mod tests {
         extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero, flip,
         fliplr, flipud, floor, fnp_python, frexp, hypot, indices, interp, isfinite, isinf, isnan,
         isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf, nan_to_num,
+        NarrowSetOp, narrow_bitmap_setop,
         nextafter, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
         python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate, radians,
         ravel_multi_index, required_dict_item, rfftfreq, rint, searchsorted, select, sign, signbit,
@@ -74800,6 +74946,51 @@ mod tests {
 
             Ok(())
         });
+    }
+
+    #[test]
+    fn narrow_bitmap_setop_matches_reference_across_ops_and_edges() {
+        // Pure-kernel proof: narrow_bitmap_setop must equal a sorted-unique
+        // BTreeSet reference for every op, including negatives, empties,
+        // duplicates and full-domain inputs. Load-independent (no Python).
+        use std::collections::BTreeSet;
+        let dims: &[(i64, i64, DType)] = &[
+            (-128, 256, DType::I8),
+            (0, 256, DType::U8),
+            (-32768, 65536, DType::I16),
+            (0, 65536, DType::U16),
+        ];
+        let lanes: &[(NarrowSetOp, fn(&BTreeSet<i64>, &BTreeSet<i64>) -> Vec<i64>)] = &[
+            (NarrowSetOp::Intersect, |a, b| a.intersection(b).copied().collect()),
+            (NarrowSetOp::Union, |a, b| a.union(b).copied().collect()),
+            (NarrowSetOp::Setdiff, |a, b| a.difference(b).copied().collect()),
+            (NarrowSetOp::Setxor, |a, b| a.symmetric_difference(b).copied().collect()),
+        ];
+        for &(min, size, dt) in dims {
+            let hi = min + size as i64;
+            // Deterministic pseudo-random sample plus the domain extremes.
+            let mut a_vals: Vec<i64> = (0..2000).map(|i| min + (i * 37 % size as i64)).collect();
+            a_vals.extend([min, hi - 1, min, hi - 1]); // duplicates + extremes
+            let b_vals: Vec<i64> = (0..2000).map(|i| min + (i * 53 % size as i64)).collect();
+            let empty: Vec<i64> = Vec::new();
+            for (left, right) in [
+                (&a_vals, &b_vals),
+                (&a_vals, &empty),
+                (&empty, &b_vals),
+                (&empty, &empty),
+            ] {
+                let sa: BTreeSet<i64> = left.iter().copied().collect();
+                let sb: BTreeSet<i64> = right.iter().copied().collect();
+                for &(op, reference) in lanes {
+                    let got = narrow_bitmap_setop(left, right, size as usize, min, op, dt, |x| x)
+                        .expect("kernel builds");
+                    let want = reference(&sa, &sb);
+                    let got_i: Vec<i64> = got.values().iter().map(|&v| v as i64).collect();
+                    assert_eq!(got_i, want, "dt={dt:?} min={min}");
+                    assert_eq!(got.dtype(), dt);
+                }
+            }
+        }
     }
 
     #[test]
