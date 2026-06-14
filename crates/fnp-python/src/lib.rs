@@ -37646,6 +37646,12 @@ fn cumsum(
         }
     };
 
+    // float16 accumulates STEPWISE in float16 in numpy (each partial sum rounded to
+    // f16); our extract path accumulates in f64 then casts once, diverging by ~1 ULP.
+    // Delegate f16 to numpy for exact parity.
+    if numpy_dtype_is_f16(a.bind(py)) {
+        return fallback();
+    }
     // Zero-copy flatten cumsum for C-contiguous f64 ndarrays (axis=None any ndim,
     // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical
     // (strictly sequential accumulation); per-axis multi-dim cumsums fall through.
@@ -37755,6 +37761,12 @@ fn cumprod(
         }
     };
 
+    // float16 accumulates STEPWISE in float16 in numpy (each partial product rounded
+    // to f16); our extract path accumulates in f64 then casts once, diverging by
+    // ~1 ULP. Delegate f16 to numpy for exact parity.
+    if numpy_dtype_is_f16(a.bind(py)) {
+        return fallback();
+    }
     // Zero-copy flatten cumprod for C-contiguous f64 ndarrays (axis=None any ndim,
     // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical
     // (strictly sequential accumulation); per-axis multi-dim cumprods fall through.
@@ -38943,6 +38955,32 @@ fn parse_single_operand_diagonal_einsum(subscripts: &str) -> Option<EinsumSingle
     }
 }
 
+fn try_zerocopy_f64_einsum_trace_contiguous(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    operand: &Bound<'_, PyAny>,
+    n: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(expected_len) = n.checked_mul(n) else {
+        return Ok(None);
+    };
+    let Ok(buffer) = PyBuffer::<f64>::get(operand) else {
+        return Ok(None);
+    };
+    let Some(input) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if input.len() != expected_len {
+        return Ok(None);
+    }
+    let stride = n + 1;
+    let mut total = 0.0f64;
+    for i in 0..n {
+        total += input[i * stride].get();
+    }
+    Ok(Some(numpy.getattr("float64")?.call1((total,))?.unbind()))
+}
+
 fn try_zerocopy_f64_einsum_single_diagonal(
     py: Python<'_>,
     subscripts: &str,
@@ -38965,11 +39003,11 @@ fn try_zerocopy_f64_einsum_single_diagonal(
     if shape.len() != 2 || shape[0] != shape[1] {
         return Ok(None);
     }
-    let Ok(diag_view) = operand.call_method0("diagonal") else {
-        return Ok(None);
-    };
     match kind {
         EinsumSingleDiagonalKind::Diagonal => {
+            let Ok(diag_view) = operand.call_method0("diagonal") else {
+                return Ok(None);
+            };
             let writeable = operand
                 .getattr("flags")?
                 .getattr("writeable")?
@@ -38982,6 +39020,14 @@ fn try_zerocopy_f64_einsum_single_diagonal(
             Ok(Some(diag_view.unbind()))
         }
         EinsumSingleDiagonalKind::Trace => {
+            if let Some(result) =
+                try_zerocopy_f64_einsum_trace_contiguous(py, &numpy, operand, shape[0])?
+            {
+                return Ok(Some(result));
+            }
+            let Ok(diag_view) = operand.call_method0("diagonal") else {
+                return Ok(None);
+            };
             let diag_array = match extract_precise_numeric_array(py, &diag_view, "einsum(diagonal)")
             {
                 Ok(array) => array,
@@ -40117,6 +40163,16 @@ fn numpy_dtype_is_f32(value: &Bound<'_, PyAny>) -> bool {
         let kind: String = dtype.getattr("kind")?.extract()?;
         let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
         Ok(kind == "f" && itemsize == 4)
+    };
+    probe().unwrap_or(false)
+}
+
+fn numpy_dtype_is_f16(value: &Bound<'_, PyAny>) -> bool {
+    let probe = || -> PyResult<bool> {
+        let dtype = value.getattr("dtype")?;
+        let kind: String = dtype.getattr("kind")?.extract()?;
+        let itemsize: usize = dtype.getattr("itemsize")?.extract()?;
+        Ok(kind == "f" && itemsize == 2)
     };
     probe().unwrap_or(false)
 }
