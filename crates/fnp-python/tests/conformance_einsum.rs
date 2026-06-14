@@ -118,6 +118,39 @@ print(h.hexdigest())
 }
 
 #[test]
+fn einsum_f64_trace_edge_bits_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def bits(value):
+    return int(np.asarray(value, dtype=np.float64).view(np.uint64))
+
+cases = [
+    np.array([[-0.0]], dtype=np.float64),
+    np.array([[np.nan]], dtype=np.float64),
+    np.array([[np.inf]], dtype=np.float64),
+    np.array([[-np.inf]], dtype=np.float64),
+    np.arange(9, dtype=np.float64).reshape(3, 3).T,
+]
+ok = True
+for a in cases:
+    ours = fnp.einsum('ii', a)
+    expected = np.einsum('ii', a)
+    ok = ok and type(ours).__name__ == type(expected).__name__
+    ok = ok and bits(ours) == bits(expected)
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum f64 trace edge bits should match numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn einsum_sum_all() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -154,8 +187,7 @@ print(np.array_equal(result, expected) and np.array_equal(result, np.sum(a, axis
 }
 
 #[test]
-fn einsum_single_operand_reductions_preserve_numpy_dtype_and_golden_sha256() -> Result<(), String>
-{
+fn einsum_single_operand_reductions_preserve_numpy_dtype_and_golden_sha256() -> Result<(), String> {
     let script = fnp_script(
         r#"
 import hashlib
@@ -633,6 +665,10 @@ print(ok)
         .into(),
     );
     let result = numpy_oracle(&script)?;
-    assert_eq!(result.trim(), "True", "einsum must preserve operand dtype like numpy");
+    assert_eq!(
+        result.trim(),
+        "True",
+        "einsum must preserve operand dtype like numpy"
+    );
     Ok(())
 }
