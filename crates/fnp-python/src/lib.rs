@@ -24686,22 +24686,11 @@ fn ascontiguousarray(
         return Ok(source_array.unbind());
     }
 
-    // Otherwise: materialize a fresh C-contiguous copy via the native
-    // export bridge.
-    let native = match extract_precise_numeric_array(py, a_bound, "ascontiguousarray(a)") {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    if native.has_integer_sidecar() {
-        return fallback(py);
-    }
-    if native.dtype() != target_dtype {
-        // dtype_requested is different from source dtype → let numpy
-        // handle the astype-with-possible-narrowing so error surfaces
-        // and NaN→int conversion semantics match exactly.
-        return fallback(py);
-    }
-    build_numpy_array_from_ufunc(py, &native)
+    // Otherwise a fresh C-contiguous copy is needed. The native extract ->
+    // UFuncArray -> export-bridge rebuild was 8-17x slower than numpy's typed
+    // memcpy (e.g. ascontiguousarray(M.T) on a 2000x2000 array); delegate the copy.
+    let _ = target_dtype;
+    fallback(py)
 }
 
 #[pyfunction]
@@ -31129,20 +31118,11 @@ fn asfortranarray(py: Python<'_>, a: Py<PyAny>, dtype: Option<Py<PyAny>>) -> PyR
         }
     }
 
-    // Materialize a fresh F-contig copy via the new export bridge.
-    let native = match extract_precise_numeric_array(py, a_bound, "asfortranarray(a)") {
-        Ok(value) => value,
-        Err(_) => return fallback(py),
-    };
-    if native.has_integer_sidecar() {
-        return fallback(py);
-    }
-    if native.dtype() != target_dtype {
-        // dtype coercion path: let numpy handle astype edge cases
-        // (narrowing, NaN→int, etc.).
-        return fallback(py);
-    }
-    build_numpy_array_from_ufunc_fortran(py, &native)
+    // A fresh F-contig copy is needed. The native extract -> UFuncArray ->
+    // export-bridge rebuild was ~10-17x slower than numpy's typed memcpy; delegate
+    // the copy (the F-contig identity fast path above is kept).
+    let _ = target_dtype;
+    fallback(py)
 }
 
 #[pyfunction]
