@@ -1231,52 +1231,61 @@ fn bench_statistics_boundary(c: &mut Criterion) {
         let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
         fnp_python(&module).expect("initialize fnp_python bench module");
         let numpy = py.import("numpy").expect("numpy oracle");
-        let rows = 200_usize;
-        let cols = 500_usize;
-        let total = rows * cols;
-        let input = numpy
-            .call_method1("linspace", (-2.0_f64, 3.0_f64, total))
-            .expect("cov f64 input")
-            .call_method1("reshape", ((rows, cols),))
-            .expect("2-D cov input");
         let fnp_cov = module.getattr("cov").expect("fnp_python.cov");
         let numpy_cov = numpy.getattr("cov").expect("numpy.cov");
         let fnp_corrcoef = module.getattr("corrcoef").expect("fnp_python.corrcoef");
         let numpy_corrcoef = numpy.getattr("corrcoef").expect("numpy.corrcoef");
 
-        group.bench_function("fnp_cov_rowvar_f64_200x500", |bench| {
-            bench.iter(|| {
-                let result = fnp_cov.call1((&input,)).expect("fnp cov benchmark call");
-                black_box(result);
-            });
-        });
+        let make_input = |rows: usize, cols: usize| {
+            let total = rows * cols;
+            numpy
+                .call_method1("linspace", (-2.0_f64, 3.0_f64, total))
+                .expect("cov f64 input")
+                .call_method1("reshape", ((rows, cols),))
+                .expect("2-D cov input")
+        };
+        let inputs = [
+            ("50x1000", make_input(50, 1000)),
+            ("200x500", make_input(200, 500)),
+            ("500x500", make_input(500, 500)),
+            ("50x10000", make_input(50, 10_000)),
+        ];
 
-        group.bench_function("numpy_cov_rowvar_f64_200x500", |bench| {
-            bench.iter(|| {
-                let result = numpy_cov
-                    .call1((&input,))
-                    .expect("numpy cov benchmark call");
-                black_box(result);
+        for (shape, input) in inputs {
+            group.bench_function(format!("fnp_cov_rowvar_f64_{shape}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_cov.call1((&input,)).expect("fnp cov benchmark call");
+                    black_box(result);
+                });
             });
-        });
 
-        group.bench_function("fnp_corrcoef_rowvar_f64_200x500", |bench| {
-            bench.iter(|| {
-                let result = fnp_corrcoef
-                    .call1((&input,))
-                    .expect("fnp corrcoef benchmark call");
-                black_box(result);
+            group.bench_function(format!("numpy_cov_rowvar_f64_{shape}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_cov
+                        .call1((&input,))
+                        .expect("numpy cov benchmark call");
+                    black_box(result);
+                });
             });
-        });
 
-        group.bench_function("numpy_corrcoef_rowvar_f64_200x500", |bench| {
-            bench.iter(|| {
-                let result = numpy_corrcoef
-                    .call1((&input,))
-                    .expect("numpy corrcoef benchmark call");
-                black_box(result);
+            group.bench_function(format!("fnp_corrcoef_rowvar_f64_{shape}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_corrcoef
+                        .call1((&input,))
+                        .expect("fnp corrcoef benchmark call");
+                    black_box(result);
+                });
             });
-        });
+
+            group.bench_function(format!("numpy_corrcoef_rowvar_f64_{shape}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_corrcoef
+                        .call1((&input,))
+                        .expect("numpy corrcoef benchmark call");
+                    black_box(result);
+                });
+            });
+        }
     });
 
     group.finish();
