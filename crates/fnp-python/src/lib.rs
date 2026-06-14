@@ -20139,9 +20139,18 @@ fn tri(
     k: i64,
     dtype: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let dtype = extract_python_dtype(py, dtype, DType::F64, "tri(dtype)")?;
-    let result = UFuncArray::tri(n, m, k, dtype).map_err(map_ufunc_error)?;
-    build_numpy_array_from_ufunc(py, &result)
+    // numpy.tri creates the boolean/typed lower-triangle directly; the native
+    // UFuncArray build-then-convert path was 18-178x slower (int8 178x). Delegate.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("k", k)?;
+    if let Some(mm) = m {
+        kwargs.set_item("M", mm)?;
+    }
+    if let Some(dtype_val) = dtype.as_ref() {
+        kwargs.set_item("dtype", dtype_val.bind(py))?;
+    }
+    Ok(numpy.getattr("tri")?.call((n,), Some(&kwargs))?.unbind())
 }
 
 #[pyfunction]
@@ -32370,11 +32379,9 @@ fn eye(
         return build_f64_eye(py, nn, mm, k);
     }
 
-    let result = match UFuncArray::eye(n as usize, m.map(|value| value as usize), k, dtype) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // Non-f64 eye: numpy creates the typed identity directly; the native UFuncArray
+    // build-then-export-bridge-convert was 200-700x slower (int8 701x). Delegate.
+    fallback()
 }
 
 #[pyfunction]
@@ -32417,11 +32424,11 @@ fn identity(py: Python<'_>, n: i64, dtype: Option<Py<PyAny>>) -> PyResult<Py<PyA
         return fallback();
     }
 
-    let result = match UFuncArray::identity(n as usize, dtype) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // numpy.identity (np.eye) is a fast direct-dtype creation; the native
+    // UFuncArray build-then-export-bridge-convert was 22-991x slower (int8 991x).
+    // Delegate.
+    let _ = dtype;
+    fallback()
 }
 
 #[pyfunction]
