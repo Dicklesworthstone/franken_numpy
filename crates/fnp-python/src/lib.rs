@@ -44,7 +44,7 @@ use fnp_ufunc::{
     divmod_arrays as ufunc_divmod, equal as ufunc_equal, fmax as ufunc_fmax,
     fmin as ufunc_fmin, frexp as ufunc_frexp,
     greater as ufunc_greater, greater_equal as ufunc_greater_equal,
-    hypot as ufunc_hypot, invert as ufunc_invert, isneginf as ufunc_isneginf,
+    hypot as ufunc_hypot, isneginf as ufunc_isneginf,
     isposinf as ufunc_isposinf, left_shift as ufunc_left_shift,
     less as ufunc_less, less_equal as ufunc_less_equal, logaddexp as ufunc_logaddexp,
     logaddexp2 as ufunc_logaddexp2, logical_and as ufunc_logical_and,
@@ -25982,6 +25982,48 @@ fn native_binary_right_shift_or_passthrough(
 // reuses the bool logical_not byte path. Both bit-identical to ufunc_invert.
 // Without this, int64/bool input paid the cold extract Vec + rebuild (~214x
 // slower than numpy). Returns None for other dtypes / layouts / non-ndarray.
+// Generic zero-copy bitwise-NOT for one integer width, PRESERVING the input
+// dtype. `!v` is the two's-complement complement for signed and the exact bit
+// complement for unsigned, matching numpy.invert bit-for-bit at every width.
+fn invert_typed<'py, T>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    x: &Bound<'py, PyAny>,
+    dtype_name: &str,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + std::ops::Not<Output = T>,
+{
+    let Ok(in_buffer) = PyBuffer::<T>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (o, c) in output.iter().zip(input) {
+            o.set(!c.get());
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    if shape.is_empty() {
+        return Ok(Some(output.bind(py).get_item(())?.unbind()));
+    }
+    Ok(Some(output))
+}
+
 fn try_zerocopy_invert(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
@@ -25994,35 +26036,25 @@ fn try_zerocopy_invert(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<
         // ~bool == logical_not(bool): nonzero->False, zero->True.
         return try_zerocopy_bool_logical_not(py, x);
     }
-    if kind != "i" || dtype.getattr("itemsize")?.extract::<usize>()? != 8 {
+    if kind != "i" && kind != "u" {
         return Ok(None);
     }
-    let Ok(in_buffer) = PyBuffer::<i64>::get(x) else {
-        return Ok(None);
-    };
-    let Some(input) = in_buffer.as_slice(py) else {
-        return Ok(None);
-    };
-    let shape: Vec<usize> = in_buffer.shape().to_vec();
-    let n = input.len();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "int64")?;
-    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
-    if n > 0 {
-        let Ok(out_buffer) = PyBuffer::<i64>::get(&flat) else {
-            return Ok(None);
-        };
-        let Some(output) = out_buffer.as_mut_slice(py) else {
-            return Ok(None);
-        };
-        unary_map_i64(input, output, |v| !v);
+    // Every integer width, dtype-PRESERVING. The old path only handled int64 and
+    // sent every narrow / unsigned dtype to the extract -> ufunc_invert fallback,
+    // which widened int8/16/32 to int64 (a dtype-parity bug) and raised ValueError
+    // for all unsigned types (a crash). numpy.invert keeps the input dtype.
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    match (kind.as_str(), itemsize) {
+        ("i", 1) => invert_typed::<i8>(py, &numpy, x, "int8"),
+        ("i", 2) => invert_typed::<i16>(py, &numpy, x, "int16"),
+        ("i", 4) => invert_typed::<i32>(py, &numpy, x, "int32"),
+        ("i", 8) => invert_typed::<i64>(py, &numpy, x, "int64"),
+        ("u", 1) => invert_typed::<u8>(py, &numpy, x, "uint8"),
+        ("u", 2) => invert_typed::<u16>(py, &numpy, x, "uint16"),
+        ("u", 4) => invert_typed::<u32>(py, &numpy, x, "uint32"),
+        ("u", 8) => invert_typed::<u64>(py, &numpy, x, "uint64"),
+        _ => Ok(None),
     }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
-    if shape.is_empty() {
-        return Ok(Some(output.bind(py).get_item(())?.unbind()));
-    }
-    Ok(Some(output))
 }
 
 fn native_unary_invert_or_passthrough(
@@ -26035,9 +26067,10 @@ fn native_unary_invert_or_passthrough(
         if let Some(out) = try_zerocopy_invert(py, &arg)? {
             return Ok(out);
         }
-        let x = extract_numeric_array(py, &arg, "invert(x)")?;
-        let result = ufunc_invert(&x).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
+        // Residual (numpy scalars, python lists, exotic dtypes): the old
+        // extract -> ufunc_invert path widened narrow ints to int64 and crashed on
+        // unsigned scalars. numpy.invert is the exact oracle, so delegate.
+        core_numpy_passthrough(py, "invert", args, kwargs)
     } else {
         core_numpy_passthrough(py, "invert", args, kwargs)
     }
