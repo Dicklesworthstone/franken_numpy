@@ -23961,12 +23961,10 @@ fn linspace(
             let parsed = numpy.getattr("dtype")?.call1((dtype_val.bind(py),))?;
             let name = parsed.getattr("name")?.extract::<String>()?;
             match DType::parse(&name) {
-                Some(value)
-                    if dtype_supported_by_numpy_export_bridge(value)
-                        && matches!(value, DType::F16 | DType::F32 | DType::F64) =>
-                {
-                    value
-                }
+                // Only float64 stays native. float32/float16 used to run the f64
+                // build then convert across the export bridge (~13x slower than
+                // numpy's typed linspace); delegate them to numpy (the exact oracle).
+                Some(DType::F64) => DType::F64,
                 _ => return fallback(py),
             }
         }
@@ -23974,6 +23972,14 @@ fn linspace(
     };
 
     let num_usize = num as usize;
+    // The native f64 build is bit-identical to numpy but ~7-11x slower at scale: it
+    // fills an owned Vec then copies it across the export bridge, vs numpy's direct
+    // SIMD fill into the output buffer. Delegate large arrays (bit-exact); keep the
+    // native path for small n where numpy's per-call dispatch overhead loses
+    // (n=1000 is ~2.7x faster native).
+    if num_usize >= (1 << 16) {
+        return fallback(py);
+    }
     if retstep {
         let (array, step) = match UFuncArray::linspace_retstep(
             start_f,
