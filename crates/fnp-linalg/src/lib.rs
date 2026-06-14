@@ -5237,18 +5237,36 @@ pub fn matrix_power_nxn(a: &[f64], n: usize, p: i64) -> Result<Vec<f64>, LinAlgE
 
     let base = if p < 0 { inv_nxn(a, n)? } else { a.to_vec() };
 
-    let can_elide_initial_identity_gemm =
-        p > 0 && (p as u64) & 1 == 1 && base.iter().all(|&v| v.is_finite() && v != 0.0);
-    if can_elide_initial_identity_gemm {
-        let mut exp = (p as u64) >> 1;
+    // The square-and-multiply ladder seeds `result = I` and folds in `result @ cur`
+    // at each set bit. The FIRST such fold is `I @ cur`, which equals `cur` exactly
+    // when `cur` is finite (1.0*x + Σ 0.0*y = x, bit-for-bit) — so we can skip that
+    // GEMM and clone `cur` instead. The old code only elided it for ODD powers (the
+    // lowest bit set), leaving a wasted `I @ cur` GEMM on every EVEN power — e.g.
+    // A² ran two GEMMs (A@A then I@A²) when one suffices. Tracking whether `result`
+    // is still the identity elides that first GEMM for ANY power. Gated on
+    // finite-nonzero entries: `0.0*∞`/`0.0*NaN` make `I @ cur` differ from `cur`, so
+    // a base with a zero or non-finite entry keeps the explicit identity seed to
+    // preserve numpy's NaN/Inf propagation. The odd-power GEMM schedule is unchanged
+    // (golden-pinned), so this is bit-identical there and on the elided even powers.
+    let elide_identity = p > 0 && base.iter().all(|&v| v.is_finite() && v != 0.0);
+    if elide_identity {
+        let mut exp = p.unsigned_abs();
         let mut cur = base;
-        let mut result = cur.clone();
+        let mut result: Vec<f64> = Vec::new();
+        let mut result_is_identity = true;
         while exp > 0 {
-            cur = mat_mul_flat(&cur, &cur, n);
             if exp & 1 == 1 {
-                result = mat_mul_flat(&result, &cur, n);
+                if result_is_identity {
+                    result = cur.clone();
+                    result_is_identity = false;
+                } else {
+                    result = mat_mul_flat(&result, &cur, n);
+                }
             }
             exp >>= 1;
+            if exp > 0 {
+                cur = mat_mul_flat(&cur, &cur, n);
+            }
         }
         return Ok(result);
     }
