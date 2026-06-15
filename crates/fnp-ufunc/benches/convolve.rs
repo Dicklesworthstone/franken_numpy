@@ -76,6 +76,17 @@ fn bench(c: &mut Criterion) {
         g.bench_function("new_floor64", |b| b.iter(|| black_box(scatter(black_box(&a), black_box(&k), false))));
         g.finish();
     }
+
+    let n = 1_000_000usize;
+    let m = 8usize;
+    let a = UFuncArray::new(vec![n], mk(n, 11), DType::F64).unwrap();
+    let k = UFuncArray::new(vec![m], mk(m, 13), DType::F64).unwrap();
+    let mut g = c.benchmark_group("convprod_short_tail_1000000x8");
+    g.sample_size(10);
+    g.bench_function("prod_convolve", |b| {
+        b.iter(|| black_box(a.convolve_mode(black_box(&k), "full").unwrap()));
+    });
+    g.finish();
 }
 criterion_group!(benches, bench);
 criterion_main!(benches);

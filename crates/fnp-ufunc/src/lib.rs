@@ -19937,6 +19937,7 @@ impl UFuncArray {
         const CONVOLVE_FFT_MIN_MINDIM: usize = 64;
         const CONVOLVE_FFT_COST_FACTOR: usize = 400;
         const CONVOLVE_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+        const CONVOLVE_GATHER_PAR_MIN_FULL_LEN: usize = 1 << 19;
         let fft_len_pow2 = full_len.next_power_of_two();
         let fft_work = fft_len_pow2.saturating_mul(fft_len_pow2.trailing_zeros() as usize);
         // SHORT-KERNEL GATHER: when the kernel is short the scatter SAXPY pays its
@@ -20028,13 +20029,18 @@ impl UFuncArray {
                     p += 1;
                 }
             };
-            // The short-kernel gather runs SERIALLY: with so few taps per output the
-            // op is memory-bandwidth bound, and splitting it across rayon worker
-            // threads lost to dispatch + per-chunk overhead at every measured size
-            // (e.g. n=50000,m=8 ran 4.4x SLOWER parallel than serial). One streaming
-            // pass over the output keeps the input window cache-resident.
             let mut full = vec![0.0f64; full_len];
-            fill(&mut full, 0);
+            if full_len >= CONVOLVE_GATHER_PAR_MIN_FULL_LEN && rayon::current_num_threads() >= 2 {
+                let threads = rayon::current_num_threads();
+                let chunk = (full_len / threads).max(32_768);
+                full.par_chunks_mut(chunk)
+                    .enumerate()
+                    .for_each(|(c, out)| fill(out, c * chunk));
+            } else {
+                // For small/medium short-kernel outputs, rayon dispatch and per-chunk
+                // edge work dominate. One streaming pass keeps the input window hot.
+                fill(&mut full, 0);
+            }
             full
         } else if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
             && n.min(m) >= 2
@@ -49058,6 +49064,56 @@ print(json.dumps(payload))
                 "parallel 1-D convolve mode={mode} diverged from scatter reference"
             );
         }
+    }
+
+    #[test]
+    fn convolve_large_short_kernel_parallel_golden_sha256() {
+        // Crosses the large-output short-kernel gather gate. The reference keeps the
+        // original scatter order so this locks both the parallel chunking semantics
+        // and the exact output bytes for NaN/signed-zero-sensitive downstream paths.
+        let (n, m) = ((1usize << 19) + 17, 8usize);
+        let mk = |len: usize, seed: u64| -> Vec<f64> {
+            (0..len)
+                .map(|i| {
+                    let h = (i as u64)
+                        .wrapping_mul(0x9E3779B97F4A7C15)
+                        .wrapping_add(seed);
+                    (h >> 11) as f64 / (1u64 << 53) as f64 - 0.5
+                })
+                .collect()
+        };
+        let a = mk(n, 21);
+        let k = mk(m, 29);
+        let arr = UFuncArray::new(vec![n], a.clone(), DType::F64).expect("a");
+        let ker = UFuncArray::new(vec![m], k.clone(), DType::F64).expect("k");
+        let out = arr.convolve_mode(&ker, "full").expect("convolve");
+
+        let full_len = n + m - 1;
+        let mut expected = vec![0.0f64; full_len];
+        for i in 0..n {
+            for j in 0..m {
+                expected[i + j] += a[i] * k[j];
+            }
+        }
+        assert_eq!(
+            out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            "large short-kernel convolve diverged from scatter reference"
+        );
+
+        let mut digest = Sha256::new();
+        for value in out.values() {
+            digest.update(value.to_le_bytes());
+        }
+        let golden: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            golden, "8dbfbcb6641f7ab209fae286813846865109e87be25e7a5699e893b8dbf609ce",
+            "large short-kernel convolve golden digest drifted"
+        );
     }
 
     #[test]
