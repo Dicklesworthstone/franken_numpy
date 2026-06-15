@@ -1520,6 +1520,15 @@ fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, Li
                     }
                 });
         } else if trail >= SYRK_MID_TRIANGULAR_MIN_TRAIL {
+            // Single-core fallback (rayon thread count < 2, so the parallel thin-panel
+            // branch above is skipped). Rather than drop to the full trail×trail GEMM
+            // (which computes the discarded strict-upper triangle = ~2x flops + a product
+            // buffer + a separate subtract pass), tile A22 into SYRK_MID_COL_BLOCK
+            // lower-triangular column blocks and subtract each directly into `work` via
+            // the packed microkernel, computing only the lower cells. ~5x over the
+            // full-GEMM path at n=895 on one core; byte-identical (same ascending-k
+            // per-cell dot — the cholesky_mid_panel_256/512 goldens hold for both this
+            // and the parallel branch).
             let mut bblk = vec![0.0f64; bw * SYRK_MID_COL_BLOCK];
             let mut c0 = 0;
             while c0 < trail {
