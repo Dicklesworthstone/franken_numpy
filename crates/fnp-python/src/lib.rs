@@ -39350,6 +39350,100 @@ fn try_zerocopy_f64_einsum_single_diagonal(
     }
 }
 
+// Two-operand FULL contraction to a scalar: subscripts of the form 'L,L->' where the
+// two operands carry the SAME distinct label string and the output is empty. Every axis
+// is summed over matched indices, i.e. the Frobenius inner product Σ_k a_flat[k]·b_flat[k]
+// (C-order flattening preserves the pairing). The general einsum kernel walks this with a
+// Cartesian loop AND first copies both operands into UFuncArrays (extract_precise_numeric_
+// array) — for a 1M-element pair that 16MB extraction alone dominates, leaving the op
+// ~25x slower than numpy. Reading the two f64 buffers zero-copy and folding them in a
+// single 8-accumulator pass skips the extraction entirely. einsum parity is tolerance-
+// based (einsum_multi_operand_values_match_numpy_within_tolerance), so the strided
+// 8-way accumulation order is fine. Repeated labels (diagonals/traces), ellipsis,
+// transposed/mismatched label strings ('ij,ji->'), non-f64, non-contiguous, or unequal-
+// shape operands all return None and fall through to the general kernel.
+fn try_zerocopy_f64_einsum_full_contraction(
+    py: Python<'_>,
+    subscripts: &str,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((inp, outp)) = subscripts.split_once("->") else {
+        return Ok(None);
+    };
+    if !outp.trim().is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<&str> = inp.trim().split(',').collect();
+    if parts.len() != 2 {
+        return Ok(None);
+    }
+    let (lhs, rhs) = (parts[0].trim(), parts[1].trim());
+    if lhs.is_empty() || lhs != rhs || lhs.contains('.') {
+        return Ok(None);
+    }
+    let labels: Vec<char> = lhs.chars().collect();
+    if !labels.iter().all(|c| c.is_ascii_alphabetic()) {
+        return Ok(None);
+    }
+    let mut seen = std::collections::HashSet::new();
+    if !labels.iter().all(|c| seen.insert(*c)) {
+        return Ok(None); // repeated label = diagonal/trace contraction, not a plain dot
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type)
+        || !b.is_exact_instance(&ndarray_type)
+        || !numpy_dtype_is_f64(py, a)
+        || !numpy_dtype_is_f64(py, b)
+    {
+        return Ok(None);
+    }
+    let (Ok(sa), Ok(sb)) = (
+        a.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
+        b.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
+    ) else {
+        return Ok(None);
+    };
+    if sa != sb || sa.len() != labels.len() {
+        return Ok(None);
+    }
+    let (Ok(ba), Ok(bb)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
+        return Ok(None);
+    };
+    let (Some(va), Some(vb)) = (ba.as_slice(py), bb.as_slice(py)) else {
+        return Ok(None); // non-contiguous
+    };
+    if va.len() != vb.len() {
+        return Ok(None);
+    }
+    // Eight independent accumulators break the single dependency chain so the fold is
+    // load-throughput bound, not add-latency bound (the PyBuffer cells are !Sync, so a
+    // single serial streaming pass is the contiguous read — matching numpy's bandwidth).
+    let mut acc = [0.0f64; 8];
+    let mut ca = va.chunks_exact(8);
+    let mut cb = vb.chunks_exact(8);
+    for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
+        acc[0] += ga[0].get() * gb[0].get();
+        acc[1] += ga[1].get() * gb[1].get();
+        acc[2] += ga[2].get() * gb[2].get();
+        acc[3] += ga[3].get() * gb[3].get();
+        acc[4] += ga[4].get() * gb[4].get();
+        acc[5] += ga[5].get() * gb[5].get();
+        acc[6] += ga[6].get() * gb[6].get();
+        acc[7] += ga[7].get() * gb[7].get();
+    }
+    let mut dot = acc.iter().sum::<f64>();
+    for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+        dot += x.get() * y.get();
+    }
+    let result = match UFuncArray::new(vec![], vec![dot], DType::F64) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(build_numpy_scalar_or_array(py, &result)?))
+}
+
 fn einsum_native(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -39389,6 +39483,19 @@ fn einsum_native(
     if args.len() == 2
         && let Some(result) =
             try_zerocopy_f64_einsum_single_diagonal(py, &subscripts, &args.get_item(1)?)?
+    {
+        return Ok(Some(result));
+    }
+    // Two-operand FULL contraction to a scalar ('ij,ij->', 'i,i->', 'abc,abc->'):
+    // run BEFORE the per-operand UFuncArray extraction (which copies both inputs),
+    // reading the buffers zero-copy. See the helper for the parity rationale.
+    if args.len() == 3
+        && let Some(result) = try_zerocopy_f64_einsum_full_contraction(
+            py,
+            &subscripts,
+            &args.get_item(1)?,
+            &args.get_item(2)?,
+        )?
     {
         return Ok(Some(result));
     }
@@ -86322,6 +86429,63 @@ mod tests {
                     .call1((ours, theirs))?
                     .extract()?;
                 assert!(close, "einsum '{subs}' diverges from numpy beyond allclose");
+            }
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn einsum_full_contraction_fast_path_matches_numpy() {
+        // The two-operand full-contraction-to-scalar fast path ('ij,ij->', 'i,i->',
+        // 'abc,abc->') reads both f64 buffers zero-copy and folds them with an
+        // 8-accumulator multiply-reduce instead of extracting + running the general
+        // Cartesian kernel. einsum parity is tolerance-based, so the result must match
+        // np.einsum within allclose AND return a float64 scalar. The DEFERRED patterns
+        // (transposed contraction 'ij,ji->', repeated-label 'ii,ii->') must still match
+        // numpy via the unchanged general kernel.
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let ours_fn = module.getattr("einsum")?;
+            let numpy = py.import("numpy")?;
+            let np_einsum = numpy.getattr("einsum")?;
+            let allclose = numpy.getattr("allclose")?;
+            let arange = numpy.getattr("arange")?;
+
+            let mk = |n: i64, shape: &[i64]| -> PyResult<Bound<'_, PyAny>> {
+                let shape_tuple = PyTuple::new(py, shape)?;
+                arange
+                    .call1((n,))?
+                    .call_method1("astype", ("float64",))?
+                    .call_method1("__mul__", (0.0007_f64,))?
+                    .call_method1("__sub__", (0.31_f64,))?
+                    .call_method1("reshape", (shape_tuple,))
+            };
+
+            // (subscripts, n, shape) — fast-path cases AND deferred cases (same harness).
+            let cases: &[(&str, i64, &[i64])] = &[
+                ("ij,ij->", 4225, &[65, 65]),  // full contraction (fast path)
+                ("i,i->", 9000, &[9000]),      // 1-D inner product (fast path)
+                ("abc,abc->", 5040, &[14, 12, 30]), // 3-D full contraction (fast path)
+                ("ij,ji->", 4225, &[65, 65]),  // transpose contraction (deferred)
+                ("ii,ii->", 2500, &[50, 50]),  // repeated labels (deferred)
+            ];
+            for (subs, n, shape) in cases {
+                let a = mk(*n, shape)?;
+                let b = mk(*n, shape)?;
+                let subs_obj = pyo3::types::PyString::new(py, subs).into_any();
+                let args = PyTuple::new(py, [subs_obj, a, b])?;
+                let ours = ours_fn.call1(&args)?;
+                let theirs = np_einsum.call1(&args)?;
+                let close: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(close, "einsum '{subs}' diverges from numpy beyond allclose");
+                // numpy returns a float64 scalar for these; ours must match dtype.
+                let our_dt: String = ours.getattr("dtype")?.str()?.extract()?;
+                let their_dt: String = theirs.getattr("dtype")?.str()?.extract()?;
+                assert_eq!(our_dt, their_dt, "einsum '{subs}' dtype mismatch");
             }
             Ok(())
         });
