@@ -485,3 +485,38 @@ print(np.array_equal(fnp_result, np_result))
     );
     Ok(())
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// reshape signature parity (numpy 2.1: reshape(a, shape, order='C', *, copy=None);
+// `newshape` removed, `shape`/`copy` added)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn reshape_shape_copy_kwargs_match_numpy() -> Result<(), String> {
+    // Each call prints the flattened result, or "ERR" if it raises TypeError.
+    // newshape= must now raise (numpy 2.1 removed it); shape=/copy= must work.
+    let arr = "np.arange(6)";
+    let calls = [
+        "shape=(2, 3)",
+        "(2, 3)",
+        "(2, 3), copy=True",
+        "(2, 3), copy=False",
+        "(2, 3), order='F'",
+        "newshape=(2, 3)", // removed in numpy 2.1 -> TypeError
+    ];
+    for call in &calls {
+        let body = |engine: &str| {
+            format!(
+                "try:\n    r = {engine}.reshape({arr}, {call})\n    print(np.asarray(r).flatten().tolist())\n\
+                 except TypeError:\n    print('ERR')\n"
+            )
+        };
+        let numpy_out = numpy_oracle(&format!("import numpy as np\n{}", body("np")))?;
+        let rust_out = numpy_oracle(&fnp_script(body("fnp")))?;
+        assert_eq!(
+            numpy_out, rust_out,
+            "reshape kwargs mismatch for ({call})\nnumpy: {numpy_out}\nrust:  {rust_out}"
+        );
+    }
+    Ok(())
+}

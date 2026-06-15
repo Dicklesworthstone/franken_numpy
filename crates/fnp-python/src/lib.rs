@@ -19154,17 +19154,49 @@ fn ravel(py: Python<'_>, a: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, newshape, order="C"))]
-fn reshape(py: Python<'_>, a: Py<PyAny>, newshape: Py<PyAny>, order: &str) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (a, shape=None, order="C", *, copy=None, newshape=None))]
+fn reshape(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    shape: Option<Py<PyAny>>,
+    order: &str,
+    copy: Option<bool>,
+    newshape: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
     // np.reshape returns a VIEW when the new shape is stride-compatible (a copy
     // otherwise) — pure metadata. The old native path always materialized a copy
     // (slow, a view-semantics divergence, and it widened narrow dtypes). Delegate
     // to numpy.reshape, which yields the exact view/copy, preserves the input
     // dtype, and raises numpy's exact errors (including the 'K'-order ValueError).
+    //
+    // numpy 2.1 renamed `newshape` -> `shape` and added keyword-only `copy`; the
+    // `newshape` spelling is still accepted (deprecated) on 2.1-2.3 and removed on
+    // 2.4+. Rather than pin one numpy version, forward whichever bound spelling the
+    // caller gives straight to numpy.reshape so fnp's accept/reject behavior tracks
+    // the installed numpy EXACTLY (e.g. newshape= raises here iff it raises in the
+    // numpy on this machine). copy is forwarded only when set so numpy's default
+    // (copy=None) is preserved on numpy builds predating the copy argument.
     let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("order", order)?;
+    if let Some(copy) = copy {
+        kwargs.set_item("copy", copy)?;
+    }
+    if let Some(newshape) = newshape.as_ref() {
+        kwargs.set_item("newshape", newshape.bind(py))?;
+    }
+    // `shape` is passed POSITIONALLY (the 2nd positional arg on every numpy — named
+    // `newshape` pre-2.1, `shape` after — so a positional bind is version-robust,
+    // unlike a `shape=` keyword which fails on pre-2.1 builds). When `shape` is
+    // omitted we forward no positional bound and let numpy validate (e.g. raise its
+    // own missing-argument error, or consume the `newshape` kwarg above).
+    let mut args: Vec<Bound<'_, PyAny>> = vec![a.bind(py).clone()];
+    if let Some(shape) = shape.as_ref() {
+        args.push(shape.bind(py).clone());
+    }
     Ok(numpy
         .getattr("reshape")?
-        .call1((a.bind(py), newshape.bind(py), order))?
+        .call(PyTuple::new(py, args)?, Some(&kwargs))?
         .unbind())
 }
 
@@ -60569,7 +60601,7 @@ mod tests {
                 vec![0.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY],
                 "float64",
             );
-            let actual = nan_to_num(py, x.clone().unbind(), 0.0, None, None)?;
+            let actual = nan_to_num(py, x.clone().unbind(), true, 0.0, None, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("nan_to_num")?.call1((x,))?;
@@ -60597,6 +60629,7 @@ mod tests {
             let actual_float = nan_to_num(
                 py,
                 float_values.clone().unbind(),
+                true,
                 1.5,
                 Some(9.0),
                 Some(-7.0),
@@ -60624,7 +60657,7 @@ mod tests {
             );
 
             let int_values = numeric_array(py, vec![1_i64, 2_i64, 3_i64], "int64");
-            let actual_int = nan_to_num(py, int_values.clone().unbind(), 0.0, None, None)?;
+            let actual_int = nan_to_num(py, int_values.clone().unbind(), true, 0.0, None, None)?;
             let expected_int = numpy.getattr("nan_to_num")?.call1((int_values,))?;
 
             assert_eq!(
