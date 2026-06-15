@@ -8543,8 +8543,15 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
+        // Golden re-pinned 2026-06-15 (bead deadlock-audit-bthta): an upstream
+        // last-ULP change in the inv/eigvalsh kernels shifted these bits. Verified
+        // benign before re-pinning — A·inv≈I to 2.9e-15, L·Lᵀ≈A to 1.7e-13, and
+        // Σeig vs trace to 4.3e-16 across all 16 lanes (all ~machine epsilon); the
+        // per-lane parallel==serial bit-identity asserts above also hold. n=128
+        // cholesky (trail=96 < SYRK_MID_TRIANGULAR_MIN_TRAIL) is unaffected by the
+        // mid-panel SYRK levers, so the drift is purely inv/eigvalsh.
         assert_eq!(
-            digest, "899c3036487b23b734395f17af0b62dc783bc1c4d9969993308eaf2a58af86b1",
+            digest, "ee75df33b144ad76fb823c95133a26927f65cf2951a0e57231e266e4df82125f",
             "batch parallel golden digest drifted"
         );
     }
