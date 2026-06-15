@@ -562,9 +562,11 @@ fn lu_factor_unblocked_into(
 // (n=384 was only ~1.15x). Pivot sequence is identical, so results match within
 // tolerance (LU is not bit-reproducible — conformance is tolerance-based like LAPACK).
 const LU_BLOCK_MIN: usize = 512;
-// Panel width >= the GEMM parallel gate (128) so the trailing-update GEMM
-// (trail × nb × trail) clears packed_gemm's k>=128 threshold and runs parallel.
-const LU_PANEL_NB: usize = 128;
+// A 64-wide panel cuts the serial pivot/panel fraction at n=512 enough to beat
+// the 128-wide GEMM-parallel panel. The trailing update may run serial at this k,
+// but the smaller panel keeps more total work in cache and wins on the det/LU
+// mid-size gate.
+const LU_PANEL_NB: usize = 64;
 
 // Right-looking blocked LU with partial pivoting (LAPACK dgetrf shape). For each
 // column panel of width nb: factor the panel (full-column pivoting, row swaps
@@ -14000,6 +14002,60 @@ mod tests {
             }
             assert!(max_err < 1e-9, "blocked P·A=L·U reconstruction err {max_err:e} (n={n})");
         }
+    }
+
+    #[test]
+    fn lu_panel_64_mid_size_keeps_pivots_logdet_and_golden_sha256() {
+        let n = 512;
+        let a = lu_spd_like(n, 0x6c75_7061_6e65_6c34);
+
+        let (lu, perm, sign) = super::lu_factor_nxn(&a, n).expect("blocked lu factor");
+        let (lu_ref, perm_ref) = lu_unblocked_ref(&a, n);
+        assert_eq!(perm, perm_ref, "64-wide panel must preserve pivot order");
+
+        let mut ref_sign = 1.0f64;
+        let mut ref_log = 0.0f64;
+        for i in 0..n {
+            let d = lu_ref[i * n + i];
+            if d < 0.0 {
+                ref_sign = -ref_sign;
+            }
+            ref_log += d.abs().ln();
+        }
+        let mut log = 0.0f64;
+        let mut det_sign = sign;
+        for i in 0..n {
+            let d = lu[i * n + i];
+            if d < 0.0 {
+                det_sign = -det_sign;
+            }
+            log += d.abs().ln();
+        }
+        assert_eq!(det_sign, ref_sign, "determinant sign drifted");
+        let rel = (log - ref_log).abs() / ref_log.abs().max(1.0);
+        assert!(
+            rel < 1e-9,
+            "64-wide panel log|det| {log} vs serial reference {ref_log} (rel {rel:e})"
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(n.to_le_bytes());
+        hasher.update(sign.to_bits().to_le_bytes());
+        for p in &perm {
+            hasher.update(p.to_le_bytes());
+        }
+        for v in &lu {
+            hasher.update(v.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "0c94d84ca8e58ff7ce27babdac9d584397074a53770050be8151b9482ee586de",
+            "64-wide LU panel golden digest drifted: {digest}"
+        );
     }
 
     #[test]
