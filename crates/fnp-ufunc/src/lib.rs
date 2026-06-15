@@ -42431,7 +42431,10 @@ print(json.dumps(payload))
                 assert_eq!(kind, FloatErrorKind::Divide);
                 assert!(detail.contains(UnaryOp::Reciprocal.name()));
             }
-            other => panic!("unexpected error: {other:?}"),
+            other => assert!(
+                matches!(other, UFuncError::FloatingPoint { .. }),
+                "unexpected error: {other:?}"
+            ),
         }
     }
 
