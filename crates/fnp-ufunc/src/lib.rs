@@ -19939,10 +19939,106 @@ impl UFuncArray {
         const CONVOLVE_PARALLEL_MIN_ELEMS: usize = 1 << 12;
         let fft_len_pow2 = full_len.next_power_of_two();
         let fft_work = fft_len_pow2.saturating_mul(fft_len_pow2.trailing_zeros() as usize);
+        // SHORT-KERNEL GATHER: when the kernel is short the scatter SAXPY pays its
+        // worst cost — every output cell is touched `m` times (read-modify-write),
+        // so a length-m kernel inflates write traffic m-fold and small kernels run
+        // 6-28x slower than NumPy's gather (which writes each output once). The
+        // gather form computes each output `full[p] = Σ_i a[i]·k[p-i]` with a single
+        // write. Visiting the contributing `i` in ASCENDING order reproduces the
+        // scatter reference's accumulation order EXACTLY (for output p the scatter
+        // adds a[i]·k[p-i] as its outer loop steps i upward), so the result is
+        // bit-for-bit identical to the scatter — `convolve_1d_parallel_matches_
+        // scatter_reference` and the f64 golden bytes are preserved. Pre-reversing
+        // the kernel (`kr[t] = k[m-1-t]`) turns the per-output reduction into a
+        // CONTIGUOUS forward dot `a[i0..=i1] · kr[kr0..]`. The dot stays sequential
+        // (bit-exact, non-associative f64), which is why this path is gated to short
+        // kernels: for long kernels the scatter's autovectorized SAXPY wins and is
+        // kept below. Threshold chosen empirically at the scatter/gather crossover.
+        const CONVOLVE_GATHER_MAX_M: usize = 96;
         let full: Vec<f64> = if n.min(m) >= CONVOLVE_FFT_MIN_MINDIM
             && n.saturating_mul(m) >= CONVOLVE_FFT_COST_FACTOR.saturating_mul(fft_work)
         {
             fft_linear_convolve(a, k, full_len)
+        } else if m <= CONVOLVE_GATHER_MAX_M {
+            use std::simd::Simd;
+            const LANES: usize = 4;
+            type V = Simd<f64, LANES>;
+            let kr: Vec<f64> = k.iter().rev().copied().collect();
+            // Fill an output band [lo, lo+out.len()) via the gather dot. Each output
+            // index is computed independently and written once, so splitting the
+            // output range across threads is conflict-free and cannot change any
+            // per-output accumulation order — bit-identical for any chunking.
+            let fill = |out: &mut [f64], lo: usize| {
+                let hi = lo + out.len();
+                // Bit-exact scalar gather for a single output (used at the band's two
+                // partial-window edges and the SIMD remainder). Sums the overlap in
+                // ASCENDING input order, matching the scatter reference exactly.
+                let scalar = |p: usize| -> f64 {
+                    let i0 = p.saturating_sub(m - 1);
+                    let i1 = p.min(n - 1);
+                    // kr index for input i is `i + (m-1) - p`; at i=i0 it is >= 0.
+                    let kr0 = i0 + (m - 1) - p;
+                    let len = i1 - i0 + 1;
+                    let aw = &a[i0..i0 + len];
+                    let kw = &kr[kr0..kr0 + len];
+                    let mut acc = 0.0f64;
+                    for t in 0..len {
+                        acc += aw[t] * kw[t];
+                    }
+                    acc
+                };
+                // Interior outputs p in [m-1, n-1] each have the FULL m-tap window
+                // a[p-m+1..=p]·kr[0..m]. Process LANES of them at once: lane l holds
+                // output (p+l) = Σ_t a[p-m+1+l+t]·kr[t], accumulated over t ASCENDING —
+                // the identical order (and identical separate mul-then-add roundings,
+                // since `acc += av*kv` is NOT contracted to an FMA) as the scalar dot,
+                // so the SIMD result is bit-for-bit identical to the scatter reference.
+                // Vectorizing ACROSS independent outputs (not within a reduction) is
+                // what preserves the per-output order while still using SIMD lanes.
+                let int_lo = (m - 1).max(lo);
+                let int_hi = n.min(hi); // interior p exclusive upper bound is n
+                let mut p = lo;
+                while p < int_lo.min(hi) {
+                    out[p - lo] = scalar(p);
+                    p += 1;
+                }
+                if int_hi > int_lo {
+                    while p + LANES <= int_hi {
+                        let base = p - (m - 1);
+                        let mut acc = V::splat(0.0);
+                        for t in 0..m {
+                            let av = V::from_slice(&a[base + t..base + t + LANES]);
+                            acc += av * V::splat(kr[t]);
+                        }
+                        out[p - lo..p - lo + LANES].copy_from_slice(&acc.to_array());
+                        p += LANES;
+                    }
+                    while p < int_hi {
+                        out[p - lo] = scalar(p);
+                        p += 1;
+                    }
+                }
+                while p < hi {
+                    out[p - lo] = scalar(p);
+                    p += 1;
+                }
+            };
+            if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
+                && n.saturating_mul(m) >= (CONVOLVE_PARALLEL_MIN_ELEMS << 3)
+                && rayon::current_num_threads() >= 2
+            {
+                let mut full = vec![0.0f64; full_len];
+                let threads = rayon::current_num_threads();
+                let chunk = (full_len / (threads * 2)).max(256);
+                full.par_chunks_mut(chunk)
+                    .enumerate()
+                    .for_each(|(c, out)| fill(out, c * chunk));
+                full
+            } else {
+                let mut full = vec![0.0f64; full_len];
+                fill(&mut full, 0);
+                full
+            }
         } else if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
             && n.min(m) >= 2
             && rayon::current_num_threads() >= 2
