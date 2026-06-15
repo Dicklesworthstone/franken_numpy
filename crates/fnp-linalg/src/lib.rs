@@ -3790,6 +3790,9 @@ pub fn svd_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
 // path keeps the unblocked loop). Panel width.
 const TRIDIAG_BLOCK_MIN: usize = 384;
 const TRIDIAG_PANEL_NB: usize = 64;
+const SBR_STAGE1_BAND_WIDTH: usize = 96;
+const SBR_STAGE1_PANEL_NB: usize = 128;
+type SbrStage1Result = (Vec<f64>, Vec<f64>, Vec<f64>);
 // Minimum trailing-block height for the parallel symmetric panel matvec (u = A·v).
 // Each matvec is only O(h²) work split across rows, so the rayon dispatch +
 // work-stealing setup (~tens of µs, worse under machine load) dominates until h is
@@ -4056,6 +4059,255 @@ fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>,
     d[n - 1] = work[(n - 1) * n + (n - 1)];
     e[n - 2] = work[(n - 2) * n + (n - 1)];
     (d, e, q)
+}
+
+fn pack_lower_band(work: &[f64], n: usize, band_width: usize) -> Vec<f64> {
+    let mut band = vec![0.0f64; n * (band_width + 1)];
+    for col in 0..n {
+        let rows = (n - col).min(band_width + 1);
+        for delta in 0..rows {
+            band[col * (band_width + 1) + delta] = work[(col + delta) * n + col];
+        }
+    }
+    band
+}
+
+#[cfg(test)]
+fn unpack_lower_band(band: &[f64], n: usize, band_width: usize) -> Vec<f64> {
+    let mut work = vec![0.0f64; n * n];
+    for col in 0..n {
+        let rows = (n - col).min(band_width + 1);
+        for delta in 0..rows {
+            let row = col + delta;
+            let value = band[col * (band_width + 1) + delta];
+            work[row * n + col] = value;
+            work[col * n + row] = value;
+        }
+    }
+    work
+}
+
+fn sbr_stage1_dense_to_band_impl(
+    a: &[f64],
+    n: usize,
+    accumulate_q: bool,
+) -> Result<SbrStage1Result, LinAlgError> {
+    if Some(a.len()) != n.checked_mul(n) || n == 0 {
+        return Err(LinAlgError::ShapeContractViolation(
+            "sbr_stage1_dense_to_band_lower_nxn: input must be n*n with n > 0",
+        ));
+    }
+    if a.iter().any(|v| !v.is_finite()) {
+        return Err(LinAlgError::NormDetRankPolicyViolation(
+            "matrix entries must be finite for SBR stage-1",
+        ));
+    }
+
+    let band_width = SBR_STAGE1_BAND_WIDTH.min(n - 1);
+    let mut work = a.to_vec();
+    let mut q = if accumulate_q {
+        let mut qq = vec![0.0f64; n * n];
+        for i in 0..n {
+            qq[i * n + i] = 1.0;
+        }
+        qq
+    } else {
+        Vec::new()
+    };
+
+    let mut jb = 0usize;
+    while jb + band_width < n {
+        let active = jb + band_width;
+        let h = n - active;
+        if h == 0 {
+            break;
+        }
+        let nb = SBR_STAGE1_PANEL_NB.min(n - band_width - jb).min(h);
+        if nb == 0 {
+            break;
+        }
+
+        let mut panel = vec![0.0f64; h * nb];
+        for row in 0..h {
+            let src = (active + row) * n + jb;
+            panel[row * nb..row * nb + nb].copy_from_slice(&work[src..src + nb]);
+        }
+
+        let mut vv = vec![0.0f64; h * nb];
+        let mut taus = vec![0.0f64; nb];
+        let mut dpanel = vec![0.0f64; nb];
+        for t in 0..nb {
+            let mut col_norm_sq = 0.0;
+            for row in t..h {
+                let x = panel[row * nb + t];
+                col_norm_sq += x * x;
+            }
+            let col_norm = col_norm_sq.sqrt();
+            if col_norm < f64::EPSILON {
+                continue;
+            }
+            let sign = if panel[t * nb + t] >= 0.0 { 1.0 } else { -1.0 };
+            for row in t..h {
+                vv[row * nb + t] = panel[row * nb + t];
+            }
+            vv[t * nb + t] += sign * col_norm;
+            let mut v_norm_sq = 0.0;
+            for row in t..h {
+                let x = vv[row * nb + t];
+                v_norm_sq += x * x;
+            }
+            if v_norm_sq == 0.0 {
+                continue;
+            }
+            let tau = 2.0 / v_norm_sq;
+            taus[t] = tau;
+
+            let width = nb - t;
+            for dj in &mut dpanel[..width] {
+                *dj = 0.0;
+            }
+            for row in t..h {
+                let vi = vv[row * nb + t];
+                let src = row * nb + t;
+                for (dj, &cell) in dpanel[..width].iter_mut().zip(panel[src..src + width].iter()) {
+                    *dj += vi * cell;
+                }
+            }
+            for dj in &mut dpanel[..width] {
+                *dj *= tau;
+            }
+            for row in t..h {
+                let vi = vv[row * nb + t];
+                let dst = row * nb + t;
+                for (cell, &dj) in panel[dst..dst + width].iter_mut().zip(dpanel[..width].iter()) {
+                    *cell -= dj * vi;
+                }
+            }
+        }
+
+        let mut tm = vec![0.0f64; nb * nb];
+        for t in 0..nb {
+            tm[t * nb + t] = taus[t];
+            if taus[t] == 0.0 {
+                continue;
+            }
+            let mut col = vec![0.0f64; t];
+            for (i, ci) in col.iter_mut().enumerate() {
+                let mut dot = 0.0;
+                for row in 0..h {
+                    dot += vv[row * nb + i] * vv[row * nb + t];
+                }
+                *ci = -taus[t] * dot;
+            }
+            for i in 0..t {
+                let mut sum = 0.0;
+                for l in i..t {
+                    sum += tm[i * nb + l] * col[l];
+                }
+                tm[i * nb + t] = sum;
+            }
+        }
+
+        let mut tmt = vec![0.0f64; nb * nb];
+        for row in 0..nb {
+            for col in 0..nb {
+                tmt[row * nb + col] = tm[col * nb + row];
+            }
+        }
+        let mut vt = vec![0.0f64; nb * h];
+        for row in 0..h {
+            for col in 0..nb {
+                vt[col * h + row] = vv[row * nb + col];
+            }
+        }
+
+        if active > 0 {
+            let mut cross = vec![0.0f64; active * h];
+            for row in 0..active {
+                let src = row * n + active;
+                cross[row * h..row * h + h].copy_from_slice(&work[src..src + h]);
+            }
+            let cv = packed_gemm(&cross, &vv, active, h, nb);
+            let cvt = packed_gemm(&cv, &tm, active, nb, nb);
+            let upd = packed_gemm(&cvt, &vt, active, nb, h);
+            for row in 0..active {
+                let dst = row * n + active;
+                for col in 0..h {
+                    let value = work[dst + col] - upd[row * h + col];
+                    work[dst + col] = value;
+                    work[(active + col) * n + row] = value;
+                }
+            }
+        }
+
+        let mut aa = vec![0.0f64; h * h];
+        for row in 0..h {
+            let src = (active + row) * n + active;
+            aa[row * h..row * h + h].copy_from_slice(&work[src..src + h]);
+        }
+        let av = packed_gemm(&aa, &vv, h, h, nb);
+        let avt = packed_gemm(&av, &tm, h, nb, nb);
+        let right_update = packed_gemm(&avt, &vt, h, nb, h);
+        for (cell, &upd) in aa.iter_mut().zip(right_update.iter()) {
+            *cell -= upd;
+        }
+        let vtr = packed_gemm(&vt, &aa, nb, h, h);
+        let ttvtr = packed_gemm(&tmt, &vtr, nb, nb, h);
+        let left_update = packed_gemm(&vv, &ttvtr, h, nb, h);
+        for (cell, &upd) in aa.iter_mut().zip(left_update.iter()) {
+            *cell -= upd;
+        }
+        for row in 0..h {
+            let dst = (active + row) * n + active;
+            work[dst..dst + h].copy_from_slice(&aa[row * h..row * h + h]);
+        }
+
+        if accumulate_q {
+            let mut qa = vec![0.0f64; n * h];
+            for row in 0..n {
+                let src = row * n + active;
+                qa[row * h..row * h + h].copy_from_slice(&q[src..src + h]);
+            }
+            let qv = packed_gemm(&qa, &vv, n, h, nb);
+            let qvt = packed_gemm(&qv, &tm, n, nb, nb);
+            let upd = packed_gemm(&qvt, &vt, n, nb, h);
+            for row in 0..n {
+                let dst = row * n + active;
+                for (cell, &x) in q[dst..dst + h].iter_mut().zip(&upd[row * h..row * h + h]) {
+                    *cell -= x;
+                }
+            }
+        }
+
+        jb += nb;
+    }
+
+    for row in 0..n {
+        for col in 0..row {
+            if row - col > band_width {
+                work[row * n + col] = 0.0;
+                work[col * n + row] = 0.0;
+            } else {
+                let value = 0.5 * (work[row * n + col] + work[col * n + row]);
+                work[row * n + col] = value;
+                work[col * n + row] = value;
+            }
+        }
+    }
+
+    let band = pack_lower_band(&work, n, band_width);
+    Ok((work, band, q))
+}
+
+#[doc(hidden)]
+pub fn sbr_stage1_dense_to_band_lower_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
+    let (_work, band, _q) = sbr_stage1_dense_to_band_impl(a, n, false)?;
+    Ok(band)
+}
+
+#[doc(hidden)]
+pub fn sbr_stage1_band_width() -> usize {
+    SBR_STAGE1_BAND_WIDTH
 }
 
 fn tridiag_reduce_impl(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
@@ -12857,6 +13109,140 @@ mod tests {
         }
         assert!(max_d < 1e-8, "parallel-matvec tridiag d err {max_d:e}");
         assert!(max_e < 1e-8, "parallel-matvec tridiag e err {max_e:e}");
+    }
+
+    fn q_t_a_q(a: &[f64], q: &[f64], n: usize) -> Vec<f64> {
+        let mut aq = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for k in 0..n {
+                    s += a[i * n + k] * q[k * n + j];
+                }
+                aq[i * n + j] = s;
+            }
+        }
+        let mut out = vec![0.0f64; n * n];
+        for i in 0..n {
+            for j in 0..n {
+                let mut s = 0.0;
+                for k in 0..n {
+                    s += q[k * n + i] * aq[k * n + j];
+                }
+                out[i * n + j] = s;
+            }
+        }
+        out
+    }
+
+    fn assert_stage1_band_oracle(a: &[f64], n: usize) {
+        let bandwidth = super::sbr_stage1_band_width().min(n - 1);
+        let (dense_band, lower_band, q) =
+            super::sbr_stage1_dense_to_band_impl(a, n, true).expect("SBR stage-1");
+        assert_eq!(dense_band.len(), n * n);
+        assert_eq!(q.len(), n * n);
+        let unpacked = super::unpack_lower_band(&lower_band, n, bandwidth);
+        for (idx, (&dense, &packed)) in dense_band.iter().zip(&unpacked).enumerate() {
+            assert_eq!(dense.to_bits(), packed.to_bits(), "compact band drift at flat index {idx}");
+        }
+
+        let mut max_outside = 0.0f64;
+        let mut max_sym = 0.0f64;
+        for i in 0..n {
+            for j in 0..n {
+                if i.abs_diff(j) > bandwidth {
+                    max_outside = max_outside.max(dense_band[i * n + j].abs());
+                }
+                max_sym = max_sym.max((dense_band[i * n + j] - dense_band[j * n + i]).abs());
+            }
+        }
+        assert_eq!(
+            max_outside.to_bits(),
+            0.0f64.to_bits(),
+            "outside-band entries must be exact zero"
+        );
+        assert_eq!(
+            max_sym.to_bits(),
+            0.0f64.to_bits(),
+            "band matrix must stay exactly symmetric"
+        );
+
+        let oracle = q_t_a_q(a, &q, n);
+        let mut max_recon = 0.0f64;
+        let mut max_orth = 0.0f64;
+        for i in 0..n {
+            for j in 0..n {
+                max_recon = max_recon.max(
+                    (oracle[i * n + j] - dense_band[i * n + j]).abs()
+                        / (1.0 + dense_band[i * n + j].abs()),
+                );
+                let mut dot = 0.0;
+                for k in 0..n {
+                    dot += q[k * n + i] * q[k * n + j];
+                }
+                let expected = if i == j { 1.0 } else { 0.0 };
+                max_orth = max_orth.max((dot - expected).abs());
+            }
+        }
+        assert!(max_recon < 2e-8, "Q^T A Q != band, rel err {max_recon:e}");
+        assert!(max_orth < 2e-10, "Q orthogonality err {max_orth:e}");
+
+        let original = eigvalsh_nxn(a, n).expect("original eigvalsh");
+        let reduced = eigvalsh_nxn(&dense_band, n).expect("band eigvalsh");
+        for (idx, (&lhs, &rhs)) in original.iter().zip(&reduced).enumerate() {
+            let err = (lhs - rhs).abs() / (1.0 + lhs.abs().max(rhs.abs()));
+            assert!(err < 2e-8, "eigval {idx} drifted: {lhs} vs {rhs}, rel {err:e}");
+        }
+    }
+
+    #[test]
+    fn sbr_stage1_band_q_oracle_preserves_symmetric_spectra() {
+        let n = 128usize;
+
+        let spd = chol_spd(n, 0x5196);
+        assert_stage1_band_oracle(&spd, n);
+
+        let mut repeated = vec![0.0f64; n * n];
+        for i in 0..n {
+            repeated[i * n + i] = if i < n / 2 { 3.0 } else { 7.0 };
+            if i + 1 < n {
+                repeated[i * n + i + 1] = 0.125;
+                repeated[(i + 1) * n + i] = 0.125;
+            }
+        }
+        assert_stage1_band_oracle(&repeated, n);
+
+        let mut indefinite = vec![0.0f64; n * n];
+        for i in 0..n {
+            indefinite[i * n + i] = i as f64 - (n as f64 / 2.0);
+            for j in (i + 1)..n {
+                let value = ((i * 17 + j * 31 + 5) % 19) as f64 / 37.0 - 0.25;
+                indefinite[i * n + j] = value;
+                indefinite[j * n + i] = value;
+            }
+        }
+        assert_stage1_band_oracle(&indefinite, n);
+    }
+
+    #[test]
+    fn sbr_stage1_compact_band_golden_sha256() {
+        let n = 128usize;
+        let a = chol_spd(n, 0x5b12_0001);
+        let (_dense_band, lower_band, _q) =
+            super::sbr_stage1_dense_to_band_impl(&a, n, false).expect("SBR stage-1");
+        let mut hasher = Sha256::new();
+        for value in &lower_band {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "8882985c52a3d394eb17ac604680960ea1ec02df0bda2b26c85f081ad7a8e275",
+            "SBR stage-1 compact-band golden digest drifted: {digest}"
+        );
     }
 
     #[test]

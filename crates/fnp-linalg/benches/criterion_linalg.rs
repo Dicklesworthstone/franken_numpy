@@ -16,8 +16,8 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
     batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, complex_matmul, det_nxn, eigvalsh_nxn,
-    inv_nxn, matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn, solve_nxn, svd_mxn_full,
-    svd_nxn,
+    inv_nxn, matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn,
+    sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full, svd_nxn,
 };
 use std::hint::black_box;
 
@@ -195,6 +195,23 @@ fn bench_eigvalsh(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
             bench.iter(|| {
                 let result = eigvalsh_nxn(black_box(&a), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_sbr_stage1(c: &mut Criterion) {
+    let mut group = c.benchmark_group("sbr_stage1_band_nxn");
+
+    for n in [512usize, 1024] {
+        let a = generate_spd_matrix(n);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
+            bench.iter(|| {
+                let result = sbr_stage1_dense_to_band_lower_nxn(black_box(&a), n);
                 black_box(result)
             });
         });
@@ -395,6 +412,7 @@ criterion_group!(
     bench_svd,
     bench_svd_full,
     bench_eigvalsh,
+    bench_sbr_stage1,
     bench_norm_frobenius,
     bench_batch_inv,
     bench_batch_eigvalsh,
