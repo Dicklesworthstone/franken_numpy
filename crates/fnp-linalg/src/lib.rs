@@ -4089,6 +4089,88 @@ fn unpack_lower_band(band: &[f64], n: usize, band_width: usize) -> Vec<f64> {
     work
 }
 
+fn sbr_active_times_v(
+    work: &[f64],
+    n: usize,
+    active: usize,
+    h: usize,
+    nb: usize,
+    vv: &[f64],
+) -> Vec<f64> {
+    let mut out = vec![0.0f64; h * nb];
+    let parallel =
+        h >= MATMUL_PARALLEL_MIN_DIM && nb >= PACKED_NR && rayon::current_num_threads() >= 2;
+    if parallel {
+        out.par_chunks_mut(nb).enumerate().for_each(|(row, dst)| {
+            let src = &work[(active + row) * n + active..(active + row) * n + active + h];
+            for k in 0..h {
+                let aik = src[k];
+                let vrow = &vv[k * nb..k * nb + nb];
+                for (cell, &v) in dst.iter_mut().zip(vrow) {
+                    *cell += aik * v;
+                }
+            }
+        });
+    } else {
+        for row in 0..h {
+            let src = &work[(active + row) * n + active..(active + row) * n + active + h];
+            let dst = &mut out[row * nb..row * nb + nb];
+            for k in 0..h {
+                let aik = src[k];
+                let vrow = &vv[k * nb..k * nb + nb];
+                for (cell, &v) in dst.iter_mut().zip(vrow) {
+                    *cell += aik * v;
+                }
+            }
+        }
+    }
+    out
+}
+
+fn sbr_apply_symmetric_rank2k_update(
+    work: &mut [f64],
+    n: usize,
+    active: usize,
+    h: usize,
+    nb: usize,
+    vv: &[f64],
+    w: &[f64],
+) {
+    const COL_TILE: usize = 32;
+    let parallel = h >= MATMUL_PARALLEL_MIN_DIM && rayon::current_num_threads() >= 2;
+    let update_row = |row_idx: usize, row: &mut [f64]| {
+        let vi = &vv[row_idx * nb..row_idx * nb + nb];
+        let wi = &w[row_idx * nb..row_idx * nb + nb];
+        let mut j0 = 0usize;
+        while j0 < h {
+            let j_end = (j0 + COL_TILE).min(h);
+            for j in j0..j_end {
+                let vj = &vv[j * nb..j * nb + nb];
+                let wj = &w[j * nb..j * nb + nb];
+                let mut delta = 0.0f64;
+                for k in 0..nb {
+                    delta += vi[k] * wj[k] + wi[k] * vj[k];
+                }
+                row[active + j] -= delta;
+            }
+            j0 = j_end;
+        }
+    };
+
+    let active_rows = &mut work[active * n..];
+    if parallel {
+        active_rows
+            .par_chunks_mut(n)
+            .take(h)
+            .enumerate()
+            .for_each(|(row_idx, row)| update_row(row_idx, row));
+    } else {
+        for (row_idx, row) in active_rows.chunks_mut(n).take(h).enumerate() {
+            update_row(row_idx, row);
+        }
+    }
+}
+
 fn sbr_stage1_dense_to_band_impl(
     a: &[f64],
     n: usize,
@@ -4242,27 +4324,15 @@ fn sbr_stage1_dense_to_band_impl(
             }
         }
 
-        let mut aa = vec![0.0f64; h * h];
-        for row in 0..h {
-            let src = (active + row) * n + active;
-            aa[row * h..row * h + h].copy_from_slice(&work[src..src + h]);
+        let av = sbr_active_times_v(&work, n, active, h, nb, &vv);
+        let mut w = packed_gemm(&av, &tm, h, nb, nb);
+        let vtw = packed_gemm(&vt, &w, nb, h, nb);
+        let corr = packed_gemm(&tmt, &vtw, nb, nb, nb);
+        let vcorr = packed_gemm(&vv, &corr, h, nb, nb);
+        for (wi, &ci) in w.iter_mut().zip(&vcorr) {
+            *wi -= 0.5 * ci;
         }
-        let av = packed_gemm(&aa, &vv, h, h, nb);
-        let avt = packed_gemm(&av, &tm, h, nb, nb);
-        let right_update = packed_gemm(&avt, &vt, h, nb, h);
-        for (cell, &upd) in aa.iter_mut().zip(right_update.iter()) {
-            *cell -= upd;
-        }
-        let vtr = packed_gemm(&vt, &aa, nb, h, h);
-        let ttvtr = packed_gemm(&tmt, &vtr, nb, nb, h);
-        let left_update = packed_gemm(&vv, &ttvtr, h, nb, h);
-        for (cell, &upd) in aa.iter_mut().zip(left_update.iter()) {
-            *cell -= upd;
-        }
-        for row in 0..h {
-            let dst = (active + row) * n + active;
-            work[dst..dst + h].copy_from_slice(&aa[row * h..row * h + h]);
-        }
+        sbr_apply_symmetric_rank2k_update(&mut work, n, active, h, nb, &vv, &w);
 
         if accumulate_q {
             let mut qa = vec![0.0f64; n * h];
@@ -13242,7 +13312,7 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            digest, "8882985c52a3d394eb17ac604680960ea1ec02df0bda2b26c85f081ad7a8e275",
+            digest, "a746956cc26746ad23415eb96d7692f844ab574c0fc186975bd073d7ef967ed6",
             "SBR stage-1 compact-band golden digest drifted: {digest}"
         );
     }
