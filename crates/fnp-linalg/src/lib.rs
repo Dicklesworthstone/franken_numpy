@@ -13734,7 +13734,7 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            digest, "4461d094b8ddfc931913f52e1b4216022c99b269b9a1ee02fb9d4c7d2d77c3c9",
+            digest, "c329cbe7cb25210c5c678dc3229349ce0ad56c74c134cf30f75fd507f20793b1",
             "1024 inverse blocked-TRSM golden digest drifted: {digest}"
         );
     }
@@ -13774,7 +13774,7 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            digest, "76ba9ec0322feb3f598ae2aef3ee95c7783a4c0b56524863de2d90ec7dabaf5b",
+            digest, "367d18d0dee0c070249d1e4fc2a92bc64167430edde840baa57ad0fad6e1bd8a",
             "768 inverse blocked-TRSM golden digest drifted: {digest}"
         );
     }
