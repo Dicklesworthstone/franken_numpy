@@ -2,11 +2,11 @@
 
 use crate::{HarnessConfig, SuiteReport};
 use asupersync::config::EncodingConfig;
-use asupersync::decoding::{DecodingConfig, DecodingPipeline};
 use asupersync::encoding::EncodingPipeline;
-use asupersync::security::{AuthenticatedSymbol, AuthenticationTag};
+use asupersync::raptorq::decoder::{InactivationDecoder, ReceivedSymbol};
+use asupersync::raptorq::systematic::SystematicParams;
 use asupersync::types::resource::{PoolConfig, SymbolPool};
-use asupersync::types::{ObjectId, ObjectParams, Symbol, SymbolId, SymbolKind};
+use asupersync::types::{ObjectId, SymbolKind};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
@@ -318,7 +318,16 @@ pub fn generate_sidecar_from_payload_with_config(
     };
 
     let source_symbol_count = payload.len().div_ceil(usize::from(symbol_size)).max(1);
-    let repair_count = source_symbol_count.div_ceil(4).max(2);
+    let systematic = SystematicParams::try_for_source_block(
+        source_symbol_count,
+        usize::from(symbol_size),
+    )
+    .map_err(|err| format!("invalid RaptorQ source block: {err:?}"))?;
+    let repair_count = systematic
+        .l
+        .saturating_sub(source_symbol_count)
+        .saturating_add(2)
+        .max(2);
 
     let pool = SymbolPool::new(PoolConfig {
         symbol_size,
@@ -401,62 +410,87 @@ fn symbol_label(record: &RaptorQSymbolRecord) -> String {
     format!("sbn={} esi={} kind={}", record.sbn, record.esi, record.kind)
 }
 
+fn seed_for_block(object_id: ObjectId, sbn: u8) -> u64 {
+    let obj = object_id.as_u128();
+    let hi = (obj >> 64) as u64;
+    let lo = obj as u64;
+    let mut seed = hi ^ lo.rotate_left(13);
+    seed ^= u64::from(sbn) << 56;
+    if seed == 0 { 1 } else { seed }
+}
+
 fn decode_payload_from_records(
     sidecar: &RaptorQSidecar,
     records: &[RaptorQSymbolRecord],
 ) -> Result<Vec<u8>, String> {
-    let mut decoder = DecodingPipeline::new(DecodingConfig {
-        symbol_size: sidecar.symbol_size,
-        max_block_size: sidecar.max_block_size,
-        // For scrub/recovery drills we decode with the minimal admissible overhead
-        // to validate recoverability even when some symbols are intentionally missing.
-        repair_overhead: 1.0,
-        min_overhead: 0,
-        max_buffered_symbols: 0,
-        block_timeout: std::time::Duration::from_secs(10),
-        verify_auth: false,
-    });
-
     let object_id = ObjectId::from_u128(sidecar.object_id_u128);
-    let params = ObjectParams::new(
-        object_id,
-        sidecar.source_size as u64,
-        sidecar.symbol_size,
-        sidecar.source_blocks.into(),
-        sidecar.source_symbols,
-    );
-    decoder
-        .set_object_params(params)
-        .map_err(|err| format!("set_object_params failed: {err}"))?;
-
-    for record in records {
-        let kind = match record.kind.as_str() {
-            "source" => SymbolKind::Source,
-            "repair" => SymbolKind::Repair,
-            other => return Err(format!("invalid symbol kind: {other}")),
-        };
-
-        let data = BASE64
-            .decode(&record.data_b64)
-            .map_err(|err| format!("base64 decode failed: {err}"))?;
-        let actual_hash = sha256_hex(&data);
-        if actual_hash != record.data_sha256 {
-            return Err(format!(
-                "symbol hash mismatch sbn={} esi={} kind={} expected={} actual={}",
-                record.sbn, record.esi, record.kind, record.data_sha256, actual_hash
-            ));
-        }
-
-        let symbol = Symbol::new(SymbolId::new(object_id, record.sbn, record.esi), data, kind);
-        let auth = AuthenticatedSymbol::new_verified(symbol, AuthenticationTag::zero());
-        let _ = decoder
-            .feed(auth)
-            .map_err(|err| format!("decoder feed failed: {err}"))?;
+    let symbol_size = usize::from(sidecar.symbol_size);
+    if symbol_size == 0 {
+        return Err("symbol_size must be nonzero".to_string());
+    }
+    if sidecar.source_size == 0 {
+        return Ok(Vec::new());
     }
 
-    decoder
-        .into_data()
-        .map_err(|err| format!("decoder finalize failed: {err}"))
+    let mut decoded = Vec::with_capacity(sidecar.source_size);
+    let mut offset = 0usize;
+    let mut sbn = 0u8;
+    while offset < sidecar.source_size {
+        let block_len = sidecar.max_block_size.min(sidecar.source_size - offset);
+        let k = block_len.div_ceil(symbol_size);
+        let decoder = InactivationDecoder::new(k, symbol_size, seed_for_block(object_id, sbn));
+        let mut received = decoder.constraint_symbols();
+
+        for record in records.iter().filter(|record| record.sbn == sbn) {
+            let data = BASE64
+                .decode(&record.data_b64)
+                .map_err(|err| format!("base64 decode failed: {err}"))?;
+            let actual_hash = sha256_hex(&data);
+            if actual_hash != record.data_sha256 {
+                return Err(format!(
+                    "symbol hash mismatch sbn={} esi={} kind={} expected={} actual={}",
+                    record.sbn, record.esi, record.kind, record.data_sha256, actual_hash
+                ));
+            }
+            if data.len() != symbol_size {
+                return Err(format!(
+                    "symbol size mismatch {} expected={} actual={}",
+                    symbol_label(record),
+                    symbol_size,
+                    data.len()
+                ));
+            }
+
+            match record.kind.as_str() {
+                "source" => received.push(ReceivedSymbol::source(record.esi, data)),
+                "repair" => {
+                    let (columns, coefficients) = decoder
+                        .repair_equation(record.esi)
+                        .map_err(|err| format!("repair equation failed: {err:?}"))?;
+                    received.push(ReceivedSymbol::repair(
+                        record.esi,
+                        columns,
+                        coefficients,
+                        data,
+                    ));
+                }
+                other => return Err(format!("invalid symbol kind: {other}")),
+            }
+        }
+
+        let result = decoder
+            .decode_with_object_id(&received, Some(&object_id))
+            .map_err(|err| format!("decoder failed for sbn={sbn}: {err:?}"))?;
+        for symbol in result.source {
+            decoded.extend_from_slice(&symbol);
+        }
+        decoded.truncate(offset + block_len);
+        offset += block_len;
+        sbn = sbn.wrapping_add(1);
+    }
+
+    decoded.truncate(sidecar.source_size);
+    Ok(decoded)
 }
 
 pub fn scrub_and_write_reports(
