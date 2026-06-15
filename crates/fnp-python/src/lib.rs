@@ -15082,13 +15082,15 @@ fn shares_memory(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, max_work: i64) -> P
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, a_min, a_max, out=None, **kwargs))]
+#[pyo3(signature = (a, a_min=None, a_max=None, out=None, min=None, max=None, **kwargs))]
 fn clip(
     py: Python<'_>,
     a: Py<PyAny>,
-    a_min: Py<PyAny>,
-    a_max: Py<PyAny>,
+    a_min: Option<Py<PyAny>>,
+    a_max: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
+    min: Option<Py<PyAny>>,
+    max: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Native clip via UFuncArray::clip for real f64/f32/int scalar min &
@@ -15098,6 +15100,44 @@ fn clip(
     // full dispatch surface is preserved exactly.
     let numpy = py.import("numpy")?;
     let clip_fn = numpy.getattr("clip")?;
+
+    // numpy 2.0 renamed a_min/a_max -> min/max. The modern min/max spelling makes
+    // each bound independently optional; the legacy a_min/a_max spelling is still
+    // accepted but cannot be MIXED with min/max (numpy raises a TypeError). When
+    // both spellings appear, hand the call to numpy verbatim so its exact error /
+    // dispatch is reproduced. Otherwise collapse to a single effective lo/hi.
+    let legacy_used = a_min.is_some() || a_max.is_some();
+    let new_used = min.is_some() || max.is_some();
+    if legacy_used && new_used {
+        let ckw = PyDict::new(py);
+        if let Some(v) = a_min.as_ref() {
+            ckw.set_item("a_min", v.bind(py))?;
+        }
+        if let Some(v) = a_max.as_ref() {
+            ckw.set_item("a_max", v.bind(py))?;
+        }
+        if let Some(v) = min.as_ref() {
+            ckw.set_item("min", v.bind(py))?;
+        }
+        if let Some(v) = max.as_ref() {
+            ckw.set_item("max", v.bind(py))?;
+        }
+        if let Some(v) = out.as_ref() {
+            ckw.set_item("out", v.bind(py))?;
+        }
+        if let Some(k) = kwargs {
+            for (key, value) in k.iter() {
+                ckw.set_item(key, value)?;
+            }
+        }
+        return Ok(clip_fn.call((a.bind(py),), Some(&ckw))?.unbind());
+    }
+    // Effective bounds: prefer the explicit a_min/a_max spelling, else min/max.
+    // An absent bound becomes Python None, which the gate below routes to numpy
+    // (numpy clip with neither bound raises; one-sided bounds defer too).
+    let a_min: Py<PyAny> = a_min.or(min).unwrap_or_else(|| py.None());
+    let a_max: Py<PyAny> = a_max.or(max).unwrap_or_else(|| py.None());
+
     let a_for_fallback = a.clone_ref(py);
     let a_min_for_fallback = a_min.clone_ref(py);
     let a_max_for_fallback = a_max.clone_ref(py);

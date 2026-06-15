@@ -330,6 +330,39 @@ fn clip_basic_matches_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn clip_min_max_kwargs_match_numpy() -> Result<(), String> {
+    // numpy 2.0 renamed a_min/a_max -> min/max (each independently optional);
+    // the legacy a_min/a_max spelling is still accepted but cannot be mixed with
+    // min/max. Verify values AND error-parity (mixed spellings raise) vs the
+    // oracle. Each case prints either the flattened result or "ERR".
+    let arr = "np.array([1.0, 2.0, 3.0, 4.0, 5.0])";
+    let calls = vec![
+        "min=2.0, max=4.0",
+        "min=2.0",
+        "max=4.0",
+        "a_min=2.0, a_max=4.0",
+        "a_min=None, a_max=4.0",
+        "min=2.0, a_max=4.0", // mixed -> numpy TypeError
+        "a_min=2.0, max=4.0", // mixed -> numpy TypeError
+    ];
+    for call in &calls {
+        let body = |engine: &str| {
+            format!(
+                "try:\n    r = {engine}.clip({arr}, {call})\n    print(np.asarray(r).flatten().tolist())\n\
+                 except TypeError:\n    print('ERR')\n"
+            )
+        };
+        let numpy_out = numpy_oracle(&format!("import numpy as np\n{}", body("np")))?;
+        let rust_out = numpy_oracle(&fnp_script(body("fnp")))?;
+        assert_eq!(
+            numpy_out, rust_out,
+            "clip kwargs mismatch for ({call})\nnumpy: {numpy_out}\nrust:  {rust_out}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn clip_nan_handling_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         ("np.array([np.nan, 1.0, 2.0, np.nan])", "0.5", "1.5"),
