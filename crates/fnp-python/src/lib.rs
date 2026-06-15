@@ -39234,6 +39234,13 @@ enum EinsumSingleDiagonalKind {
     Diagonal,
 }
 
+#[derive(Clone, Copy)]
+enum EinsumSingleReduction2dKind {
+    All,
+    KeepFirstLabel,
+    KeepSecondLabel,
+}
+
 fn parse_single_operand_diagonal_einsum(subscripts: &str) -> Option<EinsumSingleDiagonalKind> {
     let compact = subscripts
         .chars()
@@ -39263,6 +39270,33 @@ fn parse_single_operand_diagonal_einsum(subscripts: &str) -> Option<EinsumSingle
                 None
             }
         }
+    }
+}
+
+fn parse_single_operand_reduction_2d_einsum(
+    subscripts: &str,
+) -> Option<EinsumSingleReduction2dKind> {
+    let compact = subscripts
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>();
+    if compact.contains(',') || compact.contains('.') {
+        return None;
+    }
+    let (input, output) = compact.split_once("->")?;
+    let labels: Vec<char> = input.chars().collect();
+    if labels.len() != 2
+        || labels[0] == labels[1]
+        || !labels.iter().all(|c| c.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    let out: Vec<char> = output.chars().collect();
+    match out.as_slice() {
+        [] => Some(EinsumSingleReduction2dKind::All),
+        [c] if *c == labels[0] => Some(EinsumSingleReduction2dKind::KeepFirstLabel),
+        [c] if *c == labels[1] => Some(EinsumSingleReduction2dKind::KeepSecondLabel),
+        _ => None,
     }
 }
 
@@ -39348,6 +39382,113 @@ fn try_zerocopy_f64_einsum_single_diagonal(
             Ok(Some(build_numpy_scalar_or_array(py, &result)?))
         }
     }
+}
+
+// Single-operand 2-D reductions ('ij->', 'ij->i', 'ij->j') are pure sums over
+// dropped axes. The native fallback already recognizes these, but only after
+// extracting the full operand into a UFuncArray. For large f64 ndarrays that copy
+// dominates. This path reads an exact contiguous float64 ndarray through PyBuffer
+// and streams the reduction directly; non-exact forms fall through unchanged.
+fn try_zerocopy_f64_einsum_single_reduction_2d(
+    py: Python<'_>,
+    subscripts: &str,
+    operand: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some(kind) = parse_single_operand_reduction_2d_einsum(subscripts) else {
+        return Ok(None);
+    };
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !operand.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, operand) {
+        return Ok(None);
+    }
+    let Ok(shape) = operand
+        .getattr("shape")
+        .and_then(|shape| shape.extract::<Vec<usize>>())
+    else {
+        return Ok(None);
+    };
+    if shape.len() != 2 {
+        return Ok(None);
+    }
+    let (nrows, ncols) = (shape[0], shape[1]);
+    let Some(expected_len) = nrows.checked_mul(ncols) else {
+        return Ok(None);
+    };
+    let Ok(buffer) = PyBuffer::<f64>::get(operand) else {
+        return Ok(None);
+    };
+    let Some(input) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if input.len() != expected_len {
+        return Ok(None);
+    }
+
+    let result = match kind {
+        EinsumSingleReduction2dKind::All => {
+            let mut acc = [0.0f64; 8];
+            let mut chunks = input.chunks_exact(8);
+            for group in chunks.by_ref() {
+                acc[0] += group[0].get();
+                acc[1] += group[1].get();
+                acc[2] += group[2].get();
+                acc[3] += group[3].get();
+                acc[4] += group[4].get();
+                acc[5] += group[5].get();
+                acc[6] += group[6].get();
+                acc[7] += group[7].get();
+            }
+            let mut sum = acc.iter().sum::<f64>();
+            for value in chunks.remainder() {
+                sum += value.get();
+            }
+            UFuncArray::new(vec![], vec![sum], DType::F64)
+        }
+        EinsumSingleReduction2dKind::KeepFirstLabel => {
+            if ncols == 0 {
+                UFuncArray::new(vec![nrows], vec![0.0; nrows], DType::F64)
+            } else {
+                let mut out = Vec::with_capacity(nrows);
+                for row in input.chunks_exact(ncols) {
+                    let mut acc = [0.0f64; 8];
+                    let mut chunks = row.chunks_exact(8);
+                    for group in chunks.by_ref() {
+                        acc[0] += group[0].get();
+                        acc[1] += group[1].get();
+                        acc[2] += group[2].get();
+                        acc[3] += group[3].get();
+                        acc[4] += group[4].get();
+                        acc[5] += group[5].get();
+                        acc[6] += group[6].get();
+                        acc[7] += group[7].get();
+                    }
+                    let mut sum = acc.iter().sum::<f64>();
+                    for value in chunks.remainder() {
+                        sum += value.get();
+                    }
+                    out.push(sum);
+                }
+                UFuncArray::new(vec![nrows], out, DType::F64)
+            }
+        }
+        EinsumSingleReduction2dKind::KeepSecondLabel => {
+            let mut out = vec![0.0f64; ncols];
+            if ncols != 0 {
+                for row in input.chunks_exact(ncols) {
+                    for (slot, value) in out.iter_mut().zip(row) {
+                        *slot += value.get();
+                    }
+                }
+            }
+            UFuncArray::new(vec![ncols], out, DType::F64)
+        }
+    };
+    let result = match result {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(build_numpy_scalar_or_array(py, &result)?))
 }
 
 // Two-operand FULL contraction to a scalar: subscripts of the form 'L,L->' where the
@@ -39453,7 +39594,7 @@ fn try_zerocopy_f64_einsum_full_contraction(
 // so the per-output accumulation order is fine: the row form uses an 8-accumulator dot per
 // row, the column form accumulates in row-ascending order per column. Non-2-D, transposed
 // ('ij,ji->i'), repeated-label, non-f64, non-contiguous, or unequal-shape operands defer.
-fn try_zerocopy_f64_einsum_pair_partial_2d(
+fn try_zerocopy_f64_einsum_pair_partial(
     py: Python<'_>,
     subscripts: &str,
     a: &Bound<'_, PyAny>,
@@ -39467,19 +39608,28 @@ fn try_zerocopy_f64_einsum_pair_partial_2d(
         return Ok(None);
     }
     let (lhs, rhs, out) = (parts[0].trim(), parts[1].trim(), outp.trim());
-    // Both operands carry the SAME two distinct labels; output is exactly one of them.
-    if lhs.len() != 2 || lhs != rhs || out.len() != 1 {
+    // Both operands carry the SAME distinct labels; output is a non-empty STRICT subset.
+    if lhs.is_empty() || lhs != rhs || out.is_empty() || out.contains('.') {
         return Ok(None);
     }
     let labels: Vec<char> = lhs.chars().collect();
-    if !labels.iter().all(|c| c.is_ascii_alphabetic()) || labels[0] == labels[1] {
+    let outc: Vec<char> = out.chars().collect();
+    if !labels.iter().all(|c| c.is_ascii_alphabetic())
+        || outc.len() >= labels.len()
+        || labels.iter().collect::<std::collections::HashSet<_>>().len() != labels.len()
+    {
         return Ok(None);
     }
-    let keep_first = match out.chars().next() {
-        Some(c) if c == labels[0] => true,
-        Some(c) if c == labels[1] => false,
-        _ => return Ok(None),
-    };
+    // Supported output shapes:
+    //   PREFIX: out == labels[0..k] — keep the leading k axes, sum the trailing
+    //     (contiguous) axes. out[g] = Σ_t a[g·block+t]·b[g·block+t], a contiguous
+    //     block dot. Covers 'ij,ij->i', 'ijk,ijk->i', 'ijk,ijk->ij'.
+    //   2-D SUFFIX: 'ij,ij->j' — keep the trailing axis, sum the leading (strided) one.
+    let is_prefix = labels[..outc.len()] == outc[..];
+    let is_2d_suffix = labels.len() == 2 && outc.len() == 1 && outc[0] == labels[1];
+    if !is_prefix && !is_2d_suffix {
+        return Ok(None);
+    }
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !a.is_exact_instance(&ndarray_type)
@@ -39495,48 +39645,54 @@ fn try_zerocopy_f64_einsum_pair_partial_2d(
     ) else {
         return Ok(None);
     };
-    if sa.len() != 2 || sa != sb {
+    if sa.len() != labels.len() || sa != sb {
         return Ok(None);
     }
-    let (nrows, ncols) = (sa[0], sa[1]);
+    let total: usize = sa.iter().product();
     let (Ok(ba), Ok(bb)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
         return Ok(None);
     };
     let (Some(va), Some(vb)) = (ba.as_slice(py), bb.as_slice(py)) else {
         return Ok(None); // non-contiguous
     };
-    if va.len() != nrows * ncols || vb.len() != va.len() {
+    if va.len() != total || vb.len() != total {
         return Ok(None);
     }
-    let out_values: Vec<f64> = if keep_first {
-        // out[i] = Σ_j a[i,j]·b[i,j] — each row is contiguous; 8-accumulator dot per row.
-        (0..nrows)
-            .map(|i| {
-                let ra = &va[i * ncols..(i + 1) * ncols];
-                let rb = &vb[i * ncols..(i + 1) * ncols];
-                let mut acc = [0.0f64; 8];
-                let mut ca = ra.chunks_exact(8);
-                let mut cb = rb.chunks_exact(8);
-                for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
-                    acc[0] += ga[0].get() * gb[0].get();
-                    acc[1] += ga[1].get() * gb[1].get();
-                    acc[2] += ga[2].get() * gb[2].get();
-                    acc[3] += ga[3].get() * gb[3].get();
-                    acc[4] += ga[4].get() * gb[4].get();
-                    acc[5] += ga[5].get() * gb[5].get();
-                    acc[6] += ga[6].get() * gb[6].get();
-                    acc[7] += ga[7].get() * gb[7].get();
-                }
-                let mut s = acc.iter().sum::<f64>();
-                for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
-                    s += x.get() * y.get();
-                }
-                s
-            })
-            .collect()
+    // Contiguous-block 8-accumulator dot — bit-stable per block, allclose vs numpy.
+    let block_dot = |ra: &[pyo3::buffer::ReadOnlyCell<f64>],
+                     rb: &[pyo3::buffer::ReadOnlyCell<f64>]|
+     -> f64 {
+        let mut acc = [0.0f64; 8];
+        let mut ca = ra.chunks_exact(8);
+        let mut cb = rb.chunks_exact(8);
+        for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
+            acc[0] += ga[0].get() * gb[0].get();
+            acc[1] += ga[1].get() * gb[1].get();
+            acc[2] += ga[2].get() * gb[2].get();
+            acc[3] += ga[3].get() * gb[3].get();
+            acc[4] += ga[4].get() * gb[4].get();
+            acc[5] += ga[5].get() * gb[5].get();
+            acc[6] += ga[6].get() * gb[6].get();
+            acc[7] += ga[7].get() * gb[7].get();
+        }
+        let mut s = acc.iter().sum::<f64>();
+        for (x, y) in ca.remainder().iter().zip(cb.remainder()) {
+            s += x.get() * y.get();
+        }
+        s
+    };
+    let (out_values, out_shape): (Vec<f64>, Vec<usize>) = if is_prefix {
+        // Keep leading outc.len() axes; sum the trailing (contiguous) block.
+        let n_groups: usize = sa[..outc.len()].iter().product();
+        let block = if n_groups == 0 { 0 } else { total / n_groups };
+        let vals = (0..n_groups)
+            .map(|g| block_dot(&va[g * block..(g + 1) * block], &vb[g * block..(g + 1) * block]))
+            .collect();
+        (vals, sa[..outc.len()].to_vec())
     } else {
-        // out[j] = Σ_i a[i,j]·b[i,j] — stream each row, fused multiply-add into the
-        // length-ncols accumulator (kept cache-resident); ascending-i order per column.
+        // 2-D suffix 'ij,ij->j': out[j] = Σ_i a[i,j]·b[i,j] — stream rows into a
+        // length-ncols accumulator (cache-resident); ascending-i order per column.
+        let (nrows, ncols) = (sa[0], sa[1]);
         let mut out = vec![0.0f64; ncols];
         for i in 0..nrows {
             let ra = &va[i * ncols..(i + 1) * ncols];
@@ -39545,10 +39701,9 @@ fn try_zerocopy_f64_einsum_pair_partial_2d(
                 *slot += x.get() * y.get();
             }
         }
-        out
+        (out, vec![ncols])
     };
-    let out_len = out_values.len();
-    let result = match UFuncArray::new(vec![out_len], out_values, DType::F64) {
+    let result = match UFuncArray::new(out_shape, out_values, DType::F64) {
         Ok(value) => value,
         Err(_) => return Ok(None),
     };
@@ -39686,6 +39841,15 @@ fn einsum_native(
     {
         return Ok(Some(result));
     }
+    if args.len() == 2
+        && let Some(result) = try_zerocopy_f64_einsum_single_reduction_2d(
+            py,
+            &subscripts,
+            &args.get_item(1)?,
+        )?
+    {
+        return Ok(Some(result));
+    }
     // Two-operand FULL contraction to a scalar ('ij,ij->', 'i,i->', 'abc,abc->'):
     // run BEFORE the per-operand UFuncArray extraction (which copies both inputs),
     // reading the buffers zero-copy. See the helper for the parity rationale.
@@ -39702,7 +39866,7 @@ fn einsum_native(
     // Two-operand 2-D partial contraction keeping one axis ('ij,ij->i' / 'ij,ij->j'):
     // also zero-copy, before the extraction that otherwise dominates.
     if args.len() == 3
-        && let Some(result) = try_zerocopy_f64_einsum_pair_partial_2d(
+        && let Some(result) = try_zerocopy_f64_einsum_pair_partial(
             py,
             &subscripts,
             &args.get_item(1)?,
@@ -86695,6 +86859,9 @@ mod tests {
                 ("abc,abc->", 5040, &[14, 12, 30]), // 3-D full contraction (fast path)
                 ("ij,ij->i", 4002, &[58, 69]), // 2-D partial keep-row (fast path)
                 ("ij,ij->j", 4002, &[58, 69]), // 2-D partial keep-col (fast path)
+                ("ijk,ijk->i", 1680, &[8, 14, 15]), // N-D prefix reduce keep-1 (fast path)
+                ("ijk,ijk->ij", 1680, &[8, 14, 15]), // N-D prefix reduce keep-2 (fast path)
+                ("ijkl,ijkl->ij", 1680, &[4, 6, 7, 10]), // 4-D prefix reduce (fast path)
                 ("i,j->ij", 60, &[60]),        // outer product (fast path)
                 ("ij,ji->", 4225, &[65, 65]),  // transpose contraction (deferred)
                 ("ij,ji->i", 4225, &[65, 65]), // transposed partial (deferred)
