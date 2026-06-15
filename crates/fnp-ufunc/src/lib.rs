@@ -20005,10 +20005,15 @@ impl UFuncArray {
                 if int_hi > int_lo {
                     while p + LANES <= int_hi {
                         let base = p - (m - 1);
+                        // Single bounds-checked slice of the (m-1+LANES)-wide input
+                        // window; the per-tap loads and the kr read below then index
+                        // local slices of known length, hoisting the per-tap checks
+                        // out of the hot reduction.
+                        let win = &a[base..p + LANES];
                         let mut acc = V::splat(0.0);
-                        for t in 0..m {
-                            let av = V::from_slice(&a[base + t..base + t + LANES]);
-                            acc += av * V::splat(kr[t]);
+                        for (t, &kv) in kr.iter().enumerate() {
+                            let av = V::from_slice(&win[t..t + LANES]);
+                            acc += av * V::splat(kv);
                         }
                         out[p - lo..p - lo + LANES].copy_from_slice(&acc.to_array());
                         p += LANES;
@@ -20023,22 +20028,14 @@ impl UFuncArray {
                     p += 1;
                 }
             };
-            if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
-                && n.saturating_mul(m) >= (CONVOLVE_PARALLEL_MIN_ELEMS << 3)
-                && rayon::current_num_threads() >= 2
-            {
-                let mut full = vec![0.0f64; full_len];
-                let threads = rayon::current_num_threads();
-                let chunk = (full_len / (threads * 2)).max(256);
-                full.par_chunks_mut(chunk)
-                    .enumerate()
-                    .for_each(|(c, out)| fill(out, c * chunk));
-                full
-            } else {
-                let mut full = vec![0.0f64; full_len];
-                fill(&mut full, 0);
-                full
-            }
+            // The short-kernel gather runs SERIALLY: with so few taps per output the
+            // op is memory-bandwidth bound, and splitting it across rayon worker
+            // threads lost to dispatch + per-chunk overhead at every measured size
+            // (e.g. n=50000,m=8 ran 4.4x SLOWER parallel than serial). One streaming
+            // pass over the output keeps the input window cache-resident.
+            let mut full = vec![0.0f64; full_len];
+            fill(&mut full, 0);
+            full
         } else if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
             && n.min(m) >= 2
             && rayon::current_num_threads() >= 2
