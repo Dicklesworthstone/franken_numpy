@@ -16,7 +16,7 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
     batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, complex_matmul, det_nxn, eigvalsh_nxn,
-    inv_nxn, matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn,
+    inv_nxn, kron_nxn, matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn,
     sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full, svd_nxn,
 };
 use std::hint::black_box;
@@ -399,11 +399,34 @@ fn bench_matrix_power(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_kron(c: &mut Criterion) {
+    let mut group = c.benchmark_group("kron_nxn");
+    let n = 64usize;
+    let p = 4usize;
+    let a = generate_random_matrix(n, 0x4b52_4f4e);
+    let mut b = vec![0.0f64; p * p];
+    for (i, row) in b.chunks_mut(p).enumerate() {
+        if let Some(slot) = row.get_mut(i) {
+            *slot = 1.0;
+        }
+    }
+
+    group.bench_function("kron_64x64_4x4_eye", |bench| {
+        bench.iter(|| {
+            let result = kron_nxn(black_box(&a), n, n, black_box(&b), p, p);
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_complex_matmul,
     bench_multi_dot,
     bench_matrix_power,
+    bench_kron,
     bench_solve,
     bench_det,
     bench_inv,

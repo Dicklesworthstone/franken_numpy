@@ -5210,7 +5210,7 @@ pub fn kron_nxn(
             }
         }
     };
-    const KRON_PAR_MIN: usize = 1 << 15;
+    const KRON_PAR_MIN: usize = 1 << 18;
     if out_count >= KRON_PAR_MIN && rayon::current_num_threads() >= 2 {
         result
             .par_chunks_mut(out_cols)
@@ -14464,7 +14464,7 @@ mod tests {
         // The parallel row-fill kron must be BIT-IDENTICAL to the serial nested
         // loop (each cell is a single product, no accumulation), across square and
         // rectangular factors and output sizes crossing the parallel threshold
-        // (1<<15). Reference is an independent serial implementation; values include
+        // (1<<18). Reference is an independent serial implementation; values include
         // NaN / ±inf / -0.0 to lock the exact product semantics.
         fn serial(a: &[f64], m: usize, n: usize, b: &[f64], p: usize, q: usize) -> Vec<f64> {
             let out_cols = n * q;
