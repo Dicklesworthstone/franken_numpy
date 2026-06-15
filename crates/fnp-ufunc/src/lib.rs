@@ -1166,6 +1166,7 @@ impl UnaryOp {
         matches!(
             self,
             Self::Abs
+                | Self::Square
                 | Self::Floor
                 | Self::Rint
                 | Self::Reciprocal
@@ -1196,7 +1197,7 @@ impl UnaryOp {
 
     pub const fn parallel_min_len(self) -> usize {
         match self {
-            Self::Abs | Self::Floor | Self::Rint | Self::Reciprocal => 1 << 20,
+            Self::Abs | Self::Square | Self::Floor | Self::Rint | Self::Reciprocal => 1 << 20,
             _ => 1 << 15,
         }
     }
@@ -42372,6 +42373,7 @@ print(json.dumps(payload))
             .collect();
         for op in [
             UnaryOp::Abs,
+            UnaryOp::Square,
             UnaryOp::Floor,
             UnaryOp::Rint,
             UnaryOp::Reciprocal,
