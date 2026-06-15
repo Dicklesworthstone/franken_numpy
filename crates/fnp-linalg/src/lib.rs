@@ -1354,6 +1354,8 @@ const CHOL_MID_PANEL: usize = 32;
 // blocks. The per-diagonal-block upper-triangle waste is ~SYRK_COL_BLOCK/trail of
 // the update flops, so a moderate width keeps the triangular saving near 2x.
 const SYRK_COL_BLOCK: usize = 256;
+const SYRK_MID_COL_BLOCK: usize = 64;
+const SYRK_MID_TRIANGULAR_MIN_TRAIL: usize = 384;
 
 // Minimum trailing-panel height for the parallel dtrsm panel solve. Below this the
 // rayon dispatch + L11 packing cost exceeds the per-row solve work, so the small
@@ -1456,9 +1458,10 @@ fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, Li
         // flops versus a full trail×trail GEMM (matching LAPACK dpotrf's dsyrk) and
         // subtracts directly into `work` with no product buffer, transpose, or subtract
         // pass. Strict-upper entries inside diagonal blocks are written stale but never
-        // read. Only worthwhile when the trailing GEMM is itself parallel-eligible
-        // (k = bw >= the GEMM parallel threshold); otherwise the block split just adds
-        // repack + dispatch overhead, so the small-panel path keeps the plain GEMM.
+        // read. Wide panels use the generic strided-GEMM parallel gate. Mid panels use
+        // smaller lower-triangular column tiles once the trailing matrix is wide enough:
+        // each lower cell still receives one ascending-k dot product, but strict-upper
+        // cells are not computed or written.
         let mut l21 = vec![0.0f64; trail * bw];
         for i in 0..trail {
             let src = (pend + i) * n + jb;
@@ -1516,6 +1519,31 @@ fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, Li
                         wrow[pend + j] -= s;
                     }
                 });
+        } else if trail >= SYRK_MID_TRIANGULAR_MIN_TRAIL {
+            let mut bblk = vec![0.0f64; bw * SYRK_MID_COL_BLOCK];
+            let mut c0 = 0;
+            while c0 < trail {
+                let cbw = SYRK_MID_COL_BLOCK.min(trail - c0);
+                let rows = trail - c0;
+                for r in 0..cbw {
+                    let arow = (c0 + r) * bw;
+                    for k in 0..bw {
+                        bblk[k * cbw + r] = l21[arow + k];
+                    }
+                }
+                let a_block = &l21[c0 * bw..trail * bw];
+                let dst = (pend + c0) * n + (pend + c0);
+                packed_gemm_sub_assign_strided(
+                    a_block,
+                    &bblk[..bw * cbw],
+                    rows,
+                    bw,
+                    cbw,
+                    n,
+                    &mut work[dst..],
+                );
+                c0 += cbw;
+            }
         } else {
             // Small-panel path: full trail×trail GEMM, subtract into the lower triangle.
             let mut l21t = vec![0.0f64; bw * trail];
@@ -13417,6 +13445,45 @@ mod tests {
         assert_eq!(
             digest, "5677abe4016141dfb737c906dc28a8d667526c7e96c5161771033e568c9a0e4e",
             "mid-panel cholesky golden digest drifted: {digest}"
+        );
+    }
+
+    #[test]
+    fn cholesky_mid_panel_512_output_golden_sha256() {
+        let n = 512usize;
+        assert_eq!(super::CHOL_MID_PANEL, 32);
+        let a = chol_spd(n, 0xA11C_E512);
+        let l = super::cholesky_nxn(&a, n).expect("mid-panel cholesky");
+        let mut max_recon = 0.0f64;
+        for i in 0..n {
+            for j in 0..=i {
+                let mut s = 0.0f64;
+                for k in 0..=j {
+                    s += l[i * n + k] * l[j * n + k];
+                }
+                max_recon =
+                    max_recon.max((s - a[i * n + j]).abs() / (1.0 + a[i * n + j].abs()));
+            }
+        }
+        assert!(
+            max_recon < 1e-9,
+            "mid-panel reconstruction drifted: {max_recon:e}"
+        );
+
+        let mut hasher = Sha256::new();
+        hasher.update(n.to_le_bytes());
+        hasher.update(super::CHOL_MID_PANEL.to_le_bytes());
+        for value in &l {
+            hasher.update(value.to_bits().to_le_bytes());
+        }
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "d282d58a92df1fe8bfdfb2e8989f8653869db53f7e517f5128dd13a1c8671ae7",
+            "mid-panel 512 cholesky golden digest drifted: {digest}"
         );
     }
 
