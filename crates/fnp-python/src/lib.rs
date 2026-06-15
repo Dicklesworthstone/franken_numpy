@@ -39555,6 +39555,95 @@ fn try_zerocopy_f64_einsum_pair_partial_2d(
     Ok(Some(build_numpy_scalar_or_array(py, &result)?))
 }
 
+// Two-operand OUTER product 'i,j->ij': out[i,j] = a[i]·b[j] from two 1-D operands,
+// distinct labels, output = both in order. The general einsum kernel copies both
+// operands then walks the Cartesian loop (~26x slower than numpy for a 1M output).
+// The two input vectors are tiny, so copy them into Vecs (the only serial read of the
+// !Sync PyBuffer cells) and fill the large output IN PARALLEL over rows — each output
+// row i is `a[i]·b[..]`, a scalar·vector broadcast written to a disjoint slice. Pure
+// product, no reduction, so parity is exact. Non-1-D, repeated labels, output not the
+// in-order label pair, non-f64 or non-contiguous operands defer.
+fn try_zerocopy_f64_einsum_outer_2vec(
+    py: Python<'_>,
+    subscripts: &str,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    use rayon::prelude::*;
+    let Some((inp, outp)) = subscripts.split_once("->") else {
+        return Ok(None);
+    };
+    let parts: Vec<&str> = inp.trim().split(',').collect();
+    if parts.len() != 2 {
+        return Ok(None);
+    }
+    let (lhs, rhs, out) = (parts[0].trim(), parts[1].trim(), outp.trim());
+    // Two distinct single labels; output is exactly the two in input order.
+    if lhs.len() != 1 || rhs.len() != 1 || lhs == rhs || out.len() != 2 {
+        return Ok(None);
+    }
+    let li = lhs.chars().next().unwrap();
+    let rj = rhs.chars().next().unwrap();
+    let outc: Vec<char> = out.chars().collect();
+    if !li.is_ascii_alphabetic() || !rj.is_ascii_alphabetic() || outc[0] != li || outc[1] != rj {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type)
+        || !b.is_exact_instance(&ndarray_type)
+        || !numpy_dtype_is_f64(py, a)
+        || !numpy_dtype_is_f64(py, b)
+    {
+        return Ok(None);
+    }
+    let (Ok(sa), Ok(sb)) = (
+        a.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
+        b.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
+    ) else {
+        return Ok(None);
+    };
+    if sa.len() != 1 || sb.len() != 1 {
+        return Ok(None);
+    }
+    let (na, nb) = (sa[0], sb[0]);
+    let (Ok(ba), Ok(bb)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
+        return Ok(None);
+    };
+    let (Some(va), Some(vb)) = (ba.as_slice(py), bb.as_slice(py)) else {
+        return Ok(None); // non-contiguous
+    };
+    if va.len() != na || vb.len() != nb {
+        return Ok(None);
+    }
+    // Copy the two small vectors out of the !Sync PyBuffer cells, then fill the large
+    // output in parallel over disjoint rows (out[i] = a[i]·b[..]).
+    let av: Vec<f64> = va.iter().map(|c| c.get()).collect();
+    let bv: Vec<f64> = vb.iter().map(|c| c.get()).collect();
+    let mut out_values = vec![0.0f64; na * nb];
+    if na * nb >= (1 << 15) && rayon::current_num_threads() >= 2 {
+        out_values
+            .par_chunks_mut(nb)
+            .zip(av.par_iter())
+            .for_each(|(row, &ai)| {
+                for (slot, &bj) in row.iter_mut().zip(&bv) {
+                    *slot = ai * bj;
+                }
+            });
+    } else {
+        for (row, &ai) in out_values.chunks_mut(nb).zip(&av) {
+            for (slot, &bj) in row.iter_mut().zip(&bv) {
+                *slot = ai * bj;
+            }
+        }
+    }
+    let result = match UFuncArray::new(vec![na, nb], out_values, DType::F64) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(build_numpy_scalar_or_array(py, &result)?))
+}
+
 fn einsum_native(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -39614,6 +39703,17 @@ fn einsum_native(
     // also zero-copy, before the extraction that otherwise dominates.
     if args.len() == 3
         && let Some(result) = try_zerocopy_f64_einsum_pair_partial_2d(
+            py,
+            &subscripts,
+            &args.get_item(1)?,
+            &args.get_item(2)?,
+        )?
+    {
+        return Ok(Some(result));
+    }
+    // Two-operand outer product ('i,j->ij'): copy the small vectors, fill in parallel.
+    if args.len() == 3
+        && let Some(result) = try_zerocopy_f64_einsum_outer_2vec(
             py,
             &subscripts,
             &args.get_item(1)?,
@@ -86595,8 +86695,10 @@ mod tests {
                 ("abc,abc->", 5040, &[14, 12, 30]), // 3-D full contraction (fast path)
                 ("ij,ij->i", 4002, &[58, 69]), // 2-D partial keep-row (fast path)
                 ("ij,ij->j", 4002, &[58, 69]), // 2-D partial keep-col (fast path)
+                ("i,j->ij", 60, &[60]),        // outer product (fast path)
                 ("ij,ji->", 4225, &[65, 65]),  // transpose contraction (deferred)
                 ("ij,ji->i", 4225, &[65, 65]), // transposed partial (deferred)
+                ("i,j->ji", 60, &[60]),        // transposed outer (deferred)
                 ("ii,ii->", 2500, &[50, 50]),  // repeated labels (deferred)
             ];
             for (subs, n, shape) in cases {
