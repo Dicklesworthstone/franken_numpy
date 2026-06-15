@@ -553,6 +553,50 @@ print(ok)
 }
 
 #[test]
+fn cov_corrcoef_long_observation_ufunc_gate_matches_numpy_sha256() -> Result<(), String> {
+    // Locks the long-observation UFuncArray route for rowvar=True/no-y f64 inputs.
+    // The route intentionally changes the accumulation tree, so equality is by
+    // NumPy-compatible allclose and the deterministic fnp output bytes are pinned.
+    let script = fnp_script(
+        r#"
+import hashlib
+rng = np.random.default_rng(13)
+X = rng.standard_normal((50, 5000))
+f_cov = np.asarray(fnp.cov(X))
+n_cov = np.asarray(np.cov(X))
+f_corr = np.asarray(fnp.corrcoef(X))
+n_corr = np.asarray(np.corrcoef(X))
+ok = (
+    f_cov.shape == n_cov.shape
+    and f_corr.shape == n_corr.shape
+    and np.allclose(f_cov, n_cov, rtol=1e-9, atol=1e-12, equal_nan=True)
+    and np.allclose(f_corr, n_corr, rtol=1e-9, atol=1e-12, equal_nan=True)
+)
+proof = bytearray()
+for arr in (f_cov, f_corr):
+    proof.extend(str(arr.shape).encode())
+    proof.extend(str(arr.dtype).encode())
+    proof.extend(np.ascontiguousarray(arr).view(np.uint8).tobytes())
+print(ok)
+print(hashlib.sha256(proof).hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.lines().next().unwrap_or_default(),
+        "True",
+        "long-observation cov/corrcoef route must match numpy"
+    );
+    assert_eq!(
+        result.lines().nth(1).unwrap_or_default(),
+        "72b7359608b619263e2194f0f0d802f27eb25cdbcf133acbecee0a2fa2919667",
+        "long-observation cov/corrcoef golden sha256 drifted"
+    );
+    Ok(())
+}
+
+#[test]
 fn cov_corrcoef_orientation_and_scalar_edge_cases_match_numpy() -> Result<(), String> {
     // Regression for two parity gaps: (1) a genuine 2-D (1, N) input with rowvar=False
     // is N variables -> (N, N), not a scalar (the old shape[0]!=1 guard wrongly skipped

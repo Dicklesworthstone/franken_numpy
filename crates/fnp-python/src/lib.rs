@@ -20831,6 +20831,66 @@ fn build_square_f64_matrix(
     Ok(Some(reshaped.unbind()))
 }
 
+enum RowvarCovCore {
+    Cov,
+    Corrcoef,
+}
+
+fn try_ufunc_rowvar_f64_cov_core(
+    py: Python<'_>,
+    m: &Bound<'_, PyAny>,
+    core: RowvarCovCore,
+) -> PyResult<Option<Py<PyAny>>> {
+    const MIN_VARS: usize = 16;
+    const MAX_SIMD_VARS_EXCLUSIVE: usize = 128;
+    const MIN_LONG_OBS: usize = 4096;
+    const MIN_WORK: usize = 1 << 18;
+
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !m.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = m.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(m) else {
+        return Ok(None);
+    };
+    let shape = in_buffer.shape();
+    if shape.len() != 2 {
+        return Ok(None);
+    }
+    let (n_vars, n_obs) = (shape[0], shape[1]);
+    if n_vars < MIN_VARS
+        || n_vars >= MAX_SIMD_VARS_EXCLUSIVE
+        || n_obs < MIN_LONG_OBS
+        || n_vars.saturating_mul(n_vars).saturating_mul(n_obs) < MIN_WORK
+    {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+
+    let values = input.iter().map(|cell| cell.get()).collect::<Vec<f64>>();
+    let array = match UFuncArray::new(vec![n_vars, n_obs], values, DType::F64) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    let result = match core {
+        RowvarCovCore::Cov => array.cov(),
+        RowvarCovCore::Corrcoef => array.corrcoef(),
+    };
+    match result {
+        Ok(value) => build_numpy_array_from_ufunc(py, &value).map(Some),
+        Err(_) => Ok(None),
+    }
+}
+
 fn try_zerocopy_cov_rowvar_f64(
     py: Python<'_>,
     m: &Bound<'_, PyAny>,
@@ -21079,6 +21139,13 @@ fn cov(
     // Fast path: rowvar=True with no y is the common shape and maps to a single
     // zero-copy parallel Gram (no transpose / extract / full-matrix allocations).
     if rowvar
+        && resolved_ddof == 1
+        && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
+        && let Some(out) = try_ufunc_rowvar_f64_cov_core(py, m_bound, RowvarCovCore::Cov)?
+    {
+        return Ok(out);
+    }
+    if rowvar
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_zerocopy_cov_rowvar_f64(py, m_bound, resolved_ddof)?
     {
@@ -21146,6 +21213,12 @@ fn corrcoef(
     let y_binding = y.as_ref().map(|value| value.bind(py));
     // Fast path: rowvar=True with no y maps to the zero-copy parallel-Gram cov + an
     // in-place normalize, avoiding the cold-allocation UFuncArray chain (see cov).
+    if rowvar
+        && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
+        && let Some(out) = try_ufunc_rowvar_f64_cov_core(py, x_bound, RowvarCovCore::Corrcoef)?
+    {
+        return Ok(out);
+    }
     if rowvar
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_zerocopy_corrcoef_rowvar_f64(py, x_bound)?
