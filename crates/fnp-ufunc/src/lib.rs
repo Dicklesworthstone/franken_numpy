@@ -1157,17 +1157,19 @@ impl UnaryOp {
         matches!(self, Self::Invert)
     }
 
-    /// Returns `true` for transcendental / special-function ops whose per-element
-    /// cost (a libm call or polynomial series) is high enough that mapping the op
-    /// across a large array is compute-bound and benefits from data parallelism.
-    /// Cheap arithmetic/bitwise/rounding ops are excluded — they are memory-bound
-    /// and would only pay the dispatch overhead. Per-element results are unchanged,
-    /// so parallel execution stays bit-for-bit identical to the serial map.
+    /// Returns `true` for large independent unary maps whose per-element work or
+    /// residual profile gap is high enough to amortize rayon chunk dispatch.
+    /// Per-element results are unchanged, so parallel execution stays bit-for-bit
+    /// identical to the serial map.
     #[must_use]
     pub const fn is_parallel_worth(self) -> bool {
         matches!(
             self,
-            Self::Exp
+            Self::Abs
+                | Self::Floor
+                | Self::Rint
+                | Self::Reciprocal
+                | Self::Exp
                 | Self::Exp2
                 | Self::Expm1
                 | Self::Log
@@ -1190,6 +1192,13 @@ impl UnaryOp {
                 | Self::Cbrt
                 | Self::I0
         )
+    }
+
+    pub const fn parallel_min_len(self) -> usize {
+        match self {
+            Self::Abs | Self::Floor | Self::Rint | Self::Reciprocal => 1 << 20,
+            _ => 1 << 15,
+        }
     }
 
     const fn tracks_float_errors(self) -> bool {
@@ -7817,15 +7826,14 @@ impl UFuncArray {
             return Self::from_values_with_dtype(self.shape.clone(), values, dtype);
         }
 
-        // Compute-bound transcendental ops over a large array parallelize across
-        // the rayon pool. Output is filled in element order across in-order chunks
-        // (identical to the serial map -> bit-exact), and per-chunk float-error
-        // flags are unioned (order-independent -> identical dispatch).
-        const UNARY_PARALLEL_MIN_LEN: usize = 1 << 15;
+        // Large eligible unary ops parallelize across the rayon pool. Output is
+        // filled in element order across in-order chunks (identical to the serial
+        // map -> bit-exact), and per-chunk float-error flags are unioned
+        // (order-independent -> identical dispatch).
         const UNARY_PARALLEL_CHUNK: usize = 8192;
         let n = self.values.len();
         if op.is_parallel_worth()
-            && n >= UNARY_PARALLEL_MIN_LEN
+            && n >= op.parallel_min_len()
             && rayon::current_num_threads() >= 2
         {
             let mut values = vec![0.0f64; n];
@@ -42357,6 +42365,33 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn residual_unary_parallel_matches_serial_bitwise_on_large_arrays() {
+        let n = (1usize << 20) + 777; // above the cheap-op threshold, not a chunk multiple
+        let data: Vec<f64> = (0..n)
+            .map(|i| (((i % 4096) as f64) - 2048.5) / 17.0)
+            .collect();
+        for op in [
+            UnaryOp::Abs,
+            UnaryOp::Floor,
+            UnaryOp::Rint,
+            UnaryOp::Reciprocal,
+        ] {
+            let arr = UFuncArray::new(vec![n], data.clone(), DType::F64).expect("arr");
+            let parallel = arr.try_elementwise_unary(op).expect("parallel unary");
+            let serial: Vec<f64> = data.iter().map(|&v| op.apply(v)).collect();
+            assert_eq!(
+                parallel
+                    .values()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                serial.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                "{op:?}: residual parallel path diverged from serial"
+            );
+        }
+    }
+
+    #[test]
     fn parallel_unary_raises_float_errors_like_serial() {
         // A domain error in any chunk must still trap in raise mode (per-chunk
         // flags are unioned before dispatch).
@@ -42377,6 +42412,26 @@ print(json.dumps(payload))
                 }
                 other => panic!("unexpected error: {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn parallel_unary_reciprocal_raises_divide_like_serial() {
+        let n = (1usize << 20) + 1;
+        let mut data = vec![1.0f64; n];
+        data[n - 3] = 0.0;
+        let arr = UFuncArray::new(vec![n], data, DType::F64).expect("arr");
+        let err = {
+            let _guard = errstate(None, Some(FloatErrorMode::Raise), None, None, None);
+            arr.try_elementwise_unary(UnaryOp::Reciprocal)
+                .expect_err("raise mode must trap reciprocal divide-by-zero")
+        };
+        match err {
+            UFuncError::FloatingPoint { kind, detail } => {
+                assert_eq!(kind, FloatErrorKind::Divide);
+                assert!(detail.contains(UnaryOp::Reciprocal.name()));
+            }
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 
