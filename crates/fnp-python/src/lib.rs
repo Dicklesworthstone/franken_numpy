@@ -8174,8 +8174,9 @@ fn try_zerocopy_int_clip(
 // (bead lglck). Returns Ok(None) for any non-f64 / non-contiguous / non-ndarray
 // input (caller falls through to the dtype-aware extract path).
 // Zero-copy np.nan_to_num for integer ndarrays. Integers cannot be NaN or +-inf,
-// so numpy.nan_to_num (copy=True, the only mode this binding exposes) is a pure
-// dtype- and layout-preserving copy regardless of the nan/posinf/neginf args. The
+// so numpy.nan_to_num (copy=True; the copy=False in-place mode is handled earlier by
+// delegating to numpy) is a pure dtype- and layout-preserving copy regardless of the
+// nan/posinf/neginf args. The
 // extract path instead routes integers through an f64 Vec + rebuild (~155-296x
 // slower, lossy for wide ints). numpy materializes the copy with np.array(x,
 // copy=True, order='K'), so x.copy(order='K') is bit- and layout-identical. Returns
@@ -17625,14 +17626,37 @@ fn modf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x, nan=0.0, posinf=None, neginf=None))]
+#[pyo3(signature = (x, copy=true, nan=0.0, posinf=None, neginf=None))]
 fn nan_to_num(
     py: Python<'_>,
     x: Py<PyAny>,
+    copy: bool,
     nan: f64,
     posinf: Option<f64>,
     neginf: Option<f64>,
 ) -> PyResult<Py<PyAny>> {
+    // copy=False asks numpy to replace NaN/+-inf IN PLACE on the input ndarray and
+    // return that same object (np.array(x, copy=False) is the input when x is already
+    // an ndarray). The native fast paths below all allocate a fresh result, so for the
+    // (rare) in-place mode delegate to numpy with copy=False to preserve exact aliasing
+    // semantics. copy=True (the default, and the overwhelmingly common call) keeps the
+    // native zero-extract paths.
+    if !copy {
+        let numpy = py.import("numpy")?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("copy", false)?;
+        kwargs.set_item("nan", nan)?;
+        if let Some(p) = posinf {
+            kwargs.set_item("posinf", p)?;
+        }
+        if let Some(n) = neginf {
+            kwargs.set_item("neginf", n)?;
+        }
+        return Ok(numpy
+            .getattr("nan_to_num")?
+            .call((x.bind(py),), Some(&kwargs))?
+            .unbind());
+    }
     // Zero-copy fast path for exact f64 ndarrays: their default posinf/neginf
     // are f64::MAX / f64::MIN (the dtype-aware defaults the slow path computes
     // for F64), so this is bit-identical while skipping the cold extract/build.

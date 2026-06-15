@@ -159,6 +159,34 @@ fn nan_to_num_custom_nan_matches_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn nan_to_num_copy_kwarg_matches_numpy() -> Result<(), String> {
+    // numpy signature: nan_to_num(x, copy=True, nan=0.0, posinf=None, neginf=None).
+    // copy=True returns a fresh array (input untouched); copy=False replaces NaN/+-inf
+    // IN PLACE on the input ndarray and returns that same object. Verify both the
+    // returned values and the aliasing/mutation behavior against the numpy oracle.
+    // Driver prints "<input_after>|<result>|<aliases>" for each engine.
+    let case = "np.array([np.nan, np.inf, -np.inf, 1.5])";
+
+    for (copy, nan) in [("True", "0.0"), ("False", "0.0"), ("False", "7.0")] {
+        let body = |engine: &str| {
+            format!(
+                "x = {case}\n\
+                 r = {engine}.nan_to_num(x, copy={copy}, nan={nan})\n\
+                 print(x.flatten().tolist(), '|', np.asarray(r).flatten().tolist(), '|', r is x)"
+            )
+        };
+        let numpy_out = numpy_oracle(&format!("import numpy as np\n{}", body("np")))?;
+        let rust_out = numpy_oracle(&fnp_script(body("fnp")))?;
+        assert_eq!(
+            numpy_out, rust_out,
+            "nan_to_num copy={copy} nan={nan} mismatch (input-after | result | aliases)\nnumpy: {numpy_out}\nrust:  {rust_out}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn nan_to_num_custom_nan_preserves_dtype_inf_defaults() -> Result<(), String> {
     let script = r#"
 import numpy as np
