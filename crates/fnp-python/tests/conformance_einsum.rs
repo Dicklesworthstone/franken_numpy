@@ -187,6 +187,53 @@ print(np.array_equal(result, expected) and np.array_equal(result, np.sum(a, axis
 }
 
 #[test]
+fn einsum_f64_single_operand_reduction_fast_path_golden_sha256() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+import hashlib
+a = (np.arange(63 * 67).astype(np.float64) * 0.125 - 7.0).reshape(63, 67)
+subs = ['ij->', 'ij->i', 'ij->j']
+h = hashlib.sha256()
+ok = True
+for sub in subs:
+    ours = np.asarray(fnp.einsum(sub, a))
+    theirs = np.asarray(np.einsum(sub, a))
+    ok = ok and ours.dtype == theirs.dtype
+    ok = ok and ours.shape == theirs.shape
+    ok = ok and np.allclose(ours, theirs)
+    h.update(sub.encode())
+    h.update(str(ours.dtype).encode())
+    h.update(str(ours.shape).encode())
+    h.update(ours.tobytes())
+for shape in [(0, 7), (5, 0), (0, 0)]:
+    empty = np.arange(shape[0] * shape[1], dtype=np.float64).reshape(shape)
+    for sub in subs:
+        ours = np.asarray(fnp.einsum(sub, empty))
+        theirs = np.asarray(np.einsum(sub, empty))
+        ok = ok and ours.dtype == theirs.dtype
+        ok = ok and ours.shape == theirs.shape
+        ok = ok and np.allclose(ours, theirs)
+print(ok)
+print(h.hexdigest())
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let mut lines = result.lines();
+    assert_eq!(
+        lines.next(),
+        Some("True"),
+        "einsum f64 single-operand reduction parity failed: {result}"
+    );
+    assert_eq!(
+        lines.next(),
+        Some("a20af4420189d8fe967cddcb2277893bd8ed7f1940779c4d0d0e3c02e1982999"),
+        "einsum f64 single-operand reduction golden digest drifted: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn einsum_single_operand_reductions_preserve_numpy_dtype_and_golden_sha256() -> Result<(), String> {
     let script = fnp_script(
         r#"
