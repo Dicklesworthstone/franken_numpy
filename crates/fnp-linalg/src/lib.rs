@@ -1490,6 +1490,32 @@ fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, Li
                 );
                 c0 += cbw;
             }
+        } else if trail >= PAR_TRSM_MIN_TRAIL && rayon::current_num_threads() >= 2 {
+            // Thin-panel parallel SYRK. A rank-bw trailing update (here bw = the mid-size
+            // panel, < MATMUL_PARALLEL_MIN_DIM) never trips packed_gemm's k>=128 parallel
+            // gate, so the small-panel `packed_gemm` above runs the entire trail×trail
+            // update on ONE core — the dominant cost and the whole mid-size (128<=n<896)
+            // cholesky vs-numpy gap (numpy's dpotrf parallelizes its dsyrk). Instead fan
+            // out over the LARGE trailing-row dimension: each trailing row i subtracts,
+            // for every lower-triangle column j<=i, the bw-term dot accumulated in k order
+            // — BYTE-IDENTICAL to the packed_gemm product subtract (same per-cell k-order;
+            // only the lower triangle is ever read downstream, so the strict upper is left
+            // untouched exactly as the old full-GEMM result was never read there). Disjoint
+            // output rows give unsafe-free rayon over contiguous row chunks.
+            work[pend * n..n * n]
+                .par_chunks_mut(n)
+                .enumerate()
+                .for_each(|(i, wrow)| {
+                    let li = &l21[i * bw..i * bw + bw];
+                    for j in 0..=i {
+                        let lj = &l21[j * bw..j * bw + bw];
+                        let mut s = 0.0f64;
+                        for k in 0..bw {
+                            s += li[k] * lj[k];
+                        }
+                        wrow[pend + j] -= s;
+                    }
+                });
         } else {
             // Small-panel path: full trail×trail GEMM, subtract into the lower triangle.
             let mut l21t = vec![0.0f64; bw * trail];
