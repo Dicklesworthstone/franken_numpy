@@ -10417,7 +10417,7 @@ fn try_zerocopy_int_cumsum(
     }
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    if kind != "i" && kind != "u" && kind != "b" {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
@@ -10430,6 +10430,20 @@ fn try_zerocopy_int_cumsum(
         return Ok(None);
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    // numpy promotes a bool cumsum to an int64 accumulator. bool buffers export '?'
+    // (PyBuffer<u8> rejects it) so read the 0/1 bytes via a zero-copy uint8 view. Was
+    // falling through to the f64-bridge extract path (~3.7x slower than numpy).
+    if kind == "b" {
+        let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+        return cumsum_typed::<u8, i64, _, _>(
+            py,
+            &numpy,
+            &viewed,
+            "int64",
+            |v| v as i64,
+            |a, b| a.wrapping_add(b),
+        );
+    }
     match (kind.as_str(), itemsize) {
         ("i", 1) => cumsum_typed::<i8, i64, _, _>(
             py,
@@ -10853,13 +10867,18 @@ fn try_zerocopy_int_cumsum_axis(
     }
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    if kind != "i" && kind != "u" && kind != "b" {
         return Ok(None);
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     let add_i64 = |x: i64, y: i64| x.wrapping_add(y);
     let add_u64 = |x: u64, y: u64| x.wrapping_add(y);
-    let result = match (kind.as_str(), itemsize) {
+    // bool -> int64 accumulator (uint8 view of the 0/1 bytes; see try_zerocopy_int_cumsum).
+    let result = if kind == "b" {
+        let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+        cumsum_axis_typed::<u8, i64, _, _>(py, &numpy, &viewed, axis, "int64", |v| v as i64, add_i64)?
+    } else {
+        match (kind.as_str(), itemsize) {
         ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
         ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
         ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, add_i64)?,
@@ -10869,6 +10888,7 @@ fn try_zerocopy_int_cumsum_axis(
         ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, add_u64)?,
         ("u", 8) => cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, add_u64)?,
         _ => return Ok(None),
+        }
     };
     let Some((flat, shape)) = result else {
         return Ok(None);
@@ -10965,7 +10985,7 @@ fn try_zerocopy_int_cumprod(
     }
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    if kind != "i" && kind != "u" && kind != "b" {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
@@ -10980,6 +11000,14 @@ fn try_zerocopy_int_cumprod(
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     let mul_i64 = |x: i64, y: i64| x.wrapping_mul(y);
     let mul_u64 = |x: u64, y: u64| x.wrapping_mul(y);
+    // numpy promotes a bool cumprod to an int64 accumulator (the 0/1 product never
+    // wraps). bool buffers export format '?', which PyBuffer<u8> rejects, so read the
+    // bytes through a zero-copy uint8 view. Was falling through to the f64-bridge
+    // extract path (~15x slower than numpy at 4M).
+    if kind == "b" {
+        let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+        return cumsum_typed::<u8, i64, _, _>(py, &numpy, &viewed, "int64", |v| v as i64, mul_i64);
+    }
     match (kind.as_str(), itemsize) {
         ("i", 1) => cumsum_typed::<i8, i64, _, _>(py, &numpy, a, "int64", |v| v as i64, mul_i64),
         ("i", 2) => cumsum_typed::<i16, i64, _, _>(py, &numpy, a, "int64", |v| v as i64, mul_i64),
@@ -11009,13 +11037,18 @@ fn try_zerocopy_int_cumprod_axis(
     }
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    if kind != "i" && kind != "u" && kind != "b" {
         return Ok(None);
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     let mul_i64 = |x: i64, y: i64| x.wrapping_mul(y);
     let mul_u64 = |x: u64, y: u64| x.wrapping_mul(y);
-    let result = match (kind.as_str(), itemsize) {
+    // bool -> int64 accumulator (uint8 view of the 0/1 bytes; see try_zerocopy_int_cumprod).
+    let result = if kind == "b" {
+        let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+        cumsum_axis_typed::<u8, i64, _, _>(py, &numpy, &viewed, axis, "int64", |v| v as i64, mul_i64)?
+    } else {
+        match (kind.as_str(), itemsize) {
         ("i", 1) => cumsum_axis_typed::<i8, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
         ("i", 2) => cumsum_axis_typed::<i16, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
         ("i", 4) => cumsum_axis_typed::<i32, i64, _, _>(py, &numpy, a, axis, "int64", |v| v as i64, mul_i64)?,
@@ -11025,6 +11058,7 @@ fn try_zerocopy_int_cumprod_axis(
         ("u", 4) => cumsum_axis_typed::<u32, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v as u64, mul_u64)?,
         ("u", 8) => cumsum_axis_typed::<u64, u64, _, _>(py, &numpy, a, axis, "uint64", |v| v, mul_u64)?,
         _ => return Ok(None),
+        }
     };
     let Some((flat, shape)) = result else {
         return Ok(None);
