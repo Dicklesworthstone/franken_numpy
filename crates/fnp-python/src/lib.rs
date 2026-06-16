@@ -16226,11 +16226,14 @@ fn fix_invalid(
     // Fast path: the generic extract -> fix -> rebuild round-trip below runs ~22x
     // slower than numpy.ma.fix_invalid (114ms vs 5ms @4M f64) because it copies the
     // data through an owned Vec and reconstructs the MaskedArray. numpy's own
-    // fix_invalid is the parity reference here, so for the common case — a float64
-    // array/MaskedArray with no extra `mask` and no `fill_value` override — defer to
-    // numpy directly. Integer dtypes, an explicit mask, or a fill_value override keep
-    // the Rust-port path (which carries fnp-specific fill-value propagation).
-    if mask.is_none() && fill_value.is_none() && numpy_dtype_is_f64(py, &asanyarray) {
+    // fix_invalid is the parity reference, so for float64 inputs defer to numpy
+    // directly. This is also strictly MORE correct than the Rust-port path: numpy
+    // treats `fill_value` purely as the REPLACEMENT value for invalid entries and
+    // leaves the output's .fill_value at the dtype default, whereas the port path
+    // wrongly copied the override onto the output's fill_value (bead ris7w). numpy
+    // accepts the `mask` and `fill_value` kwargs natively, so all f64 shapes route
+    // here. Integer dtypes keep the Rust path.
+    if numpy_dtype_is_f64(py, &asanyarray) {
         return fallback();
     }
     let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
