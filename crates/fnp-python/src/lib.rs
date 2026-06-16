@@ -41103,6 +41103,77 @@ fn bitwise_and(
     native_binary_bitwise_and_or_passthrough(py, args, kwargs)
 }
 
+// Zero-copy popcount for a contiguous integer ndarray. np.bitwise_count is a ~1-cycle
+// POPCNT per element, so the cost is dominated by data movement: the generic path
+// extracts the input into fnp's f64-values + i64/u64-sidecar dual representation
+// (~16 bytes/elem copied) before counting and then rebuilds the output. Here we read
+// the integer buffer directly per dtype, map each element through count_ones()
+// (which lowers to POPCNT), and write straight into a uint8 numpy.empty output —
+// dropping both the dual-rep extract and the build copy. Signed integers count the
+// bits of the unsigned magnitude (numpy's documented behaviour, matching the native
+// kernel's v.unsigned_abs().count_ones()). Returns Ok(None) for any case the typed
+// path can't handle (0-d/scalar, non-contiguous, bool, non-integer) so the caller
+// falls back. Bit-identical to the native kernel.
+fn try_zerocopy_bitwise_count(
+    py: Python<'_>,
+    array: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !array.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = array.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    let shape: Vec<usize> = array.getattr("shape")?.extract()?;
+    if shape.is_empty() {
+        return Ok(None); // 0-d -> numpy returns a uint8 scalar; let the caller handle it
+    }
+    let total: usize = shape.iter().product();
+
+    fn pop_map<T: pyo3::buffer::Element + Copy>(
+        py: Python<'_>,
+        array: &Bound<'_, PyAny>,
+        total: usize,
+        f: impl Fn(T) -> u8,
+    ) -> Option<Vec<u8>> {
+        let buf = PyBuffer::<T>::get(array).ok()?;
+        let slice = buf.as_slice(py)?; // None if non-contiguous
+        if slice.len() != total {
+            return None;
+        }
+        Some(slice.iter().map(|cell| f(cell.get())).collect())
+    }
+
+    let counts: Option<Vec<u8>> = match (kind.as_str(), itemsize) {
+        ("u", 1) => pop_map::<u8>(py, array, total, |v| v.count_ones() as u8),
+        ("u", 2) => pop_map::<u16>(py, array, total, |v| v.count_ones() as u8),
+        ("u", 4) => pop_map::<u32>(py, array, total, |v| v.count_ones() as u8),
+        ("u", 8) => pop_map::<u64>(py, array, total, |v| v.count_ones() as u8),
+        ("i", 1) => pop_map::<i8>(py, array, total, |v| v.unsigned_abs().count_ones() as u8),
+        ("i", 2) => pop_map::<i16>(py, array, total, |v| v.unsigned_abs().count_ones() as u8),
+        ("i", 4) => pop_map::<i32>(py, array, total, |v| v.unsigned_abs().count_ones() as u8),
+        ("i", 8) => pop_map::<i64>(py, array, total, |v| v.unsigned_abs().count_ones() as u8),
+        _ => return Ok(None),
+    };
+    let Some(counts) = counts else {
+        return Ok(None);
+    };
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let out = numpy.call_method("empty", (PyTuple::new(py, &shape)?,), Some(&kwargs))?;
+    let out_buf =
+        PyBuffer::<u8>::get(&out).map_err(|e| PyValueError::new_err(e.to_string()))?;
+    let Some(out_slice) = out_buf.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    for (slot, &count) in out_slice.iter().zip(&counts) {
+        slot.set(count);
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (x, **kwargs))]
 fn bitwise_count(
@@ -41127,6 +41198,11 @@ fn bitwise_count(
 
     // bitwise_count only works on integer and bool types
     if kind.as_str() == "i" || kind.as_str() == "u" || kind.as_str() == "b" {
+        // Zero-copy POPCNT path for contiguous integer arrays (skips the f64+sidecar
+        // dual-representation extract that dominates this op).
+        if let Some(out) = try_zerocopy_bitwise_count(py, &array)? {
+            return Ok(out);
+        }
         let arr = match extract_numeric_array(py, &array, "bitwise_count(x)") {
             Ok(a) => a,
             Err(_) => {
