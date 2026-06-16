@@ -39724,7 +39724,6 @@ fn try_zerocopy_f64_einsum_outer_2vec(
     a: &Bound<'_, PyAny>,
     b: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    use rayon::prelude::*;
     let Some((inp, outp)) = subscripts.split_once("->") else {
         return Ok(None);
     };
@@ -39743,15 +39742,11 @@ fn try_zerocopy_f64_einsum_outer_2vec(
     if !li.is_ascii_alphabetic() || !rj.is_ascii_alphabetic() || outc[0] != li || outc[1] != rj {
         return Ok(None);
     }
-    let numpy = py.import("numpy")?;
-    let ndarray_type = numpy.getattr("ndarray")?;
-    if !a.is_exact_instance(&ndarray_type)
-        || !b.is_exact_instance(&ndarray_type)
-        || !numpy_dtype_is_f64(py, a)
-        || !numpy_dtype_is_f64(py, b)
-    {
-        return Ok(None);
-    }
+    // 'i,j->ij' with two 1-D operands is exactly np.outer(a, b). Delegate to the shared
+    // f64 outer fast path, which fills the result DIRECTLY into the np.empty output buffer
+    // (no intermediate Vec + build copy that the prior einsum-local fill incurred) and so
+    // beats numpy. Require 1-D operands so the single-label semantics hold (np.outer would
+    // ravel a higher-rank operand, which einsum 'i,j->ij' does not).
     let (Ok(sa), Ok(sb)) = (
         a.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
         b.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
@@ -39761,42 +39756,7 @@ fn try_zerocopy_f64_einsum_outer_2vec(
     if sa.len() != 1 || sb.len() != 1 {
         return Ok(None);
     }
-    let (na, nb) = (sa[0], sb[0]);
-    let (Ok(ba), Ok(bb)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
-        return Ok(None);
-    };
-    let (Some(va), Some(vb)) = (ba.as_slice(py), bb.as_slice(py)) else {
-        return Ok(None); // non-contiguous
-    };
-    if va.len() != na || vb.len() != nb {
-        return Ok(None);
-    }
-    // Copy the two small vectors out of the !Sync PyBuffer cells, then fill the large
-    // output in parallel over disjoint rows (out[i] = a[i]·b[..]).
-    let av: Vec<f64> = va.iter().map(|c| c.get()).collect();
-    let bv: Vec<f64> = vb.iter().map(|c| c.get()).collect();
-    let mut out_values = vec![0.0f64; na * nb];
-    if na * nb >= (1 << 15) && rayon::current_num_threads() >= 2 {
-        out_values
-            .par_chunks_mut(nb)
-            .zip(av.par_iter())
-            .for_each(|(row, &ai)| {
-                for (slot, &bj) in row.iter_mut().zip(&bv) {
-                    *slot = ai * bj;
-                }
-            });
-    } else {
-        for (row, &ai) in out_values.chunks_mut(nb).zip(&av) {
-            for (slot, &bj) in row.iter_mut().zip(&bv) {
-                *slot = ai * bj;
-            }
-        }
-    }
-    let result = match UFuncArray::new(vec![na, nb], out_values, DType::F64) {
-        Ok(value) => value,
-        Err(_) => return Ok(None),
-    };
-    Ok(Some(build_numpy_scalar_or_array(py, &result)?))
+    try_zerocopy_f64_outer(py, a, b)
 }
 
 // Two-operand MATRIX·VECTOR contraction 'ij,j->i' (out[i] = Σ_j A[i,j]·v[j], a matvec)
