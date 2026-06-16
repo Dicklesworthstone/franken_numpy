@@ -1339,25 +1339,29 @@ pub fn solve_triangular(
 // Blocked Cholesky engages at this dimension (same crossover rationale as the
 // blocked LU); below it the unblocked dot-product factorization wins. Panel width
 // >= the GEMM parallel gate (128) so the trailing-update GEMM runs parallel.
-const CHOL_BLOCK_MIN: usize = 896;
-const CHOL_PANEL_NB: usize = 128;
-// Mid-size matrices (below the large-n crossover) were factored by the unblocked
-// dot-product kernel, leaving them ~3.8x behind numpy at n=256. They now route
-// through the same blocked kernel with a narrow panel: a small diagonal block
-// keeps the scalar panel work tiny and pushes the bulk of the flops into the
-// vectorized, band-parallel trailing-update GEMM. Large-n behaviour is unchanged
-// (it keeps CHOL_PANEL_NB), so the shipped n>=896 path is bit-identical.
+// The blocked Cholesky factors each nb-wide diagonal block with an UNBLOCKED scalar
+// dot-product kernel (step 1 of cholesky_blocked), costing O(nb^3/3) scalar flops per
+// panel. A wide panel therefore serializes a large chunk of scalar work that the
+// (parallel, register-tiled) trailing GEMM/SYRK cannot recover. The previous 128-wide
+// large-n panel left Cholesky 1.6-2.2x behind numpy at n=896-2048; profiling (low
+// load, vs numpy) shows narrow panels win across the board:
+//   n=896/1024   nb=32 -> 1.04 / 1.73   (nb=128 gave 1.62 / 2.19)
+//   n=1536/2048  nb=64 -> 1.35 / 1.40   (nb=32 drifts to 1.47 / 1.50, nb=128 ~1.53)
+//   n in [384,640) nb=64 (prior mid tuning; 512-ish regime likes a wider panel)
 const CHOL_MID_MIN: usize = 128;
-const CHOL_MID_PANEL: usize = 32;
 
-// Same-worker profiling shows the 512-ish regime benefits from aggregating
-// trailing updates behind a wider panel, while 256 and 768 regress or flatten
-// with a global 64-wide panel. Keep the old width outside that measured band.
-const fn cholesky_mid_panel_width(n: usize) -> usize {
-    if n >= 384 && n < 640 {
+// One width policy for every blocked size. Narrow below the large-n crossover (keeps
+// the scalar diagonal block tiny); 64 once the matrix is large enough that the wider
+// rank-64 trailing GEMM amortizes its extra diagonal cost.
+const fn cholesky_panel_width(n: usize) -> usize {
+    if n >= 1280 {
+        64
+    } else if n >= 640 {
+        32
+    } else if n >= 384 {
         64
     } else {
-        CHOL_MID_PANEL
+        32
     }
 }
 
@@ -1606,11 +1610,8 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         ));
     }
 
-    if n >= CHOL_BLOCK_MIN {
-        return cholesky_blocked(a, n, CHOL_PANEL_NB);
-    }
     if n >= CHOL_MID_MIN {
-        return cholesky_blocked(a, n, cholesky_mid_panel_width(n));
+        return cholesky_blocked(a, n, cholesky_panel_width(n));
     }
 
     let mut l = vec![0.0; n * n];
@@ -13899,7 +13900,7 @@ mod tests {
     #[test]
     fn cholesky_mid_panel_256_output_golden_sha256() {
         let n = 256usize;
-        let panel = super::cholesky_mid_panel_width(n);
+        let panel = super::cholesky_panel_width(n);
         assert_eq!(panel, 32);
         let a = chol_spd(n, 0x5A5A_5A5A);
         let l = super::cholesky_nxn(&a, n).expect("mid-panel cholesky");
@@ -13939,7 +13940,7 @@ mod tests {
     #[test]
     fn cholesky_mid_panel_512_output_golden_sha256() {
         let n = 512usize;
-        let panel = super::cholesky_mid_panel_width(n);
+        let panel = super::cholesky_panel_width(n);
         assert_eq!(panel, 64);
         let a = chol_spd(n, 0xA11C_E512);
         let l = super::cholesky_nxn(&a, n).expect("mid-panel cholesky");
