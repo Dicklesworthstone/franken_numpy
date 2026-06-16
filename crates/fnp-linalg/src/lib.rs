@@ -3994,7 +3994,12 @@ fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>,
             }
         }
 
-        // Symmetric rank-2k trailing update A22 -= V·Wᵀ + W·Vᵀ via packed GEMM.
+        // Symmetric rank-2k trailing update A22 -= V·Wᵀ + W·Vᵀ.
+        // The panel width is 64, below packed_gemm's k-parallel cutoff, so the
+        // old two-GEMM materialization ran the dominant update serially and then
+        // streamed two trail×trail temporaries back into A22. The fused helper
+        // keeps the same k-ascending rank-2k formula while parallelizing across
+        // independent output rows and avoiding both materialized products.
         let trail = n - pend;
         if trail > 0 {
             let off = pend - jb;
@@ -4006,22 +4011,7 @@ fn tridiag_reduce_blocked(a: &[f64], n: usize, accumulate_q: bool) -> (Vec<f64>,
                     wtr[i * nb + t] = ww[(off + i) * nb + t];
                 }
             }
-            let mut vt = vec![0.0f64; nb * trail];
-            let mut wt = vec![0.0f64; nb * trail];
-            for i in 0..trail {
-                for t in 0..nb {
-                    vt[t * trail + i] = vtr[i * nb + t];
-                    wt[t * trail + i] = wtr[i * nb + t];
-                }
-            }
-            let vwt = packed_gemm(&vtr, &wt, trail, nb, trail); // V·Wᵀ
-            let wvt = packed_gemm(&wtr, &vt, trail, nb, trail); // W·Vᵀ
-            for i in 0..trail {
-                let dst = (pend + i) * n + pend;
-                for jj in 0..trail {
-                    work[dst + jj] -= vwt[i * trail + jj] + wvt[i * trail + jj];
-                }
-            }
+            sbr_apply_symmetric_rank2k_update(&mut work, n, pend, trail, nb, &vtr, &wtr);
         }
 
         // Q := Q·(H_jb·…·H_{pend-1}) = Q·(I − V·T·Vᵀ) via the compact-WY block
@@ -13204,6 +13194,64 @@ mod tests {
         }
         assert!(max_d < 1e-8, "parallel-matvec tridiag d err {max_d:e}");
         assert!(max_e < 1e-8, "parallel-matvec tridiag e err {max_e:e}");
+    }
+
+    #[test]
+    fn tridiag_rank2k_fused_update_preserves_spectra_and_golden_sha256() {
+        let n = 160usize;
+        let mut cases = Vec::new();
+        cases.push(chol_spd(n, 0x2130_0001));
+
+        let mut repeated = vec![0.0f64; n * n];
+        for i in 0..n {
+            repeated[i * n + i] = if i < n / 2 { 2.0 } else { 9.0 };
+            if i + 1 < n {
+                repeated[i * n + i + 1] = 0.125;
+                repeated[(i + 1) * n + i] = 0.125;
+            }
+        }
+        cases.push(repeated);
+
+        let mut indefinite = vec![0.0f64; n * n];
+        for i in 0..n {
+            indefinite[i * n + i] = i as f64 - (n as f64 / 2.0);
+            for j in (i + 1)..n {
+                let value = ((i * 19 + j * 37 + 11) % 29) as f64 / 47.0 - 0.3;
+                indefinite[i * n + j] = value;
+                indefinite[j * n + i] = value;
+            }
+        }
+        cases.push(indefinite);
+
+        let mut hasher = Sha256::new();
+        for (case_idx, a) in cases.iter().enumerate() {
+            let (mut ref_d, mut ref_e) = tridiag_unblocked_ref(a, n);
+            super::tridiag_eig_qr(&mut ref_d, &mut ref_e, None, n);
+            ref_d.sort_by(|a, b| a.total_cmp(b));
+
+            let mut eigvals = super::eigvalsh_nxn(a, n).expect("blocked eigvalsh");
+            eigvals.sort_by(|a, b| a.total_cmp(b));
+            for (idx, (&lhs, &rhs)) in ref_d.iter().zip(&eigvals).enumerate() {
+                let err = (lhs - rhs).abs() / (1.0 + lhs.abs().max(rhs.abs()));
+                assert!(
+                    err < 2e-8,
+                    "case {case_idx} eigval {idx} drifted: reference {lhs} vs blocked {rhs}, rel {err:e}"
+                );
+            }
+            for value in eigvals {
+                hasher.update(value.to_bits().to_le_bytes());
+            }
+        }
+
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "d98865db162f1bffd8abacf1f8301ea5da5174b43eeb152a97ad1047edd1707e",
+            "fused rank-2k tridiagonalization golden digest drifted: {digest}"
+        );
     }
 
     fn q_t_a_q(a: &[f64], q: &[f64], n: usize) -> Vec<f64> {
