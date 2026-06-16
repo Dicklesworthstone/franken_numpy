@@ -4176,13 +4176,14 @@ fn extract_precise_numeric_array(
         DType::U16 => ArrayStorage::U16(numpy_cast_contiguous_to_vec::<u16>(py, &flat, "uint16")?),
         DType::U32 => ArrayStorage::U32(numpy_cast_contiguous_to_vec::<u32>(py, &flat, "uint32")?),
         DType::U64 => ArrayStorage::U64(numpy_cast_contiguous_to_vec::<u64>(py, &flat, "uint64")?),
-        // f16 has no native Rust buffer Element; keep the PyList path (read as f32).
+        // f16 has no PyBuffer Element; read the raw 2-byte values through a zero-copy
+        // uint16 view (f16 and uint16 share a 2-byte layout, so .view is valid on any
+        // layout) and reconstruct via f16::from_bits. The old astype->tolist->Vec<f32>
+        // path boxed one Python float per element — ~2500x slower than numpy on a 4M abs.
         DType::F16 => ArrayStorage::F16(
-            flat.call_method1("astype", ("float16",))?
-                .call_method0("tolist")?
-                .extract::<Vec<f32>>()?
+            numpy_cast_contiguous_to_vec::<u16>(py, &flat.call_method1("view", ("uint16",))?, "uint16")?
                 .into_iter()
-                .map(f16::from_f32)
+                .map(f16::from_bits)
                 .collect(),
         ),
         DType::F32 => ArrayStorage::F32(numpy_cast_contiguous_to_vec::<f32>(py, &flat, "float32")?),
@@ -6008,13 +6009,17 @@ fn extract_storage_from_flat_array(
                 .call_method0("tolist")?
                 .extract::<Vec<u64>>()?,
         )),
+        // f16: zero-copy uint16 view -> f16::from_bits (the astype->tolist->Vec<f32>
+        // path boxed one Python float per element, ~2500x slower than numpy on abs).
         DType::F16 => Ok(ArrayStorage::F16(
-            flat.call_method1("astype", ("float16",))?
-                .call_method0("tolist")?
-                .extract::<Vec<f32>>()?
-                .into_iter()
-                .map(f16::from_f32)
-                .collect(),
+            numpy_cast_contiguous_to_vec::<u16>(
+                flat.py(),
+                &flat.call_method1("view", ("uint16",))?,
+                "uint16",
+            )?
+            .into_iter()
+            .map(f16::from_bits)
+            .collect(),
         )),
         DType::F32 => Ok(ArrayStorage::F32(
             flat.call_method1("astype", ("float32",))?
@@ -11923,16 +11928,13 @@ fn build_numpy_array_from_storage(
             u8_arr.call_method1("view", (bool_dtype,))?
         }
         ArrayStorage::F16(values) => {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("dtype", "float16")?;
-            numpy.call_method(
-                "array",
-                (PyList::new(
-                    py,
-                    values.iter().map(|value| f32::from(*value)),
-                )?,),
-                Some(&kwargs),
-            )?
+            // Write the raw 2-byte values through the uint16 buffer fast path (one
+            // memcpy) and reinterpret as float16 with a zero-copy .view — bit-identical
+            // to the old per-element PyList(f32) construction, which boxed one Python
+            // float per element (~1700x slower than numpy on a 4M abs/sqrt result).
+            let bits: Vec<u16> = values.iter().map(|value| value.to_bits()).collect();
+            let u16_arr = numpy_array_from_slice(py, &numpy, &bits, "uint16")?;
+            u16_arr.call_method1("view", ("float16",))?
         }
         unsupported => {
             return Err(PyTypeError::new_err(format!(
@@ -25584,6 +25586,13 @@ fn native_unary_elementwise(
     let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
         Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind())
     };
+    // float16: numpy's f16 unary ufuncs (computed via an f16<->f32 path) are the
+    // reference and are far faster than fnp's native f16 round-trip (no f16 PyBuffer
+    // Element, so the value Vec is rebuilt through the dtype bridge — ~80ms vs numpy's
+    // <1ms for a 4M abs). numpy is bit-identical for these element ops, so defer f16.
+    if numpy_dtype_is_f16(x) {
+        return fallback(py);
+    }
     // Zero-copy fast path: exact float64 C-contiguous ndarray inputs skip the
     // cold extract Vec entirely (see zerocopy_f64_unary_flat). Bit-identical to
     // the direct output path below; all other inputs fall through unchanged.
