@@ -5162,13 +5162,14 @@ fn masked_scalar_compare(
             if let Some(pred) = pred
                 && let Some(mask) = try_zerocopy_f64_predicate(py, x.bind(py), move |a| pred(a, v))?
             {
+                // masked_where (numpy's own internal path for these wrappers) shrinks an
+                // all-False mask to nomask, matching numpy exactly.
                 let kwargs = PyDict::new(py);
-                kwargs.set_item("mask", mask.bind(py))?;
                 kwargs.set_item("copy", copy)?;
-                let result = numpy
-                    .getattr("ma")?
-                    .getattr("array")?
-                    .call((x.bind(py),), Some(&kwargs))?;
+                let result = numpy.getattr("ma")?.getattr("masked_where")?.call(
+                    (mask.bind(py), x.bind(py)),
+                    Some(&kwargs),
+                )?;
                 if numpy_name == "masked_equal" {
                     result.setattr("fill_value", v)?;
                 }
@@ -5320,6 +5321,38 @@ fn masked_interval_compare(
             )?
             .unbind())
     };
+
+    // Fast path: a PLAIN float64 ndarray x + scalar float bounds. masked_inside masks
+    // lo<=x<=hi, masked_outside masks x<lo|x>hi (lo=min(v1,v2), hi=max). Compute the mask
+    // zero-copy from x's buffer and build np.ma.array(x, mask, copy) reusing x, skipping
+    // the extract+clone+rebuild (~13x slower). Already-masked / non-f64 / array-bound
+    // inputs fall through to the generic path.
+    {
+        let numpy = py.import("numpy")?;
+        let ndarray_type = numpy.getattr("ndarray")?;
+        if x.bind(py).get_type().is(&ndarray_type)
+            && numpy_dtype_is_f64(py, x.bind(py))
+            && let (Ok(a), Ok(b)) = (v1.bind(py).extract::<f64>(), v2.bind(py).extract::<f64>())
+        {
+            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+            let pred = move |v: f64| {
+                if outside {
+                    v < lo || v > hi
+                } else {
+                    v >= lo && v <= hi
+                }
+            };
+            if let Some(mask) = try_zerocopy_f64_predicate(py, x.bind(py), pred)? {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("copy", copy)?;
+                return Ok(numpy
+                    .getattr("ma")?
+                    .getattr("masked_where")?
+                    .call((mask.bind(py), x.bind(py)), Some(&kwargs))?
+                    .unbind());
+            }
+        }
+    }
 
     let Some(masked_x) = extract_numeric_masked_array(py, x.bind(py), context)? else {
         return fallback();
@@ -16078,6 +16111,28 @@ fn masked_invalid(py: Python<'_>, a: Py<PyAny>, copy: bool) -> PyResult<Py<PyAny
 
     if !copy {
         return fallback();
+    }
+
+    // Fast path: a PLAIN float64 ndarray. np.ma.masked_invalid(a) =
+    // np.ma.array(a, mask=~isfinite(a)). Compute the mask zero-copy from a's buffer (the
+    // ~isfinite predicate) and build with numpy's constructor reusing the original a,
+    // skipping the extract+clone+rebuild (~16x slower). Already-masked / non-f64 inputs
+    // fall through to the generic path.
+    {
+        let numpy = py.import("numpy")?;
+        let ndarray_type = numpy.getattr("ndarray")?;
+        if a.bind(py).get_type().is(&ndarray_type)
+            && numpy_dtype_is_f64(py, a.bind(py))
+            && let Some(mask) = try_zerocopy_f64_predicate(py, a.bind(py), |v| !v.is_finite())?
+        {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("copy", copy)?;
+            return Ok(numpy
+                .getattr("ma")?
+                .getattr("masked_where")?
+                .call((mask.bind(py), a.bind(py)), Some(&kwargs))?
+                .unbind());
+        }
     }
 
     let numpy = py.import("numpy")?;
