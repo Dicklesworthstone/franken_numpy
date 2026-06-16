@@ -42067,10 +42067,23 @@ fn try_zerocopy_int_prod(
     }
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    if kind != "i" && kind != "u" && kind != "b" {
         return Ok(None);
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    // numpy promotes a bool product to int64 (the 0/1 product never wraps). bool
+    // buffers export '?', which PyBuffer<u8> rejects, so read the bytes via a
+    // zero-copy uint8 view. Was falling through to the f64-bridge extract (~18x slow).
+    if kind == "b" {
+        let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+        let mul = |x: i64, y: i64| x.wrapping_mul(y);
+        return match axis {
+            None => prod_typed::<u8, i64, _, _>(py, &numpy, &viewed, "int64", 1, |v| v as i64, mul),
+            Some(ax) => {
+                prod_axis_typed::<u8, i64, _, _>(py, &numpy, &viewed, "int64", 1, |v| v as i64, mul, ax)
+            }
+        };
+    }
     // Dispatch each (input type T, accumulator type A) pair to either the full
     // reduction (prod_typed) or the per-axis row-wise path (prod_axis_typed).
     macro_rules! dispatch {
