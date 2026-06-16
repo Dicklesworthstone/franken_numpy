@@ -39799,6 +39799,143 @@ fn try_zerocopy_f64_einsum_outer_2vec(
     Ok(Some(build_numpy_scalar_or_array(py, &result)?))
 }
 
+// Two-operand MATRIX·VECTOR contraction 'ij,j->i' (out[i] = Σ_j A[i,j]·v[j], a matvec)
+// or its full reduction 'ij,j->' (Σ_ij A[i,j]·v[j], a scalar). The general einsum kernel
+// copies both operands and walks the Cartesian loop — 'ij,j->' was ~12x slower than numpy,
+// 'ij,j->i' ~2.7x. Here A's rows are contiguous, so each output is an 8-accumulator dot of
+// row i against the (tiny, copied-once) vector v. The PyBuffer cells are !Sync so the scan
+// is serial, but the 8 independent accumulators break the add-latency chain and the single
+// streaming pass over A matches numpy's bandwidth. einsum parity is tolerance-based, so the
+// per-output accumulation order is fine. The vector must match the SECOND (contiguous,
+// contracted) matrix label; the 'ij,i->...' (strided row-contraction), repeated-label,
+// non-2-D-matrix, non-f64, non-contiguous, or shape-mismatched forms defer.
+fn try_zerocopy_f64_einsum_matvec(
+    py: Python<'_>,
+    subscripts: &str,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((inp, outp)) = subscripts.split_once("->") else {
+        return Ok(None);
+    };
+    let parts: Vec<&str> = inp.trim().split(',').collect();
+    if parts.len() != 2 {
+        return Ok(None);
+    }
+    let (lhs, rhs, out) = (parts[0].trim(), parts[1].trim(), outp.trim());
+    if lhs.len() != 2 || rhs.len() != 1 {
+        return Ok(None);
+    }
+    let labels: Vec<char> = lhs.chars().collect();
+    if !labels.iter().all(|c| c.is_ascii_alphabetic()) || labels[0] == labels[1] {
+        return Ok(None);
+    }
+    // The vector contracts one matrix axis: its label is either the SECOND (column,
+    // contiguous → matvec A·v) or the FIRST (row, strided → vecmat Aᵀ·v) matrix label.
+    let vc = rhs.chars().next();
+    let contract_col = vc == Some(labels[1]);
+    let contract_row = vc == Some(labels[0]);
+    if !contract_col && !contract_row {
+        return Ok(None);
+    }
+    // Output keeps the surviving label (matvec 'ij,j->i' keeps 'i'; vecmat 'ij,i->j'
+    // keeps 'j') or is empty (full reduction to a scalar).
+    let kept = if contract_col { labels[0] } else { labels[1] };
+    let keep_axis = match out.len() {
+        0 => false,
+        1 if out.chars().next() == Some(kept) => true,
+        _ => return Ok(None),
+    };
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type)
+        || !b.is_exact_instance(&ndarray_type)
+        || !numpy_dtype_is_f64(py, a)
+        || !numpy_dtype_is_f64(py, b)
+    {
+        return Ok(None);
+    }
+    let (Ok(sa), Ok(sb)) = (
+        a.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
+        b.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
+    ) else {
+        return Ok(None);
+    };
+    let (nrows, ncols) = if sa.len() == 2 { (sa[0], sa[1]) } else { return Ok(None) };
+    // Vector length must match the contracted axis: column→ncols, row→nrows.
+    let want_vlen = if contract_col { ncols } else { nrows };
+    if sb.len() != 1 || sb[0] != want_vlen {
+        return Ok(None);
+    }
+    let (Ok(ba), Ok(bv)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
+        return Ok(None);
+    };
+    let (Some(va), Some(vv)) = (ba.as_slice(py), bv.as_slice(py)) else {
+        return Ok(None); // non-contiguous
+    };
+    if va.len() != nrows * ncols || vv.len() != want_vlen {
+        return Ok(None);
+    }
+    // Copy the small vector out of the !Sync cells once; rows of A are read in place.
+    let vvec: Vec<f64> = vv.iter().map(|c| c.get()).collect();
+    let (out_values, out_shape): (Vec<f64>, Vec<usize>) = if contract_col {
+        // matvec: each output is an 8-accumulator dot of a contiguous row against v.
+        let row_dot = |row: &[pyo3::buffer::ReadOnlyCell<f64>]| -> f64 {
+            let mut acc = [0.0f64; 8];
+            let mut ca = row.chunks_exact(8);
+            let mut cv = vvec.chunks_exact(8);
+            for (gr, gv) in ca.by_ref().zip(cv.by_ref()) {
+                acc[0] += gr[0].get() * gv[0];
+                acc[1] += gr[1].get() * gv[1];
+                acc[2] += gr[2].get() * gv[2];
+                acc[3] += gr[3].get() * gv[3];
+                acc[4] += gr[4].get() * gv[4];
+                acc[5] += gr[5].get() * gv[5];
+                acc[6] += gr[6].get() * gv[6];
+                acc[7] += gr[7].get() * gv[7];
+            }
+            let mut s = acc.iter().sum::<f64>();
+            for (x, y) in ca.remainder().iter().zip(cv.remainder()) {
+                s += x.get() * y;
+            }
+            s
+        };
+        if keep_axis {
+            ((0..nrows).map(|i| row_dot(&va[i * ncols..(i + 1) * ncols])).collect(), vec![nrows])
+        } else {
+            let mut total = 0.0f64;
+            for i in 0..nrows {
+                total += row_dot(&va[i * ncols..(i + 1) * ncols]);
+            }
+            (vec![total], vec![])
+        }
+    } else {
+        // vecmat 'ij,i->j': out[j] = Σ_i A[i,j]·v[i]. Stream each row, fused multiply-add
+        // of (row · v[i]) into the length-ncols accumulator (kept cache-resident), in
+        // ascending-i order per column — the strided keep-column reduction done as one
+        // contiguous pass over A instead of numpy's strided column gather (62x faster).
+        let mut col = vec![0.0f64; ncols];
+        for i in 0..nrows {
+            let scale = vvec[i];
+            let row = &va[i * ncols..(i + 1) * ncols];
+            for (slot, x) in col.iter_mut().zip(row) {
+                *slot += x.get() * scale;
+            }
+        }
+        if keep_axis {
+            (col, vec![ncols])
+        } else {
+            // 'ij,i->': sum the column accumulator (ascending-j) for the scalar.
+            (vec![col.iter().sum::<f64>()], vec![])
+        }
+    };
+    let result = match UFuncArray::new(out_shape, out_values, DType::F64) {
+        Ok(value) => value,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(build_numpy_scalar_or_array(py, &result)?))
+}
+
 fn einsum_native(
     py: Python<'_>,
     args: &Bound<'_, PyTuple>,
@@ -39878,6 +40015,17 @@ fn einsum_native(
     // Two-operand outer product ('i,j->ij'): copy the small vectors, fill in parallel.
     if args.len() == 3
         && let Some(result) = try_zerocopy_f64_einsum_outer_2vec(
+            py,
+            &subscripts,
+            &args.get_item(1)?,
+            &args.get_item(2)?,
+        )?
+    {
+        return Ok(Some(result));
+    }
+    // Two-operand matrix·vector contraction ('ij,j->i' / 'ij,j->'): zero-copy fused scan.
+    if args.len() == 3
+        && let Some(result) = try_zerocopy_f64_einsum_matvec(
             py,
             &subscripts,
             &args.get_item(1)?,
@@ -86878,6 +87026,29 @@ mod tests {
                 let close: bool = allclose.call1((&ours, &theirs))?.extract()?;
                 assert!(close, "einsum '{subs}' diverges from numpy beyond allclose");
                 // numpy returns a float64 scalar for these; ours must match dtype.
+                let our_dt: String = ours.getattr("dtype")?.str()?.extract()?;
+                let their_dt: String = theirs.getattr("dtype")?.str()?.extract()?;
+                assert_eq!(our_dt, their_dt, "einsum '{subs}' dtype mismatch");
+            }
+            // Matrix·vector contraction fast paths take a 2-D matrix + a 1-D vector, so
+            // they need distinct operand shapes (the same-shape loop above cannot express
+            // them). 'ij,j->i' (matvec) and 'ij,j->' (full reduction) are fast paths;
+            // 'ij,i->j' (strided row-contraction) must defer and still match numpy.
+            let matvec_cases: &[(&str, i64, &[i64], i64, &[i64])] = &[
+                ("ij,j->i", 4002, &[58, 69], 69, &[69]), // matvec keep-row
+                ("ij,j->", 4002, &[58, 69], 69, &[69]),  // matvec full reduction
+                ("ij,i->j", 4002, &[58, 69], 58, &[58]), // vecmat keep-col (strided)
+                ("ij,i->", 4002, &[58, 69], 58, &[58]),  // vecmat full reduction
+            ];
+            for (subs, na, sa, nb, sb) in matvec_cases {
+                let a = mk(*na, sa)?;
+                let v = mk(*nb, sb)?;
+                let subs_obj = pyo3::types::PyString::new(py, subs).into_any();
+                let args = PyTuple::new(py, [subs_obj, a, v])?;
+                let ours = ours_fn.call1(&args)?;
+                let theirs = np_einsum.call1(&args)?;
+                let close: bool = allclose.call1((&ours, &theirs))?.extract()?;
+                assert!(close, "einsum '{subs}' diverges from numpy beyond allclose");
                 let our_dt: String = ours.getattr("dtype")?.str()?.extract()?;
                 let their_dt: String = theirs.getattr("dtype")?.str()?.extract()?;
                 assert_eq!(our_dt, their_dt, "einsum '{subs}' dtype mismatch");
