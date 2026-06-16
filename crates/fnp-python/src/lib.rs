@@ -5136,6 +5136,47 @@ fn masked_scalar_compare(
             .unbind())
     };
 
+    // Fast path: a PLAIN float64 ndarray x (not already masked) + a scalar float value.
+    // np.ma.masked_<cmp>(x, v) = np.ma.array(x, mask=(x <cmp> v)). The generic path below
+    // extracts x's data into an owned Vec, clones it, and rebuilds — ~3 full-size copies,
+    // 10-24x slower than numpy. Here the mask is computed zero-copy from x's buffer (the
+    // predicate fast path) and the result is built with numpy's constructor reusing the
+    // original x (a single copy, matching numpy). Already-masked x / non-f64 / array value
+    // fall through to the generic mask-combination path.
+    {
+        let numpy = py.import("numpy")?;
+        let ndarray_type = numpy.getattr("ndarray")?;
+        if x.bind(py).get_type().is(&ndarray_type)
+            && numpy_dtype_is_f64(py, x.bind(py))
+            && let Ok(v) = value.bind(py).extract::<f64>()
+        {
+            let pred: Option<fn(f64, f64) -> bool> = match op {
+                BinaryOp::Greater => Some(|a, b| a > b),
+                BinaryOp::GreaterEqual => Some(|a, b| a >= b),
+                BinaryOp::Less => Some(|a, b| a < b),
+                BinaryOp::LessEqual => Some(|a, b| a <= b),
+                BinaryOp::Equal => Some(|a, b| a == b),
+                BinaryOp::NotEqual => Some(|a, b| a != b),
+                _ => None,
+            };
+            if let Some(pred) = pred
+                && let Some(mask) = try_zerocopy_f64_predicate(py, x.bind(py), move |a| pred(a, v))?
+            {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("mask", mask.bind(py))?;
+                kwargs.set_item("copy", copy)?;
+                let result = numpy
+                    .getattr("ma")?
+                    .getattr("array")?
+                    .call((x.bind(py),), Some(&kwargs))?;
+                if numpy_name == "masked_equal" {
+                    result.setattr("fill_value", v)?;
+                }
+                return Ok(result.unbind());
+            }
+        }
+    }
+
     let Some(masked_x) = extract_numeric_masked_array(py, x.bind(py), context)? else {
         return fallback();
     };
