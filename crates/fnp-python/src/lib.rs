@@ -33649,6 +33649,71 @@ fn masked_all_like(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
+// Zero-copy np.ma.compressed for a float64 MaskedArray: gather the unmasked (mask==0)
+// elements, in C-order, straight into the np.empty 1-D output. Returns None to defer.
+fn try_zerocopy_ma_compressed_f64(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
+    if !value.is_instance(&masked_array_type)? {
+        return Ok(None);
+    }
+    let data_obj = value.getattr("data")?;
+    if !numpy_dtype_is_f64(py, &data_obj) {
+        return Ok(None);
+    }
+    let Ok(shape) = value.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()) else {
+        return Ok(None);
+    };
+    let total: usize = shape.iter().product();
+    let Ok(data_buf) = PyBuffer::<f64>::get(&data_obj) else {
+        return Ok(None);
+    };
+    let Some(data) = data_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    if data.len() != total {
+        return Ok(None);
+    }
+    // bool mask reinterpreted as uint8 (zero-copy view) for the PyBuffer read.
+    let mask_obj = numpy
+        .getattr("ma")?
+        .getattr("getmaskarray")?
+        .call1((value,))?
+        .call_method1("view", (numpy.getattr("uint8")?,))?;
+    let Ok(mask_buf) = PyBuffer::<u8>::get(&mask_obj) else {
+        return Ok(None);
+    };
+    let Some(mask) = mask_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    if mask.len() != total {
+        return Ok(None);
+    }
+    let kept = mask.iter().filter(|m| m.get() == 0).count();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (kept,), Some(&kwargs))?;
+    if kept > 0 {
+        let Ok(out_buf) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out) = out_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let mut j = 0usize;
+        for (d, m) in data.iter().zip(mask) {
+            if m.get() == 0 {
+                out[j].set(d.get());
+                j += 1;
+            }
+        }
+    }
+    Ok(Some(flat.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn compressed(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -33660,6 +33725,13 @@ fn compressed(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .call1((x.bind(py),))?
             .unbind())
     };
+
+    // Zero-copy fast path for an f64 MaskedArray (same extract-3-copies gap as ma.filled):
+    // read the contiguous data + bool mask buffers and gather the unmasked elements
+    // directly into the np.empty output, no owned-Vec extraction or MaskedArray rebuild.
+    if let Some(out) = try_zerocopy_ma_compressed_f64(py, x.bind(py))? {
+        return Ok(out);
+    }
 
     let Some(masked) = extract_numeric_masked_array(py, x.bind(py), "compressed")? else {
         return fallback();
