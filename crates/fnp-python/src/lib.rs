@@ -20861,22 +20861,46 @@ fn cov_gram_rowvar_f64(
     // multiply-adds; below ~1<<18 that is microseconds and the rayon dispatch is pure
     // overhead (numpy never parallelizes a small Gram), so e.g. cov([10,100]) was ~5x
     // numpy. Gate the fan-out on the work estimate; keep small Grams serial.
+    // Each Gram cell is a length-n_obs dot. The old single-accumulator `.sum()` is one
+    // dependent FP-add chain (latency-bound, ~3 GFLOP/s); numpy's dsyrk is vectorized
+    // (~11 GFLOP/s). Eight independent accumulators break the dependency chain and let
+    // LLVM pack them into AVX registers (autovectorized), reaching numpy-class throughput.
+    // The reorder makes the result allclose (not bit-identical) for n_obs >= 8; for
+    // n_obs < 8 (the only sizes the exact-repr cov/corrcoef unit tests use) chunks_exact(8)
+    // is empty so the fold is the original left-to-right sum and those tests stay green.
+    // The large-Gram conformance goldens are re-pinned to this order (allclose-verified).
+    let dot8 = |ci: &[f64], cj: &[f64]| -> f64 {
+        let mut acc = [0.0f64; 8];
+        let mut ca = ci.chunks_exact(8);
+        let mut cb = cj.chunks_exact(8);
+        for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
+            acc[0] += ga[0] * gb[0];
+            acc[1] += ga[1] * gb[1];
+            acc[2] += ga[2] * gb[2];
+            acc[3] += ga[3] * gb[3];
+            acc[4] += ga[4] * gb[4];
+            acc[5] += ga[5] * gb[5];
+            acc[6] += ga[6] * gb[6];
+            acc[7] += ga[7] * gb[7];
+        }
+        let mut s =
+            ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+        for (&a, &b) in ca.remainder().iter().zip(cb.remainder()) {
+            s += a * b;
+        }
+        s
+    };
     let row_dot = |i: usize, row_out: &mut [f64]| {
         let ci = &centered[i * n_obs..(i + 1) * n_obs];
         for (j, slot) in row_out.iter_mut().enumerate().take(i + 1) {
             let cj = &centered[j * n_obs..(j + 1) * n_obs];
-            let dot: f64 = ci.iter().zip(cj).map(|(a, b)| a * b).sum();
-            *slot = dot * inv_fact;
+            *slot = dot8(ci, cj) * inv_fact;
         }
     };
     let mut result = vec![0.0f64; n_vars * n_vars];
-    // For a SMALL Gram the rayon dispatch dwarfs the work — cov([10,100]) was ~5x
-    // numpy purely from fanning out microseconds of compute. Gate on total work
-    // (~n_vars²·n_obs multiply-adds): below the threshold stay serial (no dispatch),
-    // above it fan out. Even at large few-variable shapes (e.g. cov([10,20000])) the
-    // dots exceed L2 and parallelism aggregates memory bandwidth, so the gate keys on
-    // work, NOT row count. Serial and parallel are bit-identical (each cell is one
-    // independent dot), so this is a pure overhead removal.
+    // Below ~1<<18 multiply-adds the rayon dispatch dwarfs the work (cov([10,100]) was ~5x
+    // numpy from fanning out microseconds), so keep small Grams serial; above it fan out
+    // over rows. Each cell is its own dot8, so serial and parallel agree.
     let work = (n_vars as u64) * (n_vars as u64) * (n_obs as u64);
     if work >= (1 << 18) && rayon::current_num_threads() >= 2 {
         result

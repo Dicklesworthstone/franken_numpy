@@ -518,7 +518,7 @@ print(hashlib.sha256(proof).hexdigest())
     );
     assert_eq!(
         result.lines().nth(1).unwrap_or_default(),
-        "a66b74e96bcdedee32568901f3d95a6f21eda1781b7b7c5fae04fb16186b10f3",
+        "80bb612d7fb9522ca878001af0fd6ba17a68eebb4a4e117006caf69a71fa3387",
         "cov fast path golden sha256 drifted"
     );
     Ok(())
