@@ -7436,6 +7436,46 @@ fn zerocopy_f64_predicate_flat<'py, F: Fn(f64) -> bool>(
     Ok(Some((flat, shape)))
 }
 
+// f64->f64 counterpart of zerocopy_f64_predicate_flat for elementwise ops not covered by
+// the UnaryOp dispatch (e.g. spacing): read the contiguous f64 buffer and write `f(v)`
+// straight into a fresh np.empty(float64) buffer, no intermediate Rust Vec / extract.
+// Returns Ok(None) (fall through to the extract path) for any non-exact-float64-ndarray.
+#[inline]
+fn zerocopy_f64_unary_flat_with<'py, F: Fn(f64) -> f64>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    x: &Bound<'py, PyAny>,
+    f: F,
+) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>> {
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.get_type().is(&ndarray_type) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    let n = input.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            slot.set(f(cell.get()));
+        }
+    }
+    Ok(Some((flat, shape)))
+}
+
 // Wrap zerocopy_f64_predicate_flat with the shared reshape / 0-d scalar handling.
 fn try_zerocopy_f64_predicate<F: Fn(f64) -> bool>(
     py: Python<'_>,
@@ -17185,6 +17225,29 @@ fn spacing(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if !numpy_dtype_is_f64(py, x.bind(py)) {
         let numpy = py.import("numpy")?;
         return Ok(numpy.getattr("spacing")?.call1((x.bind(py),))?.unbind());
+    }
+    // Zero-copy fast path: read the contiguous f64 buffer and write spacing(v) straight
+    // into the np.empty output (no extract-to-Vec + rebuild, which was ~6x slower than
+    // numpy from the extra full-size copies + cold page faults). The per-element formula
+    // is byte-identical to ufunc_spacing (UFuncArray::spacing).
+    let numpy = py.import("numpy")?;
+    if let Some((flat, shape)) = zerocopy_f64_unary_flat_with(py, &numpy, x.bind(py), |v| {
+        if v.is_nan() || v.is_infinite() {
+            f64::NAN
+        } else if v == 0.0 {
+            f64::from_bits(1)
+        } else {
+            let abs_v = v.abs();
+            let s = f64::from_bits(abs_v.to_bits().wrapping_add(1)) - abs_v;
+            if v.is_sign_negative() { -s } else { s }
+        }
+    })? {
+        let output_shape = PyTuple::new(py, shape.iter().copied())?;
+        let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+        if shape.is_empty() {
+            return Ok(output.bind(py).get_item(())?.unbind());
+        }
+        return Ok(output);
     }
     let x = extract_numeric_array(py, x.bind(py), "spacing(x)")?;
     let result = ufunc_spacing(&x).map_err(map_ufunc_error)?;
