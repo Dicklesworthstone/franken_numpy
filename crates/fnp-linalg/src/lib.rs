@@ -1423,6 +1423,7 @@ fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, Li
         // memory instead of striding across `l` by n per term. For a short trailing
         // panel the rayon dispatch + packing cost exceeds the work, so we keep the
         // original serial scan (no small-matrix regression).
+        let mut l21 = vec![0.0f64; trail * bw];
         if trail >= PAR_TRSM_MIN_TRAIL {
             let mut l11 = vec![0.0f64; bw * bw];
             let mut inv_diag = vec![0.0f64; bw];
@@ -1433,8 +1434,9 @@ fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, Li
             }
             l[pend * n..n * n]
                 .par_chunks_mut(n)
+                .zip(l21.par_chunks_mut(bw))
                 .enumerate()
-                .for_each(|(ti, lrow)| {
+                .for_each(|(ti, (lrow, l21row))| {
                     let i = pend + ti;
                     let wrow = &work[i * n..i * n + n];
                     for r in 0..bw {
@@ -1445,17 +1447,22 @@ fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, Li
                         for (&a, &b) in solved.iter().zip(l11r) {
                             sum -= a * b;
                         }
-                        lrow[j] = sum * inv_diag[r];
+                        let value = sum * inv_diag[r];
+                        lrow[j] = value;
+                        l21row[r] = value;
                     }
                 });
         } else {
             for i in pend..n {
+                let l21_base = (i - pend) * bw;
                 for j in jb..pend {
                     let mut sum = work[i * n + j];
                     for k in jb..j {
                         sum -= l[i * n + k] * l[j * n + k];
                     }
-                    l[i * n + j] = sum / l[j * n + j];
+                    let value = sum / l[j * n + j];
+                    l[i * n + j] = value;
+                    l21[l21_base + (j - jb)] = value;
                 }
             }
         }
@@ -1475,11 +1482,6 @@ fn cholesky_blocked(a: &[f64], n: usize, panel_nb: usize) -> Result<Vec<f64>, Li
         // smaller lower-triangular column tiles once the trailing matrix is wide enough:
         // each lower cell still receives one ascending-k dot product, but strict-upper
         // cells are not computed or written.
-        let mut l21 = vec![0.0f64; trail * bw];
-        for i in 0..trail {
-            let src = (pend + i) * n + jb;
-            l21[i * bw..i * bw + bw].copy_from_slice(&l[src..src + bw]);
-        }
         if bw >= MATMUL_PARALLEL_MIN_DIM && trail >= SYRK_COL_BLOCK {
             let mut bblk = vec![0.0f64; bw * SYRK_COL_BLOCK];
             let mut c0 = 0;
