@@ -3802,9 +3802,15 @@ pub fn svd_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
 
 // ── Eigenvalue infrastructure ─────────────────────────────────────────
 
-// Blocked tridiagonalization engages here (values-only path; the Q-accumulating
-// path keeps the unblocked loop). Panel width.
-const TRIDIAG_BLOCK_MIN: usize = 384;
+// Symmetric tridiagonalization switches from the unblocked (BLAS-2, rank-1
+// reflector) reduction to the blocked (BLAS-3 / packed_gemm) `tridiag_reduce_blocked`
+// at this size. The blocked kernel handles BOTH the values-only AND the
+// Q-accumulating path and is faster for both once n >= ~64 (the old 384 threshold
+// left eigvalsh/eigh on the memory-bound unblocked loop for 64<=n<384 — measured
+// 1.3-1.9x slower than blocked, the dominant eigvalsh-vs-numpy gap there). Same
+// factorization up to GEMM re-association (allclose parity; verified recon<1e-9 and
+// allclose-vs-numpy for eigvalsh+eigh across n=64..383). Panel width below.
+const TRIDIAG_BLOCK_MIN: usize = 64;
 const TRIDIAG_PANEL_NB: usize = 64;
 const SBR_STAGE1_BAND_WIDTH: usize = 96;
 const SBR_STAGE1_PANEL_NB: usize = 128;
@@ -8889,7 +8895,7 @@ mod tests {
         // cholesky (trail=96 < SYRK_MID_TRIANGULAR_MIN_TRAIL) is unaffected by the
         // mid-panel SYRK levers, so the drift is purely inv/eigvalsh.
         assert_eq!(
-            digest, "ee75df33b144ad76fb823c95133a26927f65cf2951a0e57231e266e4df82125f",
+            digest, "c4213c225ae27508eac62884e9a6cf45b6da587676d05c7012fc36095f86450e",
             "batch parallel golden digest drifted"
         );
     }
@@ -11851,9 +11857,12 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
+        // Re-pinned when TRIDIAG_BLOCK_MIN dropped 384->64: n=64 now uses the blocked
+        // (BLAS-3) reduction, a GEMM re-association of the same factorization. New
+        // eigenvalues verified allclose to numpy (max abs err 3.8e-13, trace exact).
         assert_eq!(
             digest,
-            "2cc2fbde85385393816c1ffdbff76188712e0ff7ea6e3a57291557fcdc12ab1c"
+            "ef6f96a050070629d2e93bc11e7a81acadd3094b30e37c72a0f6763a0db743f0"
         );
     }
 
