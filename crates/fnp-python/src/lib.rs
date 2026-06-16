@@ -5176,6 +5176,16 @@ fn masked_scalar_compare(
                 return Ok(result.unbind());
             }
         }
+
+        // Non-f64 plain ndarray (int / f32 / ...) + scalar value: numpy's own
+        // masked_<cmp> wrapper is optimal and exact. A plain ndarray is never
+        // already-masked (get_type().is(ndarray) excludes MaskedArray subclasses),
+        // so the wrapper matches us byte-for-byte. The generic mask-combination
+        // path below extracts the data into an owned Vec and rebuilds (~3 copies),
+        // running ~14x slower than numpy on integer inputs (e.g. masked_equal(int,2)).
+        if x.bind(py).get_type().is(&ndarray_type) && !value.bind(py).is_instance(&ndarray_type)? {
+            return fallback();
+        }
     }
 
     let Some(masked_x) = extract_numeric_masked_array(py, x.bind(py), context)? else {
