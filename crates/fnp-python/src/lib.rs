@@ -13645,6 +13645,14 @@ fn where_py(
         }
     }
 
+    // 1-arg np.where(cond) == np.nonzero(cond). numpy's nonzero is the parity
+    // reference and is optimal for every dtype; the native extract + where_nonzero
+    // scan ran 15-54x slower (bool 83ms vs 1.5ms, f64 132ms vs 8.7ms @4M). Defer the
+    // whole 1-arg form to numpy (fnp's own `nonzero` is likewise a numpy passthrough).
+    if args.is_empty() {
+        return fallback();
+    }
+
     let condition = match extract_precise_numeric_array(py, condition_bound, "where(condition)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -13668,13 +13676,8 @@ fn where_py(
             let result = UFuncArray::where_select(&condition, &x, &y).map_err(map_ufunc_error)?;
             build_numpy_array_from_ufunc(py, &result)
         }
-        0 => {
-            if condition.shape().is_empty() {
-                return fallback();
-            }
-            let result = where_nonzero(&condition).map_err(map_ufunc_error)?;
-            build_numpy_tuple_from_ufuncs(py, &result)
-        }
+        // 1-arg form is fully handled above (deferred to numpy); unreachable here.
+        0 => fallback(),
         _ => fallback(),
     }
 }
@@ -19060,6 +19063,18 @@ fn diff(
         if all_ok {
             return Ok(current);
         }
+    }
+    // Bool input reaches here (the zero-copy f64/int/f32 paths above don't take it).
+    // numpy's diff(bool) is adjacent XOR with a bool output and is optimal (single
+    // pass); the extract path below bridges bool->f64 and runs ~700x slower (85ms vs
+    // 122us @4M). numpy is the parity reference, so defer bool to it. (Checked only on
+    // the fallthrough — f64/int/f32 already returned.)
+    if a
+        .bind(py)
+        .is_exact_instance(&numpy.getattr("ndarray")?)
+        && a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
+    {
+        return fallback();
     }
     let a = match extract_precise_numeric_array(py, a.bind(py), "diff(a)") {
         Ok(array) => array,
