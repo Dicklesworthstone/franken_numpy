@@ -20526,6 +20526,83 @@ fn fft(
     Ok(fft_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
+// Zero-copy np.ma.filled for a float64 MaskedArray with a scalar-float fill: read the
+// contiguous data + bool mask buffers and write `mask[i] ? fill : data[i]` straight into
+// the np.empty output in one streaming pass. Returns None (defer) for anything else.
+fn try_zerocopy_ma_filled_f64(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    fill_value: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
+    if !value.is_instance(&masked_array_type)? {
+        return Ok(None);
+    }
+    // f64 data only.
+    let data_obj = value.getattr("data")?;
+    if !numpy_dtype_is_f64(py, &data_obj) {
+        return Ok(None);
+    }
+    // Resolve the scalar f64 fill: explicit arg if given, else the array's fill_value.
+    let fill: f64 = match fill_value {
+        Some(fv) => match fv.extract::<f64>() {
+            Ok(f) => f,
+            Err(_) => return Ok(None),
+        },
+        None => match value.getattr("fill_value").and_then(|f| f.extract::<f64>()) {
+            Ok(f) => f,
+            Err(_) => return Ok(None),
+        },
+    };
+    let Ok(shape) = value.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()) else {
+        return Ok(None);
+    };
+    let total: usize = shape.iter().product();
+    let Ok(data_buf) = PyBuffer::<f64>::get(&data_obj) else {
+        return Ok(None);
+    };
+    let Some(data) = data_buf.as_slice(py) else {
+        return Ok(None); // non-contiguous
+    };
+    if data.len() != total {
+        return Ok(None);
+    }
+    // Full bool mask (getmaskarray materializes nomask -> all-False). numpy bool buffers
+    // export format '?', which PyBuffer::<u8> rejects, so reinterpret as uint8 (same 1-byte
+    // layout, zero-copy view) before the buffer read.
+    let mask_obj = numpy
+        .getattr("ma")?
+        .getattr("getmaskarray")?
+        .call1((value,))?
+        .call_method1("view", (numpy.getattr("uint8")?,))?;
+    let Ok(mask_buf) = PyBuffer::<u8>::get(&mask_obj) else {
+        return Ok(None);
+    };
+    let Some(mask) = mask_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    if mask.len() != total {
+        return Ok(None);
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 {
+        let Ok(out_buf) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out) = out_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for ((o, d), m) in out.iter().zip(data).zip(mask) {
+            o.set(if m.get() != 0 { fill } else { d.get() });
+        }
+    }
+    let shape_tuple = PyTuple::new(py, shape)?;
+    Ok(Some(flat.call_method1("reshape", (&shape_tuple,))?.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, fill_value=None))]
 fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
@@ -20539,6 +20616,18 @@ fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResu
         }
         Ok(filled_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
+
+    // Zero-copy fast path for the common case: a float64 MaskedArray (contiguous data +
+    // contiguous bool mask) and a scalar float fill. The generic path below extracts the
+    // data AND mask into owned Vecs, builds a MaskedArray, clones the data, then builds the
+    // output — ~3+ full-size copies, ~13x slower than numpy. Here we read both buffers
+    // zero-copy and write the result DIRECTLY into the np.empty output in ONE pass
+    // (out[i] = mask[i] ? fill : data[i]). Pure element selection, so bit-identical to the
+    // generic path. Non-f64 data, non-contiguous, structured/non-float fill, or any buffer
+    // failure fall through to the generic extraction.
+    if let Some(out) = try_zerocopy_ma_filled_f64(py, a.bind(py), fill_value.as_ref().map(|v| v.bind(py)))? {
+        return Ok(out);
+    }
 
     let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "filled")? else {
         return fallback();
