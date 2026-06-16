@@ -1350,6 +1350,17 @@ const CHOL_PANEL_NB: usize = 128;
 const CHOL_MID_MIN: usize = 128;
 const CHOL_MID_PANEL: usize = 32;
 
+// Same-worker profiling shows the 512-ish regime benefits from aggregating
+// trailing updates behind a wider panel, while 256 and 768 regress or flatten
+// with a global 64-wide panel. Keep the old width outside that measured band.
+const fn cholesky_mid_panel_width(n: usize) -> usize {
+    if n >= 384 && n < 640 {
+        64
+    } else {
+        CHOL_MID_PANEL
+    }
+}
+
 // Column-block width for the block-triangular SYRK trailing update. A multiple of
 // PACKED_NR so each block stays on the register-tiled GEMM path; >= 128 so the
 // strided sub-assign GEMM clears its parallel threshold on the leading (tall)
@@ -1597,7 +1608,7 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         return cholesky_blocked(a, n, CHOL_PANEL_NB);
     }
     if n >= CHOL_MID_MIN {
-        return cholesky_blocked(a, n, CHOL_MID_PANEL);
+        return cholesky_blocked(a, n, cholesky_mid_panel_width(n));
     }
 
     let mut l = vec![0.0; n * n];
@@ -13886,7 +13897,8 @@ mod tests {
     #[test]
     fn cholesky_mid_panel_256_output_golden_sha256() {
         let n = 256usize;
-        assert_eq!(super::CHOL_MID_PANEL, 32);
+        let panel = super::cholesky_mid_panel_width(n);
+        assert_eq!(panel, 32);
         let a = chol_spd(n, 0x5A5A_5A5A);
         let l = super::cholesky_nxn(&a, n).expect("mid-panel cholesky");
         let mut max_recon = 0.0f64;
@@ -13907,7 +13919,7 @@ mod tests {
 
         let mut hasher = Sha256::new();
         hasher.update(n.to_le_bytes());
-        hasher.update(super::CHOL_MID_PANEL.to_le_bytes());
+        hasher.update(panel.to_le_bytes());
         for value in &l {
             hasher.update(value.to_bits().to_le_bytes());
         }
@@ -13925,7 +13937,8 @@ mod tests {
     #[test]
     fn cholesky_mid_panel_512_output_golden_sha256() {
         let n = 512usize;
-        assert_eq!(super::CHOL_MID_PANEL, 32);
+        let panel = super::cholesky_mid_panel_width(n);
+        assert_eq!(panel, 64);
         let a = chol_spd(n, 0xA11C_E512);
         let l = super::cholesky_nxn(&a, n).expect("mid-panel cholesky");
         let mut max_recon = 0.0f64;
@@ -13946,7 +13959,7 @@ mod tests {
 
         let mut hasher = Sha256::new();
         hasher.update(n.to_le_bytes());
-        hasher.update(super::CHOL_MID_PANEL.to_le_bytes());
+        hasher.update(panel.to_le_bytes());
         for value in &l {
             hasher.update(value.to_bits().to_le_bytes());
         }
@@ -13956,7 +13969,7 @@ mod tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         assert_eq!(
-            digest, "d282d58a92df1fe8bfdfb2e8989f8653869db53f7e517f5128dd13a1c8671ae7",
+            digest, "2d506e1089d1a9acd6eb6b4666847516b9948ab289fda72c48ed98bc05b9e617",
             "mid-panel 512 cholesky golden digest drifted: {digest}"
         );
     }
