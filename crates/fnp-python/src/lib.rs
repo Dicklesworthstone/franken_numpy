@@ -43025,6 +43025,17 @@ fn around(
         return Ok(result);
     }
 
+    // Bool input reaches here (the zero-copy f64/int/f32 paths above don't take it).
+    // numpy.around(bool) PROMOTES to float16 (a numpy quirk) — the native extract
+    // path below would instead return a bool array (wrong dtype). numpy is the parity
+    // reference, so defer bool to it (also ~optimal; checked only on the fallthrough).
+    if a
+        .bind(py)
+        .is_exact_instance(&numpy.getattr("ndarray")?)
+        && a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
+    {
+        return fallback();
+    }
     let array = match extract_precise_numeric_array(py, a.bind(py), "around(a)") {
         Ok(arr) => arr,
         Err(_) => return fallback(),
