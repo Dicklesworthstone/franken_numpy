@@ -15353,6 +15353,15 @@ fn clip(
         return fallback();
     }
 
+    // bool input: numpy.clip(bool, ...) is the parity reference; the native extract
+    // path bridges bool->f64 (~680x slower than numpy). Defer (the f64/int zero-copy
+    // paths below are unaffected — they return None for bool anyway).
+    if a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+        && a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
+    {
+        return fallback();
+    }
+
     // Zero-copy clamp for exact f64 C-contiguous ndarrays: promotion is a no-op
     // for f64 input + real scalar bounds, so this is bit-identical to the
     // native array.clip below while skipping the cold extract/build Vecs.
@@ -17889,6 +17898,28 @@ fn nan_to_num(
         neginf.map(|p| p as f32).unwrap_or(f32::MIN),
     )? {
         return Ok(out);
+    }
+    // bool has no NaN/inf, so nan_to_num(bool) is a plain bool copy — but the extract
+    // below bridges bool->f64 and rebuilds (~900x slower than numpy's bool copy). numpy
+    // is the parity reference; defer bool (only on the fallthrough — f64/int/f32 above).
+    {
+        let numpy = py.import("numpy")?;
+        if x.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+            && x.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
+        {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("nan", nan)?;
+            if let Some(p) = posinf {
+                kwargs.set_item("posinf", p)?;
+            }
+            if let Some(n) = neginf {
+                kwargs.set_item("neginf", n)?;
+            }
+            return Ok(numpy
+                .getattr("nan_to_num")?
+                .call((x.bind(py),), Some(&kwargs))?
+                .unbind());
+        }
     }
     let x_arr = match extract_precise_numeric_array(py, x.bind(py), "nan_to_num(x)") {
         Ok(arr) => arr,
