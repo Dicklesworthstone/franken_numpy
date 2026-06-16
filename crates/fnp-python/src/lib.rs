@@ -33585,6 +33585,28 @@ fn getmaskarray(py: Python<'_>, arr: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .unbind())
     };
 
+    // Fast path: for a MaskedArray whose mask is already a full bool ndarray (the common
+    // case), np.ma.getmaskarray just returns that array — O(1). The generic path below
+    // extracts the bool mask into an f64 Vec and rebuilds it (bool->f64->bool), ~235000x
+    // slower than numpy. Return arr.mask directly when it is an ndarray of the data shape;
+    // nomask / scalar masks fall through to the zeros-building generic path.
+    {
+        let numpy = py.import("numpy")?;
+        let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
+        if arr.bind(py).is_instance(&masked_array_type)?
+            && let Ok(mask) = arr.bind(py).getattr("mask")
+            && mask.is_instance(&numpy.getattr("ndarray")?)?
+            && let (Ok(mshape), Ok(dshape)) = (
+                mask.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
+                arr.bind(py).getattr("shape").and_then(|s| s.extract::<Vec<usize>>()),
+            )
+            && mshape == dshape
+            && mask.getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
+        {
+            return Ok(mask.unbind());
+        }
+    }
+
     let (_, mask, shape) = match extract_mask_metadata(py, arr.bind(py), "getmaskarray") {
         Ok(result) => result,
         Err(_) => return fallback(),
