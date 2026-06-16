@@ -37617,6 +37617,123 @@ where
     Ok(Some(output))
 }
 
+fn minmax_bool_typed(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    axis: Option<isize>,
+    keepdims: bool,
+    take_min: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let viewed = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let Ok(in_buffer) = PyBuffer::<u8>::get(&viewed) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let ndim = shape.len();
+    let (outer, axis_len, inner, out_shape): (usize, usize, usize, Vec<usize>) = match axis {
+        None => {
+            let out_shape = if keepdims { vec![1; ndim] } else { Vec::new() };
+            (1, input.len(), 1, out_shape)
+        }
+        Some(ax) => {
+            let ndim_i = ndim as isize;
+            let norm = if ax < 0 { ax + ndim_i } else { ax };
+            if norm < 0 || norm >= ndim_i {
+                return Ok(None);
+            }
+            let axu = norm as usize;
+            let outer: usize = shape[..axu].iter().product();
+            let inner: usize = shape[axu + 1..].iter().product();
+            let mut out_shape = shape.clone();
+            if keepdims {
+                out_shape[axu] = 1;
+            } else {
+                out_shape.remove(axu);
+            }
+            (outer, shape[axu], inner, out_shape)
+        }
+    };
+    if axis_len == 0 || input.is_empty() {
+        return Ok(None);
+    }
+
+    let out_elems = outer * inner;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let flat_u8 = numpy.call_method("empty", (out_elems,), Some(&kwargs))?;
+    if out_elems > 0 {
+        let Ok(out_buffer) = PyBuffer::<u8>::get(&flat_u8) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        if axis.is_none() {
+            let value = if take_min {
+                input.iter().all(|cell| cell.get() != 0)
+            } else {
+                input.iter().any(|cell| cell.get() != 0)
+            };
+            output[0].set(u8::from(value));
+        } else if inner == 1 {
+            for (o, slot) in output.iter().enumerate() {
+                let base = o * axis_len;
+                let value = if take_min {
+                    input[base..base + axis_len]
+                        .iter()
+                        .all(|cell| cell.get() != 0)
+                } else {
+                    input[base..base + axis_len]
+                        .iter()
+                        .any(|cell| cell.get() != 0)
+                };
+                slot.set(u8::from(value));
+            }
+        } else {
+            let mut accs = vec![if take_min { 1u8 } else { 0u8 }; out_elems];
+            let lane = axis_len * inner;
+            for o in 0..outer {
+                let obase = o * inner;
+                let ibase = o * lane;
+                for k in 0..axis_len {
+                    let in_a = ibase + k * inner;
+                    for i in 0..inner {
+                        let value = u8::from(input[in_a + i].get() != 0);
+                        let acc = &mut accs[obase + i];
+                        if take_min {
+                            *acc &= value;
+                        } else {
+                            *acc |= value;
+                        }
+                    }
+                }
+            }
+            for (slot, &value) in output.iter().zip(accs.iter()) {
+                slot.set(value);
+            }
+        }
+    }
+
+    let flat_bool = flat_u8.call_method1("view", (numpy.getattr("bool_")?,))?;
+    if out_shape.is_empty() {
+        let zerod = flat_bool.call_method1("reshape", (PyTuple::empty(py),))?;
+        return Ok(Some(zerod.get_item(())?.unbind()));
+    }
+    let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
+    let output = flat_bool.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Dispatch zero-copy integer np.min/np.max by dtype width. Non-integer / non-
 // ndarray inputs return None so the caller's f64 fast path or numpy fallback runs.
 fn try_zerocopy_int_minmax(
@@ -37633,6 +37750,9 @@ fn try_zerocopy_int_minmax(
     }
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if kind == "b" {
+        return minmax_bool_typed(py, &numpy, a, axis, keepdims, take_min);
+    }
     if kind != "i" && kind != "u" {
         return Ok(None);
     }

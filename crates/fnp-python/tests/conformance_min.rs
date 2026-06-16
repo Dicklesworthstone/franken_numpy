@@ -504,3 +504,57 @@ print(fnp_raised == np_raised == True)
     );
     Ok(())
 }
+
+#[test]
+fn min_bool_zero_copy_matches_numpy_and_golden() -> Result<(), String> {
+    let script = fnp_min_script(
+        r#"
+import hashlib
+
+cases = [
+    ("flat_mixed", fnp.min, np.min, np.array([[True, False, True], [True, True, False]], dtype=bool), {}),
+    ("flat_all_true", fnp.min, np.min, np.ones((4, 5), dtype=bool), {}),
+    ("flat_all_false", fnp.min, np.min, np.zeros((4, 5), dtype=bool), {}),
+    ("axis0", fnp.min, np.min, np.array([[True, False, True], [True, True, False]], dtype=bool), {"axis": 0}),
+    ("axis1", fnp.min, np.min, np.array([[True, False, True], [True, True, False]], dtype=bool), {"axis": 1}),
+    ("axis1_keepdims", fnp.min, np.min, np.array([[True, False, True], [True, True, True]], dtype=bool), {"axis": 1, "keepdims": True}),
+    ("neg_axis", fnp.min, np.min, np.array([[[True, True], [False, True]], [[True, True], [True, True]]], dtype=bool), {"axis": -1}),
+    ("alias_amin", fnp.amin, np.amin, np.array([[True, True], [False, True]], dtype=bool), {"axis": 0, "keepdims": True}),
+]
+
+chunks = []
+for name, fnp_op, np_op, arr, kwargs in cases:
+    ours = fnp_op(arr, **kwargs)
+    theirs = np_op(arr, **kwargs)
+    ours_arr = np.asarray(ours)
+    theirs_arr = np.asarray(theirs)
+    assert ours_arr.dtype == theirs_arr.dtype == np.dtype("bool"), (name, ours_arr.dtype, theirs_arr.dtype)
+    assert ours_arr.shape == theirs_arr.shape, (name, ours_arr.shape, theirs_arr.shape)
+    assert np.array_equal(ours_arr, theirs_arr), (name, ours_arr, theirs_arr)
+    chunks.append(name.encode())
+    chunks.append(str(ours_arr.dtype).encode())
+    chunks.append(np.asarray(ours_arr.shape, dtype=np.int64).tobytes())
+    chunks.append(np.ascontiguousarray(ours_arr).view(np.uint8).tobytes())
+
+for op in (fnp.min, fnp.amin):
+    try:
+        op(np.empty((0, 3), dtype=bool), axis=0)
+    except ValueError:
+        chunks.append(b"empty-axis-valueerror")
+    else:
+        raise AssertionError("empty bool min axis should defer to numpy ValueError")
+
+ours = hashlib.sha256(b"|".join(chunks)).hexdigest()
+print(ours)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    let expected_sha = "fb74db5b737a5fb424a7b8f84dfe762d394cbfe75ad5f0620b77ab1253aeef74";
+    assert_eq!(
+        result.trim(),
+        expected_sha,
+        "bool min dtype/value/shape golden changed: {result}"
+    );
+    Ok(())
+}

@@ -262,6 +262,80 @@ fn bench_max_min_reduction_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_bool_minmax_reduction_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_bool_minmax_reduction_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let input = numpy
+            .call_method1("arange", (2048_usize * 2048_usize,))
+            .expect("4M bool source")
+            .call_method1("__mod__", (3_i64,))
+            .expect("periodic bool source")
+            .call_method1("__eq__", (0_i64,))
+            .expect("periodic bool input")
+            .call_method1("reshape", ((2048_usize, 2048_usize),))
+            .expect("2048x2048 bool input");
+        let fnp_max = module.getattr("max").expect("fnp_python.max");
+        let fnp_min = module.getattr("min").expect("fnp_python.min");
+        let numpy_max = numpy.getattr("max").expect("numpy.max");
+        let numpy_min = numpy.getattr("min").expect("numpy.min");
+
+        group.bench_function("fnp_max_flat_bool_4m", |bench| {
+            bench.iter(|| {
+                let result = fnp_max.call1((&input,)).expect("fnp max bool flat");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_max_flat_bool_4m", |bench| {
+            bench.iter(|| {
+                let result = numpy_max.call1((&input,)).expect("numpy max bool flat");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_min_flat_bool_4m", |bench| {
+            bench.iter(|| {
+                let result = fnp_min.call1((&input,)).expect("fnp min bool flat");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_min_flat_bool_4m", |bench| {
+            bench.iter(|| {
+                let result = numpy_min.call1((&input,)).expect("numpy min bool flat");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_max_axis1_bool_2048x2048", |bench| {
+            bench.iter(|| {
+                let result = fnp_max.call1((&input, 1_i64)).expect("fnp max bool axis=1");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_max_axis1_bool_2048x2048", |bench| {
+            bench.iter(|| {
+                let result = numpy_max
+                    .call1((&input, 1_i64))
+                    .expect("numpy max bool axis=1");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_prod_reduction_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_prod_reduction_boundary");
     group.sample_size(10);
@@ -1539,6 +1613,7 @@ criterion_group!(
     bench_int32_unary_boundary,
     bench_narrow_int_unary_boundary,
     bench_max_min_reduction_boundary,
+    bench_bool_minmax_reduction_boundary,
     bench_prod_reduction_boundary,
     bench_ediff1d_boundary,
     bench_select_boundary,
