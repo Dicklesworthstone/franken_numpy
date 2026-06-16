@@ -1311,6 +1311,14 @@ fn bench_einsum_boundary(c: &mut Criterion) {
             .expect("einsum f64 input")
             .call_method1("reshape", ((n, n),))
             .expect("einsum square input");
+        let reduce_n = 1000_usize;
+        let reduce_input = numpy
+            .call_method1("arange", (reduce_n * reduce_n,))
+            .expect("einsum reduction raw input")
+            .call_method1("astype", ("float64",))
+            .expect("einsum reduction f64 input")
+            .call_method1("reshape", ((reduce_n, reduce_n),))
+            .expect("einsum reduction square input");
         let fnp_einsum = module.getattr("einsum").expect("fnp_python.einsum");
         let numpy_einsum = numpy.getattr("einsum").expect("numpy.einsum");
 
@@ -1346,6 +1354,60 @@ fn bench_einsum_boundary(c: &mut Criterion) {
                 let result = numpy_einsum
                     .call1(("ii->i", &input))
                     .expect("numpy einsum diag benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_einsum_reduce_all_f64_1000", |bench| {
+            bench.iter(|| {
+                let result = fnp_einsum
+                    .call1(("ij->", &reduce_input))
+                    .expect("fnp einsum reduce-all benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_einsum_reduce_all_f64_1000", |bench| {
+            bench.iter(|| {
+                let result = numpy_einsum
+                    .call1(("ij->", &reduce_input))
+                    .expect("numpy einsum reduce-all benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_einsum_reduce_rows_f64_1000", |bench| {
+            bench.iter(|| {
+                let result = fnp_einsum
+                    .call1(("ij->i", &reduce_input))
+                    .expect("fnp einsum reduce-rows benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_einsum_reduce_rows_f64_1000", |bench| {
+            bench.iter(|| {
+                let result = numpy_einsum
+                    .call1(("ij->i", &reduce_input))
+                    .expect("numpy einsum reduce-rows benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_einsum_reduce_cols_f64_1000", |bench| {
+            bench.iter(|| {
+                let result = fnp_einsum
+                    .call1(("ij->j", &reduce_input))
+                    .expect("fnp einsum reduce-cols benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_einsum_reduce_cols_f64_1000", |bench| {
+            bench.iter(|| {
+                let result = numpy_einsum
+                    .call1(("ij->j", &reduce_input))
+                    .expect("numpy einsum reduce-cols benchmark call");
                 black_box(result);
             });
         });
