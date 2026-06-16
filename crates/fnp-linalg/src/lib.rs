@@ -4151,7 +4151,7 @@ fn sbr_apply_symmetric_rank2k_update(
     let update_row = |row_idx: usize, row: &mut [f64]| {
         let vi = &vv[row_idx * nb..row_idx * nb + nb];
         let wi = &w[row_idx * nb..row_idx * nb + nb];
-        let mut j0 = 0usize;
+        let mut j0 = row_idx;
         while j0 < h {
             let j_end = (j0 + COL_TILE).min(h);
             for j in j0..j_end {
@@ -4177,6 +4177,14 @@ fn sbr_apply_symmetric_rank2k_update(
     } else {
         for (row_idx, row) in active_rows.chunks_mut(n).take(h).enumerate() {
             update_row(row_idx, row);
+        }
+    }
+
+    for row_idx in 0..h {
+        let src = (active + row_idx) * n + active;
+        for col_idx in (row_idx + 1)..h {
+            let value = work[src + col_idx];
+            work[(active + col_idx) * n + active + row_idx] = value;
         }
     }
 }
@@ -13251,6 +13259,81 @@ mod tests {
         assert_eq!(
             digest, "d98865db162f1bffd8abacf1f8301ea5da5174b43eeb152a97ad1047edd1707e",
             "fused rank-2k tridiagonalization golden digest drifted: {digest}"
+        );
+    }
+
+    #[test]
+    fn symmetric_rank2k_triangular_update_matches_full_reference_and_golden_sha256() {
+        let active = 5usize;
+        let h = 160usize;
+        let n = active + h + 3;
+        let mut hasher = Sha256::new();
+
+        for &nb in &[64usize, 128] {
+            let mut work = vec![0.0f64; n * n];
+            for row in 0..n {
+                for col in row..n {
+                    let value = ((row * 17 + col * 29 + nb + 7) % 43) as f64 / 59.0 - 0.35;
+                    work[row * n + col] = value;
+                    work[col * n + row] = value;
+                }
+            }
+
+            let mut vv = vec![0.0f64; h * nb];
+            let mut ww = vec![0.0f64; h * nb];
+            for row in 0..h {
+                for col in 0..nb {
+                    vv[row * nb + col] = ((row * 13 + col * 19 + nb + 3) % 37) as f64 / 47.0 - 0.25;
+                    ww[row * nb + col] = ((row * 23 + col * 11 + nb + 5) % 31) as f64 / 41.0 - 0.2;
+                }
+            }
+
+            let mut full = work.clone();
+            for row_idx in 0..h {
+                let vi = &vv[row_idx * nb..row_idx * nb + nb];
+                let wi = &ww[row_idx * nb..row_idx * nb + nb];
+                for col_idx in 0..h {
+                    let vj = &vv[col_idx * nb..col_idx * nb + nb];
+                    let wj = &ww[col_idx * nb..col_idx * nb + nb];
+                    let mut delta = 0.0f64;
+                    for k in 0..nb {
+                        delta += vi[k] * wj[k] + wi[k] * vj[k];
+                    }
+                    full[(active + row_idx) * n + active + col_idx] -= delta;
+                }
+            }
+
+            let mut triangular = work;
+            super::sbr_apply_symmetric_rank2k_update(
+                &mut triangular,
+                n,
+                active,
+                h,
+                nb,
+                &vv,
+                &ww,
+            );
+            for row in 0..h {
+                for col in 0..h {
+                    let idx = (active + row) * n + active + col;
+                    assert_eq!(
+                        triangular[idx].to_bits(),
+                        full[idx].to_bits(),
+                        "rank2k active block drifted at nb={nb}, row={row}, col={col}"
+                    );
+                    hasher.update(triangular[idx].to_bits().to_le_bytes());
+                }
+            }
+        }
+
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "47e81b08104eb087d27fd21a6674cdbdfea002a91b0c59fceb72d7052aec66b4",
+            "triangular rank-2k golden digest drifted: {digest}"
         );
     }
 
