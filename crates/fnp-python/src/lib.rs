@@ -20535,17 +20535,20 @@ fn make_mask_none(
     newshape: &Bound<'_, PyAny>,
     dtype: Option<&Bound<'_, PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let shape = parse_shape_override(newshape, "make_mask_none")?;
-    if dtype.is_some() {
-        let numpy = py.import("numpy.ma")?;
-        let func = numpy.getattr("make_mask_none")?;
+    // Validate the shape with our parser (matches fnp's error surface), then defer
+    // to numpy.ma.make_mask_none. The previous path built a bool UFuncArray and
+    // converted it element-by-element (~68ms @4M) where numpy just allocates a
+    // calloc-backed np.zeros(shape, bool) (~66us) — a >1000x gap on a pure
+    // zero-mask constructor with no arithmetic.
+    let _ = parse_shape_override(newshape, "make_mask_none")?;
+    let numpy = py.import("numpy.ma")?;
+    let func = numpy.getattr("make_mask_none")?;
+    if let Some(dtype) = dtype {
         let kwargs = PyDict::new(py);
         kwargs.set_item("dtype", dtype)?;
         return Ok(func.call((newshape,), Some(&kwargs))?.unbind());
     }
-    let arr = UFuncArray::zeros(shape, DType::Bool)
-        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(e.to_string()))?;
-    build_numpy_array_from_ufunc(py, &arr)
+    Ok(func.call1((newshape,))?.unbind())
 }
 
 #[pyfunction]
@@ -20927,44 +20930,12 @@ fn mask_or(
             .unbind())
     };
 
-    let left = match extract_mask_operand(py, m1.bind(py), "mask_or(m1)") {
-        Ok(mask) => mask,
-        Err(_) => return fallback(),
-    };
-    let right = match extract_mask_operand(py, m2.bind(py), "mask_or(m2)") {
-        Ok(mask) => mask,
-        Err(_) => return fallback(),
-    };
-    if let (Some(left), Some(right)) = (&left, &right)
-        && left.shape() != right.shape()
-    {
-        return fallback();
-    }
-
-    let Some(result) = ma_mask_or(left.as_ref(), right.as_ref()) else {
-        return Ok(py
-            .import("numpy")?
-            .getattr("ma")?
-            .getattr("nomask")?
-            .unbind());
-    };
-    if shrink && result.values().iter().all(|&value| value == 0.0) {
-        return Ok(py
-            .import("numpy")?
-            .getattr("ma")?
-            .getattr("nomask")?
-            .unbind());
-    }
-
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if !copy && left.is_none() && right.is_none() {
-        return Ok(py
-            .import("numpy")?
-            .getattr("ma")?
-            .getattr("nomask")?
-            .unbind());
-    }
-    Ok(output)
+    // mask_or is a pure boolean OR of two masks with nomask/shrink/copy handling.
+    // The previous path extracted BOTH operands into f64 UFuncArrays, OR-ed, and
+    // rebuilt (~101ms @4M) where numpy does a single bool logical_or (~113us) — a
+    // ~890x gap. numpy.ma.mask_or is the parity reference and handles the nomask,
+    // shrink, copy and shape-mismatch (ValueError) cases natively, so defer to it.
+    fallback()
 }
 
 #[pyfunction]
@@ -33789,35 +33760,13 @@ fn make_mask(
         return fallback();
     }
 
-    let Some(mask) = (match extract_mask_operand(py, source, "make_mask") {
-        Ok(mask) => mask,
-        Err(_) => return fallback(),
-    }) else {
-        return Ok(nomask.clone().unbind());
-    };
-
-    let all_false = mask.values().iter().all(|&value| value == 0.0);
-    if shrink && all_false {
-        return Ok(nomask.unbind());
-    }
-
-    if !copy {
-        let builtins = py.import("builtins")?;
-        let is_ndarray = builtins
-            .call_method1("isinstance", (source, numpy.getattr("ndarray")?))?
-            .extract::<bool>()?;
-        if is_ndarray
-            && source
-                .getattr("dtype")?
-                .getattr("kind")?
-                .extract::<String>()?
-                == "b"
-        {
-            return Ok(source.clone().unbind());
-        }
-    }
-
-    build_numpy_array_from_ufunc(py, &mask)
+    // Everything past the O(1) nomask/dtype short-circuits is a pure bool
+    // conversion (truthiness -> bool, all-False shrink to nomask, optional copy).
+    // The previous path extracted the operand into an f64 UFuncArray and rebuilt
+    // it (~74ms @4M) where numpy.ma.make_mask does a single bool view/copy (~132us)
+    // — a ~560x gap. Defer to numpy, which is the parity reference and handles
+    // shrink/copy/nomask natively.
+    fallback()
 }
 
 #[pyfunction]
