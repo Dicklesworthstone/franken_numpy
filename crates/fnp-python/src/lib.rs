@@ -15355,13 +15355,15 @@ fn clip(
         return fallback();
     }
 
-    // bool input: numpy.clip(bool, ...) is the parity reference; the native extract
-    // path bridges bool->f64 (~680x slower than numpy). Defer (the f64/int zero-copy
-    // paths below are unaffected — they return None for bool anyway).
-    if a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
-        && a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
-    {
-        return fallback();
+    // bool / float16 input: numpy.clip is the parity reference; the native path bridges
+    // these dtypes through f64 (no PyBuffer Element) — ~680x slower for bool, ~2.7x for
+    // f16. Defer (the f64/int/f32 zero-copy paths below return None for them anyway).
+    if a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?) {
+        let kind = a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+        let itemsize = a.bind(py).getattr("dtype")?.getattr("itemsize")?.extract::<usize>()?;
+        if kind == "b" || (kind == "f" && itemsize == 2) {
+            return fallback();
+        }
     }
 
     // Zero-copy clamp for exact f64 C-contiguous ndarrays: promotion is a no-op
@@ -25690,6 +25692,11 @@ fn native_unary_promoting(
     let fallback = |_py: Python<'_>| -> PyResult<Py<PyAny>> {
         Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind())
     };
+    // float16: numpy's f16 ufuncs (via an f16<->f32 path) are the reference and far
+    // faster than fnp's native f16 round-trip (no f16 PyBuffer Element). Defer f16.
+    if numpy_dtype_is_f16(x) {
+        return fallback(py);
+    }
     // Zero-copy fast path: exact float64 C-contiguous ndarray inputs skip the
     // cold extract Vec entirely (see zerocopy_f64_unary_flat). Integer inputs
     // (which this promoting path widens to float) are not float64 ndarrays, so
@@ -43066,15 +43073,18 @@ fn around(
     }
 
     // Bool input reaches here (the zero-copy f64/int/f32 paths above don't take it).
-    // numpy.around(bool) PROMOTES to float16 (a numpy quirk) — the native extract
-    // path below would instead return a bool array (wrong dtype). numpy is the parity
-    // reference, so defer bool to it (also ~optimal; checked only on the fallthrough).
-    if a
-        .bind(py)
-        .is_exact_instance(&numpy.getattr("ndarray")?)
-        && a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
-    {
-        return fallback();
+    // numpy.around(bool) PROMOTES to float16 (a numpy quirk) — the native extract path
+    // would instead return a bool array (wrong dtype). And around(float16) rounds via an
+    // f64 intermediate that diverges from numpy's f16-native rounding in the last bit
+    // (decimals!=0). numpy is the parity reference for both, so defer (checked only on
+    // the fallthrough — f64/int/f32 already returned above).
+    if a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?) {
+        let dtype = a.bind(py).getattr("dtype")?;
+        let kind = dtype.getattr("kind")?.extract::<String>()?;
+        let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+        if kind == "b" || (kind == "f" && itemsize == 2) {
+            return fallback();
+        }
     }
     let array = match extract_precise_numeric_array(py, a.bind(py), "around(a)") {
         Ok(arr) => arr,
