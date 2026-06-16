@@ -21651,6 +21651,105 @@ fn allequal(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>, fill_value: bool) -> PyR
             .unbind())
     };
 
+    // Zero-copy early-exit fast path: a,b both f64 (MaskedArray or plain ndarray) of
+    // the same shape. The generic path below extracts BOTH operands' data+mask into
+    // owned f64 UFuncArrays before folding (~85ms @4M, 7.9x slower than numpy) — and
+    // because the extract is O(n) up front, its later early-exit never pays off. Here
+    // we fold straight over the data/mask buffers with a genuine short-circuit, which
+    // beats numpy on the differ case AND ties it on the equal case (no extract, no
+    // materialized comparison array). numpy.ma.allequal treats any masked entry as
+    // fill_value and an all-finite exact compare otherwise.
+    {
+        let numpy = py.import("numpy")?;
+        let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
+        let ndarray_type = numpy.getattr("ndarray")?;
+        let a_b = a.bind(py);
+        let b_b = b.bind(py);
+        let a_is_ma = a_b.is_instance(&masked_array_type)?;
+        let b_is_ma = b_b.is_instance(&masked_array_type)?;
+        if (a_is_ma || a_b.is_exact_instance(&ndarray_type))
+            && (b_is_ma || b_b.is_exact_instance(&ndarray_type))
+        {
+            let a_data = if a_is_ma { a_b.getattr("data")? } else { a_b.clone() };
+            let b_data = if b_is_ma { b_b.getattr("data")? } else { b_b.clone() };
+            if numpy_dtype_is_f64(py, &a_data) && numpy_dtype_is_f64(py, &b_data) {
+                let ashape = a_b.getattr("shape").and_then(|s| s.extract::<Vec<usize>>());
+                let bshape = b_b.getattr("shape").and_then(|s| s.extract::<Vec<usize>>());
+                if let (Ok(ashape), Ok(bshape)) = (ashape, bshape)
+                    && ashape == bshape
+                    && let (Ok(adb), Ok(bdb)) =
+                        (PyBuffer::<f64>::get(&a_data), PyBuffer::<f64>::get(&b_data))
+                    && let (Some(ad), Some(bd)) = (adb.as_slice(py), bdb.as_slice(py))
+                {
+                    // Fetch a bool mask buffer ONLY for MaskedArray operands — a plain
+                    // ndarray has no mask, and calling getmaskarray on it would alloc a
+                    // full all-False array (a needless pass that regresses the no-mask
+                    // case). uint8 view: numpy bool buffers export '?' which PyBuffer<u8>
+                    // rejects.
+                    let uint8 = numpy.getattr("uint8")?;
+                    let getmask = numpy.getattr("ma")?.getattr("getmaskarray")?;
+                    let a_mask_view = if a_is_ma {
+                        Some(getmask.call1((a_b,))?.call_method1("view", (&uint8,))?)
+                    } else {
+                        None
+                    };
+                    let b_mask_view = if b_is_ma {
+                        Some(getmask.call1((b_b,))?.call_method1("view", (&uint8,))?)
+                    } else {
+                        None
+                    };
+                    let a_mask_buf = a_mask_view.as_ref().and_then(|v| PyBuffer::<u8>::get(v).ok());
+                    let b_mask_buf = b_mask_view.as_ref().and_then(|v| PyBuffer::<u8>::get(v).ok());
+                    let a_mask = a_mask_buf.as_ref().and_then(|buf| buf.as_slice(py));
+                    let b_mask = b_mask_buf.as_ref().and_then(|buf| buf.as_slice(py));
+                    let n = ad.len();
+                    // Bail (fall through to the slow path) if a MaskedArray's mask buffer
+                    // was non-contiguous / unreadable, so we never treat masked as unmasked.
+                    let mask_ready = (!a_is_ma || a_mask.is_some_and(|s| s.len() == n))
+                        && (!b_is_ma || b_mask.is_some_and(|s| s.len() == n));
+                    if bd.len() == n && mask_ready {
+                        // No-mask case (both plain ndarrays / unmasked): allequal is just
+                        // all(x == y). IEEE makes x==y already False whenever either is NaN,
+                        // so no explicit NaN test is needed. Fold in SIMD-friendly chunks —
+                        // the inner AND-reduction has no data-dependent branch so it
+                        // autovectorizes, while the per-chunk break still short-circuits
+                        // (differ cases return almost instantly).
+                        let equal = if a_mask.is_none() && b_mask.is_none() {
+                            const CHUNK: usize = 2048;
+                            let mut equal = true;
+                            'chunks: for (ca, cb) in ad.chunks(CHUNK).zip(bd.chunks(CHUNK)) {
+                                let mut chunk_eq = true;
+                                for (x, y) in ca.iter().zip(cb) {
+                                    chunk_eq &= x.get() == y.get();
+                                }
+                                if !chunk_eq {
+                                    equal = false;
+                                    break 'chunks;
+                                }
+                            }
+                            equal
+                        } else {
+                            // At least one masked operand: numpy treats any masked entry as
+                            // fill_value, an exact compare otherwise.
+                            let mut equal = true;
+                            for i in 0..n {
+                                let masked = a_mask.is_some_and(|s| s[i].get() != 0)
+                                    || b_mask.is_some_and(|s| s[i].get() != 0);
+                                let res = if masked { fill_value } else { ad[i].get() == bd[i].get() };
+                                if !res {
+                                    equal = false;
+                                    break;
+                                }
+                            }
+                            equal
+                        };
+                        return Ok(PyBool::new(py, equal).to_owned().into_any().unbind());
+                    }
+                }
+            }
+        }
+    }
+
     let Some(a_masked) = extract_numeric_masked_array(py, a.bind(py), "allequal(a)")? else {
         return fallback();
     };
