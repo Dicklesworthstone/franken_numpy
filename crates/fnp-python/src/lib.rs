@@ -33258,6 +33258,15 @@ fn ma_average(
             .unbind())
     };
 
+    // Fast path: with no weights, ma.average reduces to the masked mean. The manual
+    // extract + per-element accumulation below runs ~7x slower than numpy.ma.average
+    // (106ms vs 14ms @4M f64). numpy is the parity reference and handles the
+    // returned-tuple and all-masked -> masked-scalar cases natively, so defer the
+    // (common) no-weights case to it.
+    if weights.is_none() {
+        return fallback();
+    }
+
     let input_is_masked_array = extract_mask_metadata(py, a.bind(py), "ma_average(a)")
         .map(|(is_masked, _, _)| is_masked)
         .unwrap_or(false);
@@ -34391,6 +34400,19 @@ fn masked_values(
             )?
             .unbind())
     };
+
+    // Fast path: a PLAIN ndarray x (never already-masked — get_type().is(ndarray)
+    // excludes MaskedArray subclasses). numpy's own masked_values is the parity
+    // reference and ~15x faster than the extract -> isclose -> rebuild path below
+    // (194ms vs 12.7ms @4M f64). numpy computes the isclose mask, fills/shrinks, and
+    // sets fill_value=value natively, so the result is identical.
+    {
+        let numpy = py.import("numpy")?;
+        let ndarray_type = numpy.getattr("ndarray")?;
+        if x.bind(py).get_type().is(&ndarray_type) {
+            return fallback();
+        }
+    }
 
     let Some(masked_x) = extract_numeric_masked_array(py, x.bind(py), "masked_values(x)")? else {
         return fallback();
