@@ -4137,6 +4137,31 @@ fn sbr_active_times_v(
     out
 }
 
+fn sbr_apply_cross_wy_update(
+    work: &mut [f64],
+    n: usize,
+    active: usize,
+    h: usize,
+    nb: usize,
+    cvt: &[f64],
+    vt: &[f64],
+) {
+    if active == 0 || h == 0 {
+        return;
+    }
+    debug_assert_eq!(work.len(), n * n);
+    debug_assert_eq!(cvt.len(), active * nb);
+    debug_assert_eq!(vt.len(), nb * h);
+
+    packed_gemm_sub_assign_strided(cvt, vt, active, nb, h, n, &mut work[active..]);
+    for row in 0..active {
+        let src = row * n + active;
+        for col in 0..h {
+            work[(active + col) * n + row] = work[src + col];
+        }
+    }
+}
+
 fn sbr_apply_symmetric_rank2k_update(
     work: &mut [f64],
     n: usize,
@@ -4331,15 +4356,7 @@ fn sbr_stage1_dense_to_band_impl(
             }
             let cv = packed_gemm(&cross, &vv, active, h, nb);
             let cvt = packed_gemm(&cv, &tm, active, nb, nb);
-            let upd = packed_gemm(&cvt, &vt, active, nb, h);
-            for row in 0..active {
-                let dst = row * n + active;
-                for col in 0..h {
-                    let value = work[dst + col] - upd[row * h + col];
-                    work[dst + col] = value;
-                    work[(active + col) * n + row] = value;
-                }
-            }
+            sbr_apply_cross_wy_update(&mut work, n, active, h, nb, &cvt, &vt);
         }
 
         let av = sbr_active_times_v(&work, n, active, h, nb, &vv);
@@ -13334,6 +13351,61 @@ mod tests {
         assert_eq!(
             digest, "47e81b08104eb087d27fd21a6674cdbdfea002a91b0c59fceb72d7052aec66b4",
             "triangular rank-2k golden digest drifted: {digest}"
+        );
+    }
+
+    #[test]
+    fn sbr_cross_wy_strided_update_matches_materialized_reference_and_golden_sha256() {
+        let mut hasher = Sha256::new();
+        for &(active, h, nb) in &[(8usize, 17usize, 8usize), (96, 160, 64), (140, 192, 128)] {
+            let n = active + h + 5;
+            let mut work = vec![0.0f64; n * n];
+            for row in 0..n {
+                for col in row..n {
+                    let value = ((row * 31 + col * 17 + active + h + nb) % 53) as f64 / 67.0 - 0.37;
+                    work[row * n + col] = value;
+                    work[col * n + row] = value;
+                }
+            }
+            let cvt: Vec<f64> = (0..active * nb)
+                .map(|idx| ((idx * 19 + active + nb) % 47) as f64 / 59.0 - 0.29)
+                .collect();
+            let vt: Vec<f64> = (0..nb * h)
+                .map(|idx| ((idx * 23 + h + nb) % 61) as f64 / 71.0 - 0.31)
+                .collect();
+
+            let mut materialized = work.clone();
+            let upd = super::packed_gemm(&cvt, &vt, active, nb, h);
+            for row in 0..active {
+                let dst = row * n + active;
+                for col in 0..h {
+                    let value = materialized[dst + col] - upd[row * h + col];
+                    materialized[dst + col] = value;
+                    materialized[(active + col) * n + row] = value;
+                }
+            }
+
+            let mut strided = work;
+            super::sbr_apply_cross_wy_update(&mut strided, n, active, h, nb, &cvt, &vt);
+            assert_eq!(strided.len(), materialized.len());
+            for (idx, (&lhs, &rhs)) in strided.iter().zip(&materialized).enumerate() {
+                assert_eq!(
+                    lhs.to_bits(),
+                    rhs.to_bits(),
+                    "SBR cross WY direct update drifted at flat index {idx}, active={active}, h={h}, nb={nb}"
+                );
+                hasher.update(lhs.to_bits().to_le_bytes());
+            }
+        }
+
+        let digest = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "f3e6bf77ab1fed8c1bffa2cb8853843fca6556a4ba408f4dfbf6bf16ddd21187",
+            "SBR cross WY strided update golden digest drifted: {digest}"
         );
     }
 
