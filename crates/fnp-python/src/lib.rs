@@ -20946,7 +20946,6 @@ fn ma_count(
     axis: Option<Py<PyAny>>,
     keepdims: Option<bool>,
 ) -> PyResult<Py<PyAny>> {
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
     let fallback = || -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         let count_fn = numpy.getattr("ma")?.getattr("count")?;
@@ -20960,39 +20959,13 @@ fn ma_count(
         Ok(count_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    let keepdims = keepdims.unwrap_or(false);
-    let axis_spec = match extract_axis_spec(py, axis_for_parse, "ma_count") {
-        Ok(spec) => spec,
-        Err(_) => return fallback(),
-    };
-    let (_, mask, shape) = match extract_mask_metadata(py, a.bind(py), "ma_count") {
-        Ok(metadata) => metadata,
-        Err(_) => return fallback(),
-    };
-    let axes = match axis_spec.as_ref() {
-        Some(axes) => {
-            if ensure_unique_axes(axes, shape.len()).is_err() {
-                return fallback();
-            }
-            let mut normalized = Vec::with_capacity(axes.len());
-            for &axis in axes {
-                match try_normalize_axis(axis, shape.len()) {
-                    Some(axis) => normalized.push(axis),
-                    None => return fallback(),
-                }
-            }
-            Some(normalized)
-        }
-        None => {
-            if keepdims && shape.is_empty() {
-                return fallback();
-            }
-            None
-        }
-    };
-
-    let counts = count_valid_elements(&shape, mask.as_ref(), axes.as_deref(), keepdims)?;
-    build_numpy_scalar_or_array(py, &counts)
+    // ma.count returns size - count_masked. The previous path ran
+    // extract_mask_metadata, which materializes the bool mask as an f64 UFuncArray
+    // (8x blowup + a full copy) before counting — ~33x slower than numpy (38ms vs
+    // 1.1ms @4M). numpy is the parity reference and the underlying bool reduction is
+    // a bandwidth-bound C op safe Rust cannot beat, so defer to numpy (which matches
+    // the axis/keepdims error surface natively).
+    fallback()
 }
 
 #[pyfunction]
@@ -34647,44 +34620,13 @@ fn count_masked(py: Python<'_>, arr: Py<PyAny>, axis: Option<Py<PyAny>>) -> PyRe
         .unbind())
     };
 
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let (_, mask, shape) = match extract_mask_metadata(py, arr.bind(py), "count_masked") {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    let mask = match mask {
-        Some(mask) => mask,
-        None => build_boolean_array(&shape, false, "count_masked")?,
-    };
-    let axes = match extract_axis_spec(py, axis_for_parse, "count_masked") {
-        Ok(axes) => axes,
-        Err(_) => return fallback(),
-    };
-    if let Some(axes) = axes.as_ref() {
-        // numpy.ma.count_masked raises AxisError (a subclass of
-        // ValueError) on out-of-bounds / duplicate axes. Fall back
-        // to numpy so the error type and message match exactly.
-        let ndim = mask.shape().len();
-        if ensure_unique_axes(axes, ndim).is_err() {
-            return fallback();
-        }
-        for &ax in axes {
-            if try_normalize_axis(ax, ndim).is_none() {
-                return fallback();
-            }
-        }
-    }
-    let result = match axes.as_ref() {
-        None => mask.count_nonzero(None, false),
-        Some(axes) if axes.len() == 1 => mask.count_nonzero(Some(axes[0]), false),
-        Some(axes) => mask.count_nonzero_axes(axes, false),
-    }
-    .map_err(map_ufunc_error)?;
-    let output = build_numpy_array_from_ufunc(py, &result)?;
-    if result.shape().is_empty() {
-        return Ok(output.bind(py).get_item(())?.unbind());
-    }
-    Ok(output)
+    // count_masked sums the True entries of the mask. The previous path ran
+    // extract_mask_metadata, which materializes the bool mask as an f64 UFuncArray
+    // (8x blowup + a full copy) before counting — ~3x slower than numpy's native
+    // bool reduction (3ms vs 1ms @4M). numpy is the parity reference and counting
+    // True bits in a bool array is a bandwidth-bound C reduction safe Rust cannot
+    // beat, so defer to numpy (which also matches the AxisError surface natively).
+    fallback()
 }
 
 // Zero-copy np.kron(a, b) for two 1-D C-contiguous float64 ndarrays. For 1-D
