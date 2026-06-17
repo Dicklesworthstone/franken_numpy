@@ -8992,6 +8992,56 @@ mod tests {
             assert_eq!(a.to_bits(), b.to_bits(), "batch_eigvalsh lane drifted");
         }
 
+        // Defense against blind golden re-pins: before trusting the digest,
+        // prove the *actual* outputs still solve their defining equations to
+        // ~machine epsilon. A future kernel refactor that changes the bits but
+        // keeps these residuals tiny is a benign last-ULP drift (re-pin the
+        // digest); one that blows a residual is a real regression (do NOT
+        // re-pin). These checks are threading- and load-independent.
+        let mut max_inv_resid = 0.0f64; // ||A·inv - I||_max over all lanes
+        let mut max_chol_resid = 0.0f64; // ||L·Lᵀ - A||_max over all lanes
+        let mut max_eig_resid = 0.0f64; // |Σλ - trace(A)| over all lanes
+        for b in 0..batch {
+            let a_sub = &data[b * mat_size..(b + 1) * mat_size];
+            let inv_sub = &inv_out[b * mat_size..(b + 1) * mat_size];
+            let chol_sub = &chol_out[b * mat_size..(b + 1) * mat_size];
+            let eig_sub = &eig_out[b * n..(b + 1) * n];
+            for i in 0..n {
+                for j in 0..n {
+                    let mut ainv = 0.0;
+                    let mut llt = 0.0; // L is lower-triangular row-major: L[r*n+k]
+                    for k in 0..n {
+                        ainv += a_sub[i * n + k] * inv_sub[k * n + j];
+                        llt += chol_sub[i * n + k] * chol_sub[j * n + k];
+                    }
+                    let eye = if i == j { 1.0 } else { 0.0 };
+                    max_inv_resid = max_inv_resid.max((ainv - eye).abs());
+                    max_chol_resid = max_chol_resid.max((llt - a_sub[i * n + j]).abs());
+                }
+            }
+            let mut trace = 0.0;
+            let mut eig_sum = 0.0;
+            for i in 0..n {
+                trace += a_sub[i * n + i];
+                eig_sum += eig_sub[i];
+            }
+            max_eig_resid = max_eig_resid.max((eig_sum - trace).abs());
+        }
+        // Tolerances sit ~3 orders above the observed ~1e-13 residuals, so a
+        // genuine regression trips them long before the digest assert fires.
+        assert!(
+            max_inv_resid < 1e-10,
+            "A·inv residual {max_inv_resid:e} exceeds tolerance — real inv regression, do not re-pin"
+        );
+        assert!(
+            max_chol_resid < 1e-9,
+            "L·Lᵀ residual {max_chol_resid:e} exceeds tolerance — real cholesky regression, do not re-pin"
+        );
+        assert!(
+            max_eig_resid < 1e-9,
+            "Σλ vs trace residual {max_eig_resid:e} exceeds tolerance — real eigvalsh regression, do not re-pin"
+        );
+
         // Golden SHA-256 over the concatenated little-endian output bits pins
         // the exact numeric result against future refactors.
         let mut hasher = Sha256::new();
@@ -9003,15 +9053,14 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        // Golden re-pinned 2026-06-15 (bead deadlock-audit-bthta): an upstream
-        // last-ULP change in the inv/eigvalsh kernels shifted these bits. Verified
-        // benign before re-pinning — A·inv≈I to 2.9e-15, L·Lᵀ≈A to 1.7e-13, and
-        // Σeig vs trace to 4.3e-16 across all 16 lanes (all ~machine epsilon); the
-        // per-lane parallel==serial bit-identity asserts above also hold. n=128
-        // cholesky (trail=96 < SYRK_MID_TRIANGULAR_MIN_TRAIL) is unaffected by the
-        // mid-panel SYRK levers, so the drift is purely inv/eigvalsh.
+        // Golden re-pinned 2026-06-17: commit a44dbead lowered TRIDIAG_BLOCK_MIN
+        // 384->64, so at n=128 eigvalsh now drives the blocked tridiagonalization
+        // path; its different (valid) reduction order shifted the eigenvalue bits.
+        // Verified benign by the residual asserts above (all ~1e-13, far inside
+        // tolerance) and by the per-lane parallel==serial bit-identity asserts.
+        // Prior pin c4213c22 (2026-06-15) predated the blocked-tridiag lever.
         assert_eq!(
-            digest, "c4213c225ae27508eac62884e9a6cf45b6da587676d05c7012fc36095f86450e",
+            digest, "34aaf43da49efdd8597855ac7052ec8fcabfde45e71bdf798217258fb51c9213",
             "batch parallel golden digest drifted"
         );
     }
