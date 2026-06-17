@@ -2772,6 +2772,82 @@ fn svd_apply_fused_two_sided_row_pair(
     }
 }
 
+#[inline]
+fn svd_apply_fused_two_sided_row_quad(
+    rows: [&mut [f64]; 4],
+    vis: [f64; 4],
+    lh_tail: &[f64],
+    w_tail: &[f64],
+    right_scale: f64,
+) {
+    let [row0_tail, row1_tail, row2_tail, row3_tail] = rows;
+    debug_assert_eq!(row0_tail.len(), row1_tail.len());
+    debug_assert_eq!(row0_tail.len(), row2_tail.len());
+    debug_assert_eq!(row0_tail.len(), row3_tail.len());
+    debug_assert_eq!(row0_tail.len(), lh_tail.len());
+    debug_assert_eq!(row0_tail.len(), w_tail.len());
+
+    let tail_len = row0_tail.len();
+    let blocked_len =
+        (tail_len / SVD_FUSED_TWO_SIDED_REGISTER_BLOCK) * SVD_FUSED_TWO_SIDED_REGISTER_BLOCK;
+    let mut dots = [0.0; 4];
+    let mut offset = 0;
+    while offset < blocked_len {
+        for lane in 0..SVD_FUSED_TWO_SIDED_REGISTER_BLOCK {
+            let idx = offset + lane;
+            let lh = lh_tail[idx];
+            let w = w_tail[idx];
+            row0_tail[idx] -= lh * vis[0];
+            dots[0] += row0_tail[idx] * w;
+            row1_tail[idx] -= lh * vis[1];
+            dots[1] += row1_tail[idx] * w;
+            row2_tail[idx] -= lh * vis[2];
+            dots[2] += row2_tail[idx] * w;
+            row3_tail[idx] -= lh * vis[3];
+            dots[3] += row3_tail[idx] * w;
+        }
+        offset += SVD_FUSED_TWO_SIDED_REGISTER_BLOCK;
+    }
+    for idx in blocked_len..tail_len {
+        let lh = lh_tail[idx];
+        let w = w_tail[idx];
+        row0_tail[idx] -= lh * vis[0];
+        dots[0] += row0_tail[idx] * w;
+        row1_tail[idx] -= lh * vis[1];
+        dots[1] += row1_tail[idx] * w;
+        row2_tail[idx] -= lh * vis[2];
+        dots[2] += row2_tail[idx] * w;
+        row3_tail[idx] -= lh * vis[3];
+        dots[3] += row3_tail[idx] * w;
+    }
+
+    let fs = [
+        right_scale * dots[0],
+        right_scale * dots[1],
+        right_scale * dots[2],
+        right_scale * dots[3],
+    ];
+    let mut offset = 0;
+    while offset < blocked_len {
+        for lane in 0..SVD_FUSED_TWO_SIDED_REGISTER_BLOCK {
+            let idx = offset + lane;
+            let w = w_tail[idx];
+            row0_tail[idx] -= fs[0] * w;
+            row1_tail[idx] -= fs[1] * w;
+            row2_tail[idx] -= fs[2] * w;
+            row3_tail[idx] -= fs[3] * w;
+        }
+        offset += SVD_FUSED_TWO_SIDED_REGISTER_BLOCK;
+    }
+    for idx in blocked_len..tail_len {
+        let w = w_tail[idx];
+        row0_tail[idx] -= fs[0] * w;
+        row1_tail[idx] -= fs[1] * w;
+        row2_tail[idx] -= fs[2] * w;
+        row3_tail[idx] -= fs[3] * w;
+    }
+}
+
 fn svd_bidiag_values_with_max_iters(
     a: &[f64],
     m: usize,
@@ -2981,6 +3057,30 @@ fn svd_bidiag_qr_full(
                             let lh_tail = &lh_f[j + 1..n];
                             let w_tail = &w_house[j + 1..n];
                             let mut row = j + 1;
+                            while row + 3 < m {
+                                let rows = &mut work[row * n..(row + 4) * n];
+                                let (row0, rows) = rows.split_at_mut(n);
+                                let (row1, rows) = rows.split_at_mut(n);
+                                let (row2, row3) = rows.split_at_mut(n);
+                                svd_apply_fused_two_sided_row_quad(
+                                    [
+                                        &mut row0[j + 1..n],
+                                        &mut row1[j + 1..n],
+                                        &mut row2[j + 1..n],
+                                        &mut row3[j + 1..n],
+                                    ],
+                                    [
+                                        v_house[row],
+                                        v_house[row + 1],
+                                        v_house[row + 2],
+                                        v_house[row + 3],
+                                    ],
+                                    lh_tail,
+                                    w_tail,
+                                    right_scale,
+                                );
+                                row += 4;
+                            }
                             while row + 1 < m {
                                 let row0_base = row * n;
                                 let row1_base = (row + 1) * n;
