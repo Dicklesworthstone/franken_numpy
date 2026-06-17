@@ -2773,14 +2773,17 @@ fn svd_apply_fused_two_sided_row_pair(
 }
 
 #[inline]
+#[allow(clippy::too_many_arguments)]
 fn svd_apply_fused_two_sided_row_quad(
-    rows: [&mut [f64]; 4],
+    row0_tail: &mut [f64],
+    row1_tail: &mut [f64],
+    row2_tail: &mut [f64],
+    row3_tail: &mut [f64],
     vis: [f64; 4],
     lh_tail: &[f64],
     w_tail: &[f64],
     right_scale: f64,
 ) {
-    let [row0_tail, row1_tail, row2_tail, row3_tail] = rows;
     debug_assert_eq!(row0_tail.len(), row1_tail.len());
     debug_assert_eq!(row0_tail.len(), row2_tail.len());
     debug_assert_eq!(row0_tail.len(), row3_tail.len());
@@ -3063,12 +3066,10 @@ fn svd_bidiag_qr_full(
                                 let (row1, rows) = rows.split_at_mut(n);
                                 let (row2, row3) = rows.split_at_mut(n);
                                 svd_apply_fused_two_sided_row_quad(
-                                    [
-                                        &mut row0[j + 1..n],
-                                        &mut row1[j + 1..n],
-                                        &mut row2[j + 1..n],
-                                        &mut row3[j + 1..n],
-                                    ],
+                                    &mut row0[j + 1..n],
+                                    &mut row1[j + 1..n],
+                                    &mut row2[j + 1..n],
+                                    &mut row3[j + 1..n],
                                     [
                                         v_house[row],
                                         v_house[row + 1],
