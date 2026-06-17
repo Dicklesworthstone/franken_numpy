@@ -5584,7 +5584,12 @@ impl UFuncArray {
         endpoint: bool,
         dtype: DType,
     ) -> Result<Self, UFuncError> {
-        let lin = Self::linspace_endpoint(start, stop, num, endpoint, dtype)?;
+        // Compute the exponent ramp in full f64 precision and cast to `dtype`
+        // exactly ONCE at the end — this mirrors numpy's
+        // `power(base, linspace(...)).astype(dtype)`. Casting the inner linspace
+        // to a narrow dtype FIRST (the old behavior) pre-rounded the exponents
+        // and diverged from numpy for f32/f16/narrow-int output.
+        let lin = Self::linspace_endpoint(start, stop, num, endpoint, DType::F64)?;
         let values: Vec<f64> = lin.values.iter().map(|&v| base.powf(v)).collect();
         Self::from_values_with_dtype(vec![num], values, dtype)
     }
@@ -55764,6 +55769,28 @@ print(json.dumps(payload))
         assert!((r.values()[0] - 1.0).abs() < 1e-12); // 10^0
         assert!((r.values()[1] - 10.0).abs() < 1e-12); // 10^1
         assert!((r.values()[2] - 100.0).abs() < 1e-10); // 10^2
+    }
+
+    #[test]
+    fn logspace_f32_casts_once_like_numpy() {
+        // numpy: `power(base, linspace(...)).astype(dtype)` — the exponent ramp
+        // is full-precision f64 and the result is cast to the narrow dtype EXACTLY
+        // ONCE. fnp must not pre-round the inner linspace to f32 before powf.
+        // num=7 over [0,2] gives non-dyadic exponents (1/3, 2/3, 4/3, 5/3) that
+        // are NOT exactly representable in f32, so pre-rounding the inner linspace
+        // to f32 (the old behavior) measurably diverges from the f64 ramp.
+        let num = 7usize;
+        let (start, stop, base) = (0.0_f64, 2.0_f64, 10.0_f64);
+        let got = UFuncArray::logspace(start, stop, num, base, DType::F32).unwrap();
+        // Reference mirrors numpy's algorithm: f64 ramp -> powf -> single f32 cast.
+        let step = (stop - start) / ((num - 1) as f64);
+        let reference: Vec<f64> = (0..num)
+            .map(|i| {
+                let x = if i == num - 1 { stop } else { start + step * i as f64 };
+                (base.powf(x) as f32) as f64
+            })
+            .collect();
+        assert_eq!(got.values(), reference.as_slice());
     }
 
     #[test]
