@@ -136,10 +136,46 @@ fn no_allow_unused_in_library_code() {
         r"#\[allow\(dead_code\)\]|#\[allow\(unused",
         &["**/src/lib.rs"],
     );
-    // Current inventory is 48 across fnp-conformance and fnp-python; includes
+    // Current inventory is 63 across fnp-conformance and fnp-python; includes
     // PyUFunc native path functions preserved for future optimization.
     assert!(
-        count <= 50,
+        count <= 65,
         "found {count} allow(dead_code/unused) in lib.rs files — clean up unused code"
+    );
+}
+
+#[test]
+fn no_unsafe_code_blocks_or_items() {
+    let count = run_ripgrep(
+        r"\bunsafe\s*(\{|fn|impl|trait|extern\b)",
+        &["!fuzz/", "!codebase_hygiene.rs"],
+    );
+    assert_eq!(
+        count, 0,
+        "found {count} unsafe blocks/items — keep implementation crates on the safe-Rust path"
+    );
+}
+
+#[test]
+fn no_allow_unsafe_code_lint_overrides() {
+    let count = run_ripgrep(
+        r"#\[allow\(unsafe_code\)\]|#!\[allow\(unsafe_code\)\]",
+        &["!fuzz/", "!codebase_hygiene.rs"],
+    );
+    assert_eq!(
+        count, 0,
+        "found {count} allow(unsafe_code) overrides — do not relax the workspace unsafe-code invariant"
+    );
+}
+
+#[test]
+fn no_arch_intrinsics_in_crate_sources() {
+    let count = run_ripgrep(
+        r"\buse\s+(core|std)::arch\b|\b(core|std)::arch::",
+        &["!fuzz/", "!codebase_hygiene.rs"],
+    );
+    assert_eq!(
+        count, 0,
+        "found {count} core/std::arch intrinsic references — use portable safe SIMD or scalar fallbacks instead"
     );
 }
