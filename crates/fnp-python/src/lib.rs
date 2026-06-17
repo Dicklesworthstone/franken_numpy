@@ -9756,6 +9756,24 @@ fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy>(
     };
     let count = idx_in.len();
     let total_out = outer * count * inner;
+    // Resolve + bounds-check each index ONCE, up front. The previous loop re-ran the
+    // negative-wrap and OOB check for every outer slab, so an axis=last gather (inner=1,
+    // e.g. np.take(NxN, idx, axis=1)) validated `outer * count` times — N× redundant —
+    // making the column gather ~2.7x slower than numpy. Resolving once leaves only the
+    // raw element moves in the hot loop. Any OOB index still defers to numpy (None) so
+    // the exact IndexError surfaces, identical to before.
+    let la_i = la as i64;
+    let mut resolved = Vec::with_capacity(count);
+    for idx_cell in idx_in.iter() {
+        let mut k = idx_cell.get();
+        if k < 0 {
+            k += la_i;
+        }
+        if k < 0 || k >= la_i {
+            return Ok(None); // OOB → defer to numpy for exact IndexError
+        }
+        resolved.push(k as usize);
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", out_dtype_name)?;
     let flat = numpy.call_method("empty", (total_out,), Some(&kwargs))?;
@@ -9766,25 +9784,30 @@ fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        let la_i = la as i64;
-        for o in 0..outer {
-            let abase = o * la * inner;
-            let obase = o * count * inner;
-            for (j, idx_cell) in idx_in.iter().enumerate() {
-                let mut k = idx_cell.get();
-                if k < 0 {
-                    k += la_i;
+        if inner == 1 {
+            // Scalar gather (axis is the last axis): out[o*count + j] = arr[o*la + k_j].
+            // Specialized so the destination side iterates without per-element slice
+            // bounds checks; only the gather read indexes randomly.
+            for o in 0..outer {
+                let abase = o * la;
+                let obase = o * count;
+                for (dst, &k) in output[obase..obase + count].iter().zip(resolved.iter()) {
+                    dst.set(arr_s[abase + k].get());
                 }
-                if k < 0 || k >= la_i {
-                    return Ok(None); // OOB → defer to numpy for exact IndexError
-                }
-                let sbase = abase + (k as usize) * inner;
-                let dbase = obase + j * inner;
-                for (dst, src) in output[dbase..dbase + inner]
-                    .iter()
-                    .zip(arr_s[sbase..sbase + inner].iter())
-                {
-                    dst.set(src.get());
+            }
+        } else {
+            for o in 0..outer {
+                let abase = o * la * inner;
+                let obase = o * count * inner;
+                for (j, &k) in resolved.iter().enumerate() {
+                    let sbase = abase + k * inner;
+                    let dbase = obase + j * inner;
+                    for (dst, src) in output[dbase..dbase + inner]
+                        .iter()
+                        .zip(arr_s[sbase..sbase + inner].iter())
+                    {
+                        dst.set(src.get());
+                    }
                 }
             }
         }
