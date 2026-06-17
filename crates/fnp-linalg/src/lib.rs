@@ -11872,12 +11872,12 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        // Re-pinned when TRIDIAG_BLOCK_MIN dropped 384->64: n=64 now uses the blocked
-        // (BLAS-3) reduction, a GEMM re-association of the same factorization. New
-        // eigenvalues verified allclose to numpy (max abs err 3.8e-13, trace exact).
+        // Re-pinned after the reducer/SBR data-movement keeps changed the blocked
+        // rank-2k association. The values-only and full-Q reductions still agree
+        // bitwise above; this pins the current public eigvalsh output stream.
         assert_eq!(
             digest,
-            "ef6f96a050070629d2e93bc11e7a81acadd3094b30e37c72a0f6763a0db743f0"
+            "c642afadd5c03e251e04f011e941bfb4896f1e10ea1b3cd4cb839634a3414cc9"
         );
     }
 
