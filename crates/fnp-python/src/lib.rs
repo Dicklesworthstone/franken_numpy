@@ -38644,14 +38644,15 @@ fn trace(
     dtype: Option<Py<PyAny>>,
     out: Option<Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
-    let trace_fn = numpy.getattr("trace")?;
-
     let a_for_fallback = a.clone_ref(py);
     let dtype_for_fallback = dtype.as_ref().map(|v| v.clone_ref(py));
     let out_for_fallback = out.as_ref().map(|v| v.clone_ref(py));
 
     let fallback = || -> PyResult<Py<PyAny>> {
+        // Import numpy lazily here so the native fast paths below pay neither the
+        // module-import lookup nor the `trace` attribute fetch on the hot path.
+        let numpy = py.import("numpy")?;
+        let trace_fn = numpy.getattr("trace")?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("offset", offset)?;
         kwargs.set_item("axis1", axis1)?;
@@ -38683,6 +38684,47 @@ fn trace(
         return fallback();
     }
 
+    // Zero-copy fast path: a contiguous 2-D float64 matrix in the canonical
+    // (axis1, axis2) == (0, 1) orientation. Read its row-major buffer directly and
+    // sum the diagonal a[i, i+offset] by striding (i*ncols + i + offset) — no numpy
+    // import, no `diagonal` view object, no per-element extract across the bridge.
+    // Bit-identical to the diagonal-view path below: identical i-ascending order and
+    // the same left-to-right f64 fold from 0.0 (matching UFuncArray::scalar(_,F64)).
+    let a_bound = a.bind(py);
+    {
+        let n1 = if axis1 < 0 { axis1 + 2 } else { axis1 };
+        let n2 = if axis2 < 0 { axis2 + 2 } else { axis2 };
+        if n1 == 0
+            && n2 == 1
+            && let Ok(buffer) = PyBuffer::<f64>::get(a_bound)
+            && buffer.dimensions() == 2
+            && buffer.is_c_contiguous()
+            && let Some(data) = buffer.as_slice(py)
+        {
+            let shape = buffer.shape();
+            let (nrows, ncols) = (shape[0], shape[1]);
+            let mut sum = 0.0f64;
+            if offset >= 0 {
+                let off = offset as usize;
+                if off < ncols {
+                    let count = nrows.min(ncols - off);
+                    for i in 0..count {
+                        sum += data[i * ncols + i + off].get();
+                    }
+                }
+            } else {
+                let off = offset.unsigned_abs() as usize;
+                if off < nrows {
+                    let count = (nrows - off).min(ncols);
+                    for i in 0..count {
+                        sum += data[(i + off) * ncols + i].get();
+                    }
+                }
+            }
+            return build_numpy_scalar_or_array(py, &UFuncArray::scalar(sum, DType::F64));
+        }
+    }
+
     // Fast path: a 2-D matrix's trace only needs its N diagonal elements, but the
     // generic native path below extracts the whole N×N matrix across the bridge
     // (O(n²) data movement) just to sum the diagonal. Ask NumPy for the diagonal
@@ -38692,7 +38734,6 @@ fn trace(
     // f64 fold and the scalar dtype match exactly. Restricted to the canonical
     // (axis1, axis2) == (0, 1) form (trace_axis is transpose-invariant for 2-D, so
     // swapped/other axes keep the validated full path).
-    let a_bound = a.bind(py);
     if let Ok(shape) = a_bound
         .getattr("shape")
         .and_then(|s| s.extract::<Vec<usize>>())
