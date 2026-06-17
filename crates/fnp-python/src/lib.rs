@@ -35795,18 +35795,19 @@ fn diag(py: Python<'_>, v: Py<PyAny>, k: i64) -> PyResult<Py<PyAny>> {
     if dtype_kind == "c" {
         return Ok(numpy.getattr("diag")?.call1((arr, k))?.unbind());
     }
-    // 2-D input fast path: np.diag(M, k) EXTRACTS the k-diagonal (N values out of an
-    // N×N matrix). The generic path below copies the whole matrix across the bridge
-    // (O(n²)) just to read N elements; instead read NumPy's diagonal VIEW (O(1),
-    // strided) and extract only those N. Bit-identical to v.diag(k) — same diagonal
-    // elements, same order, same dtype. (1-D input CONSTRUCTS a matrix and has no
-    // such gap, so it keeps the generic path.)
+    // 2-D input: np.diag(M, k) returns numpy's read-only, strided VIEW of the
+    // k-diagonal — O(1), shares memory with M — because the numpy function simply
+    // forwards to M.diagonal(k). The previous fast path read those N values through
+    // the bridge into a fresh contiguous owndata copy, which was both O(N) work AND
+    // a semantic divergence: numpy's result is a non-contiguous, read-only view that
+    // aliases M (writeable=False, owndata=False), whereas the copy was writeable and
+    // owned. Delegate to numpy.diag for the exact view, dtype, writeable flag, and
+    // aliasing — we cannot beat an O(1) stride trick by copying. (1-D input
+    // CONSTRUCTS a matrix and is handled by the zero-copy diagflat path below.)
     if let Ok(shape) = arr.getattr("shape").and_then(|s| s.extract::<Vec<usize>>())
         && shape.len() == 2
-        && let Ok(diag_view) = arr.call_method1("diagonal", (k,))
-        && let Ok(result) = extract_precise_numeric_array(py, &diag_view, "diag(diagonal)")
     {
-        return build_numpy_array_from_ufunc(py, &result);
+        return Ok(numpy.getattr("diag")?.call1((arr, k))?.unbind());
     }
     // 1-D input CONSTRUCTS an (n+|k|)×(n+|k|) matrix with v on the k-th diagonal —
     // identical to diagflat for a 1-D operand. The generic path below materializes
