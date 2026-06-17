@@ -34420,6 +34420,79 @@ fn tensordot(
     build_numpy_scalar_or_array(py, &result)
 }
 
+// Zero-copy np.cross for two C-contiguous float64 ndarrays of identical shape
+// (N, 3) with the default axes — the common 3-vector batch. Reads both operands'
+// buffers directly and writes each row's cross product into a fresh
+// numpy.empty((N, 3)) in one fused serial pass, skipping the two extract copies
+// and the build round-trip the general path pays (the native UFuncArray::cross
+// loop is itself serial, so this loses no parallelism). The component formula and
+// output order (cx, cy, cz) are byte-for-byte identical to numpy and to that
+// native f64 loop — same non-fused mul/sub ops, no FMA — so results are
+// bit-identical incl. -0.0/inf/nan. Returns None (caller falls through) for any
+// non-f64, non-(N,3), shape-mismatched, non-contiguous, or non-ndarray input.
+fn try_zerocopy_f64_cross_n3(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if !numpy_dtype_is_f64(py, a) || !numpy_dtype_is_f64(py, b) {
+        return Ok(None);
+    }
+    let a_shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let b_shape: Vec<usize> = b.getattr("shape")?.extract()?;
+    if a_shape.len() != 2 || a_shape[1] != 3 || a_shape != b_shape {
+        return Ok(None);
+    }
+    // C-contiguous required so the flat buffer is row-major (row i begins at 3*i).
+    if !a
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+        || !b
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let n = a_shape[0];
+    let (Ok(a_buf), Ok(b_buf)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(b)) else {
+        return Ok(None);
+    };
+    let (Some(a_in), Some(b_in)) = (a_buf.as_slice(py), b_buf.as_slice(py)) else {
+        return Ok(None);
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", ((n, 3),), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buf) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for i in 0..n {
+            let base = i * 3;
+            let ax = a_in[base].get();
+            let ay = a_in[base + 1].get();
+            let az = a_in[base + 2].get();
+            let bx = b_in[base].get();
+            let by = b_in[base + 1].get();
+            let bz = b_in[base + 2].get();
+            output[base].set(ay * bz - az * by);
+            output[base + 1].set(az * bx - ax * bz);
+            output[base + 2].set(ax * by - ay * bx);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b, axisa=-1, axisb=-1, axisc=-1, axis=None))]
 fn cross(
@@ -34448,6 +34521,12 @@ fn cross(
 
     if axis.is_some() || axisa != -1 || axisb != -1 || axisc != -1 {
         return fallback();
+    }
+
+    // Zero-copy fast path for the common (N, 3) f64 batch: skips both extract copies
+    // and the build round-trip the native path pays. Other dtypes/shapes fall through.
+    if let Some(out) = try_zerocopy_f64_cross_n3(py, a.bind(py), b.bind(py))? {
+        return Ok(out);
     }
 
     let a = match extract_precise_numeric_array(py, a.bind(py), "cross(a)") {
