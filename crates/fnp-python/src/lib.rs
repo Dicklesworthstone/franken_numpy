@@ -32336,8 +32336,15 @@ fn try_zerocopy_f64_average_axis(
                 }
             } else {
                 for (row, lane) in asl.chunks_exact(axis_len).enumerate() {
-                    let mut sum = 0.0f64;
-                    for value in lane {
+                    let mut acc = [0.0f64; 8];
+                    let mut chunks = lane.chunks_exact(8);
+                    for group in chunks.by_ref() {
+                        for (slot, value) in acc.iter_mut().zip(group.iter()) {
+                            *slot += value.get();
+                        }
+                    }
+                    let mut sum = acc.iter().sum::<f64>();
+                    for value in chunks.remainder() {
                         sum += value.get();
                     }
                     if sum == 0.0 {
