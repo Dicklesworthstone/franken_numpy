@@ -594,6 +594,35 @@ fn apply_simd_residual_unary_chunk(
     Some(flags)
 }
 
+fn apply_simd_plain_unary_chunk(op: UnaryOp, out_chunk: &mut [f64], in_chunk: &[f64]) -> bool {
+    if !matches!(op, UnaryOp::Abs) {
+        return false;
+    }
+
+    debug_assert_eq!(out_chunk.len(), in_chunk.len());
+    use std::simd::Simd;
+    use std::simd::num::SimdFloat;
+
+    const LANES: usize = 8;
+    type V = Simd<f64, LANES>;
+
+    let mut offset = 0;
+    while offset + LANES <= in_chunk.len() {
+        let input = V::from_slice(&in_chunk[offset..offset + LANES]);
+        input
+            .abs()
+            .copy_to_slice(&mut out_chunk[offset..offset + LANES]);
+        offset += LANES;
+    }
+
+    while offset < in_chunk.len() {
+        out_chunk[offset] = op.apply(in_chunk[offset]);
+        offset += 1;
+    }
+
+    true
+}
+
 #[inline]
 #[must_use]
 fn numpy_sign_f64(x: f64) -> f64 {
@@ -5190,9 +5219,9 @@ impl UFuncArray {
             DType::Bool | DType::I8 | DType::I16 | DType::I32 | DType::I64 => Some(
                 IntegerSidecar::I64(self.values.iter().map(|&v| v as i64).collect()),
             ),
-            DType::U8 | DType::U16 | DType::U32 | DType::U64 => Some(
-                IntegerSidecar::U64(self.values.iter().map(|&v| v as u64).collect()),
-            ),
+            DType::U8 | DType::U16 | DType::U32 | DType::U64 => Some(IntegerSidecar::U64(
+                self.values.iter().map(|&v| v as u64).collect(),
+            )),
             _ => None,
         }
     }
@@ -5810,7 +5839,11 @@ impl UFuncArray {
                 }
             }
         }
-        Ok(Self::from_values_with_dtype_lossy(vec![n, cols], values, dtype))
+        Ok(Self::from_values_with_dtype_lossy(
+            vec![n, cols],
+            values,
+            dtype,
+        ))
     }
 
     /// Create a diagonal matrix from a 1-D array with optional offset.
@@ -5902,15 +5935,21 @@ impl UFuncArray {
             let mut sidecar_vals = match &self.integer_sidecar {
                 Some(IntegerSidecar::I64(_)) => {
                     let mut v: Vec<i64> = Vec::new();
-                    v.try_reserve_exact(total)
-                        .map_err(|_| UFuncError::Msg("diag: unable to allocate output array (out of memory)".to_string()))?;
+                    v.try_reserve_exact(total).map_err(|_| {
+                        UFuncError::Msg(
+                            "diag: unable to allocate output array (out of memory)".to_string(),
+                        )
+                    })?;
                     v.resize(total, 0);
                     Some(IntegerSidecar::I64(v))
                 }
                 Some(IntegerSidecar::U64(_)) => {
                     let mut v: Vec<u64> = Vec::new();
-                    v.try_reserve_exact(total)
-                        .map_err(|_| UFuncError::Msg("diag: unable to allocate output array (out of memory)".to_string()))?;
+                    v.try_reserve_exact(total).map_err(|_| {
+                        UFuncError::Msg(
+                            "diag: unable to allocate output array (out of memory)".to_string(),
+                        )
+                    })?;
                     v.resize(total, 0);
                     Some(IntegerSidecar::U64(v))
                 }
@@ -7879,9 +7918,7 @@ impl UFuncArray {
         // (order-independent -> identical dispatch).
         const UNARY_PARALLEL_CHUNK: usize = 8192;
         let n = self.values.len();
-        if op.is_parallel_worth()
-            && n >= op.parallel_min_len()
-            && rayon::current_num_threads() >= 2
+        if op.is_parallel_worth() && n >= op.parallel_min_len() && rayon::current_num_threads() >= 2
         {
             let mut values = vec![0.0f64; n];
             if !op.tracks_float_errors() {
@@ -7889,6 +7926,9 @@ impl UFuncArray {
                     .par_chunks_mut(UNARY_PARALLEL_CHUNK)
                     .zip(self.values.par_chunks(UNARY_PARALLEL_CHUNK))
                     .for_each(|(out_chunk, in_chunk)| {
+                        if apply_simd_plain_unary_chunk(op, out_chunk, in_chunk) {
+                            return;
+                        }
                         for (out_slot, &value) in out_chunk.iter_mut().zip(in_chunk.iter()) {
                             *out_slot = op.apply(value);
                         }
@@ -7899,9 +7939,7 @@ impl UFuncArray {
                 .par_chunks_mut(UNARY_PARALLEL_CHUNK)
                 .zip(self.values.par_chunks(UNARY_PARALLEL_CHUNK))
                 .map(|(out_chunk, in_chunk)| {
-                    if let Some(flags) =
-                        apply_simd_residual_unary_chunk(op, out_chunk, in_chunk)
-                    {
+                    if let Some(flags) = apply_simd_residual_unary_chunk(op, out_chunk, in_chunk) {
                         return flags;
                     }
                     let mut chunk_flags = FloatErrorFlags::default();
@@ -8413,12 +8451,12 @@ impl UFuncArray {
                     })
                 } else {
                     source_sidecar.as_ref().map(|s| match s {
-                        IntegerSidecar::I64(v) => {
-                            IntegerSidecar::I64(vec![v.iter().copied().fold(1i64, i64::wrapping_mul)])
-                        }
-                        IntegerSidecar::U64(v) => {
-                            IntegerSidecar::U64(vec![v.iter().copied().fold(1u64, u64::wrapping_mul)])
-                        }
+                        IntegerSidecar::I64(v) => IntegerSidecar::I64(vec![
+                            v.iter().copied().fold(1i64, i64::wrapping_mul),
+                        ]),
+                        IntegerSidecar::U64(v) => IntegerSidecar::U64(vec![
+                            v.iter().copied().fold(1u64, u64::wrapping_mul),
+                        ]),
                     })
                 };
                 let shape = if keepdims {
@@ -13264,12 +13302,16 @@ impl UFuncArray {
                 .for_each(do_block);
         } else if n >= FLIP_PAR_MIN && rayon::current_num_threads() >= 2 {
             // Single outer block (e.g. flip axis 0): parallelize over output rows.
-            out.par_chunks_mut(inner.max(1)).enumerate().for_each(|(k, out_row)| {
-                let rk = axis_len - 1 - k;
-                out_row.copy_from_slice(&src[rk * inner..rk * inner + inner]);
-            });
+            out.par_chunks_mut(inner.max(1))
+                .enumerate()
+                .for_each(|(k, out_row)| {
+                    let rk = axis_len - 1 - k;
+                    out_row.copy_from_slice(&src[rk * inner..rk * inner + inner]);
+                });
         } else {
-            out.chunks_mut(block).zip(src.chunks(block)).for_each(do_block);
+            out.chunks_mut(block)
+                .zip(src.chunks(block))
+                .for_each(do_block);
         }
         out
     }
@@ -14220,16 +14262,20 @@ impl UFuncArray {
         // determinants in i64/u64 with wrapping ops and then narrowing to the result
         // width reproduces NumPy's per-op wrapping exactly. (Mixed/u64-with-signed
         // inputs promote to float in NumPy and stay on the f64 path.)
-        if matches!(
-            dtype,
-            DType::I8 | DType::I16 | DType::I32 | DType::I64
-        ) {
+        if matches!(dtype, DType::I8 | DType::I16 | DType::I32 | DType::I64) {
             let av = cross_as_i64(self);
             let bv = cross_as_i64(other);
             let mut comps: Vec<i64> = Vec::with_capacity(out_len);
             for flat in 0..out_batch_count {
-                let (a_base, b_base) =
-                    cross_bases(flat, &out_batch, &out_strides, &a_steps, &b_steps, a_len, b_len);
+                let (a_base, b_base) = cross_bases(
+                    flat,
+                    &out_batch,
+                    &out_strides,
+                    &a_steps,
+                    &b_steps,
+                    a_len,
+                    b_len,
+                );
                 let ax = av[a_base];
                 let ay = av[a_base + 1];
                 let az = if a_len == 3 { av[a_base + 2] } else { 0 };
@@ -14253,16 +14299,20 @@ impl UFuncArray {
             };
             return Self::from_storage(out_shape, storage);
         }
-        if matches!(
-            dtype,
-            DType::U8 | DType::U16 | DType::U32 | DType::U64
-        ) {
+        if matches!(dtype, DType::U8 | DType::U16 | DType::U32 | DType::U64) {
             let av = cross_as_u64(self);
             let bv = cross_as_u64(other);
             let mut comps: Vec<u64> = Vec::with_capacity(out_len);
             for flat in 0..out_batch_count {
-                let (a_base, b_base) =
-                    cross_bases(flat, &out_batch, &out_strides, &a_steps, &b_steps, a_len, b_len);
+                let (a_base, b_base) = cross_bases(
+                    flat,
+                    &out_batch,
+                    &out_strides,
+                    &a_steps,
+                    &b_steps,
+                    a_len,
+                    b_len,
+                );
                 let ax = av[a_base];
                 let ay = av[a_base + 1];
                 let az = if a_len == 3 { av[a_base + 2] } else { 0 };
@@ -16944,8 +16994,7 @@ impl UFuncArray {
                 // radix-select beats the serial introselect (numpy's algorithm) by
                 // using every core for the count passes; parallelise the NaN scan too.
                 const MEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 17;
-                let parallel =
-                    n >= MEDIAN_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+                let parallel = n >= MEDIAN_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
                 let has_nan = if parallel {
                     self.values.par_iter().any(|v| v.is_nan())
                 } else {
@@ -17342,8 +17391,8 @@ impl UFuncArray {
                 // NumPy propagates NaN in percentile. Large inputs use the parallel
                 // radix-select; the NaN scan parallelises too.
                 const PERCENTILE_M_GLOBAL_PARALLEL_MIN: usize = 1 << 17;
-                let parallel = n >= PERCENTILE_M_GLOBAL_PARALLEL_MIN
-                    && rayon::current_num_threads() >= 2;
+                let parallel =
+                    n >= PERCENTILE_M_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
                 let has_nan = if parallel {
                     self.values.par_iter().any(|v| v.is_nan())
                 } else {
@@ -17886,12 +17935,20 @@ impl UFuncArray {
                 match (sidecar, &self.integer_sidecar) {
                     (IntegerSidecar::I64(v_out), Some(IntegerSidecar::I64(v_in))) => {
                         Self::pad_constant_scatter_rows(
-                            v_out, v_in, &out_shape, &self.shape, &pad_before,
+                            v_out,
+                            v_in,
+                            &out_shape,
+                            &self.shape,
+                            &pad_before,
                         );
                     }
                     (IntegerSidecar::U64(v_out), Some(IntegerSidecar::U64(v_in))) => {
                         Self::pad_constant_scatter_rows(
-                            v_out, v_in, &out_shape, &self.shape, &pad_before,
+                            v_out,
+                            v_in,
+                            &out_shape,
+                            &self.shape,
+                            &pad_before,
                         );
                     }
                     _ => {}
@@ -18818,8 +18875,7 @@ impl UFuncArray {
             // expensive search), then accumulate the weights SERIALLY in NumPy's
             // input order — float sums are order-sensitive, so this preserves
             // bit-exact parity while still parallelizing the binary search.
-            let bins_idx: Vec<Option<usize>> =
-                self.values.par_iter().map(|&v| bin_of(v)).collect();
+            let bins_idx: Vec<Option<usize>> = self.values.par_iter().map(|&v| bin_of(v)).collect();
             let wv = weights.map(|wt| &wt.values);
             let mut counts = vec![0.0f64; bins];
             for (i, b) in bins_idx.iter().enumerate() {
@@ -19443,8 +19499,7 @@ impl UFuncArray {
                     let mut acc = V::splat(0.0);
                     let mut k = 0;
                     while k + LANES <= nobs {
-                        acc += (V::from_slice(&xi[k..]) - mi_v)
-                            * (V::from_slice(&xj[k..]) - mj_v);
+                        acc += (V::from_slice(&xi[k..]) - mi_v) * (V::from_slice(&xj[k..]) - mj_v);
                         k += LANES;
                     }
                     let mut s = acc.reduce_sum();
@@ -28571,11 +28626,7 @@ fn select_median(data: &mut [f64]) -> f64 {
 #[inline]
 fn f64_sortable_key(x: f64) -> u64 {
     let b = x.to_bits();
-    if b >> 63 == 1 {
-        !b
-    } else {
-        b | (1u64 << 63)
-    }
+    if b >> 63 == 1 { !b } else { b | (1u64 << 63) }
 }
 
 /// Parallel global median of a large NaN-free slice via MSD radix-select on the
@@ -29393,8 +29444,11 @@ fn try_zeroed_f64(len: usize, ctx: &str) -> Result<Vec<f64>, UFuncError> {
 /// constructors (`full`/`eye`/`identity`/`diag`/`tri`) on huge sizes.
 fn try_filled_f64(len: usize, fill: f64, ctx: &str) -> Result<Vec<f64>, UFuncError> {
     let mut v: Vec<f64> = Vec::new();
-    v.try_reserve_exact(len)
-        .map_err(|_| UFuncError::Msg(format!("{ctx}: unable to allocate output array (out of memory)")))?;
+    v.try_reserve_exact(len).map_err(|_| {
+        UFuncError::Msg(format!(
+            "{ctx}: unable to allocate output array (out of memory)"
+        ))
+    })?;
     v.resize(len, fill);
     Ok(v)
 }
@@ -29408,8 +29462,11 @@ where
     I: ExactSizeIterator<Item = f64>,
 {
     let mut v: Vec<f64> = Vec::new();
-    v.try_reserve_exact(iter.len())
-        .map_err(|_| UFuncError::Msg(format!("{ctx}: unable to allocate output array (out of memory)")))?;
+    v.try_reserve_exact(iter.len()).map_err(|_| {
+        UFuncError::Msg(format!(
+            "{ctx}: unable to allocate output array (out of memory)"
+        ))
+    })?;
     v.extend(iter);
     Ok(v)
 }
@@ -40969,8 +41026,8 @@ mod tests {
         FromPyFuncReduceIdentity, FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError,
         MaskedArray, MaskedArrayEdges, OverrideDispatchDecision, OverrideOperand,
         OverridePayloadClass, PrintOptions, PyObjectArray, PyObjectValue, QuantileInterp,
-        ShapeError, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView,
-        UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp,
+        ShapeError, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError,
+        UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, apply_simd_plain_unary_chunk,
         apply_simd_residual_unary_chunk, bitwise_count, busday_count, busday_offset,
         busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
         chebint, chebmul, chebroots, chebsub, chebval, checked_window_total, copysign,
@@ -42504,6 +42561,46 @@ print(json.dumps(payload))
                 "{op:?}: SIMD chunk flags diverged from scalar flags"
             );
         }
+    }
+
+    #[test]
+    fn plain_unary_simd_chunk_matches_scalar_bits() {
+        let data = vec![
+            -3.5,
+            -0.0,
+            0.0,
+            f64::MIN_POSITIVE,
+            -f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            -f64::from_bits(1),
+            f64::MAX,
+            -f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::from_bits(0x7ff8_0000_0000_1234),
+            f64::from_bits(0xfff8_0000_0000_5678),
+            0.25,
+            -0.25,
+            1024.0,
+            -1024.0,
+        ];
+
+        let mut simd = vec![0.0; data.len()];
+        assert!(apply_simd_plain_unary_chunk(UnaryOp::Abs, &mut simd, &data));
+
+        let scalar: Vec<f64> = data
+            .iter()
+            .map(|&value| UnaryOp::Abs.apply(value))
+            .collect();
+
+        assert_eq!(
+            simd.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            scalar
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            "Abs SIMD chunk diverged from scalar bits"
+        );
     }
 
     #[test]
@@ -46206,7 +46303,11 @@ print(json.dumps(payload))
             for &(lo, hi) in bound_sets {
                 let got = arr.clip(lo, hi);
                 for (g, &v) in got.values().iter().zip(data.iter()) {
-                    assert_eq!(g.to_bits(), serial_clip(v, lo, hi).to_bits(), "clip len{len}");
+                    assert_eq!(
+                        g.to_bits(),
+                        serial_clip(v, lo, hi).to_bits(),
+                        "clip len{len}"
+                    );
                 }
                 for g in got.values() {
                     digest.update(g.to_bits().to_le_bytes());
@@ -48076,8 +48177,12 @@ print(json.dumps(payload))
         // select_percentile_method for every fraction × interpolation method ×
         // distribution (order statistics + interpolation are deterministic).
         let cases: Vec<Vec<f64>> = vec![
-            (0..200003).map(|i| ((i * 2654435761u64 as usize) % 100003) as f64 * 1e-2 - 500.0).collect(),
-            (0..200000).map(|i| ((i * 40503) % 977) as f64 - 488.0).collect(),
+            (0..200003)
+                .map(|i| ((i * 2654435761u64 as usize) % 100003) as f64 * 1e-2 - 500.0)
+                .collect(),
+            (0..200000)
+                .map(|i| ((i * 40503) % 977) as f64 - 488.0)
+                .collect(),
             (0..150001).map(|i| i as f64).collect(),
             (0..150000).map(|i| (150000 - i) as f64).collect(),
             vec![7.0; 140000],
@@ -48126,8 +48231,12 @@ print(json.dumps(payload))
         // across odd/even sizes, heavy duplicates, sorted/reverse, signed zeros,
         // and infinities — for any input order.
         let cases: Vec<Vec<f64>> = vec![
-            (0..100001).map(|i| ((i * 2654435761u64 as usize) % 97) as f64).collect(),
-            (0..100000).map(|i| ((i * 40503) % 131) as f64 - 60.0).collect(),
+            (0..100001)
+                .map(|i| ((i * 2654435761u64 as usize) % 97) as f64)
+                .collect(),
+            (0..100000)
+                .map(|i| ((i * 40503) % 131) as f64 - 60.0)
+                .collect(),
             (0..200003).map(|i| i as f64).collect(),
             (0..200000).map(|i| (200000 - i) as f64).collect(),
             vec![5.0; 150000],
@@ -48144,8 +48253,12 @@ print(json.dumps(payload))
                 }
                 v
             },
-            (0..131072).map(|i| ((i * 2246822519u32 as usize) % 100003) as f64 * 1e-3 - 50.0).collect(),
-            (0..262145).map(|i| (((i * 1103515245 + 12345) % 1000) as f64) - 500.0).collect(),
+            (0..131072)
+                .map(|i| ((i * 2246822519u32 as usize) % 100003) as f64 * 1e-3 - 50.0)
+                .collect(),
+            (0..262145)
+                .map(|i| (((i * 1103515245 + 12345) % 1000) as f64) - 500.0)
+                .collect(),
         ];
         for data in &cases {
             let mut serial = data.clone();
@@ -48687,8 +48800,8 @@ print(json.dumps(payload))
         // range. Spread spans roughly [-0.5, 3.5] with a few far outliers.
         let data: Vec<f64> = (0..n)
             .map(|k| match k % 311 {
-                1 => 5.0,   // above an explicit [0,3] range
-                2 => -3.0,  // below range
+                1 => 5.0,  // above an explicit [0,3] range
+                2 => -3.0, // below range
                 _ => next() * 4.0 - 0.5,
             })
             .collect();
@@ -48698,10 +48811,10 @@ print(json.dumps(payload))
 
         let mut digest = Sha256::new();
         let configs: &[(usize, Option<(f64, f64)>, bool, bool)] = &[
-            (64, None, false, false),         // unweighted, auto range  → fold path
+            (64, None, false, false),             // unweighted, auto range  → fold path
             (64, Some((0.0, 3.0)), false, false), // unweighted, explicit range
             (50, Some((0.0, 3.0)), false, true),  // unweighted, density
-            (64, None, true, false),          // weighted, auto range → lookup path
+            (64, None, true, false),              // weighted, auto range → lookup path
             (37, Some((0.0, 3.0)), true, true),   // weighted, density, range
         ];
         for &(bins, range, weighted, density) in configs {
@@ -50816,19 +50929,45 @@ print(json.dumps(payload))
         // 800 PB exceeds any address space, so try_reserve fails deterministically;
         // if any of these aborted, this test binary would die rather than report.
         const HUGE: usize = 100_000_000_000_000_000; // 1e17
-        assert!(UFuncArray::full(vec![HUGE], 7.0, DType::F64).is_err(), "full");
-        assert!(UFuncArray::eye(500_000_000, None, 0, DType::F64).is_err(), "eye n²");
-        assert!(UFuncArray::identity(500_000_000, DType::F64).is_err(), "identity");
-        assert!(UFuncArray::linspace(0.0, 1.0, HUGE, DType::F64).is_err(), "linspace");
-        assert!(UFuncArray::arange(0.0, 1e17, 1.0, DType::F64).is_err(), "arange");
+        assert!(
+            UFuncArray::full(vec![HUGE], 7.0, DType::F64).is_err(),
+            "full"
+        );
+        assert!(
+            UFuncArray::eye(500_000_000, None, 0, DType::F64).is_err(),
+            "eye n²"
+        );
+        assert!(
+            UFuncArray::identity(500_000_000, DType::F64).is_err(),
+            "identity"
+        );
+        assert!(
+            UFuncArray::linspace(0.0, 1.0, HUGE, DType::F64).is_err(),
+            "linspace"
+        );
+        assert!(
+            UFuncArray::arange(0.0, 1e17, 1.0, DType::F64).is_err(),
+            "arange"
+        );
         // diag of a 1-D vector builds an n×n matrix; a length-5e8 input → 2.5e17
         // cells. Build the small input but force the huge square output.
         let v = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         assert!(v.diag(0).is_ok(), "small diag still works");
         // Sanity: normal sizes still succeed and are unchanged.
-        assert_eq!(UFuncArray::full(vec![2], 5.0, DType::F64).unwrap().values(), &[5.0, 5.0]);
-        assert_eq!(UFuncArray::eye(2, None, 0, DType::F64).unwrap().values(), &[1.0, 0.0, 0.0, 1.0]);
-        assert_eq!(UFuncArray::linspace(0.0, 1.0, 3, DType::F64).unwrap().values(), &[0.0, 0.5, 1.0]);
+        assert_eq!(
+            UFuncArray::full(vec![2], 5.0, DType::F64).unwrap().values(),
+            &[5.0, 5.0]
+        );
+        assert_eq!(
+            UFuncArray::eye(2, None, 0, DType::F64).unwrap().values(),
+            &[1.0, 0.0, 0.0, 1.0]
+        );
+        assert_eq!(
+            UFuncArray::linspace(0.0, 1.0, 3, DType::F64)
+                .unwrap()
+                .values(),
+            &[0.0, 0.5, 1.0]
+        );
     }
 
     #[test]
@@ -51548,7 +51687,11 @@ print(json.dumps(payload))
             let arr = UFuncArray::new(shape.clone(), data.clone(), DType::F64).unwrap();
             let got = arr.repeat(*reps, Some(*ax as isize)).unwrap();
             let (want, idx, out_shape) = naive(&data, shape, *ax, *reps);
-            assert_eq!(got.shape(), &out_shape[..], "shape {shape:?} ax{ax} x{reps}");
+            assert_eq!(
+                got.shape(),
+                &out_shape[..],
+                "shape {shape:?} ax{ax} x{reps}"
+            );
             for (g, w) in got.values().iter().zip(want.iter()) {
                 assert_eq!(g.to_bits(), w.to_bits(), "repeat {shape:?} ax{ax} x{reps}");
             }
@@ -52615,9 +52758,15 @@ print(json.dumps(payload))
         let mut ai = UFuncArray::new(
             vec![3, 3],
             vec![
-                diag_i[0] as f64, 0.0, 0.0,
-                0.0, diag_i[1] as f64, 0.0,
-                0.0, 0.0, diag_i[2] as f64,
+                diag_i[0] as f64,
+                0.0,
+                0.0,
+                0.0,
+                diag_i[1] as f64,
+                0.0,
+                0.0,
+                0.0,
+                diag_i[2] as f64,
             ],
             DType::I64,
         )
@@ -52626,10 +52775,7 @@ print(json.dumps(payload))
             diag_i[0], 0, 0, 0, diag_i[1], 0, 0, 0, diag_i[2],
         ]));
         let ti = ai.trace(0).unwrap();
-        let expected_i = diag_i
-            .iter()
-            .copied()
-            .fold(0i64, i64::wrapping_add); // 6
+        let expected_i = diag_i.iter().copied().fold(0i64, i64::wrapping_add); // 6
         assert_eq!(expected_i, 6);
         match ti.integer_sidecar() {
             Some(IntegerSidecar::I64(v)) => assert_eq!(v, &[expected_i]),
@@ -52641,9 +52787,15 @@ print(json.dumps(payload))
         let mut au = UFuncArray::new(
             vec![3, 3],
             vec![
-                diag_u[0] as f64, 0.0, 0.0,
-                0.0, diag_u[1] as f64, 0.0,
-                0.0, 0.0, diag_u[2] as f64,
+                diag_u[0] as f64,
+                0.0,
+                0.0,
+                0.0,
+                diag_u[1] as f64,
+                0.0,
+                0.0,
+                0.0,
+                diag_u[2] as f64,
             ],
             DType::U64,
         )
@@ -52660,12 +52812,7 @@ print(json.dumps(payload))
         }
 
         // f64 diagonals keep the plain fold (no sidecar) — unchanged behaviour.
-        let af = UFuncArray::new(
-            vec![2, 2],
-            vec![1.5, 0.0, 0.0, 2.5],
-            DType::F64,
-        )
-        .unwrap();
+        let af = UFuncArray::new(vec![2, 2], vec![1.5, 0.0, 0.0, 2.5], DType::F64).unwrap();
         assert_eq!(af.trace(0).unwrap().values(), &[4.0]);
         assert!(af.trace(0).unwrap().integer_sidecar().is_none());
     }
@@ -53589,8 +53736,11 @@ print(json.dumps(payload))
             constant: f64,
         ) -> (Vec<f64>, Vec<usize>, Vec<usize>) {
             let ndim = shape.len();
-            let out_shape: Vec<usize> =
-                shape.iter().zip(pad).map(|(&s, &(b, a))| s + b + a).collect();
+            let out_shape: Vec<usize> = shape
+                .iter()
+                .zip(pad)
+                .map(|(&s, &(b, a))| s + b + a)
+                .collect();
             let mut src_strides = vec![1usize; ndim];
             for d in (0..ndim.saturating_sub(1)).rev() {
                 src_strides[d] = src_strides[d + 1] * shape[d + 1];
@@ -53775,7 +53925,11 @@ print(json.dumps(payload))
         };
         assert_eq!(got, want, "meshgrid u64 sidecar");
 
-        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(
             hex, "c72472123b05d5728507832f6dc35c05b8b77ead8a3638c6413df71f34092e07",
             "meshgrid golden digest drifted"
@@ -53959,7 +54113,10 @@ print(json.dumps(payload))
         // aborted, this test process would die rather than report a failure.
         let a = UFuncArray::new(vec![2], vec![0.0, 1e17], DType::I64).unwrap();
         let r = a.bincount();
-        assert!(r.is_err(), "huge bincount must return Err, not allocate/abort");
+        assert!(
+            r.is_err(),
+            "huge bincount must return Err, not allocate/abort"
+        );
         // A merely-large minlength on empty input must also fail gracefully.
         let empty = UFuncArray::new(vec![0], Vec::new(), DType::I64).unwrap();
         assert!(empty.bincount_with(None, (1e17) as usize).is_err());
@@ -54126,7 +54283,11 @@ print(json.dumps(payload))
                 .contains("too large")
         );
 
-        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(
             hex, "fc28f9dc80351f18b98ebd5936e81ed30bb1fa16fc6f8b3d7ebcbde863433448",
             "bincount small-range output golden SHA-256 changed"
@@ -55894,7 +56055,11 @@ print(json.dumps(payload))
         let step = (stop - start) / ((num - 1) as f64);
         let reference: Vec<f64> = (0..num)
             .map(|i| {
-                let x = if i == num - 1 { stop } else { start + step * i as f64 };
+                let x = if i == num - 1 {
+                    stop
+                } else {
+                    start + step * i as f64
+                };
                 (base.powf(x) as f32) as f64
             })
             .collect();
@@ -58705,9 +58870,12 @@ print(json.dumps(payload))
             }
             // i64 sidecar relocates identically through the shared mapping.
             let ivals: Vec<i64> = (0..n as i64).map(|k| (k << 21) ^ (k * 37 + 11)).collect();
-            let iarr = UFuncArray::from_storage(src_shape.clone(), ArrayStorage::I64(ivals.clone()))
-                .expect("from_storage");
-            let it = iarr.take_along_axis(&idx, *ax as isize).expect("itake_along");
+            let iarr =
+                UFuncArray::from_storage(src_shape.clone(), ArrayStorage::I64(ivals.clone()))
+                    .expect("from_storage");
+            let it = iarr
+                .take_along_axis(&idx, *ax as isize)
+                .expect("itake_along");
             let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
                 panic!("expected i64 storage");
             };
@@ -59916,11 +60084,11 @@ print(json.dumps(payload))
         }
         // (src_shape, target) — leading / trailing / interior broadcast axes.
         let cases: &[(Vec<usize>, Vec<usize>)] = &[
-            (vec![1, 130], vec![257, 130]),     // leading axis broadcast
-            (vec![130, 1], vec![130, 257]),     // trailing axis broadcast
+            (vec![1, 130], vec![257, 130]),      // leading axis broadcast
+            (vec![130, 1], vec![130, 257]),      // trailing axis broadcast
             (vec![17, 1, 19], vec![17, 41, 19]), // interior axis broadcast
-            (vec![1], vec![400, 1, 333]),       // scalar-ish into 3-D
-            (vec![5, 1, 1], vec![5, 64, 64]),   // two interior/trailing axes
+            (vec![1], vec![400, 1, 333]),        // scalar-ish into 3-D
+            (vec![5, 1, 1], vec![5, 64, 64]),    // two interior/trailing axes
         ];
         let mut seed = 0x2f1b_9e4d_77a3_c0e5u64;
         let mut next = || {
@@ -59950,8 +60118,9 @@ print(json.dumps(payload))
             }
             // i64 sidecar replicates identically.
             let ivals: Vec<i64> = (0..sn as i64).map(|k| (k << 21) ^ (k * 13 + 7)).collect();
-            let iarr = UFuncArray::from_storage(src_shape.clone(), ArrayStorage::I64(ivals.clone()))
-                .expect("from_storage");
+            let iarr =
+                UFuncArray::from_storage(src_shape.clone(), ArrayStorage::I64(ivals.clone()))
+                    .expect("from_storage");
             let it = iarr.broadcast_to(target).expect("ibcast");
             let ArrayStorage::I64(got_i) = it.to_storage().expect("to_storage") else {
                 panic!("expected i64 storage");
@@ -61913,11 +62082,7 @@ print(json.dumps(payload))
         fn seq(n: usize, scale: f64, bias: f64) -> Vec<f64> {
             (0..n)
                 .map(|i| {
-                    (((i % 31) as f64) * scale + bias).copysign(if i % 7 == 0 {
-                        -1.0
-                    } else {
-                        1.0
-                    })
+                    (((i % 31) as f64) * scale + bias).copysign(if i % 7 == 0 { -1.0 } else { 1.0 })
                 })
                 .collect()
         }
@@ -61955,7 +62120,9 @@ print(json.dumps(payload))
         // that crosses the parallel gate (batch >= 1<<15 elements).
         fn seq(n: usize, scale: f64, bias: f64) -> Vec<f64> {
             (0..n)
-                .map(|i| (((i % 37) as f64) * scale + bias).copysign(if i % 5 == 0 { -1.0 } else { 1.0 }))
+                .map(|i| {
+                    (((i % 37) as f64) * scale + bias).copysign(if i % 5 == 0 { -1.0 } else { 1.0 })
+                })
                 .collect()
         }
         fn ref_batched(a: &[f64], b: &[f64], batch: usize, csize: usize) -> Vec<u64> {
@@ -61978,7 +62145,10 @@ print(json.dumps(payload))
         let got = UFuncArray::einsum("ij,ij->i", &[&a, &b]).unwrap();
         assert_eq!(got.shape, vec![m]);
         let want = ref_batched(&av, &bv, m, k);
-        assert_eq!(got.values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(), want);
+        assert_eq!(
+            got.values.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            want
+        );
 
         // ijk,ijk->ij (batch = i*j, contract = k)
         let (i, j, kk) = (4usize, 5usize, 7usize);
@@ -62544,7 +62714,10 @@ print(json.dumps(payload))
             // same 1<<14 gate with per-thread label_vals via map_init.
             let slow = |a: &[f64], b: &[f64], n: usize| -> Vec<f64> {
                 let dims = [n, n];
-                let terms = [[(0usize, n), (1usize, 1usize)], [(0usize, n), (1usize, 1usize)]];
+                let terms = [
+                    [(0usize, n), (1usize, 1usize)],
+                    [(0usize, n), (1usize, 1usize)],
+                ];
                 let cell = |lv: &mut [usize], o: usize| -> f64 {
                     let mut rem = o;
                     for i in (0..2).rev() {
@@ -62895,7 +63068,10 @@ print(json.dumps(payload))
                         }
                     }
                     let got = r.values()[i * l_ + l];
-                    assert!((got - acc).abs() <= 1e-9 * (1.0 + acc.abs()), "chain {i},{l}");
+                    assert!(
+                        (got - acc).abs() <= 1e-9 * (1.0 + acc.abs()),
+                        "chain {i},{l}"
+                    );
                 }
             }
             for v in r.values() {
@@ -62920,7 +63096,10 @@ print(json.dumps(payload))
                     }
                 }
             }
-            assert!((r.values()[0] - acc).abs() <= 1e-9 * (1.0 + acc.abs()), "trace");
+            assert!(
+                (r.values()[0] - acc).abs() <= 1e-9 * (1.0 + acc.abs()),
+                "trace"
+            );
             digest.update(r.values()[0].to_bits().to_le_bytes());
         }
 
@@ -62945,7 +63124,10 @@ print(json.dumps(payload))
                             }
                         }
                         let got = r.values()[(bi * i_ + i) * l_ + l];
-                        assert!((got - acc).abs() <= 1e-9 * (1.0 + acc.abs()), "batch {bi},{i},{l}");
+                        assert!(
+                            (got - acc).abs() <= 1e-9 * (1.0 + acc.abs()),
+                            "batch {bi},{i},{l}"
+                        );
                     }
                 }
             }
@@ -62954,7 +63136,11 @@ print(json.dumps(payload))
             }
         }
 
-        let hex: String = digest.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = digest
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(
             hex, "599ebf7df80364b848ef8f620633c8457a21fd45dfc14fa6ce8697b830052ec0",
             "einsum multi-operand golden digest drifted"
@@ -64723,7 +64909,10 @@ print(json.dumps(payload))
         let au = UFuncArray::new(vec![1, 4], uf, DType::U32).unwrap();
         let uexp = uvals.iter().copied().fold(1u64, u64::wrapping_mul);
         assert_eq!(
-            au.reduce_prod(Some(1), false).unwrap().to_storage().unwrap(),
+            au.reduce_prod(Some(1), false)
+                .unwrap()
+                .to_storage()
+                .unwrap(),
             ArrayStorage::U64(vec![uexp]),
             "per-axis narrow-uint prod must wrap into u64"
         );

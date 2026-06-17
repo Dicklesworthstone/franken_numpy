@@ -51,7 +51,10 @@ fn scatter(a: &[f64], k: &[f64], floor_is_m: bool) -> Vec<f64> {
                 continue;
             }
             let out_off = i + j0 - lo;
-            for (d, &kv) in out[out_off..out_off + (j1 - j0)].iter_mut().zip(k[j0..j1].iter()) {
+            for (d, &kv) in out[out_off..out_off + (j1 - j0)]
+                .iter_mut()
+                .zip(k[j0..j1].iter())
+            {
                 *d += ai * kv;
             }
         }
@@ -74,8 +77,12 @@ fn bench(c: &mut Criterion) {
         let _ = UFuncArray::new(vec![n], a.clone(), DType::F64).unwrap();
         let mut g = c.benchmark_group(format!("convchunk_{n}x{m}"));
         g.sample_size(20);
-        g.bench_function("old_max_m", |b| b.iter(|| black_box(scatter(black_box(&a), black_box(&k), true))));
-        g.bench_function("new_floor64", |b| b.iter(|| black_box(scatter(black_box(&a), black_box(&k), false))));
+        g.bench_function("old_max_m", |b| {
+            b.iter(|| black_box(scatter(black_box(&a), black_box(&k), true)))
+        });
+        g.bench_function("new_floor64", |b| {
+            b.iter(|| black_box(scatter(black_box(&a), black_box(&k), false)))
+        });
         g.finish();
     }
 

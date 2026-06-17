@@ -51,14 +51,22 @@ fn bench_triangle(c: &mut Criterion) {
         let got_u = arr.triu(0).unwrap();
         let got_l = arr.tril(0).unwrap();
         assert_eq!(
-            got_u.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            got_u
+                .values()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
             old_triu(&data, rows, cols, 0)
                 .iter()
                 .map(|v| v.to_bits())
                 .collect::<Vec<_>>()
         );
         assert_eq!(
-            got_l.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            got_l
+                .values()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
             old_tril(&data, rows, cols, 0)
                 .iter()
                 .map(|v| v.to_bits())

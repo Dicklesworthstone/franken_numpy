@@ -30,7 +30,11 @@ fn reflect_index(idx: isize, n: usize) -> usize {
 
 fn old_reflect(values: &[f64], shape: &[usize], pad: &[(usize, usize)]) -> Vec<f64> {
     let ndim = shape.len();
-    let out_shape: Vec<usize> = shape.iter().zip(pad).map(|(&s, &(b, a))| s + b + a).collect();
+    let out_shape: Vec<usize> = shape
+        .iter()
+        .zip(pad)
+        .map(|(&s, &(b, a))| s + b + a)
+        .collect();
     let mut src_strides = vec![1usize; ndim];
     for d in (0..ndim - 1).rev() {
         src_strides[d] = src_strides[d + 1] * shape[d + 1];

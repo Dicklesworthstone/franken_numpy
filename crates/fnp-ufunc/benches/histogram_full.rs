@@ -68,9 +68,15 @@ fn bench_histogram_full(c: &mut Criterion) {
 
     for &bins in &[64usize, 256] {
         // Unweighted (privatized-fold path).
-        let got = arr.histogram_full(bins, Some((0.0, 100.0)), None, false).unwrap();
+        let got = arr
+            .histogram_full(bins, Some((0.0, 100.0)), None, false)
+            .unwrap();
         assert_eq!(
-            got.0.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            got.0
+                .values()
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
             old_histogram_full(&data, bins, Some((0.0, 100.0)), None)
                 .iter()
                 .map(|v| v.to_bits())
@@ -79,10 +85,22 @@ fn bench_histogram_full(c: &mut Criterion) {
         let mut g = c.benchmark_group(format!("histogram_full_unweighted_bins{bins}"));
         g.sample_size(20);
         g.bench_with_input(BenchmarkId::new("old_serial", n), &n, |b, _| {
-            b.iter(|| black_box(old_histogram_full(black_box(&data), bins, Some((0.0, 100.0)), None)))
+            b.iter(|| {
+                black_box(old_histogram_full(
+                    black_box(&data),
+                    bins,
+                    Some((0.0, 100.0)),
+                    None,
+                ))
+            })
         });
         g.bench_with_input(BenchmarkId::new("par_fold", n), &n, |b, _| {
-            b.iter(|| black_box(arr.histogram_full(bins, Some((0.0, 100.0)), None, false).unwrap()))
+            b.iter(|| {
+                black_box(
+                    arr.histogram_full(bins, Some((0.0, 100.0)), None, false)
+                        .unwrap(),
+                )
+            })
         });
         g.finish();
     }
@@ -102,7 +120,12 @@ fn bench_histogram_full(c: &mut Criterion) {
         })
     });
     g.bench_with_input(BenchmarkId::new("par_lookup", n), &n, |b, _| {
-        b.iter(|| black_box(arr.histogram_full(bins, Some((0.0, 100.0)), Some(&warr), false).unwrap()))
+        b.iter(|| {
+            black_box(
+                arr.histogram_full(bins, Some((0.0, 100.0)), Some(&warr), false)
+                    .unwrap(),
+            )
+        })
     });
     g.finish();
 }

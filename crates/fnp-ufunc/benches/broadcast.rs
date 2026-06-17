@@ -42,8 +42,8 @@ fn old_bcast(values: &[f64], src_shape: &[usize], target: &[usize]) -> Vec<f64> 
 
 fn bench_broadcast(c: &mut Criterion) {
     let cases: &[(Vec<usize>, Vec<usize>)] = &[
-        (vec![1, 4096], vec![4096, 4096]),  // leading broadcast
-        (vec![4096, 1], vec![4096, 4096]),  // trailing broadcast
+        (vec![1, 4096], vec![4096, 4096]),        // leading broadcast
+        (vec![4096, 1], vec![4096, 4096]),        // trailing broadcast
         (vec![256, 1, 256], vec![256, 256, 256]), // interior broadcast
     ];
     for (src_shape, target) in cases {

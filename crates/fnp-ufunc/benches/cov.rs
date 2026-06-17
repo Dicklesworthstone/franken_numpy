@@ -18,20 +18,17 @@ fn make(nvars: usize, nobs: usize) -> UFuncArray {
 }
 
 fn bench(c: &mut Criterion) {
-    let shapes = [
-        (50usize, 5000usize),
-        (96, 4000),
-        (50, 1000),
-        (200, 1000),
-    ];
+    let shapes = [(50usize, 5000usize), (96, 4000), (50, 1000), (200, 1000)];
     for &(nvars, nobs) in &shapes {
         let m = make(nvars, nobs);
         let _ = m.cov().unwrap();
         let mut g = c.benchmark_group(format!("cov_{nvars}x{nobs}"));
         g.sample_size(30);
-        g.bench_with_input(BenchmarkId::new("cov", format!("{nvars}x{nobs}")), &m, |b, m| {
-            b.iter(|| black_box(black_box(m).cov().unwrap()))
-        });
+        g.bench_with_input(
+            BenchmarkId::new("cov", format!("{nvars}x{nobs}")),
+            &m,
+            |b, m| b.iter(|| black_box(black_box(m).cov().unwrap())),
+        );
         g.finish();
     }
 }
