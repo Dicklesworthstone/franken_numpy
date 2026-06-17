@@ -2112,20 +2112,44 @@ fn parallel_pcg_random_f64<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f
 }
 
 /// `low + uniform[0,1) * range` for `size` samples, parallelizing the PCG draw
-/// exactly as [`parallel_pcg_random_f64`]. The affine map is applied per element
-/// AFTER the parallel fill, so each result equals the serial
-/// `low + next_f64() * range` bit-for-bit (same draw, same IEEE expression).
+/// exactly as [`parallel_pcg_random_f64`]. The affine map is FUSED into each
+/// parallel chunk right after that chunk's uniforms are generated — while they
+/// are still in cache — instead of as a second full sweep over the output. Each
+/// result still equals the serial `low + next_f64() * range` bit-for-bit (same
+/// draw via jump-ahead, same IEEE expression), so the byte-exact golden holds;
+/// the win is removing the second memory-bound DRAM round-trip over `out`.
 fn parallel_pcg_uniform<R: PcgAdvanceFill>(
     rng: &mut R,
     low: f64,
     range: f64,
     size: usize,
 ) -> Vec<f64> {
+    use rayon::prelude::*;
     let mut out = vec![0.0f64; size];
-    parallel_pcg_fill_slice(rng, &mut out);
-    for slot in out.iter_mut() {
-        *slot = low + *slot * range;
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        // Serial: fill uniforms then affine map (advances `rng` by `size` draws).
+        rng.fill_uniform_f64(&mut out);
+        for slot in out.iter_mut() {
+            *slot = low + *slot * range;
+        }
+        return out;
     }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            // Fused affine pass over the just-generated, in-cache chunk.
+            for slot in slice.iter_mut() {
+                *slot = low + *slot * range;
+            }
+        });
+    // Position the master state exactly where `size` serial draws would leave it.
+    rng.advance_by(size as u128);
     out
 }
 
