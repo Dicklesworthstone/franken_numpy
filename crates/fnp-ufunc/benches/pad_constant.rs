@@ -5,6 +5,8 @@
 //! previous behaviour: a flat scan over source elements decomposing each into a
 //! multi-index and scattering one cell at a time. Both produce bit-identical out.
 
+#![allow(clippy::needless_range_loop, clippy::type_complexity)]
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_ufunc::UFuncArray;

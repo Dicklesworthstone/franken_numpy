@@ -5,6 +5,8 @@
 //! replicates the previous behaviour: a serial `for flat { decode; gather }`
 //! loop. Both produce bit-identical output.
 
+#![allow(clippy::needless_range_loop)]
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_ufunc::UFuncArray;

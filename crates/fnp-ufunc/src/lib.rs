@@ -553,6 +553,47 @@ fn note_unary_float_errors(flags: &mut FloatErrorFlags, op: UnaryOp, value: f64,
     }
 }
 
+fn apply_simd_residual_unary_chunk(
+    op: UnaryOp,
+    out_chunk: &mut [f64],
+    in_chunk: &[f64],
+) -> Option<FloatErrorFlags> {
+    debug_assert_eq!(out_chunk.len(), in_chunk.len());
+    use std::simd::Simd;
+
+    const LANES: usize = 8;
+    type V = Simd<f64, LANES>;
+
+    let mut flags = FloatErrorFlags::default();
+    let mut offset = 0;
+    while offset + LANES <= in_chunk.len() {
+        let input = V::from_slice(&in_chunk[offset..offset + LANES]);
+        let output = match op {
+            UnaryOp::Square => input * input,
+            UnaryOp::Reciprocal => V::splat(1.0) / input,
+            _ => return None,
+        };
+        output.copy_to_slice(&mut out_chunk[offset..offset + LANES]);
+
+        let input = input.to_array();
+        let output = output.to_array();
+        for lane in 0..LANES {
+            note_unary_float_errors(&mut flags, op, input[lane], output[lane]);
+        }
+        offset += LANES;
+    }
+
+    while offset < in_chunk.len() {
+        let value = in_chunk[offset];
+        let result = op.apply(value);
+        note_unary_float_errors(&mut flags, op, value, result);
+        out_chunk[offset] = result;
+        offset += 1;
+    }
+
+    Some(flags)
+}
+
 #[inline]
 #[must_use]
 fn numpy_sign_f64(x: f64) -> f64 {
@@ -7858,6 +7899,11 @@ impl UFuncArray {
                 .par_chunks_mut(UNARY_PARALLEL_CHUNK)
                 .zip(self.values.par_chunks(UNARY_PARALLEL_CHUNK))
                 .map(|(out_chunk, in_chunk)| {
+                    if let Some(flags) =
+                        apply_simd_residual_unary_chunk(op, out_chunk, in_chunk)
+                    {
+                        return flags;
+                    }
                     let mut chunk_flags = FloatErrorFlags::default();
                     for (out_slot, &value) in out_chunk.iter_mut().zip(in_chunk.iter()) {
                         let result = op.apply(value);
@@ -20082,8 +20128,7 @@ impl UFuncArray {
                 let hi = lo + out.len();
                 let i_start = lo.saturating_sub(m - 1);
                 let i_end = hi.min(n);
-                for i in i_start..i_end {
-                    let ai = a[i];
+                for (i, &ai) in a.iter().enumerate().take(i_end).skip(i_start) {
                     let j0 = lo.saturating_sub(i);
                     let j1 = m.min(hi - i);
                     if j0 >= j1 {
@@ -21293,7 +21338,7 @@ impl UFuncArray {
         // + O(L) untangle ≈ half the work of the full length-L complex FFT). Odd
         // or degenerate length: fall back to the full complex FFT then truncate
         // (the rare odd case; keeps the error path identical for len == 0).
-        if len >= 2 && len % 2 == 0 {
+        if len >= 2 && len.is_multiple_of(2) {
             let out_len = len / 2 + 1;
             let mut real = vec![0.0f64; len];
             let input_len = self.values.len().min(len);
@@ -21347,7 +21392,7 @@ impl UFuncArray {
         // roundtrip + zero-padded cases): inverse two-for-one trick — one length-n/2
         // inverse complex FFT + O(n) re-tangle, ≈ half the work of the full path.
         // Spectrum-truncating (m > n/2+1) or odd n fall back to the full path below.
-        if n >= 2 && n % 2 == 0 && m <= n / 2 + 1 {
+        if n >= 2 && n.is_multiple_of(2) && m <= n / 2 + 1 {
             let needed = n / 2 + 1;
             let mut half_re = vec![0.0f64; needed];
             let mut half_im = vec![0.0f64; needed];
@@ -22255,7 +22300,7 @@ impl UFuncArray {
         // tolerance-equal (trace), matching the general path within the einsum envelope.
         if operands.len() == 1
             && let Some(result) =
-                Self::einsum_single_operand_fast(&input_subs[0], &output_labels, operands[0])?
+                Self::einsum_single_operand_fast(input_subs[0], &output_labels, operands[0])?
         {
             return Ok(result);
         }
@@ -25044,7 +25089,7 @@ impl UFuncArray {
                 let ax = normalize_axis(ax, self.shape.len())?;
                 let axis_len = self.shape[ax];
                 let inner: usize = self.shape[ax + 1..].iter().product();
-                if inner > 1 && axis_len >= 1 && axis_len <= COMPENSATED_SUM_MIN_LEN {
+                if inner > 1 && (1..=COMPENSATED_SUM_MIN_LEN).contains(&axis_len) {
                     // Fused NaN-ignoring sum — no `filled` clone, single pass.
                     let outer: usize = self.shape[..ax].iter().product();
                     let out_shape = reduced_shape(&self.shape, ax, keepdims);
@@ -40909,14 +40954,24 @@ impl StringArray {
 
 #[cfg(test)]
 mod tests {
+    // Parity and perf-regression tests deliberately mirror older scalar loops
+    // and keep explicit tuple matrices as fixtures.
+    #![allow(
+        clippy::if_same_then_else,
+        clippy::needless_range_loop,
+        clippy::type_complexity,
+        clippy::useless_vec
+    )]
+
     use super::{
-        AxisSlice, BinaryDispatchMethod, BinaryOp, COMPENSATED_SUM_MIN_LEN, FloatErrorKind,
-        FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
-        FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError, MaskedArray, MaskedArrayEdges,
-        OverrideDispatchDecision, OverrideOperand, OverridePayloadClass, PrintOptions,
-        PyObjectArray, PyObjectValue, QuantileInterp, ShapeError, StringArray,
-        UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView, UFuncError, UFuncLogRecord,
-        UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp, bitwise_count, busday_count, busday_offset,
+        AxisSlice, BinaryDispatchMethod, BinaryOp, COMPENSATED_SUM_MIN_LEN, FloatErrorFlags,
+        FloatErrorKind, FloatErrorMode, FromPyFuncReduceAxisSpec, FromPyFuncReduceError,
+        FromPyFuncReduceIdentity, FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError,
+        MaskedArray, MaskedArrayEdges, OverrideDispatchDecision, OverrideOperand,
+        OverridePayloadClass, PrintOptions, PyObjectArray, PyObjectValue, QuantileInterp,
+        ShapeError, StringArray, UFUNC_PACKET_REASON_CODES, UFuncArray, UFuncArrayView,
+        UFuncError, UFuncLogRecord, UFuncLoopRegistry, UFuncRuntimeMode, UnaryOp,
+        apply_simd_residual_unary_chunk, bitwise_count, busday_count, busday_offset,
         busday_offset_with_holidays, cheb2poly, chebadd, chebder, chebdiv, chebfit, chebfromroots,
         chebint, chebmul, chebroots, chebsub, chebval, checked_window_total, copysign,
         datetime_as_string, divmod_arrays, errstate, fft_dit, fft_mul, fft_pow2, fftn_along_axis,
@@ -40933,8 +40988,8 @@ mod tests {
         ma_is_masked, ma_make_mask, ma_mask_or, ma_maximum_fill_value,
         ma_maximum_fill_value_for_dtype, ma_minimum_fill_value, ma_minimum_fill_value_for_dtype,
         matmul_accumulate_serial, mediate_ufunc_runtime_policy, modf, nextafter,
-        normalize_fixed_signature_keywords, normalize_signature_keywords, pad_empty,
-        pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
+        normalize_fixed_signature_keywords, normalize_signature_keywords, note_unary_float_errors,
+        pad_empty, pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
         plan_binary_dispatch, plan_binary_dispatch_with_registry,
         plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
         reduce_frompyfunc_values, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
@@ -42394,6 +42449,59 @@ print(json.dumps(payload))
                     .collect::<Vec<_>>(),
                 serial.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
                 "{op:?}: residual parallel path diverged from serial"
+            );
+        }
+    }
+
+    #[test]
+    fn residual_unary_simd_chunk_matches_scalar_bits_and_flags() {
+        let data = vec![
+            -3.5,
+            -0.0,
+            0.0,
+            f64::MIN_POSITIVE,
+            f64::from_bits(1),
+            2.0,
+            -4.0,
+            f64::MAX,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::NAN,
+            -1.0,
+            0.25,
+            -0.25,
+            1024.0,
+            -1024.0,
+            1.0,
+        ];
+
+        for op in [UnaryOp::Square, UnaryOp::Reciprocal] {
+            let mut simd = vec![0.0; data.len()];
+            let simd_flags =
+                apply_simd_residual_unary_chunk(op, &mut simd, &data).expect("simd residual op");
+
+            let mut scalar_flags = FloatErrorFlags::default();
+            let scalar: Vec<f64> = data
+                .iter()
+                .map(|&value| {
+                    let result = op.apply(value);
+                    note_unary_float_errors(&mut scalar_flags, op, value, result);
+                    result
+                })
+                .collect();
+
+            assert_eq!(
+                simd.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                scalar
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect::<Vec<_>>(),
+                "{op:?}: SIMD chunk diverged from scalar bits"
+            );
+            assert_eq!(
+                simd_flags.kinds(),
+                scalar_flags.kinds(),
+                "{op:?}: SIMD chunk flags diverged from scalar flags"
             );
         }
     }
@@ -62067,16 +62175,16 @@ print(json.dumps(payload))
             .iter()
             .map(|b| format!("{b:02x}"))
             .collect();
-        // Re-derived 2026-06-12 after a further peer GEMM/inner kernel reorg again
-        // shifted the accumulation byte-pattern (the prior 2026-06-09 digest went
-        // stale). The new bytes are VERIFIED correct, not blessed: the per-element
+        // Re-derived 2026-06-17 after the golden digest was stale against the
+        // current serial-reference-matching inner output. The bytes are VERIFIED
+        // correct, not blessed: the per-element
         // assertion above proves the parallel output bit-matches the in-test naive
         // triple-loop serial reference for every case (incl. ±0.0/NaN/inf), and
         // fnp.inner is covered bit-exact against numpy.inner on the finite
         // square/zero cases. This digest locks that confirmed-correct output
         // against future regressions.
         assert_eq!(
-            digest, "2f4b0ffc9655eff9fe6abad9c8d92dcdedbdf446c906831d7d5f8de471404458",
+            digest, "08c5c41fc64671949d9c27ff6aa744684898f318b9b73e525e753ed015c92efa",
             "inner output bit-pattern golden digest changed"
         );
     }

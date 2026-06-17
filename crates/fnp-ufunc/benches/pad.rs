@@ -6,6 +6,8 @@
 //! index with `ndim` divisions and applying the mode's branchy index logic per
 //! element. Both produce bit-identical output.
 
+#![allow(clippy::type_complexity)]
+
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_ufunc::UFuncArray;

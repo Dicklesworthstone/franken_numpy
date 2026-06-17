@@ -1,3 +1,5 @@
+#![allow(clippy::needless_range_loop)]
+
 use criterion::{Criterion, criterion_group, criterion_main};
 use fnp_dtype::DType;
 use fnp_ufunc::UFuncArray;
