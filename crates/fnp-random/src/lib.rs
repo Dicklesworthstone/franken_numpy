@@ -6797,6 +6797,46 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_standard_gamma_then_random(
+        shape: f64,
+        gamma_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+shape = float(sys.argv[1])
+gamma_size = int(sys.argv[2])
+random_size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.standard_gamma(shape, size=gamma_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            shape.to_string(),
+            gamma_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle standard_gamma values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
     fn numpy_oracle_gamma(
         shape: f64,
         scale: f64,
@@ -13702,6 +13742,37 @@ for child in rng.spawn(n_children):
         assert!(infinite_values.iter().all(|value| *value == f64::INFINITY));
         let infinite_after = infinite_shape.random(5);
         assert_f64_seq("standard_gamma_inf_after", &infinite_after, &expected_after);
+    }
+
+    #[test]
+    fn standard_gamma_nonfinite_shape_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, shape) in [
+            ("standard_gamma_nan_shape", f64::NAN),
+            ("standard_gamma_inf_shape", f64::INFINITY),
+        ] {
+            let (expected_values, expected_after) =
+                numpy_oracle_standard_gamma_then_random(shape, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g
+                .standard_gamma(shape, 3)
+                .map_err(|_| "standard_gamma nonfinite live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
     }
 
     #[test]
