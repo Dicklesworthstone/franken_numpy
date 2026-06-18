@@ -36819,7 +36819,12 @@ pub fn chebint(c: &[f64], m: usize) -> Vec<f64> {
                 int[k] = (ck_minus_1 - ck_plus_1) / (2.0 * k as f64);
             }
         }
-        // Integration constant: int[0] = 0
+        // numpy picks the integration constant so the antiderivative is 0 at the
+        // default lower bound lbnd=0: int[0] += k - chebval(lbnd, int), with k=0. The
+        // previous code left int[0] = 0, diverging from numpy whenever the
+        // antiderivative is nonzero at x=0 (e.g. chebint([1,2,3,4,5])[0] was 0, not -1).
+        int[0] = 0.0;
+        int[0] = -chebval(&[0.0], &int)[0];
         coeffs = int;
     }
     coeffs
@@ -37216,7 +37221,12 @@ pub fn legint(c: &[f64], m: usize) -> Vec<f64> {
                 int[j - 1] -= scale;
             }
         }
-        // int[0] is the integration constant (left as accumulated)
+        // numpy picks the integration constant so the antiderivative is 0 at the
+        // default lower bound lbnd=0: int[0] = k - legval(lbnd, int), k=0. The loop
+        // above left int[0] at the accumulated -c[1]/3, which is not numpy's value
+        // (e.g. legint([1,2,3,4,5])[0] was -2/3, numpy is -1/6).
+        int[0] = 0.0;
+        int[0] = -legval(&[0.0], &int)[0];
         coeffs = int;
     }
     coeffs
@@ -37555,6 +37565,10 @@ pub fn hermint(c: &[f64], m: usize) -> Vec<f64> {
         for k in 0..n {
             int[k + 1] = coeffs[k] / (2.0 * (k as f64 + 1.0));
         }
+        // Lower-bound (lbnd=0) integration constant, matching numpy: the loop leaves
+        // int[0] = 0, so set it to -hermval(0, int) so the antiderivative is 0 at x=0
+        // (e.g. hermint([1,2,3,4,5])[0] was 0, numpy is -5).
+        int[0] = -hermval(&[0.0], &int)[0];
         coeffs = int;
     }
     coeffs
@@ -57081,6 +57095,19 @@ print(json.dumps(payload))
         (a - b).abs() <= 1e-7 * (1.0 + a.abs().max(b.abs()))
     }
 
+    fn poly_close_vec(got: &[f64], want: &[f64], name: &str) {
+        assert_eq!(
+            got.len(),
+            want.len(),
+            "{name}: length {} vs {}",
+            got.len(),
+            want.len()
+        );
+        for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+            assert!(poly_close(g, w), "{name}[{i}] = {g}, want {w}");
+        }
+    }
+
     #[test]
     fn polynomial_families_der_undoes_int() {
         // d/dx ∫ p dx = p exactly: integrating once (constant 0) then differentiating
@@ -57186,6 +57213,74 @@ print(json.dumps(payload))
                 );
             }
         }
+    }
+
+    #[test]
+    fn polynomial_int_matches_numpy_golden() {
+        // numpy.polynomial.{chebyshev,legendre,hermite,laguerre}.*int([1,2,3,4,5], 1).
+        let c = [1.0, 2.0, 3.0, 4.0, 5.0];
+        poly_close_vec(
+            &chebint(&c, 1),
+            &[-1.0, -0.5, -0.5, -0.333_333_333_333_333_37, 0.5, 0.5],
+            "chebint",
+        );
+        poly_close_vec(
+            &legint(&c, 1),
+            &[
+                -0.166_666_666_666_666_66,
+                0.4,
+                0.095_238_095_238_095_23,
+                0.044_444_444_444_444_4,
+                0.571_428_571_428_571_4,
+                0.555_555_555_555_555_6,
+            ],
+            "legint",
+        );
+        poly_close_vec(&hermint(&c, 1), &[-5.0, 0.5, 0.5, 0.5, 0.5, 0.5], "hermint");
+        poly_close_vec(&lagint(&c, 1), &[1.0, 1.0, 1.0, 1.0, 1.0, -5.0], "lagint");
+    }
+
+    #[test]
+    fn polynomial_2poly_matches_numpy_golden() {
+        // numpy.polynomial.*.{X}2poly([1,2,3,4,5]) — basis -> power-series conversion.
+        let c = [1.0, 2.0, 3.0, 4.0, 5.0];
+        poly_close_vec(&cheb2poly(&c), &[3.0, -10.0, -34.0, 16.0, 40.0], "cheb2poly");
+        poly_close_vec(
+            &leg2poly(&c),
+            &[1.375, -4.0, -14.25, 10.0, 21.875],
+            "leg2poly",
+        );
+        poly_close_vec(
+            &herm2poly(&c),
+            &[55.0, -44.0, -228.0, 32.0, 80.0],
+            "herm2poly",
+        );
+        poly_close_vec(
+            &herme2poly(&c),
+            &[13.0, -10.0, -27.0, 4.0, 5.0],
+            "herme2poly",
+        );
+        poly_close_vec(
+            &lag2poly(&c),
+            &[15.0, -40.0, 22.5, -4.0, 0.208_333_333_333_333_34],
+            "lag2poly",
+        );
+    }
+
+    #[test]
+    fn polynomial_families_basis_conversion_roundtrips() {
+        // poly2X(X2poly(c)) == c and X2poly(poly2X(c)) == c for every family.
+        let c = [1.5, -2.0, 0.5, 3.0, -1.25];
+        poly_close_vec(&poly2cheb(&cheb2poly(&c)), &c, "cheb p2c∘c2p");
+        poly_close_vec(&cheb2poly(&poly2cheb(&c)), &c, "cheb c2p∘p2c");
+        poly_close_vec(&poly2leg(&leg2poly(&c)), &c, "leg p2l∘l2p");
+        poly_close_vec(&leg2poly(&poly2leg(&c)), &c, "leg l2p∘p2l");
+        poly_close_vec(&poly2herm(&herm2poly(&c)), &c, "herm p2h∘h2p");
+        poly_close_vec(&herm2poly(&poly2herm(&c)), &c, "herm h2p∘p2h");
+        poly_close_vec(&poly2herme(&herme2poly(&c)), &c, "herme p2he∘he2p");
+        poly_close_vec(&herme2poly(&poly2herme(&c)), &c, "herme he2p∘p2he");
+        poly_close_vec(&poly2lag(&lag2poly(&c)), &c, "lag p2l∘l2p");
+        poly_close_vec(&lag2poly(&poly2lag(&c)), &c, "lag l2p∘p2l");
     }
 
     #[test]
