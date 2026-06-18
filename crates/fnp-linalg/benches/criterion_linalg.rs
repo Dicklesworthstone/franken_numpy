@@ -16,8 +16,9 @@
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
     batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, complex_matmul, cond_nxn, det_nxn,
-    eigvalsh_nxn, inv_nxn, kron_nxn, matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn,
-    sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full, svd_nxn,
+    eigvalsh_nxn, inv_nxn, kron_nxn, matrix_norm_frobenius, matrix_norm_nxn,
+    matrix_power_nxn, multi_dot, qr_nxn, sbr_stage1_dense_to_band_lower_nxn, solve_nxn,
+    svd_mxn_full, svd_nxn,
 };
 use std::hint::black_box;
 
@@ -229,6 +230,37 @@ fn bench_norm_frobenius(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
             bench.iter(|| {
                 let result = matrix_norm_frobenius(black_box(&a), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_matrix_norm_orders(c: &mut Criterion) {
+    let mut group = c.benchmark_group("matrix_norm_nxn_orders");
+
+    // Public np.linalg.norm-style orders that should be memory-bandwidth bound:
+    // fro/inf scan rows, while 1/-1 used to stride columns through row-major data.
+    for n in [128usize, 256, 512, 1024] {
+        let a = generate_random_matrix(n, 0x4E4F_524D_4F52_4445);
+
+        group.bench_with_input(BenchmarkId::new("one", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = matrix_norm_nxn(black_box(&a), black_box(n), black_box(n), "1");
+                black_box(result)
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("neg_one", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = matrix_norm_nxn(black_box(&a), black_box(n), black_box(n), "-1");
+                black_box(result)
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("fro", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = matrix_norm_nxn(black_box(&a), black_box(n), black_box(n), "fro");
                 black_box(result)
             });
         });
@@ -456,6 +488,7 @@ criterion_group!(
     bench_eigvalsh,
     bench_sbr_stage1,
     bench_norm_frobenius,
+    bench_matrix_norm_orders,
     bench_cond,
     bench_batch_inv,
     bench_batch_eigvalsh,

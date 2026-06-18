@@ -3683,6 +3683,82 @@ pub fn matrix_norm_frobenius(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
     Ok(sum.sqrt())
 }
 
+const MATRIX_NORM_CACHE_LINEAR_COLUMN_SUM_MIN_ELEMS: usize = 4096;
+
+fn matrix_norm_spectral_precheck(a: &[f64]) -> Result<Option<f64>, LinAlgError> {
+    if a.iter().any(|value| value.is_nan()) {
+        return Err(LinAlgError::SvdNonConvergence);
+    }
+    if a.iter().any(|value| value.is_infinite()) {
+        return Ok(Some(f64::NAN));
+    }
+    Ok(None)
+}
+
+fn matrix_norm_column_sum_strided(a: &[f64], m: usize, n: usize, use_min: bool) -> f64 {
+    let mut selected = if use_min { f64::INFINITY } else { 0.0 };
+    for j in 0..n {
+        let mut col_sum = 0.0;
+        for i in 0..m {
+            let value = a[i * n + j];
+            if value.is_nan() {
+                return f64::NAN;
+            }
+            col_sum += value.abs();
+        }
+        selected = if use_min {
+            selected.min(col_sum)
+        } else {
+            selected.max(col_sum)
+        };
+    }
+    selected
+}
+
+fn matrix_norm_column_sum_cache_linear(a: &[f64], n: usize, use_min: bool) -> f64 {
+    let mut col_sums = vec![0.0_f64; n];
+    for row in a.chunks_exact(n) {
+        for (sum, &value) in col_sums.iter_mut().zip(row) {
+            if value.is_nan() {
+                return f64::NAN;
+            }
+            *sum += value.abs();
+        }
+    }
+    if use_min {
+        col_sums.into_iter().fold(f64::INFINITY, f64::min)
+    } else {
+        col_sums.into_iter().fold(0.0_f64, f64::max)
+    }
+}
+
+fn matrix_norm_column_sum(a: &[f64], m: usize, n: usize, use_min: bool) -> f64 {
+    if a.len() >= MATRIX_NORM_CACHE_LINEAR_COLUMN_SUM_MIN_ELEMS {
+        matrix_norm_column_sum_cache_linear(a, n, use_min)
+    } else {
+        matrix_norm_column_sum_strided(a, m, n, use_min)
+    }
+}
+
+fn matrix_norm_row_sum(a: &[f64], n: usize, use_min: bool) -> f64 {
+    let mut selected = if use_min { f64::INFINITY } else { 0.0 };
+    for row in a.chunks_exact(n) {
+        let mut row_sum = 0.0;
+        for &value in row {
+            if value.is_nan() {
+                return f64::NAN;
+            }
+            row_sum += value.abs();
+        }
+        selected = if use_min {
+            selected.min(row_sum)
+        } else {
+            selected.max(row_sum)
+        };
+    }
+    selected
+}
+
 /// General NxN matrix norm (np.linalg.norm for matrices).
 /// Supports: "fro" (Frobenius), "1" (max column sum), "inf" (max row sum),
 /// "2" (spectral, i.e. largest singular value), "nuc" (nuclear/trace norm).
@@ -3692,99 +3768,42 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
             "matrix_norm_nxn: input must be m*n with m,n > 0",
         ));
     }
-    let has_nan = a.iter().any(|value| value.is_nan());
-    let has_inf = a.iter().any(|value| value.is_infinite());
     match ord {
         "fro" => Ok(a.iter().map(|v| v * v).sum::<f64>().sqrt()),
         "1" => {
-            if has_nan {
-                return Ok(f64::NAN);
-            }
-            // Max absolute column sum
-            let mut max_col = 0.0_f64;
-            for j in 0..n {
-                let mut col_sum = 0.0;
-                for i in 0..m {
-                    col_sum += a[i * n + j].abs();
-                }
-                max_col = max_col.max(col_sum);
-            }
-            Ok(max_col)
+            // Large row-major matrices make strided column walks cache-hostile;
+            // scan rows once while preserving the per-column addition order.
+            Ok(matrix_norm_column_sum(a, m, n, false))
         }
         "-1" => {
-            if has_nan {
-                return Ok(f64::NAN);
-            }
-            // Min absolute column sum
-            let mut min_col = f64::INFINITY;
-            for j in 0..n {
-                let mut col_sum = 0.0;
-                for i in 0..m {
-                    col_sum += a[i * n + j].abs();
-                }
-                min_col = min_col.min(col_sum);
-            }
-            Ok(min_col)
+            Ok(matrix_norm_column_sum(a, m, n, true))
         }
         "inf" => {
-            if has_nan {
-                return Ok(f64::NAN);
-            }
-            // Max absolute row sum
-            let mut max_row = 0.0_f64;
-            for i in 0..m {
-                let mut row_sum = 0.0;
-                for j in 0..n {
-                    row_sum += a[i * n + j].abs();
-                }
-                max_row = max_row.max(row_sum);
-            }
-            Ok(max_row)
+            Ok(matrix_norm_row_sum(a, n, false))
         }
         "-inf" => {
-            if has_nan {
-                return Ok(f64::NAN);
-            }
-            // Min absolute row sum
-            let mut min_row = f64::INFINITY;
-            for i in 0..m {
-                let mut row_sum = 0.0;
-                for j in 0..n {
-                    row_sum += a[i * n + j].abs();
-                }
-                min_row = min_row.min(row_sum);
-            }
-            Ok(min_row)
+            Ok(matrix_norm_row_sum(a, n, true))
         }
         "2" => {
             // Spectral norm = largest singular value (works on MxN)
-            if has_nan {
-                return Err(LinAlgError::SvdNonConvergence);
-            }
-            if has_inf {
-                return Ok(f64::NAN);
+            if let Some(value) = matrix_norm_spectral_precheck(a)? {
+                return Ok(value);
             }
             let sigmas = svd_mxn(a, m, n)?;
             Ok(sigmas.first().copied().unwrap_or(0.0))
         }
         "-2" => {
             // Smallest singular value (works on MxN)
-            if has_nan {
-                return Err(LinAlgError::SvdNonConvergence);
-            }
-            if has_inf {
-                return Ok(f64::NAN);
+            if let Some(value) = matrix_norm_spectral_precheck(a)? {
+                return Ok(value);
             }
             let sigmas = svd_mxn(a, m, n)?;
             Ok(sigmas.last().copied().unwrap_or(0.0))
         }
         "nuc" => {
             // Nuclear norm = sum of singular values (works on MxN)
-            if has_nan {
-                return Err(LinAlgError::SvdNonConvergence);
-            }
-            if has_inf {
-                return Ok(f64::NAN);
+            if let Some(value) = matrix_norm_spectral_precheck(a)? {
+                return Ok(value);
             }
             let sigmas = svd_mxn(a, m, n)?;
             Ok(sigmas.iter().sum())
@@ -12324,6 +12343,58 @@ mod tests {
         assert!((n1 - 6.0).abs() < 1e-10, "1-norm={n1}");
         let ni = matrix_norm_nxn(&a, 2, 2, "inf").unwrap();
         assert!((ni - 7.0).abs() < 1e-10, "inf-norm={ni}");
+    }
+
+    fn matrix_norm_column_sum_strided_reference(
+        a: &[f64],
+        m: usize,
+        n: usize,
+        use_min: bool,
+    ) -> f64 {
+        let mut selected = if use_min { f64::INFINITY } else { 0.0 };
+        for j in 0..n {
+            let mut col_sum = 0.0;
+            for i in 0..m {
+                let value = a[i * n + j];
+                if value.is_nan() {
+                    return f64::NAN;
+                }
+                col_sum += value.abs();
+            }
+            selected = if use_min {
+                selected.min(col_sum)
+            } else {
+                selected.max(col_sum)
+            };
+        }
+        selected
+    }
+
+    #[test]
+    fn matrix_norm_column_reduction_matches_strided_reference_bits() {
+        let m = 67;
+        let n = 73;
+        let a: Vec<f64> = (0..m * n)
+            .map(|i| (((i * 29 + 17) % 113) as f64 - 56.0) / 13.0)
+            .collect();
+        assert!(a.len() >= super::MATRIX_NORM_CACHE_LINEAR_COLUMN_SUM_MIN_ELEMS);
+
+        for (ord, use_min) in [("1", false), ("-1", true)] {
+            let expected = matrix_norm_column_sum_strided_reference(&a, m, n, use_min);
+            let actual = matrix_norm_nxn(&a, m, n, ord).expect("matrix norm");
+            assert_eq!(
+                actual.to_bits(),
+                expected.to_bits(),
+                "cache-linear {ord} reduction must preserve the former strided sum bits"
+            );
+        }
+
+        let mut with_nan = a.clone();
+        with_nan[n + 5] = f64::NAN;
+        assert!(matrix_norm_nxn(&with_nan, m, n, "1").unwrap().is_nan());
+        assert!(matrix_norm_nxn(&with_nan, m, n, "-1").unwrap().is_nan());
+        assert!(matrix_norm_nxn(&with_nan, m, n, "inf").unwrap().is_nan());
+        assert!(matrix_norm_nxn(&with_nan, m, n, "-inf").unwrap().is_nan());
     }
 
     #[test]
