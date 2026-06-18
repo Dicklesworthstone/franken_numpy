@@ -280,11 +280,16 @@ def choose_outcome(fn, a, choices, **kwargs):
         return ("err", type(exc).__name__, str(exc))
 
 cases = [
+    ("scalar index scalar choices", lambda: (1, [10, 20, 30], {})),
+    ("bool indices two choices", lambda: ([False, True, False], [[1, 1, 1], [9, 9, 9]], {})),
     ("list indices list choices", lambda: ([0, 1, 2, 1], [[10, 10, 10, 10], [20, 20, 20, 20], [30, 30, 30, 30]], {})),
     ("tuple indices tuple choices", lambda: ((0, 1, 0), ((1.5, 2.5, 3.5), (10.5, 20.5, 30.5)), {})),
+    ("scalar choice broadcasts", lambda: ([0, 1, 1], [5, [10, 20, 30]], {})),
+    ("string choices", lambda: ([0, 1, 0], [["a", "a", "a"], ["b", "b", "b"]], {})),
     ("nested list choices", lambda: ([[0, 1], [1, 0]], [[[1, 2], [3, 4]], [[10, 20], [30, 40]]], {})),
     ("wrap mode", lambda: ([-1, 0, 3], [[10, 10, 10], [20, 20, 20], [30, 30, 30]], {"mode": "wrap"})),
     ("clip mode", lambda: ([-1, 0, 3], [[10, 10, 10], [20, 20, 20], [30, 30, 30]], {"mode": "clip"})),
+    ("invalid mode error", lambda: ([0, 1], [[10, 10], [20, 20]], {"mode": "bad"})),
     ("raise mode error", lambda: ([0, 3], [[10, 10], [20, 20]], {})),
 ]
 
