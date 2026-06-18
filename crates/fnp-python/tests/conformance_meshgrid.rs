@@ -38,6 +38,72 @@ fn fnp_script(body: String) -> String {
 }
 
 #[test]
+fn meshgrid_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize_grid(value):
+    array = np.asarray(value)
+    return (
+        str(array.dtype),
+        tuple(array.shape),
+        clean(array.tolist()),
+        bool(array.flags["WRITEABLE"]),
+    )
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", tuple(normalize_grid(grid) for grid in call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    ("list tuple default", lambda: (([1, 2, 3], (4, 5)), {})),
+    ("ij sparse false", lambda: (([1, 2, 3], [4, 5]), {"indexing": "ij", "sparse": False})),
+    ("xy sparse true", lambda: (([1, 2, 3], [4, 5]), {"indexing": "xy", "sparse": True})),
+    ("copy false dense", lambda: ((np.array([1, 2, 3]), np.array([4, 5])), {"copy": False})),
+    (
+        "object sparse copy false",
+        lambda: ((["b", "a"], np.array([1, None], dtype=object)), {"sparse": True, "copy": False}),
+    ),
+    (
+        "three inputs mixed containers",
+        lambda: (([1, 2], (3, 4), np.array([5, 6], dtype=np.int16)), {"indexing": "ij"}),
+    ),
+    ("invalid indexing error", lambda: (([1, 2], [3, 4]), {"indexing": "bad"})),
+]
+
+ok = True
+for label, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(fnp.meshgrid, *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(np.meshgrid, *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "meshgrid Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn meshgrid_2_arrays() -> Result<(), String> {
     let script = fnp_script(
         r#"
