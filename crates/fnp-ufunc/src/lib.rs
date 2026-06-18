@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
 const POLYVAL_ND_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+const POLYVALFROMROOTS_PARALLEL_MIN_WORK: usize = 1 << 14;
 const POLYVANDER_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20670,11 +20671,21 @@ impl UFuncArray {
                 "polyvalfromroots: roots must be 1-D".to_string(),
             ));
         }
-        let result_vals: Vec<f64> = self
+        let roots_values = &roots.values;
+        let eval_point =
+            |&x: &f64| roots_values.iter().fold(1.0, |acc, &r| acc * (x - r));
+        let result_vals: Vec<f64> = if self
             .values
-            .iter()
-            .map(|&x| roots.values.iter().fold(1.0, |acc, &r| acc * (x - r)))
-            .collect();
+            .len()
+            .saturating_mul(roots_values.len())
+            >= POLYVALFROMROOTS_PARALLEL_MIN_WORK
+            && roots_values.len() >= 2
+            && rayon::current_num_threads() >= 2
+        {
+            self.values.par_iter().map(eval_point).collect()
+        } else {
+            self.values.iter().map(eval_point).collect()
+        };
 
         Ok(Self {
             shape: self.shape.clone(),
@@ -49481,6 +49492,49 @@ print(json.dumps(payload))
         assert_eq!(
             digest, "a0230a3f27f9d19a90c0b56c4eff10884fc0d3f31d5a073918f65922fc28701c",
             "polyvander golden digest drifted"
+        );
+    }
+
+    #[test]
+    fn polyvalfromroots_parallel_matches_serial_reference_and_golden_sha256() {
+        // Each point evaluates the same roots-order product fold independently.
+        // Keep that fold serial per point and only split the point batch.
+        let n = 2049usize;
+        let roots_len = 9usize;
+        assert!(n * roots_len > super::POLYVALFROMROOTS_PARALLEL_MIN_WORK);
+        let x_vals: Vec<f64> = (0..n)
+            .map(|i| ((i * 41 + 23) % 1201) as f64 / 113.0 - 5.0)
+            .collect();
+        let root_vals: Vec<f64> = (0..roots_len)
+            .map(|j| ((j * 31 + 5) % 199) as f64 / 37.0 - 2.5)
+            .collect();
+        let x = UFuncArray::new(vec![n], x_vals.clone(), DType::F64).unwrap();
+        let roots = UFuncArray::new(vec![roots_len], root_vals.clone(), DType::F64).unwrap();
+        let out = x.polyvalfromroots(&roots).unwrap();
+
+        assert_eq!(out.shape(), &[n]);
+        let mut digest = Sha256::new();
+        for (i, &xi) in x_vals.iter().enumerate() {
+            let mut expected = 1.0f64;
+            for &root in &root_vals {
+                expected *= xi - root;
+            }
+            let got = out.values()[i];
+            assert_eq!(
+                got.to_bits(),
+                expected.to_bits(),
+                "polyvalfromroots drifted at point {i}"
+            );
+            digest.update(got.to_bits().to_le_bytes());
+        }
+        let digest = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "de013e527080254a129dbd3e3becd813064ac8e52953a0a0d380090fc23a92af",
+            "polyvalfromroots golden digest drifted"
         );
     }
 
