@@ -1743,10 +1743,17 @@ impl PyRandomGenerator {
             Some(axes) if axes.len() == 1 => {
                 let axis = axes[0];
                 Some(try_normalize_axis(axis, shape.len()).ok_or_else(|| {
-                    PyValueError::new_err(format!(
-                        "axis {axis} is out of bounds for array of dimension {}",
-                        shape.len()
-                    ))
+                    let axis_error = numpy
+                        .getattr("exceptions")
+                        .and_then(|exceptions| exceptions.getattr("AxisError"))
+                        .and_then(|axis_error| axis_error.call1((axis, shape.len())));
+                    match axis_error {
+                        Ok(error) => PyErr::from_value(error),
+                        Err(_) => PyValueError::new_err(format!(
+                            "axis {axis} is out of bounds for array of dimension {}",
+                            shape.len()
+                        )),
+                    }
                 })?)
             }
             Some(_) => {
@@ -52339,6 +52346,27 @@ mod tests {
                     None,
                 )?
             );
+
+            let scalar_axis_kwargs = PyDict::new(py);
+            scalar_axis_kwargs.set_item("axis", 0_i64)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 318)?;
+            let actual_scalar_axis = call_outcome(
+                py,
+                &ours.getattr("permuted")?,
+                &PyTuple::new(py, [numpy.call_method1("array", (5_i64,))?])?,
+                Some(&scalar_axis_kwargs),
+            )?;
+            let expected_scalar_axis = call_outcome(
+                py,
+                &theirs.getattr("permuted")?,
+                &PyTuple::new(py, [numpy.call_method1("array", (5_i64,))?])?,
+                Some(&scalar_axis_kwargs),
+            )?;
+            if !actual_scalar_axis.eq(&expected_scalar_axis) {
+                return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                    "permuted scalar explicit-axis mismatch: actual={actual_scalar_axis:?} expected={expected_scalar_axis:?}"
+                )));
+            }
 
             Ok(())
         });
