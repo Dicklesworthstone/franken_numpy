@@ -17347,18 +17347,48 @@ fn solve_triangular(
     build_numpy_array_from_ufunc(py, &result)
 }
 
-#[pyfunction]
-fn isposinf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let x = extract_numeric_array(py, x.bind(py), "isposinf(x)")?;
+fn isposinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x, "isposinf(x)")?;
     let result = ufunc_isposinf(&x).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
 }
 
 #[pyfunction]
-fn isneginf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let x = extract_numeric_array(py, x.bind(py), "isneginf(x)")?;
+#[pyo3(signature = (*args, **kwargs))]
+fn isposinf(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        isposinf_native(py, &x_arg)
+            .or_else(|_| core_numpy_passthrough(py, "isposinf", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "isposinf", args, kwargs)
+    }
+}
+
+fn isneginf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    let x = extract_numeric_array(py, x, "isneginf(x)")?;
     let result = ufunc_isneginf(&x).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn isneginf(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        isneginf_native(py, &x_arg)
+            .or_else(|_| core_numpy_passthrough(py, "isneginf", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "isneginf", args, kwargs)
+    }
 }
 
 #[pyfunction]
@@ -46885,8 +46915,8 @@ mod tests {
         diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
         extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero, flip,
         fliplr, flipud, floor, fnp_python, frexp, hypot, indices, interp, isfinite, isinf, isnan,
-        isneginf, isposinf, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf, nan_to_num,
-        NarrowSetOp, narrow_bitmap_setop, wide_int_table_bounds,
+        isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf,
+        nan_to_num, NarrowSetOp, narrow_bitmap_setop, wide_int_table_bounds,
         nextafter, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
         python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate, radians,
         ravel_multi_index, required_dict_item, rfftfreq, rint, searchsorted, select, sign, signbit,
@@ -61068,7 +61098,7 @@ mod tests {
                 vec![f64::NEG_INFINITY, -1.0, 0.0, f64::INFINITY, f64::NAN],
                 "float64",
             );
-            let actual = isposinf(py, values.clone().unbind())?;
+            let actual = isposinf_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("isposinf", (values,))?;
 
@@ -61095,7 +61125,7 @@ mod tests {
                 ],
                 "float64",
             );
-            let actual = isneginf(py, values.clone().unbind())?;
+            let actual = isneginf_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("isneginf", (values,))?;
 
