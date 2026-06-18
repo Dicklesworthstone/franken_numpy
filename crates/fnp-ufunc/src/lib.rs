@@ -48191,7 +48191,7 @@ print(json.dumps(payload))
                 .map(|i| ((i * 2654435761u64 as usize) % 100003) as f64 * 1e-2 - 500.0)
                 .collect(),
             (0..200000)
-                .map(|i| ((i * 40503) % 977) as f64 - 488.0)
+                .map(|i| ((i as u64 * 40503) % 977) as f64 - 488.0)
                 .collect(),
             (0..150001).map(|i| i as f64).collect(),
             (0..150000).map(|i| (150000 - i) as f64).collect(),
@@ -48245,7 +48245,7 @@ print(json.dumps(payload))
                 .map(|i| ((i * 2654435761u64 as usize) % 97) as f64)
                 .collect(),
             (0..100000)
-                .map(|i| ((i * 40503) % 131) as f64 - 60.0)
+                .map(|i| ((i as u64 * 40503) % 131) as f64 - 60.0)
                 .collect(),
             (0..200003).map(|i| i as f64).collect(),
             (0..200000).map(|i| (200000 - i) as f64).collect(),
@@ -48267,7 +48267,7 @@ print(json.dumps(payload))
                 .map(|i| ((i * 2246822519u32 as usize) % 100003) as f64 * 1e-3 - 50.0)
                 .collect(),
             (0..262145)
-                .map(|i| (((i * 1103515245 + 12345) % 1000) as f64) - 500.0)
+                .map(|i| (((i as u64 * 1103515245 + 12345) % 1000) as f64) - 500.0)
                 .collect(),
         ];
         for data in &cases {
