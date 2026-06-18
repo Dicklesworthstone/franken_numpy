@@ -390,11 +390,16 @@ def diagonal_outcome(fn, a, **kwargs):
 
 cases = [
     ("list 2d", lambda: ([[1, 2, 3], [4, 5, 6], [7, 8, 9]], {})),
+    ("bool list 2d", lambda: ([[True, False], [False, True]], {})),
+    ("string list 2d", lambda: ([["a", "b"], ["c", "d"]], {})),
     ("tuple offset positive", lambda: (((1, 2, 3), (4, 5, 6), (7, 8, 9)), {"offset": 1})),
     ("list offset negative", lambda: ([[1, 2, 3, 4], [5, 6, 7, 8]], {"offset": -1})),
+    ("rectangular empty positive offset", lambda: ([[1, 2], [3, 4]], {"offset": 3})),
     ("nested list custom axes", lambda: (np.arange(24).reshape(2, 3, 4).tolist(), {"axis1": 0, "axis2": 2})),
+    ("ndarray negative axes", lambda: (np.arange(24).reshape(2, 3, 4), {"axis1": -1, "axis2": -2})),
     ("scalar error", lambda: (5, {})),
     ("repeated axis error", lambda: ([[1, 2], [3, 4]], {"axis1": 0, "axis2": 0})),
+    ("axis out of bounds error", lambda: ([[1, 2], [3, 4]], {"axis1": 0, "axis2": 2})),
 ]
 
 ok = True
