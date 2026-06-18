@@ -10777,6 +10777,28 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn random_f32_zero_axis_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected_after = numpy_oracle_random_f32_bits(1)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_axis = rng
+            .random_f32_shaped(Some(&[2, 0, 3]))
+            .map_err(|_| "random_f32_shaped zero-axis live oracle")?;
+        assert_eq!(zero_axis.shape(), &[2, 0, 3]);
+        assert!(zero_axis.is_empty());
+        let after_bits = rng
+            .random_f32(1)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(after_bits, expected_after);
+        Ok(())
+    }
+
+    #[test]
     fn integers_in_range() {
         let mut rng = test_generator();
         let vals = rng.integers(0, 10, 100).unwrap();
