@@ -18583,6 +18583,14 @@ fn searchsorted(
     {
         return Ok(out);
     }
+    // Same idea for an f64 haystack + f64 array query: the cold path extracts the whole
+    // haystack, which dominates for a small query array (~13x slower at n_query=1000).
+    if sorter.is_none()
+        && !v_is_scalar
+        && let Some(out) = try_zerocopy_f64_searchsorted(py, a.bind(py), v_bound, side)?
+    {
+        return Ok(out);
+    }
     let a = extract_numeric_array(py, a.bind(py), "searchsorted(a)")?;
     let v = extract_numeric_array(py, v_bound, "searchsorted(v)")?;
     let sorter = sorter
@@ -18727,6 +18735,60 @@ fn try_zerocopy_scalar_searchsorted(
         _ => return Ok(None),
     };
     Ok(Some(numpy.getattr("intp")?.call1((idx as i64,))?.unbind()))
+}
+
+// Zero-copy np.searchsorted for an f64 haystack `a` and an f64 array query `v`
+// (sorter=None). Reads both buffers and runs the NaN-aware f64 binary search per
+// query, writing an intp output of v.shape — no extract of the haystack (the cold
+// path's haystack copy dominates for a small query array). Mixed dtypes (numpy would
+// promote) and non-ndarray/non-1-D-haystack inputs defer (None). Bit-exact: same
+// NaN-aware comparison numpy uses.
+fn try_zerocopy_f64_searchsorted(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    v: &Bound<'_, PyAny>,
+    side: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !v.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if a.getattr("ndim")?.extract::<usize>()? != 1 {
+        return Ok(None); // numpy searchsorted requires a 1-D haystack
+    }
+    if !numpy_dtype_is_f64(py, a) || !numpy_dtype_is_f64(py, v) {
+        return Ok(None); // mixed dtypes → numpy promotes; defer for exact semantics
+    }
+    let right = match side {
+        "left" => false,
+        "right" => true,
+        _ => return Ok(None),
+    };
+    let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(v)) else {
+        return Ok(None);
+    };
+    let (Some(a_s), Some(v_s)) = (a_buf.as_slice(py), v_buf.as_slice(py)) else {
+        return Ok(None);
+    };
+    let m = v_s.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "intp")?;
+    let flat = numpy.call_method("empty", (m,), Some(&kwargs))?;
+    if m > 0 {
+        let Ok(o_buf) = PyBuffer::<i64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(output) = o_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (o, vc) in output.iter().zip(v_s.iter()) {
+            o.set(scalar_search_index_f64(a_s, vc.get(), right) as i64);
+        }
+    }
+    let shape: Vec<usize> = v.getattr("shape")?.extract()?;
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    Ok(Some(flat.call_method1("reshape", (&output_shape,))?.unbind()))
 }
 
 // Typed binary-search core for np.searchsorted over a sorted haystack. For each
