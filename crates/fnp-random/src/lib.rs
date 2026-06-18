@@ -2304,6 +2304,61 @@ fn parallel_pcg_logistic<R: PcgAdvanceFill>(
     out
 }
 
+#[inline]
+fn triangular_transform(
+    u: f64,
+    left: f64,
+    ratio: f64,
+    leftprod: f64,
+    right: f64,
+    rightprod: f64,
+) -> f64 {
+    if u <= ratio {
+        left + (u * leftprod).sqrt()
+    } else {
+        right - ((1.0 - u) * rightprod).sqrt()
+    }
+}
+
+/// Triangular inverse-CDF sampling for PCG-family cores. This path consumes one
+/// f64 uniform per output with no rejection loop, so jump-ahead chunking exactly
+/// preserves the scalar PCG stream while each chunk performs the branchy
+/// transform while its uniforms are still cache-hot.
+fn parallel_pcg_triangular<R: PcgAdvanceFill>(
+    rng: &mut R,
+    left: f64,
+    ratio: f64,
+    leftprod: f64,
+    right: f64,
+    rightprod: f64,
+    size: usize,
+) -> Vec<f64> {
+    use rayon::prelude::*;
+    let mut out = vec![0.0f64; size];
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        rng.fill_uniform_f64(&mut out);
+        for slot in out.iter_mut() {
+            *slot = triangular_transform(*slot, left, ratio, leftprod, right, rightprod);
+        }
+        return out;
+    }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                *slot = triangular_transform(*slot, left, ratio, leftprod, right, rightprod);
+            }
+        });
+    rng.advance_by(size as u128);
+    out
+}
+
 /// Fill a caller-provided slice with uniform `[0,1)` doubles, parallelizing the
 /// PCG jump-ahead exactly as [`parallel_pcg_random_f64`]. Filling an externally
 /// owned buffer (e.g. a NumPy output array via the buffer protocol) avoids the
@@ -2359,6 +2414,30 @@ fn logistic_from_core<R: ZigguratRngCore>(
 ) -> Vec<f64> {
     (0..size)
         .map(|_| logistic_transform(rng.ziggurat_next_f64(), loc, scale))
+        .collect()
+}
+
+#[inline]
+fn triangular_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    left: f64,
+    ratio: f64,
+    leftprod: f64,
+    right: f64,
+    rightprod: f64,
+    size: usize,
+) -> Vec<f64> {
+    (0..size)
+        .map(|_| {
+            triangular_transform(
+                rng.ziggurat_next_f64(),
+                left,
+                ratio,
+                leftprod,
+                right,
+                rightprod,
+            )
+        })
         .collect()
 }
 
@@ -5266,16 +5345,31 @@ impl Generator {
         let ratio = leftbase / base;
         let leftprod = leftbase * base;
         let rightprod = (right - mode) * base;
-        Ok((0..size)
-            .map(|_| {
-                let u = self.next_f64();
-                if u <= ratio {
-                    left + (u * leftprod).sqrt()
-                } else {
-                    right - ((1.0 - u) * rightprod).sqrt()
-                }
-            })
-            .collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => {
+                triangular_from_core(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+            RngBackend::Pcg64(rng) => {
+                parallel_pcg_triangular(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+            RngBackend::Pcg64Dxsm(rng) => {
+                parallel_pcg_triangular(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+            RngBackend::Mt19937(rng) => {
+                triangular_from_core(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+            RngBackend::Philox(rng) => {
+                triangular_from_core(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+            RngBackend::Sfc64(rng) => {
+                triangular_from_core(rng, left, ratio, leftprod, right, rightprod, size)
+            }
+        })
     }
 
     /// Laplace (double exponential) distribution (matching NumPy's algorithm).
@@ -17767,6 +17861,56 @@ for child in rng.spawn(n_children):
         assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
         let zero_scale = buffered.logistic(loc, 0.0, n).unwrap();
         assert!(zero_scale.iter().all(|value| value.to_bits() == loc.to_bits()));
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+    }
+
+    #[test]
+    fn parallel_pcg_triangular_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        let left = -3.0;
+        let mode = 0.25;
+        let right = 5.5;
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(5150);
+            let mut combined = parallel.triangular(left, mode, right, n).unwrap();
+            combined.extend(parallel.triangular(left, mode, right, n).unwrap());
+            let after_parallel: Vec<u64> =
+                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(5150);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.triangular(left, mode, right, 1).unwrap()[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: triangular diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-triangular f64 state diverged"
+            );
+        }
+
+        let mut buffered = Generator::from_pcg64(888).unwrap();
+        let mut serial = Generator::from_pcg64(888).unwrap();
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+        assert!(buffered.triangular(left, mode, right, 0).unwrap().is_empty());
         assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
     }
 }

@@ -223,6 +223,25 @@ fn bench_generator_logistic(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_generator_triangular(c: &mut Criterion) {
+    let mut group = c.benchmark_group("generator_triangular");
+
+    let sizes = [100, 1000, 10000, 100000];
+
+    for &size in &sizes {
+        let ss = seed_sequence();
+        let bg = BitGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &ss).unwrap();
+        let mut generator = Generator::from_bit_generator(bg);
+
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_with_input(BenchmarkId::new("skewed", size), &size, |b, &size| {
+            b.iter(|| black_box(generator.triangular(-3.0, 0.25, 5.5, size).unwrap()))
+        });
+    }
+
+    group.finish();
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bit generator comparison (same operation across all generators)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -281,6 +300,7 @@ criterion_group!(
     bench_generator_integers,
     bench_generator_exponential,
     bench_generator_logistic,
+    bench_generator_triangular,
     bench_bitgen_comparison,
 );
 
