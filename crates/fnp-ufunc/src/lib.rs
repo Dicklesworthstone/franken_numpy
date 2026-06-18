@@ -50,6 +50,7 @@ const POLYVAL_ND_PARALLEL_MIN_ELEMS: usize = 1 << 12;
 const POLYVALFROMROOTS_PARALLEL_MIN_WORK: usize = 1 << 14;
 const POLYVANDER_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const WHERE_SELECT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const SELECT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UFuncRuntimeMode {
@@ -27709,6 +27710,39 @@ impl UFuncArray {
         }
         let out_shape = Self::broadcast_shapes(&shapes)?;
         let out_count = element_count(&out_shape).map_err(UFuncError::Shape)?;
+        let mut out_dtype = fnp_dtype::min_scalar_type(default);
+        for choice in choicelist {
+            out_dtype = promote(out_dtype, choice.dtype);
+        }
+
+        if out_count >= SELECT_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+            && condlist
+                .iter()
+                .all(|cond| cond.shape.as_slice() == out_shape.as_slice())
+            && choicelist
+                .iter()
+                .all(|choice| choice.shape.as_slice() == out_shape.as_slice())
+        {
+            let values = (0..out_count)
+                .into_par_iter()
+                .map(|flat| {
+                    for (cond, choice) in condlist.iter().zip(choicelist.iter()) {
+                        if cond.values[flat] != 0.0 {
+                            return choice.values[flat];
+                        }
+                    }
+                    default
+                })
+                .collect();
+            return Ok(Self {
+                shape: out_shape,
+                values,
+                dtype: out_dtype,
+                integer_sidecar: None,
+            });
+        }
+
         let broadcast_conds: Vec<Self> = condlist
             .iter()
             .map(|cond| cond.broadcast_to(&out_shape))
@@ -27717,11 +27751,6 @@ impl UFuncArray {
             .iter()
             .map(|choice| choice.broadcast_to(&out_shape))
             .collect::<Result<_, _>>()?;
-
-        let mut out_dtype = fnp_dtype::min_scalar_type(default);
-        for choice in choicelist {
-            out_dtype = promote(out_dtype, choice.dtype);
-        }
 
         let mut values = vec![default; out_count];
         // Iterate in reverse so first matching condition wins
@@ -65155,6 +65184,93 @@ print(json.dumps(payload))
         // First condition matches, so choice1 wins
         assert!((r.values()[0] - 10.0).abs() < 1e-10);
         assert!((r.values()[1] - 20.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn select_equal_shape_parallel_matches_first_match_reference_and_golden_sha256() {
+        let n = super::SELECT_PARALLEL_MIN_ELEMS + 313;
+        let cond1_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 11 == 0 || (i * 17 + 3) % 19 == 0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let cond2_vals: Vec<f64> = (0..n)
+            .map(|i| if ((i * 7 + 5) % 13) < 4 { 1.0 } else { 0.0 })
+            .collect();
+        let cond3_vals: Vec<f64> = (0..n)
+            .map(|i| if i % 5 == 0 { 1.0 } else { 0.0 })
+            .collect();
+        let choice1_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 101 == 0 {
+                    -0.0
+                } else {
+                    ((i * 31 + 7) % 1009) as f64 / 17.0 - 23.0
+                }
+            })
+            .collect();
+        let choice2_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 257 == 0 {
+                    f64::INFINITY
+                } else {
+                    ((i * 29 + 11) % 997) as f64 / 19.0 - 19.0
+                }
+            })
+            .collect();
+        let choice3_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 263 == 0 {
+                    f64::NEG_INFINITY
+                } else {
+                    ((i * 23 + 13) % 991) as f64 / 23.0 - 17.0
+                }
+            })
+            .collect();
+
+        let cond1 = UFuncArray::new(vec![n], cond1_vals.clone(), DType::Bool).unwrap();
+        let cond2 = UFuncArray::new(vec![n], cond2_vals.clone(), DType::Bool).unwrap();
+        let cond3 = UFuncArray::new(vec![n], cond3_vals.clone(), DType::Bool).unwrap();
+        let choice1 = UFuncArray::new(vec![n], choice1_vals.clone(), DType::F64).unwrap();
+        let choice2 = UFuncArray::new(vec![n], choice2_vals.clone(), DType::F64).unwrap();
+        let choice3 = UFuncArray::new(vec![n], choice3_vals.clone(), DType::F64).unwrap();
+
+        let out = UFuncArray::select(
+            &[&cond1, &cond2, &cond3],
+            &[&choice1, &choice2, &choice3],
+            -7.25,
+        )
+        .unwrap();
+
+        assert_eq!(out.shape(), &[n]);
+        assert_eq!(out.dtype, DType::F64);
+        let mut digest = Sha256::new();
+        for i in 0..n {
+            let expected = if cond1_vals[i] != 0.0 {
+                choice1_vals[i]
+            } else if cond2_vals[i] != 0.0 {
+                choice2_vals[i]
+            } else if cond3_vals[i] != 0.0 {
+                choice3_vals[i]
+            } else {
+                -7.25
+            };
+            assert_eq!(out.values()[i].to_bits(), expected.to_bits());
+            digest.update(out.values()[i].to_le_bytes());
+        }
+        let digest_hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest_hex,
+            "a00dcce28fd9c43541746e2bd210c30d5dbf469fd6701e7e0dc552da2ba27ff1"
+        );
     }
 
     #[test]
