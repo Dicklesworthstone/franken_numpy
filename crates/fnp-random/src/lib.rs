@@ -6901,6 +6901,23 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_exponential(scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+scale = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.exponential(scale, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [scale.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_logseries_then_random(
         p: &str,
     ) -> Result<(Vec<u64>, Vec<f64>), &'static str> {
@@ -12742,6 +12759,21 @@ for child in rng.spawn(n_children):
             0.6935091163855989,
         ];
         assert_f64_seq("exponential", &vals, &expected);
+    }
+
+    #[test]
+    fn exponential_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_exponential(2.5, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .exponential(2.5, 10)
+            .map_err(|_| "exponential live oracle")?;
+        assert_f64_seq("exponential_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
