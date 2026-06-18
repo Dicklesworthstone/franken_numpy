@@ -6422,6 +6422,36 @@ except Exception as exc:
             .to_string()
     }
 
+    fn numpy_oracle_stdout_from_stdin(
+        script: &str,
+        args: &[String],
+    ) -> Result<Vec<u8>, &'static str> {
+        let mut command = Command::new(oracle_python_bin());
+        command.arg("-");
+        for arg in args {
+            command.arg(arg);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| "python oracle failed to launch")?;
+        child
+            .stdin
+            .as_mut()
+            .ok_or("python oracle stdin unavailable")?
+            .write_all(script.as_bytes())
+            .map_err(|_| "python oracle script write failed")?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| "python oracle failed to finish")?;
+        if !output.status.success() {
+            return Err("NumPy oracle failed");
+        }
+        Ok(output.stdout)
+    }
+
     fn numpy_oracle_integers_dtype(
         dtype: &str,
         low: i64,
@@ -6450,32 +6480,15 @@ rng = np.random.Generator(np.random.PCG64DXSM(12345))
 out = rng.integers(low, high, size=size, dtype=dtype, endpoint=endpoint)
 print(",".join(str(int(value)) for value in out.reshape(-1).tolist()))
 "#;
-        let mut child = Command::new(oracle_python_bin())
-            .arg("-")
-            .arg(dtype)
-            .arg(low.to_string())
-            .arg(high.to_string())
-            .arg(size_arg)
-            .arg(if endpoint { "true" } else { "false" })
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|_| "python oracle failed to launch")?;
-        child
-            .stdin
-            .as_mut()
-            .ok_or("python oracle stdin unavailable")?
-            .write_all(script.as_bytes())
-            .map_err(|_| "python oracle script write failed")?;
-        let output = child
-            .wait_with_output()
-            .map_err(|_| "python oracle failed to finish")?;
-        if !output.status.success() {
-            return Err("NumPy typed integers oracle failed");
-        }
-        let stdout =
-            std::str::from_utf8(&output.stdout).map_err(|_| "oracle stdout must be utf-8")?;
+        let args = [
+            dtype.to_string(),
+            low.to_string(),
+            high.to_string(),
+            size_arg,
+            if endpoint { "true" } else { "false" }.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
         let mut values = Vec::new();
         for token in stdout.trim().split(',').filter(|token| !token.is_empty()) {
             let value = token
@@ -6484,6 +6497,46 @@ print(",".join(str(int(value)) for value in out.reshape(-1).tolist()))
             values.push(value);
         }
         Ok(values)
+    }
+
+    fn parse_oracle_f64_csv(csv: &str) -> Result<Vec<f64>, &'static str> {
+        let mut values = Vec::new();
+        for token in csv.split(',').filter(|token| !token.is_empty()) {
+            let value = token
+                .parse::<f64>()
+                .map_err(|_| "oracle float parse failed")?;
+            values.push(value);
+        }
+        Ok(values)
+    }
+
+    fn numpy_oracle_choice_weighted_no_replace() -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import numpy as np
+
+a = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+p = np.array([0.4, 0.3, 0.2, 0.05, 0.05])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+samples = rng.choice(a, size=3, replace=False, p=p)
+after = rng.random(5)
+print("samples:" + ",".join(str(float(value)) for value in samples.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut samples = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("samples:") {
+                samples = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            samples.ok_or("oracle samples missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
     }
 
     fn numpy_oracle_geometric_outcome(p: f64, size: usize) -> String {
@@ -10986,6 +11039,35 @@ for child in rng.spawn(n_children):
         ];
         let after = rng.random(5);
         assert_f64_seq("choice_weighted_no_replace_after", &after, &expected_after);
+    }
+
+    #[test]
+    fn choice_weighted_no_replace_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_samples, expected_after) = numpy_oracle_choice_weighted_no_replace()?;
+        let mut rng = oracle_gen();
+        let a = [1.0, 2.0, 3.0, 4.0, 5.0];
+        let p = [0.4, 0.3, 0.2, 0.05, 0.05];
+
+        let samples = rng
+            .choice_weighted(&a, 3, false, &p)
+            .map_err(|_| "weighted choice live oracle case")?;
+        assert_f64_seq(
+            "choice_weighted_no_replace_live_numpy_samples",
+            &samples,
+            &expected_samples,
+        );
+
+        let after = rng.random(5);
+        assert_f64_seq(
+            "choice_weighted_no_replace_live_numpy_after",
+            &after,
+            &expected_after,
+        );
+        Ok(())
     }
 
     #[test]
