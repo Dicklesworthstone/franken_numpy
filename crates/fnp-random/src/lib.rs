@@ -6521,6 +6521,23 @@ print(",".join(str(int(value)) for value in out.reshape(-1).tolist()))
         Ok(values)
     }
 
+    fn numpy_oracle_poisson(lam: f64, size: usize) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+lam = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.poisson(lam, size=size)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let args = [lam.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_logseries_then_random(
         p: &str,
     ) -> Result<(Vec<u64>, Vec<f64>), &'static str> {
@@ -13087,6 +13104,26 @@ for child in rng.spawn(n_children):
         let vals = g.poisson(20.0, 10).unwrap();
         let expected: Vec<u64> = vec![28, 16, 21, 26, 19, 18, 26, 18, 22, 16];
         assert_u64_seq("poisson_large", &vals, &expected);
+    }
+
+    #[test]
+    fn poisson_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, lam, size) in [
+            ("poisson_live_numpy", 3.0, 10),
+            ("poisson_large_live_numpy", 20.0, 10),
+        ] {
+            let expected = numpy_oracle_poisson(lam, size)?;
+            let mut g = oracle_gen();
+            let actual = g
+                .poisson(lam, size)
+                .map_err(|_| "poisson live oracle case")?;
+            assert_u64_seq(label, &actual, &expected);
+        }
+        Ok(())
     }
 
     #[test]
