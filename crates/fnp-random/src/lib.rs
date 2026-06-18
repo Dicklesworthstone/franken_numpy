@@ -3570,6 +3570,90 @@ impl Generator {
         (m >> 64) as u64
     }
 
+    fn buffered_uint16(&mut self, bcnt: &mut u8, buf: &mut u32) -> u16 {
+        if *bcnt == 0 {
+            *buf = self.next_uint32();
+            *bcnt = 1;
+        } else {
+            *buf >>= 16;
+            *bcnt -= 1;
+        }
+        *buf as u16
+    }
+
+    fn buffered_uint8(&mut self, bcnt: &mut u8, buf: &mut u32) -> u8 {
+        if *bcnt == 0 {
+            *buf = self.next_uint32();
+            *bcnt = 3;
+        } else {
+            *buf >>= 8;
+            *bcnt -= 1;
+        }
+        *buf as u8
+    }
+
+    fn buffered_bounded_lemire_uint16(
+        &mut self,
+        rng: u16,
+        bcnt: &mut u8,
+        buf: &mut u32,
+    ) -> u16 {
+        let rng_excl = u32::from(rng) + 1;
+        let mut m = u32::from(self.buffered_uint16(bcnt, buf)) * rng_excl;
+        let mut leftover = m as u16;
+
+        if u32::from(leftover) < rng_excl {
+            let threshold = ((u32::from(u16::MAX - rng)) % rng_excl) as u16;
+            while leftover < threshold {
+                m = u32::from(self.buffered_uint16(bcnt, buf)) * rng_excl;
+                leftover = m as u16;
+            }
+        }
+
+        (m >> 16) as u16
+    }
+
+    fn buffered_bounded_lemire_uint8(
+        &mut self,
+        rng: u8,
+        bcnt: &mut u8,
+        buf: &mut u32,
+    ) -> u8 {
+        let rng_excl = u16::from(rng) + 1;
+        let mut m = u16::from(self.buffered_uint8(bcnt, buf)) * rng_excl;
+        let mut leftover = m as u8;
+
+        if u16::from(leftover) < rng_excl {
+            let threshold = ((u16::from(u8::MAX - rng)) % rng_excl) as u8;
+            while leftover < threshold {
+                m = u16::from(self.buffered_uint8(bcnt, buf)) * rng_excl;
+                leftover = m as u8;
+            }
+        }
+
+        (m >> 8) as u8
+    }
+
+    fn numpy_bounded_uint16(&mut self, off: u16, rng: u16, bcnt: &mut u8, buf: &mut u32) -> u16 {
+        if rng == 0 {
+            return off;
+        }
+        if rng == u16::MAX {
+            return off.wrapping_add(self.buffered_uint16(bcnt, buf));
+        }
+        off.wrapping_add(self.buffered_bounded_lemire_uint16(rng, bcnt, buf))
+    }
+
+    fn numpy_bounded_uint8(&mut self, off: u8, rng: u8, bcnt: &mut u8, buf: &mut u32) -> u8 {
+        if rng == 0 {
+            return off;
+        }
+        if rng == u8::MAX {
+            return off.wrapping_add(self.buffered_uint8(bcnt, buf));
+        }
+        off.wrapping_add(self.buffered_bounded_lemire_uint8(rng, bcnt, buf))
+    }
+
     /// NumPy-compatible bounded uint64 with automatic 32/64-bit dispatch.
     ///
     /// Returns a value in `[0, rng]` (inclusive).
@@ -3828,6 +3912,175 @@ impl Generator {
     ) -> Result<ShapedRandomOutput<i64>, RandomError> {
         let size = resolve_random_size(size)?;
         let values = self.integers_endpoint(low, high, size.len)?;
+        Ok(shaped_output(size, values))
+    }
+
+    fn narrow_integer_high_inclusive(
+        low: i64,
+        high: i64,
+        min: i64,
+        max: i64,
+        endpoint: bool,
+    ) -> Result<i64, RandomError> {
+        if low < min || low > max {
+            return Err(RandomError::InvalidParameter);
+        }
+        let high_limit = if endpoint { max } else { max + 1 };
+        if high < min || high > high_limit {
+            return Err(RandomError::InvalidParameter);
+        }
+        if endpoint {
+            if high < low {
+                return Err(RandomError::InvalidUpperBound);
+            }
+            Ok(high)
+        } else {
+            if high <= low {
+                return Err(RandomError::InvalidUpperBound);
+            }
+            Ok(high - 1)
+        }
+    }
+
+    pub fn integers_i8_endpoint_mode(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: usize,
+        endpoint: bool,
+    ) -> Result<Vec<i8>, RandomError> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let high = Self::narrow_integer_high_inclusive(
+            low,
+            high,
+            i64::from(i8::MIN),
+            i64::from(i8::MAX),
+            endpoint,
+        )?;
+        let off = (low as i8) as u8;
+        let rng = (high - low) as u8;
+        let mut bcnt = 0;
+        let mut buf = 0;
+        Ok((0..size)
+            .map(|_| self.numpy_bounded_uint8(off, rng, &mut bcnt, &mut buf) as i8)
+            .collect())
+    }
+
+    pub fn integers_i8_shaped(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: Option<&[usize]>,
+        endpoint: bool,
+    ) -> Result<ShapedRandomOutput<i8>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.integers_i8_endpoint_mode(low, high, size.len, endpoint)?;
+        Ok(shaped_output(size, values))
+    }
+
+    pub fn integers_i16_endpoint_mode(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: usize,
+        endpoint: bool,
+    ) -> Result<Vec<i16>, RandomError> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let high = Self::narrow_integer_high_inclusive(
+            low,
+            high,
+            i64::from(i16::MIN),
+            i64::from(i16::MAX),
+            endpoint,
+        )?;
+        let off = (low as i16) as u16;
+        let rng = (high - low) as u16;
+        let mut bcnt = 0;
+        let mut buf = 0;
+        Ok((0..size)
+            .map(|_| self.numpy_bounded_uint16(off, rng, &mut bcnt, &mut buf) as i16)
+            .collect())
+    }
+
+    pub fn integers_i16_shaped(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: Option<&[usize]>,
+        endpoint: bool,
+    ) -> Result<ShapedRandomOutput<i16>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.integers_i16_endpoint_mode(low, high, size.len, endpoint)?;
+        Ok(shaped_output(size, values))
+    }
+
+    pub fn integers_u8_endpoint_mode(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: usize,
+        endpoint: bool,
+    ) -> Result<Vec<u8>, RandomError> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let high =
+            Self::narrow_integer_high_inclusive(low, high, 0, i64::from(u8::MAX), endpoint)?;
+        let off = low as u8;
+        let rng = (high - low) as u8;
+        let mut bcnt = 0;
+        let mut buf = 0;
+        Ok((0..size)
+            .map(|_| self.numpy_bounded_uint8(off, rng, &mut bcnt, &mut buf))
+            .collect())
+    }
+
+    pub fn integers_u8_shaped(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: Option<&[usize]>,
+        endpoint: bool,
+    ) -> Result<ShapedRandomOutput<u8>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.integers_u8_endpoint_mode(low, high, size.len, endpoint)?;
+        Ok(shaped_output(size, values))
+    }
+
+    pub fn integers_u16_endpoint_mode(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: usize,
+        endpoint: bool,
+    ) -> Result<Vec<u16>, RandomError> {
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        let high =
+            Self::narrow_integer_high_inclusive(low, high, 0, i64::from(u16::MAX), endpoint)?;
+        let off = low as u16;
+        let rng = (high - low) as u16;
+        let mut bcnt = 0;
+        let mut buf = 0;
+        Ok((0..size)
+            .map(|_| self.numpy_bounded_uint16(off, rng, &mut bcnt, &mut buf))
+            .collect())
+    }
+
+    pub fn integers_u16_shaped(
+        &mut self,
+        low: i64,
+        high: i64,
+        size: Option<&[usize]>,
+        endpoint: bool,
+    ) -> Result<ShapedRandomOutput<u16>, RandomError> {
+        let size = resolve_random_size(size)?;
+        let values = self.integers_u16_endpoint_mode(low, high, size.len, endpoint)?;
         Ok(shaped_output(size, values))
     }
 

@@ -1451,6 +1451,61 @@ impl PyRandomGenerator {
         let dtype = extract_python_dtype(py, dtype, DType::I64, "Generator.integers(dtype)")?;
         validate_random_integer_dtype_bounds(low, high, dtype, endpoint)?;
         let size = random_size_from_py(py, size, "Generator.integers(size)")?;
+        match dtype {
+            DType::I8 => {
+                let output = self
+                    .inner
+                    .integers_i8_shaped(low, high, size.as_deref(), endpoint)
+                    .map_err(map_random_error)?;
+                let (shape, values, scalar) = output.into_parts();
+                return build_random_integer_storage_parts(
+                    py,
+                    shape,
+                    ArrayStorage::I8(values),
+                    scalar,
+                );
+            }
+            DType::I16 => {
+                let output = self
+                    .inner
+                    .integers_i16_shaped(low, high, size.as_deref(), endpoint)
+                    .map_err(map_random_error)?;
+                let (shape, values, scalar) = output.into_parts();
+                return build_random_integer_storage_parts(
+                    py,
+                    shape,
+                    ArrayStorage::I16(values),
+                    scalar,
+                );
+            }
+            DType::U8 => {
+                let output = self
+                    .inner
+                    .integers_u8_shaped(low, high, size.as_deref(), endpoint)
+                    .map_err(map_random_error)?;
+                let (shape, values, scalar) = output.into_parts();
+                return build_random_integer_storage_parts(
+                    py,
+                    shape,
+                    ArrayStorage::U8(values),
+                    scalar,
+                );
+            }
+            DType::U16 => {
+                let output = self
+                    .inner
+                    .integers_u16_shaped(low, high, size.as_deref(), endpoint)
+                    .map_err(map_random_error)?;
+                let (shape, values, scalar) = output.into_parts();
+                return build_random_integer_storage_parts(
+                    py,
+                    shape,
+                    ArrayStorage::U16(values),
+                    scalar,
+                );
+            }
+            _ => {}
+        }
         let output = if endpoint {
             self.inner
                 .integers_endpoint_shaped(low, high, size.as_deref())
@@ -3614,6 +3669,22 @@ fn build_random_i64_parts(
 
 fn random_integer_storage(values: Vec<i64>, dtype: DType) -> PyResult<ArrayStorage> {
     match dtype {
+        DType::I8 => values
+            .into_iter()
+            .map(|value| {
+                i8::try_from(value)
+                    .map_err(|_| PyValueError::new_err("random integer sample exceeds int8"))
+            })
+            .collect::<PyResult<Vec<_>>>()
+            .map(ArrayStorage::I8),
+        DType::I16 => values
+            .into_iter()
+            .map(|value| {
+                i16::try_from(value)
+                    .map_err(|_| PyValueError::new_err("random integer sample exceeds int16"))
+            })
+            .collect::<PyResult<Vec<_>>>()
+            .map(ArrayStorage::I16),
         DType::I32 => values
             .into_iter()
             .map(|value| {
@@ -3623,6 +3694,22 @@ fn random_integer_storage(values: Vec<i64>, dtype: DType) -> PyResult<ArrayStora
             .collect::<PyResult<Vec<_>>>()
             .map(ArrayStorage::I32),
         DType::I64 => Ok(ArrayStorage::I64(values)),
+        DType::U8 => values
+            .into_iter()
+            .map(|value| {
+                u8::try_from(value)
+                    .map_err(|_| PyValueError::new_err("random integer sample exceeds uint8"))
+            })
+            .collect::<PyResult<Vec<_>>>()
+            .map(ArrayStorage::U8),
+        DType::U16 => values
+            .into_iter()
+            .map(|value| {
+                u16::try_from(value)
+                    .map_err(|_| PyValueError::new_err("random integer sample exceeds uint16"))
+            })
+            .collect::<PyResult<Vec<_>>>()
+            .map(ArrayStorage::U16),
         DType::U32 => values
             .into_iter()
             .map(|value| {
@@ -3646,6 +3733,19 @@ fn random_integer_storage(values: Vec<i64>, dtype: DType) -> PyResult<ArrayStora
     }
 }
 
+fn build_random_integer_storage_parts(
+    py: Python<'_>,
+    shape: Vec<usize>,
+    storage: ArrayStorage,
+    scalar: bool,
+) -> PyResult<Py<PyAny>> {
+    if scalar {
+        let array = build_numpy_array_from_storage(py, &[1], storage)?;
+        return Ok(array.bind(py).get_item(0_usize)?.unbind());
+    }
+    build_numpy_array_from_storage(py, &shape, storage)
+}
+
 fn build_random_integer_parts(
     py: Python<'_>,
     shape: Vec<usize>,
@@ -3654,11 +3754,7 @@ fn build_random_integer_parts(
     dtype: DType,
 ) -> PyResult<Py<PyAny>> {
     let storage = random_integer_storage(values, dtype)?;
-    if scalar {
-        let array = build_numpy_array_from_storage(py, &[1], storage)?;
-        return Ok(array.bind(py).get_item(0_usize)?.unbind());
-    }
-    build_numpy_array_from_storage(py, &shape, storage)
+    build_random_integer_storage_parts(py, shape, storage, scalar)
 }
 
 fn validate_random_integer_dtype_bounds(
@@ -3668,6 +3764,32 @@ fn validate_random_integer_dtype_bounds(
     endpoint: bool,
 ) -> PyResult<()> {
     match dtype {
+        DType::I8 => {
+            if low < i64::from(i8::MIN) {
+                return Err(PyValueError::new_err("low is out of bounds for int8"));
+            }
+            let high_limit = if endpoint {
+                i64::from(i8::MAX)
+            } else {
+                i64::from(i8::MAX) + 1
+            };
+            if high > high_limit {
+                return Err(PyValueError::new_err("high is out of bounds for int8"));
+            }
+        }
+        DType::I16 => {
+            if low < i64::from(i16::MIN) {
+                return Err(PyValueError::new_err("low is out of bounds for int16"));
+            }
+            let high_limit = if endpoint {
+                i64::from(i16::MAX)
+            } else {
+                i64::from(i16::MAX) + 1
+            };
+            if high > high_limit {
+                return Err(PyValueError::new_err("high is out of bounds for int16"));
+            }
+        }
         DType::I32 => {
             if low < i64::from(i32::MIN) {
                 return Err(PyValueError::new_err("low is out of bounds for int32"));
@@ -3682,6 +3804,32 @@ fn validate_random_integer_dtype_bounds(
             }
         }
         DType::I64 => {}
+        DType::U8 => {
+            if low < 0 {
+                return Err(PyValueError::new_err("low is out of bounds for uint8"));
+            }
+            let high_limit = if endpoint {
+                i64::from(u8::MAX)
+            } else {
+                i64::from(u8::MAX) + 1
+            };
+            if high > high_limit {
+                return Err(PyValueError::new_err("high is out of bounds for uint8"));
+            }
+        }
+        DType::U16 => {
+            if low < 0 {
+                return Err(PyValueError::new_err("low is out of bounds for uint16"));
+            }
+            let high_limit = if endpoint {
+                i64::from(u16::MAX)
+            } else {
+                i64::from(u16::MAX) + 1
+            };
+            if high > high_limit {
+                return Err(PyValueError::new_err("high is out of bounds for uint16"));
+            }
+        }
         DType::U32 => {
             if low < 0 {
                 return Err(PyValueError::new_err("low is out of bounds for uint32"));
@@ -51021,6 +51169,77 @@ mod tests {
                     (0_i64, i64::from(u32::MAX), shape),
                     Some(&uint32_endpoint_kwargs),
                 )?,
+            )?;
+
+            let narrow_shape = PyTuple::new(py, [3_usize, 2_usize])?;
+
+            let int8_kwargs = PyDict::new(py);
+            int8_kwargs.set_item("dtype", numpy.getattr("int8")?)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 274)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method(
+                    "integers",
+                    (-5_i64, 5_i64, narrow_shape.clone()),
+                    Some(&int8_kwargs),
+                )?,
+                &theirs.call_method(
+                    "integers",
+                    (-5_i64, 5_i64, narrow_shape.clone()),
+                    Some(&int8_kwargs),
+                )?,
+            )?;
+
+            let int16_kwargs = PyDict::new(py);
+            int16_kwargs.set_item("dtype", numpy.getattr("int16")?)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 275)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method("integers", (-300_i64, 300_i64, 6_usize), Some(&int16_kwargs))?,
+                &theirs.call_method(
+                    "integers",
+                    (-300_i64, 300_i64, 6_usize),
+                    Some(&int16_kwargs),
+                )?,
+            )?;
+
+            let uint8_kwargs = PyDict::new(py);
+            uint8_kwargs.set_item("dtype", numpy.getattr("uint8")?)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 276)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method(
+                    "integers",
+                    (0_i64, 200_i64, narrow_shape.clone()),
+                    Some(&uint8_kwargs),
+                )?,
+                &theirs.call_method(
+                    "integers",
+                    (0_i64, 200_i64, narrow_shape),
+                    Some(&uint8_kwargs),
+                )?,
+            )?;
+
+            let uint16_endpoint_kwargs = PyDict::new(py);
+            uint16_endpoint_kwargs.set_item("dtype", numpy.getattr("uint16")?)?;
+            uint16_endpoint_kwargs.set_item("endpoint", true)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 277)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method(
+                    "integers",
+                    (0_i64, i64::from(u16::MAX), 7_usize),
+                    Some(&uint16_endpoint_kwargs),
+                )?,
+                &theirs.call_method(
+                    "integers",
+                    (0_i64, i64::from(u16::MAX), 7_usize),
+                    Some(&uint16_endpoint_kwargs),
+                )?,
+            )?;
+
+            let scalar_uint8_kwargs = PyDict::new(py);
+            scalar_uint8_kwargs.set_item("dtype", numpy.getattr("uint8")?)?;
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 278)?;
+            assert_random_sample_matches_numpy(
+                &ours.call_method("integers", (0_i64, 256_i64), Some(&scalar_uint8_kwargs))?,
+                &theirs.call_method("integers", (0_i64, 256_i64), Some(&scalar_uint8_kwargs))?,
             )?;
 
             let uint64_kwargs = PyDict::new(py);
