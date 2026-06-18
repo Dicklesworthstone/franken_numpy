@@ -6687,6 +6687,21 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_standard_cauchy(size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+size = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.standard_cauchy(size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[size.to_string()])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_rayleigh(scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
         let script = r#"
 import sys
@@ -13292,6 +13307,19 @@ for child in rng.spawn(n_children):
             -0.023788035645022024,
         ];
         assert_f64_seq("standard_cauchy", &vals, &expected);
+    }
+
+    #[test]
+    fn standard_cauchy_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_standard_cauchy(10)?;
+        let mut g = oracle_gen();
+        let actual = g.standard_cauchy(10);
+        assert_f64_seq("standard_cauchy_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
