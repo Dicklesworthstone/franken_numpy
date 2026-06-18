@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
 const BOOLEAN_SET_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const ARGWHERE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COUNT_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const EXTRACT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
@@ -27766,14 +27767,58 @@ impl UFuncArray {
     /// Return indices of nonzero elements as an (N, ndim) array (np.argwhere).
     pub fn argwhere(&self) -> Self {
         let ndim = self.shape.len();
-        let nz_flat: Vec<usize> = self
-            .values
-            .iter()
-            .enumerate()
-            .filter(|&(_, v)| *v != 0.0)
-            .map(|(i, _)| i)
-            .collect();
-        let n = nz_flat.len();
+        let (n, out) = if self.dtype == DType::F64
+            && self.integer_sidecar.is_none()
+            && self.values.len() >= ARGWHERE_PARALLEL_MIN_ELEMS
+        {
+            let strides = c_strides_elems(&self.shape);
+            let chunk_len = ARGWHERE_PARALLEL_MIN_ELEMS / 4;
+            let chunks: Vec<(usize, Vec<f64>)> = self
+                .values
+                .par_chunks(chunk_len)
+                .enumerate()
+                .map(|(chunk_idx, chunk)| {
+                    let base = chunk_idx * chunk_len;
+                    let count = chunk.iter().filter(|&&v| v != 0.0).count();
+                    let mut out = Vec::with_capacity(count * ndim);
+                    for (offset, &v) in chunk.iter().enumerate() {
+                        if v != 0.0 {
+                            let mut rem = base + offset;
+                            for s in &strides {
+                                out.push((rem / s) as f64);
+                                rem %= s;
+                            }
+                        }
+                    }
+                    (count, out)
+                })
+                .collect();
+            let n = chunks.iter().map(|(count, _)| *count).sum();
+            let mut out = Vec::with_capacity(chunks.iter().map(|(_, values)| values.len()).sum());
+            for (_, chunk_values) in chunks {
+                out.extend(chunk_values);
+            }
+            (n, out)
+        } else {
+            let nz_flat: Vec<usize> = self
+                .values
+                .iter()
+                .enumerate()
+                .filter(|&(_, v)| *v != 0.0)
+                .map(|(i, _)| i)
+                .collect();
+            let n = nz_flat.len();
+            let strides = c_strides_elems(&self.shape);
+            let mut out = Vec::with_capacity(n * ndim);
+            for flat_idx in nz_flat {
+                let mut rem = flat_idx;
+                for s in &strides {
+                    out.push((rem / s) as f64);
+                    rem %= s;
+                }
+            }
+            (n, out)
+        };
         if n == 0 {
             return Self {
                 shape: vec![0, ndim],
@@ -27781,15 +27826,6 @@ impl UFuncArray {
                 dtype: DType::I64,
                 integer_sidecar: None,
             };
-        }
-        let strides = c_strides_elems(&self.shape);
-        let mut out = Vec::with_capacity(n * ndim);
-        for flat_idx in nz_flat {
-            let mut rem = flat_idx;
-            for s in &strides {
-                out.push((rem / s) as f64);
-                rem %= s;
-            }
         }
         Self {
             shape: vec![n, ndim],
@@ -69310,6 +69346,62 @@ print(json.dumps(payload))
         let result = a.argwhere();
         assert_eq!(result.shape(), &[0, 2]);
         assert!(result.values().is_empty());
+    }
+
+    #[test]
+    fn argwhere_f64_parallel_matches_serial_reference_and_golden_sha256() {
+        let shape = vec![127usize, 133usize];
+        let n: usize = shape.iter().product();
+        assert!(n >= super::ARGWHERE_PARALLEL_MIN_ELEMS);
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 193 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_0088)
+                } else if i % 151 == 0 {
+                    -0.0
+                } else if i % 139 == 0 {
+                    f64::INFINITY
+                } else if matches!((i * 37 + 23) % 29, 0 | 4 | 9 | 16 | 21) {
+                    ((i * 53 + 31) % 5003) as f64 - 2501.5
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut expected = Vec::new();
+        for (flat, &value) in values.iter().enumerate() {
+            if value != 0.0 {
+                expected.push((flat / shape[1]) as i64);
+                expected.push((flat % shape[1]) as i64);
+            }
+        }
+
+        let a = UFuncArray::new(shape.clone(), values, DType::F64).unwrap();
+        let result = a.argwhere();
+        assert_eq!(result.shape(), &[expected.len() / shape.len(), shape.len()]);
+        assert_eq!(result.dtype(), DType::I64);
+        assert!(!result.has_integer_sidecar());
+
+        let mut digest = Sha256::new();
+        for (&got, &want) in result.values().iter().zip(&expected) {
+            assert_eq!(got.to_bits(), (want as f64).to_bits());
+            digest.update(want.to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            write!(&mut digest_hex, "{byte:02x}").expect("write digest hex");
+        }
+        assert_eq!(
+            digest_hex,
+            "fe7813fd093c462ab409377c38383c5c2ed59e006d259815a425230882873eb1"
+        );
+
+        let zeros = UFuncArray::new(shape, vec![-0.0; n], DType::F64).unwrap();
+        let empty = zeros.argwhere();
+        assert_eq!(empty.shape(), &[0, 2]);
+        assert!(empty.values().is_empty());
+        assert!(!empty.has_integer_sidecar());
     }
 
     // --- StringArray char.index / rindex / splitlines / mod_format tests ---

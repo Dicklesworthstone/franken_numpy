@@ -271,6 +271,39 @@ fn bench_where_nonzero_f64_2d_sparse(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_argwhere_f64_2d_sparse(c: &mut Criterion) {
+    let mut group = c.benchmark_group("argwhere_f64_2d_sparse");
+    for rows in [512usize, 1024].iter() {
+        let cols = *rows;
+        let size = *rows * cols;
+        group.throughput(Throughput::Elements(size as u64));
+        let arr = UFuncArray::new(
+            vec![*rows, cols],
+            (0..size)
+                .map(|i| {
+                    if i % 193 == 0 {
+                        f64::NAN
+                    } else if i % 151 == 0 {
+                        -0.0
+                    } else if i % 139 == 0 {
+                        f64::INFINITY
+                    } else if matches!((i * 37 + 23) % 29, 0 | 4 | 9 | 16 | 21) {
+                        ((i * 53 + 31) % 5003) as f64 - 2501.5
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            DType::F64,
+        )
+        .unwrap();
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |bench, _| {
+            bench.iter(|| black_box(&arr).argwhere())
+        });
+    }
+    group.finish();
+}
+
 fn bench_copyto_equal_shape_masked(c: &mut Criterion) {
     let mut group = c.benchmark_group("copyto_equal_shape_masked");
     for size in [100_000usize, 1_000_000].iter() {
@@ -342,6 +375,7 @@ criterion_group!(
     bench_flatnonzero_f64_sparse,
     bench_count_nonzero_flat_f64_sparse,
     bench_where_nonzero_f64_2d_sparse,
+    bench_argwhere_f64_2d_sparse,
     bench_copyto_equal_shape_masked,
     bench_putmask_f64_masked
 );
