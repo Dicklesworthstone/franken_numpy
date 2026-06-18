@@ -6342,6 +6342,44 @@ for row in out:
             .collect()
     }
 
+    fn numpy_oracle_multivariate_normal_cholesky(size: usize) -> Vec<Vec<f64>> {
+        let script = r#"
+import numpy as np
+import sys
+
+size = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+out = rng.multivariate_normal(
+    [0.0, 0.0],
+    [[1.0, 0.5], [0.5, 1.0]],
+    size=size,
+    method="cholesky",
+)
+for row in out:
+    print(",".join(str(float(value)) for value in row.tolist()))
+"#;
+        let output = Command::new(oracle_python_bin())
+            .arg("-c")
+            .arg(script)
+            .arg(size.to_string())
+            .output()
+            .expect("python oracle should launch");
+        assert!(
+            output.status.success(),
+            "NumPy multivariate_normal cholesky oracle must succeed"
+        );
+        String::from_utf8(output.stdout)
+            .expect("oracle stdout must be utf-8")
+            .lines()
+            .map(|line| {
+                line.split(',')
+                    .filter(|token| !token.is_empty())
+                    .map(|token| token.parse::<f64>().expect("oracle float"))
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
     fn numpy_oracle_zipf_outcome(a: f64, size: usize) -> String {
         let a_arg = if a.is_nan() {
             "__nan__".to_string()
@@ -14971,6 +15009,32 @@ for child in rng.spawn(n_children):
                     (g_val - e_val).abs() < 1e-12,
                     "mvn[{i}][{j}]: got {g_val}, expected {e_val}, diff {}",
                     (g_val - e_val).abs()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn multivariate_normal_cholesky_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let cov = [1.0, 0.5, 0.5, 1.0];
+        let mut g = oracle_gen();
+        let actual = g.multivariate_normal(&[0.0, 0.0], &cov, 3);
+        let expected = numpy_oracle_multivariate_normal_cholesky(3);
+        assert_eq!(actual.len(), expected.len(), "mvn live sample count");
+        for (row_idx, (got_row, exp_row)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                got_row.len(),
+                exp_row.len(),
+                "mvn live oracle row {row_idx}: dim mismatch"
+            );
+            for (col_idx, (&got, &exp)) in got_row.iter().zip(exp_row.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-12,
+                    "mvn live oracle[{row_idx}][{col_idx}]: got {got}, expected {exp}"
                 );
             }
         }
