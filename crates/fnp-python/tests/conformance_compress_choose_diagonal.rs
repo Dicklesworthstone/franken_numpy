@@ -42,6 +42,52 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn compress_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def compress_outcome(fn, condition, a, **kwargs):
+    try:
+        result = fn(condition, a, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list condition list payload", lambda: ([True, False, True], [10, 20, 30], {})),
+    ("tuple condition tuple payload", lambda: ((False, True, True), (1.5, 2.5, 3.5), {})),
+    ("shorter condition truncates", lambda: ([True, False], [1, 2, 3, 4], {})),
+    ("nested list axis zero", lambda: ([True, False, True], [[1, 2], [3, 4], [5, 6]], {"axis": 0})),
+    ("nested list axis one", lambda: ([False, True], [[1, 2], [3, 4], [5, 6]], {"axis": 1})),
+    ("string payload list", lambda: ([True, False, True], ["alpha", "beta", "gamma"], {})),
+    ("axis mismatch error", lambda: ([True, False, True], [[1, 2], [3, 4]], {"axis": 1})),
+]
+
+ok = True
+for label, factory in cases:
+    condition, a, kwargs = factory()
+    actual = compress_outcome(fnp.compress, condition, a, **kwargs)
+    condition, a, kwargs = factory()
+    expected = compress_outcome(np.compress, condition, a, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "compress Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn compress_1d_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
