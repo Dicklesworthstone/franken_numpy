@@ -37,6 +37,39 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn outcome_body(setup: &str, call_expr: &str) -> String {
+    format!(
+        "{setup}\n\
+         def outcome(op):\n\
+             try:\n\
+                 value = {call_expr}\n\
+                 arr = np.asarray(value)\n\
+                 print('ok')\n\
+                 print(type(value).__name__)\n\
+                 print(str(arr.dtype))\n\
+                 print(tuple(arr.shape))\n\
+                 print(repr(arr.tolist()))\n\
+             except Exception as exc:\n\
+                 print('err')\n\
+                 print(type(exc).__name__)\n\
+         outcome(op)"
+    )
+}
+
+fn numpy_outcome_script(function_expr: &str, setup: &str, call_expr: &str) -> String {
+    format!(
+        "import numpy as np\nop = {function_expr}\n{}",
+        outcome_body(setup, call_expr)
+    )
+}
+
+fn fnp_outcome_script(function_name: &str, setup: &str, call_expr: &str) -> String {
+    fnp_script(format!(
+        "op = fnp.{function_name}\n{}",
+        outcome_body(setup, call_expr)
+    ))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // histogram
 // ─────────────────────────────────────────────────────────────────────────────
@@ -218,6 +251,86 @@ print(np.array_equal(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 // digitize
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn histogram_bin_edges_python_container_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let cases = [
+        ("list data with int bins", "", "op([0, 1, 2, 3], bins=4)"),
+        (
+            "tuple data with explicit edge list",
+            "",
+            "op((0.2, 0.8, 1.4), bins=[0.0, 0.5, 1.0, 1.5])",
+        ),
+        (
+            "range and weights keywords",
+            "",
+            "op([0, 1, 2, 3], bins=3, range=(0, 3), weights=[1, 2, 3, 4])",
+        ),
+        (
+            "auto bin estimator fallback",
+            "",
+            "op([0.0, 0.5, 1.0, 1.5, 2.0], bins='auto')",
+        ),
+        (
+            "invalid range error type",
+            "",
+            "op([0, 1], bins=3, range=(2, 1))",
+        ),
+    ];
+
+    for (label, setup, call_expr) in cases {
+        let numpy_result =
+            numpy_oracle(&numpy_outcome_script("np.histogram_bin_edges", setup, call_expr))?;
+        let rust_result =
+            numpy_oracle(&fnp_outcome_script("histogram_bin_edges", setup, call_expr))?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "histogram_bin_edges Python-container keyword surface mismatch for {label}"
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
+fn digitize_python_container_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "list x with tuple bins",
+            "",
+            "op([0.2, 1.5, 2.3], (1.0, 2.0, 3.0))",
+        ),
+        (
+            "tuple x with right keyword",
+            "",
+            "op((1, 2, 3), [1, 2, 3], right=True)",
+        ),
+        ("scalar x output", "", "op(np.float64(2.5), [1, 2, 3, 4])"),
+        (
+            "decreasing bins with right keyword",
+            "",
+            "op([0.5, 1.5, 3.5], [4, 3, 2, 1], right=True)",
+        ),
+        (
+            "nonmonotonic bins error type",
+            "",
+            "op([1, 2], [0, 2, 1])",
+        ),
+    ];
+
+    for (label, setup, call_expr) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script("np.digitize", setup, call_expr))?;
+        let rust_result = numpy_oracle(&fnp_outcome_script("digitize", setup, call_expr))?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "digitize Python-container keyword surface mismatch for {label}"
+        );
+    }
+
+    Ok(())
+}
 
 #[test]
 fn digitize_basic() -> Result<(), String> {
