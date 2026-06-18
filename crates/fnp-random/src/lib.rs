@@ -6216,7 +6216,8 @@ impl RandomLogRecord {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::io::Write;
+    use std::process::{Command, Stdio};
 
     use sha2::{Digest, Sha256};
 
@@ -6419,6 +6420,70 @@ except Exception as exc:
             .expect("oracle stdout must be utf-8")
             .trim()
             .to_string()
+    }
+
+    fn numpy_oracle_integers_dtype(
+        dtype: &str,
+        low: i64,
+        high: i64,
+        size: &[usize],
+        endpoint: bool,
+    ) -> Result<Vec<i64>, &'static str> {
+        let size_arg = format!(
+            "[{}]",
+            size.iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+dtype = np.dtype(sys.argv[1])
+low = int(sys.argv[2])
+high = int(sys.argv[3])
+size = tuple(json.loads(sys.argv[4]))
+endpoint = sys.argv[5] == "true"
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+out = rng.integers(low, high, size=size, dtype=dtype, endpoint=endpoint)
+print(",".join(str(int(value)) for value in out.reshape(-1).tolist()))
+"#;
+        let mut child = Command::new(oracle_python_bin())
+            .arg("-")
+            .arg(dtype)
+            .arg(low.to_string())
+            .arg(high.to_string())
+            .arg(size_arg)
+            .arg(if endpoint { "true" } else { "false" })
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|_| "python oracle failed to launch")?;
+        child
+            .stdin
+            .as_mut()
+            .ok_or("python oracle stdin unavailable")?
+            .write_all(script.as_bytes())
+            .map_err(|_| "python oracle script write failed")?;
+        let output = child
+            .wait_with_output()
+            .map_err(|_| "python oracle failed to finish")?;
+        if !output.status.success() {
+            return Err("NumPy typed integers oracle failed");
+        }
+        let stdout =
+            std::str::from_utf8(&output.stdout).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = Vec::new();
+        for token in stdout.trim().split(',').filter(|token| !token.is_empty()) {
+            let value = token
+                .parse::<i64>()
+                .map_err(|_| "oracle integer parse failed")?;
+            values.push(value);
+        }
+        Ok(values)
     }
 
     fn numpy_oracle_geometric_outcome(p: f64, size: usize) -> String {
@@ -13139,6 +13204,75 @@ for child in rng.spawn(n_children):
                 .1,
             vec![89u16, 125, 45, 121, 59, 249, 5, 26, 48, 78, 89, 73],
         );
+    }
+
+    #[test]
+    fn narrow_width_integers_match_live_numpy_oracle_when_available() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected_i8 = numpy_oracle_integers_dtype("int8", -5, 5, &[2, 3], false)?;
+        let mut i8_rng = oracle_gen();
+        let actual_i8 = i8_rng
+            .integers_i8_shaped(-5, 5, Some(&[2, 3]), false)
+            .map_err(|_| "int8 narrow integer oracle case")?
+            .into_parts()
+            .1
+            .into_iter()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_i8, expected_i8);
+
+        let expected_i16 = numpy_oracle_integers_dtype("int16", -300, 300, &[6], false)?;
+        let mut i16_rng = oracle_gen();
+        let actual_i16 = i16_rng
+            .integers_i16_shaped(-300, 300, Some(&[6]), false)
+            .map_err(|_| "int16 narrow integer oracle case")?
+            .into_parts()
+            .1
+            .into_iter()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_i16, expected_i16);
+
+        let expected_u8 = numpy_oracle_integers_dtype("uint8", 0, 200, &[2, 3], false)?;
+        let mut u8_rng = oracle_gen();
+        let actual_u8 = u8_rng
+            .integers_u8_shaped(0, 200, Some(&[2, 3]), false)
+            .map_err(|_| "uint8 narrow integer oracle case")?
+            .into_parts()
+            .1
+            .into_iter()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_u8, expected_u8);
+
+        let expected_u16 =
+            numpy_oracle_integers_dtype("uint16", 0, i64::from(u16::MAX), &[7], true)?;
+        let mut u16_rng = oracle_gen();
+        let actual_u16 = u16_rng
+            .integers_u16_shaped(0, i64::from(u16::MAX), Some(&[7]), true)
+            .map_err(|_| "uint16 endpoint narrow integer oracle case")?
+            .into_parts()
+            .1
+            .into_iter()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_u16, expected_u16);
+
+        let expected_u8_full = numpy_oracle_integers_dtype("uint8", 0, 256, &[8], false)?;
+        let mut u8_full_rng = oracle_gen();
+        let actual_u8_full = u8_full_rng
+            .integers_u8_shaped(0, 256, Some(&[8]), false)
+            .map_err(|_| "uint8 full exclusive range oracle case")?
+            .into_parts()
+            .1
+            .into_iter()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_u8_full, expected_u8_full);
+        Ok(())
     }
 
     #[test]
