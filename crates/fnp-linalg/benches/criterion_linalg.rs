@@ -557,6 +557,30 @@ fn bench_batch_matrix_norm_row_sum(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_batch_matrix_norm_column_sum(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_matrix_norm_column_sum");
+
+    for ord in ["1", "-1"] {
+        for (batch, m, n) in [(4096usize, 8usize, 8usize), (1024, 32, 32)] {
+            let mat_size = m * n;
+            let data: Vec<f64> = (0..batch * mat_size)
+                .map(|idx| ((idx % 251) as f64 - 125.0) * 0.125)
+                .collect();
+            let shape = [batch, m, n];
+            let id = format!("{ord}_{batch}x{m}x{n}");
+            group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {
+                bench.iter(|| {
+                    let result =
+                        batch_matrix_norm(black_box(&data), black_box(shape), black_box(ord));
+                    black_box(result)
+                });
+            });
+        }
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_complex_matmul,
@@ -581,6 +605,7 @@ criterion_group!(
     bench_batch_trace,
     bench_batch_matrix_norm_fro,
     bench_batch_matrix_norm_row_sum,
+    bench_batch_matrix_norm_column_sum,
 );
 
 criterion_main!(benches);
