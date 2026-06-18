@@ -2264,6 +2264,46 @@ fn parallel_pcg_standard_exponential_inv<R: PcgAdvanceFill>(
     out
 }
 
+#[inline]
+fn logistic_transform(u: f64, loc: f64, scale: f64) -> f64 {
+    loc + scale * (u / (1.0 - u)).ln()
+}
+
+/// Inverse-CDF logistic sampling for PCG-family cores. The positive-scale path
+/// consumes exactly one f64 uniform per output, so jump-ahead chunking preserves
+/// the serial stream while fusing the logit transform into each cache-hot chunk.
+fn parallel_pcg_logistic<R: PcgAdvanceFill>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    use rayon::prelude::*;
+    let mut out = vec![0.0f64; size];
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        rng.fill_uniform_f64(&mut out);
+        for slot in out.iter_mut() {
+            *slot = logistic_transform(*slot, loc, scale);
+        }
+        return out;
+    }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                *slot = logistic_transform(*slot, loc, scale);
+            }
+        });
+    rng.advance_by(size as u128);
+    out
+}
+
 /// Fill a caller-provided slice with uniform `[0,1)` doubles, parallelizing the
 /// PCG jump-ahead exactly as [`parallel_pcg_random_f64`]. Filling an externally
 /// owned buffer (e.g. a NumPy output array via the buffer protocol) avoids the
@@ -2307,6 +2347,18 @@ fn uniform_from_core<R: ZigguratRngCore>(
 fn standard_exponential_inv_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
     (0..size)
         .map(|_| -(-rng.ziggurat_next_f64()).ln_1p())
+        .collect()
+}
+
+#[inline]
+fn logistic_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    (0..size)
+        .map(|_| logistic_transform(rng.ziggurat_next_f64(), loc, scale))
         .collect()
 }
 
@@ -5701,15 +5753,22 @@ impl Generator {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                if scale == 0.0 {
-                    return loc;
-                }
-                let u = self.next_f64();
-                loc + scale * (u / (1.0 - u)).ln()
-            })
-            .collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        if scale == 0.0 {
+            return Ok(vec![loc; size]);
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => logistic_from_core(rng, loc, scale, size),
+            RngBackend::Pcg64(rng) => parallel_pcg_logistic(rng, loc, scale, size),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_logistic(rng, loc, scale, size),
+            RngBackend::Mt19937(rng) => logistic_from_core(rng, loc, scale, size),
+            RngBackend::Philox(rng) => logistic_from_core(rng, loc, scale, size),
+            RngBackend::Sfc64(rng) => logistic_from_core(rng, loc, scale, size),
+        })
     }
 
     /// Hypergeometric distribution: draws from a population of `ngood + nbad`
@@ -17659,5 +17718,55 @@ for child in rng.spawn(n_children):
                 "dxsm={dxsm}: post-fill f64 state diverged"
             );
         }
+    }
+
+    #[test]
+    fn parallel_pcg_logistic_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        let loc = -2.25;
+        let scale = 3.5;
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(4242);
+            let mut combined = parallel.logistic(loc, scale, n).unwrap();
+            combined.extend(parallel.logistic(loc, scale, n).unwrap());
+            let after_parallel: Vec<u64> =
+                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(4242);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.logistic(loc, scale, 1).unwrap()[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: logistic diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-logistic f64 state diverged"
+            );
+        }
+
+        let mut buffered = Generator::from_pcg64(777).unwrap();
+        let mut serial = Generator::from_pcg64(777).unwrap();
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+        let zero_scale = buffered.logistic(loc, 0.0, n).unwrap();
+        assert!(zero_scale.iter().all(|value| value.to_bits() == loc.to_bits()));
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
     }
 }
