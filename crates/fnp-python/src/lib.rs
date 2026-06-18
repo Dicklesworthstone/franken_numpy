@@ -52347,26 +52347,32 @@ mod tests {
                 )?
             );
 
-            let scalar_axis_kwargs = PyDict::new(py);
-            scalar_axis_kwargs.set_item("axis", 0_i64)?;
-            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 318)?;
-            let actual_scalar_axis = call_outcome(
-                py,
-                &ours.getattr("permuted")?,
-                &PyTuple::new(py, [numpy.call_method1("array", (5_i64,))?])?,
-                Some(&scalar_axis_kwargs),
-            )?;
-            let expected_scalar_axis = call_outcome(
-                py,
-                &theirs.getattr("permuted")?,
-                &PyTuple::new(py, [numpy.call_method1("array", (5_i64,))?])?,
-                Some(&scalar_axis_kwargs),
-            )?;
-            if !actual_scalar_axis.eq(&expected_scalar_axis) {
-                return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
-                    "permuted scalar explicit-axis mismatch: actual={actual_scalar_axis:?} expected={expected_scalar_axis:?}"
-                )));
-            }
+            let check_scalar_axis = |axis: i64, seed: u64| -> PyResult<()> {
+                let scalar_axis_kwargs = PyDict::new(py);
+                scalar_axis_kwargs.set_item("axis", axis)?;
+                let (ours, theirs) = random_generator_pair(&random, &numpy_random, seed)?;
+                let actual_scalar_axis = call_outcome(
+                    py,
+                    &ours.getattr("permuted")?,
+                    &PyTuple::new(py, [numpy.call_method1("array", (5_i64,))?])?,
+                    Some(&scalar_axis_kwargs),
+                )?;
+                let expected_scalar_axis = call_outcome(
+                    py,
+                    &theirs.getattr("permuted")?,
+                    &PyTuple::new(py, [numpy.call_method1("array", (5_i64,))?])?,
+                    Some(&scalar_axis_kwargs),
+                )?;
+                if !actual_scalar_axis.eq(&expected_scalar_axis) {
+                    return Err(pyo3::exceptions::PyAssertionError::new_err(format!(
+                        "permuted scalar axis={axis} mismatch: actual={actual_scalar_axis:?} expected={expected_scalar_axis:?}"
+                    )));
+                }
+                Ok(())
+            };
+            check_scalar_axis(0, 318)?;
+            check_scalar_axis(-1, 319)?;
+            check_scalar_axis(1, 320)?;
 
             Ok(())
         });
