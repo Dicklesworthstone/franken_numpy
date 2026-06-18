@@ -12362,6 +12362,19 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn bytes_shaped_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let expected = numpy_oracle_bytes_sequence(&[7]);
+        let mut rng = oracle_gen();
+        let output = rng.bytes_shaped(7);
+        assert_eq!(output.shape(), &[7]);
+        assert_eq!(output.values(), expected[0].as_slice());
+    }
+
+    #[test]
     fn bytes_empty() {
         let mut rng = test_generator();
         let data = rng.bytes(0);
