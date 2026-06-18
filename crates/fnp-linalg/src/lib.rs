@@ -8175,6 +8175,22 @@ pub fn batch_matrix_norm(
         }
         return Ok((0..batch).map(norm_lane).collect());
     }
+    if ord == "inf" || ord == "-inf" {
+        if batch > 0 && (m == 0 || n == 0) {
+            return Err(LinAlgError::ShapeContractViolation(
+                "matrix_norm_nxn: input must be m*n with m,n > 0",
+            ));
+        }
+        let use_min = ord == "-inf";
+        let norm_lane = |b: usize| {
+            let base = b * mat_size;
+            matrix_norm_row_sum(&data[base..base + mat_size], n, use_min)
+        };
+        if batch_should_parallelize(batch, mat_size) {
+            return Ok((0..batch).into_par_iter().map(norm_lane).collect());
+        }
+        return Ok((0..batch).map(norm_lane).collect());
+    }
     batch_map_lanes(batch, mat_size, |b| {
         matrix_norm_nxn(&data[b * mat_size..(b + 1) * mat_size], m, n, ord)
     })
@@ -17640,6 +17656,56 @@ except Exception as exc:
         let empty = batch_matrix_norm(&[], &[0, 0, 8], "fro").expect("empty batch");
         assert!(empty.is_empty());
         assert!(batch_matrix_norm(&[], &[1, 0, 8], "fro").is_err());
+    }
+
+    #[test]
+    fn batch_matrix_norm_row_sum_direct_lane_fill_matches_per_lane_reference_bits() {
+        fn reference(data: &[f64], batch: usize, m: usize, n: usize, ord: &str) -> Vec<f64> {
+            let mat_size = m * n;
+            (0..batch)
+                .map(|b| {
+                    matrix_norm_nxn(&data[b * mat_size..(b + 1) * mat_size], m, n, ord)
+                        .expect("reference row-sum norm")
+                })
+                .collect()
+        }
+
+        for ord in ["inf", "-inf"] {
+            for &(batch, m, n) in &[(3usize, 3usize, 5usize), (512, 8, 8)] {
+                let mat_size = m * n;
+                let mut data: Vec<f64> = (0..batch * mat_size)
+                    .map(|idx| ((idx % 113) as f64 - 56.0) * 0.1875)
+                    .collect();
+                for b in 0..batch {
+                    let base = b * mat_size;
+                    if b % 17 == 0 {
+                        data[base] = f64::NAN;
+                    }
+                    if b % 19 == 0 && mat_size > 1 {
+                        data[base + 1] = -0.0;
+                    }
+                    if b % 23 == 0 && mat_size > n {
+                        data[base + n] = 0.0;
+                    }
+                }
+
+                let got =
+                    batch_matrix_norm(&data, &[batch, m, n], ord).expect("batch row-sum norm");
+                let want = reference(&data, batch, m, n, ord);
+                assert_eq!(got.len(), want.len());
+                for (idx, (g, w)) in got.iter().zip(&want).enumerate() {
+                    assert_eq!(
+                        g.to_bits(),
+                        w.to_bits(),
+                        "batch {ord} norm bit drift for batch={batch}, shape={m}x{n}, lane={idx}"
+                    );
+                }
+            }
+
+            let empty = batch_matrix_norm(&[], &[0, 0, 8], ord).expect("empty batch");
+            assert!(empty.is_empty());
+            assert!(batch_matrix_norm(&[], &[1, 0, 8], ord).is_err());
+        }
     }
 
     #[test]
