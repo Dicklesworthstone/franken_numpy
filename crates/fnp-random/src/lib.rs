@@ -13074,6 +13074,73 @@ for child in rng.spawn(n_children):
         assert_eq!(g.integers_endpoint(5, 4, 0).unwrap(), Vec::<i64>::new());
     }
 
+    /// Golden regression for the narrow-width integer samplers (int8/int16/uint8/
+    /// uint16). numpy draws these with a *buffered* bounded-Lemire stream that is
+    /// distinct from the 32/64-bit path (it reuses leftover bytes of a single uint32
+    /// draw across consecutive narrow samples) — a width-specific algorithm that is
+    /// easy to break silently. The expected sequences were captured from
+    /// `numpy.random.default_rng(424242).integers(...)` (numpy 2.4) and cross-checked
+    /// across 126 (dtype, range, size, endpoint) cases against the live oracle.
+    /// `default_rng(U64(424242))` here is the same PCG64 stream that fnp-python's
+    /// `default_rng(424242)` exposes, so this pins bit-exact numpy parity without a
+    /// live interpreter at test time, guarding the buffered narrow-width sampler.
+    #[test]
+    fn narrow_width_integers_match_numpy_golden() {
+        fn seeded() -> Generator {
+            default_rng(SeedMaterial::U64(424242)).expect("seed")
+        }
+        assert_eq!(
+            seeded()
+                .integers_i8_shaped(0, 100, Some(&[16]), false)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![98i8, 34, 22, 48, 93, 17, 49, 47, 82, 84, 97, 68, 1, 90, 73, 18],
+        );
+        assert_eq!(
+            seeded()
+                .integers_u8_shaped(0, 100, Some(&[16]), false)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![98u8, 34, 22, 48, 93, 17, 49, 47, 82, 84, 97, 68, 1, 90, 73, 18],
+        );
+        assert_eq!(
+            seeded()
+                .integers_i16_shaped(0, 100, Some(&[16]), false)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![35i16, 48, 17, 47, 23, 97, 2, 10, 19, 30, 34, 28, 36, 66, 61, 24],
+        );
+        assert_eq!(
+            seeded()
+                .integers_u16_shaped(0, 100, Some(&[16]), false)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![35u16, 48, 17, 47, 23, 97, 2, 10, 19, 30, 34, 28, 36, 66, 61, 24],
+        );
+        // endpoint=true with a negative low (int8), and a power-of-two range (uint16,
+        // the mask path with no Lemire rejection).
+        assert_eq!(
+            seeded()
+                .integers_i8_shaped(-50, 50, Some(&[12]), true)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![49i8, -28, -1, 44, -33, -3, 33, -27, 35, 48, 19, -49],
+        );
+        assert_eq!(
+            seeded()
+                .integers_u16_shaped(0, 256, Some(&[12]), false)
+                .unwrap()
+                .into_parts()
+                .1,
+            vec![89u16, 125, 45, 121, 59, 249, 5, 26, 48, 78, 89, 73],
+        );
+    }
+
     #[test]
     fn integers_endpoint_extreme_ranges_match_live_numpy_oracle_when_available() {
         if !numpy_oracle_available() {
