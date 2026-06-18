@@ -48,6 +48,7 @@ const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
 const BOOLEAN_SET_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const EXTRACT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const FLATNONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PUTMASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
 const POLYVAL_ND_PARALLEL_MIN_ELEMS: usize = 1 << 12;
@@ -27705,13 +27706,41 @@ impl UFuncArray {
         // its direct sidecar path instead of cloning/scanning/casting through
         // generic to_storage. Values stay as f64 positions for existing Rust
         // callers; shape, dtype, and ascending C-order positions are unchanged.
-        let sidecar: Vec<i64> = self
-            .values
-            .iter()
-            .enumerate()
-            .filter(|&(_, v)| *v != 0.0)
-            .map(|(i, _)| i as i64)
-            .collect();
+        let sidecar: Vec<i64> = if self.dtype == DType::F64
+            && self.integer_sidecar.is_none()
+            && self.values.len() >= FLATNONZERO_PARALLEL_MIN_ELEMS
+        {
+            let chunk_len = FLATNONZERO_PARALLEL_MIN_ELEMS / 4;
+            let chunks: Vec<Vec<i64>> = self
+                .values
+                .par_chunks(chunk_len)
+                .enumerate()
+                .map(|(chunk_idx, chunk)| {
+                    let base = chunk_idx * chunk_len;
+                    let count = chunk.iter().filter(|&&value| value != 0.0).count();
+                    let mut indices = Vec::with_capacity(count);
+                    for (offset, &value) in chunk.iter().enumerate() {
+                        if value != 0.0 {
+                            indices.push((base + offset) as i64);
+                        }
+                    }
+                    indices
+                })
+                .collect();
+            let len = chunks.iter().map(Vec::len).sum();
+            let mut sidecar = Vec::with_capacity(len);
+            for chunk in chunks {
+                sidecar.extend(chunk);
+            }
+            sidecar
+        } else {
+            self.values
+                .iter()
+                .enumerate()
+                .filter(|&(_, v)| *v != 0.0)
+                .map(|(i, _)| i as i64)
+                .collect()
+        };
         let n = sidecar.len();
         let values: Vec<f64> = sidecar.iter().map(|&i| i as f64).collect();
         Self {
@@ -65329,6 +65358,73 @@ print(json.dumps(payload))
         assert_eq!(
             digest_hex,
             "986268093f27b36b0ff1219c2268038a005dc5361e97692983f1c343919762f4"
+        );
+    }
+
+    #[test]
+    fn flatnonzero_f64_parallel_matches_serial_reference_and_golden_sha256() {
+        let n = super::FLATNONZERO_PARALLEL_MIN_ELEMS + 337;
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 173 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_0055)
+                } else if i % 149 == 0 {
+                    -0.0
+                } else if i % 131 == 0 {
+                    f64::INFINITY
+                } else if matches!((i * 31 + 7) % 23, 0 | 5 | 11 | 19) {
+                    ((i * 37 + 11) % 2003) as f64 - 1001.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let expected: Vec<i64> = values
+            .iter()
+            .enumerate()
+            .filter_map(|(index, &value)| {
+                if value != 0.0 {
+                    Some(index as i64)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let array = UFuncArray::new(vec![n], values, DType::F64).unwrap();
+        let actual = array.flatnonzero();
+
+        assert_eq!(actual.shape(), &[expected.len()]);
+        assert_eq!(actual.dtype(), DType::I64);
+        assert!(actual.has_integer_sidecar());
+        let ArrayStorage::I64(indices) = actual.to_storage().unwrap() else {
+            panic!("parallel flatnonzero should export int64 storage");
+        };
+        assert_eq!(indices, expected);
+
+        let mut digest = Sha256::new();
+        for (&got_value, &want_index) in actual.values().iter().zip(&expected) {
+            assert_eq!(got_value.to_bits(), (want_index as f64).to_bits());
+            digest.update(want_index.to_le_bytes());
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(&mut digest_hex, "{byte:02x}").expect("write digest hex");
+        }
+        assert_eq!(
+            digest_hex,
+            "de98074a9c147bedd3f20cf4a39d6e4cc0bb4f246348562927d7a0c85870ba96"
+        );
+
+        let zeros = UFuncArray::new(vec![n], vec![-0.0; n], DType::F64).unwrap();
+        let empty = zeros.flatnonzero();
+        assert_eq!(empty.shape(), &[0]);
+        assert!(empty.values().is_empty());
+        assert_eq!(
+            empty.to_storage().unwrap(),
+            ArrayStorage::I64(Vec::new())
         );
     }
 
