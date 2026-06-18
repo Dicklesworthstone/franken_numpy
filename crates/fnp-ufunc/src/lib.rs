@@ -59167,6 +59167,43 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn convolve_correlate_match_numpy_golden() {
+        // numpy.convolve / numpy.correlate of [1,2,3,4] with [0.5,1,-1] across modes.
+        let a = UFuncArray::new(vec![4], vec![1.0, 2.0, 3.0, 4.0], DType::F64).unwrap();
+        let b = UFuncArray::new(vec![3], vec![0.5, 1.0, -1.0], DType::F64).unwrap();
+        poly_close_vec(
+            a.convolve_mode(&b, "full").unwrap().values(),
+            &[0.5, 2.0, 2.5, 3.0, 1.0, -4.0],
+            "convolve full",
+        );
+        poly_close_vec(
+            a.convolve_mode(&b, "same").unwrap().values(),
+            &[2.0, 2.5, 3.0, 1.0],
+            "convolve same",
+        );
+        poly_close_vec(
+            a.convolve_mode(&b, "valid").unwrap().values(),
+            &[2.5, 3.0],
+            "convolve valid",
+        );
+        poly_close_vec(
+            a.correlate_mode(&b, "full").unwrap().values(),
+            &[-1.0, -1.0, -0.5, 0.0, 5.5, 2.0],
+            "correlate full",
+        );
+        poly_close_vec(
+            a.correlate_mode(&b, "same").unwrap().values(),
+            &[-1.0, -0.5, 0.0, 5.5],
+            "correlate same",
+        );
+        poly_close_vec(
+            a.correlate_mode(&b, "valid").unwrap().values(),
+            &[-0.5, 0.0],
+            "correlate valid",
+        );
+    }
+
+    #[test]
     fn hanning_window() {
         let w = UFuncArray::hanning(5);
         assert_eq!(w.shape(), &[5]);
