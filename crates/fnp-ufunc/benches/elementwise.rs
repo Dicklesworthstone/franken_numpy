@@ -176,6 +176,25 @@ fn bench_extract_f64_masked(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_compress_f64_bool_flat_sparse(c: &mut Criterion) {
+    let mut group = c.benchmark_group("compress_f64_bool_flat_sparse");
+    for size in [100_000usize, 1_000_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        let arr = make_sign_array(*size);
+        let condition: Vec<bool> = (0..*size)
+            .map(|i| (i % 181 == 0) || matches!((i * 41 + 17) % 23, 0 | 3 | 8 | 13 | 21))
+            .collect();
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter(|| {
+                black_box(&arr)
+                    .compress(black_box(&condition), None)
+                    .unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
 fn bench_flatnonzero_f64_sparse(c: &mut Criterion) {
     let mut group = c.benchmark_group("flatnonzero_f64_sparse");
     for size in [100_000usize, 1_000_000].iter() {
@@ -372,6 +391,7 @@ criterion_group!(
     bench_sign,
     bench_boolean_set_f64_masked,
     bench_extract_f64_masked,
+    bench_compress_f64_bool_flat_sparse,
     bench_flatnonzero_f64_sparse,
     bench_count_nonzero_flat_f64_sparse,
     bench_where_nonzero_f64_2d_sparse,
