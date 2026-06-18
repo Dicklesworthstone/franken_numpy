@@ -7027,6 +7027,21 @@ print("after:" + ",".join(str(float(value)) for value in after.tolist()))
         ))
     }
 
+    fn numpy_oracle_permutation_f64(n: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+n = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.permutation(np.arange(n, dtype=float))
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[n.to_string()])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_negative_binomial(
         n: f64,
         p: f64,
@@ -13877,6 +13892,22 @@ for child in rng.spawn(n_children):
         let perm = g.permutation(&arr).expect("permutation");
         let expected = [4.0, 8.0, 0.0, 2.0, 6.0, 1.0, 5.0, 7.0, 3.0, 9.0];
         assert_f64_seq("permutation", &perm, &expected);
+    }
+
+    #[test]
+    fn permutation_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_permutation_f64(10)?;
+        let mut g = oracle_gen();
+        let arr: Vec<f64> = (0..10).map(|i| i as f64).collect();
+        let actual = g
+            .permutation(&arr)
+            .map_err(|_| "permutation live oracle")?;
+        assert_f64_seq("permutation_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
