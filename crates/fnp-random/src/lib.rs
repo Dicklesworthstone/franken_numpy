@@ -11826,6 +11826,53 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn empty_shaped_permutations_preserve_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected_values = numpy_oracle_permutation_f64(0)?;
+        let expected_after = numpy_oracle_random(1)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual_values = rng
+            .permutation_shaped(&[])
+            .map_err(|_| "empty permutation_shaped live oracle")?;
+        assert_eq!(actual_values.shape(), &[0]);
+        assert!(actual_values.is_empty());
+        assert_f64_seq(
+            "empty_permutation_shaped_live_numpy",
+            actual_values.values(),
+            &expected_values,
+        );
+        let after_values = rng.random(1);
+        assert_f64_seq(
+            "empty_permutation_shaped_after_live_numpy",
+            &after_values,
+            &expected_after,
+        );
+
+        let expected_range = numpy_oracle_permutation_range(0)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual_range = rng
+            .permutation_range_shaped(0)
+            .map_err(|_| "empty permutation_range_shaped live oracle")?;
+        assert_eq!(actual_range.shape(), &[0]);
+        assert!(actual_range.is_empty());
+        assert_u64_seq(
+            "empty_permutation_range_shaped_live_numpy",
+            actual_range.values(),
+            &expected_range,
+        );
+        let after_range = rng.random(1);
+        assert_f64_seq(
+            "empty_permutation_range_shaped_after_live_numpy",
+            &after_range,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn deterministic_same_seed() {
         let mut rng1 = test_generator();
         let mut rng2 = test_generator();
