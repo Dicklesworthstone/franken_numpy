@@ -142,6 +142,50 @@ print(np.array_equal(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn take_along_axis_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def take_along_axis_outcome(fn, arr, indices, **kwargs):
+    try:
+        result = fn(arr, indices, **kwargs)
+        out = np.asarray(result)
+        return ("ok", type(result).__name__, str(out.dtype), tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("nested list axis one", lambda: ([[10, 20, 30], [40, 50, 60]], [[0], [2]], {"axis": 1})),
+    ("tuple payload tuple indices", lambda: (((3, 1, 2), (6, 4, 5)), ((2, 1, 0), (0, 1, 2)), {"axis": 1})),
+    ("axis zero list indices", lambda: ([[10, 20, 30], [40, 50, 60]], [[1, 0, 1]], {"axis": 0})),
+    ("axis none flattening", lambda: ([3, 1, 2, 6], [3, 0], {"axis": None})),
+    ("shape mismatch error", lambda: ([[1, 2, 3], [4, 5, 6]], [[0, 1], [1, 0], [0, 1]], {"axis": 1})),
+]
+
+ok = True
+for label, factory in cases:
+    arr, indices, kwargs = factory()
+    actual = take_along_axis_outcome(fnp.take_along_axis, arr, indices, **kwargs)
+    arr, indices, kwargs = factory()
+    expected = take_along_axis_outcome(np.take_along_axis, arr, indices, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take_along_axis Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn take_along_axis_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
