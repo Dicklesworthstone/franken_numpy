@@ -61756,6 +61756,63 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn fft_satisfies_parseval_and_linearity() {
+        // Parseval (N·Σx² = Σ|X|²) and linearity (fft(3x+2y) = 3·fft(x)+2·fft(y))
+        // hold by definition of the DFT, independent of any numpy oracle. Exercise
+        // both the radix-2 (n=8) and Bluestein (n=6) paths.
+        for (x, y) in [
+            (
+                vec![1.5, -2.0, 3.0, 0.5, -1.0, 4.0, 2.5, -3.0],
+                vec![0.5, 1.0, -1.5, 2.0, 0.0, -0.5, 3.0, 1.0],
+            ),
+            (
+                vec![1.0, -2.0, 0.5, 3.0, -1.5, 2.0],
+                vec![0.25, 1.0, -1.0, 0.5, 2.0, -0.5],
+            ),
+        ] {
+            let n = x.len();
+            let fx = UFuncArray::new(vec![n], x.clone(), DType::F64)
+                .unwrap()
+                .fft(None)
+                .unwrap();
+            let fy = UFuncArray::new(vec![n], y.clone(), DType::F64)
+                .unwrap()
+                .fft(None)
+                .unwrap();
+            // Parseval.
+            let energy_time: f64 = x.iter().map(|v| v * v).sum();
+            let energy_freq: f64 = (0..n)
+                .map(|k| fx.values[2 * k] * fx.values[2 * k] + fx.values[2 * k + 1] * fx.values[2 * k + 1])
+                .sum();
+            assert!(
+                (n as f64 * energy_time - energy_freq).abs() <= 1e-8 * (1.0 + energy_freq.abs()),
+                "Parseval n={n}: N*Et={} Ef={}",
+                n as f64 * energy_time,
+                energy_freq
+            );
+            // Linearity.
+            let comb: Vec<f64> = x
+                .iter()
+                .zip(y.iter())
+                .map(|(&xi, &yi)| 3.0 * xi + 2.0 * yi)
+                .collect();
+            let fc = UFuncArray::new(vec![n], comb, DType::F64)
+                .unwrap()
+                .fft(None)
+                .unwrap();
+            for k in 0..2 * n {
+                let expected = 3.0 * fx.values[k] + 2.0 * fy.values[k];
+                assert!(
+                    (fc.values[k] - expected).abs() <= 1e-8 * (1.0 + expected.abs()),
+                    "linearity n={n} [{k}]: got {} expected {}",
+                    fc.values[k],
+                    expected
+                );
+            }
+        }
+    }
+
+    #[test]
     fn fft_non_power_of_two() {
         // FFT of length 6 (non-power-of-2, uses Bluestein)
         let vals = vec![1.0, 0.0, -1.0, 0.0, 1.0, 0.0];
