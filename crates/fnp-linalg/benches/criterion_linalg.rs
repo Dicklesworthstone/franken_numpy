@@ -15,8 +15,8 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
-    batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, complex_matmul, cond_nxn, det_nxn,
-    eigvalsh_nxn, inv_nxn, kron_nxn, matrix_norm_frobenius, matrix_norm_nxn,
+    batch_cholesky, batch_eigvalsh, batch_inv, batch_trace, cholesky_nxn, complex_matmul,
+    cond_nxn, det_nxn, eigvalsh_nxn, inv_nxn, kron_nxn, matrix_norm_frobenius, matrix_norm_nxn,
     matrix_power_nxn, multi_dot, qr_nxn, sbr_stage1_dense_to_band_lower_nxn, solve_nxn,
     svd_mxn_full, svd_nxn,
 };
@@ -491,6 +491,27 @@ fn bench_kron(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_batch_trace(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_trace");
+
+    for (batch, n) in [(4096usize, 8usize), (1024, 32)] {
+        let mat_size = n * n;
+        let data: Vec<f64> = (0..batch * mat_size)
+            .map(|idx| ((idx % 251) as f64 - 125.0) * 0.125)
+            .collect();
+        let shape = [batch, n, n];
+        let id = format!("{batch}x{n}x{n}");
+        group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {
+            bench.iter(|| {
+                let result = batch_trace(black_box(&data), black_box(shape));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_complex_matmul,
@@ -512,6 +533,7 @@ criterion_group!(
     bench_batch_inv,
     bench_batch_eigvalsh,
     bench_batch_cholesky,
+    bench_batch_trace,
 );
 
 criterion_main!(benches);

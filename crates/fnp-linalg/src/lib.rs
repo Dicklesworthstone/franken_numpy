@@ -3814,6 +3814,18 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
     }
 }
 
+#[inline]
+fn trace_nxn_unchecked_at(a: &[f64], base: usize, n: usize) -> f64 {
+    let stride = n + 1;
+    let mut idx = base;
+    let mut sum = 0.0;
+    for _ in 0..n {
+        sum += a[idx];
+        idx += stride;
+    }
+    sum
+}
+
 /// Trace of an NxN flat matrix (sum of diagonal elements).
 pub fn trace_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
     if Some(a.len()) != n.checked_mul(n) {
@@ -3821,7 +3833,7 @@ pub fn trace_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
             "trace_nxn: input must be n*n",
         ));
     }
-    Ok((0..n).map(|i| a[i * n + i]).sum())
+    Ok(trace_nxn_unchecked_at(a, 0, n))
 }
 
 fn validate_matrix_rank_tol(tol: Option<f64>) -> Result<(), LinAlgError> {
@@ -8179,9 +8191,12 @@ pub fn batch_trace(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgErro
             "batch_trace: data length does not match shape",
         ));
     }
-    batch_map_lanes(batch, mat_size, |b| {
-        trace_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
-    })
+    let trace_lane = |b: usize| trace_nxn_unchecked_at(data, b * mat_size, n);
+    if batch_should_parallelize(batch, mat_size) {
+        Ok((0..batch).into_par_iter().map(trace_lane).collect())
+    } else {
+        Ok((0..batch).map(trace_lane).collect())
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -17516,6 +17531,46 @@ except Exception as exc:
         assert_eq!(traces.len(), 2);
         assert!((traces[0] - 5.0).abs() < 1e-12);
         assert!((traces[1] - 13.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn batch_trace_direct_lane_fill_matches_per_lane_reference_bits() {
+        fn reference(data: &[f64], batch: usize, n: usize) -> Vec<f64> {
+            let mat_size = n * n;
+            (0..batch)
+                .map(|b| {
+                    trace_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
+                        .expect("reference trace")
+                })
+                .collect()
+        }
+
+        for &(batch, n) in &[(3usize, 3usize), (512, 8)] {
+            let mat_size = n * n;
+            let mut data: Vec<f64> = (0..batch * mat_size)
+                .map(|idx| ((idx % 97) as f64 - 48.0) * 0.25)
+                .collect();
+            for b in 0..batch {
+                let base = b * mat_size;
+                if b % 17 == 0 {
+                    data[base] = f64::NAN;
+                }
+                if b % 19 == 0 && n > 1 {
+                    data[base + n + 1] = -0.0;
+                }
+            }
+
+            let got = batch_trace(&data, &[batch, n, n]).expect("batch_trace");
+            let want = reference(&data, batch, n);
+            assert_eq!(got.len(), want.len());
+            for (idx, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(
+                    g.to_bits(),
+                    w.to_bits(),
+                    "batch trace bit drift for batch={batch}, n={n}, lane={idx}"
+                );
+            }
+        }
     }
 
     #[test]
