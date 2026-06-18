@@ -7930,6 +7930,73 @@ mm.flush()
     }
 
     #[test]
+    fn npy_float_complex_bool_int32_64_roundtrip() {
+        // Round-trip the dtypes the existing npy roundtrip tests do not cover:
+        // i32/i64, f32/f64 (incl. inf/nan/-0 bytes), complex64/128, and bool. The
+        // write/read path is byte-level, so special float bit patterns must survive.
+        let roundtrip = |descr: IOSupportedDType, shape: Vec<usize>, payload: Vec<u8>| {
+            let header = NpyHeader {
+                shape,
+                fortran_order: false,
+                descr,
+            };
+            let encoded = write_npy_bytes(&header, &payload, false).expect("write");
+            let decoded = read_npy_bytes(&encoded, false).expect("read");
+            assert_eq!(decoded.header.descr, header.descr);
+            assert_eq!(decoded.payload, payload.into());
+        };
+        roundtrip(
+            IOSupportedDType::I32,
+            vec![3],
+            [1_i32, -2, 2_000_000]
+                .into_iter()
+                .flat_map(i32::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(
+            IOSupportedDType::I64,
+            vec![2],
+            [-5_i64, 9_000_000_000]
+                .into_iter()
+                .flat_map(i64::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(
+            IOSupportedDType::F32,
+            vec![4],
+            [1.5_f32, -2.25, f32::INFINITY, f32::NAN]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(
+            IOSupportedDType::F64,
+            vec![3],
+            [3.141_592_653_589_793_f64, -0.0, f64::NEG_INFINITY]
+                .into_iter()
+                .flat_map(f64::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(
+            IOSupportedDType::Complex64,
+            vec![2],
+            [1.0_f32, 2.0, -3.0, 4.0]
+                .into_iter()
+                .flat_map(f32::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(
+            IOSupportedDType::Complex128,
+            vec![1],
+            [1.5_f64, -2.5]
+                .into_iter()
+                .flat_map(f64::to_le_bytes)
+                .collect(),
+        );
+        roundtrip(IOSupportedDType::Bool, vec![4], vec![1_u8, 0, 1, 0]);
+    }
+
+    #[test]
     fn npy_i16_u16_roundtrip() {
         let header = NpyHeader {
             shape: vec![2],
