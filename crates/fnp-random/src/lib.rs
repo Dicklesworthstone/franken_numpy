@@ -10596,6 +10596,50 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn shaped_scalar_distributions_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected_random = numpy_oracle_random(4)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let random = rng
+            .random_shaped(Some(&[2, 2]))
+            .map_err(|_| "random_shaped live oracle")?;
+        assert_eq!(random.shape(), &[2, 2]);
+        assert_f64_seq("random_shaped_live_numpy", random.values(), &expected_random);
+
+        let expected_standard_normal = numpy_oracle_standard_normal(6)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let standard_normal = rng
+            .standard_normal_shaped(Some(&[2, 3]))
+            .map_err(|_| "standard_normal_shaped live oracle")?;
+        assert_eq!(standard_normal.shape(), &[2, 3]);
+        assert_f64_seq(
+            "standard_normal_shaped_live_numpy",
+            standard_normal.values(),
+            &expected_standard_normal,
+        );
+
+        let expected_uniform = numpy_oracle_uniform(-1.0, 2.0, 4)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let uniform = rng
+            .uniform_shaped(-1.0, 2.0, Some(&[2, 2]))
+            .map_err(|_| "uniform_shaped live oracle")?;
+        assert_eq!(uniform.shape(), &[2, 2]);
+        assert_f64_seq("uniform_shaped_live_numpy", uniform.values(), &expected_uniform);
+
+        let expected_normal = numpy_oracle_normal(5.0, 2.0, 4)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let normal = rng
+            .normal_shaped(5.0, 2.0, Some(&[4]))
+            .map_err(|_| "normal_shaped live oracle")?;
+        assert_eq!(normal.shape(), &[4]);
+        assert_f64_seq("normal_shaped_live_numpy", normal.values(), &expected_normal);
+        Ok(())
+    }
+
+    #[test]
     fn integers_in_range() {
         let mut rng = test_generator();
         let vals = rng.integers(0, 10, 100).unwrap();
