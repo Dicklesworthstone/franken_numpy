@@ -37,9 +37,90 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn outcome_body(setup: &str, call_expr: &str) -> String {
+    format!(
+        "{setup}\n\
+         def outcome(op):\n\
+             try:\n\
+                 value = {call_expr}\n\
+                 arr = np.asarray(value)\n\
+                 print('ok')\n\
+                 print(type(value).__name__)\n\
+                 print(str(arr.dtype))\n\
+                 print(tuple(arr.shape))\n\
+                 print(repr(arr.tolist()))\n\
+             except Exception as exc:\n\
+                 print('err')\n\
+                 print(type(exc).__name__)\n\
+         outcome(op)"
+    )
+}
+
+fn numpy_outcome_script(function_expr: &str, setup: &str, call_expr: &str) -> String {
+    format!(
+        "import numpy as np\nop = {function_expr}\n{}",
+        outcome_body(setup, call_expr)
+    )
+}
+
+fn fnp_outcome_script(function_name: &str, setup: &str, call_expr: &str) -> String {
+    fnp_script(format!(
+        "op = fnp.{function_name}\n{}",
+        outcome_body(setup, call_expr)
+    ))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // interp
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn interp_python_container_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "scalar tuple inputs with left/right keywords",
+            "",
+            "op(0.0, (1, 2, 3), (10, 20, 30), left=-5, right=99)",
+        ),
+        (
+            "list inputs preserve ndarray metadata",
+            "",
+            "op([0.0, 1.5, 3.0], [1, 2, 3], [10, 20, 30], left=-1, right=100)",
+        ),
+        (
+            "period keyword delegates angular interpolation",
+            "",
+            "op([0, 90, 270, 360], [0, 180, 360], [0.0, 1.0, 0.0], period=360)",
+        ),
+        (
+            "tuple probe with ndarray xp fp",
+            "xp = np.array([0.0, 2.0, 4.0])\nfp = np.array([0.0, 20.0, 40.0])",
+            "op((1.0, 3.0), xp, fp)",
+        ),
+        (
+            "missing fp error type",
+            "",
+            "op([0.0], [0.0])",
+        ),
+        (
+            "xp fp length mismatch error type",
+            "",
+            "op([0.0, 1.0], [0.0, 1.0], [10.0])",
+        ),
+    ];
+
+    for (label, setup, call_expr) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script("np.interp", setup, call_expr))?;
+        let rust_result = numpy_oracle(&fnp_outcome_script("interp", setup, call_expr))?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "interp Python-container keyword surface mismatch for {label}"
+        );
+    }
+
+    Ok(())
+}
 
 #[test]
 fn interp_basic() -> Result<(), String> {
@@ -144,6 +225,46 @@ print(np.allclose(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 // trapz
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn trapz_python_container_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let cases = [
+        ("list y default scalar", "", "op([1, 2, 3, 4])"),
+        (
+            "tuple y with x list",
+            "",
+            "op((1, 2, 3, 4), x=[0, 1, 3, 6])",
+        ),
+        (
+            "nested list axis zero",
+            "",
+            "op([[1, 2, 3], [4, 5, 6]], axis=0)",
+        ),
+        (
+            "nested tuple axis one dx keyword",
+            "",
+            "op(((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)), dx=0.5, axis=1)",
+        ),
+        (
+            "ndarray y with broadcast x spacing",
+            "y = np.array([[1.0, 2.0, 4.0], [2.0, 3.0, 5.0]])\nx = np.array([0.0, 0.5, 2.0])",
+            "op(y, x=x, axis=-1)",
+        ),
+        ("axis type error parity", "", "op([1, 2, 3], axis='bad')"),
+    ];
+
+    for (label, setup, call_expr) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script("np.trapezoid", setup, call_expr))?;
+        let rust_result = numpy_oracle(&fnp_outcome_script("trapz", setup, call_expr))?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "trapz Python-container keyword surface mismatch for {label}"
+        );
+    }
+
+    Ok(())
+}
 
 #[test]
 fn trapz_basic() -> Result<(), String> {
