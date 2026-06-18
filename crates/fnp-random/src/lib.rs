@@ -16967,6 +16967,27 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn permuted_shaped_zero_size_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_permuted(&[2, 0, 3], None);
+        let expected_after = numpy_oracle_random(1)?;
+        let data = Vec::new();
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual = rng
+            .permuted_shaped(&data, &[2, 0, 3], None)
+            .map_err(|_| "permuted_shaped zero-size live oracle")?;
+        assert_eq!(actual.shape(), &[2, 0, 3]);
+        assert!(actual.is_empty());
+        assert_eq!(actual.values(), expected.as_slice());
+        let after = rng.random(1);
+        assert_f64_seq("permuted_shaped_zero_size_after_live_numpy", &after, &expected_after);
+        Ok(())
+    }
+
+    #[test]
     fn permuted_axis_out_of_bounds() {
         let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
         let data = vec![1.0, 2.0, 3.0];
