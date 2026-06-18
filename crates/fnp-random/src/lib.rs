@@ -6938,6 +6938,46 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_chisquare_then_random(
+        df: f64,
+        chisquare_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+df = float(sys.argv[1])
+chisquare_size = int(sys.argv[2])
+random_size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.chisquare(df, size=chisquare_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            df.to_string(),
+            chisquare_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle chisquare values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
     fn numpy_oracle_beta(a: f64, b: f64, size: usize) -> Result<Vec<f64>, &'static str> {
         let script = r#"
 import sys
@@ -15107,6 +15147,28 @@ for child in rng.spawn(n_children):
             .chisquare(5.0, 10)
             .map_err(|_| "chisquare live oracle")?;
         assert_f64_seq("chisquare_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
+    fn chisquare_zero_size_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_values, expected_after) = numpy_oracle_chisquare_then_random(5.0, 0, 1)?;
+        let mut g = oracle_gen();
+        let actual_values = g
+            .chisquare(5.0, 0)
+            .map_err(|_| "chisquare zero-size live oracle")?;
+        assert!(actual_values.is_empty());
+        assert_f64_seq("chisquare_zero_size_live_numpy", &actual_values, &expected_values);
+        let actual_after = g.random(1);
+        assert_f64_seq(
+            "chisquare_zero_size_after_live_numpy",
+            &actual_after,
+            &expected_after,
+        );
         Ok(())
     }
 
