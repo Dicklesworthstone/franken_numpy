@@ -37,6 +37,65 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn index_helper_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def normalize(value):
+    if isinstance(value, tuple):
+        return ("tuple", tuple(normalize(item) for item in value))
+    array = np.asarray(value)
+    return (
+        "array",
+        str(array.dtype),
+        tuple(array.shape),
+        array.tolist(),
+    )
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+square_object = np.array([["a", "b", "c"], ["d", "e", "f"], ["g", "h", "i"]], dtype=object)
+rect_object = np.array([["a", "b", "c"], ["d", "e", "f"]], dtype=object)
+cases = [
+    ("diag_indices_from object", "diag_indices_from", lambda: ((square_object,), {})),
+    ("diag_indices_from rectangular error", "diag_indices_from", lambda: ((rect_object,), {})),
+    ("tril_indices_from object k", "tril_indices_from", lambda: ((rect_object,), {"k": 1})),
+    ("triu_indices_from object k", "triu_indices_from", lambda: ((rect_object,), {"k": -1})),
+    ("tril_indices m keyword", "tril_indices", lambda: ((3,), {"m": 5, "k": 1})),
+    ("triu_indices m keyword", "triu_indices", lambda: ((3,), {"m": 5, "k": -1})),
+    ("mask_indices triu k", "mask_indices", lambda: ((4, np.triu), {"k": 1})),
+    ("mask_indices tril negative k", "mask_indices", lambda: ((4, np.tril), {"k": -1})),
+    ("mask_indices negative n error", "mask_indices", lambda: ((-1, np.triu), {})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "index-helper Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // indices
 // ─────────────────────────────────────────────────────────────────────────────
