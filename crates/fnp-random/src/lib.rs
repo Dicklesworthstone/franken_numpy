@@ -13317,6 +13317,18 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn vonmises_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let expected = numpy_oracle_vonmises(0.0, 4.0, 10);
+        let mut g = oracle_gen();
+        let actual = g.vonmises(0.0, 4.0, 10).unwrap();
+        assert_f64_seq("vonmises_live_numpy", &actual, &expected);
+    }
+
+    #[test]
     fn oracle_vonmises_zero_kappa_with_nonzero_mu() {
         let mut g = oracle_gen();
         let vals = g.vonmises(1.5, 0.0, 10).unwrap();
