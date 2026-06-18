@@ -17417,59 +17417,102 @@ fn signbit(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     build_numpy_scalar_or_array(py, &result)
 }
 
-#[pyfunction]
-fn isnan(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    if let Some(out) = try_zerocopy_f64_predicate(py, x.bind(py), f64::is_nan)? {
+fn isnan_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_predicate(py, x, f64::is_nan)? {
         return Ok(out);
     }
-    if let Some(out) = try_zerocopy_f32_predicate(py, x.bind(py), f32::is_nan)? {
+    if let Some(out) = try_zerocopy_f32_predicate(py, x, f32::is_nan)? {
         return Ok(out);
     }
     // Complex: numpy applies the predicate per-component (isnan(z)=isnan(re)|isnan(im)).
     // extract_numeric_array can't push a complex array through the real-valued Isnan
     // kernel and raises TypeError, so delegate complex inputs to numpy (the oracle).
-    if numpy_dtype_is_complex(x.bind(py)) {
+    if numpy_dtype_is_complex(x) {
         let numpy = py.import("numpy")?;
-        return Ok(numpy.getattr("isnan")?.call1((x.bind(py),))?.unbind());
+        return Ok(numpy.getattr("isnan")?.call1((x,))?.unbind());
     }
-    let x = extract_numeric_array(py, x.bind(py), "isnan(x)")?;
+    let x = extract_numeric_array(py, x, "isnan(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isnan))
 }
 
 #[pyfunction]
-fn isinf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    if let Some(out) = try_zerocopy_f64_predicate(py, x.bind(py), f64::is_infinite)? {
+#[pyo3(signature = (*args, **kwargs))]
+fn isnan(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        isnan_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "isnan", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "isnan", args, kwargs)
+    }
+}
+
+fn isinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_predicate(py, x, f64::is_infinite)? {
         return Ok(out);
     }
-    if let Some(out) = try_zerocopy_f32_predicate(py, x.bind(py), f32::is_infinite)? {
+    if let Some(out) = try_zerocopy_f32_predicate(py, x, f32::is_infinite)? {
         return Ok(out);
     }
     // Complex: numpy applies the predicate per-component (isinf(z)=isinf(re)|isinf(im)).
     // The real-valued kernel raises TypeError on complex, so delegate to numpy.
-    if numpy_dtype_is_complex(x.bind(py)) {
+    if numpy_dtype_is_complex(x) {
         let numpy = py.import("numpy")?;
-        return Ok(numpy.getattr("isinf")?.call1((x.bind(py),))?.unbind());
+        return Ok(numpy.getattr("isinf")?.call1((x,))?.unbind());
     }
-    let x = extract_numeric_array(py, x.bind(py), "isinf(x)")?;
+    let x = extract_numeric_array(py, x, "isinf(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isinf))
 }
 
 #[pyfunction]
-fn isfinite(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    if let Some(out) = try_zerocopy_f64_predicate(py, x.bind(py), f64::is_finite)? {
+#[pyo3(signature = (*args, **kwargs))]
+fn isinf(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        isinf_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "isinf", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "isinf", args, kwargs)
+    }
+}
+
+fn isfinite_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_predicate(py, x, f64::is_finite)? {
         return Ok(out);
     }
-    if let Some(out) = try_zerocopy_f32_predicate(py, x.bind(py), f32::is_finite)? {
+    if let Some(out) = try_zerocopy_f32_predicate(py, x, f32::is_finite)? {
         return Ok(out);
     }
     // Complex: numpy ANDs the components (isfinite(z)=isfinite(re)&isfinite(im)).
     // The real-valued kernel raises TypeError on complex, so delegate to numpy.
-    if numpy_dtype_is_complex(x.bind(py)) {
+    if numpy_dtype_is_complex(x) {
         let numpy = py.import("numpy")?;
-        return Ok(numpy.getattr("isfinite")?.call1((x.bind(py),))?.unbind());
+        return Ok(numpy.getattr("isfinite")?.call1((x,))?.unbind());
     }
-    let x = extract_numeric_array(py, x.bind(py), "isfinite(x)")?;
+    let x = extract_numeric_array(py, x, "isfinite(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Isfinite))
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn isfinite(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        isfinite_native(py, &x_arg)
+            .or_else(|_| core_numpy_passthrough(py, "isfinite", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "isfinite", args, kwargs)
+    }
 }
 
 #[pyfunction]
@@ -46914,9 +46957,10 @@ mod tests {
         build_numpy_array_from_ufunc, ceil, choose, compress, copysign, count_nonzero, degrees,
         diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
         extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero, flip,
-        fliplr, flipud, floor, fnp_python, frexp, hypot, indices, interp, isfinite, isinf, isnan,
-        isneginf_native, isposinf_native, ix_, ldexp, logaddexp, logaddexp2, meshgrid, modf,
-        nan_to_num, NarrowSetOp, narrow_bitmap_setop, wide_int_table_bounds,
+        fliplr, flipud, floor, fnp_python, frexp, hypot, indices, interp, isfinite_native,
+        isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp,
+        logaddexp2, meshgrid, modf, nan_to_num, NarrowSetOp, narrow_bitmap_setop,
+        wide_int_table_bounds,
         nextafter, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
         python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate, radians,
         ravel_multi_index, required_dict_item, rfftfreq, rint, searchsorted, select, sign, signbit,
@@ -61213,7 +61257,7 @@ mod tests {
                 vec![f64::NAN, f64::NEG_INFINITY, -1.0, 0.0, f64::INFINITY],
                 "float64",
             );
-            let actual = isnan(py, values.clone().unbind())?;
+            let actual = isnan_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("isnan", (values,))?;
 
@@ -61240,7 +61284,7 @@ mod tests {
                 ],
                 "float64",
             );
-            let actual = isinf(py, values.clone().unbind())?;
+            let actual = isinf_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("isinf", (values,))?;
 
@@ -61268,7 +61312,7 @@ mod tests {
                 vec![f64::NAN, f64::NEG_INFINITY, -3.0, -0.0, 1.5, f64::INFINITY],
                 "float64",
             );
-            let actual = isfinite(py, values.clone().unbind())?;
+            let actual = isfinite_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("isfinite", (values,))?;
 

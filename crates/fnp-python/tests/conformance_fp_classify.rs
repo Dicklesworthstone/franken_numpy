@@ -287,3 +287,54 @@ print(type(fnp_result).__name__ == type(np_result).__name__, fnp_result, np_resu
     }
     Ok(())
 }
+
+#[test]
+fn fp_classify_out_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def out_outcome(module, name, positional=False, bad_shape=False):
+    fn = getattr(module, name)
+    try:
+        x = np.array([np.inf, np.nan, 1.0])
+        out = np.empty((2,), dtype=bool) if bad_shape else np.empty(3, dtype=bool)
+        if positional:
+            result = fn(x, out)
+        else:
+            result = fn(x, out=out)
+        return ("ok", result is out, str(out.dtype), tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    ("isnan keyword out", "isnan", False, False),
+    ("isinf keyword out", "isinf", False, False),
+    ("isfinite keyword out", "isfinite", False, False),
+    ("isnan positional out", "isnan", True, False),
+    ("isinf positional out", "isinf", True, False),
+    ("isfinite positional out", "isfinite", True, False),
+    ("isnan bad out shape", "isnan", False, True),
+    ("isinf bad out shape", "isinf", False, True),
+    ("isfinite bad out shape", "isfinite", False, True),
+]
+
+ok = True
+for label, name, positional, bad_shape in cases:
+    actual = out_outcome(fnp, name, positional, bad_shape)
+    expected = out_outcome(np, name, positional, bad_shape)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "fp-classify out surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
