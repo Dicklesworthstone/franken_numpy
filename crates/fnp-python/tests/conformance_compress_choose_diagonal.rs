@@ -364,6 +364,51 @@ print(np.allclose(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn diagonal_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def diagonal_outcome(fn, a, **kwargs):
+    try:
+        result = fn(a, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list 2d", lambda: ([[1, 2, 3], [4, 5, 6], [7, 8, 9]], {})),
+    ("tuple offset positive", lambda: (((1, 2, 3), (4, 5, 6), (7, 8, 9)), {"offset": 1})),
+    ("list offset negative", lambda: ([[1, 2, 3, 4], [5, 6, 7, 8]], {"offset": -1})),
+    ("nested list custom axes", lambda: (np.arange(24).reshape(2, 3, 4).tolist(), {"axis1": 0, "axis2": 2})),
+    ("scalar error", lambda: (5, {})),
+    ("repeated axis error", lambda: ([[1, 2], [3, 4]], {"axis1": 0, "axis2": 0})),
+]
+
+ok = True
+for label, factory in cases:
+    a, kwargs = factory()
+    actual = diagonal_outcome(fnp.diagonal, a, **kwargs)
+    a, kwargs = factory()
+    expected = diagonal_outcome(np.diagonal, a, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "diagonal Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn diagonal_2d_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
