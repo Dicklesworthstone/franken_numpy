@@ -57412,6 +57412,53 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn polynomial_add_sub_matches_numpy_golden() {
+        // add/sub are basis-independent element-wise ops over [1,2,3,4] and [0.5,-1,2].
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let b = [0.5, -1.0, 2.0];
+        let add_g = [1.5, 1.0, 5.0, 4.0];
+        let sub_g = [0.5, 3.0, 1.0, 4.0];
+        poly_close_vec(&chebadd(&a, &b), &add_g, "chebadd");
+        poly_close_vec(&chebsub(&a, &b), &sub_g, "chebsub");
+        poly_close_vec(&legadd(&a, &b), &add_g, "legadd");
+        poly_close_vec(&legsub(&a, &b), &sub_g, "legsub");
+        poly_close_vec(&hermadd(&a, &b), &add_g, "hermadd");
+        poly_close_vec(&hermsub(&a, &b), &sub_g, "hermsub");
+        poly_close_vec(&hermeadd(&a, &b), &add_g, "hermeadd");
+        poly_close_vec(&hermesub(&a, &b), &sub_g, "hermesub");
+        poly_close_vec(&lagadd(&a, &b), &add_g, "lagadd");
+        poly_close_vec(&lagsub(&a, &b), &sub_g, "lagsub");
+    }
+
+    #[test]
+    fn polynomial_mul_matches_numpy_golden() {
+        // numpy.polynomial.*.{X}mul([1,2,3,4], [0.5,-1,2]) — basis convolution.
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let b = [0.5, -1.0, 2.0];
+        poly_close_vec(&chebmul(&a, &b), &[2.5, 4.5, 0.5, 2.5, 1.0, 4.0], "chebmul");
+        poly_close_vec(
+            &legmul(&a, &b),
+            &[1.033_333, 2.457_143, 2.166_667, 4.733_333, 0.8, 3.809_524],
+            "legmul",
+        );
+        poly_close_vec(
+            &hermmul(&a, &b),
+            &[44.5, 196.0, 25.5, 99.0, 2.0, 8.0],
+            "hermmul",
+        );
+        poly_close_vec(
+            &hermemul(&a, &b),
+            &[10.5, 50.0, 13.5, 51.0, 2.0, 8.0],
+            "hermemul",
+        );
+        poly_close_vec(
+            &lagmul(&a, &b),
+            &[4.5, 6.0, -52.5, 149.0, -172.0, 80.0],
+            "lagmul",
+        );
+    }
+
+    #[test]
     fn roots_linear() {
         // 2x + 6 = 0 -> x = -3
         let p = UFuncArray::new(vec![2], vec![2.0, 6.0], DType::F64).unwrap();
