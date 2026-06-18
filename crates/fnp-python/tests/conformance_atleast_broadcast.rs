@@ -37,6 +37,106 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn atleast_broadcast_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+class SubArray(np.ndarray):
+    pass
+
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize_array(value):
+    array = np.asarray(value)
+    return (
+        type(value).__name__,
+        str(array.dtype),
+        tuple(array.shape),
+        clean(array.tolist()),
+        bool(array.flags["WRITEABLE"]),
+    )
+
+def normalize(value):
+    if isinstance(value, (list, tuple)):
+        return ("sequence", [normalize_array(item) for item in value])
+    return ("array", normalize_array(value))
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+sub = np.arange(3).view(SubArray)
+cases = [
+    (
+        "atleast_1d mixed multiple",
+        "atleast_1d",
+        lambda: ((1, [2, 3], np.array(None, dtype=object)), {}),
+    ),
+    (
+        "atleast_2d tuple input",
+        "atleast_2d",
+        lambda: ((((1, 2, 3), (4, 5, 6)),), {}),
+    ),
+    (
+        "atleast_3d object list",
+        "atleast_3d",
+        lambda: ((np.array(["a", "b"], dtype=object),), {}),
+    ),
+    ("broadcast_to Python list shape list", "broadcast_to", lambda: (([1, 2, 3], [2, 3]), {})),
+    (
+        "broadcast_to subclass subok",
+        "broadcast_to",
+        lambda: ((sub, (2, 3)), {"subok": True}),
+    ),
+    (
+        "broadcast_arrays mixed Python list and ndarray",
+        "broadcast_arrays",
+        lambda: (([1, 2, 3], np.arange(3).reshape(1, 3)), {}),
+    ),
+    (
+        "broadcast_arrays subclass subok",
+        "broadcast_arrays",
+        lambda: ((sub, np.arange(3).reshape(1, 3)), {"subok": True}),
+    ),
+    ("broadcast_to incompatible error", "broadcast_to", lambda: (([1, 2, 3], (2, 2)), {})),
+    (
+        "broadcast_arrays incompatible error",
+        "broadcast_arrays",
+        lambda: ((np.ones((2, 3)), np.ones((4,))), {}),
+    ),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "atleast/broadcast Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // atleast_1d
 // ─────────────────────────────────────────────────────────────────────────────
