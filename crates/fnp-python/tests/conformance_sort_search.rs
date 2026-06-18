@@ -426,6 +426,54 @@ print(len(result) == len(expected) and result[0].size == 0 and expected[0].size 
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn count_nonzero_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def count_nonzero_outcome(fn, value, **kwargs):
+    try:
+        result = fn(value, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list fallback", lambda: ([0, 2, 0, 3], {})),
+    ("tuple fallback", lambda: ((0, 0, 5, 0), {})),
+    ("bool list", lambda: ([False, True, False, True], {})),
+    ("nested list", lambda: ([[0, 1], [2, 0]], {})),
+    ("nested keepdims", lambda: ([[0, 1], [2, 0]], {"axis": 1, "keepdims": True})),
+    ("scalar nonzero", lambda: (7, {})),
+    ("scalar zero", lambda: (0, {})),
+    ("object truthiness", lambda: (np.array(["", "x", "0"], dtype=object), {})),
+    ("ragged list error", lambda: ([[1], [0, 2]], {})),
+]
+
+ok = True
+for label, factory in cases:
+    value, kwargs = factory()
+    actual = count_nonzero_outcome(fnp.count_nonzero, value, **kwargs)
+    value, kwargs = factory()
+    expected = count_nonzero_outcome(np.count_nonzero, value, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "count_nonzero Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn count_nonzero_1d() -> Result<(), String> {
     let script = fnp_script(
         r#"
