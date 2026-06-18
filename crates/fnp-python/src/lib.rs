@@ -21108,10 +21108,11 @@ fn cov_gram_rowvar_f64(
     };
     let mut result = vec![0.0f64; n_vars * n_vars];
     // Below ~1<<18 multiply-adds the rayon dispatch dwarfs the work (cov([10,100]) was ~5x
-    // numpy from fanning out microseconds), so keep small Grams serial; above it fan out
-    // over rows. Each cell is its own dot8, so serial and parallel agree.
+    // numpy from fanning out microseconds), and below 32 rows there are too few row tasks
+    // to amortize fan-out even for long observations. Above both gates, fan out over rows.
+    // Each cell is its own dot8, so serial and parallel agree.
     let work = (n_vars as u64) * (n_vars as u64) * (n_obs as u64);
-    if work >= (1 << 18) && rayon::current_num_threads() >= 2 {
+    if n_vars >= 32 && work >= (1 << 18) && rayon::current_num_threads() >= 2 {
         result
             .par_chunks_mut(n_vars)
             .enumerate()
