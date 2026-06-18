@@ -6742,6 +6742,28 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_logistic(
+        loc: f64,
+        scale: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+loc = float(sys.argv[1])
+scale = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.logistic(loc, scale, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [loc.to_string(), scale.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_logseries_then_random(
         p: &str,
     ) -> Result<(Vec<u64>, Vec<f64>), &'static str> {
@@ -12748,6 +12770,21 @@ for child in rng.spawn(n_children):
             -0.711540918907822,
         ];
         assert_f64_seq("logistic", &vals, &expected);
+    }
+
+    #[test]
+    fn logistic_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_logistic(0.0, 1.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .logistic(0.0, 1.0, 10)
+            .map_err(|_| "logistic live oracle")?;
+        assert_f64_seq("logistic_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
