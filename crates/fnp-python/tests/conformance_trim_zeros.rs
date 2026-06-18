@@ -3,13 +3,29 @@
 //! Tests the native Rust trim_zeros implementation against NumPy across various
 //! input arrays and trim modes.
 
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 fn numpy_oracle(script: &str) -> Result<String, String> {
-    let output = Command::new("python3")
-        .args(["-c", script])
-        .output()
+    let mut child = Command::new("python3")
+        .arg("-")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|error| format!("python3 should be available: {error}\nScript: {script}"))?;
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("python3 stdin should be available\nScript: {script}"))?;
+    stdin
+        .write_all(script.as_bytes())
+        .map_err(|error| format!("failed to write Python oracle script: {error}\nScript: {script}"))?;
+    drop(stdin);
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("failed to read Python oracle output: {error}\nScript: {script}"))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("NumPy oracle failed: {stderr}\nScript: {script}"));
@@ -51,6 +67,64 @@ fn parse_float_list(s: &str) -> Vec<f64> {
             t.parse().ok()
         })
         .collect()
+}
+
+fn trim_zeros_outcome_body(function_expr: &str, input_expr: &str, trim_arg: &str) -> String {
+    format!(
+        "def outcome(fn):\n\
+             try:\n\
+                 value = fn({input_expr}{trim_arg})\n\
+                 print('ok')\n\
+                 print(type(value).__name__)\n\
+                 print(repr(value))\n\
+             except Exception as exc:\n\
+                 print('err')\n\
+                 print(type(exc).__name__)\n\
+                 print(str(exc))\n\
+         outcome({function_expr})"
+    )
+}
+
+fn numpy_trim_zeros_outcome_script(input_expr: &str, trim_arg: &str) -> String {
+    format!(
+        "import numpy as np\n{}",
+        trim_zeros_outcome_body("np.trim_zeros", input_expr, trim_arg)
+    )
+}
+
+fn fnp_trim_zeros_outcome_script(input_expr: &str, trim_arg: &str) -> String {
+    fnp_trim_zeros_script(trim_zeros_outcome_body(
+        "fnp.trim_zeros",
+        input_expr,
+        trim_arg,
+    ))
+}
+
+#[test]
+fn trim_zeros_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let cases = [
+        ("list default", "[0, 0, 1, 2, 0, 0]", ""),
+        ("tuple front", "(0, 0, 1, 2, 0, 0)", ", 'f'"),
+        ("list uppercase trim", "[0, 0, 1, 2, 0, 0]", ", 'FB'"),
+        ("scalar input error", "0", ""),
+        ("list invalid trim error", "[0, 1, 0]", ", 'x'"),
+        ("array invalid trim error", "np.array([0, 1, 0])", ", 'x'"),
+    ];
+
+    for (label, input_expr, trim_arg) in cases {
+        let numpy_script = numpy_trim_zeros_outcome_script(input_expr, trim_arg);
+        let numpy_result = numpy_oracle(&numpy_script)?;
+
+        let rust_script = fnp_trim_zeros_outcome_script(input_expr, trim_arg);
+        let rust_result = numpy_oracle(&rust_script)?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "trim_zeros Python-container surface mismatch for {label}"
+        );
+    }
+
+    Ok(())
 }
 
 #[test]
