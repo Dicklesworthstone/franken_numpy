@@ -13802,6 +13802,21 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn beta_johnk_small_shapes_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_beta(0.5, 0.75, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .beta(0.5, 0.75, 10)
+            .map_err(|_| "beta johnk live oracle")?;
+        assert_f64_seq("beta_johnk_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_beta_nonfinite_parameters_advance_stream() {
         let expected_after_one_nonfinite = [
             0.329_258_442_888_161_75,
