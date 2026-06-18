@@ -37,6 +37,91 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn ravel_unravel_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize(value):
+    if isinstance(value, tuple):
+        return ("tuple", tuple(normalize(item) for item in value))
+    array = np.asarray(value)
+    return (
+        "array",
+        str(array.dtype),
+        tuple(array.shape),
+        clean(array.tolist()),
+    )
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    (
+        "unravel list indices list dims C",
+        "unravel_index",
+        lambda: (([3, 4, 5], [2, 3]), {}),
+    ),
+    (
+        "unravel ndarray indices Fortran",
+        "unravel_index",
+        lambda: ((np.array([[0, 5], [6, 11]], dtype=np.int64), (3, 4)), {"order": "F"}),
+    ),
+    ("unravel scalar ndarray", "unravel_index", lambda: ((np.array(5), (2, 3)), {})),
+    ("unravel invalid order error", "unravel_index", lambda: ((5, (2, 3)), {"order": "A"})),
+    ("unravel out of bounds error", "unravel_index", lambda: ((6, (2, 3)), {})),
+    (
+        "ravel tuple coords list dims",
+        "ravel_multi_index",
+        lambda: ((([0, 1, 2], [1, 2, 3]), [3, 4]), {}),
+    ),
+    (
+        "ravel ndarray coords mode sequence",
+        "ravel_multi_index",
+        lambda: ((np.array([[-1, 2, 3], [0, 5, -1]], dtype=np.int64), (3, 4)), {"mode": ("wrap", "clip")}),
+    ),
+    (
+        "ravel list coords Fortran order",
+        "ravel_multi_index",
+        lambda: ((([0, 1, 2], [1, 2, 3]), (3, 4)), {"order": "F"}),
+    ),
+    ("ravel invalid mode error", "ravel_multi_index", lambda: (((0, 1), (3, 4)), {"mode": "middle"})),
+    ("ravel coord out of bounds error", "ravel_multi_index", lambda: (((3, 1), (3, 4)), {})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "ravel/unravel Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // unravel_index
 // ─────────────────────────────────────────────────────────────────────────────
