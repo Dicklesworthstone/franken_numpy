@@ -42,6 +42,49 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn apply_along_axis_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def apply_along_axis_outcome(fn, func1d, axis, arr):
+    try:
+        result = fn(func1d, axis, arr)
+        out = np.asarray(result)
+        return ("ok", type(result).__name__, str(out.dtype), tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list axis zero sum", lambda: (np.sum, 0, [[1, 2, 3], [4, 5, 6]])),
+    ("tuple axis one mean", lambda: (np.mean, 1, ((1, 2, 3), (4, 5, 6)))),
+    ("list negative axis max", lambda: (np.max, -1, [[1, 9, 3], [4, 2, 6]])),
+    ("axis out of bounds", lambda: (np.sum, 3, [[1, 2, 3], [4, 5, 6]])),
+]
+
+ok = True
+for label, factory in cases:
+    func1d, axis, arr = factory()
+    actual = apply_along_axis_outcome(fnp.apply_along_axis, func1d, axis, arr)
+    func1d, axis, arr = factory()
+    expected = apply_along_axis_outcome(np.apply_along_axis, func1d, axis, arr)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_along_axis Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn apply_along_axis_sum() -> Result<(), String> {
     let script = fnp_script(
         r#"
@@ -124,6 +167,49 @@ print(np.array_equal(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 // apply_over_axes
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn apply_over_axes_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def apply_over_axes_outcome(fn, func, arr, axes):
+    try:
+        result = fn(func, arr, axes)
+        out = np.asarray(result)
+        return ("ok", type(result).__name__, str(out.dtype), tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list single axis", lambda: (np.sum, [[1, 2, 3], [4, 5, 6]], 0)),
+    ("list multiple axes", lambda: (np.sum, np.arange(24).reshape(2, 3, 4).tolist(), [0, 2])),
+    ("tuple mean axis", lambda: (np.mean, (((1, 2), (3, 4)), ((5, 6), (7, 8))), [1])),
+    ("axis out of bounds", lambda: (np.sum, [[1, 2, 3], [4, 5, 6]], [3])),
+]
+
+ok = True
+for label, factory in cases:
+    func, arr, axes = factory()
+    actual = apply_over_axes_outcome(fnp.apply_over_axes, func, arr, axes)
+    func, arr, axes = factory()
+    expected = apply_over_axes_outcome(np.apply_over_axes, func, arr, axes)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "apply_over_axes Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
 
 #[test]
 fn apply_over_axes_sum_single() -> Result<(), String> {
