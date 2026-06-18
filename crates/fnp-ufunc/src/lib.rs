@@ -49,6 +49,7 @@ const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
 const POLYVAL_ND_PARALLEL_MIN_ELEMS: usize = 1 << 12;
 const POLYVALFROMROOTS_PARALLEL_MIN_WORK: usize = 1 << 14;
 const POLYVANDER_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const WHERE_SELECT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UFuncRuntimeMode {
@@ -11011,6 +11012,32 @@ impl UFuncArray {
             DType::I64 | DType::U64 => y.synthesized_integer_sidecar("where_select")?,
             _ => None,
         };
+
+        if out_count >= WHERE_SELECT_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+            && x_sidecar.is_none()
+            && y_sidecar.is_none()
+            && condition.shape.as_slice() == out_shape.as_slice()
+            && x.shape.as_slice() == out_shape.as_slice()
+            && y.shape.as_slice() == out_shape.as_slice()
+        {
+            let values = (0..out_count)
+                .into_par_iter()
+                .map(|flat| {
+                    if condition.values[flat] != 0.0 {
+                        x.values[flat]
+                    } else {
+                        y.values[flat]
+                    }
+                })
+                .collect();
+            return Ok(Self {
+                shape: out_shape,
+                values,
+                dtype: out_dtype,
+                integer_sidecar: None,
+            });
+        }
 
         let cond_strides = contiguous_strides_elems(&condition.shape);
         let x_strides = contiguous_strides_elems(&x.shape);
@@ -47832,6 +47859,60 @@ print(json.dumps(payload))
         assert_eq!(
             out.to_storage().unwrap(),
             ArrayStorage::U64(vec![9_007_199_254_740_993, 8, 9_007_199_254_740_995])
+        );
+    }
+
+    #[test]
+    fn where_select_equal_shape_parallel_matches_serial_reference_and_golden_sha256() {
+        let n = super::WHERE_SELECT_PARALLEL_MIN_ELEMS + 257;
+        let cond_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if matches!((i * 37 + 11) % 7, 0 | 3 | 5) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let x_vals: Vec<f64> = (0..n)
+            .map(|i| ((i * 17 + 5) % 1009) as f64 / 31.0 - 10.0)
+            .collect();
+        let y_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 97 == 0 {
+                    -0.0
+                } else {
+                    ((i * 29 + 13) % 997) as f64 / 29.0 - 12.0
+                }
+            })
+            .collect();
+
+        let cond = UFuncArray::new(vec![n], cond_vals.clone(), DType::Bool).expect("cond");
+        let x = UFuncArray::new(vec![n], x_vals.clone(), DType::F64).expect("x");
+        let y = UFuncArray::new(vec![n], y_vals.clone(), DType::F64).expect("y");
+        let out = UFuncArray::where_select(&cond, &x, &y).expect("where");
+
+        assert_eq!(out.shape(), &[n]);
+        assert_eq!(out.dtype, DType::F64);
+        assert!(!out.has_integer_sidecar());
+        let mut digest = Sha256::new();
+        for i in 0..n {
+            let expected = if cond_vals[i] != 0.0 {
+                x_vals[i]
+            } else {
+                y_vals[i]
+            };
+            assert_eq!(out.values()[i].to_bits(), expected.to_bits());
+            digest.update(out.values()[i].to_le_bytes());
+        }
+        let digest_hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest_hex,
+            "1d76508c8f5e8d48e9f28652a92c45d295e064ac2b261a2e04124f79d16b0177"
         );
     }
 
