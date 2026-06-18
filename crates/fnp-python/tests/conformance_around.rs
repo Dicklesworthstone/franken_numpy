@@ -35,6 +35,107 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn indent_python(body: &str) -> String {
+    body.lines().map(|line| format!("    {line}\n")).collect()
+}
+
+fn outcome_body(body: &str) -> String {
+    let indented = indent_python(body);
+    r#"import json
+
+def normalize(value):
+    if isinstance(value, np.ndarray):
+        return {
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": value.tolist(),
+        }
+    if np.isscalar(value):
+        scalar_type = type(value).__name__
+        scalar_dtype = str(value.dtype) if hasattr(value, "dtype") else None
+        scalar_value = value.item() if hasattr(value, "item") else value
+        return {
+            "kind": "scalar",
+            "type": scalar_type,
+            "dtype": scalar_dtype,
+            "value": scalar_value,
+        }
+    return {"kind": "object", "type": type(value).__name__, "repr": repr(value)}
+
+try:
+__BODY__    payload = {"status": "ok", "result": normalize(result)}
+    if "out" in locals():
+        payload["out"] = normalize(out)
+        payload["result_is_out"] = result is out
+    print(json.dumps(payload, sort_keys=True, default=str))
+except Exception as exc:
+    message = str(exc).splitlines()[0] if str(exc) else ""
+    print(json.dumps(
+        {"status": "err", "type": type(exc).__name__, "message": message},
+        sort_keys=True,
+        default=str,
+    ))
+"#
+    .replace("__BODY__", &indented)
+}
+
+fn numpy_outcome_script(body: &str) -> String {
+    format!(
+        "import numpy as np\n\
+         MODULE = np\n\
+         {}",
+        outcome_body(body)
+    )
+}
+
+fn fnp_outcome_script(body: &str) -> String {
+    fnp_script(format!("MODULE = fnp\n{}", outcome_body(body)))
+}
+
+#[test]
+fn around_round_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "list decimals",
+            "result = MODULE.around([1.25, 2.75, -3.125], decimals=1)",
+        ),
+        (
+            "round scalar decimals",
+            "result = MODULE.round(np.float64(1.567), decimals=2)",
+        ),
+        (
+            "around bool fallback dtype",
+            "result = MODULE.around(np.array([True, False]))",
+        ),
+        (
+            "around complex fallback",
+            "result = MODULE.around(np.array([1.25 + 2.75j, -3.125 - 4.5j]), decimals=1)",
+        ),
+        (
+            "around out forwarding",
+            "out = np.empty((3,), dtype=np.float32)
+result = MODULE.around(np.array([1.25, 2.75, -3.125]), decimals=1, out=out)",
+        ),
+        (
+            "round out shape error",
+            "out = np.empty((2,), dtype=np.float64)
+result = MODULE.round(np.array([1.25, 2.75, -3.125]), out=out)",
+        ),
+    ];
+
+    for (name, body) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script(body))?;
+        let fnp_result = numpy_oracle(&fnp_outcome_script(body))?;
+
+        assert_eq!(
+            fnp_result, numpy_result,
+            "around/round outcome mismatch for {name}\nnumpy: {numpy_result}\nfnp:   {fnp_result}"
+        );
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // around basic
 // ─────────────────────────────────────────────────────────────────────────────
