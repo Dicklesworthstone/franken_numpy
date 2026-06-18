@@ -10668,6 +10668,30 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn shaped_generic_integers_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_integers_dtype("int64", 10, 20, &[2, 3], false)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual = rng
+            .integers_shaped(10, 20, Some(&[2, 3]))
+            .map_err(|_| "integers_shaped live oracle")?;
+        assert_eq!(actual.shape(), &[2, 3]);
+        assert_eq!(actual.values(), expected.as_slice());
+
+        let expected_endpoint = numpy_oracle_integers_dtype("int64", -2, 2, &[2, 2], true)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual_endpoint = rng
+            .integers_endpoint_shaped(-2, 2, Some(&[2, 2]))
+            .map_err(|_| "integers_endpoint_shaped live oracle")?;
+        assert_eq!(actual_endpoint.shape(), &[2, 2]);
+        assert_eq!(actual_endpoint.values(), expected_endpoint.as_slice());
+        Ok(())
+    }
+
+    #[test]
     fn integers_high_le_low_error() {
         let mut rng = test_generator();
         assert!(rng.integers(5, 5, 10).is_err());
