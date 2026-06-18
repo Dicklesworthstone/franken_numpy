@@ -379,6 +379,119 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+#[test]
+fn append_insert_delete_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize(value):
+    array = np.asarray(value)
+    return (str(array.dtype), tuple(array.shape), clean(array.tolist()))
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    (
+        "append same dtype flat fast path",
+        "append",
+        lambda: ((np.array([1, 2], dtype=np.int16), np.array([3, 4], dtype=np.int16)), {}),
+    ),
+    (
+        "append Python list promotion",
+        "append",
+        lambda: ((np.array([1, 2], dtype=np.int16), [3, 4]), {}),
+    ),
+    (
+        "append nested list axis 0",
+        "append",
+        lambda: ((np.array([[1, 2], [3, 4]]), [[5, 6]]), {"axis": 0}),
+    ),
+    (
+        "append nested list axis 1",
+        "append",
+        lambda: ((np.array([[1], [2]]), [[3], [4]]), {"axis": 1}),
+    ),
+    (
+        "insert flattened list positions",
+        "insert",
+        lambda: (([1, 2, 3], [1, 3], [10, 11]), {}),
+    ),
+    (
+        "insert axis scalar broadcast",
+        "insert",
+        lambda: ((np.array([[1, 2], [3, 4]]), 1, 99), {"axis": 1}),
+    ),
+    (
+        "delete scalar index Python list",
+        "delete",
+        lambda: (([1, 2, 3, 4], 1), {}),
+    ),
+    (
+        "delete list indices",
+        "delete",
+        lambda: ((np.arange(6), [0, 2, 5]), {}),
+    ),
+    (
+        "delete slice object",
+        "delete",
+        lambda: ((np.arange(6), slice(1, None, 2)), {}),
+    ),
+    (
+        "delete bool mask",
+        "delete",
+        lambda: ((np.array([1, 2, 3, 4]), np.array([True, False, True, False])), {}),
+    ),
+    (
+        "append invalid axis error",
+        "append",
+        lambda: ((np.array([1, 2]), [3]), {"axis": 1}),
+    ),
+    (
+        "insert out of bounds error",
+        "insert",
+        lambda: (([1, 2], 5, 9), {}),
+    ),
+    (
+        "delete out of bounds error",
+        "delete",
+        lambda: (([1, 2], 5), {}),
+    ),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "append/insert/delete Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // insert
 // ─────────────────────────────────────────────────────────────────────────────
