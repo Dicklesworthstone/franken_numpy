@@ -162,3 +162,10 @@ nohup.out
 # *.perf.data binaries (and their .old rotations) are ephemeral.
 *.perf.data
 *.perf.data.old
+
+# === Ephemeral build & scratch artifacts (multi-repo cleanup 2026-06-18) ===
+# Stray out-of-tree compile outputs (normal builds live under target/, already ignored).
+*.rlib
+rust_out
+# One-off local CARGO_TARGET_DIR override directories (e.g. criterion micro-benches).
+**/local-target/
