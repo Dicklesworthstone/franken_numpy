@@ -17391,30 +17391,44 @@ fn isneginf(
     }
 }
 
-#[pyfunction]
-fn signbit(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    if let Some(out) = try_zerocopy_f64_predicate(py, x.bind(py), f64::is_sign_negative)? {
+fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_predicate(py, x, f64::is_sign_negative)? {
         return Ok(out);
     }
-    if let Some(out) = try_zerocopy_f32_predicate(py, x.bind(py), f32::is_sign_negative)? {
+    if let Some(out) = try_zerocopy_f32_predicate(py, x, f32::is_sign_negative)? {
         return Ok(out);
     }
     // Integer ndarrays: extract_numeric_array canonicalizes to an f64 Vec
     // element-wise (~49x slower than numpy for int32). np.signbit(int) = (x < 0)
     // (unsigned -> all False) is the exact oracle, so delegate instead.
     {
-        let xb = x.bind(py);
         let numpy = py.import("numpy")?;
-        if xb.is_exact_instance(&numpy.getattr("ndarray")?) {
-            let kind: String = xb.getattr("dtype")?.getattr("kind")?.extract()?;
+        if x.is_exact_instance(&numpy.getattr("ndarray")?) {
+            let kind: String = x.getattr("dtype")?.getattr("kind")?.extract()?;
             if kind == "i" || kind == "u" {
-                return Ok(numpy.getattr("signbit")?.call1((xb,))?.unbind());
+                return Ok(numpy.getattr("signbit")?.call1((x,))?.unbind());
             }
         }
     }
-    let x = extract_numeric_array(py, x.bind(py), "signbit(x)")?;
+    let x = extract_numeric_array(py, x, "signbit(x)")?;
     let result = ufunc_signbit(&x).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn signbit(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        signbit_native(py, &x_arg)
+            .or_else(|_| core_numpy_passthrough(py, "signbit", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "signbit", args, kwargs)
+    }
 }
 
 fn isnan_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
@@ -46963,10 +46977,10 @@ mod tests {
         wide_int_table_bounds,
         nextafter, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
         python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate, radians,
-        ravel_multi_index, required_dict_item, rfftfreq, rint, searchsorted, select, sign, signbit,
-        sinc, solve_triangular, spacing, take, take_along_axis, tensorinv, tensorsolve, trapezoid,
-        trapz, tri, tril_indices, tril_indices_from, triu_indices, triu_indices_from, trunc,
-        unravel_index, where_py,
+        ravel_multi_index, required_dict_item, rfftfreq, rint, searchsorted, select, sign,
+        signbit_native, sinc, solve_triangular, spacing, take, take_along_axis, tensorinv,
+        tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from, triu_indices,
+        triu_indices_from, trunc, unravel_index, where_py,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -61205,7 +61219,7 @@ mod tests {
                 ],
                 "float64",
             );
-            let actual = signbit(py, values.clone().unbind())?;
+            let actual = signbit_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("signbit", (values,))?;
 
@@ -61229,7 +61243,7 @@ mod tests {
                 vec![vec![-0.0, 1.0, -2.0], vec![3.0, -4.0, f64::NEG_INFINITY]],
                 "float64",
             );
-            let actual = signbit(py, values.clone().unbind())?;
+            let actual = signbit_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("signbit", (values,))?;
 

@@ -295,7 +295,7 @@ fn fp_classify_out_keyword_surfaces_match_numpy() -> Result<(), String> {
 def out_outcome(module, name, positional=False, bad_shape=False):
     fn = getattr(module, name)
     try:
-        x = np.array([np.inf, np.nan, 1.0])
+        x = np.array([-0.0, np.nan, 1.0])
         out = np.empty((2,), dtype=bool) if bad_shape else np.empty(3, dtype=bool)
         if positional:
             result = fn(x, out)
@@ -309,12 +309,15 @@ cases = [
     ("isnan keyword out", "isnan", False, False),
     ("isinf keyword out", "isinf", False, False),
     ("isfinite keyword out", "isfinite", False, False),
+    ("signbit keyword out", "signbit", False, False),
     ("isnan positional out", "isnan", True, False),
     ("isinf positional out", "isinf", True, False),
     ("isfinite positional out", "isfinite", True, False),
+    ("signbit positional out", "signbit", True, False),
     ("isnan bad out shape", "isnan", False, True),
     ("isinf bad out shape", "isinf", False, True),
     ("isfinite bad out shape", "isfinite", False, True),
+    ("signbit bad out shape", "signbit", False, True),
 ]
 
 ok = True
