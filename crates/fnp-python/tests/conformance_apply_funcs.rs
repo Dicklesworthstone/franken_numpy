@@ -55,7 +55,9 @@ def apply_along_axis_outcome(fn, func1d, axis, arr):
 
 cases = [
     ("list axis zero sum", lambda: (np.sum, 0, [[1, 2, 3], [4, 5, 6]])),
+    ("ndarray int16 axis zero sum", lambda: (np.sum, 0, np.array([[1, 2], [3, 4]], dtype=np.int16))),
     ("tuple axis one mean", lambda: (np.mean, 1, ((1, 2, 3), (4, 5, 6)))),
+    ("list axis one vector result", lambda: (lambda x: [int(np.min(x)), int(np.max(x))], 1, [[1, 2, 3], [4, 5, 6]])),
     ("list negative axis max", lambda: (np.max, -1, [[1, 9, 3], [4, 2, 6]])),
     ("axis out of bounds", lambda: (np.sum, 3, [[1, 2, 3], [4, 5, 6]])),
 ]
@@ -182,7 +184,9 @@ def apply_over_axes_outcome(fn, func, arr, axes):
 
 cases = [
     ("list single axis", lambda: (np.sum, [[1, 2, 3], [4, 5, 6]], 0)),
+    ("negative axis", lambda: (np.sum, [[1, 2, 3], [4, 5, 6]], [-1])),
     ("list multiple axes", lambda: (np.sum, np.arange(24).reshape(2, 3, 4).tolist(), [0, 2])),
+    ("ndarray int16 multiple axes", lambda: (np.sum, np.arange(12, dtype=np.int16).reshape(2, 2, 3), [0, 2])),
     ("tuple mean axis", lambda: (np.mean, (((1, 2), (3, 4)), ((5, 6), (7, 8))), [1])),
     ("axis out of bounds", lambda: (np.sum, [[1, 2, 3], [4, 5, 6]], [3])),
 ]
