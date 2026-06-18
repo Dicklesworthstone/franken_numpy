@@ -42,6 +42,53 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn take_python_container_modes_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def take_outcome(fn, a, indices, **kwargs):
+    try:
+        result = fn(a, indices, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list payload list indices", lambda: ([4, 3, 5, 7, 6, 8], [0, 1, 4], {})),
+    ("tuple payload tuple indices", lambda: ((1.5, 2.5, 3.5), (2, 0), {})),
+    ("nested list axis zero", lambda: ([[1, 2], [3, 4], [5, 6]], [2, 0], {"axis": 0})),
+    ("nested list axis one", lambda: ([[1, 2, 3], [4, 5, 6]], [2, 0], {"axis": 1})),
+    ("wrap mode", lambda: ([10, 20, 30], [-1, 3], {"mode": "wrap"})),
+    ("clip mode", lambda: ([10, 20, 30], [-1, 3], {"mode": "clip"})),
+    ("raise mode error", lambda: ([10, 20, 30], [0, 4], {})),
+    ("string payload", lambda: (["alpha", "beta", "gamma"], [2, 0], {})),
+]
+
+ok = True
+for label, factory in cases:
+    a, indices, kwargs = factory()
+    actual = take_outcome(fnp.take, a, indices, **kwargs)
+    a, indices, kwargs = factory()
+    expected = take_outcome(np.take, a, indices, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "take Python-container modes should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn take_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
