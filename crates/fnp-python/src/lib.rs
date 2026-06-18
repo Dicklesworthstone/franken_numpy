@@ -17711,43 +17711,65 @@ fn rint(
     }
 }
 
-#[pyfunction]
-fn degrees(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Degrees)? {
+fn native_angle_conversion(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    op: UnaryOp,
+    numpy_name: &str,
+    extract_label: &str,
+) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_f64_unary(py, x, op)? {
         return Ok(out);
     }
     // NumPy promotes by exact width: int8/uint8 -> float16, int16/uint16 -> float32,
     // wider ints -> float64, bool -> float16, and float16/float32 are preserved. The
-    // native path mapped every integer to float64 (widening int8/int16), so defer all
-    // non-float64 inputs to numpy.degrees for exact dtype + value parity.
-    if !numpy_dtype_is_f64(py, x.bind(py)) {
-        return Ok(py
-            .import("numpy")?
-            .getattr("degrees")?
-            .call1((x.bind(py),))?
-            .unbind());
+    // native path maps every integer to float64 (widening int8/int16), so defer all
+    // non-float64 inputs to numpy for exact dtype + value parity.
+    if !numpy_dtype_is_f64(py, x) {
+        return Ok(py.import("numpy")?.getattr(numpy_name)?.call1((x,))?.unbind());
     }
-    let x = extract_precise_numeric_array(py, x.bind(py), "degrees(x)")?;
-    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Degrees))
+    let x = extract_precise_numeric_array(py, x, extract_label)?;
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(op))
+}
+
+fn degrees_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    native_angle_conversion(py, x, UnaryOp::Degrees, "degrees", "degrees(x)")
 }
 
 #[pyfunction]
-fn radians(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Radians)? {
-        return Ok(out);
+#[pyo3(signature = (*args, **kwargs))]
+fn degrees(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        degrees_native(py, &x_arg)
+            .or_else(|_| core_numpy_passthrough(py, "degrees", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "degrees", args, kwargs)
     }
-    // See degrees: NumPy promotes narrow ints to float16/float32 by width, so defer
-    // every non-float64 input to numpy.radians for exact dtype + value parity instead
-    // of widening int8/int16 to float64.
-    if !numpy_dtype_is_f64(py, x.bind(py)) {
-        return Ok(py
-            .import("numpy")?
-            .getattr("radians")?
-            .call1((x.bind(py),))?
-            .unbind());
+}
+
+fn radians_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    native_angle_conversion(py, x, UnaryOp::Radians, "radians", "radians(x)")
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn radians(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        radians_native(py, &x_arg)
+            .or_else(|_| core_numpy_passthrough(py, "radians", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "radians", args, kwargs)
     }
-    let x = extract_precise_numeric_array(py, x.bind(py), "radians(x)")?;
-    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Radians))
 }
 
 #[pyfunction]
@@ -25936,12 +25958,21 @@ fn heaviside(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn rad2deg(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (*args, **kwargs))]
+fn rad2deg(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // Rust-owned alias of np.degrees. Matches numpy's dtype surface:
     // bool/int8/uint8 -> float16, int16/uint16 -> float32, wider ints -> float64,
     // and inexact inputs preserve their floating width while multiplying by 180/pi.
-    degrees(py, x)
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        degrees_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "rad2deg", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "rad2deg", args, kwargs)
+    }
 }
 
 #[pyfunction]
@@ -27350,12 +27381,21 @@ fn log1p(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn deg2rad(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (*args, **kwargs))]
+fn deg2rad(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // Rust-owned alias of np.radians. Matches numpy's dtype surface:
     // bool/int8/uint8 -> float16, int16/uint16 -> float32, wider ints -> float64,
     // and inexact inputs preserve their floating width while multiplying by pi/180.
-    radians(py, x)
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        radians_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "deg2rad", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "deg2rad", args, kwargs)
+    }
 }
 
 #[pyfunction]
@@ -47015,14 +47055,14 @@ mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere, bincount,
         build_numpy_array_from_ufunc, ceil_native, choose, compress, copysign, count_nonzero,
-        degrees, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
+        degrees_native, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
         extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero, flip,
         fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp, isfinite_native,
         isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp,
         logaddexp2, meshgrid, modf, nan_to_num, NarrowSetOp, narrow_bitmap_setop,
         wide_int_table_bounds,
         nextafter, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
-        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate, radians,
+        python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate, radians_native,
         ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted, select, sign,
         signbit_native, sinc, solve_triangular, spacing, take, take_along_axis, tensorinv,
         tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from, triu_indices,
@@ -61623,7 +61663,7 @@ mod tests {
                 vec![0.0, std::f64::consts::FRAC_PI_2, std::f64::consts::PI],
                 "float64",
             );
-            let actual = degrees(py, values.clone().unbind())?;
+            let actual = degrees_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("degrees", (values,))?;
 
@@ -61835,7 +61875,7 @@ mod tests {
                 vec![vec![0_i64, 90_i64], vec![180_i64, -45_i64]],
                 "int64",
             );
-            let actual = radians(py, values.clone().unbind())?;
+            let actual = radians_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("radians", (values,))?;
 

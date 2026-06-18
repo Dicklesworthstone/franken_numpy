@@ -565,6 +565,60 @@ print(np.allclose(deg, roundtrip))
 }
 
 #[test]
+fn angle_conversion_out_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def out_outcome(module, name, positional=False, bad_shape=False):
+    fn = getattr(module, name)
+    try:
+        x = np.array([-180.0, -90.0, 0.0, 90.0, 180.0], dtype=np.float64)
+        out = np.empty((2,), dtype=np.float64) if bad_shape else np.empty(5, dtype=np.float64)
+        if positional:
+            result = fn(x, out)
+        else:
+            result = fn(x, out=out)
+        return ("ok", result is out, out.dtype.str, tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc).splitlines()[0])
+
+cases = [
+    ("degrees keyword out", "degrees", False, False),
+    ("radians keyword out", "radians", False, False),
+    ("deg2rad keyword out", "deg2rad", False, False),
+    ("rad2deg keyword out", "rad2deg", False, False),
+    ("degrees positional out", "degrees", True, False),
+    ("radians positional out", "radians", True, False),
+    ("deg2rad positional out", "deg2rad", True, False),
+    ("rad2deg positional out", "rad2deg", True, False),
+    ("degrees bad out shape", "degrees", False, True),
+    ("radians bad out shape", "radians", False, True),
+    ("deg2rad bad out shape", "deg2rad", False, True),
+    ("rad2deg bad out shape", "rad2deg", False, True),
+]
+
+ok = True
+for label, name, positional, bad_shape in cases:
+    actual = out_outcome(fnp, name, positional, bad_shape)
+    expected = out_outcome(np, name, positional, bad_shape)
+    if actual[0] != expected[0] or actual[1] != expected[1]:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "angle conversion out keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn trig_scalar_return_type_matches_numpy() -> Result<(), String> {
     let funcs = [
         "sin", "cos", "tan", "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh", "arcsinh",
