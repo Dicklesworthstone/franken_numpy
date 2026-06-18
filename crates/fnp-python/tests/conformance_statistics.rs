@@ -37,6 +37,66 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn indent_python(body: &str) -> String {
+    body.lines().map(|line| format!("    {line}\n")).collect()
+}
+
+fn average_outcome_body(body: &str) -> String {
+    let indented = indent_python(body);
+    r#"import json
+
+def normalize(value):
+    if isinstance(value, tuple):
+        return {"kind": "tuple", "items": [normalize(item) for item in value]}
+    if isinstance(value, np.ndarray):
+        return {
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": value.tolist(),
+        }
+    if np.isscalar(value):
+        scalar_type = type(value).__name__
+        scalar_dtype = str(value.dtype) if hasattr(value, "dtype") else None
+        scalar_value = value.item() if hasattr(value, "item") else value
+        return {
+            "kind": "scalar",
+            "type": scalar_type,
+            "dtype": scalar_dtype,
+            "value": scalar_value,
+        }
+    return {"kind": "object", "type": type(value).__name__, "repr": repr(value)}
+
+try:
+__BODY__    print(json.dumps(
+        {"status": "ok", "result": normalize(result)},
+        sort_keys=True,
+        default=str,
+    ))
+except Exception as exc:
+    message = str(exc).splitlines()[0] if str(exc) else ""
+    print(json.dumps(
+        {"status": "err", "type": type(exc).__name__, "message": message},
+        sort_keys=True,
+        default=str,
+    ))
+"#
+    .replace("__BODY__", &indented)
+}
+
+fn numpy_average_outcome_script(body: &str) -> String {
+    format!(
+        "import numpy as np\n\
+         MODULE = np\n\
+         {}",
+        average_outcome_body(body)
+    )
+}
+
+fn fnp_average_outcome_script(body: &str) -> String {
+    fnp_script(format!("MODULE = fnp\n{}", average_outcome_body(body)))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // corrcoef
 // ─────────────────────────────────────────────────────────────────────────────
@@ -166,6 +226,44 @@ print(np.allclose(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 // average
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn average_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "list input scalar",
+            "result = MODULE.average([1, 2, 3, 4])",
+        ),
+        (
+            "tuple input axis weights returned",
+            "result = MODULE.average(
+    ((1.0, 2.0, 3.0), (4.0, 5.0, 6.0)),
+    axis=1,
+    weights=[1.0, 2.0, 3.0],
+    returned=True,
+)",
+        ),
+        (
+            "keepdims keyword",
+            "result = MODULE.average(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0, keepdims=True)",
+        ),
+        (
+            "zero weights error type",
+            "result = MODULE.average([1.0, 2.0, 3.0], weights=[0.0, 0.0, 0.0])",
+        ),
+    ];
+
+    for (name, body) in cases {
+        let numpy_result = numpy_oracle(&numpy_average_outcome_script(body))?;
+        let fnp_result = numpy_oracle(&fnp_average_outcome_script(body))?;
+
+        assert_eq!(
+            fnp_result, numpy_result,
+            "average outcome mismatch for {name}\nnumpy: {numpy_result}\nfnp:   {fnp_result}"
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn average_basic() -> Result<(), String> {
