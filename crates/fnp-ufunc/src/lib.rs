@@ -45,6 +45,7 @@ use std::thread;
 use serde::{Deserialize, Serialize};
 
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
+const BOOLEAN_SET_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PUTMASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
@@ -15979,6 +15980,23 @@ impl UFuncArray {
                 mask.values.len(),
                 self.values.len()
             )));
+        }
+        let n = self.values.len();
+        if n >= BOOLEAN_SET_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+            && self.dtype == DType::F64
+            && self.integer_sidecar.is_none()
+            && mask.integer_sidecar.is_none()
+        {
+            self.values
+                .par_iter_mut()
+                .zip(mask.values.par_iter())
+                .for_each(|(dst, &mask_value)| {
+                    if mask_value != 0.0 {
+                        *dst = value;
+                    }
+                });
+            return Ok(());
         }
         for (flat_index, &m) in mask.values.iter().enumerate() {
             if m != 0.0 {
@@ -53641,6 +53659,71 @@ print(json.dumps(payload))
         let mask = UFuncArray::new(vec![4], vec![0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
         a.boolean_set(&mask, 99.0).unwrap();
         assert_eq!(a.values(), &[1.0, 99.0, 3.0, 99.0]);
+    }
+
+    #[test]
+    fn boolean_set_f64_parallel_matches_serial_reference_and_golden_sha256() {
+        let n = super::BOOLEAN_SET_PARALLEL_MIN_ELEMS + 271;
+        let original: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 211 == 0 {
+                    f64::NAN
+                } else if i % 149 == 0 {
+                    -0.0
+                } else if i % 97 == 0 {
+                    f64::INFINITY
+                } else {
+                    ((i * 41 + 7) % 1009) as f64 / 43.0 - 12.0
+                }
+            })
+            .collect();
+        let mask_values: Vec<f64> = (0..n)
+            .map(|i| {
+                if matches!((i * 31 + 5) % 17, 0 | 3 | 8 | 12) {
+                    1.0
+                } else if i % 29 == 0 {
+                    -0.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let value = -0.0;
+        let expected: Vec<f64> = original
+            .iter()
+            .zip(&mask_values)
+            .map(|(&current, &mask_value)| {
+                if mask_value != 0.0 {
+                    value
+                } else {
+                    current
+                }
+            })
+            .collect();
+
+        let mut actual = UFuncArray::new(vec![n], original, DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![n], mask_values, DType::Bool).unwrap();
+        actual.boolean_set(&mask, value).unwrap();
+
+        assert!(!actual.has_integer_sidecar());
+        let mut digest = Sha256::new();
+        for (idx, (&got, &want)) in actual.values().iter().zip(&expected).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "parallel boolean_set bit drift at index {idx}"
+            );
+            digest.update(got.to_le_bytes());
+        }
+        let digest_hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest_hex,
+            "331291d8d3a4b29c0a72b3e2b13aebf5762a5f94989e57b52646e26199d1f132"
+        );
     }
 
     #[test]
