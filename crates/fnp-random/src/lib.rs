@@ -13789,6 +13789,24 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn logseries_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_values, expected_after) = numpy_oracle_logseries_then_random("0.6")?;
+        let mut rng = oracle_gen();
+        let values = rng
+            .logseries(0.6, 5)
+            .map_err(|_| "logseries live oracle")?;
+        assert_u64_seq("logseries_live_numpy_values", &values, &expected_values);
+
+        let after = rng.random(5);
+        assert_f64_seq("logseries_live_numpy_after", &after, &expected_after);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_logseries_zero_probability_advances_stream() {
         let expected_after = [
             0.883_167_405_273_299_6,
