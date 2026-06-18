@@ -162,8 +162,13 @@ def take_along_axis_outcome(fn, arr, indices, **kwargs):
 cases = [
     ("nested list axis one", lambda: ([[10, 20, 30], [40, 50, 60]], [[0], [2]], {"axis": 1})),
     ("tuple payload tuple indices", lambda: (((3, 1, 2), (6, 4, 5)), ((2, 1, 0), (0, 1, 2)), {"axis": 1})),
+    ("negative axis", lambda: ([[10, 20, 30], [40, 50, 60]], [[2, 1, 0], [0, 1, 2]], {"axis": -1})),
+    ("bool payload", lambda: ([[True, False], [False, True]], [[1], [0]], {"axis": 1})),
+    ("empty indices axis one", lambda: ([[1, 2], [3, 4]], [[], []], {"axis": 1})),
     ("axis zero list indices", lambda: ([[10, 20, 30], [40, 50, 60]], [[1, 0, 1]], {"axis": 0})),
     ("axis none flattening", lambda: ([3, 1, 2, 6], [3, 0], {"axis": None})),
+    ("axis out of bounds error", lambda: ([[1, 2, 3], [4, 5, 6]], [[0], [1]], {"axis": 2})),
+    ("index out of bounds error", lambda: ([[1, 2, 3], [4, 5, 6]], [[3], [0]], {"axis": 1})),
     ("shape mismatch error", lambda: ([[1, 2, 3], [4, 5, 6]], [[0, 1], [1, 0], [0, 1]], {"axis": 1})),
 ]
 
