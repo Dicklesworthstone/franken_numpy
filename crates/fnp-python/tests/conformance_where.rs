@@ -41,6 +41,86 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn where_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(clean(item) for item in value)
+    return value
+
+def normalize(value):
+    if isinstance(value, tuple):
+        arrays = []
+        for item in value:
+            array = np.asarray(item)
+            arrays.append((str(array.dtype), tuple(array.shape), clean(array.tolist())))
+        return ("tuple", len(value), arrays)
+    array = np.asarray(value)
+    return ("array", type(value).__name__, str(array.dtype), tuple(array.shape), clean(array.tolist()))
+
+def where_outcome(where_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(where_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("one arg list condition", lambda: (([False, True, False, True],), {})),
+    ("one arg nested tuple condition", lambda: ((((0, 1), (2, 0)),), {})),
+    ("list condition scalar choices", lambda: (([True, False, True], 1, 0), {})),
+    (
+        "tuple condition tuple choices",
+        lambda: (((True, False, True), (1.5, 2.5, 3.5), (10.5, 20.5, 30.5)), {}),
+    ),
+    (
+        "nested list string choices",
+        lambda: (([[True, False], [False, True]], [["a", "b"], ["c", "d"]], "fallback"), {}),
+    ),
+    (
+        "object none choices",
+        lambda: (([True, False, True], None, np.array([1, 2, 3], dtype=object)), {}),
+    ),
+    (
+        "broadcast scalar condition",
+        lambda: ((True, np.array([1, 2, 3]), np.array([10, 20, 30])), {}),
+    ),
+    (
+        "condition kwargs",
+        lambda: ((), {"condition": [True, False, True], "x": [1, 2, 3], "y": [10, 20, 30]}),
+    ),
+    ("partial args error", lambda: (([True, False], [1, 2]), {})),
+]
+
+ok = True
+for label, factory in cases:
+    args, kwargs = factory()
+    actual = where_outcome(fnp.where, *args, **kwargs)
+    args, kwargs = factory()
+    expected = where_outcome(np.where, *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "where Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // where(condition, x, y) - selection mode
 // ─────────────────────────────────────────────────────────────────────────────
