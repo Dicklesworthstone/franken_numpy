@@ -235,6 +235,51 @@ print(np.allclose(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn searchsorted_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def searchsorted_outcome(fn, a, v, **kwargs):
+    try:
+        result = fn(a, v, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list query stays array", lambda: ([1, 3, 5], [4], {})),
+    ("tuple query right", lambda: ((1, 2, 2, 3), (2, 3), {"side": "right"})),
+    ("python scalar query", lambda: ([1, 3, 5], 4, {})),
+    ("zero-dimensional query", lambda: ([1, 3, 5], np.array(3), {})),
+    ("sorter as list", lambda: ([30, 10, 20], [15, 30], {"sorter": [1, 2, 0]})),
+    ("string list delegate", lambda: (["a", "c", "e"], ["b", "e"], {})),
+]
+
+ok = True
+for label, factory in cases:
+    a, v, kwargs = factory()
+    actual = searchsorted_outcome(fnp.searchsorted, a, v, **kwargs)
+    a, v, kwargs = factory()
+    expected = searchsorted_outcome(np.searchsorted, a, v, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "searchsorted Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn searchsorted_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
