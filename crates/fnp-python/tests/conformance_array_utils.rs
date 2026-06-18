@@ -37,6 +37,115 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn array_utils_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize(value):
+    if isinstance(value, (bool, np.bool_)):
+        return ("bool", bool(value))
+    array = np.asarray(value)
+    return (
+        "array",
+        type(value).__name__,
+        str(array.dtype),
+        tuple(array.shape),
+        clean(array.tolist()),
+        bool(array.flags["C_CONTIGUOUS"]),
+        bool(array.flags["F_CONTIGUOUS"]),
+    )
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    (
+        "array_equal equal_nan list inputs",
+        "array_equal",
+        lambda: (([1.0, np.nan], [1.0, np.nan]), {"equal_nan": True}),
+    ),
+    (
+        "array_equal object inputs",
+        "array_equal",
+        lambda: ((np.array([None, "x"], dtype=object), [None, "x"]), {}),
+    ),
+    (
+        "array_equiv scalar broadcast",
+        "array_equiv",
+        lambda: ((1, [[1, 1], [1, 1]]), {}),
+    ),
+    (
+        "array_equiv object mismatch",
+        "array_equiv",
+        lambda: ((np.array(["a", "b"], dtype=object), [["a", "c"]]), {}),
+    ),
+    (
+        "ascontiguousarray list dtype",
+        "ascontiguousarray",
+        lambda: (([[1, 2], [3, 4]],), {"dtype": np.float32}),
+    ),
+    (
+        "ascontiguousarray fortran source dtype",
+        "ascontiguousarray",
+        lambda: ((np.asfortranarray([[1, 2], [3, 4]]),), {"dtype": np.int64}),
+    ),
+    (
+        "asfortranarray list dtype",
+        "asfortranarray",
+        lambda: (([[1, 2], [3, 4]],), {"dtype": np.float32}),
+    ),
+    (
+        "copy order F",
+        "copy",
+        lambda: ((np.arange(6).reshape(2, 3),), {"order": "F"}),
+    ),
+    (
+        "copy order K fortran source",
+        "copy",
+        lambda: ((np.asfortranarray(np.arange(6).reshape(2, 3)),), {"order": "K", "subok": False}),
+    ),
+    (
+        "ascontiguousarray invalid dtype error",
+        "ascontiguousarray",
+        lambda: (([1, 2],), {"dtype": "not-a-dtype"}),
+    ),
+    ("copy invalid order error", "copy", lambda: ((np.arange(4),), {"order": "Z"})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "array utility Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // array_equal
 // ─────────────────────────────────────────────────────────────────────────────
