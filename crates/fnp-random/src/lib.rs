@@ -14926,6 +14926,32 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn dirichlet_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let alpha = [1.0, 2.0, 3.0];
+        let mut g = oracle_gen();
+        let actual = g.dirichlet(&alpha, 3).expect("dirichlet should succeed");
+        let expected = numpy_oracle_dirichlet(&alpha, 3);
+        assert_eq!(actual.len(), expected.len());
+        for (row_idx, (got_row, exp_row)) in actual.iter().zip(expected.iter()).enumerate() {
+            assert_eq!(
+                got_row.len(),
+                exp_row.len(),
+                "dirichlet live oracle row {row_idx}: dim mismatch"
+            );
+            for (col_idx, (&got, &exp)) in got_row.iter().zip(exp_row.iter()).enumerate() {
+                assert!(
+                    (got - exp).abs() < 1e-12,
+                    "dirichlet live oracle[{row_idx}][{col_idx}]: got {got}, expected {exp}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn oracle_dirichlet_zero_alpha_edges() {
         let mut g = oracle_gen();
 
