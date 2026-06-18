@@ -10610,6 +10610,24 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn shaped_random_zero_axis_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_axis = rng
+            .random_shaped(Some(&[2, 0, 3]))
+            .map_err(|_| "random_shaped zero-axis live oracle")?;
+        assert_eq!(zero_axis.shape(), &[2, 0, 3]);
+        assert!(zero_axis.is_empty());
+        let after = rng.random(1);
+        assert_f64_seq("random_shaped_zero_axis_after_live_numpy", &after, &expected_after);
+        Ok(())
+    }
+
+    #[test]
     fn shaped_size_overflow_is_rejected() {
         let mut rng = test_generator();
         assert_eq!(
