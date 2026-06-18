@@ -37,9 +37,75 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn outcome_body(setup: &str, call_expr: &str) -> String {
+    format!(
+        "{setup}\n\
+         def normalize(value):\n\
+             if isinstance(value, tuple):\n\
+                 return ('tuple', [normalize(item) for item in value])\n\
+             if isinstance(value, list):\n\
+                 return ('list', [normalize(item) for item in value])\n\
+             arr = np.asarray(value)\n\
+             return ('array', str(arr.dtype), tuple(arr.shape), repr(arr.tolist()))\n\
+         def outcome(op):\n\
+             try:\n\
+                 print(('ok', normalize({call_expr})))\n\
+             except Exception as exc:\n\
+                 print(('err', type(exc).__name__))\n\
+         outcome(op)"
+    )
+}
+
+fn numpy_outcome_script(function_expr: &str, setup: &str, call_expr: &str) -> String {
+    format!(
+        "import numpy as np\nop = {function_expr}\n{}",
+        outcome_body(setup, call_expr)
+    )
+}
+
+fn fnp_outcome_script(function_name: &str, setup: &str, call_expr: &str) -> String {
+    fnp_script(format!(
+        "op = fnp.{function_name}\n{}",
+        outcome_body(setup, call_expr)
+    ))
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // histogram2d
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn histogram2d_tuple_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "list tuple inputs with per-axis bins",
+            "",
+            "op([0.2, 1.2, 2.2, 3.2], (0.4, 1.4, 2.4, 3.4), bins=[2, 3])",
+        ),
+        (
+            "weights density keywords",
+            "",
+            "op([0.0, 1.0, 2.0], [0.5, 1.5, 2.5], bins=2, weights=[1.0, 2.0, 3.0], density=True)",
+        ),
+        (
+            "invalid bins length error type",
+            "",
+            "op([0.0, 1.0], [0.0, 1.0], bins=[2])",
+        ),
+    ];
+
+    for (label, setup, call_expr) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script("np.histogram2d", setup, call_expr))?;
+        let rust_result = numpy_oracle(&fnp_outcome_script("histogram2d", setup, call_expr))?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "histogram2d tuple outcome mismatch for {label}"
+        );
+    }
+
+    Ok(())
+}
 
 #[test]
 fn histogram2d_basic() -> Result<(), String> {
@@ -202,6 +268,39 @@ print(match)
 // ─────────────────────────────────────────────────────────────────────────────
 // histogramdd
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn histogramdd_tuple_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "list sample with per-axis bins",
+            "",
+            "op([[0.0, 0.0], [1.0, 1.0], [2.0, 4.0], [3.0, 9.0]], bins=[2, 3])",
+        ),
+        (
+            "range weights density keywords",
+            "",
+            "op([[0.0, 0.0], [1.0, 1.0], [2.0, 4.0]], bins=2, range=[[0.0, 2.0], [0.0, 4.0]], weights=[1.0, 2.0, 3.0], density=True)",
+        ),
+        (
+            "invalid bins length error type",
+            "",
+            "op([[0.0, 0.0], [1.0, 1.0]], bins=[2])",
+        ),
+    ];
+
+    for (label, setup, call_expr) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script("np.histogramdd", setup, call_expr))?;
+        let rust_result = numpy_oracle(&fnp_outcome_script("histogramdd", setup, call_expr))?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "histogramdd tuple outcome mismatch for {label}"
+        );
+    }
+
+    Ok(())
+}
 
 #[test]
 fn histogramdd_2d() -> Result<(), String> {
