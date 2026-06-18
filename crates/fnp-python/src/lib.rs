@@ -1532,15 +1532,16 @@ impl PyRandomGenerator {
             return build_random_i64_parts(py, shape, values, scalar);
         }
 
-        let (population_shape, values) =
-            extract_random_f64_array(py, a.bind(py), "Generator.choice(a)")?;
+        let numpy = py.import("numpy")?;
+        let arr = numpy.call_method1("asarray", (a.bind(py),))?;
+        let population_shape: Vec<usize> = arr.getattr("shape")?.extract()?;
         let axis = try_normalize_axis(axis, population_shape.len()).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "axis {axis} is out of bounds for array of dimension {}",
                 population_shape.len()
             ))
         })?;
-        let (sample_shape, sample_len, scalar) = random_len_and_shape(size)?;
+        let (sample_shape, sample_len, _scalar) = random_len_and_shape(size)?;
         let axis_len = population_shape[axis];
         let sample_indices = if let Some(weights) = weights.as_deref() {
             if weights.len() != axis_len {
@@ -1563,17 +1564,22 @@ impl PyRandomGenerator {
                 .choice_indices_with_shuffle(axis_len, sample_len, replace, shuffle)
                 .map_err(map_random_error)?
         };
-        let (output_shape, values) = choose_random_f64_axis(
-            &values,
-            &population_shape,
-            axis,
-            &sample_indices,
-            &sample_shape,
-        )?;
-        if output_shape.is_empty() {
-            return build_random_f64_parts(py, output_shape, values, scalar);
+        // Gather the sampled elements from the ORIGINAL array via numpy.take so the
+        // result keeps a's exact dtype (int/float/complex/string/...) instead of being
+        // canonicalized to float64 — numpy.choice is itself `a.take(idx, axis)`. The
+        // index array carries the sample shape; take then yields numpy's exact output
+        // shape (population_shape with `axis` replaced by the sample shape). A 0-d result
+        // (size=None over a 1-D population) collapses to numpy's scalar element.
+        let index_i64: Vec<i64> = sample_indices.iter().map(|&value| value as i64).collect();
+        let index_array =
+            build_numpy_array_from_storage(py, &sample_shape, ArrayStorage::I64(index_i64))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", axis as isize)?;
+        let result = arr.call_method("take", (index_array.bind(py),), Some(&kwargs))?;
+        if result.getattr("ndim")?.extract::<usize>()? == 0 {
+            return Ok(result.get_item(())?.unbind());
         }
-        build_random_f64_parts(py, output_shape, values, false)
+        Ok(result.unbind())
     }
 
     #[pyo3(signature = (x, axis=0))]
@@ -1600,7 +1606,14 @@ impl PyRandomGenerator {
             return build_numpy_array_from_storage(py, &[n], ArrayStorage::I64(values));
         }
 
-        let (shape, values) = extract_random_f64_array(py, bound, "Generator.permutation(x)")?;
+        // Permute the ORIGINAL array via numpy.take so the result keeps x's exact dtype
+        // (int/float/complex/string/datetime/...) instead of being canonicalized to
+        // float64. The permutation order is the same bit-exact stream as before, and
+        // numpy.permutation is itself a copy-then-shuffle along `axis`, so take(order,
+        // axis) reproduces it byte-for-byte while preserving dtype.
+        let numpy = py.import("numpy")?;
+        let arr = numpy.call_method1("asarray", (bound,))?;
+        let shape: Vec<usize> = arr.getattr("shape")?.extract()?;
         let axis = try_normalize_axis(axis, shape.len()).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "axis {axis} is out of bounds for array of dimension {}",
@@ -1611,14 +1624,27 @@ impl PyRandomGenerator {
             .inner
             .permutation_range(shape[axis])
             .map_err(map_random_error)?;
-        let values = permute_random_f64_axis(&values, &shape, axis, &order)?;
-        build_random_f64_parts(py, shape, values, false)
+        let order_i64: Vec<i64> = order.into_iter().map(|value| value as i64).collect();
+        let index_array =
+            build_numpy_array_from_storage(py, &[shape[axis]], ArrayStorage::I64(order_i64))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", axis as isize)?;
+        Ok(arr
+            .call_method("take", (index_array.bind(py),), Some(&kwargs))?
+            .unbind())
     }
 
     #[pyo3(signature = (x, axis=0))]
     fn shuffle(&mut self, py: Python<'_>, x: Py<PyAny>, axis: isize) -> PyResult<Py<PyAny>> {
         let bound = x.bind(py);
-        let (shape, values) = extract_random_f64_array(py, bound, "Generator.shuffle(x)")?;
+        // Shuffle in place while preserving x's dtype. The previous path extracted x to
+        // float64 and then copyto'd the float64 result back, which raised for integer x
+        // ("Cannot cast float64 to int64") and silently widened narrow dtypes. Instead
+        // gather x along `axis` with the same bit-exact permutation order via numpy.take
+        // (a same-dtype copy) and copyto that back — so the in-place write matches x's
+        // dtype and the values match numpy's shuffle exactly.
+        let numpy = py.import("numpy")?;
+        let shape: Vec<usize> = bound.getattr("shape")?.extract()?;
         let axis = try_normalize_axis(axis, shape.len()).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "axis {axis} is out of bounds for array of dimension {}",
@@ -1629,10 +1655,13 @@ impl PyRandomGenerator {
             .inner
             .permutation_range(shape[axis])
             .map_err(map_random_error)?;
-        let values = permute_random_f64_axis(&values, &shape, axis, &order)?;
-        let shuffled = build_random_f64_parts(py, shape, values, false)?;
-        py.import("numpy")?
-            .call_method1("copyto", (bound, shuffled.bind(py)))?;
+        let order_i64: Vec<i64> = order.into_iter().map(|value| value as i64).collect();
+        let index_array =
+            build_numpy_array_from_storage(py, &[shape[axis]], ArrayStorage::I64(order_i64))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", axis as isize)?;
+        let shuffled = bound.call_method("take", (index_array.bind(py),), Some(&kwargs))?;
+        numpy.call_method1("copyto", (bound, &shuffled))?;
         Ok(py.None())
     }
 
@@ -3770,100 +3799,6 @@ fn extract_random_f64_array(
         .call_method0("tolist")?
         .extract::<Vec<f64>>()?;
     Ok((shape, values))
-}
-
-fn permute_random_f64_axis(
-    values: &[f64],
-    shape: &[usize],
-    axis: usize,
-    order: &[u64],
-) -> PyResult<Vec<f64>> {
-    if axis >= shape.len() || order.len() != shape[axis] {
-        return Err(PyValueError::new_err("permutation axis metadata mismatch"));
-    }
-    let total = element_count(shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
-    if values.len() != total {
-        return Err(PyValueError::new_err(
-            "permutation values do not match shape",
-        ));
-    }
-    if shape[axis] <= 1 {
-        return Ok(values.to_vec());
-    }
-
-    let mut strides = vec![1usize; shape.len()];
-    for dim in (0..shape.len() - 1).rev() {
-        strides[dim] = strides[dim + 1]
-            .checked_mul(shape[dim + 1])
-            .ok_or_else(|| PyValueError::new_err("permutation shape is too large"))?;
-    }
-
-    let axis_stride = strides[axis];
-    let mut output = Vec::with_capacity(values.len());
-    for linear in 0..values.len() {
-        let axis_index = (linear / axis_stride) % shape[axis];
-        let source_axis = usize::try_from(order[axis_index])
-            .map_err(|_| PyValueError::new_err("permutation index is too large"))?;
-        let base = linear - axis_index * axis_stride;
-        let source = base + source_axis * axis_stride;
-        output.push(values[source]);
-    }
-    Ok(output)
-}
-
-fn choose_random_f64_axis(
-    values: &[f64],
-    shape: &[usize],
-    axis: usize,
-    sample_indices: &[u64],
-    sample_shape: &[usize],
-) -> PyResult<(Vec<usize>, Vec<f64>)> {
-    if axis >= shape.len() {
-        return Err(PyValueError::new_err("choice axis metadata mismatch"));
-    }
-    let total = element_count(shape).map_err(|err| PyValueError::new_err(err.to_string()))?;
-    if values.len() != total {
-        return Err(PyValueError::new_err("choice values do not match shape"));
-    }
-
-    let axis_len = shape[axis];
-    let before =
-        element_count(&shape[..axis]).map_err(|err| PyValueError::new_err(err.to_string()))?;
-    let after =
-        element_count(&shape[axis + 1..]).map_err(|err| PyValueError::new_err(err.to_string()))?;
-
-    let mut output_shape = Vec::with_capacity(shape.len() - 1 + sample_shape.len());
-    output_shape.extend_from_slice(&shape[..axis]);
-    output_shape.extend_from_slice(sample_shape);
-    output_shape.extend_from_slice(&shape[axis + 1..]);
-
-    let output_len = before
-        .checked_mul(sample_indices.len())
-        .and_then(|len| len.checked_mul(after))
-        .ok_or_else(|| PyValueError::new_err("choice output shape is too large"))?;
-    let mut output = Vec::with_capacity(output_len);
-    for outer in 0..before {
-        let block = outer
-            .checked_mul(axis_len)
-            .and_then(|offset| offset.checked_mul(after))
-            .ok_or_else(|| PyValueError::new_err("choice input shape is too large"))?;
-        for &sample in sample_indices {
-            let sample = usize::try_from(sample)
-                .map_err(|_| PyValueError::new_err("choice sample index is too large"))?;
-            if sample >= axis_len {
-                return Err(PyValueError::new_err("choice sample index out of bounds"));
-            }
-            let start = block
-                .checked_add(
-                    sample
-                        .checked_mul(after)
-                        .ok_or_else(|| PyValueError::new_err("choice input shape is too large"))?,
-                )
-                .ok_or_else(|| PyValueError::new_err("choice input shape is too large"))?;
-            output.extend_from_slice(&values[start..start + after]);
-        }
-    }
-    Ok((output_shape, output))
 }
 
 fn extract_random_f64_vector(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
