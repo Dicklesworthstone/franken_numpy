@@ -1673,7 +1673,9 @@ impl PyRandomGenerator {
         axis: Option<Py<PyAny>>,
         out: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
-        let (shape, values) = extract_random_f64_array(py, x.bind(py), "Generator.permuted(x)")?;
+        let numpy = py.import("numpy")?;
+        let arr = numpy.call_method1("asarray", (x.bind(py),))?;
+        let shape: Vec<usize> = arr.getattr("shape")?.extract()?;
         let axis = match extract_axis_spec(py, axis, "Generator.permuted(axis)")? {
             None => None,
             Some(axes) if axes.len() == 1 => {
@@ -1691,17 +1693,32 @@ impl PyRandomGenerator {
                 ));
             }
         };
-        let output = self
+        // permuted is a position-only Fisher-Yates rearrangement that never computes on
+        // the values, so run the SAME shuffle over an identity index array and gather the
+        // result from the ORIGINAL array via numpy — preserving x's exact dtype
+        // (int/complex/string/...) instead of canonicalizing to float64. The RNG
+        // consumption is identical, so this is bit-exact vs numpy; the f64 identity
+        // indices are exact for any real array size (< 2^53 elements).
+        let total: usize = shape.iter().product();
+        let identity: Vec<f64> = (0..total).map(|index| index as f64).collect();
+        let permuted_index = self
             .inner
-            .permuted_shaped(&values, &shape, axis)
+            .permuted(&identity, &shape, axis)
             .map_err(map_random_error)?;
-        let generated = build_random_f64_output(py, output)?;
+        let index_i64: Vec<i64> = permuted_index.iter().map(|&value| value as i64).collect();
+        let index_array =
+            build_numpy_array_from_storage(py, &[total], ArrayStorage::I64(index_i64))?;
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        let generated = arr
+            .call_method1("reshape", (-1,))?
+            .call_method1("take", (index_array.bind(py),))?
+            .call_method1("reshape", (shape_tuple,))?;
         let Some(out) = out else {
-            return Ok(generated);
+            return Ok(generated.unbind());
         };
         let out_bound = out.bind(py);
         if out_bound.is_none() {
-            return Ok(generated);
+            return Ok(generated.unbind());
         }
         require_numpy_ndarray(py, out_bound, "Generator.permuted(out)")?;
         let out_shape = out_bound.getattr("shape")?.extract::<Vec<usize>>()?;
@@ -1710,11 +1727,7 @@ impl PyRandomGenerator {
         }
         let kwargs = PyDict::new(py);
         kwargs.set_item("casting", "safe")?;
-        py.import("numpy")?.call_method(
-            "copyto",
-            (out_bound, generated.bind(py)),
-            Some(&kwargs),
-        )?;
+        numpy.call_method("copyto", (out_bound, &generated), Some(&kwargs))?;
         Ok(out)
     }
 }
@@ -3778,27 +3791,6 @@ fn bit_generator_random_raw(
             .unbind());
     }
     build_numpy_array_from_storage(py, &shape, ArrayStorage::U64(bit_generator.fill_u64(len)))
-}
-
-fn extract_random_f64_array(
-    py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<(Vec<usize>, Vec<f64>)> {
-    let numpy = py.import("numpy")?;
-    let array = numpy.call_method1("asarray", (value,))?;
-    let shape = array.getattr("shape")?.extract::<Vec<usize>>()?;
-    if shape.is_empty() {
-        return Err(PyTypeError::new_err(format!(
-            "{context}: len() of unsized object",
-        )));
-    }
-    let flat = array.call_method1("reshape", (-1,))?;
-    let values = flat
-        .call_method1("astype", ("float64",))?
-        .call_method0("tolist")?
-        .extract::<Vec<f64>>()?;
-    Ok((shape, values))
 }
 
 fn extract_random_f64_vector(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<Vec<f64>> {
