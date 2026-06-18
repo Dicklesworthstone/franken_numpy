@@ -13375,6 +13375,26 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn geometric_matches_live_numpy_oracle_when_available() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let expected = numpy_oracle_geometric_outcome(0.5, 10);
+        let mut g = oracle_gen();
+        let actual = g.geometric(0.5, 10).expect("p=0.5 should succeed");
+        let actual_payload = format!(
+            "ok:{}",
+            actual
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        assert_eq!(actual_payload, expected);
+    }
+
+    #[test]
     fn oracle_geometric_p_one() {
         let mut g = oracle_gen();
         let vals = g.geometric(1.0, 10).expect("p=1 should succeed");
