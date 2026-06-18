@@ -6681,6 +6681,49 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_noncentral_chisquare_then_random(
+        df: f64,
+        nonc: f64,
+        chisquare_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+df = float(sys.argv[1])
+nonc = float(sys.argv[2])
+chisquare_size = int(sys.argv[3])
+random_size = int(sys.argv[4])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.noncentral_chisquare(df, nonc, size=chisquare_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            df.to_string(),
+            nonc.to_string(),
+            chisquare_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle noncentral_chisquare values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
     fn numpy_oracle_noncentral_f(
         dfnum: f64,
         dfden: f64,
@@ -15224,6 +15267,38 @@ for child in rng.spawn(n_children):
             &nan_nonc_after,
             &expected_after_no_consume,
         );
+    }
+
+    #[test]
+    fn noncentral_chisquare_nan_stream_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, df, nonc) in [
+            ("noncentral_chisquare_nan_df_zero_nonc", f64::NAN, 0.0),
+            ("noncentral_chisquare_nan_df_finite_nonc", f64::NAN, 1.0),
+            ("noncentral_chisquare_nan_nonc", f64::NAN, f64::NAN),
+        ] {
+            let (expected_values, expected_after) =
+                numpy_oracle_noncentral_chisquare_then_random(df, nonc, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g
+                .noncentral_chisquare(df, nonc, 3)
+                .map_err(|_| "noncentral_chisquare nan stream live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
     }
 
     #[test]
