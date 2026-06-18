@@ -57459,6 +57459,33 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn percentile_methods_match_numpy_golden() {
+        // numpy.percentile([1..7], q, method=...) for q in [25,50,75,40] across the
+        // five interpolation methods.
+        let a =
+            UFuncArray::new(vec![7], vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0], DType::F64).unwrap();
+        let qs = [25.0, 50.0, 75.0, 40.0];
+        let cases = [
+            (QuantileInterp::Linear, [2.5, 4.0, 5.5, 3.4]),
+            (QuantileInterp::Lower, [2.0, 4.0, 5.0, 3.0]),
+            (QuantileInterp::Higher, [3.0, 4.0, 6.0, 4.0]),
+            (QuantileInterp::Nearest, [3.0, 4.0, 5.0, 3.0]),
+            (QuantileInterp::Midpoint, [2.5, 4.0, 5.5, 3.5]),
+        ];
+        for (method, golden) in cases {
+            for (i, &q) in qs.iter().enumerate() {
+                let got = a.percentile_method(q, None, method).unwrap();
+                assert!(
+                    poly_close(got.values()[0], golden[i]),
+                    "{method:?} q={q}: got {} want {}",
+                    got.values()[0],
+                    golden[i]
+                );
+            }
+        }
+    }
+
+    #[test]
     fn roots_linear() {
         // 2x + 6 = 0 -> x = -3
         let p = UFuncArray::new(vec![2], vec![2.0, 6.0], DType::F64).unwrap();
