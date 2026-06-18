@@ -37788,6 +37788,53 @@ pub fn hermediv(c1: &[f64], c2: &[f64]) -> Result<(Vec<f64>, Vec<f64>), UFuncErr
     Ok((poly2herme(&pq), poly2herme(&pr)))
 }
 
+/// Differentiate a probabilist's Hermite (HermiteE) series `m` times.
+///
+/// He_n'(x) = n·He_{n-1}(x), so the derivative coefficients are der[k] = (k+1)·c[k+1]
+/// (the physicist Hermite recurrence without the factor of 2). Mirrors numpy's
+/// hermite_e.hermeder; the other four families already have a native der, herme did
+/// not (fnp-python only passed it through to numpy).
+pub fn hermeder(c: &[f64], m: usize) -> Vec<f64> {
+    if m == 0 {
+        return c.to_vec();
+    }
+    let mut coeffs = c.to_vec();
+    for _ in 0..m {
+        let n = coeffs.len();
+        if n <= 1 {
+            return vec![0.0];
+        }
+        let mut der = vec![0.0; n - 1];
+        for k in 0..n - 1 {
+            der[k] = (k as f64 + 1.0) * coeffs[k + 1];
+        }
+        coeffs = der;
+    }
+    coeffs
+}
+
+/// Integrate a probabilist's Hermite (HermiteE) series `m` times (constant=0).
+///
+/// ∫He_n dx = He_{n+1}/(n+1), so int[k+1] = c[k]/(k+1). numpy picks the integration
+/// constant so the antiderivative is 0 at the default lower bound lbnd=0:
+/// int[0] = -hermeval(0, int). Mirrors numpy's hermite_e.hermeint.
+pub fn hermeint(c: &[f64], m: usize) -> Vec<f64> {
+    if m == 0 {
+        return c.to_vec();
+    }
+    let mut coeffs = c.to_vec();
+    for _ in 0..m {
+        let n = coeffs.len();
+        let mut int = vec![0.0; n + 1];
+        for k in 0..n {
+            int[k + 1] = coeffs[k] / (k as f64 + 1.0);
+        }
+        int[0] = -hermeval(&[0.0], &int)[0];
+        coeffs = int;
+    }
+    coeffs
+}
+
 /// Find roots of a probabilist's Hermite series.
 pub fn hermeroots(c: &[f64]) -> Result<Vec<f64>, UFuncError> {
     let mut coeffs: Vec<f64> = c.to_vec();
@@ -41060,8 +41107,9 @@ mod tests {
         financial_pmt, financial_ppmt, financial_pv, financial_rate, frexp, frompyfunc,
         frompyfunc_object, frompyfunc_python, frompyfunc_python_import,
         frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
-        geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermediv, hermefit,
-        hermefromroots, hermemul, hermeroots, hermesub, hermeval, hermfit, hermfromroots, hermint,
+        geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermeder, hermediv,
+        hermefit, hermefromroots, hermeint, hermemul, hermeroots, hermesub, hermeval, hermfit,
+        hermfromroots, hermint,
         hermmul, hermroots, hermsub, hermval, hypot, interpolate_percentile, is_busday, isnat,
         isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul,
         lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv, legfit,
@@ -57483,6 +57531,35 @@ print(json.dumps(payload))
                 );
             }
         }
+    }
+
+    #[test]
+    fn hermeder_hermeint_match_numpy_golden() {
+        // Native HermiteE der/int (newly added; fnp-python previously only passed
+        // these through to numpy). Goldens from numpy.polynomial.hermite_e.
+        let c = [1.0, 2.0, 3.0, 4.0, 5.0];
+        poly_close_vec(&hermeder(&c, 1), &[2.0, 6.0, 12.0, 20.0], "hermeder1");
+        poly_close_vec(&hermeder(&c, 2), &[6.0, 24.0, 60.0], "hermeder2");
+        poly_close_vec(
+            &hermeint(&c, 1),
+            &[-2.0, 1.0, 1.0, 1.0, 1.0, 1.0],
+            "hermeint1",
+        );
+        poly_close_vec(
+            &hermeint(&c, 2),
+            &[
+                2.25,
+                -2.0,
+                0.5,
+                0.333_333_33,
+                0.25,
+                0.2,
+                0.166_666_67,
+            ],
+            "hermeint2",
+        );
+        // der undoes int (the constant is removed by differentiation).
+        poly_close_vec(&hermeder(&hermeint(&c, 1), 1), &c, "herme der∘int");
     }
 
     #[test]
