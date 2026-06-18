@@ -37,6 +37,94 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn tile_repeat_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize_array(value):
+    array = np.asarray(value)
+    return (
+        str(array.dtype),
+        tuple(array.shape),
+        clean(array.tolist()),
+        bool(array.flags["WRITEABLE"]),
+    )
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize_array(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    ("tile Python list scalar reps", "tile", lambda: (([1, 2, 3], 2), {})),
+    ("tile tuple input tuple reps", "tile", lambda: ((((1, 2), (3, 4)), (2, 1)), {})),
+    (
+        "tile object list keyword reps",
+        "tile",
+        lambda: (([1, None, "x"],), {"reps": (2,)}),
+    ),
+    ("tile zero reps tuple", "tile", lambda: (([1, 2, 3], (2, 0)), {})),
+    ("tile negative reps error", "tile", lambda: (([1, 2, 3], (2, -1)), {})),
+    (
+        "repeat Python list scalar repeats",
+        "repeat",
+        lambda: (([1, 2, 3],), {"repeats": 2}),
+    ),
+    (
+        "repeat tuple input list repeats",
+        "repeat",
+        lambda: ((((1, 2, 3), (4, 5, 6)), [1, 0, 2]), {}),
+    ),
+    (
+        "repeat nested list axis keyword",
+        "repeat",
+        lambda: (([[1, 2], [3, 4]], [1, 2]), {"axis": 0}),
+    ),
+    (
+        "repeat object tuple axis keyword",
+        "repeat",
+        lambda: ((np.array([["a", None]], dtype=object), [2, 1]), {"axis": 1}),
+    ),
+    ("repeat negative repeats error", "repeat", lambda: (([1, 2, 3], [1, -1, 1]), {})),
+    (
+        "repeat axis out of bounds error",
+        "repeat",
+        lambda: (([[1, 2], [3, 4]], 2), {"axis": 4}),
+    ),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "tile/repeat Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // tile
 // ─────────────────────────────────────────────────────────────────────────────
