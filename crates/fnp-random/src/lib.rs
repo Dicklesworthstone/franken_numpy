@@ -7446,6 +7446,21 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_permutation_range(n: usize) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+n = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.permutation(n)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[n.to_string()])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_negative_binomial(
         n: f64,
         p: f64,
@@ -11114,6 +11129,21 @@ for child in rng.spawn(n_children):
         let mut sorted = perm;
         sorted.sort();
         assert_eq!(sorted, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn permutation_range_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_permutation_range(10)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual = rng
+            .permutation_range(10)
+            .map_err(|_| "permutation_range live oracle")?;
+        assert_eq!(actual, expected);
+        Ok(())
     }
 
     #[test]
