@@ -6753,6 +6753,52 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_noncentral_f_then_random(
+        dfnum: f64,
+        dfden: f64,
+        nonc: f64,
+        f_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+dfnum = float(sys.argv[1])
+dfden = float(sys.argv[2])
+nonc = float(sys.argv[3])
+f_size = int(sys.argv[4])
+random_size = int(sys.argv[5])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.noncentral_f(dfnum, dfden, nonc, size=f_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            dfnum.to_string(),
+            dfden.to_string(),
+            nonc.to_string(),
+            f_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle noncentral_f values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
     fn numpy_oracle_standard_t(df: f64, size: usize) -> Result<Vec<f64>, &'static str> {
         let script = r#"
 import sys
@@ -15388,6 +15434,38 @@ for child in rng.spawn(n_children):
             &nonc_nan_after,
             &expected_after_nonc_nan,
         );
+    }
+
+    #[test]
+    fn noncentral_f_nan_stream_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, dfnum, dfden, nonc) in [
+            ("noncentral_f_dfnum_nan", f64::NAN, 5.0, 1.0),
+            ("noncentral_f_dfden_nan", 2.0, f64::NAN, 1.0),
+            ("noncentral_f_nonc_nan", 2.0, 5.0, f64::NAN),
+        ] {
+            let (expected_values, expected_after) =
+                numpy_oracle_noncentral_f_then_random(dfnum, dfden, nonc, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g
+                .noncentral_f(dfnum, dfden, nonc, 3)
+                .map_err(|_| "noncentral_f nan stream live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
     }
 
     #[test]
