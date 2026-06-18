@@ -7598,6 +7598,38 @@ print("after:" + ",".join(str(float(value)) for value in after.tolist()))
         ))
     }
 
+    fn numpy_oracle_choice_indices(
+        seed: u64,
+        pop_size: usize,
+        size: usize,
+        replace: bool,
+        shuffle: bool,
+    ) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+seed = int(sys.argv[1])
+pop_size = int(sys.argv[2])
+size = int(sys.argv[3])
+replace = sys.argv[4] == "true"
+shuffle = sys.argv[5] == "true"
+rng = np.random.Generator(np.random.PCG64DXSM(seed))
+values = rng.choice(pop_size, size=size, replace=replace, shuffle=shuffle)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let args = [
+            seed.to_string(),
+            pop_size.to_string(),
+            size.to_string(),
+            if replace { "true" } else { "false" }.to_string(),
+            if shuffle { "true" } else { "false" }.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_geometric_outcome(p: f64, size: usize) -> String {
         let script = r#"
 import sys
@@ -10926,6 +10958,34 @@ for child in rng.spawn(n_children):
                 .expect("choice indices"),
             [4, 1, 0, 2, 9]
         );
+    }
+
+    #[test]
+    fn choice_indices_match_live_numpy_integer_domain_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (seed, pop_size, size, replace, shuffle) in [
+            (260_u64, 5_usize, 3_usize, true, true),
+            (262_u64, 5_usize, 4_usize, false, true),
+            (263_u64, 0_usize, 0_usize, true, true),
+            (360_u64, 10_usize, 5_usize, false, false),
+        ] {
+            let expected = numpy_oracle_choice_indices(seed, pop_size, size, replace, shuffle)?;
+            let bit_generator =
+                BitGenerator::new(BitGeneratorKind::Pcg64Dxsm, SeedMaterial::U64(seed))
+                    .map_err(|_| "pcg64dxsm seed")?;
+            let mut rng = Generator::from_bit_generator(bit_generator);
+            let actual = rng
+                .choice_indices_with_shuffle(pop_size, size, replace, shuffle)
+                .map_err(|_| "choice indices live oracle")?;
+            assert_eq!(
+                actual, expected,
+                "seed={seed}, pop_size={pop_size}, size={size}, replace={replace}, shuffle={shuffle}"
+            );
+        }
+        Ok(())
     }
 
     #[test]
