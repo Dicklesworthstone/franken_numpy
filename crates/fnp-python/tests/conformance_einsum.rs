@@ -37,6 +37,126 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn indent_python(body: &str) -> String {
+    body.lines().map(|line| format!("    {line}\n")).collect()
+}
+
+fn outcome_body(body: &str) -> String {
+    let indented = indent_python(body);
+    r#"import json
+
+def normalize(value):
+    if isinstance(value, (tuple, list)):
+        return {
+            "kind": type(value).__name__,
+            "items": [normalize(item) for item in value],
+        }
+    if isinstance(value, np.ndarray):
+        return {
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": value.tolist(),
+        }
+    if np.isscalar(value):
+        scalar_type = type(value).__name__
+        scalar_dtype = str(value.dtype) if hasattr(value, "dtype") else None
+        scalar_value = value.item() if hasattr(value, "item") else value
+        return {
+            "kind": "scalar",
+            "type": scalar_type,
+            "dtype": scalar_dtype,
+            "value": scalar_value,
+        }
+    return {"kind": "object", "type": type(value).__name__, "repr": repr(value)}
+
+try:
+__BODY__    payload = {"status": "ok", "result": normalize(result)}
+    if "out" in locals():
+        payload["out"] = normalize(out)
+        payload["result_is_out"] = result is out
+    print(json.dumps(payload, sort_keys=True, default=str))
+except Exception as exc:
+    message = str(exc).splitlines()[0] if str(exc) else ""
+    print(json.dumps(
+        {"status": "err", "type": type(exc).__name__, "message": message},
+        sort_keys=True,
+        default=str,
+    ))
+"#
+    .replace("__BODY__", &indented)
+}
+
+fn numpy_outcome_script(body: &str) -> String {
+    format!(
+        "import numpy as np\n\
+         MODULE = np\n\
+         {}",
+        outcome_body(body)
+    )
+}
+
+fn fnp_outcome_script(body: &str) -> String {
+    fnp_script(format!("MODULE = fnp\n{}", outcome_body(body)))
+}
+
+#[test]
+fn einsum_keyword_and_path_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "scalar contraction",
+            "result = MODULE.einsum('i,i->', [1, 2, 3], [4, 5, 6])",
+        ),
+        (
+            "dtype order casting",
+            "result = MODULE.einsum(
+    'ij,jk->ik',
+    np.array([[1, 2], [3, 4]], dtype=np.int32),
+    np.array([[5, 6], [7, 8]], dtype=np.int32),
+    dtype=np.float64,
+    casting='unsafe',
+    order='F',
+)",
+        ),
+        (
+            "optimize out forwarding",
+            "out = np.empty((2, 2), dtype=np.float64)
+result = MODULE.einsum(
+    'ij,jk->ik',
+    np.array([[1.0, 2.0], [3.0, 4.0]]),
+    np.array([[5.0, 6.0], [7.0, 8.0]]),
+    optimize='greedy',
+    out=out,
+)",
+        ),
+        (
+            "path tuple output",
+            "result = MODULE.einsum_path(
+    'ij,jk,kl->il',
+    np.ones((2, 3)),
+    np.ones((3, 4)),
+    np.ones((4, 2)),
+    optimize='optimal',
+)",
+        ),
+        (
+            "subscript dimension error",
+            "result = MODULE.einsum('ij,j->i', np.arange(3), np.arange(3))",
+        ),
+    ];
+
+    for (name, body) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script(body))?;
+        let fnp_result = numpy_oracle(&fnp_outcome_script(body))?;
+
+        assert_eq!(
+            fnp_result, numpy_result,
+            "einsum outcome mismatch for {name}\nnumpy: {numpy_result}\nfnp:   {fnp_result}"
+        );
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // einsum - basic operations
 // ─────────────────────────────────────────────────────────────────────────────
