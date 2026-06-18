@@ -42,6 +42,51 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn extract_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def extract_outcome(fn, condition, arr):
+    try:
+        result = fn(condition, arr)
+        out = np.asarray(result)
+        return ("ok", type(result).__name__, str(out.dtype), tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list condition list payload", lambda: ([True, False, True], [10, 20, 30])),
+    ("tuple condition tuple payload", lambda: ((False, True, True), (1.5, 2.5, 3.5))),
+    ("nested list flattening", lambda: ([[True, False], [False, True]], [[1, 2], [3, 4]])),
+    ("short condition", lambda: ([True, False], [1, 2, 3, 4])),
+    ("string payload", lambda: ([True, False, True], ["alpha", "beta", "gamma"])),
+    ("scalar payload mismatch", lambda: ([True, False], 5)),
+]
+
+ok = True
+for label, factory in cases:
+    condition, arr = factory()
+    actual = extract_outcome(fnp.extract, condition, arr)
+    condition, arr = factory()
+    expected = extract_outcome(np.extract, condition, arr)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "extract Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn extract_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
