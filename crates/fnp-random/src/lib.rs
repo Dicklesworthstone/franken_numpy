@@ -10739,6 +10739,44 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn random_f32_scalar_and_zero_dim_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_random_f32_bits(1)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .random_f32_shaped(None)
+            .map_err(|_| "random_f32_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        let scalar_bits = scalar
+            .values()
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(scalar_bits, expected);
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .random_f32_shaped(Some(&[]))
+            .map_err(|_| "random_f32_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        let zero_dim_bits = zero_dim
+            .values()
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(zero_dim_bits, expected);
+        Ok(())
+    }
+
+    #[test]
     fn integers_in_range() {
         let mut rng = test_generator();
         let vals = rng.integers(0, 10, 100).unwrap();
