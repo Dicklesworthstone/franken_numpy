@@ -38,6 +38,99 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn outcome_body(setup: &str, call_expr: &str) -> String {
+    format!(
+        "{setup}\n\
+         def outcome(op):\n\
+             try:\n\
+                 value = {call_expr}\n\
+                 arr = np.asarray(value)\n\
+                 print('ok')\n\
+                 print(type(value).__name__)\n\
+                 print(str(arr.dtype))\n\
+                 print(tuple(arr.shape))\n\
+                 print(repr(arr.tolist()))\n\
+             except Exception as exc:\n\
+                 print('err')\n\
+                 print(type(exc).__name__)\n\
+         outcome(op)"
+    )
+}
+
+fn numpy_outcome_script(function_expr: &str, setup: &str, call_expr: &str) -> String {
+    format!(
+        "import numpy as np\nop = {function_expr}\n{}",
+        outcome_body(setup, call_expr)
+    )
+}
+
+fn fnp_outcome_script(function_name: &str, setup: &str, call_expr: &str) -> String {
+    fnp_script(format!(
+        "op = fnp.{function_name}\n{}",
+        outcome_body(setup, call_expr)
+    ))
+}
+
+#[test]
+fn nan_function_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "nansum",
+            "np.nansum",
+            "nansum",
+            "",
+            "op([[1.0, np.nan], [3.0, 4.0]], axis=1, keepdims=True)",
+        ),
+        (
+            "nanmean",
+            "np.nanmean",
+            "nanmean",
+            "",
+            "op(((1.0, np.nan), (3.0, 5.0)), axis=0, dtype=np.float64, keepdims=True)",
+        ),
+        (
+            "nanstd where ddof",
+            "np.nanstd",
+            "nanstd",
+            "x = np.array([[1.0, np.nan, 3.0], [4.0, 5.0, np.nan]])\nmask = np.array([[True, False, True], [True, True, False]])",
+            "op(x, axis=1, ddof=1, where=mask, keepdims=True)",
+        ),
+        (
+            "nanmin keepdims",
+            "np.nanmin",
+            "nanmin",
+            "",
+            "op([[np.nan, 2.0], [3.0, 4.0]], axis=0, keepdims=True)",
+        ),
+        (
+            "nanargmin keepdims",
+            "np.nanargmin",
+            "nanargmin",
+            "",
+            "op([[np.nan, 2.0], [3.0, 4.0]], axis=0, keepdims=True)",
+        ),
+        (
+            "nanargmin all nan error type",
+            "np.nanargmin",
+            "nanargmin",
+            "",
+            "op([np.nan, np.nan])",
+        ),
+    ];
+
+    for (label, numpy_name, fnp_name, setup, call_expr) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script(numpy_name, setup, call_expr))?;
+        let rust_result = numpy_oracle(&fnp_outcome_script(fnp_name, setup, call_expr))?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "nan function keyword outcome mismatch for {label}"
+        );
+    }
+
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // nansum
 // ─────────────────────────────────────────────────────────────────────────────
