@@ -6603,6 +6603,42 @@ print(",".join(str(int(value)) for value in values.tolist()))
         parse_oracle_u64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_multivariate_hypergeometric_count(
+        colors: &[u64],
+        nsample: u64,
+        size: usize,
+    ) -> Result<Vec<Vec<u64>>, &'static str> {
+        let colors_arg = format!(
+            "[{}]",
+            colors
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+colors = json.loads(sys.argv[1])
+nsample = int(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.multivariate_hypergeometric(colors, nsample, size=size, method="count")
+for row in values.tolist():
+    print(",".join(str(int(value)) for value in row))
+"#;
+        let args = [colors_arg, nsample.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut rows = Vec::new();
+        for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+            rows.push(parse_oracle_u64_csv(line.trim())?);
+        }
+        Ok(rows)
+    }
+
     fn numpy_oracle_choice_weighted_no_replace() -> Result<(Vec<f64>, Vec<f64>), &'static str> {
         let script = r#"
 import numpy as np
@@ -11330,6 +11366,23 @@ for child in rng.spawn(n_children):
             samples,
             vec![vec![0, 1, 4], vec![0, 1, 4], vec![1, 2, 2], vec![1, 2, 2]]
         );
+    }
+
+    #[test]
+    fn multivariate_hypergeometric_count_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_multivariate_hypergeometric_count(&[10, 20, 30], 5, 4)?;
+        let mut rng = oracle_gen();
+        let actual = rng
+            .multivariate_hypergeometric_count(&[10, 20, 30], 5, 4)
+            .map_err(|_| "multivariate_hypergeometric count live oracle case")?;
+        if !actual.eq(&expected) {
+            return Err("multivariate_hypergeometric count live oracle mismatch");
+        }
+        Ok(())
     }
 
     #[test]
