@@ -6510,6 +6510,48 @@ print(",".join(str(int(value)) for value in out.reshape(-1).tolist()))
         Ok(values)
     }
 
+    fn parse_oracle_u64_csv(csv: &str) -> Result<Vec<u64>, &'static str> {
+        let mut values = Vec::new();
+        for token in csv.split(',').filter(|token| !token.is_empty()) {
+            let value = token
+                .parse::<u64>()
+                .map_err(|_| "oracle integer parse failed")?;
+            values.push(value);
+        }
+        Ok(values)
+    }
+
+    fn numpy_oracle_logseries_then_random(
+        p: &str,
+    ) -> Result<(Vec<u64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+p = float(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.logseries(p, size=5)
+after = rng.random(5)
+print("values:" + ",".join(str(int(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[p.to_string()])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_u64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
     fn numpy_oracle_choice_weighted_no_replace() -> Result<(Vec<f64>, Vec<f64>), &'static str> {
         let script = r#"
 import numpy as np
@@ -12839,6 +12881,39 @@ for child in rng.spawn(n_children):
             &negative_zero_after,
             &expected_after,
         );
+    }
+
+    #[test]
+    fn logseries_zero_probability_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (values_label, after_label, p_arg, p_value) in [
+            (
+                "logseries_zero_live_numpy_values",
+                "logseries_zero_live_numpy_after",
+                "0.0",
+                0.0,
+            ),
+            (
+                "logseries_negative_zero_live_numpy_values",
+                "logseries_negative_zero_live_numpy_after",
+                "-0.0",
+                -0.0,
+            ),
+        ] {
+            let (expected_values, expected_after) = numpy_oracle_logseries_then_random(p_arg)?;
+            let mut rng = oracle_gen();
+            let values = rng
+                .logseries(p_value, 5)
+                .map_err(|_| "logseries zero probability live oracle case")?;
+            assert_u64_seq(values_label, &values, &expected_values);
+
+            let after = rng.random(5);
+            assert_f64_seq(after_label, &after, &expected_after);
+        }
+        Ok(())
     }
 
     #[test]
