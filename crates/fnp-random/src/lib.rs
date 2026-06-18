@@ -6342,6 +6342,47 @@ for row in out:
             .collect()
     }
 
+    fn numpy_oracle_dirichlet_then_random(
+        alpha: &[f64],
+        size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<Vec<f64>>, Vec<f64>), &'static str> {
+        let alpha_arg = alpha
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = r#"
+import sys
+import numpy as np
+
+alpha = [float(part) for part in sys.argv[1].split(",") if part]
+size = int(sys.argv[2])
+random_size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+out = rng.dirichlet(alpha, size=size)
+after = rng.random(random_size)
+for row in out:
+    print("row:" + ",".join(str(float(value)) for value in row.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(
+            script,
+            &[alpha_arg, size.to_string(), random_size.to_string()],
+        )?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut rows = Vec::new();
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("row:") {
+                rows.push(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((rows, after.ok_or("oracle after stream missing")?))
+    }
+
     fn numpy_oracle_multivariate_normal_cholesky(size: usize) -> Vec<Vec<f64>> {
         let script = r#"
 import numpy as np
@@ -15748,6 +15789,48 @@ for child in rng.spawn(n_children):
             let after = g.random(5);
             assert_f64_seq(label, &after, expected_after);
         }
+    }
+
+    #[test]
+    fn dirichlet_nonfinite_alpha_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, alpha) in [
+            ("dirichlet_nan_one", [f64::NAN, 1.0]),
+            ("dirichlet_one_nan", [1.0, f64::NAN]),
+            ("dirichlet_inf_one", [f64::INFINITY, 1.0]),
+            ("dirichlet_one_inf", [1.0, f64::INFINITY]),
+            ("dirichlet_nan_inf", [f64::NAN, f64::INFINITY]),
+        ] {
+            let (expected_rows, expected_after) = numpy_oracle_dirichlet_then_random(&alpha, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_rows = g
+                .dirichlet(&alpha, 3)
+                .map_err(|_| "dirichlet nonfinite live oracle")?;
+            assert_eq!(
+                actual_rows.len(),
+                expected_rows.len(),
+                "{label}: row count mismatch"
+            );
+            for (row_idx, (actual_row, expected_row)) in
+                actual_rows.iter().zip(expected_rows.iter()).enumerate()
+            {
+                assert_f64_seq_with_nan(
+                    &format!("{label}_row_{row_idx}_live_numpy"),
+                    actual_row,
+                    expected_row,
+                );
+            }
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
     }
 
     #[test]
