@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
 const POLYVAL_ND_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+const POLYVANDER_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UFuncRuntimeMode {
@@ -20626,12 +20627,27 @@ impl UFuncArray {
         let cols = deg + 1;
         let mut v = vec![0.0; n * cols];
 
-        for i in 0..n {
+        let fill_row = |i: usize, row: &mut [f64]| {
             let x = self.values[i];
             let mut power = 1.0;
-            for j in 0..cols {
-                v[i * cols + j] = power;
+            for slot in row {
+                *slot = power;
                 power *= x;
+            }
+        };
+
+        if cols == 0 {
+            // Preserve the old zero-column behavior for wrapping release builds.
+        } else if n * cols >= POLYVANDER_PARALLEL_MIN_ELEMS
+            && cols >= 2
+            && rayon::current_num_threads() >= 2
+        {
+            v.par_chunks_mut(cols)
+                .enumerate()
+                .for_each(|(i, row)| fill_row(i, row));
+        } else {
+            for (i, row) in v.chunks_mut(cols).enumerate() {
+                fill_row(i, row);
             }
         }
 
@@ -49425,6 +49441,46 @@ print(json.dumps(payload))
         assert_eq!(
             digest3, "6df764114a9778ae5e61d17e8e489d61d644b78c5994164b5bbfe2ef613938c7",
             "polyval3d golden digest drifted"
+        );
+    }
+
+    #[test]
+    fn polyvander_parallel_matches_serial_reference_and_golden_sha256() {
+        // Each Vandermonde row is an independent power chain. This size clears
+        // the row-morsel gate so threaded test runs exercise the parallel path,
+        // while the serial reference pins the exact per-row multiplication order.
+        let n = super::POLYVANDER_PARALLEL_MIN_ELEMS / 4 + 3;
+        let deg = 7usize;
+        let cols = deg + 1;
+        let x_vals: Vec<f64> = (0..n)
+            .map(|i| ((i * 37 + 17) % 1009) as f64 / 101.0 - 4.0)
+            .collect();
+        let x = UFuncArray::new(vec![n], x_vals.clone(), DType::F64).unwrap();
+        let out = x.polyvander(deg).unwrap();
+
+        assert_eq!(out.shape(), &[n, cols]);
+        let mut digest = Sha256::new();
+        for (i, &xi) in x_vals.iter().enumerate() {
+            let mut expected = 1.0f64;
+            for j in 0..cols {
+                let got = out.values()[i * cols + j];
+                assert_eq!(
+                    got.to_bits(),
+                    expected.to_bits(),
+                    "polyvander drifted at row {i}, col {j}"
+                );
+                digest.update(got.to_bits().to_le_bytes());
+                expected *= xi;
+            }
+        }
+        let digest = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "a0230a3f27f9d19a90c0b56c4eff10884fc0d3f31d5a073918f65922fc28701c",
+            "polyvander golden digest drifted"
         );
     }
 
