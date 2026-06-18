@@ -308,10 +308,17 @@ def select_outcome(fn, condlist, choicelist, **kwargs):
 
 cases = [
     ("list conditions list choices", lambda: ([[True, False, True], [False, True, False]], [[1, 2, 3], [10, 20, 30]], {"default": 0})),
+    (
+        "ndarray conditions choices",
+        lambda: ([np.array([False, True, True]), np.array([True, False, False])], [np.array([1, 2, 3], dtype=np.int16), np.array([10, 20, 30], dtype=np.int16)], {"default": -5}),
+    ),
     ("tuple conditions tuple choices", lambda: (((True, False, False), (False, True, True)), ((1.5, 2.5, 3.5), (10.5, 20.5, 30.5)), {})),
     ("scalar choices default", lambda: ([[True, False, True], [False, True, False]], [1, 2], {"default": -1})),
+    ("scalar condition broadcasts", lambda: ([True, False], [np.array([1, 2, 3]), np.array([4, 5, 6])], {"default": 0})),
+    ("mixed numeric promotion", lambda: ([[False, True, False], [True, False, False]], [1.5, [1, 2, 3]], {"default": -1})),
     ("nested list choices", lambda: ([[[True, False], [False, True]]], [[["a", "b"], ["c", "d"]]], {"default": "fallback"})),
     ("string choices default", lambda: ([[True, False, True]], [["alpha", "beta", "gamma"]], {"default": "fallback"})),
+    ("non-bool condition error", lambda: ([[1, 0, 1]], [[1, 2, 3]], {})),
     ("length mismatch error", lambda: ([[True, False, True], [False, True, False]], [[1, 2, 3]], {})),
 ]
 
