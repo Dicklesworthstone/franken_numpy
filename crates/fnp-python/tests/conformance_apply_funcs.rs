@@ -209,6 +209,51 @@ print(callable(fnp.vectorize))
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn select_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def select_outcome(fn, condlist, choicelist, **kwargs):
+    try:
+        result = fn(condlist, choicelist, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list conditions list choices", lambda: ([[True, False, True], [False, True, False]], [[1, 2, 3], [10, 20, 30]], {"default": 0})),
+    ("tuple conditions tuple choices", lambda: (((True, False, False), (False, True, True)), ((1.5, 2.5, 3.5), (10.5, 20.5, 30.5)), {})),
+    ("scalar choices default", lambda: ([[True, False, True], [False, True, False]], [1, 2], {"default": -1})),
+    ("nested list choices", lambda: ([[[True, False], [False, True]]], [[["a", "b"], ["c", "d"]]], {"default": "fallback"})),
+    ("string choices default", lambda: ([[True, False, True]], [["alpha", "beta", "gamma"]], {"default": "fallback"})),
+    ("length mismatch error", lambda: ([[True, False, True], [False, True, False]], [[1, 2, 3]], {})),
+]
+
+ok = True
+for label, factory in cases:
+    condlist, choicelist, kwargs = factory()
+    actual = select_outcome(fnp.select, condlist, choicelist, **kwargs)
+    condlist, choicelist, kwargs = factory()
+    expected = select_outcome(np.select, condlist, choicelist, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "select Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn select_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
