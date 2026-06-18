@@ -6616,6 +6616,49 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_f_distribution_then_random(
+        dfnum: f64,
+        dfden: f64,
+        f_size: usize,
+        random_size: usize,
+    ) -> Result<(Vec<f64>, Vec<f64>), &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+dfnum = float(sys.argv[1])
+dfden = float(sys.argv[2])
+f_size = int(sys.argv[3])
+random_size = int(sys.argv[4])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.f(dfnum, dfden, size=f_size)
+after = rng.random(random_size)
+print("values:" + ",".join(str(float(value)) for value in values.tolist()))
+print("after:" + ",".join(str(float(value)) for value in after.tolist()))
+"#;
+        let args = [
+            dfnum.to_string(),
+            dfden.to_string(),
+            f_size.to_string(),
+            random_size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = None;
+        let mut after = None;
+        for line in stdout.lines() {
+            if let Some(csv) = line.strip_prefix("values:") {
+                values = Some(parse_oracle_f64_csv(csv)?);
+            } else if let Some(csv) = line.strip_prefix("after:") {
+                after = Some(parse_oracle_f64_csv(csv)?);
+            }
+        }
+        Ok((
+            values.ok_or("oracle f values missing")?,
+            after.ok_or("oracle after stream missing")?,
+        ))
+    }
+
     fn numpy_oracle_noncentral_chisquare(
         df: f64,
         nonc: f64,
@@ -14471,6 +14514,40 @@ for child in rng.spawn(n_children):
             let after = g.random(5);
             assert_f64_seq(label, &after, expected_after);
         }
+    }
+
+    #[test]
+    fn f_nonfinite_parameters_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, dfnum, dfden) in [
+            ("f_inf_one", f64::INFINITY, 1.0),
+            ("f_one_inf", 1.0, f64::INFINITY),
+            ("f_inf_inf", f64::INFINITY, f64::INFINITY),
+            ("f_nan_one", f64::NAN, 1.0),
+            ("f_one_nan", 1.0, f64::NAN),
+        ] {
+            let (expected_values, expected_after) =
+                numpy_oracle_f_distribution_then_random(dfnum, dfden, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g
+                .f(dfnum, dfden, 3)
+                .map_err(|_| "f nonfinite live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
     }
 
     #[test]
