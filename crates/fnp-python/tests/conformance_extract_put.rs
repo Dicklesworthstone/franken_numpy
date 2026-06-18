@@ -54,10 +54,18 @@ def extract_outcome(fn, condition, arr):
         return ("err", type(exc).__name__, str(exc))
 
 cases = [
+    ("empty condition", lambda: ([], [1, 2, 3])),
+    ("all false condition", lambda: ([False, False], [10, 20])),
     ("list condition list payload", lambda: ([True, False, True], [10, 20, 30])),
+    ("integer condition truthiness", lambda: ([1, 0, 2], [10, 20, 30])),
+    (
+        "bool ndarray condition",
+        lambda: (np.array([False, True, True], dtype=np.bool_), np.array([1, 2, 3], dtype=np.int16)),
+    ),
     ("tuple condition tuple payload", lambda: ((False, True, True), (1.5, 2.5, 3.5))),
     ("nested list flattening", lambda: ([[True, False], [False, True]], [[1, 2], [3, 4]])),
     ("short condition", lambda: ([True, False], [1, 2, 3, 4])),
+    ("nan signed-zero payload", lambda: ([True, False, True], [np.nan, 0.0, -0.0])),
     ("string payload", lambda: ([True, False, True], ["alpha", "beta", "gamma"])),
     ("scalar payload mismatch", lambda: ([True, False], 5)),
 ]
