@@ -37,6 +37,100 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn range_functions_keyword_and_fallback_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def attempt(call_fn, *args, **kwargs):
+    try:
+        return ("ok", call_fn(*args, **kwargs))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+def values_match(actual, expected):
+    if isinstance(actual, tuple) or isinstance(expected, tuple):
+        if not isinstance(actual, tuple) or not isinstance(expected, tuple):
+            return False
+        if len(actual) != len(expected):
+            return False
+        return all(values_match(a, e) for a, e in zip(actual, expected))
+    actual_array = np.asarray(actual)
+    expected_array = np.asarray(expected)
+    if str(actual_array.dtype) != str(expected_array.dtype):
+        return False
+    if tuple(actual_array.shape) != tuple(expected_array.shape):
+        return False
+    if bool(actual_array.flags["WRITEABLE"]) != bool(expected_array.flags["WRITEABLE"]):
+        return False
+    if actual_array.dtype.kind in "fc":
+        return bool(np.allclose(actual_array, expected_array, equal_nan=True))
+    return bool(np.array_equal(actual_array, expected_array))
+
+cases = [
+    ("arange dtype keyword", "arange", lambda: ((1, 5), {"dtype": np.float32})),
+    ("arange device none keyword", "arange", lambda: ((5,), {"device": None})),
+    ("arange like ndarray keyword", "arange", lambda: ((3,), {"like": np.array([], dtype=np.int8)})),
+    ("arange zero step error", "arange", lambda: ((1, 5, 0), {})),
+    ("linspace retstep tuple", "linspace", lambda: ((0, 1), {"num": 5, "retstep": True})),
+    (
+        "linspace array endpoints dtype axis",
+        "linspace",
+        lambda: (([0, 10], [1, 20]), {"num": 3, "axis": 1, "dtype": np.float32}),
+    ),
+    ("linspace negative num error", "linspace", lambda: ((0, 1), {"num": -1})),
+    (
+        "logspace base dtype keyword",
+        "logspace",
+        lambda: ((0, 3), {"num": 4, "base": 2.0, "dtype": np.float32}),
+    ),
+    (
+        "logspace array endpoints axis keyword",
+        "logspace",
+        lambda: (([0, 1], [2, 3]), {"num": 3, "axis": -1}),
+    ),
+    ("geomspace negative endpoints fallback", "geomspace", lambda: ((-1, -1000), {"num": 4})),
+    (
+        "geomspace array endpoints axis keyword",
+        "geomspace",
+        lambda: (([1, 10], [100, 1000]), {"num": 3, "axis": 1}),
+    ),
+    ("geomspace negative num error", "geomspace", lambda: ((1, 10), {"num": -2})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = attempt(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = attempt(getattr(np, name), *args, **kwargs)
+    if actual[0] != expected[0]:
+        print(label)
+        print(actual[0])
+        print(expected[0])
+        ok = False
+    elif actual[0] == "err" and actual[1] != expected[1]:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+    elif actual[0] == "ok" and not values_match(actual[1], expected[1]):
+        print(label)
+        print(np.asarray(actual[1]).dtype if not isinstance(actual[1], tuple) else "tuple")
+        print(np.asarray(expected[1]).dtype if not isinstance(expected[1], tuple) else "tuple")
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "range-function keyword/fallback surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // arange
 // ─────────────────────────────────────────────────────────────────────────────
