@@ -2073,6 +2073,7 @@ fn random_f64_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64
 /// fixed-consumption fills (one `next_u64` per output) with an identical stream.
 trait PcgAdvanceFill: Clone + Send + Sync {
     fn advance_by(&mut self, delta: u128);
+    fn next_u64_word(&mut self) -> u64;
     fn fill_uniform_f64(&mut self, out: &mut [f64]);
 }
 
@@ -2082,6 +2083,10 @@ macro_rules! impl_pcg_advance_fill {
             #[inline]
             fn advance_by(&mut self, delta: u128) {
                 self.advance(delta);
+            }
+            #[inline]
+            fn next_u64_word(&mut self) -> u64 {
+                self.next_u64()
             }
             #[inline]
             fn fill_uniform_f64(&mut self, out: &mut [f64]) {
@@ -2109,6 +2114,79 @@ fn parallel_pcg_random_f64<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f
     let mut out = vec![0.0f64; size];
     parallel_pcg_fill_slice(rng, &mut out);
     out
+}
+
+#[inline]
+fn random_f32_from_uint32(word: u32) -> f32 {
+    ((word >> 8) as f32) * (1.0_f32 / 16_777_216.0_f32)
+}
+
+#[inline]
+fn fill_pcg_random_f32_chunk<R: PcgAdvanceFill>(rng: &mut R, start: usize, out: &mut [f32]) {
+    rng.advance_by((start / 2) as u128);
+    let mut idx = 0usize;
+    if start % 2 == 1 && !out.is_empty() {
+        let word = rng.next_u64_word();
+        out[0] = random_f32_from_uint32((word >> 32) as u32);
+        idx = 1;
+    }
+    while idx + 1 < out.len() {
+        let word = rng.next_u64_word();
+        out[idx] = random_f32_from_uint32(word as u32);
+        out[idx + 1] = random_f32_from_uint32((word >> 32) as u32);
+        idx += 2;
+    }
+    if idx < out.len() {
+        let word = rng.next_u64_word();
+        out[idx] = random_f32_from_uint32(word as u32);
+    }
+}
+
+/// Generate `size` uniform `[0,1)` float32 values for PCG-family cores. NumPy's
+/// float32 path consumes u64 words as low-then-high u32 halves; this keeps that
+/// schedule exactly, including the buffered high half after odd-length fills.
+fn parallel_pcg_random_f32<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> (Vec<f32>, Option<u32>) {
+    use rayon::prelude::*;
+    let mut out = vec![0.0f32; size];
+    let words = size.div_ceil(2);
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        let mut idx = 0usize;
+        while idx + 1 < out.len() {
+            let word = rng.next_u64_word();
+            out[idx] = random_f32_from_uint32(word as u32);
+            out[idx + 1] = random_f32_from_uint32((word >> 32) as u32);
+            idx += 2;
+        }
+        let buffered = if idx < out.len() {
+            let word = rng.next_u64_word();
+            out[idx] = random_f32_from_uint32(word as u32);
+            Some((word >> 32) as u32)
+        } else {
+            None
+        };
+        return (out, buffered);
+    }
+
+    let buffered = if size % 2 == 1 {
+        let mut tail = rng.clone();
+        tail.advance_by((words - 1) as u128);
+        let word = tail.next_u64_word();
+        Some((word >> 32) as u32)
+    } else {
+        None
+    };
+
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            fill_pcg_random_f32_chunk(&mut local, start, slice);
+        });
+    rng.advance_by(words as u128);
+    (out, buffered)
 }
 
 /// `low + uniform[0,1) * range` for `size` samples, parallelizing the PCG draw
@@ -3746,6 +3824,37 @@ impl Generator {
     /// Mimics `rng.random(size, dtype=np.float32)`.
     #[must_use]
     pub fn random_f32(&mut self, size: usize) -> Vec<f32> {
+        if size == 0 {
+            return Vec::new();
+        }
+
+        // If a prior scalar f32 draw left a high u32 buffered, preserve the
+        // exact NumPy half-word schedule by finishing on the serial path.
+        if !self.u32_buf_ready {
+            match &mut self.bit_generator.rng {
+                RngBackend::Pcg64(rng) => {
+                    let (values, buffered) = parallel_pcg_random_f32(rng, size);
+                    if let Some(buf) = buffered {
+                        self.u32_buf = buf;
+                        self.u32_buf_ready = true;
+                    }
+                    return values;
+                }
+                RngBackend::Pcg64Dxsm(rng) => {
+                    let (values, buffered) = parallel_pcg_random_f32(rng, size);
+                    if let Some(buf) = buffered {
+                        self.u32_buf = buf;
+                        self.u32_buf_ready = true;
+                    }
+                    return values;
+                }
+                RngBackend::Deterministic(_)
+                | RngBackend::Mt19937(_)
+                | RngBackend::Philox(_)
+                | RngBackend::Sfc64(_) => {}
+            }
+        }
+
         (0..size).map(|_| self.next_f32()).collect()
     }
 
@@ -17398,5 +17507,64 @@ for child in rng.spawn(n_children):
             digest, "d0241aa054fc4a4a577d7e2acca371d43ababb4245875df2c1d77c3c118b1001",
             "PCG64 uniform(low,high) golden stream changed"
         );
+    }
+
+    #[test]
+    fn parallel_pcg_random_f32_matches_serial_stream_state_and_halfword_buffer() {
+        let n_even = 70_000usize;
+        let n_odd = 70_001usize;
+        assert!(n_even > super::PCG_PARALLEL_MIN_LEN);
+        assert!(n_odd > super::PCG_PARALLEL_MIN_LEN);
+
+        for n in [n_even, n_odd] {
+            for dxsm in [false, true] {
+                let mk = |seed: u64| {
+                    if dxsm {
+                        Generator::from_pcg64_dxsm(seed).unwrap()
+                    } else {
+                        Generator::from_pcg64(seed).unwrap()
+                    }
+                };
+
+                let mut parallel = mk(77);
+                let values = parallel.random_f32(n);
+                let after_parallel: Vec<u32> =
+                    (0..17).map(|_| parallel.next_f32().to_bits()).collect();
+
+                let mut serial = mk(77);
+                let expected: Vec<f32> = (0..n).map(|_| serial.random_f32(1)[0]).collect();
+                let after_serial: Vec<u32> =
+                    (0..17).map(|_| serial.next_f32().to_bits()).collect();
+
+                assert_eq!(values.len(), expected.len());
+                for (index, (got, want)) in values.iter().zip(&expected).enumerate() {
+                    assert_eq!(
+                        got.to_bits(),
+                        want.to_bits(),
+                        "dxsm={dxsm} n={n}: f32 stream diverged at index {index}"
+                    );
+                }
+                assert_eq!(
+                    after_parallel, after_serial,
+                    "dxsm={dxsm} n={n}: post-fill f32 buffer state diverged"
+                );
+            }
+        }
+
+        let mut prebuffered = Generator::from_pcg64(99).unwrap();
+        let mut serial = Generator::from_pcg64(99).unwrap();
+        assert_eq!(prebuffered.next_f32().to_bits(), serial.next_f32().to_bits());
+        let got = prebuffered.random_f32(n_odd);
+        let want: Vec<f32> = (0..n_odd).map(|_| serial.random_f32(1)[0]).collect();
+        for (index, (got, want)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "prebuffered fallback diverged at index {index}"
+            );
+        }
+        let after_got: Vec<u32> = (0..17).map(|_| prebuffered.next_f32().to_bits()).collect();
+        let after_want: Vec<u32> = (0..17).map(|_| serial.next_f32().to_bits()).collect();
+        assert_eq!(after_got, after_want);
     }
 }

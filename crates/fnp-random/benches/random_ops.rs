@@ -79,7 +79,7 @@ fn bench_sfc64_next_u64(c: &mut Criterion) {
 fn bench_generator_random(c: &mut Criterion) {
     let mut group = c.benchmark_group("generator_random");
 
-    let sizes = [100, 1000, 10000];
+    let sizes = [100, 1000, 10000, 100000];
 
     for &size in &sizes {
         let ss = seed_sequence();
@@ -89,6 +89,13 @@ fn bench_generator_random(c: &mut Criterion) {
         group.throughput(Throughput::Elements(size as u64));
         group.bench_with_input(BenchmarkId::new("f64", size), &size, |b, &size| {
             b.iter(|| black_box(generator.random(size)))
+        });
+
+        let ss = seed_sequence();
+        let bg = BitGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &ss).unwrap();
+        let mut generator = Generator::from_bit_generator(bg);
+        group.bench_with_input(BenchmarkId::new("f32", size), &size, |b, &size| {
+            b.iter(|| black_box(generator.random_f32(size)))
         });
     }
 
