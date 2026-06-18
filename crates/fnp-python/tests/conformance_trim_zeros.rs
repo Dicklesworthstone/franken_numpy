@@ -104,9 +104,22 @@ fn fnp_trim_zeros_outcome_script(input_expr: &str, trim_arg: &str) -> String {
 fn trim_zeros_python_container_surfaces_match_numpy() -> Result<(), String> {
     let cases = [
         ("list default", "[0, 0, 1, 2, 0, 0]", ""),
+        ("tuple default", "(0, 0, 1, 2, 0, 0)", ""),
         ("tuple front", "(0, 0, 1, 2, 0, 0)", ", 'f'"),
+        ("tuple back", "(0, 0, 1, 2, 0, 0)", ", 'b'"),
         ("list uppercase trim", "[0, 0, 1, 2, 0, 0]", ", 'FB'"),
+        (
+            "array uppercase trim native path",
+            "np.array([0, 0, 1, 2, 0, 0])",
+            ", 'FB'",
+        ),
+        (
+            "array reversed uppercase trim native path",
+            "np.array([0, 0, 1, 2, 0, 0])",
+            ", 'BF'",
+        ),
         ("scalar input error", "0", ""),
+        ("tuple invalid trim error", "(0, 1, 0)", ", 'ff'"),
         ("list invalid trim error", "[0, 1, 0]", ", 'x'"),
         ("array invalid trim error", "np.array([0, 1, 0])", ", 'x'"),
     ];
