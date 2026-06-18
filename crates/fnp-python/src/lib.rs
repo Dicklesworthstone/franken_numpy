@@ -30082,14 +30082,14 @@ fn tanh(
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, kth, axis=-1_i64, kind="introselect", order=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, kth, axis=-1, kind='introselect', order=None)"
+)]
 fn partition(
     py: Python<'_>,
-    a: Py<PyAny>,
-    kth: Py<PyAny>,
-    axis: i64,
-    kind: &str,
-    order: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy. The native introselect (`UFuncArray::partition`,
     // select_nth_unstable) matches numpy's algorithm and per-compare cost, but the
@@ -30101,27 +30101,18 @@ fn partition(
     // `sort`/`norm` already do. Parity is exact (this IS numpy). Native path tracked
     // for a future single-buffer bridge in the perf bead.
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("axis", axis)?;
-    kwargs.set_item("kind", kind)?;
-    if let Some(order_val) = order.as_ref() {
-        kwargs.set_item("order", order_val.bind(py))?;
-    }
-    Ok(numpy
-        .getattr("partition")?
-        .call((a.bind(py), kth.bind(py)), Some(&kwargs))?
-        .unbind())
+    Ok(numpy.getattr("partition")?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
-#[pyo3(signature = (a, kth, axis=-1_i64, kind="introselect", order=None))]
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(a, kth, axis=-1, kind='introselect', order=None)"
+)]
 fn argpartition(
     py: Python<'_>,
-    a: Py<PyAny>,
-    kth: Py<PyAny>,
-    axis: i64,
-    kind: &str,
-    order: Option<Py<PyAny>>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Passthrough to numpy — same rationale as `partition`: the native
     // `UFuncArray::argpartition` (select_nth over an index vector) matches numpy's
@@ -30130,16 +30121,7 @@ fn argpartition(
     // inputs. An identical O(n) index selection can at best tie numpy, so route to
     // numpy. Parity is exact (this IS numpy).
     let numpy = py.import("numpy")?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("axis", axis)?;
-    kwargs.set_item("kind", kind)?;
-    if let Some(order_val) = order.as_ref() {
-        kwargs.set_item("order", order_val.bind(py))?;
-    }
-    Ok(numpy
-        .getattr("argpartition")?
-        .call((a.bind(py), kth.bind(py)), Some(&kwargs))?
-        .unbind())
+    Ok(numpy.getattr("argpartition")?.call(args, kwargs)?.unbind())
 }
 
 #[pyfunction]
