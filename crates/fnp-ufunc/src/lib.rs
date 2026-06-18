@@ -45,6 +45,7 @@ use std::thread;
 use serde::{Deserialize, Serialize};
 
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
+const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
 const POLYVAL_ND_PARALLEL_MIN_ELEMS: usize = 1 << 12;
 const POLYVALFROMROOTS_PARALLEL_MIN_WORK: usize = 1 << 14;
@@ -27811,6 +27812,27 @@ impl UFuncArray {
                     return Err(UFuncError::Msg(
                         "copyto: where mask must have boolean dtype".to_string(),
                     ));
+                }
+                if self.values.len() >= COPYTO_PARALLEL_MIN_ELEMS
+                    && rayon::current_num_threads() >= 2
+                    && self.dtype == DType::F64
+                    && src.dtype == DType::F64
+                    && self.integer_sidecar.is_none()
+                    && src.integer_sidecar.is_none()
+                    && m.integer_sidecar.is_none()
+                    && src.shape.as_slice() == self.shape.as_slice()
+                    && m.shape.as_slice() == self.shape.as_slice()
+                {
+                    self.values
+                        .par_iter_mut()
+                        .zip(src.values.par_iter())
+                        .zip(m.values.par_iter())
+                        .for_each(|((dst, &src_value), &mask_value)| {
+                            if mask_value != 0.0 {
+                                *dst = src_value;
+                            }
+                        });
+                    return Ok(());
                 }
                 let broadcast_mask = m.broadcast_to(&self.shape).map_err(|_| {
                     UFuncError::Msg(format!(
@@ -65342,6 +65364,78 @@ print(json.dumps(payload))
         assert!((dst.values()[0] - 10.0).abs() < 1e-10);
         assert!((dst.values()[1] - 0.0).abs() < 1e-10); // mask false, unchanged
         assert!((dst.values()[2] - 30.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn copyto_masked_equal_shape_parallel_matches_serial_reference_and_golden_sha256() {
+        let n = super::COPYTO_PARALLEL_MIN_ELEMS + 257;
+        let dst_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 97 == 0 {
+                    -0.0
+                } else if i % 193 == 0 {
+                    f64::NAN
+                } else {
+                    ((i * 17 + 5) % 1009) as f64 / 31.0 - 10.0
+                }
+            })
+            .collect();
+        let src_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 89 == 0 {
+                    -0.0
+                } else if i % 211 == 0 {
+                    f64::INFINITY
+                } else {
+                    ((i * 29 + 13) % 997) as f64 / 29.0 - 12.0
+                }
+            })
+            .collect();
+        let mask_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 101 == 0 {
+                    f64::NAN
+                } else if matches!((i * 37 + 11) % 17, 0 | 3 | 5) {
+                    1.0
+                } else if i % 19 == 0 {
+                    -0.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut expected = dst_vals.clone();
+        for (dst, (&src_value, &mask_value)) in
+            expected.iter_mut().zip(src_vals.iter().zip(&mask_vals))
+        {
+            if mask_value != 0.0 {
+                *dst = src_value;
+            }
+        }
+
+        let mut dst = UFuncArray::new(vec![n], dst_vals, DType::F64).unwrap();
+        let src = UFuncArray::new(vec![n], src_vals, DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![n], mask_vals, DType::Bool).unwrap();
+        dst.copyto(&src, Some(&mask), None).unwrap();
+
+        let mut digest = Sha256::new();
+        for (idx, (&actual, &want)) in dst.values().iter().zip(&expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                want.to_bits(),
+                "parallel copyto bit drift at index {idx}"
+            );
+            digest.update(actual.to_le_bytes());
+        }
+        let digest_hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest_hex,
+            "1357fe611f8daf1a20cdd6839f09fa36f4ae0c15a0c9444360b9de7c3af30501"
+        );
     }
 
     #[test]

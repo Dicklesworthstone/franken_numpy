@@ -123,6 +123,35 @@ fn bench_sign(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_copyto_equal_shape_masked(c: &mut Criterion) {
+    let mut group = c.benchmark_group("copyto_equal_shape_masked");
+    for size in [100_000usize, 1_000_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        let dst_template = make_array(*size);
+        let src = make_sign_array(*size);
+        let mask = UFuncArray::new(
+            vec![*size],
+            (0..*size)
+                .map(|i| if matches!(i % 11, 0 | 3 | 7) { 1.0 } else { 0.0 })
+                .collect(),
+            DType::Bool,
+        )
+        .unwrap();
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter_batched(
+                || dst_template.clone(),
+                |mut dst| {
+                    dst.copyto(black_box(&src), Some(black_box(&mask)), None)
+                        .unwrap();
+                    dst
+                },
+                BatchSize::LargeInput,
+            )
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -131,6 +160,7 @@ criterion_group!(
     bench_divide,
     bench_chained_ops,
     bench_from_storage_f64_move,
-    bench_sign
+    bench_sign,
+    bench_copyto_equal_shape_masked
 );
 criterion_main!(benches);
