@@ -42,6 +42,53 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn sort_argsort_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def sort_like_outcome(fn, args, kwargs):
+    try:
+        result = fn(*args, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("sort list ints", fnp.sort, np.sort, lambda: (([3, 1, 2, 1],), {})),
+    ("sort tuple floats", fnp.sort, np.sort, lambda: (((3.5, 1.5, 2.5),), {})),
+    ("sort nested axis none", fnp.sort, np.sort, lambda: (([[3, 1], [2, 4]],), {"axis": None})),
+    ("sort string list", fnp.sort, np.sort, lambda: ((["b", "a", "c"],), {})),
+    ("argsort list ints", fnp.argsort, np.argsort, lambda: (([3, 1, 2, 1],), {})),
+    ("argsort tuple floats", fnp.argsort, np.argsort, lambda: (((3.5, 1.5, 2.5),), {})),
+    ("argsort nested axis none", fnp.argsort, np.argsort, lambda: (([[3, 1], [2, 4]],), {"axis": None})),
+    ("argsort stable ties", fnp.argsort, np.argsort, lambda: (([2, 1, 2, 1],), {"stable": True})),
+]
+
+ok = True
+for label, actual_fn, expected_fn, factory in cases:
+    args, kwargs = factory()
+    actual = sort_like_outcome(actual_fn, args, kwargs)
+    args, kwargs = factory()
+    expected = sort_like_outcome(expected_fn, args, kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sort/argsort Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn sort_1d() -> Result<(), String> {
     let script = fnp_script(
         r#"
