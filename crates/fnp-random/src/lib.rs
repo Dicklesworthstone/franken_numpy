@@ -7676,6 +7676,42 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_choice_f64_shaped(
+        pool: &[f64],
+        shape: &[usize],
+        replace: bool,
+    ) -> Result<Vec<f64>, &'static str> {
+        let pool_arg = pool
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let shape_arg = shape
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = r#"
+import sys
+import numpy as np
+
+pool = np.array([float(part) for part in sys.argv[1].split(",") if part], dtype=float)
+shape = tuple(int(part) for part in sys.argv[2].split(",") if part)
+replace = sys.argv[3] == "true"
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.choice(pool, size=shape, replace=replace)
+print(",".join(str(float(value)) for value in values.reshape(-1).tolist()))
+"#;
+        let args = [
+            pool_arg,
+            shape_arg,
+            if replace { "true" } else { "false" }.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_shuffle_f64(values: &[f64]) -> Result<Vec<f64>, &'static str> {
         let values_arg = values
             .iter()
@@ -11174,6 +11210,23 @@ for child in rng.spawn(n_children):
         let mut sorted = range.values().to_vec();
         sorted.sort();
         assert_eq!(sorted, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn shaped_choice_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let pool = [10.0, 20.0, 30.0];
+        let expected = numpy_oracle_choice_f64_shaped(&pool, &[2, 2], true)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual = rng
+            .choice_shaped(&pool, Some(&[2, 2]), true)
+            .map_err(|_| "choice_shaped live oracle")?;
+        assert_eq!(actual.shape(), &[2, 2]);
+        assert_f64_seq("choice_shaped_live_numpy", actual.values(), &expected);
+        Ok(())
     }
 
     #[test]
