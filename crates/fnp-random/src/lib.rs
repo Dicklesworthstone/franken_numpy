@@ -15811,6 +15811,54 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn int8_integers_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_integers_dtype("int8", -5, 5, &[], false)?;
+
+        let mut scalar_rng = oracle_gen();
+        let scalar = scalar_rng
+            .integers_i8_shaped(-5, 5, None, false)
+            .map_err(|_| "int8 shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        let scalar_values = scalar
+            .values()
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(scalar_values, expected);
+
+        let mut zero_dim_rng = oracle_gen();
+        let zero_dim = zero_dim_rng
+            .integers_i8_shaped(-5, 5, Some(&[]), false)
+            .map_err(|_| "int8 shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        let zero_dim_values = zero_dim
+            .values()
+            .iter()
+            .copied()
+            .map(i64::from)
+            .collect::<Vec<_>>();
+        assert_eq!(zero_dim_values, expected);
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = oracle_gen();
+        let empty = empty_rng
+            .integers_i8_shaped(-5, 5, Some(&[2, 0, 3]), false)
+            .map_err(|_| "int8 shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq("int8_integers_shaped_empty_after_live_numpy", &after, &expected_after);
+        Ok(())
+    }
+
+    #[test]
     fn integers_endpoint_extreme_ranges_match_live_numpy_oracle_when_available() {
         if !numpy_oracle_available() {
             return;
