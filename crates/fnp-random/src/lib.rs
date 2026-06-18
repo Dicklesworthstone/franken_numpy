@@ -6753,6 +6753,35 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_triangular(
+        left: f64,
+        mode: f64,
+        right: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+left = float(sys.argv[1])
+mode = float(sys.argv[2])
+right = float(sys.argv[3])
+size = int(sys.argv[4])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.triangular(left, mode, right, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [
+            left.to_string(),
+            mode.to_string(),
+            right.to_string(),
+            size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_gumbel(
         loc: f64,
         scale: f64,
@@ -13272,6 +13301,21 @@ for child in rng.spawn(n_children):
             -0.18850946661324297,
         ];
         assert_f64_seq("triangular", &vals, &expected);
+    }
+
+    #[test]
+    fn triangular_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_triangular(-1.0, 0.0, 1.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .triangular(-1.0, 0.0, 1.0, 10)
+            .map_err(|_| "triangular live oracle")?;
+        assert_f64_seq("triangular_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
