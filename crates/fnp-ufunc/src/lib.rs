@@ -57363,6 +57363,55 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn polynomial_fromroots_matches_numpy_golden() {
+        // numpy.polynomial.*.{X}fromroots([-1.5, 0.5, 2.0]).
+        let r = [-1.5, 0.5, 2.0];
+        poly_close_vec(&chebfromroots(&r), &[1.0, -2.0, -0.5, 0.25], "chebfromroots");
+        poly_close_vec(
+            &legfromroots(&r),
+            &[1.166_666_67, -2.15, -0.666_666_67, 0.4],
+            "legfromroots",
+        );
+        poly_close_vec(
+            &hermfromroots(&r),
+            &[1.0, -0.625, -0.25, 0.125],
+            "hermfromroots",
+        );
+        poly_close_vec(
+            &hermefromroots(&r),
+            &[0.5, 0.25, -1.0, 1.0],
+            "hermefromroots",
+        );
+        poly_close_vec(
+            &lagfromroots(&r),
+            &[2.75, -11.25, 16.0, -6.0],
+            "lagfromroots",
+        );
+    }
+
+    #[test]
+    fn polynomial_div_matches_numpy_golden() {
+        // numpy.polynomial.*.{X}div([1,2,3,4], [1,1,1]) -> (quotient, remainder).
+        let a = [1.0, 2.0, 3.0, 4.0];
+        let b = [1.0, 1.0, 1.0];
+        let (q, r) = chebdiv(&a, &b).unwrap();
+        poly_close_vec(&q, &[-1.0, 8.0], "chebdiv q");
+        poly_close_vec(&r, &[-2.0, -9.0], "chebdiv r");
+        let (q, r) = legdiv(&a, &b).unwrap();
+        poly_close_vec(&q, &[-1.444_444_44, 6.666_666_67], "legdiv q");
+        poly_close_vec(&r, &[0.222_222_22, -5.888_888_89], "legdiv r");
+        let (q, r) = hermdiv(&a, &b).unwrap();
+        poly_close_vec(&q, &[-1.0, 4.0], "hermdiv q");
+        poly_close_vec(&r, &[-6.0, -17.0], "hermdiv r");
+        let (q, r) = hermediv(&a, &b).unwrap();
+        poly_close_vec(&q, &[-1.0, 4.0], "hermediv q");
+        poly_close_vec(&r, &[-2.0, -9.0], "hermediv r");
+        let (q, r) = lagdiv(&a, &b).unwrap();
+        poly_close_vec(&q, &[5.666_666_67, 1.333_333_33], "lagdiv q");
+        poly_close_vec(&r, &[-6.0, -5.0], "lagdiv r");
+    }
+
+    #[test]
     fn roots_linear() {
         // 2x + 6 = 0 -> x = -3
         let p = UFuncArray::new(vec![2], vec![2.0, 6.0], DType::F64).unwrap();
