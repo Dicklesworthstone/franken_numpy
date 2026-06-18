@@ -2231,6 +2231,39 @@ fn parallel_pcg_uniform<R: PcgAdvanceFill>(
     out
 }
 
+/// Inverse-CDF standard exponential sampling for PCG-family cores. This method
+/// consumes exactly one f64 uniform per output, so jump-ahead chunking preserves
+/// the serial stream while fusing `-ln1p(-u)` into each cache-hot chunk.
+fn parallel_pcg_standard_exponential_inv<R: PcgAdvanceFill>(
+    rng: &mut R,
+    size: usize,
+) -> Vec<f64> {
+    use rayon::prelude::*;
+    let mut out = vec![0.0f64; size];
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        rng.fill_uniform_f64(&mut out);
+        for slot in out.iter_mut() {
+            *slot = -(-*slot).ln_1p();
+        }
+        return out;
+    }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                *slot = -(-*slot).ln_1p();
+            }
+        });
+    rng.advance_by(size as u128);
+    out
+}
+
 /// Fill a caller-provided slice with uniform `[0,1)` doubles, parallelizing the
 /// PCG jump-ahead exactly as [`parallel_pcg_random_f64`]. Filling an externally
 /// owned buffer (e.g. a NumPy output array via the buffer protocol) avoids the
@@ -2267,6 +2300,13 @@ fn uniform_from_core<R: ZigguratRngCore>(
 ) -> Vec<f64> {
     (0..size)
         .map(|_| low + rng.ziggurat_next_f64() * range)
+        .collect()
+}
+
+#[inline]
+fn standard_exponential_inv_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
+    (0..size)
+        .map(|_| -(-rng.ziggurat_next_f64()).ln_1p())
         .collect()
 }
 
@@ -4299,7 +4339,19 @@ impl Generator {
     /// Mimics `rng.standard_exponential(size, method="inv")`.
     #[must_use]
     pub fn standard_exponential_inv(&mut self, size: usize) -> Vec<f64> {
-        (0..size).map(|_| -(-self.next_f64()).ln_1p()).collect()
+        if size == 0 {
+            return Vec::new();
+        }
+
+        self.u32_buf_ready = false;
+        match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => standard_exponential_inv_from_core(rng, size),
+            RngBackend::Pcg64(rng) => parallel_pcg_standard_exponential_inv(rng, size),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_standard_exponential_inv(rng, size),
+            RngBackend::Mt19937(rng) => standard_exponential_inv_from_core(rng, size),
+            RngBackend::Philox(rng) => standard_exponential_inv_from_core(rng, size),
+            RngBackend::Sfc64(rng) => standard_exponential_inv_from_core(rng, size),
+        }
     }
 
     /// Generate standard gamma samples (scale=1).
@@ -17566,5 +17618,46 @@ for child in rng.spawn(n_children):
         let after_got: Vec<u32> = (0..17).map(|_| prebuffered.next_f32().to_bits()).collect();
         let after_want: Vec<u32> = (0..17).map(|_| serial.next_f32().to_bits()).collect();
         assert_eq!(after_got, after_want);
+    }
+
+    #[test]
+    fn parallel_pcg_standard_exponential_inv_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(31337);
+            let mut combined = parallel.standard_exponential_inv(n);
+            combined.extend(parallel.standard_exponential_inv(n));
+            let after_parallel: Vec<u64> =
+                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(31337);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.standard_exponential_inv(1)[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: standard_exponential_inv diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-fill f64 state diverged"
+            );
+        }
     }
 }
