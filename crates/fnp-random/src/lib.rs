@@ -6589,6 +6589,30 @@ print(",".join(str(int(value)) for value in out.reshape(-1).tolist()))
         Ok(values)
     }
 
+    fn numpy_oracle_random_f32_bits(size: usize) -> Result<Vec<u32>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+size = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.random(size, dtype=np.float32)
+bits = values.view(np.uint32)
+print(",".join(str(int(value)) for value in bits.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[size.to_string()])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut values = Vec::new();
+        for token in stdout.trim().split(',').filter(|token| !token.is_empty()) {
+            values.push(
+                token
+                    .parse::<u32>()
+                    .map_err(|_| "oracle float32 bits parse failed")?,
+            );
+        }
+        Ok(values)
+    }
+
     fn parse_oracle_u64_csv(csv: &str) -> Result<Vec<u64>, &'static str> {
         let mut values = Vec::new();
         for token in csv.split(',').filter(|token| !token.is_empty()) {
@@ -10636,6 +10660,37 @@ for child in rng.spawn(n_children):
             .map_err(|_| "normal_shaped live oracle")?;
         assert_eq!(normal.shape(), &[4]);
         assert_f64_seq("normal_shaped_live_numpy", normal.values(), &expected_normal);
+        Ok(())
+    }
+
+    #[test]
+    fn random_f32_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_random_f32_bits(6)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual = rng
+            .random_f32(6)
+            .into_iter()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+
+        let expected_shaped = numpy_oracle_random_f32_bits(4)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let shaped = rng
+            .random_f32_shaped(Some(&[2, 2]))
+            .map_err(|_| "random_f32_shaped live oracle")?;
+        assert_eq!(shaped.shape(), &[2, 2]);
+        let actual_shaped = shaped
+            .values()
+            .iter()
+            .copied()
+            .map(f32::to_bits)
+            .collect::<Vec<_>>();
+        assert_eq!(actual_shaped, expected_shaped);
         Ok(())
     }
 
