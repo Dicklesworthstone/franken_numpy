@@ -57284,6 +57284,85 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn polynomial_val_matches_numpy_golden() {
+        // numpy.polynomial.*.{X}val([-0.7,0.3,1.5], [1.5,-2,0.5,3,-1.25]).
+        let c = [1.5, -2.0, 0.5, 3.0, -1.25];
+        let xs = [-0.7, 0.3, 1.5];
+        poly_close_vec(&chebval(&xs, &c), &[6.323, -2.317, -2.125], "chebval");
+        poly_close_vec(
+            &legval(&xs, &c),
+            &[4.110_078_125, -0.521_171_875, 0.892_578_125],
+            "legval",
+        );
+        poly_close_vec(&hermval(&xs, &c), &[30.846, -20.434, 44.75], "hermval");
+        poly_close_vec(
+            &hermeval(&xs, &c),
+            &[7.540_875, -5.259_125, 2.546_875],
+            "hermeval",
+        );
+        poly_close_vec(
+            &lagval(&xs, &c),
+            &[4.213_161_458_3, 0.948_578_125, 0.361_328_125],
+            "lagval",
+        );
+    }
+
+    #[test]
+    fn polynomial_higher_order_der_int_matches_numpy_golden() {
+        // Second derivative and double integral per family (m=2) on [1,2,3,4,5];
+        // exercises the per-iteration recurrence + integration-constant correction.
+        let c = [1.0, 2.0, 3.0, 4.0, 5.0];
+        poly_close_vec(&chebder(&c, 2), &[172.0, 96.0, 240.0], "chebder2");
+        poly_close_vec(&legder(&c, 2), &[59.0, 60.0, 175.0], "legder2");
+        poly_close_vec(&hermder(&c, 2), &[24.0, 96.0, 240.0], "hermder2");
+        poly_close_vec(&lagder(&c, 2), &[26.0, 14.0, 5.0], "lagder2");
+        poly_close_vec(
+            &chebint(&c, 2),
+            &[
+                0.104_166_67,
+                -0.75,
+                -0.041_666_67,
+                -0.166_666_67,
+                -0.104_166_67,
+                0.05,
+                0.041_666_67,
+            ],
+            "chebint2",
+        );
+        poly_close_vec(
+            &legint(&c, 2),
+            &[
+                0.095_833_33,
+                -0.185_714_29,
+                0.126_984_13,
+                -0.044_444_44,
+                -0.044_155_84,
+                0.063_492_06,
+                0.050_505_05,
+            ],
+            "legint2",
+        );
+        poly_close_vec(
+            &hermint(&c, 2),
+            &[
+                4.5,
+                -2.5,
+                0.125,
+                0.083_333_33,
+                0.0625,
+                0.05,
+                0.041_666_67,
+            ],
+            "hermint2",
+        );
+        poly_close_vec(
+            &lagint(&c, 2),
+            &[1.0, 0.0, 0.0, 0.0, 0.0, -6.0, 5.0],
+            "lagint2",
+        );
+    }
+
+    #[test]
     fn roots_linear() {
         // 2x + 6 = 0 -> x = -3
         let p = UFuncArray::new(vec![2], vec![2.0, 6.0], DType::F64).unwrap();
