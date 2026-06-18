@@ -2882,6 +2882,14 @@ fn svd_bidiag_values(a: &[f64], m: usize, n: usize) -> Result<Vec<f64>, LinAlgEr
     svd_bidiag_values_with_max_iters(a, m, n, SVD_QR_ITERATION_COEFF * k * k)
 }
 
+#[inline]
+fn sort_singular_values_descending_in_place(values: &mut [f64]) {
+    values.sort_by(|a, b| {
+        b.partial_cmp(a)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+}
+
 /// Core QR-phase SVD implementation for the bidiagonalized matrix.
 ///
 /// Requires `m >= n`; transpose handling and fallback are done by the wrapper.
@@ -3639,10 +3647,9 @@ fn svd_bidiag_qr_values(
         }
     }
 
-    let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| d[b].partial_cmp(&d[a]).unwrap_or(std::cmp::Ordering::Equal));
-
-    Ok(order.iter().take(k).map(|&i| d[i]).collect())
+    sort_singular_values_descending_in_place(&mut d);
+    d.truncate(k);
+    Ok(d)
 }
 
 /// Transpose an m×n matrix (row-major) to n×m.
@@ -15195,6 +15202,45 @@ mod tests {
         assert_eq!(
             digest, "4c7c7aa6cdf4721a02c213c87c18eec2f977fef96cb9ca52b6b79a873f413f7a",
             "values-only SVD singular-value bit pattern must remain fixed"
+        );
+    }
+
+    #[test]
+    fn values_only_svd_in_place_sort_matches_former_index_schedule() {
+        fn former_index_schedule(values: &[f64]) -> Vec<u64> {
+            let mut order: Vec<usize> = (0..values.len()).collect();
+            order.sort_by(|&a, &b| {
+                values[b]
+                    .partial_cmp(&values[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            order
+                .into_iter()
+                .map(|index| values[index].to_bits())
+                .collect()
+        }
+
+        let mut values = vec![
+            5.0,
+            -0.0,
+            3.0,
+            f64::INFINITY,
+            3.0,
+            0.0,
+            1.5,
+            1.5,
+            f64::MIN_POSITIVE,
+        ];
+        let expected_bits = former_index_schedule(&values);
+        super::sort_singular_values_descending_in_place(&mut values);
+        let actual_bits = values
+            .iter()
+            .map(|value| value.to_bits())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            actual_bits, expected_bits,
+            "in-place values-only SVD sort must preserve the former index-order bits"
         );
     }
 

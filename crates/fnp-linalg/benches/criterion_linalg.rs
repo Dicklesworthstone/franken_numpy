@@ -15,8 +15,8 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
-    batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, complex_matmul, det_nxn, eigvalsh_nxn,
-    inv_nxn, kron_nxn, matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn,
+    batch_cholesky, batch_eigvalsh, batch_inv, cholesky_nxn, complex_matmul, cond_nxn, det_nxn,
+    eigvalsh_nxn, inv_nxn, kron_nxn, matrix_norm_frobenius, matrix_power_nxn, multi_dot, qr_nxn,
     sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full, svd_nxn,
 };
 use std::hint::black_box;
@@ -237,6 +237,25 @@ fn bench_norm_frobenius(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_cond(c: &mut Criterion) {
+    let mut group = c.benchmark_group("cond_nxn");
+
+    // cond(A) is the main public linalg consumer that needs only ordered
+    // singular values from the SVD pipeline, not U/Vt reconstruction.
+    for n in [64usize, 128, 256, 512] {
+        let a = generate_invertible_matrix(n);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = cond_nxn(black_box(&a), black_box(n));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 // Stacked-matrix ("batched") workloads: NumPy-style leading batch dims. These
 // loop over many independent matrices, the embarrassingly-parallel hot path
 // exercised by np.linalg.{inv,eigvalsh,cholesky} on (..., n, n) arrays.
@@ -437,6 +456,7 @@ criterion_group!(
     bench_eigvalsh,
     bench_sbr_stage1,
     bench_norm_frobenius,
+    bench_cond,
     bench_batch_inv,
     bench_batch_eigvalsh,
     bench_batch_cholesky,
