@@ -11653,6 +11653,43 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn choice_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let pool = [10.0, 20.0, 30.0];
+        let expected = numpy_oracle_choice_f64(&pool, 1, true)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .choice_shaped(&pool, None, true)
+            .map_err(|_| "choice_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_f64_seq("choice_shaped_scalar_live_numpy", scalar.values(), &expected);
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .choice_shaped(&pool, Some(&[]), true)
+            .map_err(|_| "choice_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_f64_seq("choice_shaped_zero_dim_live_numpy", zero_dim.values(), &expected);
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .choice_shaped(&pool, Some(&[2, 0, 3]), true)
+            .map_err(|_| "choice_shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq("choice_shaped_empty_after_live_numpy", &after, &expected_after);
+        Ok(())
+    }
+
+    #[test]
     fn shaped_permutations_match_live_numpy_oracle() -> Result<(), &'static str> {
         if !numpy_oracle_available() {
             return Ok(());
