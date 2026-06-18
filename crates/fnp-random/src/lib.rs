@@ -6764,6 +6764,28 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_lognormal(
+        mean: f64,
+        sigma: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+mean = float(sys.argv[1])
+sigma = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.lognormal(mean, sigma, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [mean.to_string(), sigma.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_logseries_then_random(
         p: &str,
     ) -> Result<(Vec<u64>, Vec<f64>), &'static str> {
@@ -12804,6 +12826,21 @@ for child in rng.spawn(n_children):
             0.2976587986528511,
         ];
         assert_f64_seq("lognormal", &vals, &expected);
+    }
+
+    #[test]
+    fn lognormal_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_lognormal(0.0, 1.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .lognormal(0.0, 1.0, 10)
+            .map_err(|_| "lognormal live oracle")?;
+        assert_f64_seq("lognormal_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
