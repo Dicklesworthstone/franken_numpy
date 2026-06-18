@@ -322,6 +322,54 @@ print(result == expected)
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn nonzero_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def nonzero_outcome(fn, value):
+    try:
+        result = fn(value)
+        arrays = []
+        for item in result:
+            arr = np.asarray(item)
+            arrays.append((str(arr.dtype), tuple(arr.shape), arr.tolist()))
+        return ("ok", type(result).__name__, len(result), arrays)
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list fallback", lambda: [0, 2, 0, 3]),
+    ("tuple fallback", lambda: (0, 0, 5, 0)),
+    ("bool list", lambda: [False, True, False, True]),
+    ("nested list", lambda: [[0, 1], [2, 0]]),
+    ("scalar nonzero", lambda: 7),
+    ("scalar zero", lambda: 0),
+    ("object truthiness", lambda: np.array(["", "x", "0"], dtype=object)),
+    ("ragged list error", lambda: [[1], [0, 2]]),
+]
+
+ok = True
+for label, factory in cases:
+    actual = nonzero_outcome(fnp.nonzero, factory())
+    expected = nonzero_outcome(np.nonzero, factory())
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "nonzero Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn nonzero_1d() -> Result<(), String> {
     let script = fnp_script(
         r#"
