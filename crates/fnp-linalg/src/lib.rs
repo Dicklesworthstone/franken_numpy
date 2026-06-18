@@ -3759,6 +3759,15 @@ fn matrix_norm_row_sum(a: &[f64], n: usize, use_min: bool) -> f64 {
     selected
 }
 
+#[inline]
+fn matrix_norm_frobenius_unchecked_at(a: &[f64], base: usize, len: usize) -> f64 {
+    let mut sum = 0.0;
+    for &value in &a[base..base + len] {
+        sum += value * value;
+    }
+    sum.sqrt()
+}
+
 /// General NxN matrix norm (np.linalg.norm for matrices).
 /// Supports: "fro" (Frobenius), "1" (max column sum), "inf" (max row sum),
 /// "2" (spectral, i.e. largest singular value), "nuc" (nuclear/trace norm).
@@ -3769,7 +3778,7 @@ pub fn matrix_norm_nxn(a: &[f64], m: usize, n: usize, ord: &str) -> Result<f64, 
         ));
     }
     match ord {
-        "fro" => Ok(a.iter().map(|v| v * v).sum::<f64>().sqrt()),
+        "fro" => Ok(matrix_norm_frobenius_unchecked_at(a, 0, a.len())),
         "1" => {
             // Large row-major matrices make strided column walks cache-hostile;
             // scan rows once while preserving the per-column addition order.
@@ -8154,6 +8163,18 @@ pub fn batch_matrix_norm(
             "batch_matrix_norm: data length does not match shape",
         ));
     }
+    if ord == "fro" {
+        if batch > 0 && (m == 0 || n == 0) {
+            return Err(LinAlgError::ShapeContractViolation(
+                "matrix_norm_nxn: input must be m*n with m,n > 0",
+            ));
+        }
+        let norm_lane = |b: usize| matrix_norm_frobenius_unchecked_at(data, b * mat_size, mat_size);
+        if batch_should_parallelize(batch, mat_size) {
+            return Ok((0..batch).into_par_iter().map(norm_lane).collect());
+        }
+        return Ok((0..batch).map(norm_lane).collect());
+    }
     batch_map_lanes(batch, mat_size, |b| {
         matrix_norm_nxn(&data[b * mat_size..(b + 1) * mat_size], m, n, ord)
     })
@@ -8931,6 +8952,7 @@ mod tests {
         batch_eig,
         batch_eigvalsh,
         batch_inv,
+        batch_matrix_norm,
         batch_qr,
         batch_slogdet,
         batch_solve,
@@ -17571,6 +17593,53 @@ except Exception as exc:
                 );
             }
         }
+    }
+
+    #[test]
+    fn batch_matrix_norm_fro_direct_lane_fill_matches_per_lane_reference_bits() {
+        fn reference(data: &[f64], batch: usize, m: usize, n: usize) -> Vec<f64> {
+            let mat_size = m * n;
+            (0..batch)
+                .map(|b| {
+                    matrix_norm_nxn(&data[b * mat_size..(b + 1) * mat_size], m, n, "fro")
+                        .expect("reference fro norm")
+                })
+                .collect()
+        }
+
+        for &(batch, m, n) in &[(3usize, 3usize, 5usize), (512, 8, 8)] {
+            let mat_size = m * n;
+            let mut data: Vec<f64> = (0..batch * mat_size)
+                .map(|idx| ((idx % 127) as f64 - 63.0) * 0.125)
+                .collect();
+            for b in 0..batch {
+                let base = b * mat_size;
+                if b % 17 == 0 {
+                    data[base] = f64::NAN;
+                }
+                if b % 19 == 0 && mat_size > 1 {
+                    data[base + 1] = f64::INFINITY;
+                }
+                if b % 23 == 0 && mat_size > 2 {
+                    data[base + 2] = -0.0;
+                }
+            }
+
+            let got = batch_matrix_norm(&data, &[batch, m, n], "fro").expect("batch fro norm");
+            let want = reference(&data, batch, m, n);
+            assert_eq!(got.len(), want.len());
+            for (idx, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(
+                    g.to_bits(),
+                    w.to_bits(),
+                    "batch fro norm bit drift for batch={batch}, shape={m}x{n}, lane={idx}"
+                );
+            }
+        }
+
+        let empty = batch_matrix_norm(&[], &[0, 0, 8], "fro").expect("empty batch");
+        assert!(empty.is_empty());
+        assert!(batch_matrix_norm(&[], &[1, 0, 8], "fro").is_err());
     }
 
     #[test]
