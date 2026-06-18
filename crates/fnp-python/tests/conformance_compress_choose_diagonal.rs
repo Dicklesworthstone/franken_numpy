@@ -54,11 +54,19 @@ def compress_outcome(fn, condition, a, **kwargs):
         return ("err", type(exc).__name__, str(exc))
 
 cases = [
+    ("empty condition", lambda: ([], [1, 2, 3], {})),
     ("list condition list payload", lambda: ([True, False, True], [10, 20, 30], {})),
+    ("integer condition truthiness", lambda: ([1, 0, 2], [10, 20, 30], {})),
+    (
+        "bool ndarray condition",
+        lambda: (np.array([False, True, True], dtype=np.bool_), np.array([1, 2, 3], dtype=np.int16), {}),
+    ),
     ("tuple condition tuple payload", lambda: ((False, True, True), (1.5, 2.5, 3.5), {})),
     ("shorter condition truncates", lambda: ([True, False], [1, 2, 3, 4], {})),
     ("nested list axis zero", lambda: ([True, False, True], [[1, 2], [3, 4], [5, 6]], {"axis": 0})),
     ("nested list axis one", lambda: ([False, True], [[1, 2], [3, 4], [5, 6]], {"axis": 1})),
+    ("nested list axis minus one", lambda: ([True, False], [[1, 2], [3, 4], [5, 6]], {"axis": -1})),
+    ("empty axis result", lambda: ([False, False], [[1, 2], [3, 4]], {"axis": 1})),
     ("string payload list", lambda: ([True, False, True], ["alpha", "beta", "gamma"], {})),
     ("axis mismatch error", lambda: ([True, False, True], [[1, 2], [3, 4]], {"axis": 1})),
 ]
