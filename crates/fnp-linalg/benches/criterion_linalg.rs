@@ -469,6 +469,25 @@ fn bench_kron(c: &mut Criterion) {
         });
     });
 
+    let large_n = 128usize;
+    let a_nonnegative: Vec<f64> = generate_random_matrix(large_n, 0x4b52_4f4e_4641_5354)
+        .into_iter()
+        .map(f64::abs)
+        .collect();
+    group.bench_function("kron_128x128_4x4_eye_nonnegative_fast_path", |bench| {
+        bench.iter(|| {
+            let result = kron_nxn(
+                black_box(&a_nonnegative),
+                large_n,
+                large_n,
+                black_box(&b),
+                p,
+                p,
+            );
+            black_box(result)
+        });
+    });
+
     group.finish();
 }
 

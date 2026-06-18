@@ -5328,6 +5328,64 @@ pub fn cross_product(a: &[f64], b: &[f64]) -> Result<Vec<f64>, LinAlgError> {
     }
 }
 
+fn kron_identity_rhs_nonnegative_fast_path(
+    a: &[f64],
+    m: usize,
+    n: usize,
+    b: &[f64],
+    p: usize,
+    q: usize,
+) -> Option<Vec<f64>> {
+    if p != q {
+        return None;
+    }
+
+    let one_bits = 1.0f64.to_bits();
+    let positive_zero_bits = 0.0f64.to_bits();
+    for row in 0..p {
+        for col in 0..q {
+            let expected = if row == col {
+                one_bits
+            } else {
+                positive_zero_bits
+            };
+            if b[row * q + col].to_bits() != expected {
+                return None;
+            }
+        }
+    }
+    if !a
+        .iter()
+        .all(|value| value.is_finite() && value.is_sign_positive())
+    {
+        return None;
+    }
+
+    let out_cols = n * q;
+    let mut result = vec![0.0; m * p * out_cols];
+    let fill_identity_row = |(r, row): (usize, &mut [f64])| {
+        let i = r / p;
+        let k = r % p;
+        let a_base = i * n;
+        for j in 0..n {
+            row[j * p + k] = a[a_base + j];
+        }
+    };
+    const KRON_PAR_MIN: usize = 1 << 18;
+    if result.len() >= KRON_PAR_MIN && rayon::current_num_threads() >= 2 {
+        result
+            .par_chunks_mut(out_cols)
+            .enumerate()
+            .for_each(fill_identity_row);
+    } else {
+        result
+            .chunks_mut(out_cols)
+            .enumerate()
+            .for_each(fill_identity_row);
+    }
+    Some(result)
+}
+
 /// Kronecker product of two matrices (np.kron).
 ///
 /// Given `a` of shape `(m, n)` and `b` of shape `(p, q)`,
@@ -5348,10 +5406,13 @@ pub fn kron_nxn(
     let out_rows = m * p;
     let out_cols = n * q;
     let out_count = out_rows * out_cols;
-    let mut result = vec![0.0; out_count];
     if out_count == 0 {
-        return Ok(result);
+        return Ok(Vec::new());
     }
+    if let Some(identity_result) = kron_identity_rhs_nonnegative_fast_path(a, m, n, b, p, q) {
+        return Ok(identity_result);
+    }
+    let mut result = vec![0.0; out_count];
 
     // Each output row `R = i*p + k` (so `i = R/p`, `k = R%p`) is an independent
     // function of a-row `i` and b-row `k`: `result[R][j*q + l] = a[i*n+j] *
@@ -14980,6 +15041,58 @@ mod tests {
             hex, "6d16bc3a90ee6673f1f7f200b5955b17bfbe5402416926516eff16920d77efc7",
             "kron parallel golden digest drifted"
         );
+    }
+
+    #[test]
+    fn kron_identity_rhs_fast_path_matches_dense_reference_and_fallbacks() {
+        fn serial(a: &[f64], m: usize, n: usize, b: &[f64], p: usize, q: usize) -> Vec<f64> {
+            let out_cols = n * q;
+            let mut out = vec![0.0f64; m * p * out_cols];
+            for i in 0..m {
+                for j in 0..n {
+                    let av = a[i * n + j];
+                    for k in 0..p {
+                        for l in 0..q {
+                            out[(i * p + k) * out_cols + (j * q + l)] = av * b[k * q + l];
+                        }
+                    }
+                }
+            }
+            out
+        }
+
+        let a = [0.0, 1.25, 2.5, 3.75, 5.0, 6.25];
+        let eye3 = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let fast = super::kron_identity_rhs_nonnegative_fast_path(&a, 2, 3, &eye3, 3, 3)
+            .expect("nonnegative exact identity RHS should specialize");
+        let got = super::kron_nxn(&a, 2, 3, &eye3, 3, 3).expect("kron");
+        let want = serial(&a, 2, 3, &eye3, 3, 3);
+        assert_eq!(fast.len(), want.len());
+        assert_eq!(got.len(), want.len());
+        for (idx, ((f, g), w)) in fast.iter().zip(&got).zip(&want).enumerate() {
+            assert_eq!(f.to_bits(), w.to_bits(), "fast path bit drift at {idx}");
+            assert_eq!(g.to_bits(), w.to_bits(), "public kron bit drift at {idx}");
+        }
+
+        let fallback_cases: &[(&[f64], &[f64], usize, usize, usize, usize)] = &[
+            (&[-1.0, 2.0], &eye3, 1, 2, 3, 3),
+            (&[-0.0, 2.0], &eye3, 1, 2, 3, 3),
+            (&[f64::NAN, 2.0], &eye3, 1, 2, 3, 3),
+            (&[f64::INFINITY, 2.0], &eye3, 1, 2, 3, 3),
+            (&[1.0, 2.0], &[1.0, -0.0, 0.0, 1.0], 1, 2, 2, 2),
+        ];
+        for &(case_a, case_b, m, n, p, q) in fallback_cases {
+            assert!(
+                super::kron_identity_rhs_nonnegative_fast_path(case_a, m, n, case_b, p, q)
+                    .is_none(),
+                "fallback-sensitive case should not specialize"
+            );
+            let got = super::kron_nxn(case_a, m, n, case_b, p, q).expect("fallback kron");
+            let want = serial(case_a, m, n, case_b, p, q);
+            for (idx, (g, w)) in got.iter().zip(&want).enumerate() {
+                assert_eq!(g.to_bits(), w.to_bits(), "fallback bit drift at {idx}");
+            }
+        }
     }
 
     #[test]
