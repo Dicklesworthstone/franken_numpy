@@ -6825,6 +6825,44 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_uniform(
+        low: f64,
+        high: f64,
+        size: usize,
+    ) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+low = float(sys.argv[1])
+high = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.uniform(low, high, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [low.to_string(), high.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
+    fn numpy_oracle_standard_normal(size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+size = int(sys.argv[1])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.standard_normal(size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_logseries_then_random(
         p: &str,
     ) -> Result<(Vec<u64>, Vec<f64>), &'static str> {
@@ -12518,6 +12556,21 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn uniform_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_uniform(2.0, 5.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .uniform(2.0, 5.0, 10)
+            .map_err(|_| "uniform live oracle")?;
+        assert_f64_seq("uniform_live_numpy", &actual, &expected);
+        Ok(())
+    }
+
+    #[test]
     fn oracle_standard_normal() {
         let mut g = oracle_gen();
         let vals = g.standard_normal(10);
@@ -12534,6 +12587,19 @@ for child in rng.spawn(n_children):
             -1.2118074194203396,
         ];
         assert_f64_seq("standard_normal", &vals, &expected);
+    }
+
+    #[test]
+    fn standard_normal_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_standard_normal(10)?;
+        let mut g = oracle_gen();
+        let actual = g.standard_normal(10);
+        assert_f64_seq("standard_normal_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
