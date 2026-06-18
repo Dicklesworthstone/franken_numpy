@@ -25976,9 +25976,20 @@ fn rad2deg(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn positive(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_elementwise(py, x.bind(py), UnaryOp::Positive, "positive", "positive(x)")
+#[pyo3(signature = (*args, **kwargs))]
+fn positive(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_elementwise_or_passthrough(
+        py,
+        args,
+        kwargs,
+        UnaryOp::Positive,
+        "positive",
+        "positive(x)",
+    )
 }
 
 #[pyfunction]
@@ -27409,9 +27420,20 @@ fn fabs(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn negative(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_elementwise(py, x.bind(py), UnaryOp::Negative, "negative", "negative(x)")
+#[pyo3(signature = (*args, **kwargs))]
+fn negative(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_elementwise_or_passthrough(
+        py,
+        args,
+        kwargs,
+        UnaryOp::Negative,
+        "negative",
+        "negative(x)",
+    )
 }
 
 #[pyfunction]

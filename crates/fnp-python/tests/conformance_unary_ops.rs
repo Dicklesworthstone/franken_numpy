@@ -70,6 +70,54 @@ print(np.array_equal(result, expected))
 }
 
 #[test]
+fn sign_unary_out_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def out_outcome(module, name, positional=False, bad_shape=False):
+    fn = getattr(module, name)
+    try:
+        x = np.array([-2.0, -0.0, 0.0, 3.5], dtype=np.float64)
+        out = np.empty((2,), dtype=np.float64) if bad_shape else np.empty(4, dtype=np.float64)
+        if positional:
+            result = fn(x, out)
+        else:
+            result = fn(x, out=out)
+        return ("ok", result is out, out.dtype.str, tuple(out.shape), out.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc).splitlines()[0])
+
+cases = [
+    ("positive keyword out", "positive", False, False),
+    ("negative keyword out", "negative", False, False),
+    ("positive positional out", "positive", True, False),
+    ("negative positional out", "negative", True, False),
+    ("positive bad out shape", "positive", False, True),
+    ("negative bad out shape", "negative", False, True),
+]
+
+ok = True
+for label, name, positional, bad_shape in cases:
+    actual = out_outcome(fnp, name, positional, bad_shape)
+    expected = out_outcome(np, name, positional, bad_shape)
+    if actual[0] != expected[0] or actual[1] != expected[1]:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "positive/negative out keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn int32_unary_wraps_and_matches_numpy_golden_sha256() -> Result<(), String> {
     let script = fnp_script(
         r#"
