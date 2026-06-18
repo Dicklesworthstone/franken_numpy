@@ -14865,6 +14865,32 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn standard_gamma_zero_size_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_values, expected_after) = numpy_oracle_standard_gamma_then_random(3.0, 0, 1)?;
+        let mut g = oracle_gen();
+        let actual_values = g
+            .standard_gamma(3.0, 0)
+            .map_err(|_| "standard_gamma zero-size live oracle")?;
+        assert!(actual_values.is_empty());
+        assert_f64_seq(
+            "standard_gamma_zero_size_live_numpy",
+            &actual_values,
+            &expected_values,
+        );
+        let actual_after = g.random(1);
+        assert_f64_seq(
+            "standard_gamma_zero_size_after_live_numpy",
+            &actual_after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn oracle_standard_gamma_nonfinite_shape_advances_stream() {
         let expected_after = [
             0.888_337_197_310_043_6,
