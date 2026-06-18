@@ -37,6 +37,124 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn indent_python(body: &str) -> String {
+    body.lines().map(|line| format!("    {line}\n")).collect()
+}
+
+fn outcome_body(body: &str) -> String {
+    let indented = indent_python(body);
+    r#"import json
+
+def normalize(value):
+    if isinstance(value, tuple):
+        return {"kind": "tuple", "items": [normalize(item) for item in value]}
+    if isinstance(value, np.ndarray):
+        return {
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": value.tolist(),
+        }
+    if np.isscalar(value):
+        scalar_type = type(value).__name__
+        scalar_dtype = str(value.dtype) if hasattr(value, "dtype") else None
+        scalar_value = value.item() if hasattr(value, "item") else value
+        return {
+            "kind": "scalar",
+            "type": scalar_type,
+            "dtype": scalar_dtype,
+            "value": scalar_value,
+        }
+    return {"kind": "object", "type": type(value).__name__, "repr": repr(value)}
+
+try:
+__BODY__    payload = {"status": "ok", "result": normalize(result)}
+    if "out" in locals():
+        payload["out"] = normalize(out)
+        payload["result_is_out"] = result is out
+    print(json.dumps(payload, sort_keys=True, default=str))
+except Exception as exc:
+    message = str(exc).splitlines()[0] if str(exc) else ""
+    print(json.dumps(
+        {"status": "err", "type": type(exc).__name__, "message": message},
+        sort_keys=True,
+        default=str,
+    ))
+"#
+    .replace("__BODY__", &indented)
+}
+
+fn numpy_outcome_script(body: &str) -> String {
+    format!(
+        "import numpy as np\n\
+         MODULE = np\n\
+         {}",
+        outcome_body(body)
+    )
+}
+
+fn fnp_outcome_script(body: &str) -> String {
+    fnp_script(format!("MODULE = fnp\n{}", outcome_body(body)))
+}
+
+#[test]
+fn percentile_quantile_median_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "percentile list scalar q",
+            "result = MODULE.percentile([1, 2, 3, 4], 50)",
+        ),
+        (
+            "percentile q sequence method keepdims",
+            "result = MODULE.percentile(
+    np.array([[1, 2, 3], [4, 5, 6]]),
+    [25, 75],
+    axis=1,
+    method='nearest',
+    keepdims=True,
+)",
+        ),
+        (
+            "percentile out forwarding",
+            "out = np.empty((2,), dtype=np.float64)
+result = MODULE.percentile(np.array([[1.0, 2.0], [3.0, 4.0]]), 50, axis=0, out=out)",
+        ),
+        (
+            "quantile tuple q sequence axis",
+            "result = MODULE.quantile(((1, 2, 3), (4, 5, 6)), [0.25, 0.75], axis=0)",
+        ),
+        (
+            "quantile method fallback",
+            "result = MODULE.quantile(np.array([1, 2, 3, 4]), 0.5, method='lower')",
+        ),
+        (
+            "median tuple axis keepdims",
+            "result = MODULE.median(((1, 3, 2), (6, 4, 5)), axis=1, keepdims=True)",
+        ),
+        (
+            "median out forwarding",
+            "out = np.empty((2,), dtype=np.float64)
+result = MODULE.median(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0, out=out)",
+        ),
+        (
+            "median axis error type",
+            "result = MODULE.median([1, 2, 3], axis=2)",
+        ),
+    ];
+
+    for (name, body) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script(body))?;
+        let fnp_result = numpy_oracle(&fnp_outcome_script(body))?;
+
+        assert_eq!(
+            fnp_result, numpy_result,
+            "percentile/quantile/median outcome mismatch for {name}\n\
+             numpy: {numpy_result}\nfnp:   {fnp_result}"
+        );
+    }
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // percentile
 // ─────────────────────────────────────────────────────────────────────────────
