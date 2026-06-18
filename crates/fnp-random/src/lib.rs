@@ -11230,6 +11230,39 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn shaped_permutations_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let values = [0.0, 1.0, 2.0, 3.0];
+        let expected_values = numpy_oracle_permutation_f64(values.len())?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual_values = rng
+            .permutation_shaped(&values)
+            .map_err(|_| "permutation_shaped live oracle")?;
+        assert_eq!(actual_values.shape(), &[values.len()]);
+        assert_f64_seq(
+            "permutation_shaped_live_numpy",
+            actual_values.values(),
+            &expected_values,
+        );
+
+        let expected_range = numpy_oracle_permutation_range(5)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let actual_range = rng
+            .permutation_range_shaped(5)
+            .map_err(|_| "permutation_range_shaped live oracle")?;
+        assert_eq!(actual_range.shape(), &[5]);
+        assert_u64_seq(
+            "permutation_range_shaped_live_numpy",
+            actual_range.values(),
+            &expected_range,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn deterministic_same_seed() {
         let mut rng1 = test_generator();
         let mut rng2 = test_generator();
