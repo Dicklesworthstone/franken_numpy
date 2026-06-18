@@ -260,6 +260,51 @@ print(np.array_equal(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn choose_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def choose_outcome(fn, a, choices, **kwargs):
+    try:
+        result = fn(a, choices, **kwargs)
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), arr.tolist())
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list indices list choices", lambda: ([0, 1, 2, 1], [[10, 10, 10, 10], [20, 20, 20, 20], [30, 30, 30, 30]], {})),
+    ("tuple indices tuple choices", lambda: ((0, 1, 0), ((1.5, 2.5, 3.5), (10.5, 20.5, 30.5)), {})),
+    ("nested list choices", lambda: ([[0, 1], [1, 0]], [[[1, 2], [3, 4]], [[10, 20], [30, 40]]], {})),
+    ("wrap mode", lambda: ([-1, 0, 3], [[10, 10, 10], [20, 20, 20], [30, 30, 30]], {"mode": "wrap"})),
+    ("clip mode", lambda: ([-1, 0, 3], [[10, 10, 10], [20, 20, 20], [30, 30, 30]], {"mode": "clip"})),
+    ("raise mode error", lambda: ([0, 3], [[10, 10], [20, 20]], {})),
+]
+
+ok = True
+for label, factory in cases:
+    a, choices, kwargs = factory()
+    actual = choose_outcome(fnp.choose, a, choices, **kwargs)
+    a, choices, kwargs = factory()
+    expected = choose_outcome(np.choose, a, choices, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "choose Python-container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn choose_basic() -> Result<(), String> {
     let script = fnp_script(
         r#"
