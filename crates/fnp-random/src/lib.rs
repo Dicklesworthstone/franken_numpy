@@ -7661,6 +7661,26 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_shuffle_f64(values: &[f64]) -> Result<Vec<f64>, &'static str> {
+        let values_arg = values
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let script = r#"
+import sys
+import numpy as np
+
+values = np.array([float(part) for part in sys.argv[1].split(",") if part], dtype=float)
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+rng.shuffle(values)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let output = numpy_oracle_stdout_from_stdin(script, &[values_arg])?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_geometric_outcome(p: f64, size: usize) -> String {
         let script = r#"
 import sys
@@ -11059,6 +11079,21 @@ for child in rng.spawn(n_children):
         let mut sorted = vals;
         sorted.sort_by(f64::total_cmp);
         assert_eq!(sorted, [1.0, 2.0, 3.0, 4.0, 5.0]);
+    }
+
+    #[test]
+    fn shuffle_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let mut values: Vec<f64> = (0..10).map(|value| value as f64).collect();
+        let expected = numpy_oracle_shuffle_f64(&values)?;
+        let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        rng.shuffle(&mut values)
+            .map_err(|_| "shuffle live oracle")?;
+        assert_f64_seq("shuffle_live_numpy", &values, &expected);
+        Ok(())
     }
 
     #[test]
