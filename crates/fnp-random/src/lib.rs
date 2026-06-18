@@ -16240,6 +16240,20 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn permuted_shaped_matches_numpy_oracle_for_named_axis() {
+        if !numpy_oracle_available() {
+            return;
+        }
+
+        let data: Vec<f64> = (0..12).map(|value| value as f64).collect();
+        let mut rng = Generator::from_pcg64_dxsm(12345).unwrap();
+        let actual = rng.permuted_shaped(&data, &[3, 4], Some(1)).unwrap();
+        let expected = numpy_oracle_permuted(&[3, 4], Some(1));
+        assert_eq!(actual.shape(), &[3, 4]);
+        assert_eq!(actual.values(), expected.as_slice());
+    }
+
+    #[test]
     fn permuted_axis_out_of_bounds() {
         let mut rng = Generator::from_pcg64_dxsm(42).unwrap();
         let data = vec![1.0, 2.0, 3.0];
