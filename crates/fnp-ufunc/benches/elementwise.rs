@@ -150,6 +150,32 @@ fn bench_boolean_set_f64_masked(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_extract_f64_masked(c: &mut Criterion) {
+    let mut group = c.benchmark_group("extract_f64_masked");
+    for size in [100_000usize, 1_000_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        let arr = make_sign_array(*size);
+        let condition = UFuncArray::new(
+            vec![*size],
+            (0..*size)
+                .map(|i| {
+                    if matches!(i % 19, 0 | 3 | 7 | 14) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            DType::Bool,
+        )
+        .unwrap();
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter(|| UFuncArray::extract(black_box(&condition), black_box(&arr)).unwrap())
+        });
+    }
+    group.finish();
+}
+
 fn bench_copyto_equal_shape_masked(c: &mut Criterion) {
     let mut group = c.benchmark_group("copyto_equal_shape_masked");
     for size in [100_000usize, 1_000_000].iter() {
@@ -217,6 +243,7 @@ criterion_group!(
     bench_from_storage_f64_move,
     bench_sign,
     bench_boolean_set_f64_masked,
+    bench_extract_f64_masked,
     bench_copyto_equal_shape_masked,
     bench_putmask_f64_masked
 );

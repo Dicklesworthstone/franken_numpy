@@ -47,6 +47,7 @@ use serde::{Deserialize, Serialize};
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
 const BOOLEAN_SET_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const EXTRACT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PUTMASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
 const POLYVAL_ND_PARALLEL_MIN_ELEMS: usize = 1 << 12;
@@ -16248,6 +16249,39 @@ impl UFuncArray {
                 condition.values.len(),
                 arr.values.len()
             )));
+        }
+        if arr.values.len() >= EXTRACT_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+            && arr.dtype == DType::F64
+            && arr.integer_sidecar.is_none()
+            && condition.integer_sidecar.is_none()
+        {
+            let chunk_len = EXTRACT_PARALLEL_MIN_ELEMS / 4;
+            let chunks: Vec<Vec<f64>> = condition
+                .values
+                .par_chunks(chunk_len)
+                .zip(arr.values.par_chunks(chunk_len))
+                .map(|(condition_chunk, value_chunk)| {
+                    let mut selected = Vec::new();
+                    for (&c, &v) in condition_chunk.iter().zip(value_chunk) {
+                        if c != 0.0 {
+                            selected.push(v);
+                        }
+                    }
+                    selected
+                })
+                .collect();
+            let n: usize = chunks.iter().map(Vec::len).sum();
+            let mut values = Vec::with_capacity(n);
+            for chunk in chunks {
+                values.extend(chunk);
+            }
+            return Ok(Self {
+                shape: vec![n],
+                values,
+                dtype: arr.dtype,
+                integer_sidecar: None,
+            });
         }
         let mut values = Vec::new();
         let mut source_indices = Vec::new();
@@ -60086,6 +60120,79 @@ print(json.dumps(payload))
         let arr = UFuncArray::new(vec![5], vec![10.0, 20.0, 30.0, 40.0, 50.0], DType::F64).unwrap();
         let r = UFuncArray::extract(&cond, &arr).unwrap();
         assert_eq!(r.values(), &[10.0, 30.0, 50.0]);
+    }
+
+    #[test]
+    fn extract_f64_parallel_matches_serial_reference_and_golden_sha256() {
+        let n = super::EXTRACT_PARALLEL_MIN_ELEMS + 313;
+        let arr_values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 211 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_0042)
+                } else if i % 157 == 0 {
+                    -0.0
+                } else if i % 97 == 0 {
+                    f64::NEG_INFINITY
+                } else {
+                    ((i * 53 + 17) % 1009) as f64 / 47.0 - 10.0
+                }
+            })
+            .collect();
+        let condition_values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 173 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_0001)
+                } else if matches!((i * 37 + 11) % 19, 0 | 4 | 10 | 15) {
+                    1.0
+                } else if i % 23 == 0 {
+                    -0.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let expected: Vec<f64> = condition_values
+            .iter()
+            .zip(&arr_values)
+            .filter_map(|(&condition, &value)| {
+                if condition != 0.0 {
+                    Some(value)
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let condition = UFuncArray::new(vec![n], condition_values, DType::Bool).unwrap();
+        let arr = UFuncArray::new(vec![n], arr_values, DType::F64).unwrap();
+        let actual = UFuncArray::extract(&condition, &arr).unwrap();
+
+        assert_eq!(actual.shape(), &[expected.len()]);
+        assert_eq!(actual.dtype(), DType::F64);
+        assert!(!actual.has_integer_sidecar());
+        let mut digest = Sha256::new();
+        for (idx, (&got, &want)) in actual.values().iter().zip(&expected).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "parallel extract bit drift at index {idx}"
+            );
+            digest.update(got.to_le_bytes());
+        }
+        let digest_hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest_hex,
+            "9fae5a20076bfcac5b86d49aae788f85f484c1dbe612209e38fd075cc489423d"
+        );
+
+        let false_condition = UFuncArray::new(vec![n], vec![0.0; n], DType::Bool).unwrap();
+        let empty = UFuncArray::extract(&false_condition, &arr).unwrap();
+        assert_eq!(empty.shape(), &[0]);
+        assert!(empty.values().is_empty());
     }
 
     #[test]
