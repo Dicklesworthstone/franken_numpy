@@ -50,6 +50,68 @@ fn parse_int_list(s: &str) -> Vec<i64> {
         .collect()
 }
 
+fn flatnonzero_outcome_body(function_expr: &str, input_expr: &str) -> String {
+    format!(
+        "def outcome(fn):\n\
+             try:\n\
+                 value = fn({input_expr})\n\
+                 arr = np.asarray(value)\n\
+                 print('ok')\n\
+                 print(type(value).__name__)\n\
+                 print(str(arr.dtype))\n\
+                 print(tuple(arr.shape))\n\
+                 print(arr.tolist())\n\
+             except Exception as exc:\n\
+                 print('err')\n\
+                 print(type(exc).__name__)\n\
+                 print(str(exc))\n\
+         outcome({function_expr})"
+    )
+}
+
+fn numpy_flatnonzero_outcome_script(input_expr: &str) -> String {
+    format!(
+        "import numpy as np\n{}",
+        flatnonzero_outcome_body("np.flatnonzero", input_expr)
+    )
+}
+
+fn fnp_flatnonzero_outcome_script(input_expr: &str) -> String {
+    fnp_flatnonzero_script(flatnonzero_outcome_body("fnp.flatnonzero", input_expr))
+}
+
+#[test]
+fn flatnonzero_python_container_surfaces_match_numpy() -> Result<(), String> {
+    let cases = [
+        ("list fallback", "[0, 2, 0, 3]"),
+        ("tuple fallback", "(0, 0, 5, 0)"),
+        ("bool list", "[False, True, False, True]"),
+        ("nested list", "[[0, 1], [2, 0]]"),
+        ("scalar nonzero", "7"),
+        ("scalar zero", "0"),
+        (
+            "object truthiness",
+            "np.array(['', 'x', '0'], dtype=object)",
+        ),
+        ("ragged list error", "[[1], [0, 2]]"),
+    ];
+
+    for (label, input_expr) in cases {
+        let numpy_script = numpy_flatnonzero_outcome_script(input_expr);
+        let numpy_result = numpy_oracle(&numpy_script)?;
+
+        let rust_script = fnp_flatnonzero_outcome_script(input_expr);
+        let rust_result = numpy_oracle(&rust_script)?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "flatnonzero Python-container surface mismatch for {label}"
+        );
+    }
+
+    Ok(())
+}
+
 #[test]
 fn flatnonzero_1d_matches_numpy_across_50_cases() -> Result<(), String> {
     let test_cases = vec![
