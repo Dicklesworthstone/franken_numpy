@@ -45,6 +45,7 @@ use std::thread;
 use serde::{Deserialize, Serialize};
 
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
+const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UFuncRuntimeMode {
@@ -14246,7 +14247,6 @@ impl UFuncArray {
         } else {
             out_batch_count
         };
-        let mut values = Vec::with_capacity(out_len);
 
         let out_strides = contiguous_strides_elems(&out_batch);
         let a_batch_strides = contiguous_strides_elems(a_batch);
@@ -14337,6 +14337,60 @@ impl UFuncArray {
             return Self::from_storage(out_shape, storage);
         }
 
+        if out_batch_count >= CROSS_PARALLEL_MIN_BATCHES && rayon::current_num_threads() >= 2 {
+            if vector_output {
+                let mut values = vec![0.0; out_len];
+                values.par_chunks_mut(3).enumerate().for_each(|(flat, out)| {
+                    let (a_base, b_base) = cross_bases(
+                        flat,
+                        &out_batch,
+                        &out_strides,
+                        &a_steps,
+                        &b_steps,
+                        a_len,
+                        b_len,
+                    );
+                    let ax = self.values[a_base];
+                    let ay = self.values[a_base + 1];
+                    let az = if a_len == 3 {
+                        self.values[a_base + 2]
+                    } else {
+                        0.0
+                    };
+                    let bx = other.values[b_base];
+                    let by = other.values[b_base + 1];
+                    let bz = if b_len == 3 {
+                        other.values[b_base + 2]
+                    } else {
+                        0.0
+                    };
+                    out[0] = ay * bz - az * by;
+                    out[1] = az * bx - ax * bz;
+                    out[2] = ax * by - ay * bx;
+                });
+                return Self::from_values_with_dtype(out_shape, values, dtype);
+            }
+
+            let values: Vec<f64> = (0..out_batch_count)
+                .into_par_iter()
+                .map(|flat| {
+                    let (a_base, b_base) = cross_bases(
+                        flat,
+                        &out_batch,
+                        &out_strides,
+                        &a_steps,
+                        &b_steps,
+                        a_len,
+                        b_len,
+                    );
+                    self.values[a_base] * other.values[b_base + 1]
+                        - self.values[a_base + 1] * other.values[b_base]
+                })
+                .collect();
+            return Self::from_values_with_dtype(out_shape, values, dtype);
+        }
+
+        let mut values = Vec::with_capacity(out_len);
         for flat in 0..out_batch_count {
             let mut a_vector_index = 0usize;
             let mut b_vector_index = 0usize;
@@ -61028,6 +61082,54 @@ print(json.dumps(payload))
 
         assert_eq!(r.shape(), &[2, 3]);
         assert_eq!(r.values(), &[-1.0, 2.0, -1.0, -4.0, 8.0, -4.0]);
+    }
+
+    #[test]
+    fn cross_large_vector_batch_matches_serial_reference_and_golden_sha256() {
+        // Clears the parallel batch gate, so multi-threaded test runs exercise the
+        // disjoint output-chunk path. The reference is the original serial formula.
+        let batches = super::CROSS_PARALLEL_MIN_BATCHES + 257;
+        let a_vals: Vec<f64> = (0..batches * 3)
+            .map(|i| ((i * 17 + 5) % 251) as f64 / 7.0 - 17.0)
+            .collect();
+        let b_vals: Vec<f64> = (0..batches * 3)
+            .map(|i| ((i * 29 + 11) % 263) as f64 / 5.0 - 23.0)
+            .collect();
+        let a = UFuncArray::new(vec![batches, 3], a_vals.clone(), DType::F64).unwrap();
+        let b = UFuncArray::new(vec![batches, 3], b_vals.clone(), DType::F64).unwrap();
+
+        let r = a.cross(&b).unwrap();
+
+        assert_eq!(r.shape(), &[batches, 3]);
+        assert_eq!(r.values().len(), batches * 3);
+        let mut digest = Sha256::new();
+        for i in 0..batches {
+            let ax = a_vals[i * 3];
+            let ay = a_vals[i * 3 + 1];
+            let az = a_vals[i * 3 + 2];
+            let bx = b_vals[i * 3];
+            let by = b_vals[i * 3 + 1];
+            let bz = b_vals[i * 3 + 2];
+            let expected = [ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx];
+            for lane in 0..3 {
+                let got = r.values()[i * 3 + lane];
+                assert_eq!(
+                    got.to_bits(),
+                    expected[lane].to_bits(),
+                    "cross drifted at vector {i} lane {lane}"
+                );
+                digest.update(got.to_bits().to_le_bytes());
+            }
+        }
+        let digest = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest, "0781bff4af2f69c2bdaed837925b28537eea25837bc14313b773ca1c95ff08dc",
+            "large cross batch golden digest drifted"
+        );
     }
 
     #[test]
