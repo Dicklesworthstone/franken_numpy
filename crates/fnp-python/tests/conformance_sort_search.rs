@@ -301,7 +301,17 @@ def unique_outcome(fn, value, **kwargs):
         return ("err", type(exc).__name__, str(exc))
 
 cases = [
+    ("empty list all return flags", lambda: ([], {
+        "return_index": True,
+        "return_inverse": True,
+        "return_counts": True,
+    })),
     ("list return_index", lambda: ([3, 1, 2, 1, 3], {"return_index": True})),
+    ("bool list return_counts", lambda: ([False, True, False, True], {"return_counts": True})),
+    ("string list delegate counts", lambda: (["b", "a", "b"], {
+        "return_index": True,
+        "return_counts": True,
+    })),
     ("tuple all return flags", lambda: ((3, 1, 2, 1, 3), {
         "return_index": True,
         "return_inverse": True,
@@ -316,6 +326,10 @@ cases = [
     ("axis rows counts", lambda: ([[1, 2], [1, 2], [3, 4]], {
         "axis": 0,
         "return_counts": True,
+    })),
+    ("axis columns inverse", lambda: ([[1, 1, 2], [3, 3, 4]], {
+        "axis": 1,
+        "return_inverse": True,
     })),
 ]
 
