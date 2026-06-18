@@ -41,7 +41,7 @@ fn indent_python(body: &str) -> String {
     body.lines().map(|line| format!("    {line}\n")).collect()
 }
 
-fn average_outcome_body(body: &str) -> String {
+fn stats_outcome_body(body: &str) -> String {
     let indented = indent_python(body);
     r#"import json
 
@@ -85,16 +85,24 @@ except Exception as exc:
 }
 
 fn numpy_average_outcome_script(body: &str) -> String {
+    numpy_stats_outcome_script(body)
+}
+
+fn fnp_average_outcome_script(body: &str) -> String {
+    fnp_stats_outcome_script(body)
+}
+
+fn numpy_stats_outcome_script(body: &str) -> String {
     format!(
         "import numpy as np\n\
          MODULE = np\n\
          {}",
-        average_outcome_body(body)
+        stats_outcome_body(body)
     )
 }
 
-fn fnp_average_outcome_script(body: &str) -> String {
-    fnp_script(format!("MODULE = fnp\n{}", average_outcome_body(body)))
+fn fnp_stats_outcome_script(body: &str) -> String {
+    fnp_script(format!("MODULE = fnp\n{}", stats_outcome_body(body)))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -157,6 +165,55 @@ print(np.allclose(result, expected))
 // ─────────────────────────────────────────────────────────────────────────────
 // cov
 // ─────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn cov_corrcoef_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "cov rowvar false bias",
+            "result = MODULE.cov(((1.0, 2.0, 3.0), (2.0, 4.0, 6.0)), rowvar=False, bias=True)",
+        ),
+        (
+            "cov y ddof",
+            "result = MODULE.cov([1.0, 2.0, 4.0], y=[2.0, 1.0, 0.0], ddof=0)",
+        ),
+        (
+            "cov fweights aweights",
+            "result = MODULE.cov(
+    np.array([[1.0, 2.0, 3.0], [2.0, 4.0, 8.0]]),
+    fweights=[1, 2, 1],
+    aweights=[1.0, 0.5, 2.0],
+)",
+        ),
+        (
+            "cov weight shape error",
+            "result = MODULE.cov([1.0, 2.0], fweights=[1, 2, 3])",
+        ),
+        (
+            "corrcoef rowvar false dtype",
+            "result = MODULE.corrcoef(np.array([[1.0, 2.0], [3.0, 4.0], [5.0, 8.0]]), rowvar=False, dtype=np.float32)",
+        ),
+        (
+            "corrcoef y ddof compatibility",
+            "result = MODULE.corrcoef([1.0, 2.0, 3.0], y=[3.0, 2.0, 1.0], ddof=0)",
+        ),
+        (
+            "corrcoef y shape error",
+            "result = MODULE.corrcoef([1.0, 2.0], y=[1.0, 2.0, 3.0])",
+        ),
+    ];
+
+    for (name, body) in cases {
+        let numpy_result = numpy_oracle(&numpy_stats_outcome_script(body))?;
+        let fnp_result = numpy_oracle(&fnp_stats_outcome_script(body))?;
+
+        assert_eq!(
+            fnp_result, numpy_result,
+            "cov/corrcoef outcome mismatch for {name}\nnumpy: {numpy_result}\nfnp:   {fnp_result}"
+        );
+    }
+    Ok(())
+}
 
 #[test]
 fn cov_1d() -> Result<(), String> {
