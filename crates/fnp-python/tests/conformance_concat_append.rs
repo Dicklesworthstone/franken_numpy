@@ -42,6 +42,102 @@ fn fnp_script(body: String) -> String {
 // ──────────────���──────────────────────────────────────────────────────────────
 
 #[test]
+fn concatenate_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize(value):
+    array = np.asarray(value)
+    return (str(array.dtype), tuple(array.shape), clean(array.tolist()))
+
+def outcome(concat_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(concat_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    ("tuple of Python lists", lambda: ((((1, 2), (3, 4)),), {})),
+    (
+        "axis none nested lists",
+        lambda: (([np.array([[1, 2], [3, 4]]), [[5, 6]]],), {"axis": None}),
+    ),
+    (
+        "negative axis tuple arrays",
+        lambda: (((np.arange(6).reshape(2, 3), np.arange(6, 12).reshape(2, 3)),), {"axis": -1}),
+    ),
+    (
+        "mixed ndarray and list",
+        lambda: (([np.array([1, 2], dtype=np.int16), [3, 4]],), {}),
+    ),
+    (
+        "dtype casting unsafe",
+        lambda: (([np.array([1.25, 2.75]), np.array([3.5])],), {"dtype": np.int64, "casting": "unsafe"}),
+    ),
+    (
+        "object string fallback",
+        lambda: (([np.array(["a", "b"], dtype=object), ["c"]],), {}),
+    ),
+    ("empty sequence error", lambda: (([],), {})),
+    ("scalar entries error", lambda: (([1, 2],), {})),
+    (
+        "invalid axis error",
+        lambda: (([np.array([1, 2]), np.array([3, 4])],), {"axis": 2}),
+    ),
+    (
+        "out dtype conflict error",
+        lambda: (
+            ([np.array([1, 2]), np.array([3, 4])],),
+            {"out": np.empty(4, dtype=np.int64), "dtype": np.float64},
+        ),
+    ),
+]
+
+ok = True
+for label, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(fnp.concatenate, *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(np.concatenate, *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+
+def out_contract(concat_fn):
+    out = np.empty(4, dtype=np.float64)
+    result = concat_fn([np.array([1.5, 2.5]), [3.5, 4.5]], out=out)
+    return (normalize(result), normalize(out), result is out)
+
+actual_out = out_contract(fnp.concatenate)
+expected_out = out_contract(np.concatenate)
+if actual_out != expected_out:
+    print("out contract")
+    print(actual_out)
+    print(expected_out)
+    ok = False
+
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "concatenate Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn concatenate_1d() -> Result<(), String> {
     let script = fnp_script(
         r#"
