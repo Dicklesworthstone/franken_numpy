@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
 const BOOLEAN_SET_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const COUNT_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const EXTRACT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const FLATNONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
@@ -27334,7 +27335,17 @@ impl UFuncArray {
     pub fn count_nonzero(&self, axis: Option<isize>, keepdims: bool) -> Result<Self, UFuncError> {
         match axis {
             None => {
-                let count = self.values.iter().filter(|&&v| v != 0.0).count() as f64;
+                let count = if self.dtype == DType::F64
+                    && self.integer_sidecar.is_none()
+                    && self.values.len() >= COUNT_NONZERO_PARALLEL_MIN_ELEMS
+                {
+                    self.values
+                        .par_chunks(COUNT_NONZERO_PARALLEL_MIN_ELEMS / 4)
+                        .map(|chunk| chunk.iter().filter(|&&v| v != 0.0).count())
+                        .sum::<usize>() as f64
+                } else {
+                    self.values.iter().filter(|&&v| v != 0.0).count() as f64
+                };
                 let shape = if keepdims {
                     vec![1; self.shape.len()]
                 } else {
@@ -63010,6 +63021,55 @@ print(json.dumps(payload))
         assert_eq!(a.count_nonzero(None, false).unwrap().values(), &[3.0]);
         let z = UFuncArray::new(vec![3], vec![0.0, 0.0, 0.0], DType::F64).unwrap();
         assert_eq!(z.count_nonzero(None, false).unwrap().values(), &[0.0]);
+    }
+
+    #[test]
+    fn count_nonzero_f64_parallel_matches_serial_reference_and_golden_sha256() {
+        let n = super::COUNT_NONZERO_PARALLEL_MIN_ELEMS + 421;
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 181 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_0066)
+                } else if i % 163 == 0 {
+                    -0.0
+                } else if i % 127 == 0 {
+                    f64::NEG_INFINITY
+                } else if matches!((i * 41 + 13) % 29, 0 | 3 | 7 | 17 | 23) {
+                    ((i * 43 + 19) % 3001) as f64 + 0.5
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let expected = values.iter().filter(|&&value| value != 0.0).count();
+        let array = UFuncArray::new(vec![n], values, DType::F64).unwrap();
+
+        let actual = array.count_nonzero(None, false).unwrap();
+        assert_eq!(actual.shape(), &[]);
+        assert_eq!(actual.dtype(), DType::I64);
+        assert!(!actual.has_integer_sidecar());
+        assert_eq!(actual.values(), &[expected as f64]);
+
+        let keepdims = array.count_nonzero(None, true).unwrap();
+        assert_eq!(keepdims.shape(), &[1]);
+        assert_eq!(keepdims.values(), &[expected as f64]);
+
+        let zeros = UFuncArray::new(vec![n], vec![-0.0; n], DType::F64).unwrap();
+        assert_eq!(zeros.count_nonzero(None, false).unwrap().values(), &[0.0]);
+
+        let mut digest = Sha256::new();
+        digest.update((expected as u64).to_le_bytes());
+        digest.update((n as u64).to_le_bytes());
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            use std::fmt::Write as _;
+            write!(&mut digest_hex, "{byte:02x}").expect("write digest hex");
+        }
+        assert_eq!(
+            digest_hex,
+            "5643d08050c0ea41be0f8f11bd0f49a48523de5493eaabdb228cd12a79af9d50"
+        );
     }
 
     #[test]

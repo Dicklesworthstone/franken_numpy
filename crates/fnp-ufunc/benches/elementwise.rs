@@ -207,6 +207,37 @@ fn bench_flatnonzero_f64_sparse(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_count_nonzero_flat_f64_sparse(c: &mut Criterion) {
+    let mut group = c.benchmark_group("count_nonzero_flat_f64_sparse");
+    for size in [100_000usize, 1_000_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        let arr = UFuncArray::new(
+            vec![*size],
+            (0..*size)
+                .map(|i| {
+                    if i % 181 == 0 {
+                        f64::NAN
+                    } else if i % 163 == 0 {
+                        -0.0
+                    } else if i % 127 == 0 {
+                        f64::NEG_INFINITY
+                    } else if matches!((i * 41 + 13) % 29, 0 | 3 | 7 | 17 | 23) {
+                        ((i * 43 + 19) % 3001) as f64 + 0.5
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            DType::F64,
+        )
+        .unwrap();
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter(|| black_box(&arr).count_nonzero(None, false).unwrap())
+        });
+    }
+    group.finish();
+}
+
 fn bench_copyto_equal_shape_masked(c: &mut Criterion) {
     let mut group = c.benchmark_group("copyto_equal_shape_masked");
     for size in [100_000usize, 1_000_000].iter() {
@@ -276,6 +307,7 @@ criterion_group!(
     bench_boolean_set_f64_masked,
     bench_extract_f64_masked,
     bench_flatnonzero_f64_sparse,
+    bench_count_nonzero_flat_f64_sparse,
     bench_copyto_equal_shape_masked,
     bench_putmask_f64_masked
 );
