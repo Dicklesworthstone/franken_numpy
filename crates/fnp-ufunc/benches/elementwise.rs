@@ -1,6 +1,6 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_dtype::{ArrayStorage, DType};
-use fnp_ufunc::{UFuncArray, UnaryOp, add, divide, multiply, subtract};
+use fnp_ufunc::{UFuncArray, UnaryOp, add, divide, multiply, subtract, where_nonzero};
 use std::hint::black_box;
 
 fn make_array(n: usize) -> UFuncArray {
@@ -238,6 +238,39 @@ fn bench_count_nonzero_flat_f64_sparse(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_where_nonzero_f64_2d_sparse(c: &mut Criterion) {
+    let mut group = c.benchmark_group("where_nonzero_f64_2d_sparse");
+    for rows in [512usize, 1024].iter() {
+        let cols = *rows;
+        let size = *rows * cols;
+        group.throughput(Throughput::Elements(size as u64));
+        let arr = UFuncArray::new(
+            vec![*rows, cols],
+            (0..size)
+                .map(|i| {
+                    if i % 191 == 0 {
+                        f64::NAN
+                    } else if i % 167 == 0 {
+                        -0.0
+                    } else if i % 137 == 0 {
+                        f64::NEG_INFINITY
+                    } else if matches!((i * 43 + 17) % 31, 0 | 5 | 11 | 19 | 23) {
+                        ((i * 47 + 29) % 4001) as f64 + 0.25
+                    } else {
+                        0.0
+                    }
+                })
+                .collect(),
+            DType::F64,
+        )
+        .unwrap();
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |bench, _| {
+            bench.iter(|| where_nonzero(black_box(&arr)).unwrap())
+        });
+    }
+    group.finish();
+}
+
 fn bench_copyto_equal_shape_masked(c: &mut Criterion) {
     let mut group = c.benchmark_group("copyto_equal_shape_masked");
     for size in [100_000usize, 1_000_000].iter() {
@@ -308,6 +341,7 @@ criterion_group!(
     bench_extract_f64_masked,
     bench_flatnonzero_f64_sparse,
     bench_count_nonzero_flat_f64_sparse,
+    bench_where_nonzero_f64_2d_sparse,
     bench_copyto_equal_shape_masked,
     bench_putmask_f64_masked
 );

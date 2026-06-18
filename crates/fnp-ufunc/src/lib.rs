@@ -51,6 +51,7 @@ const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const EXTRACT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const FLATNONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PUTMASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const WHERE_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
 const POLYVAL_ND_PARALLEL_MIN_ELEMS: usize = 1 << 12;
 const POLYVALFROMROOTS_PARALLEL_MIN_WORK: usize = 1 << 14;
@@ -36885,18 +36886,54 @@ pub fn where_nonzero(condition: &UFuncArray) -> Result<Vec<UFuncArray>, UFuncErr
         ));
     }
     let strides = contiguous_strides_elems(&condition.shape);
-    let mut nd_indices: Vec<Vec<f64>> = vec![Vec::new(); ndim];
-
-    for (flat, &v) in condition.values.iter().enumerate() {
-        if v != 0.0 {
-            let mut remaining = flat;
-            for d in 0..ndim {
-                let idx = remaining / strides[d];
-                remaining %= strides[d];
-                nd_indices[d].push(idx as f64);
+    let nd_indices: Vec<Vec<f64>> = if condition.dtype == DType::F64
+        && condition.integer_sidecar.is_none()
+        && condition.values.len() >= WHERE_NONZERO_PARALLEL_MIN_ELEMS
+    {
+        let chunk_len = WHERE_NONZERO_PARALLEL_MIN_ELEMS / 4;
+        let chunks: Vec<Vec<Vec<f64>>> = condition
+            .values
+            .par_chunks(chunk_len)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let base = chunk_idx * chunk_len;
+                let mut local_indices: Vec<Vec<f64>> = vec![Vec::new(); ndim];
+                for (offset, &v) in chunk.iter().enumerate() {
+                    if v != 0.0 {
+                        let mut remaining = base + offset;
+                        for d in 0..ndim {
+                            let idx = remaining / strides[d];
+                            remaining %= strides[d];
+                            local_indices[d].push(idx as f64);
+                        }
+                    }
+                }
+                local_indices
+            })
+            .collect();
+        let mut nd_indices: Vec<Vec<f64>> = (0..ndim)
+            .map(|dim| Vec::with_capacity(chunks.iter().map(|chunk| chunk[dim].len()).sum()))
+            .collect();
+        for chunk in chunks {
+            for (dst, src) in nd_indices.iter_mut().zip(chunk) {
+                dst.extend(src);
             }
         }
-    }
+        nd_indices
+    } else {
+        let mut nd_indices: Vec<Vec<f64>> = vec![Vec::new(); ndim];
+        for (flat, &v) in condition.values.iter().enumerate() {
+            if v != 0.0 {
+                let mut remaining = flat;
+                for d in 0..ndim {
+                    let idx = remaining / strides[d];
+                    remaining %= strides[d];
+                    nd_indices[d].push(idx as f64);
+                }
+            }
+        }
+        nd_indices
+    };
 
     let result: Vec<UFuncArray> = nd_indices
         .into_iter()
@@ -72024,6 +72061,68 @@ print(json.dumps(payload))
         assert_eq!(result[0].values(), &[1.0]); // dim 0
         assert_eq!(result[1].values(), &[0.0]); // dim 1
         assert_eq!(result[2].values(), &[1.0]); // dim 2
+    }
+
+    #[test]
+    fn where_nonzero_f64_parallel_matches_serial_reference_and_golden_sha256() {
+        let shape = vec![129usize, 131usize];
+        let n: usize = shape.iter().product();
+        assert!(n >= super::WHERE_NONZERO_PARALLEL_MIN_ELEMS);
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 191 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_0077)
+                } else if i % 167 == 0 {
+                    -0.0
+                } else if i % 137 == 0 {
+                    f64::NEG_INFINITY
+                } else if matches!((i * 43 + 17) % 31, 0 | 5 | 11 | 19 | 23) {
+                    ((i * 47 + 29) % 4001) as f64 + 0.25
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut expected: Vec<Vec<i64>> = vec![Vec::new(); shape.len()];
+        for (flat, &value) in values.iter().enumerate() {
+            if value != 0.0 {
+                expected[0].push((flat / shape[1]) as i64);
+                expected[1].push((flat % shape[1]) as i64);
+            }
+        }
+
+        let arr = UFuncArray::new(shape.clone(), values, DType::F64).unwrap();
+        let actual = where_nonzero(&arr).unwrap();
+        assert_eq!(actual.len(), shape.len());
+
+        let mut digest = Sha256::new();
+        for (axis_result, expected_axis) in actual.iter().zip(&expected) {
+            assert_eq!(axis_result.shape(), &[expected_axis.len()]);
+            assert_eq!(axis_result.dtype(), DType::I64);
+            assert!(!axis_result.has_integer_sidecar());
+            for (&got, &want) in axis_result.values().iter().zip(expected_axis) {
+                assert_eq!(got.to_bits(), (want as f64).to_bits());
+                digest.update(want.to_le_bytes());
+            }
+        }
+        let digest = digest.finalize();
+        let mut digest_hex = String::with_capacity(digest.len() * 2);
+        for byte in digest {
+            write!(&mut digest_hex, "{byte:02x}").expect("write digest hex");
+        }
+        assert_eq!(
+            digest_hex,
+            "e68e87be2bc4c07e8f1b156aaa78784a40eb0ba94824ea8b4bb47ba50dcf5975"
+        );
+
+        let zeros = UFuncArray::new(shape, vec![-0.0; n], DType::F64).unwrap();
+        let empty = where_nonzero(&zeros).unwrap();
+        assert_eq!(empty.len(), 2);
+        for axis_result in empty {
+            assert_eq!(axis_result.shape(), &[0]);
+            assert!(axis_result.values().is_empty());
+            assert!(!axis_result.has_integer_sidecar());
+        }
     }
 
     // ── unique variants tests ───────────────────────────────────────────
