@@ -6639,6 +6639,42 @@ for row in values.tolist():
         Ok(rows)
     }
 
+    fn numpy_oracle_multinomial(
+        n: u64,
+        pvals: &[f64],
+        size: usize,
+    ) -> Result<Vec<Vec<u64>>, &'static str> {
+        let pvals_arg = format!(
+            "[{}]",
+            pvals
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        let script = r#"
+import json
+import sys
+import numpy as np
+
+n = int(sys.argv[1])
+pvals = json.loads(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.multinomial(n, pvals, size=size)
+for row in values.tolist():
+    print(",".join(str(int(value)) for value in row))
+"#;
+        let args = [n.to_string(), pvals_arg, size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        let mut rows = Vec::new();
+        for line in stdout.lines().filter(|line| !line.trim().is_empty()) {
+            rows.push(parse_oracle_u64_csv(line.trim())?);
+        }
+        Ok(rows)
+    }
+
     fn numpy_oracle_choice_weighted_no_replace() -> Result<(Vec<f64>, Vec<f64>), &'static str> {
         let script = r#"
 import numpy as np
@@ -13880,6 +13916,32 @@ for child in rng.spawn(n_children):
         for (i, (got, exp)) in vals.iter().zip(expected.iter()).enumerate() {
             assert_eq!(got, exp, "multinomial[{i}]: got {got:?}, expected {exp:?}");
         }
+    }
+
+    #[test]
+    fn multinomial_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let pvals = [0.3, 0.5, 0.2];
+        let expected = numpy_oracle_multinomial(20, &pvals, 3)?;
+        let mut g = oracle_gen();
+        let actual = g.multinomial(20, &pvals, 3);
+        match actual.len().cmp(&expected.len()) {
+            std::cmp::Ordering::Equal => {}
+            _ => return Err("multinomial live oracle sample count mismatch"),
+        }
+        for (i, (got, exp)) in actual.iter().zip(expected.iter()).enumerate() {
+            let label = match i {
+                0 => "multinomial_live_numpy[0]",
+                1 => "multinomial_live_numpy[1]",
+                2 => "multinomial_live_numpy[2]",
+                _ => "multinomial_live_numpy",
+            };
+            assert_u64_seq(label, got, exp);
+        }
+        Ok(())
     }
 
     // NOTE: NumPy defaults to method='svd' for multivariate_normal. Our
