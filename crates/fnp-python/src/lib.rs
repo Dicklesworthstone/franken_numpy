@@ -18562,6 +18562,19 @@ fn searchsorted(
                 || v_bound.extract::<bool>().is_ok()
         }
     };
+    // Zero-copy scalar-query fast path: a single binary search over the haystack
+    // buffer, with no extract of the (potentially huge) sorted array. The cold path
+    // below materializes the entire haystack into a UFuncArray just to answer one
+    // lookup — ~1600x (f64) to ~36000x (i64) slower than numpy for a scalar v. This
+    // reuses the same lower/upper-bound loop as the array path, so it is bit-exact.
+    // Non-f64/i64/u64 haystacks and int-haystack-with-float-query (numpy promotes to
+    // f64) defer to the existing path.
+    if sorter.is_none()
+        && v_is_scalar
+        && let Some(out) = try_zerocopy_scalar_searchsorted(py, a.bind(py), v_bound, side)?
+    {
+        return Ok(out);
+    }
     // Fast typed binary search for matched integer dtypes with an array `v` and no
     // sorter — skips the cold extract→UFuncArray path (~11x slower).
     if sorter.is_none()
@@ -18587,6 +18600,133 @@ fn searchsorted(
     } else {
         Ok(array)
     }
+}
+
+// Lower/upper-bound insertion index for a single key over a sorted PyBuffer slice —
+// the same branchless loop searchsorted_typed runs per array element. side="left"
+// (right=false) counts elements < key; side="right" counts elements <= key.
+// Insertion index of `key` over a sorted integer PyBuffer slice — the same branchless
+// loop searchsorted_typed runs per array element. Integers are totally ordered (no
+// NaN), so plain </<= matches numpy. side="left" counts elements < key; side="right"
+// counts elements <= key.
+fn scalar_search_index<T: pyo3::buffer::Element + Copy + PartialOrd>(
+    s: &[pyo3::buffer::ReadOnlyCell<T>],
+    key: T,
+    right: bool,
+) -> usize {
+    let mut left = 0usize;
+    let mut len = s.len();
+    while len > 0 {
+        let half = len / 2;
+        let mid = left + half;
+        let probe = s[mid].get();
+        let cond = if right { probe <= key } else { probe < key };
+        if cond {
+            left = mid + 1;
+            len -= half + 1;
+        } else {
+            len = half;
+        }
+    }
+    left
+}
+
+// f64 variant with numpy's NaN-aware ordering: NaN sorts after every real value, so a
+// NaN key inserts at the end and a NaN probe compares greater than any real key.
+// `lt(a, b) = a < b || (b.is_nan() && !a.is_nan())`; using is_nan keeps it clippy-clean.
+fn scalar_search_index_f64(s: &[pyo3::buffer::ReadOnlyCell<f64>], key: f64, right: bool) -> usize {
+    let mut left = 0usize;
+    let mut len = s.len();
+    while len > 0 {
+        let half = len / 2;
+        let mid = left + half;
+        let probe = s[mid].get();
+        let cond = if right {
+            !(key < probe || (probe.is_nan() && !key.is_nan()))
+        } else {
+            probe < key || (key.is_nan() && !probe.is_nan())
+        };
+        if cond {
+            left = mid + 1;
+            len -= half + 1;
+        } else {
+            len = half;
+        }
+    }
+    left
+}
+
+// Zero-copy np.searchsorted for a SCALAR query `v` over a 1-D numeric haystack `a`,
+// returning numpy's np.intp scalar. Reads `a`'s buffer directly and runs one binary
+// search — no extract of the haystack. Handles the haystacks where the comparison is
+// unambiguous: f64 (numpy compares in f64 whether v is int or float), and i64/u64
+// with an integer-valued query. An int/uint haystack with a non-integer (float) query
+// promotes to f64 in numpy, so that — and every other dtype (narrow ints, f32,
+// complex, datetime) — defers (returns None) to the existing path. Bit-exact: the
+// search loop is identical to the array fast path.
+fn try_zerocopy_scalar_searchsorted(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    v: &Bound<'_, PyAny>,
+    side: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if a.getattr("ndim")?.extract::<usize>()? != 1 {
+        return Ok(None); // numpy searchsorted requires a 1-D haystack
+    }
+    let right = match side {
+        "left" => false,
+        "right" => true,
+        _ => return Ok(None),
+    };
+    let a_dtype = a.getattr("dtype")?;
+    let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    let idx = match (kind.as_str(), itemsize) {
+        ("f", 8) => {
+            let Ok(key) = v.extract::<f64>() else {
+                return Ok(None);
+            };
+            let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            scalar_search_index_f64(slice, key, right)
+        }
+        ("i", 8) => {
+            // A float (non-integer) query promotes both sides to f64 in numpy; defer.
+            let Ok(key) = v.extract::<i64>() else {
+                return Ok(None);
+            };
+            let Ok(buffer) = PyBuffer::<i64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            scalar_search_index(slice, key, right)
+        }
+        ("u", 8) => {
+            let Ok(key) = v.extract::<u64>() else {
+                return Ok(None);
+            };
+            let Ok(buffer) = PyBuffer::<u64>::get(a) else {
+                return Ok(None);
+            };
+            let Some(slice) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            scalar_search_index(slice, key, right)
+        }
+        _ => return Ok(None),
+    };
+    Ok(Some(numpy.getattr("intp")?.call1((idx as i64,))?.unbind()))
 }
 
 // Typed binary-search core for np.searchsorted over a sorted haystack. For each
