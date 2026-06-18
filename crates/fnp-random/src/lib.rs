@@ -6703,6 +6703,23 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_power(a: f64, size: usize) -> Result<Vec<f64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+a = float(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.power(a, size=size)
+print(",".join(str(float(value)) for value in values.tolist()))
+"#;
+        let args = [a.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_f64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_logseries_then_random(
         p: &str,
     ) -> Result<(Vec<u64>, Vec<f64>), &'static str> {
@@ -12819,6 +12836,19 @@ for child in rng.spawn(n_children):
             0.7531010773400103,
         ];
         assert_f64_seq("power", &vals, &expected);
+    }
+
+    #[test]
+    fn power_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_power(5.0, 10)?;
+        let mut g = oracle_gen();
+        let actual = g.power(5.0, 10).map_err(|_| "power live oracle")?;
+        assert_f64_seq("power_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
