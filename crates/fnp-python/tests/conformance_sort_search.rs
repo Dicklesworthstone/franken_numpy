@@ -230,6 +230,72 @@ print(np.allclose(result, expected))
     Ok(())
 }
 
+#[test]
+fn unique_return_flag_container_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize_unique_result(value):
+    if isinstance(value, tuple):
+        return ("tuple", [normalize_unique_result(item) for item in value])
+    arr = np.asarray(value)
+    return ("array", type(value).__name__, str(arr.dtype), tuple(arr.shape), clean(arr.tolist()))
+
+def unique_outcome(fn, value, **kwargs):
+    try:
+        return ("ok", normalize_unique_result(fn(value, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__, str(exc))
+
+cases = [
+    ("list return_index", lambda: ([3, 1, 2, 1, 3], {"return_index": True})),
+    ("tuple all return flags", lambda: ((3, 1, 2, 1, 3), {
+        "return_index": True,
+        "return_inverse": True,
+        "return_counts": True,
+    })),
+    ("int16 counting full return", lambda: (np.array([2, 1, 2, 0, 1, 2], dtype=np.int16), {
+        "return_index": True,
+        "return_inverse": True,
+        "return_counts": True,
+    })),
+    ("equal_nan false delegate", lambda: (np.array([np.nan, 1.0, np.nan]), {"equal_nan": False})),
+    ("axis rows counts", lambda: ([[1, 2], [1, 2], [3, 4]], {
+        "axis": 0,
+        "return_counts": True,
+    })),
+]
+
+ok = True
+for label, factory in cases:
+    value, kwargs = factory()
+    actual = unique_outcome(fnp.unique, value, **kwargs)
+    value, kwargs = factory()
+    expected = unique_outcome(np.unique, value, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "unique return-flag container surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // searchsorted
 // ─────────────────────────────────────────────────────────────────────────────
