@@ -6574,6 +6574,35 @@ print(",".join(str(int(value)) for value in values.tolist()))
         parse_oracle_u64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_hypergeometric(
+        good: u64,
+        bad: u64,
+        sample: u64,
+        size: usize,
+    ) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+good = int(sys.argv[1])
+bad = int(sys.argv[2])
+sample = int(sys.argv[3])
+size = int(sys.argv[4])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.hypergeometric(good, bad, sample, size=size)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let args = [
+            good.to_string(),
+            bad.to_string(),
+            sample.to_string(),
+            size.to_string(),
+        ];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_choice_weighted_no_replace() -> Result<(Vec<f64>, Vec<f64>), &'static str> {
         let script = r#"
 import numpy as np
@@ -13768,6 +13797,21 @@ for child in rng.spawn(n_children):
         let vals = g.hypergeometric(20, 30, 10, 10).unwrap();
         let expected: Vec<u64> = vec![2, 6, 3, 3, 3, 4, 3, 7, 3, 2];
         assert_u64_seq("hypergeometric", &vals, &expected);
+    }
+
+    #[test]
+    fn hypergeometric_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_hypergeometric(20, 30, 10, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .hypergeometric(20, 30, 10, 10)
+            .map_err(|_| "hypergeometric live oracle case")?;
+        assert_u64_seq("hypergeometric_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
