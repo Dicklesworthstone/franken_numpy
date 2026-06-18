@@ -13942,6 +13942,38 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn gamma_zero_shape_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, scale) in [
+            ("gamma_zero_shape_finite_scale", 2.0),
+            ("gamma_zero_shape_nan_scale", f64::NAN),
+            ("gamma_zero_shape_infinite_scale", f64::INFINITY),
+        ] {
+            let (expected_values, expected_after) =
+                numpy_oracle_gamma_then_random(0.0, scale, 3, 5)?;
+            let mut g = oracle_gen();
+            let actual_values = g
+                .gamma(0.0, scale, 3)
+                .map_err(|_| "gamma zero-shape live oracle")?;
+            assert_f64_seq_with_nan(
+                &format!("{label}_values_live_numpy"),
+                &actual_values,
+                &expected_values,
+            );
+            let actual_after = g.random(5);
+            assert_f64_seq(
+                &format!("{label}_after_live_numpy"),
+                &actual_after,
+                &expected_after,
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn oracle_chisquare() {
         let mut g = oracle_gen();
         let vals = g.chisquare(5.0, 10).unwrap();
