@@ -11739,6 +11739,60 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn choice_shaped_unshuffled_scalar_empty_matches_live_numpy_oracle()
+    -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let pool = [10.0, 20.0, 30.0];
+        let expected_index = numpy_oracle_choice_indices(12345, pool.len(), 1, false, false)?
+            .into_iter()
+            .next()
+            .ok_or("choice index oracle empty")?;
+        let expected = vec![pool[usize::try_from(expected_index).map_err(|_| "choice index")?]];
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .choice_shaped_with_shuffle(&pool, None, false, false)
+            .map_err(|_| "choice_shaped unshuffled scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_f64_seq(
+            "choice_shaped_unshuffled_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .choice_shaped_with_shuffle(&pool, Some(&[]), false, false)
+            .map_err(|_| "choice_shaped unshuffled zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_f64_seq(
+            "choice_shaped_unshuffled_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .choice_shaped_with_shuffle(&pool, Some(&[2, 0, 3]), false, false)
+            .map_err(|_| "choice_shaped unshuffled empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "choice_shaped_unshuffled_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn shaped_permutations_match_live_numpy_oracle() -> Result<(), &'static str> {
         if !numpy_oracle_available() {
             return Ok(());
