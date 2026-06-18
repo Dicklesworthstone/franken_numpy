@@ -364,7 +364,12 @@ cases = [
     ("tuple query right", lambda: ((1, 2, 2, 3), (2, 3), {"side": "right"})),
     ("python scalar query", lambda: ([1, 3, 5], 4, {})),
     ("zero-dimensional query", lambda: ([1, 3, 5], np.array(3), {})),
+    ("matrix query shape", lambda: ([1, 3, 5, 7], [[0, 4], [8, 1]], {})),
+    ("empty haystack", lambda: ([], [0, 1], {})),
+    ("empty query", lambda: ([1, 2, 3], [], {})),
+    ("nan-aware f64 ordering", lambda: (np.array([0.0, 1.0, np.nan]), [np.nan, 0.5], {})),
     ("sorter as list", lambda: ([30, 10, 20], [15, 30], {"sorter": [1, 2, 0]})),
+    ("invalid side error", lambda: ([1, 3, 5], [3], {"side": "middle"})),
     ("string list delegate", lambda: (["a", "c", "e"], ["b", "e"], {})),
 ]
 
