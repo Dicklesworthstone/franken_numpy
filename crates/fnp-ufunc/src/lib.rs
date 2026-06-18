@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
+const POLYVAL_ND_PARALLEL_MIN_ELEMS: usize = 1 << 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UFuncRuntimeMode {
@@ -20686,24 +20687,30 @@ impl UFuncArray {
         let deg_x = c.shape[0];
         let deg_y = c.shape[1];
 
-        let result_vals: Vec<f64> = x
-            .values
-            .iter()
-            .zip(y.values.iter())
-            .map(|(&xi, &yi)| {
-                let mut result = 0.0;
-                let mut x_power = 1.0;
-                for i in 0..deg_x {
-                    let mut y_power = 1.0;
-                    for j in 0..deg_y {
-                        result += c.values[i * deg_y + j] * x_power * y_power;
-                        y_power *= yi;
-                    }
-                    x_power *= xi;
+        let c_values = &c.values;
+        let eval_point = |idx: usize| {
+            let xi = x.values[idx];
+            let yi = y.values[idx];
+            let mut result = 0.0;
+            let mut x_power = 1.0;
+            for i in 0..deg_x {
+                let mut y_power = 1.0;
+                for j in 0..deg_y {
+                    result += c_values[i * deg_y + j] * x_power * y_power;
+                    y_power *= yi;
                 }
-                result
-            })
-            .collect();
+                x_power *= xi;
+            }
+            result
+        };
+        let result_vals: Vec<f64> = if x.values.len() >= POLYVAL_ND_PARALLEL_MIN_ELEMS
+            && deg_x.saturating_mul(deg_y) >= 4
+            && rayon::current_num_threads() >= 2
+        {
+            (0..x.values.len()).into_par_iter().map(eval_point).collect()
+        } else {
+            (0..x.values.len()).map(eval_point).collect()
+        };
 
         Ok(Self {
             shape: x.shape.clone(),
@@ -20732,30 +20739,36 @@ impl UFuncArray {
         let deg_y = c.shape[1];
         let deg_z = c.shape[2];
 
-        let result_vals: Vec<f64> = x
-            .values
-            .iter()
-            .zip(y.values.iter())
-            .zip(z.values.iter())
-            .map(|((&xi, &yi), &zi)| {
-                let mut result = 0.0;
-                let mut x_power = 1.0;
-                for i in 0..deg_x {
-                    let mut y_power = 1.0;
-                    for j in 0..deg_y {
-                        let mut z_power = 1.0;
-                        for k in 0..deg_z {
-                            let idx = i * deg_y * deg_z + j * deg_z + k;
-                            result += c.values[idx] * x_power * y_power * z_power;
-                            z_power *= zi;
-                        }
-                        y_power *= yi;
+        let c_values = &c.values;
+        let eval_point = |idx: usize| {
+            let xi = x.values[idx];
+            let yi = y.values[idx];
+            let zi = z.values[idx];
+            let mut result = 0.0;
+            let mut x_power = 1.0;
+            for i in 0..deg_x {
+                let mut y_power = 1.0;
+                for j in 0..deg_y {
+                    let mut z_power = 1.0;
+                    for k in 0..deg_z {
+                        let coeff_idx = i * deg_y * deg_z + j * deg_z + k;
+                        result += c_values[coeff_idx] * x_power * y_power * z_power;
+                        z_power *= zi;
                     }
-                    x_power *= xi;
+                    y_power *= yi;
                 }
-                result
-            })
-            .collect();
+                x_power *= xi;
+            }
+            result
+        };
+        let result_vals: Vec<f64> = if x.values.len() >= POLYVAL_ND_PARALLEL_MIN_ELEMS
+            && deg_x.saturating_mul(deg_y).saturating_mul(deg_z) >= 4
+            && rayon::current_num_threads() >= 2
+        {
+            (0..x.values.len()).into_par_iter().map(eval_point).collect()
+        } else {
+            (0..x.values.len()).map(eval_point).collect()
+        };
 
         Ok(Self {
             shape: x.shape.clone(),
@@ -49315,6 +49328,103 @@ print(json.dumps(payload))
             out.values().iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             expected.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
             "parallel polyval diverged from serial Horner reference"
+        );
+    }
+
+    #[test]
+    fn polyval_nd_parallel_matches_serial_reference_and_golden_sha256() {
+        // The 2-D/3-D polynomial paths evaluate each point independently in the
+        // same coefficient order as the serial implementation. Use a size above
+        // the parallel gate so multi-threaded test runs exercise the new path.
+        let npts = super::POLYVAL_ND_PARALLEL_MIN_ELEMS + 193;
+        let x_vals: Vec<f64> = (0..npts)
+            .map(|i| ((i * 17 + 3) % 997) as f64 / 97.0 - 5.0)
+            .collect();
+        let y_vals: Vec<f64> = (0..npts)
+            .map(|i| ((i * 29 + 11) % 991) as f64 / 89.0 - 4.0)
+            .collect();
+        let z_vals: Vec<f64> = (0..npts)
+            .map(|i| ((i * 31 + 7) % 983) as f64 / 83.0 - 3.0)
+            .collect();
+        let c2_vals: Vec<f64> = (0..5 * 4)
+            .map(|i| ((i * 13 + 5) % 37) as f64 / 11.0 - 1.5)
+            .collect();
+        let c3_vals: Vec<f64> = (0..4 * 3 * 3)
+            .map(|i| ((i * 19 + 2) % 41) as f64 / 13.0 - 1.25)
+            .collect();
+
+        let x = UFuncArray::new(vec![npts], x_vals.clone(), DType::F64).unwrap();
+        let y = UFuncArray::new(vec![npts], y_vals.clone(), DType::F64).unwrap();
+        let z = UFuncArray::new(vec![npts], z_vals.clone(), DType::F64).unwrap();
+        let c2 = UFuncArray::new(vec![5, 4], c2_vals.clone(), DType::F64).unwrap();
+        let c3 = UFuncArray::new(vec![4, 3, 3], c3_vals.clone(), DType::F64).unwrap();
+
+        let out2 = UFuncArray::polyval2d(&x, &y, &c2).unwrap();
+        let out3 = UFuncArray::polyval3d(&x, &y, &z, &c3).unwrap();
+
+        assert_eq!(out2.shape(), &[npts]);
+        assert_eq!(out3.shape(), &[npts]);
+        let mut digest2 = Sha256::new();
+        let mut digest3 = Sha256::new();
+        for idx in 0..npts {
+            let xi = x_vals[idx];
+            let yi = y_vals[idx];
+            let zi = z_vals[idx];
+            let mut expected2 = 0.0;
+            let mut x_power = 1.0;
+            for i in 0..5 {
+                let mut y_power = 1.0;
+                for j in 0..4 {
+                    expected2 += c2_vals[i * 4 + j] * x_power * y_power;
+                    y_power *= yi;
+                }
+                x_power *= xi;
+            }
+            assert_eq!(
+                out2.values()[idx].to_bits(),
+                expected2.to_bits(),
+                "polyval2d drifted at point {idx}"
+            );
+            digest2.update(out2.values()[idx].to_bits().to_le_bytes());
+
+            let mut expected3 = 0.0;
+            let mut x_power = 1.0;
+            for i in 0..4 {
+                let mut y_power = 1.0;
+                for j in 0..3 {
+                    let mut z_power = 1.0;
+                    for k in 0..3 {
+                        expected3 += c3_vals[i * 9 + j * 3 + k] * x_power * y_power * z_power;
+                        z_power *= zi;
+                    }
+                    y_power *= yi;
+                }
+                x_power *= xi;
+            }
+            assert_eq!(
+                out3.values()[idx].to_bits(),
+                expected3.to_bits(),
+                "polyval3d drifted at point {idx}"
+            );
+            digest3.update(out3.values()[idx].to_bits().to_le_bytes());
+        }
+        let digest2 = digest2
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let digest3 = digest3
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(
+            digest2, "370f8147ef951cd566cf5685b666ac0e77f1bfc4c22b5994fcb41975618559af",
+            "polyval2d golden digest drifted"
+        );
+        assert_eq!(
+            digest3, "6df764114a9778ae5e61d17e8e489d61d644b78c5994164b5bbfe2ef613938c7",
+            "polyval3d golden digest drifted"
         );
     }
 
