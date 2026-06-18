@@ -38,3 +38,11 @@ re-baseline against this artifact.
 - **franken_numpy-g9jvo** (P2) — `fft` Cooley–Tukey 65 536 (2.51 ms); twiddle reuse / iterative in-place.
 
 `sort_quicksort` (4.67 ms) left unfiled — algorithmically expected O(n log n); revisit only after #1.
+
+## Code-first batch attempt ledger
+
+| Date | Bead | Lever | Status | Benchmark guard | Conformance guard | Do not retry unless |
+|------|------|-------|--------|-----------------|-------------------|---------------------|
+| 2026-06-18 | franken_numpy-ixs5y | Reuse per-worker LU/permutation scratch in `batch_det`/`batch_slogdet` for small stacked matrices (`n < 16`) and write scalar outputs directly instead of allocating a fresh LU bundle and pair vector per lane. | **PENDING BATCH TEST** - compile-only batch by instruction; no performance claim yet. | New Criterion group `batch_det_slogdet/{det,slogdet}` at `8192x4x4` and `2048x8x8`, plus the existing Python-vs-NumPy `fnp_slogdet_f64_batch8192_4x4` gate. | New bitwise guard compares the scratch path against scalar `det_nxn`/`slogdet_nxn` lane references, including singular, NaN, Inf, and negative-zero lanes. | Same-worker Criterion and Python-vs-NumPy evidence show a real win with unchanged guards. Reject and record as negative evidence if the new rows regress or the nonfinite/singular guard fails. |
+
+Avoided negative-evidence families for this batch: broad SVD row/panel/finalization retreads, packed-GEMM tile retunes, and batch-solve blocking experiments. Prior runs already routed those deeper; this attempt targets a different realistic stacked-small-matrix cost center.

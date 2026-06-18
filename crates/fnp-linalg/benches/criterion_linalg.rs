@@ -15,9 +15,9 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use fnp_linalg::{
-    batch_cholesky, batch_eigvalsh, batch_inv, batch_matrix_norm, batch_trace, cholesky_nxn,
-    complex_matmul, cond_nxn, det_nxn, eigvalsh_nxn, inv_nxn, kron_nxn,
-    matrix_norm_frobenius, matrix_norm_nxn, matrix_power_nxn, multi_dot, qr_nxn,
+    batch_cholesky, batch_det, batch_eigvalsh, batch_inv, batch_matrix_norm, batch_slogdet,
+    batch_trace, cholesky_nxn, complex_matmul, cond_nxn, det_nxn, eigvalsh_nxn, inv_nxn,
+    kron_nxn, matrix_norm_frobenius, matrix_norm_nxn, matrix_power_nxn, multi_dot, qr_nxn,
     sbr_stage1_dense_to_band_lower_nxn, solve_nxn, svd_mxn_full, svd_nxn,
 };
 use std::hint::black_box;
@@ -512,6 +512,31 @@ fn bench_batch_trace(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_batch_det_slogdet(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_det_slogdet");
+
+    // Real np.linalg.det/slogdet workloads often stack many small independent
+    // matrices. These rows isolate allocator/scratch overhead from cubic work.
+    for (batch, n) in [(8192usize, 4usize), (2048, 8)] {
+        let (data, shape) = generate_batch_invertible(batch, n);
+        let id = format!("{batch}x{n}x{n}");
+        group.bench_with_input(BenchmarkId::new("det", id.clone()), &shape, |bench, shape| {
+            bench.iter(|| {
+                let result = batch_det(black_box(&data), black_box(shape));
+                black_box(result)
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("slogdet", id), &shape, |bench, shape| {
+            bench.iter(|| {
+                let result = batch_slogdet(black_box(&data), black_box(shape));
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_batch_matrix_norm_fro(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_matrix_norm_fro");
 
@@ -603,6 +628,7 @@ criterion_group!(
     bench_batch_eigvalsh,
     bench_batch_cholesky,
     bench_batch_trace,
+    bench_batch_det_slogdet,
     bench_batch_matrix_norm_fro,
     bench_batch_matrix_norm_row_sum,
     bench_batch_matrix_norm_column_sum,

@@ -548,6 +548,22 @@ fn lu_factor_unblocked_into(
     Ok(sign)
 }
 
+#[inline]
+fn lu_factor_for_det_into(
+    a: &[f64],
+    n: usize,
+    lu: &mut [f64],
+    perm: &mut [usize],
+) -> Result<f64, LinAlgError> {
+    let matrix_max_abs = a.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let singularity_threshold = if matrix_max_abs.is_finite() {
+        (n as f64) * f64::EPSILON * matrix_max_abs
+    } else {
+        0.0
+    };
+    lu_factor_unblocked_into(a, n, singularity_threshold, lu, perm)
+}
+
 // Engage blocked LU once the parallel trailing GEMM beats the unblocked rank-1 sweep.
 // Fresh same-load Criterion A/B (RAYON_NUM_THREADS=16, det_nxn) shows the blocked
 // level-3 path already wins from n=512 — the old 896 cutoff left the whole 512..896
@@ -1002,6 +1018,36 @@ fn solve_nxn_multi_into_out(
     Ok(())
 }
 
+#[inline]
+fn det_from_lu_diagonal(lu: &[f64], n: usize, sign: f64) -> f64 {
+    let mut det = sign;
+    for i in 0..n {
+        det *= lu[i * n + i];
+    }
+    det
+}
+
+#[inline]
+fn slogdet_from_lu_diagonal(lu: &[f64], n: usize, sign: f64) -> (f64, f64) {
+    let mut det_sign = sign;
+    let mut log_abs_det = 0.0;
+    for i in 0..n {
+        let diag = lu[i * n + i];
+        if diag.is_nan() {
+            return (det_sign, f64::NAN);
+        }
+        if diag < 0.0 {
+            det_sign = -det_sign;
+            log_abs_det += (-diag).ln();
+        } else if diag > 0.0 {
+            log_abs_det += diag.ln();
+        } else {
+            return (0.0, f64::NEG_INFINITY);
+        }
+    }
+    (det_sign, log_abs_det)
+}
+
 /// Determinant of an NxN matrix (flat row-major).  Returns 0.0 for singular
 /// matrices instead of erroring.
 pub fn det_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
@@ -1015,13 +1061,7 @@ pub fn det_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
     }
 
     match lu_decompose_for_det(a, n) {
-        Ok((lu, _, sign)) => {
-            let mut det = sign;
-            for i in 0..n {
-                det *= lu[i * n + i];
-            }
-            Ok(det)
-        }
+        Ok((lu, _, sign)) => Ok(det_from_lu_diagonal(&lu, n, sign)),
         Err(LinAlgError::SolverSingularity) => Ok(0.0),
         Err(e) => Err(e),
     }
@@ -1039,25 +1079,35 @@ pub fn slogdet_nxn(a: &[f64], n: usize) -> Result<(f64, f64), LinAlgError> {
     }
 
     match lu_decompose_for_det(a, n) {
-        Ok((lu, _, sign)) => {
-            let mut det_sign = sign;
-            let mut log_abs_det = 0.0;
-            for i in 0..n {
-                let diag = lu[i * n + i];
-                if diag.is_nan() {
-                    return Ok((det_sign, f64::NAN));
-                }
-                if diag < 0.0 {
-                    det_sign = -det_sign;
-                    log_abs_det += (-diag).ln();
-                } else if diag > 0.0 {
-                    log_abs_det += diag.ln();
-                } else {
-                    return Ok((0.0, f64::NEG_INFINITY));
-                }
-            }
-            Ok((det_sign, log_abs_det))
-        }
+        Ok((lu, _, sign)) => Ok(slogdet_from_lu_diagonal(&lu, n, sign)),
+        Err(LinAlgError::SolverSingularity) => Ok((0.0, f64::NEG_INFINITY)),
+        Err(e) => Err(e),
+    }
+}
+
+#[inline]
+fn det_nxn_unblocked_with_scratch(
+    a: &[f64],
+    n: usize,
+    lu: &mut [f64],
+    perm: &mut [usize],
+) -> Result<f64, LinAlgError> {
+    match lu_factor_for_det_into(a, n, lu, perm) {
+        Ok(sign) => Ok(det_from_lu_diagonal(lu, n, sign)),
+        Err(LinAlgError::SolverSingularity) => Ok(0.0),
+        Err(e) => Err(e),
+    }
+}
+
+#[inline]
+fn slogdet_nxn_unblocked_with_scratch(
+    a: &[f64],
+    n: usize,
+    lu: &mut [f64],
+    perm: &mut [usize],
+) -> Result<(f64, f64), LinAlgError> {
+    match lu_factor_for_det_into(a, n, lu, perm) {
+        Ok(sign) => Ok(slogdet_from_lu_diagonal(lu, n, sign)),
         Err(LinAlgError::SolverSingularity) => Ok((0.0, f64::NEG_INFINITY)),
         Err(e) => Err(e),
     }
@@ -7762,6 +7812,48 @@ pub fn batch_det(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
             "batch_det: data length does not match shape",
         ));
     }
+    // Small stacked determinants are dominated by per-lane LU/perm allocation in
+    // realistic np.linalg.det/slogdet batches. Reuse caller-owned scratch per
+    // worker and write scalar outputs directly; arithmetic and singular handling
+    // remain the same unblocked LU path used by det_nxn for n < LU_BLOCK_MIN.
+    const DET_SCRATCH_MAX_N: usize = 16;
+    if n < DET_SCRATCH_MAX_N {
+        let mut result = vec![0.0f64; batch];
+        if batch_should_parallelize(batch, mat_size) {
+            use std::sync::Mutex;
+            let first_err: Mutex<Option<(usize, LinAlgError)>> = Mutex::new(None);
+            result.par_iter_mut().enumerate().for_each_init(
+                || (vec![0.0f64; mat_size], vec![0usize; n]),
+                |(lu, perm), (idx, out)| {
+                    let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
+                    match det_nxn_unblocked_with_scratch(a_sub, n, lu, perm) {
+                        Ok(det) => *out = det,
+                        Err(e) => {
+                            let mut slot = first_err.lock().unwrap();
+                            let replace = match slot.as_ref() {
+                                None => true,
+                                Some((i, _)) => idx < *i,
+                            };
+                            if replace {
+                                *slot = Some((idx, e));
+                            }
+                        }
+                    }
+                },
+            );
+            if let Some((_, e)) = first_err.into_inner().unwrap() {
+                return Err(e);
+            }
+        } else {
+            let mut lu = vec![0.0f64; mat_size];
+            let mut perm = vec![0usize; n];
+            for (idx, out) in result.iter_mut().enumerate() {
+                let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
+                *out = det_nxn_unblocked_with_scratch(a_sub, n, &mut lu, &mut perm)?;
+            }
+        }
+        return Ok(result);
+    }
     batch_map_lanes(batch, mat_size, |b| {
         det_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
     })
@@ -7775,6 +7867,55 @@ pub fn batch_slogdet(data: &[f64], shape: &[usize]) -> Result<(Vec<f64>, Vec<f64
         return Err(LinAlgError::ShapeContractViolation(
             "batch_slogdet: data length does not match shape",
         ));
+    }
+    const DET_SCRATCH_MAX_N: usize = 16;
+    if n < DET_SCRATCH_MAX_N {
+        let mut signs = vec![0.0f64; batch];
+        let mut logabsdets = vec![0.0f64; batch];
+        if batch_should_parallelize(batch, mat_size) {
+            use std::sync::Mutex;
+            let first_err: Mutex<Option<(usize, LinAlgError)>> = Mutex::new(None);
+            signs
+                .par_iter_mut()
+                .zip(logabsdets.par_iter_mut())
+                .enumerate()
+                .for_each_init(
+                    || (vec![0.0f64; mat_size], vec![0usize; n]),
+                    |(lu, perm), (idx, (sign_out, log_out))| {
+                        let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
+                        match slogdet_nxn_unblocked_with_scratch(a_sub, n, lu, perm) {
+                            Ok((sign, logabsdet)) => {
+                                *sign_out = sign;
+                                *log_out = logabsdet;
+                            }
+                            Err(e) => {
+                                let mut slot = first_err.lock().unwrap();
+                                let replace = match slot.as_ref() {
+                                    None => true,
+                                    Some((i, _)) => idx < *i,
+                                };
+                                if replace {
+                                    *slot = Some((idx, e));
+                                }
+                            }
+                        }
+                    },
+                );
+            if let Some((_, e)) = first_err.into_inner().unwrap() {
+                return Err(e);
+            }
+        } else {
+            let mut lu = vec![0.0f64; mat_size];
+            let mut perm = vec![0usize; n];
+            for idx in 0..batch {
+                let a_sub = &data[idx * mat_size..(idx + 1) * mat_size];
+                let (sign, logabsdet) =
+                    slogdet_nxn_unblocked_with_scratch(a_sub, n, &mut lu, &mut perm)?;
+                signs[idx] = sign;
+                logabsdets[idx] = logabsdet;
+            }
+        }
+        return Ok((signs, logabsdets));
     }
     let lanes = batch_map_lanes(batch, mat_size, |b| {
         slogdet_nxn(&data[b * mat_size..(b + 1) * mat_size], n)
@@ -16490,6 +16631,73 @@ mod tests {
                 (got - expected).abs() < 1e-10,
                 "det[{i}]: got {got}, expected {expected}"
             );
+        }
+    }
+
+    #[test]
+    fn batch_det_slogdet_scratch_paths_match_per_lane_reference_bits() {
+        fn assert_same_bits_or_nan(got: f64, want: f64, context: &str) {
+            if want.is_nan() {
+                assert!(got.is_nan(), "{context}: got {got}, expected NaN");
+            } else {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "{context}: got {got:?}, expected {want:?}"
+                );
+            }
+        }
+
+        for &(batch, n) in &[(5usize, 3usize), (1024, 4)] {
+            let mat_size = n * n;
+            let mut data = Vec::with_capacity(batch * mat_size);
+            for b in 0..batch {
+                let mut matrix = vec![0.0f64; mat_size];
+                for i in 0..n {
+                    for j in 0..n {
+                        matrix[i * n + j] = if i == j {
+                            (n + 3) as f64 + (b % 5) as f64 * 0.25
+                        } else {
+                            ((b + i * 7 + j * 11) % 17) as f64 * 0.03125
+                        };
+                    }
+                }
+                if b % 29 == 0 && n > 1 {
+                    let row0 = matrix[0..n].to_vec();
+                    matrix[n..2 * n].copy_from_slice(&row0);
+                }
+                if b % 31 == 0 {
+                    matrix[0] = f64::NAN;
+                }
+                if b % 37 == 0 && mat_size > 1 {
+                    matrix[1] = f64::INFINITY;
+                }
+                if b % 41 == 0 && mat_size > 2 {
+                    matrix[2] = -0.0;
+                }
+                data.extend_from_slice(&matrix);
+            }
+
+            let shape = [batch, n, n];
+            let dets = batch_det(&data, &shape).expect("batch det");
+            let (signs, logabsdets) = batch_slogdet(&data, &shape).expect("batch slogdet");
+            assert_eq!(dets.len(), batch);
+            assert_eq!(signs.len(), batch);
+            assert_eq!(logabsdets.len(), batch);
+
+            for lane in 0..batch {
+                let matrix = &data[lane * mat_size..(lane + 1) * mat_size];
+                let want_det = det_nxn(matrix, n).expect("reference det");
+                let (want_sign, want_logabsdet) =
+                    slogdet_nxn(matrix, n).expect("reference slogdet");
+                assert_same_bits_or_nan(dets[lane], want_det, "det scratch path drift");
+                assert_same_bits_or_nan(signs[lane], want_sign, "slogdet sign drift");
+                assert_same_bits_or_nan(
+                    logabsdets[lane],
+                    want_logabsdet,
+                    "slogdet logabsdet drift",
+                );
+            }
         }
     }
 
