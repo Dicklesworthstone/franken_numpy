@@ -37177,13 +37177,23 @@ pub fn legder(c: &[f64], m: usize) -> Vec<f64> {
         if n <= 1 {
             return vec![0.0];
         }
-        let mut der = vec![0.0; n - 1];
-        for j in (0..n - 1).rev() {
-            der[j] = (2.0 * j as f64 + 1.0) * coeffs[j + 1];
-            if j + 2 < n - 1 {
-                der[j] += der[j + 2];
-            }
+        // numpy's Legendre derivative: descend folding c[j] into c[j-2] so the
+        // (2j-1) scaling captures the full running tail sum (P_j' is a (2j-1)-scaled
+        // sum of every lower P_k of the same parity). The previous recurrence added
+        // der[j+2], which already carried the (2(j+2)+1) factor instead of (2j+1), so
+        // legder did not match numpy (e.g. legder([1,2,3,4,5]) gave [22,44,20,35]
+        // instead of [6,24,20,35]) and legder(legint(c)) failed to recover c.
+        let dn = n - 1;
+        let mut work = coeffs.clone();
+        let mut der = vec![0.0; dn];
+        for j in (3..=dn).rev() {
+            der[j - 1] = (2.0 * j as f64 - 1.0) * work[j];
+            work[j - 2] += work[j];
         }
+        if dn > 1 {
+            der[1] = 3.0 * work[2];
+        }
+        der[0] = work[1];
         coeffs = der;
     }
     coeffs
@@ -57060,6 +57070,122 @@ print(json.dumps(payload))
         // k shorter than m (and not length 1) is a ValueError parity case
         let err = p.polyint_order(3, &[1.0, 2.0]).unwrap_err();
         assert!(err.to_string().contains("scalar or a rank-1 array"));
+    }
+
+    // ── Metamorphic / property tests for the orthogonal-polynomial families ──
+    // These hold by algebra alone (no numpy oracle): each one cross-exercises
+    // der/int/mul/roots/fromroots/val so a regression in any single primitive is
+    // caught by the relation it violates, not just by a pinned value.
+
+    fn poly_close(a: f64, b: f64) -> bool {
+        (a - b).abs() <= 1e-7 * (1.0 + a.abs().max(b.abs()))
+    }
+
+    #[test]
+    fn polynomial_families_der_undoes_int() {
+        // d/dx ∫ p dx = p exactly: integrating once (constant 0) then differentiating
+        // once must recover the original coefficients for every family with der+int.
+        let c = vec![1.5, -2.0, 0.5, 3.0, -1.25];
+        type DerInt = (
+            fn(&[f64], usize) -> Vec<f64>,
+            fn(&[f64], usize) -> Vec<f64>,
+            &'static str,
+        );
+        let families: [DerInt; 4] = [
+            (chebder, chebint, "cheb"),
+            (legder, legint, "leg"),
+            (hermder, hermint, "herm"),
+            (lagder, lagint, "lag"),
+        ];
+        for (der, int, name) in families {
+            let recovered = der(&int(&c, 1), 1);
+            assert_eq!(recovered.len(), c.len(), "{name}: length");
+            for (i, (&got, &want)) in recovered.iter().zip(c.iter()).enumerate() {
+                assert!(
+                    poly_close(got, want),
+                    "{name} der(int(c))[{i}] = {got}, want {want}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn polynomial_families_mul_matches_pointwise_product() {
+        // val(x, mul(a, b)) == val(x, a) * val(x, b) at every sample point: the basis
+        // multiplication must agree with the pointwise product of the polynomials.
+        let a = vec![2.0, -1.0, 0.5, 1.0];
+        let b = vec![-0.5, 1.0, 2.0];
+        let xs = [-0.9, -0.4, 0.0, 0.3, 0.8];
+        type ValMul = (
+            fn(&[f64], &[f64]) -> Vec<f64>,
+            fn(&[f64], &[f64]) -> Vec<f64>,
+            &'static str,
+        );
+        let families: [ValMul; 5] = [
+            (chebval, chebmul, "cheb"),
+            (legval, legmul, "leg"),
+            (hermval, hermmul, "herm"),
+            (hermeval, hermemul, "herme"),
+            (lagval, lagmul, "lag"),
+        ];
+        for (val, mul, name) in families {
+            let prod = mul(&a, &b);
+            let lhs = val(&xs, &prod);
+            let va = val(&xs, &a);
+            let vb = val(&xs, &b);
+            for i in 0..xs.len() {
+                let rhs = va[i] * vb[i];
+                assert!(
+                    poly_close(lhs[i], rhs),
+                    "{name} at x={}: val(mul)={}, val*val={}",
+                    xs[i],
+                    lhs[i],
+                    rhs
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn polynomial_der_matches_numpy_golden() {
+        // Direct golden from numpy.polynomial.{chebyshev,legendre,hermite,laguerre}
+        // .*der([1,2,3,4,5],1). Pins the first derivative per family; legder was
+        // returning [22,44,20,35] here (wrong tail-sum scaling) before the fix.
+        let c = [1.0, 2.0, 3.0, 4.0, 5.0];
+        assert_eq!(chebder(&c, 1), vec![14.0, 52.0, 24.0, 40.0]);
+        assert_eq!(legder(&c, 1), vec![6.0, 24.0, 20.0, 35.0]);
+        assert_eq!(hermder(&c, 1), vec![4.0, 12.0, 24.0, 40.0]);
+        assert_eq!(lagder(&c, 1), vec![-14.0, -12.0, -9.0, -5.0]);
+    }
+
+    #[test]
+    fn polynomial_families_roots_recover_fromroots() {
+        // roots(fromroots(r)) == r (as a set), for well-separated real roots.
+        let roots = [-2.0, -0.5, 1.0, 2.5];
+        type RootFrom = (
+            fn(&[f64]) -> Vec<f64>,
+            fn(&[f64]) -> Result<Vec<f64>, UFuncError>,
+            &'static str,
+        );
+        let families: [RootFrom; 5] = [
+            (chebfromroots, chebroots, "cheb"),
+            (legfromroots, legroots, "leg"),
+            (hermfromroots, hermroots, "herm"),
+            (hermefromroots, hermeroots, "herme"),
+            (lagfromroots, lagroots, "lag"),
+        ];
+        for (fromroots, rootfn, name) in families {
+            let coeffs = fromroots(&roots);
+            let mut got = rootfn(&coeffs).unwrap_or_else(|e| panic!("{name} roots: {e}"));
+            got.sort_by(|a, b| a.partial_cmp(b).expect("finite roots"));
+            assert_eq!(got.len(), roots.len(), "{name}: root count");
+            for (i, (&g, &want)) in got.iter().zip(roots.iter()).enumerate() {
+                assert!(
+                    (g - want).abs() <= 1e-5 * (1.0 + want.abs()),
+                    "{name} root[{i}] = {g}, want {want}"
+                );
+            }
+        }
     }
 
     #[test]
