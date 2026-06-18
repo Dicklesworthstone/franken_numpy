@@ -806,14 +806,56 @@ fn sort_complex() -> Result<(), String> {
     let script = fnp_script(
         r#"
 a = np.array([3+1j, 1-1j, 2+2j], dtype=np.complex128)
-fnp_result = fnp.sort(a)
-np_result = np.sort(a)
+fnp_result = fnp.sort_complex(a)
+np_result = np.sort_complex(a)
 print(np.array_equal(fnp_result, np_result))
 "#
         .into(),
     );
     let result = numpy_oracle(&script)?;
     assert_eq!(result.trim(), "True", "sort complex should match numpy");
+    Ok(())
+}
+
+#[test]
+fn sort_complex_python_container_outcomes_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def sort_complex_outcome(call):
+    try:
+        result = call()
+        arr = np.asarray(result)
+        return ("ok", type(result).__name__, str(arr.dtype), tuple(arr.shape), repr(arr.tolist()))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    ("real list", lambda module: module.sort_complex([3, 1, 2])),
+    ("complex list", lambda module: module.sort_complex([3 + 1j, 1 - 1j, 2 + 2j])),
+    ("2d list fallback", lambda module: module.sort_complex([[3, 1], [2, 4]])),
+    ("scalar error", lambda module: module.sort_complex(3)),
+    ("string error", lambda module: module.sort_complex(["b", "a"])),
+]
+
+ok = True
+for label, factory in cases:
+    actual = sort_complex_outcome(lambda: factory(fnp))
+    expected = sort_complex_outcome(lambda: factory(np))
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "sort_complex Python-container outcomes should match numpy: {result}"
+    );
     Ok(())
 }
 
