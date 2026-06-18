@@ -6538,6 +6538,24 @@ print(",".join(str(int(value)) for value in values.tolist()))
         parse_oracle_u64_csv(stdout.trim())
     }
 
+    fn numpy_oracle_binomial(n: u64, p: f64, size: usize) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+n = int(sys.argv[1])
+p = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.binomial(n, p, size=size)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let args = [n.to_string(), p.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_f_distribution(
         dfnum: f64,
         dfden: f64,
@@ -13127,6 +13145,21 @@ for child in rng.spawn(n_children):
         let vals = g.binomial(10, 0.5, 10).unwrap();
         let expected: Vec<u64> = vec![7, 4, 4, 4, 5, 7, 7, 4, 5, 4];
         assert_u64_seq("binomial", &vals, &expected);
+    }
+
+    #[test]
+    fn binomial_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_binomial(10, 0.5, 10)?;
+        let mut g = oracle_gen();
+        let actual = g
+            .binomial(10, 0.5, 10)
+            .map_err(|_| "binomial live oracle")?;
+        assert_u64_seq("binomial_live_numpy", &actual, &expected);
+        Ok(())
     }
 
     #[test]
