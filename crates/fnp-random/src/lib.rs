@@ -10566,6 +10566,32 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn shaped_random_scalar_and_zero_dim_match_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_random(1)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .random_shaped(None)
+            .map_err(|_| "random_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_f64_seq("random_shaped_scalar_live_numpy", scalar.values(), &expected);
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .random_shaped(Some(&[]))
+            .map_err(|_| "random_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_f64_seq("random_shaped_zero_dim_live_numpy", zero_dim.values(), &expected);
+        Ok(())
+    }
+
+    #[test]
     fn shaped_random_tuple_and_zero_axis_preserve_shape_and_stream() {
         let mut flat_rng = test_generator();
         let expected = flat_rng.standard_normal(6);
