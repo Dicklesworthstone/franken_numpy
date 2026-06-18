@@ -6552,6 +6552,28 @@ print("after:" + ",".join(str(float(value)) for value in after.tolist()))
         ))
     }
 
+    fn numpy_oracle_negative_binomial(
+        n: f64,
+        p: f64,
+        size: usize,
+    ) -> Result<Vec<u64>, &'static str> {
+        let script = r#"
+import sys
+import numpy as np
+
+n = float(sys.argv[1])
+p = float(sys.argv[2])
+size = int(sys.argv[3])
+rng = np.random.Generator(np.random.PCG64DXSM(12345))
+values = rng.negative_binomial(n, p, size=size)
+print(",".join(str(int(value)) for value in values.tolist()))
+"#;
+        let args = [n.to_string(), p.to_string(), size.to_string()];
+        let output = numpy_oracle_stdout_from_stdin(script, &args)?;
+        let stdout = std::str::from_utf8(&output).map_err(|_| "oracle stdout must be utf-8")?;
+        parse_oracle_u64_csv(stdout.trim())
+    }
+
     fn numpy_oracle_choice_weighted_no_replace() -> Result<(Vec<f64>, Vec<f64>), &'static str> {
         let script = r#"
 import numpy as np
@@ -13568,6 +13590,26 @@ for child in rng.spawn(n_children):
         let vals = g.negative_binomial(50.0, 0.3, 5).unwrap();
         let expected: Vec<u64> = vec![117, 124, 101, 100, 191];
         assert_u64_seq("negative_binomial_large_n", &vals, &expected);
+    }
+
+    #[test]
+    fn negative_binomial_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        for (label, n, p, size) in [
+            ("negative_binomial_live_numpy", 5.0, 0.5, 10),
+            ("negative_binomial_large_n_live_numpy", 50.0, 0.3, 5),
+        ] {
+            let expected = numpy_oracle_negative_binomial(n, p, size)?;
+            let mut rng = oracle_gen();
+            let actual = rng
+                .negative_binomial(n, p, size)
+                .map_err(|_| "negative binomial live oracle case")?;
+            assert_u64_seq(label, &actual, &expected);
+        }
+        Ok(())
     }
 
     #[test]
