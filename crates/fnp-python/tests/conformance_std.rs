@@ -38,6 +38,66 @@ fn fnp_std_script(body: String) -> String {
     )
 }
 
+fn indent_python(body: &str) -> String {
+    body.lines().map(|line| format!("    {line}\n")).collect()
+}
+
+fn std_outcome_body(body: &str) -> String {
+    let indented = indent_python(body);
+    r#"import json
+
+def normalize(value):
+    if isinstance(value, tuple):
+        return {"kind": "tuple", "items": [normalize(item) for item in value]}
+    if isinstance(value, np.ndarray):
+        return {
+            "kind": "ndarray",
+            "dtype": str(value.dtype),
+            "shape": list(value.shape),
+            "values": value.tolist(),
+        }
+    if np.isscalar(value):
+        scalar_type = type(value).__name__
+        scalar_dtype = str(value.dtype) if hasattr(value, "dtype") else None
+        scalar_value = value.item() if hasattr(value, "item") else value
+        return {
+            "kind": "scalar",
+            "type": scalar_type,
+            "dtype": scalar_dtype,
+            "value": scalar_value,
+        }
+    return {"kind": "object", "type": type(value).__name__, "repr": repr(value)}
+
+try:
+__BODY__    payload = {"status": "ok", "result": normalize(result)}
+    if "out" in locals():
+        payload["out"] = normalize(out)
+        payload["result_is_out"] = result is out
+    print(json.dumps(payload, sort_keys=True, default=str))
+except Exception as exc:
+    message = str(exc).splitlines()[0] if str(exc) else ""
+    print(json.dumps(
+        {"status": "err", "type": type(exc).__name__, "message": message},
+        sort_keys=True,
+        default=str,
+    ))
+"#
+    .replace("__BODY__", &indented)
+}
+
+fn numpy_std_outcome_script(body: &str) -> String {
+    format!(
+        "import numpy as np\n\
+         MODULE = np\n\
+         {}",
+        std_outcome_body(body)
+    )
+}
+
+fn fnp_std_outcome_script(body: &str) -> String {
+    fnp_std_script(format!("MODULE = fnp\n{}", std_outcome_body(body)))
+}
+
 fn parse_float(s: &str) -> f64 {
     s.trim().parse::<f64>().unwrap_or(f64::NAN)
 }
@@ -73,6 +133,55 @@ fn arrays_close(a: &[f64], b: &[f64], tol: f64) -> bool {
     a.iter()
         .zip(b.iter())
         .all(|(x, y)| floats_close(*x, *y, tol))
+}
+
+#[test]
+fn std_python_container_keyword_outcomes_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "list input scalar",
+            "result = MODULE.std([1, 2, 3])",
+        ),
+        (
+            "tuple input axis keepdims",
+            "result = MODULE.std(((1, 2, 3), (4, 5, 6)), axis=1, keepdims=True)",
+        ),
+        (
+            "dtype keyword",
+            "result = MODULE.std(np.array([1, 2, 3], dtype=np.int16), dtype=np.float32)",
+        ),
+        (
+            "ddof keyword",
+            "result = MODULE.std([1.0, 2.0, 3.0, 4.0], ddof=1)",
+        ),
+        (
+            "where keyword",
+            "result = MODULE.std(
+    np.array([[1.0, 2.0], [3.0, 4.0]]),
+    where=np.array([[True, False], [False, True]]),
+)",
+        ),
+        (
+            "out forwarding",
+            "out = np.empty((2,), dtype=np.float64)
+result = MODULE.std(np.array([[1.0, 2.0], [3.0, 4.0]]), axis=0, out=out)",
+        ),
+        (
+            "axis error type",
+            "result = MODULE.std([1, 2, 3], axis=2)",
+        ),
+    ];
+
+    for (name, body) in cases {
+        let numpy_result = numpy_oracle(&numpy_std_outcome_script(body))?;
+        let fnp_result = numpy_oracle(&fnp_std_outcome_script(body))?;
+
+        assert_eq!(
+            fnp_result, numpy_result,
+            "std outcome mismatch for {name}\nnumpy: {numpy_result}\nfnp:   {fnp_result}"
+        );
+    }
+    Ok(())
 }
 
 #[test]
