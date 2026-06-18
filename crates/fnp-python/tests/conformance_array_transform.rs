@@ -37,6 +37,101 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn array_transform_python_container_and_axis_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize(value):
+    array = np.asarray(value)
+    return (str(array.dtype), tuple(array.shape), clean(array.tolist()))
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    ("roll Python list flatten", "roll", lambda: (([1, 2, 3, 4], 1), {})),
+    (
+        "roll tuple shift axes",
+        "roll",
+        lambda: ((np.arange(12).reshape(3, 4), (1, -2)), {"axis": (0, 1)}),
+    ),
+    (
+        "roll repeated axis accumulates",
+        "roll",
+        lambda: ((np.arange(12).reshape(3, 4), (1, 2)), {"axis": (1, 1)}),
+    ),
+    ("roll scalar input", "roll", lambda: ((7, 3), {})),
+    (
+        "rot90 custom axes",
+        "rot90",
+        lambda: ((np.arange(24).reshape(2, 3, 4),), {"k": -1, "axes": (1, 2)}),
+    ),
+    ("flip Python list all axes", "flip", lambda: (([[1, 2, 3], [4, 5, 6]],), {})),
+    (
+        "flip tuple axes",
+        "flip",
+        lambda: ((np.arange(24).reshape(2, 3, 4),), {"axis": (0, -1)}),
+    ),
+    (
+        "flip list axes",
+        "flip",
+        lambda: ((np.arange(24).reshape(2, 3, 4),), {"axis": [1, 2]}),
+    ),
+    ("flipud Python list", "flipud", lambda: (([[1, 2], [3, 4]],), {})),
+    ("fliplr Python list", "fliplr", lambda: (([[1, 2], [3, 4]],), {})),
+    (
+        "roll shift axis mismatch error",
+        "roll",
+        lambda: ((np.arange(6).reshape(2, 3), (1, 2)), {"axis": (0,)}),
+    ),
+    (
+        "rot90 repeated axes error",
+        "rot90",
+        lambda: ((np.arange(4).reshape(2, 2),), {"axes": (0, 0)}),
+    ),
+    (
+        "flip repeated axis error",
+        "flip",
+        lambda: ((np.arange(6).reshape(2, 3),), {"axis": (1, 1)}),
+    ),
+    ("flipud scalar error", "flipud", lambda: ((np.array(1),), {})),
+    ("fliplr one dimensional error", "fliplr", lambda: ((np.arange(3),), {})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "array transform Python-container and axis surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // roll
 // ─────────────────────────────────────────────────────────────────────────────
