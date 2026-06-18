@@ -2359,6 +2359,41 @@ fn parallel_pcg_triangular<R: PcgAdvanceFill>(
     out
 }
 
+#[inline]
+fn vonmises_uniform_transform(u: f64) -> f64 {
+    std::f64::consts::PI * (2.0 * u - 1.0)
+}
+
+/// Near-zero-kappa von Mises degenerates to a uniform angle. This branch
+/// consumes exactly one f64 uniform per output, so PCG jump-ahead can preserve
+/// the scalar stream while fusing the angle transform into each cache-hot chunk.
+fn parallel_pcg_vonmises_uniform<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
+    use rayon::prelude::*;
+    let mut out = vec![0.0f64; size];
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        rng.fill_uniform_f64(&mut out);
+        for slot in out.iter_mut() {
+            *slot = vonmises_uniform_transform(*slot);
+        }
+        return out;
+    }
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                *slot = vonmises_uniform_transform(*slot);
+            }
+        });
+    rng.advance_by(size as u128);
+    out
+}
+
 /// Fill a caller-provided slice with uniform `[0,1)` doubles, parallelizing the
 /// PCG jump-ahead exactly as [`parallel_pcg_random_f64`]. Filling an externally
 /// owned buffer (e.g. a NumPy output array via the buffer protocol) avoids the
@@ -2438,6 +2473,13 @@ fn triangular_from_core<R: ZigguratRngCore>(
                 rightprod,
             )
         })
+        .collect()
+}
+
+#[inline]
+fn vonmises_uniform_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64> {
+    (0..size)
+        .map(|_| vonmises_uniform_transform(rng.ziggurat_next_f64()))
         .collect()
 }
 
@@ -5787,11 +5829,22 @@ impl Generator {
         if kappa.is_nan() {
             return Ok(vec![f64::NAN; size]);
         }
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+        if kappa < 1e-8 {
+            self.u32_buf_ready = false;
+            return Ok(match &mut self.bit_generator.rng {
+                RngBackend::Deterministic(rng) => vonmises_uniform_from_core(rng, size),
+                RngBackend::Pcg64(rng) => parallel_pcg_vonmises_uniform(rng, size),
+                RngBackend::Pcg64Dxsm(rng) => parallel_pcg_vonmises_uniform(rng, size),
+                RngBackend::Mt19937(rng) => vonmises_uniform_from_core(rng, size),
+                RngBackend::Philox(rng) => vonmises_uniform_from_core(rng, size),
+                RngBackend::Sfc64(rng) => vonmises_uniform_from_core(rng, size),
+            });
+        }
         Ok((0..size)
             .map(|_| {
-                if kappa < 1e-8 {
-                    return std::f64::consts::PI * (2.0 * self.next_f64() - 1.0);
-                }
                 if kappa > 1e6 {
                     return wrap_angle_to_pi(
                         mu + (1.0 / kappa).sqrt() * self.sample_standard_normal_single(),
@@ -17912,5 +17965,72 @@ for child in rng.spawn(n_children):
         assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
         assert!(buffered.triangular(left, mode, right, 0).unwrap().is_empty());
         assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+    }
+
+    #[test]
+    fn parallel_pcg_vonmises_uniform_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        let mu = 1.75;
+        let kappa = 0.0;
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(6262);
+            let mut combined = parallel.vonmises(mu, kappa, n).unwrap();
+            combined.extend(parallel.vonmises(mu, kappa, n).unwrap());
+            let after_parallel: Vec<u64> =
+                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(6262);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.vonmises(mu, kappa, 1).unwrap()[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: vonmises near-uniform diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-vonmises f64 state diverged"
+            );
+        }
+
+        let mut buffered = Generator::from_pcg64(999).unwrap();
+        let mut serial = Generator::from_pcg64(999).unwrap();
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+        let got = buffered.vonmises(mu, kappa, n).unwrap();
+        let want: Vec<f64> = (0..n)
+            .map(|_| serial.vonmises(mu, kappa, 1).unwrap()[0])
+            .collect();
+        for (index, (got, want)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "prebuffered vonmises diverged at index {index}"
+            );
+        }
+        let after_got: Vec<u32> = (0..17).map(|_| buffered.next_f32().to_bits()).collect();
+        let after_want: Vec<u32> = (0..17).map(|_| serial.next_f32().to_bits()).collect();
+        assert_eq!(after_got, after_want);
+
+        let mut zero = Generator::from_pcg64(123).unwrap();
+        let mut zero_serial = Generator::from_pcg64(123).unwrap();
+        assert_eq!(zero.next_f32().to_bits(), zero_serial.next_f32().to_bits());
+        assert!(zero.vonmises(mu, kappa, 0).unwrap().is_empty());
+        assert_eq!(zero.next_f32().to_bits(), zero_serial.next_f32().to_bits());
     }
 }

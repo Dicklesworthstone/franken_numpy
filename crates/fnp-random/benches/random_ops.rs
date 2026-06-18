@@ -242,6 +242,25 @@ fn bench_generator_triangular(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_generator_vonmises(c: &mut Criterion) {
+    let mut group = c.benchmark_group("generator_vonmises");
+
+    let sizes = [100, 1000, 10000, 100000];
+
+    for &size in &sizes {
+        let ss = seed_sequence();
+        let bg = BitGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &ss).unwrap();
+        let mut generator = Generator::from_bit_generator(bg);
+
+        group.throughput(Throughput::Elements(size as u64));
+        group.bench_with_input(BenchmarkId::new("near_uniform", size), &size, |b, &size| {
+            b.iter(|| black_box(generator.vonmises(1.75, 0.0, size).unwrap()))
+        });
+    }
+
+    group.finish();
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bit generator comparison (same operation across all generators)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -301,6 +320,7 @@ criterion_group!(
     bench_generator_exponential,
     bench_generator_logistic,
     bench_generator_triangular,
+    bench_generator_vonmises,
     bench_bitgen_comparison,
 );
 
