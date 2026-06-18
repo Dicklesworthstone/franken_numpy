@@ -15207,6 +15207,28 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn beta_zero_size_preserves_live_numpy_stream() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let (expected_values, expected_after) = numpy_oracle_beta_then_random(2.0, 5.0, 0, 1)?;
+        let mut g = oracle_gen();
+        let actual_values = g
+            .beta(2.0, 5.0, 0)
+            .map_err(|_| "beta zero-size live oracle")?;
+        assert!(actual_values.is_empty());
+        assert_f64_seq("beta_zero_size_live_numpy", &actual_values, &expected_values);
+        let actual_after = g.random(1);
+        assert_f64_seq(
+            "beta_zero_size_after_live_numpy",
+            &actual_after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn oracle_beta_johnk_small_shapes() {
         let mut g = oracle_gen();
         let vals = g.beta(0.5, 0.75, 10).unwrap();
