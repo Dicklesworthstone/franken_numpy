@@ -1645,6 +1645,9 @@ impl PyRandomGenerator {
         // dtype and the values match numpy's shuffle exactly.
         let numpy = py.import("numpy")?;
         let shape: Vec<usize> = bound.getattr("shape")?.extract()?;
+        if shape.is_empty() {
+            return Err(PyTypeError::new_err("len() of unsized object"));
+        }
         let axis = try_normalize_axis(axis, shape.len()).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "axis {axis} is out of bounds for array of dimension {}",
@@ -1676,7 +1679,11 @@ impl PyRandomGenerator {
         let numpy = py.import("numpy")?;
         let arr = numpy.call_method1("asarray", (x.bind(py),))?;
         let shape: Vec<usize> = arr.getattr("shape")?.extract()?;
-        let axis = match extract_axis_spec(py, axis, "Generator.permuted(axis)")? {
+        let axis_spec = extract_axis_spec(py, axis, "Generator.permuted(axis)")?;
+        if shape.is_empty() && axis_spec.is_none() {
+            return Err(PyTypeError::new_err("len() of unsized object"));
+        }
+        let axis = match axis_spec {
             None => None,
             Some(axes) if axes.len() == 1 => {
                 let axis = axes[0];
@@ -51757,6 +51764,22 @@ mod tests {
             theirs.call_method("shuffle", (&theirs_array,), Some(&axis_last_kwargs))?;
             assert_random_sample_matches_numpy(&ours_array, &theirs_array)?;
 
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 322)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("shuffle")?,
+                    &PyTuple::new(py, [numpy.call_method1("array", (5_i64,))?])?,
+                    None,
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("shuffle")?,
+                    &PyTuple::new(py, [numpy.call_method1("array", (5_i64,))?])?,
+                    None,
+                )?
+            );
+
             Ok(())
         });
     }
@@ -51877,6 +51900,22 @@ mod tests {
                     &theirs.getattr("permuted")?,
                     &PyTuple::new(py, [numpy.call_method1("array", (matrix,))?])?,
                     Some(&dtype_mismatch_kwargs),
+                )?
+            );
+
+            let (ours, theirs) = random_generator_pair(&random, &numpy_random, 317)?;
+            assert_eq!(
+                call_outcome(
+                    py,
+                    &ours.getattr("permuted")?,
+                    &PyTuple::new(py, [numpy.call_method1("array", (5_i64,))?])?,
+                    None,
+                )?,
+                call_outcome(
+                    py,
+                    &theirs.getattr("permuted")?,
+                    &PyTuple::new(py, [numpy.call_method1("array", (5_i64,))?])?,
+                    None,
                 )?
             );
 
