@@ -10971,6 +10971,42 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn integers_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_integers_dtype("int64", 10, 20, &[], false)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .integers_shaped(10, 20, None)
+            .map_err(|_| "integers_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_eq!(scalar.values(), expected.as_slice());
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .integers_shaped(10, 20, Some(&[]))
+            .map_err(|_| "integers_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_eq!(zero_dim.values(), expected.as_slice());
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .integers_shaped(10, 20, Some(&[2, 0, 3]))
+            .map_err(|_| "integers_shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq("integers_shaped_empty_after_live_numpy", &after, &expected_after);
+        Ok(())
+    }
+
+    #[test]
     fn integers_high_le_low_error() {
         let mut rng = test_generator();
         assert!(rng.integers(5, 5, 10).is_err());
