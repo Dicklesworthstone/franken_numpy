@@ -116,6 +116,24 @@ fn argwhere_python_container_surfaces_match_numpy() -> Result<(), String> {
         ("nested list", "[[0, 1], [2, 0]]"),
         ("scalar nonzero", "7"),
         ("scalar zero", "0"),
+        ("zero-d ndarray nonzero", "np.array(7)"),
+        ("zero-d ndarray zero", "np.array(0)"),
+        (
+            "bool ndarray fast path",
+            "np.array([False, True, False, True], dtype=np.bool_)",
+        ),
+        (
+            "uint16 ndarray fast path",
+            "np.array([0, 4, 0, 5], dtype=np.uint16)",
+        ),
+        (
+            "signed-zero nan float path",
+            "np.array([-0.0, np.nan, 2.5, 0.0])",
+        ),
+        (
+            "empty two-dimensional ndarray",
+            "np.zeros((0, 2), dtype=np.int64)",
+        ),
         (
             "object truthiness",
             "np.array(['', 'x', '0'], dtype=object)",
