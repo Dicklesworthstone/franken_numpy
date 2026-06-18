@@ -56,11 +56,17 @@ def sort_like_outcome(fn, args, kwargs):
 cases = [
     ("sort list ints", fnp.sort, np.sort, lambda: (([3, 1, 2, 1],), {})),
     ("sort tuple floats", fnp.sort, np.sort, lambda: (((3.5, 1.5, 2.5),), {})),
+    ("sort bool list", fnp.sort, np.sort, lambda: (([True, False, True],), {})),
     ("sort nested axis none", fnp.sort, np.sort, lambda: (([[3, 1], [2, 4]],), {"axis": None})),
+    ("sort nested axis minus one", fnp.sort, np.sort, lambda: (([[3, 1], [2, 4]],), {"axis": -1})),
+    ("sort invalid axis error", fnp.sort, np.sort, lambda: (([[3, 1], [2, 4]],), {"axis": 2})),
     ("sort string list", fnp.sort, np.sort, lambda: ((["b", "a", "c"],), {})),
     ("argsort list ints", fnp.argsort, np.argsort, lambda: (([3, 1, 2, 1],), {})),
     ("argsort tuple floats", fnp.argsort, np.argsort, lambda: (((3.5, 1.5, 2.5),), {})),
+    ("argsort bool list", fnp.argsort, np.argsort, lambda: (([True, False, True],), {})),
     ("argsort nested axis none", fnp.argsort, np.argsort, lambda: (([[3, 1], [2, 4]],), {"axis": None})),
+    ("argsort nested axis zero", fnp.argsort, np.argsort, lambda: (([[3, 1], [2, 4]],), {"axis": 0})),
+    ("argsort invalid axis error", fnp.argsort, np.argsort, lambda: (([[3, 1], [2, 4]],), {"axis": 2})),
     ("argsort stable ties", fnp.argsort, np.argsort, lambda: (([2, 1, 2, 1],), {"stable": True})),
 ]
 
