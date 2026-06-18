@@ -17602,67 +17602,113 @@ fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Sign))
 }
 
-#[pyfunction]
-fn floor(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+fn native_rounding_unary(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    op: UnaryOp,
+    numpy_name: &str,
+    extract_label: &str,
+) -> PyResult<Py<PyAny>> {
     // NumPy's floor/ceil/trunc preserve the input dtype exactly (int32 -> int32,
     // float32 -> float32, bool -> bool). extract_numeric_array canonicalizes narrow
     // widths, so the native path only matches NumPy for float64; defer the rest.
-    if !numpy_dtype_is_f64(py, x.bind(py)) {
+    if !numpy_dtype_is_f64(py, x) {
         let numpy = py.import("numpy")?;
-        return Ok(numpy.getattr("floor")?.call1((x.bind(py),))?.unbind());
+        return Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind());
     }
-    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Floor)? {
+    if let Some(out) = try_zerocopy_f64_unary(py, x, op)? {
         return Ok(out);
     }
-    let x = extract_numeric_array(py, x.bind(py), "floor(x)")?;
-    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Floor))
+    let x = extract_numeric_array(py, x, extract_label)?;
+    build_numpy_scalar_or_array(py, &x.elementwise_unary(op))
+}
+
+fn floor_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    native_rounding_unary(py, x, UnaryOp::Floor, "floor", "floor(x)")
 }
 
 #[pyfunction]
-fn ceil(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // See floor: NumPy preserves the exact input dtype; native path matches only
-    // for float64, so defer the rest to numpy.
-    if !numpy_dtype_is_f64(py, x.bind(py)) {
-        let numpy = py.import("numpy")?;
-        return Ok(numpy.getattr("ceil")?.call1((x.bind(py),))?.unbind());
+#[pyo3(signature = (*args, **kwargs))]
+fn floor(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        floor_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "floor", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "floor", args, kwargs)
     }
-    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Ceil)? {
-        return Ok(out);
-    }
-    let x = extract_numeric_array(py, x.bind(py), "ceil(x)")?;
-    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Ceil))
+}
+
+fn ceil_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    native_rounding_unary(py, x, UnaryOp::Ceil, "ceil", "ceil(x)")
 }
 
 #[pyfunction]
-fn trunc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // See floor: NumPy preserves the exact input dtype; native path matches only
-    // for float64, so defer the rest to numpy.
-    if !numpy_dtype_is_f64(py, x.bind(py)) {
-        let numpy = py.import("numpy")?;
-        return Ok(numpy.getattr("trunc")?.call1((x.bind(py),))?.unbind());
+#[pyo3(signature = (*args, **kwargs))]
+fn ceil(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        ceil_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "ceil", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "ceil", args, kwargs)
     }
-    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Trunc)? {
-        return Ok(out);
-    }
-    let x = extract_numeric_array(py, x.bind(py), "trunc(x)")?;
-    build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Trunc))
+}
+
+fn trunc_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    native_rounding_unary(py, x, UnaryOp::Trunc, "trunc", "trunc(x)")
 }
 
 #[pyfunction]
-fn rint(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(signature = (*args, **kwargs))]
+fn trunc(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        trunc_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "trunc", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "trunc", args, kwargs)
+    }
+}
+
+fn rint_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // NumPy's rint preserves float64 but applies a graded int/bool -> float
     // promotion (bool/int8/uint8 -> float16, int16/uint16 -> float32, wider int ->
     // float64). extract_numeric_array canonicalizes every narrow width away, so the
     // native path only reproduces NumPy's dtype for float64; defer the rest.
-    if !numpy_dtype_is_f64(py, x.bind(py)) {
+    if !numpy_dtype_is_f64(py, x) {
         let numpy = py.import("numpy")?;
-        return Ok(numpy.getattr("rint")?.call1((x.bind(py),))?.unbind());
+        return Ok(numpy.getattr("rint")?.call1((x,))?.unbind());
     }
-    if let Some(out) = try_zerocopy_f64_unary(py, x.bind(py), UnaryOp::Rint)? {
+    if let Some(out) = try_zerocopy_f64_unary(py, x, UnaryOp::Rint)? {
         return Ok(out);
     }
-    let x = extract_numeric_array(py, x.bind(py), "rint(x)")?;
+    let x = extract_numeric_array(py, x, "rint(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Rint))
+}
+
+#[pyfunction]
+#[pyo3(signature = (*args, **kwargs))]
+fn rint(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1 {
+        let x_arg = args.get_item(0)?;
+        rint_native(py, &x_arg).or_else(|_| core_numpy_passthrough(py, "rint", args, kwargs))
+    } else {
+        core_numpy_passthrough(py, "rint", args, kwargs)
+    }
 }
 
 #[pyfunction]
@@ -46968,19 +47014,19 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
 mod tests {
     use super::{
         PyFromPyFunc, PyVectorize, PythonNativeGemmOp, argwhere, bincount,
-        build_numpy_array_from_ufunc, ceil, choose, compress, copysign, count_nonzero, degrees,
-        diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
+        build_numpy_array_from_ufunc, ceil_native, choose, compress, copysign, count_nonzero,
+        degrees, diag, diag_indices, diag_indices_from, diagflat, diagonal, digitize, extract,
         extract_numeric_array, extract_precise_numeric_array, fill_diagonal, flatnonzero, flip,
-        fliplr, flipud, floor, fnp_python, frexp, hypot, indices, interp, isfinite_native,
+        fliplr, flipud, floor_native, fnp_python, frexp, hypot, indices, interp, isfinite_native,
         isinf_native, isnan_native, isneginf_native, isposinf_native, ix_, ldexp, logaddexp,
         logaddexp2, meshgrid, modf, nan_to_num, NarrowSetOp, narrow_bitmap_setop,
         wide_int_table_bounds,
         nextafter, place, put, put_along_axis, putmask, python_native_gemm_f64_2d,
         python_native_gemm_f64_2d_eligible, python_native_gemm_f64_2d_metadata_gate, radians,
-        ravel_multi_index, required_dict_item, rfftfreq, rint, searchsorted, select, sign,
+        ravel_multi_index, required_dict_item, rfftfreq, rint_native, searchsorted, select, sign,
         signbit_native, sinc, solve_triangular, spacing, take, take_along_axis, tensorinv,
         tensorsolve, trapezoid, trapz, tri, tril_indices, tril_indices_from, triu_indices,
-        triu_indices_from, trunc, unravel_index, where_py,
+        triu_indices_from, trunc_native, unravel_index, where_py,
     };
     use fnp_dtype::{ArrayStorage, DType};
     use fnp_ufunc::UFuncArray;
@@ -61493,7 +61539,7 @@ mod tests {
                 vec![-1.7, -0.2, -0.0, 0.0, 1.2, f64::INFINITY, f64::NAN],
                 "float64",
             );
-            let actual = floor(py, values.clone().unbind())?;
+            let actual = floor_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("floor", (values,))?;
 
@@ -61525,7 +61571,7 @@ mod tests {
                 vec![-1.7, -0.2, -0.0, 0.0, 1.2, f64::INFINITY, f64::NAN],
                 "float64",
             );
-            let actual_float = ceil(py, float_values.clone().unbind())?;
+            let actual_float = ceil_native(py, &float_values)?;
             let numpy = py.import("numpy")?;
             let expected_float = numpy.call_method1("ceil", (float_values,))?;
 
@@ -61539,7 +61585,7 @@ mod tests {
                 vec![vec![1_i64, -2_i64, 0_i64], vec![5_i64, -8_i64, 3_i64]],
                 "int64",
             );
-            let actual_int = ceil(py, int_values.clone().unbind())?;
+            let actual_int = ceil_native(py, &int_values)?;
             let expected_int = numpy.call_method1("ceil", (int_values,))?;
 
             assert_eq!(
@@ -61616,7 +61662,7 @@ mod tests {
                 ],
                 "float64",
             );
-            let actual = trunc(py, values.clone().unbind())?;
+            let actual = trunc_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("trunc", (values,))?;
 
@@ -61648,7 +61694,7 @@ mod tests {
                 vec![vec![1_i64, -2_i64, 0_i64], vec![5_i64, -8_i64, 3_i64]],
                 "int64",
             );
-            let actual = trunc(py, values.clone().unbind())?;
+            let actual = trunc_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("trunc", (values,))?;
 
@@ -61693,7 +61739,7 @@ mod tests {
                 ],
                 "float64",
             );
-            let actual = rint(py, values.clone().unbind())?;
+            let actual = rint_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("rint", (values,))?;
 
@@ -61725,7 +61771,7 @@ mod tests {
                 vec![vec![1_i64, -2_i64, 0_i64], vec![7_i64, -9_i64, 4_i64]],
                 "int64",
             );
-            let actual = rint(py, values.clone().unbind())?;
+            let actual = rint_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("rint", (values,))?;
 
@@ -61757,7 +61803,7 @@ mod tests {
             }
 
             let values = numeric_array(py, vec![true, false, true], "bool");
-            let actual = rint(py, values.clone().unbind())?;
+            let actual = rint_native(py, &values)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("rint", (values,))?;
 
