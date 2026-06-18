@@ -116,6 +116,48 @@ fn nan_function_keyword_outcomes_match_numpy() -> Result<(), String> {
             "",
             "op([np.nan, np.nan])",
         ),
+        (
+            "nanpercentile q sequence method keepdims",
+            "np.nanpercentile",
+            "nanpercentile",
+            "",
+            "op(np.array([[1.0, np.nan, 3.0], [4.0, 5.0, np.nan]]), [25, 75], axis=1, method='nearest', keepdims=True)",
+        ),
+        (
+            "nanpercentile out forwarding",
+            "np.nanpercentile",
+            "nanpercentile",
+            "x = np.array([[1.0, np.nan], [3.0, 5.0]])\nout = np.empty((2,), dtype=np.float64)",
+            "op(x, 50, axis=0, out=out)",
+        ),
+        (
+            "nanquantile q sequence method",
+            "np.nanquantile",
+            "nanquantile",
+            "",
+            "op(((1.0, np.nan, 3.0), (4.0, 5.0, np.nan)), [0.25, 0.75], axis=0, method='lower')",
+        ),
+        (
+            "nanquantile out forwarding",
+            "np.nanquantile",
+            "nanquantile",
+            "x = np.array([[1.0, np.nan], [3.0, 5.0]])\nout = np.empty((2,), dtype=np.float64)",
+            "op(x, 0.5, axis=0, out=out)",
+        ),
+        (
+            "nanmedian keepdims",
+            "np.nanmedian",
+            "nanmedian",
+            "",
+            "op(((1.0, np.nan, 3.0), (6.0, 4.0, np.nan)), axis=1, keepdims=True)",
+        ),
+        (
+            "nanmedian axis error type",
+            "np.nanmedian",
+            "nanmedian",
+            "",
+            "op([1.0, np.nan, 3.0], axis=2)",
+        ),
     ];
 
     for (label, numpy_name, fnp_name, setup, call_expr) in cases {
