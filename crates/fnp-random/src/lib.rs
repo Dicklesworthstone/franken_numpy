@@ -10744,6 +10744,54 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
+    fn standard_normal_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+        if !numpy_oracle_available() {
+            return Ok(());
+        }
+
+        let expected = numpy_oracle_standard_normal(1)?;
+
+        let mut scalar_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let scalar = scalar_rng
+            .standard_normal_shaped(None)
+            .map_err(|_| "standard_normal_shaped scalar live oracle")?;
+        assert!(scalar.is_scalar());
+        assert!(scalar.shape().is_empty());
+        assert_f64_seq(
+            "standard_normal_shaped_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
+
+        let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let zero_dim = zero_dim_rng
+            .standard_normal_shaped(Some(&[]))
+            .map_err(|_| "standard_normal_shaped zero-dim live oracle")?;
+        assert!(!zero_dim.is_scalar());
+        assert!(zero_dim.shape().is_empty());
+        assert_f64_seq(
+            "standard_normal_shaped_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
+
+        let expected_after = numpy_oracle_random(1)?;
+        let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
+        let empty = empty_rng
+            .standard_normal_shaped(Some(&[2, 0, 3]))
+            .map_err(|_| "standard_normal_shaped empty live oracle")?;
+        assert_eq!(empty.shape(), &[2, 0, 3]);
+        assert!(empty.is_empty());
+        let after = empty_rng.random(1);
+        assert_f64_seq(
+            "standard_normal_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
+        Ok(())
+    }
+
+    #[test]
     fn normal_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
         if !numpy_oracle_available() {
             return Ok(());
