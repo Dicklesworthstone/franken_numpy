@@ -46,6 +46,7 @@ use serde::{Deserialize, Serialize};
 
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const PUTMASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
 const POLYVAL_ND_PARALLEL_MIN_ELEMS: usize = 1 << 12;
 const POLYVALFROMROOTS_PARALLEL_MIN_WORK: usize = 1 << 14;
@@ -27010,6 +27011,39 @@ impl UFuncArray {
             return Ok(());
         }
         let n = self.values.len();
+        if n >= PUTMASK_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+            && self.dtype == DType::F64
+            && values.dtype == DType::F64
+            && self.integer_sidecar.is_none()
+            && values.integer_sidecar.is_none()
+            && mask.integer_sidecar.is_none()
+        {
+            let mask_values = &mask.values;
+            let src_values = &values.values;
+            let src_len = src_values.len();
+            if src_len == n {
+                self.values
+                    .par_iter_mut()
+                    .zip(src_values.par_iter())
+                    .zip(mask_values.par_iter())
+                    .for_each(|((dst, &src_value), &mask_value)| {
+                        if mask_value != 0.0 {
+                            *dst = src_value;
+                        }
+                    });
+            } else {
+                self.values
+                    .par_iter_mut()
+                    .enumerate()
+                    .for_each(|(i, dst)| {
+                        if mask_values[i] != 0.0 {
+                            *dst = src_values[i % src_len];
+                        }
+                    });
+            }
+            return Ok(());
+        }
         for i in 0..n {
             if mask.values[i] != 0.0 {
                 let src_index = i % values.values.len();
@@ -66365,6 +66399,77 @@ print(json.dumps(payload))
         a.putmask(&mask, &vals).unwrap();
         // Cycles: 10, 20, 10, 20
         assert_eq!(a.values(), &[10.0, 20.0, 10.0, 20.0]);
+    }
+
+    #[test]
+    fn putmask_f64_parallel_matches_serial_reference_and_golden_sha256() {
+        let n = super::PUTMASK_PARALLEL_MIN_ELEMS + 193;
+        let value_len = 257;
+        let dst_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 83 == 0 {
+                    -0.0
+                } else if i % 197 == 0 {
+                    f64::NAN
+                } else {
+                    ((i * 19 + 7) % 1009) as f64 / 37.0 - 11.0
+                }
+            })
+            .collect();
+        let put_vals: Vec<f64> = (0..value_len)
+            .map(|i| {
+                if i % 31 == 0 {
+                    -0.0
+                } else if i % 53 == 0 {
+                    f64::INFINITY
+                } else {
+                    ((i * 23 + 3) % 997) as f64 / 41.0 - 9.0
+                }
+            })
+            .collect();
+        let mask_vals: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 109 == 0 {
+                    f64::NAN
+                } else if matches!((i * 43 + 17) % 19, 0 | 4 | 9) {
+                    1.0
+                } else if i % 23 == 0 {
+                    -0.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let mut expected = dst_vals.clone();
+        for (i, &mask_value) in mask_vals.iter().enumerate() {
+            if mask_value != 0.0 {
+                expected[i] = put_vals[i % put_vals.len()];
+            }
+        }
+
+        let mut dst = UFuncArray::new(vec![n], dst_vals, DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![n], mask_vals, DType::Bool).unwrap();
+        let values = UFuncArray::new(vec![value_len], put_vals, DType::F64).unwrap();
+        dst.putmask(&mask, &values).unwrap();
+
+        let mut digest = Sha256::new();
+        for (idx, (&actual, &want)) in dst.values().iter().zip(&expected).enumerate() {
+            assert_eq!(
+                actual.to_bits(),
+                want.to_bits(),
+                "parallel putmask bit drift at index {idx}"
+            );
+            digest.update(actual.to_le_bytes());
+        }
+        let digest_hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest_hex,
+            "9aa248d9f61fe732fdd894fddc4cf55427f06ba49d20fd6c73a6917e11552cc7"
+        );
     }
 
     // ── sliding_window_view tests ──
