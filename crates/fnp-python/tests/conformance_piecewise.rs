@@ -39,6 +39,39 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+fn outcome_body(setup: &str, call_expr: &str) -> String {
+    format!(
+        "{setup}\n\
+         def outcome(op):\n\
+             try:\n\
+                 value = {call_expr}\n\
+                 arr = np.asarray(value)\n\
+                 print('ok')\n\
+                 print(type(value).__name__)\n\
+                 print(str(arr.dtype))\n\
+                 print(tuple(arr.shape))\n\
+                 print(repr(arr.tolist()))\n\
+             except Exception as exc:\n\
+                 print('err')\n\
+                 print(type(exc).__name__)\n\
+         outcome(op)"
+    )
+}
+
+fn numpy_outcome_script(setup: &str, call_expr: &str) -> String {
+    format!(
+        "import numpy as np\nop = np.piecewise\n{}",
+        outcome_body(setup, call_expr)
+    )
+}
+
+fn fnp_outcome_script(setup: &str, call_expr: &str) -> String {
+    fnp_script(format!(
+        "op = fnp.piecewise\n{}",
+        outcome_body(setup, call_expr)
+    ))
+}
+
 fn parse_float_list(s: &str) -> Result<Vec<f64>, String> {
     if s.is_empty() || s == "[]" {
         return Ok(vec![]);
@@ -86,6 +119,54 @@ fn floats_close(a: &[f64], b: &[f64], rel_tol: f64) -> bool {
             diff <= rel_tol * max_val
         }
     })
+}
+
+#[test]
+fn piecewise_python_container_error_surfaces_match_numpy() -> Result<(), String> {
+    let cases = [
+        (
+            "list x and list masks with scalar default",
+            "",
+            "op([0, 1, 2, 3], [[True, False, True, False], [False, True, False, True]], [10, 20, 99])",
+        ),
+        (
+            "tuple x with callable and scalar fallback",
+            "",
+            "op((0.0, 1.0, 2.0), [np.array([True, False, True])], [lambda x: x + 0.5, -1.0])",
+        ),
+        (
+            "args kwargs forwarded to callable",
+            "x = np.array([1.0, 2.0, 3.0])\ncond = [np.array([True, False, True])]",
+            "op(x, cond, [lambda x, scale, offset=0.0: x * scale + offset, -1.0], 10.0, offset=5.0)",
+        ),
+        (
+            "nested Python list shape preserved",
+            "",
+            "op([[1, 2], [3, 4]], [[[True, False], [False, True]]], [lambda x: x * 3, 0])",
+        ),
+        (
+            "funclist length mismatch error type",
+            "",
+            "op([1, 2], [[True, False], [False, True]], [10])",
+        ),
+        (
+            "condition shape mismatch error type",
+            "",
+            "op([1, 2, 3], [[True, False]], [10, 0])",
+        ),
+    ];
+
+    for (label, setup, call_expr) in cases {
+        let numpy_result = numpy_oracle(&numpy_outcome_script(setup, call_expr))?;
+        let rust_result = numpy_oracle(&fnp_outcome_script(setup, call_expr))?;
+
+        assert_eq!(
+            numpy_result, rust_result,
+            "piecewise Python-container error surface mismatch for {label}"
+        );
+    }
+
+    Ok(())
 }
 
 #[test]
