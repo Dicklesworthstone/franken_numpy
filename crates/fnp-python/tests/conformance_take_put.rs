@@ -56,11 +56,17 @@ def take_outcome(fn, a, indices, **kwargs):
 cases = [
     ("list payload list indices", lambda: ([4, 3, 5, 7, 6, 8], [0, 1, 4], {})),
     ("tuple payload tuple indices", lambda: ((1.5, 2.5, 3.5), (2, 0), {})),
+    ("scalar index", lambda: ([10, 20, 30], 1, {})),
+    ("matrix indices shape", lambda: ([10, 20, 30], [[0, 2], [1, 1]], {})),
+    ("empty indices", lambda: ([10, 20, 30], [], {})),
+    ("bool payload", lambda: ([True, False, True], [2, 0], {})),
     ("nested list axis zero", lambda: ([[1, 2], [3, 4], [5, 6]], [2, 0], {"axis": 0})),
     ("nested list axis one", lambda: ([[1, 2, 3], [4, 5, 6]], [2, 0], {"axis": 1})),
+    ("nested list negative axis", lambda: ([[1, 2, 3], [4, 5, 6]], [2, 0], {"axis": -1})),
     ("wrap mode", lambda: ([10, 20, 30], [-1, 3], {"mode": "wrap"})),
     ("clip mode", lambda: ([10, 20, 30], [-1, 3], {"mode": "clip"})),
     ("raise mode error", lambda: ([10, 20, 30], [0, 4], {})),
+    ("axis out of bounds error", lambda: ([[1, 2]], [0], {"axis": 2})),
     ("string payload", lambda: (["alpha", "beta", "gamma"], [2, 0], {})),
 ]
 
