@@ -59063,6 +59063,110 @@ print(json.dumps(payload))
     }
 
     #[test]
+    fn window_and_special_functions_match_numpy_golden() {
+        // Precise numpy goldens (numpy 2.4). The other window tests only check
+        // endpoints/symmetry, hamming had no test, and kaiser exercises bessel_i0.
+        poly_close_vec(
+            UFuncArray::hamming(8).values(),
+            &[
+                0.08,
+                0.253_194_691_1,
+                0.642_359_629_6,
+                0.954_445_679_2,
+                0.954_445_679_2,
+                0.642_359_629_6,
+                0.253_194_691_1,
+                0.08,
+            ],
+            "hamming",
+        );
+        poly_close_vec(
+            UFuncArray::hanning(8).values(),
+            &[
+                0.0,
+                0.188_255_099_1,
+                0.611_260_467,
+                0.950_484_434,
+                0.950_484_434,
+                0.611_260_467,
+                0.188_255_099_1,
+                0.0,
+            ],
+            "hanning",
+        );
+        poly_close_vec(
+            UFuncArray::blackman(8).values(),
+            &[
+                0.0,
+                0.090_453_424_4,
+                0.459_182_957_5,
+                0.920_363_618_1,
+                0.920_363_618_1,
+                0.459_182_957_5,
+                0.090_453_424_4,
+                0.0,
+            ],
+            "blackman",
+        );
+        poly_close_vec(
+            UFuncArray::bartlett(8).values(),
+            &[
+                0.0,
+                0.285_714_285_7,
+                0.571_428_571_4,
+                0.857_142_857_1,
+                0.857_142_857_1,
+                0.571_428_571_4,
+                0.285_714_285_7,
+                0.0,
+            ],
+            "bartlett",
+        );
+        poly_close_vec(
+            UFuncArray::kaiser(8, 14.0).values(),
+            &[
+                7.726_9e-6,
+                0.017_964_073_5,
+                0.272_772_068_2,
+                0.870_803_731_6,
+                0.870_803_731_6,
+                0.272_772_068_2,
+                0.017_964_073_5,
+                7.726_9e-6,
+            ],
+            "kaiser",
+        );
+        let i0 = UFuncArray::new(vec![5], vec![0.0, 0.5, 1.0, 2.0, 5.0], DType::F64)
+            .unwrap()
+            .i0();
+        poly_close_vec(
+            i0.values(),
+            &[
+                1.0,
+                1.063_483_370_7,
+                1.266_065_877_8,
+                2.279_585_302_3,
+                27.239_871_823_6,
+            ],
+            "i0",
+        );
+        let sinc = UFuncArray::new(vec![5], vec![-1.5, -0.5, 0.0, 0.5, 1.5], DType::F64)
+            .unwrap()
+            .sinc();
+        poly_close_vec(
+            sinc.values(),
+            &[
+                -0.212_206_590_8,
+                0.636_619_772_4,
+                1.0,
+                0.636_619_772_4,
+                -0.212_206_590_8,
+            ],
+            "sinc",
+        );
+    }
+
+    #[test]
     fn hanning_window() {
         let w = UFuncArray::hanning(5);
         assert_eq!(w.shape(), &[5]);
