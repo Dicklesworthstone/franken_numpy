@@ -42,6 +42,102 @@ fn fnp_script(body: String) -> String {
 // ─────────────────────────────────────────────────────────────────────────────
 
 #[test]
+fn split_helpers_python_container_and_index_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize_parts(parts):
+    normalized = []
+    for part in parts:
+        array = np.asarray(part)
+        normalized.append((str(array.dtype), tuple(array.shape), clean(array.tolist())))
+    return normalized
+
+def outcome(split_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize_parts(split_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    ("split Python list equal sections", "split", lambda: (([1, 2, 3, 4], 2), {})),
+    (
+        "split tuple indices with empty partitions",
+        "split",
+        lambda: ((np.arange(6, dtype=np.int16), (0, 2, 6)), {}),
+    ),
+    (
+        "split negative axis list indices",
+        "split",
+        lambda: ((np.arange(12).reshape(2, 3, 2), [1, 2]), {"axis": -2}),
+    ),
+    (
+        "array_split more sections than elements",
+        "array_split",
+        lambda: (([10, 20, 30], 5), {}),
+    ),
+    (
+        "array_split tuple indices",
+        "array_split",
+        lambda: ((np.arange(5, dtype=np.uint16), (0, 2, 5)), {}),
+    ),
+    (
+        "hsplit Python list matrix",
+        "hsplit",
+        lambda: (([[1, 2, 3, 4], [5, 6, 7, 8]], 2), {}),
+    ),
+    (
+        "vsplit Python list matrix",
+        "vsplit",
+        lambda: (([[1, 2], [3, 4], [5, 6], [7, 8]], 2), {}),
+    ),
+    (
+        "dsplit tuple indices",
+        "dsplit",
+        lambda: ((np.arange(24, dtype=np.int32).reshape(2, 3, 4), (0, 2, 4)), {}),
+    ),
+    ("split uneven sections error", "split", lambda: ((np.arange(5), 2), {})),
+    (
+        "split invalid axis error",
+        "split",
+        lambda: ((np.arange(4), 2), {"axis": 2}),
+    ),
+    ("hsplit scalar error", "hsplit", lambda: ((np.array(1), 2), {})),
+    ("vsplit one dimensional error", "vsplit", lambda: ((np.arange(4), 2), {})),
+    ("dsplit two dimensional error", "dsplit", lambda: ((np.ones((2, 2)), 2), {})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "split helper Python-container and index surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn split_equal_parts() -> Result<(), String> {
     let script = fnp_script(
         r#"
