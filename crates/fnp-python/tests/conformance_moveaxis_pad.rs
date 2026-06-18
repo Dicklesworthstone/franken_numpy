@@ -37,6 +37,97 @@ fn fnp_script(body: String) -> String {
     )
 }
 
+#[test]
+fn moveaxis_pad_python_container_and_keyword_surfaces_match_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def clean(value):
+    if isinstance(value, float) and np.isnan(value):
+        return "nan"
+    if isinstance(value, list):
+        return [clean(item) for item in value]
+    return value
+
+def normalize(value):
+    array = np.asarray(value)
+    return (str(array.dtype), tuple(array.shape), clean(array.tolist()))
+
+def outcome(call_fn, *args, **kwargs):
+    try:
+        return ("ok", normalize(call_fn(*args, **kwargs)))
+    except Exception as exc:
+        return ("err", type(exc).__name__)
+
+cases = [
+    (
+        "moveaxis Python list source",
+        "moveaxis",
+        lambda: (([[[1, 2], [3, 4]]], 0, -1), {}),
+    ),
+    (
+        "moveaxis tuple/list axes",
+        "moveaxis",
+        lambda: ((np.arange(24).reshape(2, 3, 4), (0, 2), [2, 0]), {}),
+    ),
+    ("pad Python list scalar width", "pad", lambda: (([1, 2, 3], 2), {})),
+    (
+        "pad nested width constant values",
+        "pad",
+        lambda: ((np.array([[1, 2], [3, 4]], dtype=np.int16), ((1, 0), (2, 1))), {"mode": "constant", "constant_values": ((9, 8), (7, 6))}),
+    ),
+    (
+        "pad linear ramp end values",
+        "pad",
+        lambda: ((np.array([1.0, 2.0, 3.0]), (2, 1)), {"mode": "linear_ramp", "end_values": (0.5, 9.5)}),
+    ),
+    (
+        "pad maximum stat length",
+        "pad",
+        lambda: ((np.arange(6).reshape(2, 3), ((1, 1), (2, 0))), {"mode": "maximum", "stat_length": ((1, 1), (2, 1))}),
+    ),
+    (
+        "pad reflect odd",
+        "pad",
+        lambda: ((np.array([1, 2, 4]), 2), {"mode": "reflect", "reflect_type": "odd"}),
+    ),
+    (
+        "moveaxis repeated source error",
+        "moveaxis",
+        lambda: ((np.arange(24).reshape(2, 3, 4), (0, 0), (1, 2)), {}),
+    ),
+    (
+        "moveaxis length mismatch error",
+        "moveaxis",
+        lambda: ((np.arange(24).reshape(2, 3, 4), (0, 1), (2,)), {}),
+    ),
+    ("pad negative width error", "pad", lambda: ((np.arange(3), (-1, 1)), {})),
+    ("pad invalid mode error", "pad", lambda: ((np.arange(3), 1), {"mode": "not-a-mode"})),
+]
+
+ok = True
+for label, name, factory in cases:
+    args, kwargs = factory()
+    actual = outcome(getattr(fnp, name), *args, **kwargs)
+    args, kwargs = factory()
+    expected = outcome(getattr(np, name), *args, **kwargs)
+    if actual != expected:
+        print(label)
+        print(actual)
+        print(expected)
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "moveaxis/pad Python-container and keyword surfaces should match numpy: {result}"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // moveaxis
 // ─────────────────────────────────────────────────────────────────────────────
