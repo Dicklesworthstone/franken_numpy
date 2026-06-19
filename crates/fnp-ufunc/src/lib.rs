@@ -54,7 +54,7 @@ const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
 const INSERT_FLAT_SPLICE_MIN_WORK: usize = 1 << 14;
 const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PUT_MASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-const PUTMASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const PUTMASK_PARALLEL_MIN_ELEMS: usize = 1 << 20;
 const WHERE_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
 const POLYVAL_ND_PARALLEL_MIN_ELEMS: usize = 1 << 12;
@@ -27173,9 +27173,7 @@ impl UFuncArray {
             return Ok(());
         }
         let n = self.values.len();
-        if n >= PUTMASK_PARALLEL_MIN_ELEMS
-            && rayon::current_num_threads() >= 2
-            && self.dtype == DType::F64
+        if self.dtype == DType::F64
             && values.dtype == DType::F64
             && self.integer_sidecar.is_none()
             && values.integer_sidecar.is_none()
@@ -27184,7 +27182,8 @@ impl UFuncArray {
             let mask_values = &mask.values;
             let src_values = &values.values;
             let src_len = src_values.len();
-            if src_len == n {
+            if n >= PUTMASK_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 && src_len == n
+            {
                 self.values
                     .par_iter_mut()
                     .zip(src_values.par_iter())
@@ -27194,15 +27193,26 @@ impl UFuncArray {
                             *dst = src_value;
                         }
                     });
+            } else if n >= PUTMASK_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+                self.values.par_iter_mut().enumerate().for_each(|(i, dst)| {
+                    if mask_values[i] != 0.0 {
+                        *dst = src_values[i % src_len];
+                    }
+                });
+            } else if src_len == n {
+                for ((dst, &src_value), &mask_value) in
+                    self.values.iter_mut().zip(src_values).zip(mask_values)
+                {
+                    if mask_value != 0.0 {
+                        *dst = src_value;
+                    }
+                }
             } else {
-                self.values
-                    .par_iter_mut()
-                    .enumerate()
-                    .for_each(|(i, dst)| {
-                        if mask_values[i] != 0.0 {
-                            *dst = src_values[i % src_len];
-                        }
-                    });
+                for (i, (dst, &mask_value)) in self.values.iter_mut().zip(mask_values).enumerate() {
+                    if mask_value != 0.0 {
+                        *dst = src_values[i % src_len];
+                    }
+                }
             }
             return Ok(());
         }
@@ -67404,7 +67414,7 @@ print(json.dumps(payload))
             .collect();
         assert_eq!(
             digest_hex,
-            "9aa248d9f61fe732fdd894fddc4cf55427f06ba49d20fd6c73a6917e11552cc7"
+            "4fffe2fd2c9e96fa07d22719917ae99810b0f84a3ee5fb1d7c5128f910da2b75"
         );
     }
 

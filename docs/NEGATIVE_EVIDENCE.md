@@ -594,3 +594,52 @@ Notes:
 - `cargo fmt -p fnp-ufunc -- --check` still reports broad pre-existing formatting drift outside this slice; no workspace formatter was run.
 - `timeout 120s ubs --only=rust crates/fnp-ufunc/src/lib.rs` did not emit a completion summary before the cap; keep the incomplete `ubs_fnp_ufunc_lib.txt` artifact as a tooling caveat, not a pass.
 - Retry condition: reopen only if a same-host NumPy rerun beats the final local FNP median on either row, if compact bool-mask storage replaces the current f64 mask representation, or if a larger-copy workload shows the raised Rayon threshold losing above `1 << 20`.
+
+## 2026-06-19 - Gauntlet Verify: FNP putmask vs NumPy
+
+Artifact directory: `tests/artifacts/perf/2026-06-19_ufunc_putmask_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.243`.
+- Subject before measured correction: F64/no-sidecar `putmask` activated Rayon at `1 << 14` elements, so the 100k masked cycling-fill row paid scheduler overhead and the serial fallback still routed every write through integer-mutation sidecar plumbing.
+- Final code: F64/no-sidecar `putmask` uses direct dense serial loops below `1 << 20`; above that threshold it keeps the existing Rayon path, including position-index cycling with `values[i % values.len()]`.
+- Subject API: direct Rust `fnp-ufunc` `UFuncArray::putmask` Criterion row.
+- Oracle/reference: NumPy 2.4.3 on Python 3.13.7.
+- Same-worker FNP confirmation: rch worker `vmi1227854`.
+- Same-host decision machine: `thinkstation1`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-ufunc --bench elementwise putmask_f64_masked -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `RCH_WORKER=vmi1227854 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-ufunc --bench elementwise putmask_f64_masked -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- Python NumPy timing script in `numpy_putmask_local.txt` using the same data formula.
+- `cargo bench -p fnp-ufunc --bench elementwise putmask_f64_masked -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `RCH_WORKER=vmi1227854 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-ufunc putmask_f64_parallel_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo check -p fnp-ufunc --all-targets`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings`
+- `cargo fmt -p fnp-ufunc -- --check`
+- `timeout 120s ubs --only=rust crates/fnp-ufunc/src/lib.rs`
+
+Triage scorecard:
+- Current focused `putmask` run vs local NumPy median: win/loss/neutral = 1/1/0 across the two decision rows. The 100k row lost by 1.362x and was selected.
+- Final rch same-worker `putmask` run vs local NumPy median: win/loss/neutral = 2/0/0.
+- Final local same-host `putmask` run vs local NumPy median: win/loss/neutral = 2/0/0.
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.243` | Current code, routing evidence | 100k current rch | `criterion_putmask_current_rch.txt`, `numpy_putmask_local.txt` | 128.047 us | 93.991 us | 1.362x | Loss, selected |
+| `franken_numpy-ixs5y.243` | Current code, routing evidence | 1M current rch | `criterion_putmask_current_rch.txt`, `numpy_putmask_local.txt` | 632.938 us | 1209.271 us | 0.523x | Existing win |
+| `franken_numpy-ixs5y.243` | Final direct serial gate below `1 << 20` | 100k final rch | `criterion_putmask_after_serial_threshold_rch.txt`, `numpy_putmask_local.txt` | 65.564 us | 93.991 us | 0.698x | Keep |
+| `franken_numpy-ixs5y.243` | Final direct serial gate below `1 << 20` | 1M final rch | `criterion_putmask_after_serial_threshold_rch.txt`, `numpy_putmask_local.txt` | 554.537 us | 1209.271 us | 0.459x | Keep |
+| `franken_numpy-ixs5y.243` | Final direct serial gate below `1 << 20` | 100k final local | `criterion_putmask_after_serial_threshold_local.txt`, `numpy_putmask_local.txt` | 53.237 us | 93.991 us | 0.566x | Keep, same-host |
+| `franken_numpy-ixs5y.243` | Final direct serial gate below `1 << 20` | 1M final local | `criterion_putmask_after_serial_threshold_local.txt`, `numpy_putmask_local.txt` | 559.970 us | 1209.271 us | 0.463x | Keep, same-host |
+
+Notes:
+- Same-worker FNP delta on `vmi1227854`: 100k improved from 128.047 us to 65.564 us, a 1.95x speedup; 1M improved from 632.938 us to 554.537 us, a 1.14x speedup.
+- The kept lever is the graveyard "constants kill you" correction: avoid tiny Rayon morsels and integer-sidecar mutation machinery when SCE and dtype checks prove a dense F64/no-sidecar loop. The exotic idea was deliberately small but architectural: use the layout proof to select the flat cache-local loop before generic mutation dispatch.
+- NumPy 100k timing was noisy at 11.47% CV, but the final local FNP median of 53.237 us is still below the NumPy minimum of 90.348 us, so the keep decision does not rest on a noisy median edge.
+- The first focused golden run failed only at the SHA-256 digest after the elementwise serial-reference comparison had already passed. The updated digest `4fffe2fd2c9e96fa07d22719917ae99810b0f84a3ee5fb1d7c5128f910da2b75` reflects the intentional threshold-fixture path change, and the final golden test passed.
+- Final focused validation passed for `putmask_f64_parallel_matches_serial_reference_and_golden_sha256`, `cargo check -p fnp-ufunc --all-targets`, and `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`.
+- `cargo fmt -p fnp-ufunc -- --check` still reports broad pre-existing formatting drift in `crates/fnp-ufunc/benches/elementwise.rs` and unrelated `crates/fnp-ufunc/src/lib.rs` regions; no workspace formatter was run.
+- `timeout 120s ubs --only=rust crates/fnp-ufunc/src/lib.rs` timed out with `UBS_EXIT:124`; keep `ubs_fnp_ufunc_lib.txt` as a tooling caveat, not a pass.
+- Retry condition: reopen only if a same-host NumPy rerun beats the final local FNP median on either row, if `putmask` semantics change away from position-index cycling, if compact bool-mask storage changes the measured loop body, or if larger rows above `1 << 20` show the raised Rayon threshold losing.
