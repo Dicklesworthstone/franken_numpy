@@ -2304,6 +2304,83 @@ fn parallel_pcg_logistic<R: PcgAdvanceFill>(
     out
 }
 
+#[inline]
+fn laplace_transform(u: f64, loc: f64, scale: f64) -> Option<f64> {
+    if u >= 0.5 {
+        Some(loc - scale * (2.0 - u - u).ln())
+    } else if u > 0.0 {
+        Some(loc + scale * (u + u).ln())
+    } else {
+        None
+    }
+}
+
+fn pcg_laplace_serial<R: PcgAdvanceFill>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(size);
+    let mut raw = [0.0f64; 1];
+    while out.len() < size {
+        rng.fill_uniform_f64(&mut raw);
+        if let Some(value) = laplace_transform(raw[0], loc, scale) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// Inverse-CDF Laplace sampling for PCG-family cores. Accepted samples consume
+/// exactly one f64 uniform, so jump-ahead chunking preserves the scalar stream.
+/// The exact-zero uniform retry is handled by replaying the whole call through
+/// the saved serial state if any chunk observes that rare branch.
+fn parallel_pcg_laplace<R: PcgAdvanceFill>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        return pcg_laplace_serial(rng, loc, scale, size);
+    }
+
+    let original = rng.clone();
+    let mut out = vec![0.0f64; size];
+    let rejected = AtomicBool::new(false);
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                if let Some(value) = laplace_transform(*slot, loc, scale) {
+                    *slot = value;
+                } else {
+                    rejected.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+
+    if rejected.load(Ordering::Relaxed) {
+        let mut serial = original;
+        let out = pcg_laplace_serial(&mut serial, loc, scale, size);
+        *rng = serial;
+        return out;
+    }
+
+    rng.advance_by(size as u128);
+    out
+}
+
 fn pcg_gumbel_serial<R: PcgAdvanceFill>(
     rng: &mut R,
     loc: f64,
@@ -2517,6 +2594,22 @@ fn logistic_from_core<R: ZigguratRngCore>(
     (0..size)
         .map(|_| logistic_transform(rng.ziggurat_next_f64(), loc, scale))
         .collect()
+}
+
+#[inline]
+fn laplace_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(size);
+    while out.len() < size {
+        if let Some(value) = laplace_transform(rng.ziggurat_next_f64(), loc, scale) {
+            out.push(value);
+        }
+    }
+    out
 }
 
 #[inline]
@@ -5511,7 +5604,22 @@ impl Generator {
     ///
     /// NumPy requires `scale >= 0`.
     pub fn laplace(&mut self, loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, RandomError> {
-        self.laplace_broadcast(&[loc], &[], &[scale], &[], Some(&[size]))
+        if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
+            return Err(RandomError::InvalidParameter);
+        }
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => laplace_from_core(rng, loc, scale, size),
+            RngBackend::Pcg64(rng) => parallel_pcg_laplace(rng, loc, scale, size),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_laplace(rng, loc, scale, size),
+            RngBackend::Mt19937(rng) => laplace_from_core(rng, loc, scale, size),
+            RngBackend::Philox(rng) => laplace_from_core(rng, loc, scale, size),
+            RngBackend::Sfc64(rng) => laplace_from_core(rng, loc, scale, size),
+        })
     }
 
     /// Broadcasted Laplace (double exponential) distribution matching NumPy's
@@ -18010,6 +18118,74 @@ for child in rng.spawn(n_children):
         assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
         let zero_scale = buffered.logistic(loc, 0.0, n).unwrap();
         assert!(zero_scale.iter().all(|value| value.to_bits() == loc.to_bits()));
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+    }
+
+    #[test]
+    fn parallel_pcg_laplace_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        let loc = 1.5;
+        let scale = 2.25;
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(7373);
+            let mut combined = parallel.laplace(loc, scale, n).unwrap();
+            combined.extend(parallel.laplace(loc, scale, n).unwrap());
+            let after_parallel: Vec<u64> =
+                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(7373);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.laplace(loc, scale, 1).unwrap()[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: laplace diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-laplace f64 state diverged"
+            );
+        }
+
+        let mut zero_scale = Generator::from_pcg64(4040).unwrap();
+        let mut serial_zero_scale = Generator::from_pcg64(4040).unwrap();
+        let got = zero_scale.laplace(loc, 0.0, n).unwrap();
+        let want: Vec<f64> = (0..n)
+            .map(|_| serial_zero_scale.laplace(loc, 0.0, 1).unwrap()[0])
+            .collect();
+        for (index, (got, want)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "zero-scale laplace diverged at index {index}"
+            );
+        }
+        let after_got: Vec<u64> = (0..17).map(|_| zero_scale.next_f64().to_bits()).collect();
+        let after_want: Vec<u64> = (0..17)
+            .map(|_| serial_zero_scale.next_f64().to_bits())
+            .collect();
+        assert_eq!(after_got, after_want);
+
+        let mut buffered = Generator::from_pcg64(5050).unwrap();
+        let mut serial = Generator::from_pcg64(5050).unwrap();
+        assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+        assert!(buffered.laplace(loc, scale, 0).unwrap().is_empty());
         assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
     }
 
