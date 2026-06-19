@@ -4850,6 +4850,99 @@ fn tridiag_eig_qr(d: &mut [f64], e: &mut [f64], q: Option<&mut [f64]>, n: usize)
     }
 }
 
+// Robust scaled Euclidean length of a 2-vector, without libm `hypot`'s full
+// correctly-rounded special-case machinery. Used in the eigenvalues-ONLY symmetric
+// tridiagonal QR chase, where `hypot` is called O(n^2) times and dominates runtime.
+// Overflow-safe (only the larger magnitude is squared after scaling) and accurate to
+// ~1 ulp, which is well within the eigvalsh allclose contract.
+#[inline(always)]
+fn scaled_hypot(x: f64, z: f64) -> f64 {
+    let ax = x.abs();
+    let az = z.abs();
+    let (hi, lo) = if ax >= az { (ax, az) } else { (az, ax) };
+    if hi == 0.0 {
+        0.0
+    } else {
+        let t = lo / hi;
+        hi * (1.0 + t * t).sqrt()
+    }
+}
+
+/// Eigenvalues-ONLY implicit-QR iteration on a symmetric tridiagonal `(d, e)`.
+/// Identical Wilkinson-shift bulge chase as [`tridiag_eig_qr`] with `q = None`, but
+/// the per-rotation length uses [`scaled_hypot`] instead of libm `hypot` and there is
+/// no eigenvector-accumulation branch in the hot loop. Eigenvalues end up on `d`.
+/// Result matches the eigenvector path to allclose (residual-checked by tests).
+fn tridiag_eigvals_qr(d: &mut [f64], e: &mut [f64], n: usize) {
+    if n <= 1 {
+        return;
+    }
+    let eps = f64::EPSILON;
+    let max_iter = EIGEN_QR_ITERATION_COEFF * n * n;
+
+    for _iter in 0..max_iter {
+        // Deflation: set small off-diagonals to zero.
+        for i in 0..e.len() {
+            if e[i].abs() <= eps * (d[i].abs() + d[i + 1].abs()) {
+                e[i] = 0.0;
+            }
+        }
+
+        // Largest unreduced trailing block [lo..=hi].
+        let mut hi = n - 1;
+        while hi > 0 && e[hi - 1] == 0.0 {
+            hi -= 1;
+        }
+        if hi == 0 {
+            break;
+        }
+        let mut lo = hi - 1;
+        while lo > 0 && e[lo - 1] != 0.0 {
+            lo -= 1;
+        }
+
+        // Wilkinson shift from the trailing 2×2.
+        let delta = (d[hi - 1] - d[hi]) / 2.0;
+        let shift = if delta == 0.0 {
+            d[hi] - e[hi - 1].abs()
+        } else {
+            let sign = if delta >= 0.0 { 1.0 } else { -1.0 };
+            d[hi]
+                - e[hi - 1] * e[hi - 1]
+                    / (delta + sign * (delta * delta + e[hi - 1] * e[hi - 1]).sqrt())
+        };
+
+        let mut x = d[lo] - shift;
+        let mut z = e[lo];
+        let mut bulge = 0.0;
+
+        for kk in lo..hi {
+            let r = scaled_hypot(x, z);
+            let (c, s) = if r > 0.0 { (x / r, z / r) } else { (1.0, 0.0) };
+
+            if kk > lo {
+                e[kk - 1] = r;
+            }
+
+            let dk = d[kk];
+            let dk1 = d[kk + 1];
+            let ek = e[kk];
+
+            d[kk] = c * c * dk + 2.0 * c * s * ek + s * s * dk1;
+            d[kk + 1] = s * s * dk - 2.0 * c * s * ek + c * c * dk1;
+            e[kk] = c * s * (dk1 - dk) + (c * c - s * s) * ek;
+
+            if kk + 1 < hi {
+                bulge = s * e[kk + 1];
+                e[kk + 1] *= c;
+            }
+
+            x = e[kk];
+            z = bulge;
+        }
+    }
+}
+
 /// Reduce general n×n matrix to upper Hessenberg form via Householder similarity.
 /// Returns `(H, Q)` where `A = Q H Q^T`, `H` is upper Hessenberg (n×n row-major).
 fn hessenberg_reduce(a: &[f64], n: usize) -> (Vec<f64>, Vec<f64>) {
@@ -5234,7 +5327,7 @@ pub fn eigvalsh_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
     }
 
     let (mut d, mut e) = tridiag_reduce_values(a, n);
-    tridiag_eig_qr(&mut d, &mut e, None, n);
+    tridiag_eigvals_qr(&mut d, &mut e, n);
 
     d.sort_by(|a, b| a.total_cmp(b));
     Ok(d)
@@ -9350,15 +9443,15 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        // Golden re-pinned 2026-06-17: commit a44dbead lowered TRIDIAG_BLOCK_MIN
-        // 384->64, so at n=128 eigvalsh now drives the blocked tridiagonalization
-        // path; its different (valid) reduction order shifted the eigenvalue bits.
-        // Verified benign by the residual asserts above (all ~1e-13, far inside
-        // tolerance) and by the per-lane parallel==serial bit-identity asserts.
-        // Prior pin c4213c22 (2026-06-15) predated the blocked-tridiag lever.
+        // Golden re-pinned 2026-06-19: eigvalsh's eigenvalues-only QR chase moved to
+        // `scaled_hypot` (benign ~1 ulp/rotation), shifting the eig_out bits. Verified
+        // benign by the residual asserts above (all ~1e-13, far inside tolerance) and
+        // the per-lane parallel==serial bit-identity asserts. Prior pin
+        // 34aaf43d (2026-06-17) predated the scaled_hypot lever; c4213c22 (2026-06-15)
+        // predated the blocked-tridiag lever.
         assert_eq!(
-            digest, "34aaf43da49efdd8597855ac7052ec8fcabfde45e71bdf798217258fb51c9213",
-            "batch parallel golden digest drifted"
+            digest, "5fa28f4d0c627ca64d3f5da7f1f355dc690878377898af89ebbf278bea9f2b86",
+            "batch parallel golden digest drifted: {digest}"
         );
     }
 
@@ -12319,13 +12412,101 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
-        // Re-pinned after the reducer/SBR data-movement keeps changed the blocked
-        // rank-2k association. The values-only and full-Q reductions still agree
-        // bitwise above; this pins the current public eigvalsh output stream.
+        // Re-pinned after the eigenvalues-only QR chase moved to `scaled_hypot`
+        // (faster than libm `hypot`, ~1 ulp different per Givens rotation → a benign
+        // shift of the last bits of the converged eigenvalues). The values-only and
+        // full-Q reductions still agree bitwise above, every eigvalsh residual/known-
+        // value test still passes, and the output stream stays deterministic across
+        // builds (scalar IEEE div/sqrt/mul, no FMA under +avx2). This pins the new
+        // public eigvalsh output stream.
         assert_eq!(
             digest,
-            "c642afadd5c03e251e04f011e941bfb4896f1e10ea1b3cd4cb839634a3414cc9"
+            "8918728120e12aa8cc5442a80d0a14a05b3669793ae13425a340d9602344dbb2"
         );
+    }
+
+    #[test]
+    fn tridiag_eigvals_qr_matches_eig_qr_to_allclose() {
+        // The values-only kernel must agree with the (proven) eigenvector-path QR to
+        // allclose across odd sizes and clustered/spread spectra.
+        for &n in &[7usize, 33, 64, 128] {
+            let mut s = 0x9e3779b97f4a7c15u64 ^ (n as u64).wrapping_mul(0x100000001b3);
+            let mut next = || {
+                s = s
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
+                ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+            };
+            let mut d_ref = vec![0.0f64; n];
+            let mut e_ref = vec![0.0f64; n - 1];
+            for v in d_ref.iter_mut() {
+                *v = next() * 4.0;
+            }
+            for v in e_ref.iter_mut() {
+                *v = next();
+            }
+            let (mut d_old, mut e_old) = (d_ref.clone(), e_ref.clone());
+            super::tridiag_eig_qr(&mut d_old, &mut e_old, None, n);
+            d_old.sort_by(f64::total_cmp);
+            let (mut d_new, mut e_new) = (d_ref.clone(), e_ref.clone());
+            super::tridiag_eigvals_qr(&mut d_new, &mut e_new, n);
+            d_new.sort_by(f64::total_cmp);
+            let max_diff = d_old
+                .iter()
+                .zip(&d_new)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f64, f64::max);
+            assert!(
+                max_diff < 1e-9,
+                "n={n}: values-only QR diverged from eigvec QR by {max_diff}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "perf timing; run with --release -- --ignored --nocapture"]
+    fn tridiag_eigvals_qr_perf_report() {
+        use std::time::Instant;
+        for &n in &[256usize, 512, 768] {
+            // Reduce a deterministic dense symmetric matrix to tridiagonal once.
+            let mut s = 0x1234_5678u64 ^ (n as u64);
+            let mut a = vec![0.0f64; n * n];
+            for i in 0..n {
+                for j in i..n {
+                    s = s
+                        .wrapping_mul(6364136223846793005)
+                        .wrapping_add(1442695040888963407);
+                    let v = ((s >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0;
+                    a[i * n + j] = v;
+                    a[j * n + i] = v;
+                }
+            }
+            let (d0, e0) = super::tridiag_reduce_values(&a, n);
+            let timed = |old: bool| -> f64 {
+                let mut best = f64::MAX;
+                for _ in 0..5 {
+                    let (mut d, mut e) = (d0.clone(), e0.clone());
+                    let t = Instant::now();
+                    if old {
+                        super::tridiag_eig_qr(&mut d, &mut e, None, n);
+                    } else {
+                        super::tridiag_eigvals_qr(&mut d, &mut e, n);
+                    }
+                    best = best.min(t.elapsed().as_secs_f64() * 1e3);
+                }
+                best
+            };
+            // interleave OLD(libm hypot) vs NEW(scaled_hypot) to share machine state
+            let (mut t_old, mut t_new) = (f64::MAX, f64::MAX);
+            for _ in 0..3 {
+                t_new = t_new.min(timed(false));
+                t_old = t_old.min(timed(true));
+            }
+            println!(
+                "n={n:5} QR_OLD={t_old:8.3}ms  QR_NEW={t_new:8.3}ms  QRspeedup={:.2}x",
+                t_old / t_new
+            );
+        }
     }
 
     #[test]
@@ -13772,8 +13953,12 @@ mod tests {
             .iter()
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
+        // Re-pinned 2026-06-19: eigvalsh's eigenvalues-only QR chase moved to
+        // `scaled_hypot` (benign ~1 ulp/rotation). The correctness gate above
+        // (blocked eigvalsh vs unblocked-ref QR, rel err < 2e-8) still passes for all
+        // three cases, so this only shifts the last bits of the output stream.
         assert_eq!(
-            digest, "d98865db162f1bffd8abacf1f8301ea5da5174b43eeb152a97ad1047edd1707e",
+            digest, "d8a5154cdf2b005605b832840983ece912dac6252c0d6b59452f47256b8cb2f8",
             "fused rank-2k tridiagonalization golden digest drifted: {digest}"
         );
     }
