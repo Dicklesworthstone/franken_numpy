@@ -1,0 +1,3 @@
+f32 hist bins=   10: np=  26448.2us fnp=  23350.4us fnp/np=0.883
+f32 hist bins=  100: np=  26291.4us fnp=  23155.1us fnp/np=0.881
+f32 hist bins= 1000: np=  25299.0us fnp=  23254.9us fnp/np=0.919

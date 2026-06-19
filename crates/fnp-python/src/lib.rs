@@ -19193,7 +19193,7 @@ fn u64_is_f64_exact(value: u64) -> bool {
     value <= F64_EXACT_INT_LIMIT
 }
 
-fn histogram_typed<T: pyo3::buffer::Element + Copy>(
+fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
@@ -19224,6 +19224,110 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy>(
         kwargs.set_item("bins", nbins)?;
         return Ok(Some(histogram_fn.call((a,), Some(&kwargs))?.unbind()));
     };
+    // Large 1-D arrays: numpy runs histogram single-threaded, so a privatized
+    // parallel min/max reduce + privatized bin-tally fold across the rayon pool
+    // beats it outright. The buffer is read-only and contiguous (as_slice
+    // succeeded) and the GIL is held, so reading the cells as a plain `&[T]`
+    // (T is a POD numeric Sync type) for the duration of this call is sound;
+    // par_iter then needs no per-element copy. Bins are chosen with the same
+    // partition_point-over-edges rule as UFuncArray::histogram_full
+    // (franken_numpy-40n4u), which is bit-identical to NumPy's edge binning and
+    // avoids the f64 internal-edge rounding drop. Integer +1 tallies merge
+    // order-independently, so the reduced counts are exact regardless of how the
+    // pool folds them.
+    const HISTOGRAM_PARALLEL_MIN_ELEMS: usize = 1 << 16;
+    if n >= HISTOGRAM_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        // SAFETY: `s` is a contiguous, read-only PyBuffer slice of length `n`
+        // and ReadOnlyCell<T> is repr(transparent) over T. The GIL is held for
+        // this whole function, so Python cannot mutate or free the buffer while
+        // `data` is alive, and the parallel closures only read it.
+        let data: &[T] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<T>(), n) };
+
+        // Parallel range scan: (min, max, all_supported, all_finite).
+        let (mn, mx, supported, finite) = data
+            .par_iter()
+            .map(|&raw| {
+                let v = to_f64(raw);
+                (
+                    v,
+                    v,
+                    value_supported(raw),
+                    !check_finite || v.is_finite(),
+                )
+            })
+            .reduce(
+                || (f64::INFINITY, f64::NEG_INFINITY, true, true),
+                |(amn, amx, aok, afin), (bmn, bmx, bok, bfin)| {
+                    (amn.min(bmn), amx.max(bmx), aok && bok, afin && bfin)
+                },
+            );
+        if !supported || !finite {
+            return Ok(None);
+        }
+
+        let (mut first, mut last) = (mn, mx);
+        if first == last {
+            first -= 0.5;
+            last += 0.5;
+        }
+        let edges = numpy.call_method1("linspace", (first, last, nbins + 1))?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("dtype", "int64")?;
+        let counts = numpy.call_method("zeros", (nbins,), Some(&kwargs))?;
+
+        let Ok(ebuf) = PyBuffer::<f64>::get(&edges) else {
+            return Ok(None);
+        };
+        let Some(es) = ebuf.as_slice(py) else {
+            return Ok(None);
+        };
+        let edges_vec: Vec<f64> = es.iter().map(|c| c.get()).collect();
+        for i in 1..edges_vec.len() {
+            if edges_vec[i - 1] >= edges_vec[i] {
+                return Ok(None);
+            }
+        }
+
+        let last_bin = nbins - 1;
+        let local_counts = data
+            .par_iter()
+            .fold(
+                || vec![0i64; nbins],
+                |mut local, &raw| {
+                    let x = to_f64(raw);
+                    if x >= first && x <= last {
+                        let count_le = edges_vec.partition_point(|edge| *edge <= x);
+                        let idx = if count_le == 0 { 0 } else { count_le - 1 };
+                        local[idx.min(last_bin)] += 1;
+                    }
+                    local
+                },
+            )
+            .reduce(
+                || vec![0i64; nbins],
+                |mut a, b| {
+                    for (x, y) in a.iter_mut().zip(b.iter()) {
+                        *x += *y;
+                    }
+                    a
+                },
+            );
+
+        let Ok(cbuf) = PyBuffer::<i64>::get(&counts) else {
+            return Ok(None);
+        };
+        let Some(cs) = cbuf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for (slot, value) in cs.iter().zip(local_counts) {
+            slot.set(value);
+        }
+        return Ok(Some(
+            PyTuple::new(py, [counts, edges])?.into_any().unbind(),
+        ));
+    }
+
     let mut mn = to_f64(s[0].get());
     let mut mx = mn;
     for c in s.iter() {
