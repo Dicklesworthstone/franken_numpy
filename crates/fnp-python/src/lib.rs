@@ -43469,68 +43469,145 @@ fn try_zerocopy_f64_ptp_axis(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
+        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and `input` is a
+        // read-only contiguous PyBuffer slice held under the GIL, so reading it as
+        // &[f64] (Sync) for the parallel folds below is sound.
+        let data: &[f64] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+        use rayon::prelude::*;
+        const PTP_AXIS_PARALLEL_MIN: usize = 1 << 16;
+        let parallel = outer * axis_len * inner >= PTP_AXIS_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2;
         let lane = axis_len * inner;
-        if inner == 1 {
-            // Last axis: each output cell reduces a contiguous run.
-            for (o, slot) in output.iter().enumerate().take(outer) {
-                let l = &input[o * lane..o * lane + axis_len];
-                let first = l[0].get();
+        // ptp tracks NaN-presence SEPARATELY and emits NaN for any nan lane, so the
+        // running max/min can use branchless NaN-skipping f64::max/min (vectorizes;
+        // the previous `if v > *m` branch did not). Output is bit-identical: when a
+        // lane has no NaN this is the true max/min; when it has a NaN the `any_nan`
+        // override forces NaN regardless of the skipped extreme, and a ±0 extreme
+        // can't change a difference `a - 0`.
+        let result: Vec<f64> = if inner == 1 {
+            // Last axis: each lane is an independent contiguous run — fan across the
+            // rayon pool (numpy runs this single-threaded).
+            let lane_ptp = |l: &[f64]| -> f64 {
+                let first = l[0];
                 let (mut mn, mut mx) = (first, first);
-                let mut any_nan = first.is_nan();
-                for c in &l[1..] {
-                    let v = c.get();
-                    any_nan |= v.is_nan();
-                    if v < mn {
-                        mn = v;
-                    }
-                    if v > mx {
-                        mx = v;
-                    }
+                let mut any_nan = first != first;
+                for &v in &l[1..] {
+                    any_nan |= v != v;
+                    mx = mx.max(v);
+                    mn = mn.min(v);
                 }
-                slot.set(if any_nan { f64::NAN } else { mx - mn });
+                if any_nan { f64::NAN } else { mx - mn }
+            };
+            if parallel {
+                data.par_chunks_exact(axis_len).map(lane_ptp).collect()
+            } else {
+                data.chunks_exact(axis_len).map(lane_ptp).collect()
             }
         } else {
-            // Strided (non-last axis): per-inner running max/min/nan accumulators so
-            // the slab update vectorizes ACROSS inner.
-            let mut mxv = vec![0.0f64; inner];
-            let mut mnv = vec![0.0f64; inner];
-            let mut nanv = vec![false; inner];
-            for o in 0..outer {
-                let obase = o * lane;
-                for (i, c) in input[obase..obase + inner].iter().enumerate() {
-                    let v = c.get();
-                    mxv[i] = v;
-                    mnv[i] = v;
-                    nanv[i] = v.is_nan();
-                }
+            // Strided (non-last axis): per-inner running max/min/nan plane. ≥2 outer
+            // groups fan across groups; a single group (2-D axis=0) privatizes across
+            // row-blocks and merges the planes elementwise.
+            let to_ptp = |mxv: &[f64], mnv: &[f64], nanv: &[bool]| -> Vec<f64> {
+                mxv.iter()
+                    .zip(mnv)
+                    .zip(nanv)
+                    .map(|((&m, &n), &nf)| if nf { f64::NAN } else { m - n })
+                    .collect()
+            };
+            let group_plane = |obase: usize| -> (Vec<f64>, Vec<f64>, Vec<bool>) {
+                let mut mxv = data[obase..obase + inner].to_vec();
+                let mut mnv = mxv.clone();
+                let mut nanv: Vec<bool> = data[obase..obase + inner].iter().map(|&v| v != v).collect();
                 for a_idx in 1..axis_len {
-                    let slab = &input[obase + a_idx * inner..obase + a_idx * inner + inner];
-                    for (((m, n), nf), c) in mxv
+                    let slab = &data[obase + a_idx * inner..obase + a_idx * inner + inner];
+                    for (((m, n), nf), &v) in mxv
                         .iter_mut()
                         .zip(mnv.iter_mut())
                         .zip(nanv.iter_mut())
                         .zip(slab.iter())
                     {
-                        let v = c.get();
-                        *nf |= v.is_nan();
-                        if v > *m {
-                            *m = v;
-                        }
-                        if v < *n {
-                            *n = v;
-                        }
+                        *nf |= v != v;
+                        *m = m.max(v);
+                        *n = n.min(v);
                     }
                 }
-                let outl = &output[o * inner..o * inner + inner];
-                for (((slot, &m), &n), &nf) in outl
-                    .iter()
-                    .zip(mxv.iter())
-                    .zip(mnv.iter())
-                    .zip(nanv.iter())
-                {
-                    slot.set(if nf { f64::NAN } else { m - n });
+                (mxv, mnv, nanv)
+            };
+            if parallel && outer >= 2 {
+                let planes: Vec<Vec<f64>> = (0..outer)
+                    .into_par_iter()
+                    .map(|o| {
+                        let (mx, mn, nf) = group_plane(o * lane);
+                        to_ptp(&mx, &mn, &nf)
+                    })
+                    .collect();
+                let mut result = vec![0.0f64; out_elems];
+                for (o, p) in planes.into_iter().enumerate() {
+                    result[o * inner..o * inner + inner].copy_from_slice(&p);
                 }
+                result
+            } else if parallel {
+                // Single group: privatize across row-blocks, merge planes elementwise.
+                let (mxv, mnv, nanv) = (0..axis_len)
+                    .into_par_iter()
+                    .fold(
+                        || {
+                            (
+                                vec![f64::NEG_INFINITY; inner],
+                                vec![f64::INFINITY; inner],
+                                vec![false; inner],
+                            )
+                        },
+                        |(mut mx, mut mn, mut nf), r| {
+                            let slab = &data[r * inner..r * inner + inner];
+                            for (((m, n), f), &v) in mx
+                                .iter_mut()
+                                .zip(mn.iter_mut())
+                                .zip(nf.iter_mut())
+                                .zip(slab.iter())
+                            {
+                                *f |= v != v;
+                                *m = m.max(v);
+                                *n = n.min(v);
+                            }
+                            (mx, mn, nf)
+                        },
+                    )
+                    .reduce(
+                        || {
+                            (
+                                vec![f64::NEG_INFINITY; inner],
+                                vec![f64::INFINITY; inner],
+                                vec![false; inner],
+                            )
+                        },
+                        |(mut amx, mut amn, mut anf), (bmx, bmn, bnf)| {
+                            for (x, y) in amx.iter_mut().zip(bmx) {
+                                *x = x.max(y);
+                            }
+                            for (x, y) in amn.iter_mut().zip(bmn) {
+                                *x = x.min(y);
+                            }
+                            for (x, y) in anf.iter_mut().zip(bnf) {
+                                *x |= y;
+                            }
+                            (amx, amn, anf)
+                        },
+                    );
+                to_ptp(&mxv, &mnv, &nanv)
+            } else {
+                let mut result = vec![0.0f64; out_elems];
+                for o in 0..outer {
+                    let (mx, mn, nf) = group_plane(o * lane);
+                    let p = to_ptp(&mx, &mn, &nf);
+                    result[o * inner..o * inner + inner].copy_from_slice(&p);
+                }
+                result
             }
+        };
+        for (slot, &v) in output.iter().zip(result.iter()) {
+            slot.set(v);
         }
     }
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
