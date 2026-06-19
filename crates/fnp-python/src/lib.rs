@@ -23857,16 +23857,18 @@ fn nanstd(
         return fallback();
     }
     // nanstd == sqrt(nanvar); same bit-exact SIMD two-pass flat fast path.
-    if !keepdims.unwrap_or(false)
-        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(ddof_val) = ddof
             .as_ref()
             .map_or(Some(0isize), |v| v.bind(py).extract::<isize>().ok())
         && ddof_val >= 0
         && let Some(var) = compute_f64_nanvar_flat(py, a.bind(py), ddof_val as usize)?
     {
-        let numpy = py.import("numpy")?;
-        return Ok(numpy.getattr("float64")?.call1((var.sqrt(),))?.unbind());
+        let out = numpy.getattr("float64")?.call1((var.sqrt(),))?.unbind();
+        if keepdims.unwrap_or(false) {
+            return keepdims_reshape_scalar(py, &numpy, a.bind(py), out);
+        }
+        return Ok(out);
     }
     // Zero-copy per-lane pairwise nanstd over the contiguous last axis (bit-exact;
     // parallel) — skips the cold extract → native nanstd path.
@@ -23985,18 +23987,21 @@ fn nanvar(
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
-    // Bit-exact SIMD two-pass flat fast path (axis=None, no keepdims): ~3x faster
-    // than the extract → native scan. DoF<=0 / all-NaN defer to numpy (warning).
-    if !keepdims.unwrap_or(false)
-        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+    // Bit-exact SIMD two-pass flat fast path (axis=None): ~3x faster than the extract
+    // → native scan. DoF<=0 / all-NaN defer to numpy (warning). keepdims reshapes the
+    // scalar to numpy's all-ones shape.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(ddof_val) = ddof
             .as_ref()
             .map_or(Some(0isize), |v| v.bind(py).extract::<isize>().ok())
         && ddof_val >= 0
         && let Some(var) = compute_f64_nanvar_flat(py, a.bind(py), ddof_val as usize)?
     {
-        let numpy = py.import("numpy")?;
-        return Ok(numpy.getattr("float64")?.call1((var,))?.unbind());
+        let out = numpy.getattr("float64")?.call1((var,))?.unbind();
+        if keepdims.unwrap_or(false) {
+            return keepdims_reshape_scalar(py, &numpy, a.bind(py), out);
+        }
+        return Ok(out);
     }
     // Zero-copy per-lane pairwise nanvar over the contiguous last axis (bit-exact;
     // parallel) — skips the cold extract → native nanvar path.
