@@ -23141,12 +23141,82 @@ fn simd_nanextreme_raw(
     (m, vsaw.any() || saw_tail)
 }
 
+// Direct SIMD nan-extreme over a plain &[f64] (no per-block staging copy). Returns
+// (extreme, saw_nonnan). IEEE maxNum/minNum (simd_max/simd_min return the non-NaN
+// operand), so NaNs are skipped exactly as the staged `simd_nanextreme_raw` fold —
+// bit-identical, just without the memcpy into the reused buffer.
+fn simd_nanextreme_slice(data: &[f64], take_max: bool) -> (f64, bool) {
+    use std::simd::cmp::SimdPartialEq;
+    use std::simd::num::SimdFloat;
+    use std::simd::{Mask, Simd};
+    const L: usize = 8;
+    type V = Simd<f64, L>;
+    let init = if take_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+    let n = data.len();
+    let full = n - n % L;
+    let mut acc = V::splat(init);
+    let mut vsaw = Mask::<i64, L>::splat(false);
+    let mut off = 0;
+    while off < full {
+        let c = V::from_slice(&data[off..off + L]);
+        vsaw |= c.simd_eq(c); // non-NaN lanes (c == c)
+        acc = if take_max { acc.simd_max(c) } else { acc.simd_min(c) };
+        off += L;
+    }
+    let mut m = init;
+    let mut saw = vsaw.any();
+    for &v in &acc.to_array() {
+        m = if take_max { m.max(v) } else { m.min(v) };
+    }
+    for &v in &data[full..] {
+        if !v.is_nan() {
+            saw = true;
+            m = if take_max { m.max(v) } else { m.min(v) };
+        }
+    }
+    (m, saw)
+}
+
 fn simd_nanextreme_f64(cells: &[pyo3::buffer::ReadOnlyCell<f64>], take_max: bool) -> Option<f64> {
     if cells.is_empty() {
         return None;
     }
-    let mut buf = vec![0.0f64; NANEXTREME_BLK.min(cells.len().max(1))];
-    let (m, saw) = simd_nanextreme_raw(cells, take_max, &mut buf);
+    let n = cells.len();
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and `cells` is a
+    // read-only PyBuffer slice held under the GIL, so reading it as &[f64] for the
+    // duration of this fold is sound. Avoids staging each block through `buf`.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    // numpy runs nanmax/nanmin single-threaded; this reduction is order-independent
+    // (NaN-skipping min/max, and the ±0-sign tie defers below), so a parallel fold
+    // across the rayon pool exploits the extra memory channels and beats it. The +1
+    // identity for an empty chunk is the same init value, so the merge is exact.
+    const NANEXTREME_PARALLEL_MIN: usize = 1 << 18;
+    let (m, saw) = if n >= NANEXTREME_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        const CHUNK: usize = 1 << 15; // 256 KiB of f64 per task
+        let init = if take_max {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        data.par_chunks(CHUNK)
+            .map(|c| simd_nanextreme_slice(c, take_max))
+            .reduce(
+                || (init, false),
+                |(am, asaw), (bm, bsaw)| {
+                    (
+                        if take_max { am.max(bm) } else { am.min(bm) },
+                        asaw || bsaw,
+                    )
+                },
+            )
+    } else {
+        simd_nanextreme_slice(data, take_max)
+    };
     if !saw {
         return None; // all-NaN or empty — defer to numpy for warning/NaN/error parity
     }
