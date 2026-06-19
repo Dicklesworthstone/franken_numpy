@@ -39833,7 +39833,7 @@ fn try_zerocopy_f64_argextreme(
 // to it (short-circuits — for narrow ints the extreme recurs early so this is
 // nearly free). First-equal == numpy's first-occurrence tie rule, and integer
 // order is total, so the result is identical to the sequential scan.
-fn lastaxis_argextreme_int<T: pyo3::buffer::Element + Copy + PartialOrd + PartialEq>(
+fn lastaxis_argextreme_int<T: pyo3::buffer::Element + Copy + PartialOrd + PartialEq + Sync>(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     outer: usize,
@@ -39845,33 +39845,41 @@ fn lastaxis_argextreme_int<T: pyo3::buffer::Element + Copy + PartialOrd + Partia
     if cells.len() != outer * lane {
         return None;
     }
-    let mut out = Vec::with_capacity(outer);
-    for o in 0..outer {
-        let base = o * lane;
-        let row = &cells[base..base + lane];
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only buffer under the
+    // GIL -> &[T] (Sync, T a POD numeric). Each lane is independent — fan across the
+    // rayon pool (numpy runs argmax single-threaded).
+    let data: &[T] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<T>(), cells.len()) };
+    let lane_arg = |row: &[T]| -> i64 {
         // Pass 1: extreme value (branchless fold autovectorizes).
-        let mut ext = row[0].get();
+        let mut ext = row[0];
         if take_max {
-            for c in &row[1..] {
-                let v = c.get();
+            for &v in &row[1..] {
                 ext = if v > ext { v } else { ext };
             }
         } else {
-            for c in &row[1..] {
-                let v = c.get();
+            for &v in &row[1..] {
                 ext = if v < ext { v } else { ext };
             }
         }
         // Pass 2: first index achieving it (numpy's first-occurrence tie-break).
         let mut best_i = 0usize;
-        for (j, c) in row.iter().enumerate() {
-            if c.get() == ext {
+        for (j, &v) in row.iter().enumerate() {
+            if v == ext {
                 best_i = j;
                 break;
             }
         }
-        out.push(best_i as i64);
-    }
+        best_i as i64
+    };
+    use rayon::prelude::*;
+    const ARGEXTREME_INT_LASTAXIS_PARALLEL_MIN: usize = 1 << 16;
+    let out: Vec<i64> = if outer * lane >= ARGEXTREME_INT_LASTAXIS_PARALLEL_MIN
+        && rayon::current_num_threads() >= 2
+    {
+        data.par_chunks_exact(lane).map(lane_arg).collect()
+    } else {
+        data.chunks_exact(lane).map(lane_arg).collect()
+    };
     Some(out)
 }
 
@@ -39930,19 +39938,30 @@ fn try_zerocopy_lastaxis_argextreme(
         if cells.len() != outer * lane {
             return Ok(None);
         }
-        let mut buf = vec![0.0f64; lane];
-        let mut out = Vec::with_capacity(outer);
-        for o in 0..outer {
-            let base = o * lane;
-            for (d, c) in buf.iter_mut().zip(cells[base..base + lane].iter()) {
-                *d = c.get();
-            }
-            match simd_argextreme_f64(&buf, take_max) {
-                Some(i) => out.push(i as i64),
-                None => return Ok(None), // NaN lane — defer the whole call to numpy
-            }
+        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer
+        // under the GIL -> &[f64] (Sync). Each lane is an independent contiguous run,
+        // so pass the sub-slice straight to simd_argextreme_f64 (no per-lane copy) and
+        // fan the lanes across the rayon pool. simd_argextreme_f64 keeps the FIRST max
+        // on ties, so per-lane results match numpy exactly; any NaN lane defers whole.
+        let data: &[f64] =
+            unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+        use rayon::prelude::*;
+        const ARGEXTREME_LASTAXIS_PARALLEL_MIN: usize = 1 << 16;
+        let parallel = outer * lane >= ARGEXTREME_LASTAXIS_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2;
+        let per: Vec<Option<usize>> = if parallel {
+            data.par_chunks_exact(lane)
+                .map(|l| simd_argextreme_f64(l, take_max))
+                .collect()
+        } else {
+            data.chunks_exact(lane)
+                .map(|l| simd_argextreme_f64(l, take_max))
+                .collect()
+        };
+        if per.iter().any(|x| x.is_none()) {
+            return Ok(None); // NaN lane — defer the whole call to numpy
         }
-        out
+        per.into_iter().map(|i| i.unwrap() as i64).collect()
     } else if kind == "i" || kind == "u" {
         let res = match (kind.as_str(), itemsize) {
             ("i", 1) => lastaxis_argextreme_int::<i8>(py, a, outer, lane, take_max),
