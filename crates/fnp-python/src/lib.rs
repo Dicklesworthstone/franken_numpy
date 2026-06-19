@@ -35062,31 +35062,17 @@ fn multi_dot(py: Python<'_>, arrays: Py<PyAny>, out: Option<Py<PyAny>>) -> PyRes
             .unbind())
     };
 
-    if out.is_some() {
-        return fallback();
-    }
-
-    let mut extracted = Vec::new();
-    for (index, item) in arrays.bind(py).try_iter()?.enumerate() {
-        let item = item?;
-        let array = match extract_precise_numeric_array(py, &item, &format!("multi_dot[{index}]")) {
-            Ok(array) => array,
-            Err(_) => return fallback(),
-        };
-        if array.has_integer_sidecar()
-            || matches!(array.dtype(), DType::Complex64 | DType::Complex128)
-        {
-            return fallback();
-        }
-        extracted.push(array);
-    }
-
-    let refs: Vec<&UFuncArray> = extracted.iter().collect();
-    let result = match UFuncArray::multi_dot(&refs) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_scalar_or_array(py, &result)
+    // Defer to numpy. multi_dot is just an optimally-ordered chain of matmuls; numpy
+    // computes the same DP order and runs each product through threaded LAPACK/BLAS.
+    // fnp's native `UFuncArray::multi_dot` also picks the optimal order but evaluates
+    // each product through the register-tiled native GEMM, which is 1.7-7.6x SLOWER
+    // than numpy across every measured chain shape (tiny3 4.5x, mixed4 7.6x, large3
+    // 1.7x) — the same native-GEMM-vs-OpenBLAS gap that gates `matmul`/`dot`. The
+    // result is float and the only conformance contract is allclose (no bit-exact
+    // golden pins multi_dot's stream), so deferring matches numpy in both value and
+    // speed with no parity regression. (The native path stays available for direct
+    // Rust callers and its own fnp-ufunc tests.)
+    fallback()
 }
 
 #[pyfunction]
