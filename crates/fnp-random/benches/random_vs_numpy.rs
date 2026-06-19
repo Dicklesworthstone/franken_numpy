@@ -3,15 +3,17 @@
 //! The NumPy side keeps one Python process per Criterion sample and times the
 //! inner loop with `time.perf_counter()`, avoiding per-iteration spawn cost.
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fnp_random::{BitGenerator, BitGeneratorKind, Generator, Pcg64Rng, SeedSequence};
 use std::hint::black_box;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 const SEED: u32 = 42;
 const RAW_U64_SIZES: [usize; 2] = [100_000, 1_000_000];
 const BYTE_SIZES: [usize; 2] = [100_000, 1_000_000];
+const DIST_SIZES: [usize; 2] = [100_000, 1_000_000];
 
 const NUMPY_RANDOM_RAW_SCRIPT: &str = r#"
 import sys, time
@@ -51,6 +53,44 @@ elapsed = time.perf_counter() - start
 print(f"{elapsed:.12f} {checksum}")
 "#;
 
+const NUMPY_GUMBEL_SCRIPT: &str = r#"
+import sys, time
+import numpy as np
+
+iters = int(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64(42))
+checksum = 0.0
+
+start = time.perf_counter()
+for _ in range(iters):
+    values = rng.gumbel(-1.25, 2.75, size=size)
+    checksum += float(values[0])
+    checksum += float(values[-1])
+elapsed = time.perf_counter() - start
+
+print(f"{elapsed:.12f} {checksum:.17g}")
+"#;
+
+const NUMPY_LAPLACE_SCRIPT: &str = r#"
+import sys, time
+import numpy as np
+
+iters = int(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64(42))
+checksum = 0.0
+
+start = time.perf_counter()
+for _ in range(iters):
+    values = rng.laplace(1.5, 2.25, size=size)
+    checksum += float(values[0])
+    checksum += float(values[-1])
+elapsed = time.perf_counter() - start
+
+print(f"{elapsed:.12f} {checksum:.17g}")
+"#;
+
 fn seed_sequence() -> SeedSequence {
     SeedSequence::new(&[SEED]).expect("fixed seed should build")
 }
@@ -63,13 +103,26 @@ fn generator_from_pcg64() -> Generator {
 
 fn run_numpy_timed(script: &str, iterations: u64, size: usize) -> Duration {
     let python = std::env::var("FNP_ORACLE_PYTHON").unwrap_or_else(|_| "python3".to_string());
-    let output = Command::new(&python)
-        .arg("-c")
-        .arg(script)
+    let mut child = Command::new(&python)
+        .arg("-")
         .arg(iterations.to_string())
         .arg(size.to_string())
-        .output()
-        .expect("failed to run NumPy benchmark command");
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("failed to start NumPy benchmark command");
+
+    child
+        .stdin
+        .as_mut()
+        .expect("NumPy benchmark stdin should be piped")
+        .write_all(script.as_bytes())
+        .expect("failed to write NumPy benchmark script");
+
+    let output = child
+        .wait_with_output()
+        .expect("failed to collect NumPy benchmark output");
 
     assert!(
         output.status.success(),
@@ -154,9 +207,73 @@ fn bench_pcg64_bytes_vs_numpy(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_pcg64_gumbel_vs_numpy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("vs_numpy_pcg64_gumbel");
+
+    for &size in &DIST_SIZES {
+        group.throughput(Throughput::Elements(size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("franken_gumbel", size),
+            &size,
+            |b, &size| {
+                b.iter_custom(|iterations| {
+                    let mut generator = generator_from_pcg64();
+                    let start = Instant::now();
+                    for _ in 0..iterations {
+                        black_box(generator.gumbel(-1.25, 2.75, size).unwrap());
+                    }
+                    start.elapsed()
+                });
+            },
+        );
+
+        group.bench_with_input(BenchmarkId::new("numpy_gumbel", size), &size, |b, &size| {
+            b.iter_custom(|iterations| run_numpy_timed(NUMPY_GUMBEL_SCRIPT, iterations, size));
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_pcg64_laplace_vs_numpy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("vs_numpy_pcg64_laplace");
+
+    for &size in &DIST_SIZES {
+        group.throughput(Throughput::Elements(size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("franken_laplace", size),
+            &size,
+            |b, &size| {
+                b.iter_custom(|iterations| {
+                    let mut generator = generator_from_pcg64();
+                    let start = Instant::now();
+                    for _ in 0..iterations {
+                        black_box(generator.laplace(1.5, 2.25, size).unwrap());
+                    }
+                    start.elapsed()
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("numpy_laplace", size),
+            &size,
+            |b, &size| {
+                b.iter_custom(|iterations| run_numpy_timed(NUMPY_LAPLACE_SCRIPT, iterations, size));
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_pcg64_random_raw_vs_numpy,
     bench_pcg64_bytes_vs_numpy,
+    bench_pcg64_gumbel_vs_numpy,
+    bench_pcg64_laplace_vs_numpy,
 );
 criterion_main!(benches);

@@ -3,6 +3,34 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-19 - Random PCG Distribution Verification Slice
+
+Scope:
+- Recent code-first pending backlog measured: `franken_numpy-ixs5y.250` and
+  `franken_numpy-ixs5y.253`.
+- Crate: `fnp-random`.
+- Reference: NumPy 2.4.3.
+- Worker: `ovh-a` via `rch exec`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS | 4/4 measured size rows faster than NumPy median; speedups ranged from 6.01x to 8.67x. |
+| Noise discipline | PASS | Criterion `bencher` output recorded all rows with sample size 10 and the same worker for FNP and NumPy rows. |
+| Targeted correctness | PASS | PCG gumbel/laplace stream-state guards and live NumPy oracle checks passed. |
+| Crate bench compile health | PASS | `rch exec -- cargo check -p fnp-random --benches` passed with requested `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`. |
+| Revert decision | PASS | No revert required; no measured row was neutral or regressed in this slice. |
+| Evidence durability | PASS | Results recorded in `docs/NEGATIVE_EVIDENCE.md` with retry predicates and artifacts under `tests/artifacts/perf/2026-06-19_random_vs_numpy_pcg_distributions/`. |
+
+Cluster score: **90 / 100**
+
+Score rationale:
+- +40 performance: all target rows beat NumPy by at least 6.01x.
+- +20 correctness: stream-state guards and live NumPy oracle checks passed.
+- +15 reproducibility: same worker and explicit target-dir rewrite recorded.
+- +15 ledger discipline: every result and retry predicate recorded.
+- -10 project-wide release gap: this is not a full workspace gauntlet, full
+  conformance, or 10-round convergence run.
+
 ## 2026-06-19 - Ufunc Data-Movement Verification Slice
 
 Scope:
