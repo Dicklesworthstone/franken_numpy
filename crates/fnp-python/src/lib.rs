@@ -22583,12 +22583,15 @@ fn nanmean(
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
-    // Bit-exact SIMD-pairwise flat fast path (axis=None, no keepdims): ~5x faster
-    // than the extract → native scan; all-NaN defers to numpy (warning + NaN).
-    if !keepdims
-        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+    // Bit-exact SIMD-pairwise flat fast path (axis=None): ~5x faster than the extract
+    // → native scan; all-NaN defers to numpy (warning + NaN). keepdims reshapes the
+    // scalar to numpy's all-ones shape.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(out) = try_zerocopy_f64_nanmean_flat(py, a.bind(py))?
     {
+        if keepdims {
+            return keepdims_reshape_scalar(py, &numpy, a.bind(py), out);
+        }
         return Ok(out);
     }
     // Per-lane pairwise fast path for the contiguous last axis (~5.7x faster than
@@ -22804,6 +22807,23 @@ fn try_zerocopy_f64_mean_flat(
 // Bit-exact flat nanmean (axis=None) = pairwise nansum / count(non-NaN). All-NaN
 // (count==0) defers to numpy for its "Mean of empty slice" RuntimeWarning + NaN.
 // C-contiguous f64 only.
+// Wrap a full-reduction (axis=None) scalar result as numpy's keepdims=True output:
+// an all-ones-shaped ndarray of the input's ndim. The reduction has one element, so
+// asarray + reshape preserves the value and dtype exactly — lets the flat fast paths
+// serve keepdims=True instead of falling to the cold extract → native path.
+fn keepdims_reshape_scalar(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    out: Py<PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    let arr = numpy.call_method1("asarray", (out.bind(py),))?;
+    Ok(arr
+        .call_method1("reshape", (PyTuple::new(py, vec![1usize; ndim])?,))?
+        .unbind())
+}
+
 fn try_zerocopy_f64_nanmean_flat(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -22927,12 +22947,15 @@ fn nansum(
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
-    // Bit-exact SIMD-pairwise flat fast path (axis=None, no keepdims): ~7x faster
-    // than the extract → scalar nan-scan, and beats numpy (no whole-array temp).
-    if !keepdims
-        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+    // Bit-exact SIMD-pairwise flat fast path (axis=None): ~7x faster than the extract
+    // → scalar nan-scan, and beats numpy (no whole-array temp). keepdims reshapes the
+    // scalar to numpy's all-ones shape.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(out) = try_zerocopy_f64_nansum_flat(py, a.bind(py))?
     {
+        if keepdims {
+            return keepdims_reshape_scalar(py, &numpy, a.bind(py), out);
+        }
         return Ok(out);
     }
     if !keepdims
@@ -23024,12 +23047,15 @@ fn nanprod(
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
-    // Zero-copy sequential-product flat fast path (axis=None, no keepdims): ~4x
-    // faster than the extract → native scan, single allocation-free pass.
-    if !keepdims.unwrap_or(false)
-        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+    // Zero-copy sequential-product flat fast path (axis=None): ~4x faster than the
+    // extract → native scan, single allocation-free pass. keepdims reshapes the scalar
+    // to numpy's all-ones shape.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
         && let Some(out) = try_zerocopy_f64_nanprod_flat(py, a.bind(py))?
     {
+        if keepdims.unwrap_or(false) {
+            return keepdims_reshape_scalar(py, &numpy, a.bind(py), out);
+        }
         return Ok(out);
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanprod(a)") {

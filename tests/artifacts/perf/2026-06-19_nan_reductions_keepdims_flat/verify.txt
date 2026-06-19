@@ -1,0 +1,4 @@
+cases=15 fails=0
+nansum_kd  np= 22554.1us fnp=  2231.5us fnp/np=0.099
+nanmean_kd  np= 28862.4us fnp=  1695.1us fnp/np=0.059
+nanprod_kd  np= 23035.1us fnp=  3066.1us fnp/np=0.133
