@@ -1,0 +1,6 @@
+  [2m2026-06-19T17:50:41.515459Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: python3 -[0m
+    [2;3mat[0m rch/src/hook.rs:702 [2;3mon[0m ThreadId(1)
+
+numpy_version 2.4.3
+compress_f64_bool_flat_sparse/100000 median_ns=52056.345 mean_ns=55214.531 min_ns=50467.180 max_ns=69887.180 stdev_ns=6032.477 cv_pct=10.93 selected=22173
+compress_f64_bool_flat_sparse/1000000 median_ns=503993.460 mean_ns=514799.557 min_ns=498348.340 max_ns=634367.300 stdev_ns=28612.270 cv_pct=5.56 selected=221714

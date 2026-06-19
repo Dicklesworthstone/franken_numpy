@@ -53,6 +53,18 @@ const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 20;
 const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
 const INSERT_FLAT_SPLICE_MIN_WORK: usize = 1 << 14;
 const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+
+#[inline(always)]
+fn bool_chunk8_bitmask(chunk: &[bool]) -> u8 {
+    (chunk[0] as u8)
+        | ((chunk[1] as u8) << 1)
+        | ((chunk[2] as u8) << 2)
+        | ((chunk[3] as u8) << 3)
+        | ((chunk[4] as u8) << 4)
+        | ((chunk[5] as u8) << 5)
+        | ((chunk[6] as u8) << 6)
+        | ((chunk[7] as u8) << 7)
+}
 const PUT_MASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PUTMASK_PARALLEL_MIN_ELEMS: usize = 1 << 20;
 const WHERE_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
@@ -15983,6 +15995,47 @@ impl UFuncArray {
     pub fn compress(&self, condition: &[bool], axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
             None => {
+                if self.dtype == DType::F64
+                    && self.integer_sidecar.is_none()
+                    && !condition
+                        .get(self.values.len()..)
+                        .is_some_and(|tail| tail.iter().any(|&selected| selected))
+                {
+                    const LANES: usize = 8;
+
+                    let bounded_len = condition.len().min(self.values.len());
+                    let bounded_condition = &condition[..bounded_len];
+                    let bounded_values = &self.values[..bounded_len];
+
+                    let mut values = Vec::with_capacity((bounded_len / 4 + LANES).min(bounded_len));
+                    let mut condition_chunks = bounded_condition.chunks_exact(LANES);
+                    let mut value_chunks = bounded_values.chunks_exact(LANES);
+                    for (condition_chunk, value_chunk) in
+                        condition_chunks.by_ref().zip(value_chunks.by_ref())
+                    {
+                        let mut mask = bool_chunk8_bitmask(condition_chunk);
+                        while mask != 0 {
+                            let lane = mask.trailing_zeros() as usize;
+                            values.push(value_chunk[lane]);
+                            mask &= mask - 1;
+                        }
+                    }
+                    for (&selected, &value) in condition_chunks
+                        .remainder()
+                        .iter()
+                        .zip(value_chunks.remainder())
+                    {
+                        if selected {
+                            values.push(value);
+                        }
+                    }
+                    return Ok(Self {
+                        shape: vec![values.len()],
+                        values,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
+                }
                 let indices: Vec<i64> = condition
                     .iter()
                     .enumerate()
@@ -53922,6 +53975,84 @@ print(json.dumps(payload))
     fn compress_extra_true_past_end_errors() {
         let a = UFuncArray::new(vec![3], vec![1.0, 2.0, 3.0], DType::F64).unwrap();
         assert!(a.compress(&[false, false, false, true], None).is_err());
+    }
+
+    #[test]
+    fn compress_f64_bool_flat_matches_serial_reference_and_golden_sha256() {
+        let n = (1 << 14) + 291;
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 211 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_0042)
+                } else if i % 157 == 0 {
+                    -0.0
+                } else if i % 97 == 0 {
+                    f64::NEG_INFINITY
+                } else {
+                    ((i * 53 + 17) % 1009) as f64 / 47.0 - 10.0
+                }
+            })
+            .collect();
+        let condition: Vec<bool> = (0..(n + 17))
+            .map(|i| {
+                if i >= n {
+                    false
+                } else {
+                    i % 173 == 0 || matches!((i * 37 + 11) % 19, 0 | 4 | 10 | 15)
+                }
+            })
+            .collect();
+        let expected: Vec<f64> = condition
+            .iter()
+            .take(n)
+            .zip(&values)
+            .filter_map(|(&selected, &value)| if selected { Some(value) } else { None })
+            .collect();
+
+        let arr = UFuncArray::new(vec![n], values, DType::F64).unwrap();
+        let actual = arr.compress(&condition, None).unwrap();
+
+        assert_eq!(actual.shape(), &[expected.len()]);
+        assert_eq!(actual.dtype(), DType::F64);
+        assert!(!actual.has_integer_sidecar());
+        let mut digest = Sha256::new();
+        for (idx, (&got, &want)) in actual.values().iter().zip(&expected).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "compress bit drift at index {idx}"
+            );
+            digest.update(got.to_le_bytes());
+        }
+        let digest_hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest_hex,
+            "81276111fdbfe090ecd3c825cf1ecc3fb5c6601e318fbd5683b9dfe6877d550f"
+        );
+
+        let short = arr.compress(&[true, false, true], None).unwrap();
+        assert_eq!(short.values().len(), 2);
+        assert_eq!(short.values()[0].to_bits(), arr.values()[0].to_bits());
+        assert_eq!(short.values()[1].to_bits(), arr.values()[2].to_bits());
+        assert!(
+            arr.compress(&[false, false, false, false, false, true], None)
+                .is_ok()
+        );
+        assert!(
+            arr.compress(
+                &{
+                    let mut c = vec![false; n + 1];
+                    c[n] = true;
+                    c
+                },
+                None
+            )
+            .is_err()
+        );
     }
 
     #[test]

@@ -4,6 +4,77 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-19 - BOLD-VERIFY Keep: FNP compress direct bool-mask decode vs NumPy
+
+Artifact directory: `tests/artifacts/perf/2026-06-19_ufunc_compress_simd_cod_a/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.263`.
+- Parent gap: `.249` left serial `compress(condition, axis=None)` slower than
+  NumPy after reverting the per-chunk `Vec<Vec<f64>>` parallel gather.
+- Subject API: direct Rust `fnp-ufunc` `UFuncArray::compress` Criterion row
+  `compress_f64_bool_flat_sparse`.
+- Oracle/reference: NumPy 2.4.3 on Python 3.13.7 using the same value and
+  bool-mask formula.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Worker notes: baseline and early candidates ran under `rch` on `hz1`; the
+  final remote candidate ran on `hz2`; direct SSH NumPy timing on `hz2` failed
+  with `Permission denied (publickey,password)`, so same-host keep/reject uses
+  the local FNP Criterion confirmation plus the local NumPy probe.
+
+Commands:
+- `rch exec -- cargo bench -p fnp-ufunc --bench elementwise compress_f64_bool_flat_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `rch exec -- cargo test -p fnp-ufunc compress_f64_bool_flat_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `rch exec -- cargo test -p fnp-ufunc compress -- --nocapture`
+- `rch exec -- cargo check -p fnp-ufunc --all-targets`
+- `rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings`
+- Local same-host confirmation: `cargo bench -p fnp-ufunc --bench elementwise compress_f64_bool_flat_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- Python NumPy timing probe in `baseline_numpy_compress_rch.txt`; `rch exec`
+  warned that arbitrary `python3 -` is non-compilation and did not provide a
+  worker pin.
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.263` | Baseline serial index materialization + `take` | 100k, `hz1` FNP vs local NumPy | `baseline_fnp_compress_rch.txt`, `baseline_numpy_compress_rch.txt` | 113.207 us | 52.056 us | 2.18x slower | Open gap confirmed |
+| `franken_numpy-ixs5y.263` | Baseline serial index materialization + `take` | 1M, `hz1` FNP vs local NumPy | `baseline_fnp_compress_rch.txt`, `baseline_numpy_compress_rch.txt` | 1.232777 ms | 503.993 us | 2.45x slower | Open gap confirmed |
+| `franken_numpy-ixs5y.263` | Two-pass bool mask count/decode, exact allocation | 100k, `hz1` FNP vs local NumPy | `candidate_fnp_compress_rch.txt`, `baseline_numpy_compress_rch.txt` | 85.032 us | 52.056 us | 1.63x slower | Superseded |
+| `franken_numpy-ixs5y.263` | Two-pass bool mask count/decode, exact allocation | 1M, `hz1` FNP vs local NumPy | `candidate_fnp_compress_rch.txt`, `baseline_numpy_compress_rch.txt` | 520.739 us | 503.993 us | 1.03x slower | Neutral, superseded |
+| `franken_numpy-ixs5y.263` | Single-pass bool bitmask decode, full input capacity | 100k, `hz1` FNP vs local NumPy | `candidate_fnp_compress_single_pass_rch.txt`, `baseline_numpy_compress_rch.txt` | 52.650 us | 52.056 us | 1.01x slower | Neutral, superseded |
+| `franken_numpy-ixs5y.263` | Single-pass bool bitmask decode, full input capacity | 1M, `hz1` FNP vs local NumPy | `candidate_fnp_compress_single_pass_rch.txt`, `baseline_numpy_compress_rch.txt` | 508.565 us | 503.993 us | 1.01x slower | Neutral, superseded |
+| `franken_numpy-ixs5y.263` | Single-pass bool bitmask decode, quarter-capacity output | 100k same-host local | `candidate_fnp_compress_capacity_local.txt`, `baseline_numpy_compress_rch.txt` | 44.374 us | 52.056 us | 0.852x, 1.17x faster | Keep |
+| `franken_numpy-ixs5y.263` | Single-pass bool bitmask decode, quarter-capacity output | 1M same-host local | `candidate_fnp_compress_capacity_local.txt`, `baseline_numpy_compress_rch.txt` | 410.823 us | 503.993 us | 0.815x, 1.23x faster | Keep |
+| `franken_numpy-ixs5y.263` | Single-pass bool bitmask decode, quarter-capacity output | 100k remote routing, `hz2` | `candidate_fnp_compress_capacity_rch.txt`, `baseline_numpy_compress_rch.txt` | 33.082 us | 52.056 us | 0.635x, 1.57x faster | Routing confirmation |
+| `franken_numpy-ixs5y.263` | Single-pass bool bitmask decode, quarter-capacity output | 1M remote routing, `hz2` | `candidate_fnp_compress_capacity_rch.txt`, `baseline_numpy_compress_rch.txt` | 339.188 us | 503.993 us | 0.673x, 1.49x faster | Routing confirmation |
+
+Scorecard:
+- Final same-host vs NumPy: win/loss/neutral = 2/0/0.
+- Rejected/superseded candidates vs NumPy: win/loss/neutral = 0/3/1.
+- Old-to-final local comparison against the prior `.249` post-revert local
+  serial rows: 100k improved 90.800 us -> 44.374 us (2.05x faster); 1M
+  improved 1.1369 ms -> 410.823 us (2.77x faster).
+
+Notes:
+- Kept path is not the rejected `.249` per-chunk parallel gather. It avoids
+  `Vec<Vec<f64>>`, avoids building an index vector, preserves the existing
+  `take` fallback for true bits beyond the array end, and is limited to
+  sidecar-free F64 `axis=None`.
+- The final lever maps to Vectorized Execution-style selection bitmasks over a
+  cache-local flat buffer plus the "constants kill you" rule: the exact-count
+  two-pass and full-capacity one-pass versions were neutral/losses, so only the
+  measured quarter-capacity one-pass decoder was kept.
+- Golden guard digest:
+  `81276111fdbfe090ecd3c825cf1ecc3fb5c6601e318fbd5683b9dfe6877d550f`.
+- Focused validation passed for `cargo test -p fnp-ufunc compress`,
+  `cargo check -p fnp-ufunc --all-targets`, `cargo clippy -p fnp-ufunc
+  --all-targets -- -D warnings`, and `git diff --check`.
+- `cargo fmt --check -p fnp-ufunc` still reports pre-existing rustfmt drift in
+  unrelated fnp-ufunc sections and bench rows; it is recorded in
+  `cargo_fmt_check_fnp_ufunc.txt` and kept out of this commit.
+- UBS on the changed-file set exited nonzero with broad pre-existing
+  `fnp-ufunc` inventory (489 critical, 14639 warnings); sampled findings are
+  outside the new compress helper/path and the full output is recorded in
+  `ubs_changed_files.txt`.
+
 ## 2026-06-19 - Gauntlet Verify: FNP flatnonzero gather vs NumPy
 
 Artifact directory: `tests/artifacts/perf/2026-06-19_ufunc_flatnonzero_vs_numpy/`
