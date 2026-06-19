@@ -23515,6 +23515,7 @@ fn try_zerocopy_f64_nanvar_axis(
     axis_obj: &Bound<'_, PyAny>,
     ddof: usize,
     take_sqrt: bool,
+    keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
@@ -23584,7 +23585,11 @@ fn try_zerocopy_f64_nanvar_axis(
     }
     let out: Vec<f64> = results.into_iter().map(|r| r.unwrap()).collect();
     let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
-    let out_shape: Vec<usize> = shape[..ax].to_vec();
+    let mut out_shape: Vec<usize> = shape[..ax].to_vec();
+    if keepdims {
+        // numpy keeps the reduced last axis as length 1.
+        out_shape.push(1);
+    }
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {
         return Ok(Some(reshaped.get_item(())?.unbind()));
@@ -23825,15 +23830,20 @@ fn nanstd(
     }
     // Zero-copy per-lane pairwise nanstd over the contiguous last axis (bit-exact;
     // parallel) — skips the cold extract → native nanstd path.
-    if !keepdims.unwrap_or(false)
-        && let Some(axis_val) = axis.as_ref()
+    if let Some(axis_val) = axis.as_ref()
         && !axis_val.bind(py).is_none()
         && let Some(ddof_val) = ddof
             .as_ref()
             .map_or(Some(0isize), |v| v.bind(py).extract::<isize>().ok())
         && ddof_val >= 0
-        && let Some(out) =
-            try_zerocopy_f64_nanvar_axis(py, a.bind(py), axis_val.bind(py), ddof_val as usize, true)?
+        && let Some(out) = try_zerocopy_f64_nanvar_axis(
+            py,
+            a.bind(py),
+            axis_val.bind(py),
+            ddof_val as usize,
+            true,
+            keepdims.unwrap_or(false),
+        )?
     {
         return Ok(out);
     }
@@ -23950,15 +23960,20 @@ fn nanvar(
     }
     // Zero-copy per-lane pairwise nanvar over the contiguous last axis (bit-exact;
     // parallel) — skips the cold extract → native nanvar path.
-    if !keepdims.unwrap_or(false)
-        && let Some(axis_val) = axis.as_ref()
+    if let Some(axis_val) = axis.as_ref()
         && !axis_val.bind(py).is_none()
         && let Some(ddof_val) = ddof
             .as_ref()
             .map_or(Some(0isize), |v| v.bind(py).extract::<isize>().ok())
         && ddof_val >= 0
-        && let Some(out) =
-            try_zerocopy_f64_nanvar_axis(py, a.bind(py), axis_val.bind(py), ddof_val as usize, false)?
+        && let Some(out) = try_zerocopy_f64_nanvar_axis(
+            py,
+            a.bind(py),
+            axis_val.bind(py),
+            ddof_val as usize,
+            false,
+            keepdims.unwrap_or(false),
+        )?
     {
         return Ok(out);
     }

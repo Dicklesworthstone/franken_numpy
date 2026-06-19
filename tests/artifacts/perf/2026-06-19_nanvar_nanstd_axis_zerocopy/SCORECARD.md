@@ -31,3 +31,10 @@ nanstd_ax0 (non-last, native path) already 0.60x — left as is.
 84/84 differential cases BIT-EXACT (np.array_equal equal_nan) across 7 shapes x
 last-axis x ddof {0,1,2} x {plain, partial-NaN} x {nanstd, nanvar}, plus error
 parity. conformance_nan_funcs nanstd/nanvar tests green.
+
+## FOLLOW-UP: keepdims=True extended (same fast path)
+nanstd/nanvar(axis=last, keepdims=True) had fallen to the cold extract path (the
+fast path gated on !keepdims) -> 1.46x slow. Threaded keepdims through
+try_zerocopy_f64_nanvar_axis (append a length-1 reduced axis to the output shape).
+96/96 differential cases bit-exact incl keepdims {True,False}. Measured (4096x4096):
+nanstd_kd_ax1 1.46x slow -> 0.020x (50x fast), nanvar_kd_ax1 0.020x.
