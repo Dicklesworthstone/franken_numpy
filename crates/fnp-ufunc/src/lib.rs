@@ -63741,7 +63741,7 @@ print(json.dumps(payload))
         let array = UFuncArray::new(vec![n], values, DType::F64).unwrap();
 
         let actual = array.count_nonzero(None, false).unwrap();
-        assert_eq!(actual.shape(), &[]);
+        assert_eq!(actual.shape(), &[] as &[usize]);
         assert_eq!(actual.dtype(), DType::I64);
         assert!(!actual.has_integer_sidecar());
         assert_eq!(actual.values(), &[expected as f64]);
