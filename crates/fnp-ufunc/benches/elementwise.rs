@@ -225,6 +225,23 @@ fn bench_boolean_index_f64_masked_sparse(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_delete_flat_f64_sparse_indices(c: &mut Criterion) {
+    let mut group = c.benchmark_group("delete_flat_f64_sparse_indices");
+    for size in [100_000usize, 1_000_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        let arr = make_sign_array(*size);
+        let mut indices: Vec<usize> = (0..*size)
+            .rev()
+            .filter(|&i| i % 251 == 0 || matches!((i * 41 + 19) % 113, 0 | 7 | 31))
+            .collect();
+        indices.extend_from_slice(&[*size / 2, 0, *size - 1, 251, 251]);
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter(|| black_box(&arr).delete(black_box(&indices), None).unwrap())
+        });
+    }
+    group.finish();
+}
+
 fn bench_flatnonzero_f64_sparse(c: &mut Criterion) {
     let mut group = c.benchmark_group("flatnonzero_f64_sparse");
     for size in [100_000usize, 1_000_000].iter() {
@@ -479,6 +496,7 @@ criterion_group!(
     bench_extract_f64_masked,
     bench_compress_f64_bool_flat_sparse,
     bench_boolean_index_f64_masked_sparse,
+    bench_delete_flat_f64_sparse_indices,
     bench_flatnonzero_f64_sparse,
     bench_count_nonzero_flat_f64_sparse,
     bench_where_nonzero_f64_2d_sparse,

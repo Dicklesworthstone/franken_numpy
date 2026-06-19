@@ -50,6 +50,7 @@ const ARGWHERE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COMPRESS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COUNT_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
 const EXTRACT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const FLATNONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
@@ -10559,6 +10560,31 @@ impl UFuncArray {
                             "delete: index {idx} out of bounds for size {n}"
                         )));
                     }
+                }
+                if n >= DELETE_FLAT_SPAN_COPY_MIN_ELEMS
+                    && self.dtype == DType::F64
+                    && self.integer_sidecar.is_none()
+                {
+                    let mut delete_indices = indices.to_vec();
+                    delete_indices.sort_unstable();
+                    delete_indices.dedup();
+                    let mut values = Vec::with_capacity(n - delete_indices.len());
+                    let mut copy_start = 0usize;
+                    for &delete_idx in &delete_indices {
+                        if copy_start < delete_idx {
+                            values.extend_from_slice(&self.values[copy_start..delete_idx]);
+                        }
+                        copy_start = delete_idx + 1;
+                    }
+                    if copy_start < n {
+                        values.extend_from_slice(&self.values[copy_start..]);
+                    }
+                    return Ok(Self {
+                        shape: vec![values.len()],
+                        values,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
                 }
                 let mask: std::collections::HashSet<usize> = indices.iter().copied().collect();
                 let mut values = Vec::with_capacity(n.saturating_sub(mask.len()));
@@ -59387,6 +59413,105 @@ print(json.dumps(payload))
         let a = UFuncArray::new(vec![5], vec![1.0, 2.0, 3.0, 4.0, 5.0], DType::F64).unwrap();
         let r = a.delete(&[1, 3], None).unwrap();
         assert_eq!(r.values(), &[1.0, 3.0, 5.0]);
+    }
+
+    #[test]
+    fn delete_flat_f64_span_copy_matches_hashset_reference_and_golden_sha256() {
+        let n = super::DELETE_FLAT_SPAN_COPY_MIN_ELEMS + 503;
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 223 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_1000 | i as u64)
+                } else if i % 173 == 0 {
+                    -0.0
+                } else if i % 109 == 0 {
+                    f64::NEG_INFINITY
+                } else if i % 97 == 0 {
+                    f64::INFINITY
+                } else {
+                    ((i * 71 + 23) % 10007) as f64 / 29.0 - 512.0
+                }
+            })
+            .collect();
+        let mut indices: Vec<usize> = (0..n)
+            .rev()
+            .filter(|&i| {
+                i == 0
+                    || i == n - 1
+                    || i == n / 2
+                    || i % 257 == 0
+                    || matches!((i * 41 + 19) % 113, 0 | 7 | 31)
+            })
+            .collect();
+        indices.extend_from_slice(&[n / 2, 0, n - 1, 257, 257]);
+        let deleted: std::collections::HashSet<usize> = indices.iter().copied().collect();
+        let expected: Vec<f64> = values
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &value)| (!deleted.contains(&idx)).then_some(value))
+            .collect();
+
+        let a = UFuncArray::new(vec![n], values.clone(), DType::F64).unwrap();
+        let actual = a.delete(&indices, None).unwrap();
+        assert_eq!(actual.shape(), &[expected.len()]);
+        assert_eq!(actual.dtype(), DType::F64);
+        assert!(!actual.has_integer_sidecar());
+
+        let mut digest = Sha256::new();
+        for (idx, (&got, &want)) in actual.values().iter().zip(&expected).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "delete span-copy bit drift at index {idx}"
+            );
+            digest.update(got.to_bits().to_le_bytes());
+        }
+        let digest_hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest_hex,
+            "0b88ab093604465ea9d0a271fc8d2f24e3a4b6dcff0fa9e21e5d376af0b8f18a"
+        );
+
+        let no_delete = a.delete(&[], None).unwrap();
+        assert_eq!(no_delete.shape(), &[n]);
+        for (&got, &want) in no_delete.values().iter().zip(&values) {
+            assert_eq!(got.to_bits(), want.to_bits());
+        }
+
+        let all_indices: Vec<usize> = (0..n).rev().collect();
+        let all_deleted = a.delete(&all_indices, None).unwrap();
+        assert_eq!(all_deleted.shape(), &[0]);
+        assert!(all_deleted.values().is_empty());
+
+        let err = a.delete(&[n], None).unwrap_err();
+        assert!(format!("{err}").contains(&format!("index {n} out of bounds")));
+
+        let sidecar_n = super::DELETE_FLAT_SPAN_COPY_MIN_ELEMS + 17;
+        let sidecar_values: Vec<i64> = (0..sidecar_n)
+            .map(|i| (1_i64 << 53) + i as i64 * 17 - 9)
+            .collect();
+        let sidecar = UFuncArray::from_storage(
+            vec![sidecar_n],
+            ArrayStorage::I64(sidecar_values.clone()),
+        )
+        .unwrap();
+        let sidecar_out = sidecar.delete(&[0, sidecar_n / 2, sidecar_n - 1, 0], None).unwrap();
+        let expected_sidecar: Vec<i64> = sidecar_values
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &value)| {
+                (idx != 0 && idx != sidecar_n / 2 && idx != sidecar_n - 1)
+                    .then_some(value)
+            })
+            .collect();
+        assert_eq!(
+            sidecar_out.to_storage().unwrap(),
+            ArrayStorage::I64(expected_sidecar)
+        );
     }
 
     #[test]
