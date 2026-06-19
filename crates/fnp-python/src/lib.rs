@@ -23637,12 +23637,19 @@ fn nanmax(
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
-    // Zero-copy SIMD f64 fast path (axis=None, no keepdims): ~8x faster than the
-    // extract → scalar nan-scan. All-NaN/empty defer to numpy (warning/error).
+    // Zero-copy SIMD f64 fast path (axis=None): ~8x faster than the extract → scalar
+    // nan-scan. All-NaN/empty defer to numpy (warning/error). keepdims=True reshapes
+    // the scalar to the all-ones shape numpy returns (one element, dtype preserved).
     if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && !keepdims.unwrap_or(false)
         && let Some(out) = try_zerocopy_f64_nanextreme(py, a.bind(py), true)?
     {
+        if keepdims.unwrap_or(false) {
+            let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+            let arr = numpy.call_method1("asarray", (out.bind(py),))?;
+            let reshaped =
+                arr.call_method1("reshape", (PyTuple::new(py, vec![1usize; ndim])?,))?;
+            return Ok(reshaped.unbind());
+        }
         return Ok(out);
     }
     // Zero-copy SIMD per-lane fast path for the contiguous last axis (~12x faster
@@ -23713,12 +23720,19 @@ fn nanmin(
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
-    // Zero-copy SIMD f64 fast path (axis=None, no keepdims): ~9x faster than the
-    // extract → scalar nan-scan. All-NaN/empty defer to numpy (warning/error).
+    // Zero-copy SIMD f64 fast path (axis=None): ~9x faster than the extract → scalar
+    // nan-scan. All-NaN/empty defer to numpy (warning/error). keepdims=True reshapes
+    // the scalar to the all-ones shape numpy returns (one element, dtype preserved).
     if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
-        && !keepdims.unwrap_or(false)
         && let Some(out) = try_zerocopy_f64_nanextreme(py, a.bind(py), false)?
     {
+        if keepdims.unwrap_or(false) {
+            let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+            let arr = numpy.call_method1("asarray", (out.bind(py),))?;
+            let reshaped =
+                arr.call_method1("reshape", (PyTuple::new(py, vec![1usize; ndim])?,))?;
+            return Ok(reshaped.unbind());
+        }
         return Ok(out);
     }
     // Zero-copy SIMD per-lane fast path for the contiguous last axis (~12x faster
