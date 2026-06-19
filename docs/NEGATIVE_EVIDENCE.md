@@ -4,6 +4,55 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-19 - Gauntlet Verify: FNP flatnonzero gather vs NumPy
+
+Artifact directory: `tests/artifacts/perf/2026-06-19_ufunc_flatnonzero_vs_numpy/`
+
+Run identity:
+- Verification bead: `franken_numpy-ixs5y.260`.
+- Original optimization bead: `franken_numpy-ixs5y.245`.
+- Subject commit before revert: `68a5d002`.
+- Final code: `.245` parallel F64 `flatnonzero` index-gather fast path removed; serial exact int64 sidecar export retained.
+- Subject API: direct Rust `fnp-ufunc` `UFuncArray::flatnonzero` Criterion row.
+- Oracle/reference: NumPy 2.4.3 on Python 3.13.7.
+- Same-host decision machine: `thinkstation1` for both local FNP Criterion and local NumPy timing.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+
+Commands:
+- `rch exec -- cargo test -p fnp-ufunc flatnonzero_f64_parallel_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `cargo bench -p fnp-ufunc --bench elementwise flatnonzero_f64_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3`
+- Python NumPy timing script in `numpy_flatnonzero_local.txt` using the same sparse F64 formula, warmups, GC disabled, and per-sample inner loops.
+- `rch exec -- cargo test -p fnp-ufunc flatnonzero_f64_matches_serial_reference_and_golden_sha256 -- --nocapture`
+
+Decision ratios use the same-host local NumPy timing in
+`numpy_flatnonzero_local.txt`. The remote Criterion run on `vmi1227854` is
+retained as routing evidence only because `rch exec` does not offload arbitrary
+Python commands, and direct SSH to the worker was denied.
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.245` | Parallel F64 `flatnonzero` per-chunk index gather candidate | 100k local candidate | `criterion_flatnonzero_local_candidate.txt`, `numpy_flatnonzero_local.txt` | 255.53 us | 239.794 us | 1.07x slower | Reverted |
+| `franken_numpy-ixs5y.245` | Parallel F64 `flatnonzero` per-chunk index gather candidate | 1M local candidate | `criterion_flatnonzero_local_candidate.txt`, `numpy_flatnonzero_local.txt` | 703.16 us | 2512.132 us | 0.280x, 3.57x faster | Reverted despite win |
+| `franken_numpy-ixs5y.245` | Final serial `flatnonzero` with exact int64 sidecar export | 100k post-revert | `criterion_flatnonzero_local_post_revert.txt`, `numpy_flatnonzero_local.txt` | 74.662 us | 239.794 us | 0.311x, 3.21x faster | Final code |
+| `franken_numpy-ixs5y.245` | Final serial `flatnonzero` with exact int64 sidecar export | 1M post-revert | `criterion_flatnonzero_local_post_revert.txt`, `numpy_flatnonzero_local.txt` | 789.35 us | 2512.132 us | 0.314x, 3.18x faster | Final code |
+
+Notes:
+- The candidate passed the golden guard, but correctness was not enough: it lost
+  to NumPy at 100k, regressed local Criterion history at 100k, and was only a
+  modest 1.12x faster than the final serial path at 1M.
+- The production parallel branch was removed. The final serial sidecar-export
+  path beats NumPy on both measured rows and avoids the 100k regression.
+- Final focused validation passed for the post-revert golden guard,
+  `rch exec -- cargo check -p fnp-ufunc --all-targets`, `rch exec -- cargo
+  clippy -p fnp-ufunc --all-targets -- -D warnings`, and `git diff --check`.
+- `cargo fmt --check`, `cargo fmt -p fnp-ufunc -- --check`, and UBS still
+  report broad pre-existing `fnp-ufunc` drift/inventory outside the touched
+  flatnonzero lines.
+- Retry condition: retry `flatnonzero` parallel index gather only with a design
+  that avoids per-chunk `Vec<Vec<i64>>` allocation, proves same-host speed over
+  NumPy and over the serial sidecar path at both 100k and 1M sparse rows, and
+  keeps NumPy timing CV below 10% on the decision rows.
+
 ## 2026-06-19 - fnp-random PCG raw fill and bytes cluster
 
 Artifact directory: `tests/artifacts/perf/2026-06-19_random_vs_numpy_pcg/`

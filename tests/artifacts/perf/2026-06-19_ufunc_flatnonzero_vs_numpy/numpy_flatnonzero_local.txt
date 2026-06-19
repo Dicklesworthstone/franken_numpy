@@ -1,0 +1,6 @@
+host=thinkstation1 python=3.13.7 numpy=2.4.3 platform=Linux-6.17.0-35-generic-x86_64-with-glibc2.42
+pid=1619553
+flatnonzero_f64_sparse/100000 loops=200 hits=18366 sha256=a8bf9d3b151fe9cea1df162e2e0a09601d579b3d8b4803cca2effb6987fe808b
+  us: min=215.220 p50=239.794 p95=284.106 mean=244.371 stdev=21.061 cv=8.62%
+flatnonzero_f64_sparse/1000000 loops=40 hits=183667 sha256=f2046974e18770c666d6774674157316b99dbb4baf4743ab275d33c3247823cd
+  us: min=2141.148 p50=2512.132 p95=2893.738 mean=2529.446 stdev=310.462 cv=12.27%

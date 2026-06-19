@@ -3,6 +3,47 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-19 - Ufunc Flatnonzero Rejection Slice
+
+Scope:
+- Recent code-first pending backlog measured: `franken_numpy-ixs5y.245` via
+  cod-a verification bead `franken_numpy-ixs5y.260`.
+- Crate: `fnp-ufunc`.
+- Reference: NumPy 2.4.3.
+- Same-host decision machine: `thinkstation1`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | MIXED, REJECT CANDIDATE | Candidate was 1.07x slower at 100k and 3.57x faster at 1M; the 100k regression failed the keep gate. |
+| Final code performance | PASS | Post-revert serial sidecar path is 3.21x faster than NumPy at 100k and 3.18x faster at 1M. |
+| Revert discipline | PASS | Removed the `.245` parallel flatnonzero production fast path after measurement. |
+| Targeted correctness | PASS | Pre-revert and post-revert flatnonzero golden guards passed remotely through `rch`. |
+| Crate compile health | PASS | `rch exec -- cargo check -p fnp-ufunc --all-targets` passed with `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`. |
+| Clippy health | PASS | `rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings` passed. |
+| Formatting health | KNOWN GAP | `cargo fmt --check` and `cargo fmt -p fnp-ufunc -- --check` still report broad pre-existing format drift outside this slice. |
+| UBS health | KNOWN GAP | UBS reports the established broad `fnp-ufunc` inventory; no references to the touched flatnonzero lines were reported. |
+| Evidence durability | PASS | Results recorded in `docs/NEGATIVE_EVIDENCE.md` and `tests/artifacts/perf/2026-06-19_ufunc_flatnonzero_vs_numpy/`. |
+
+Cluster score: **78 / 100**
+
+Score rationale:
+- +20 correctness: candidate and post-revert golden guards passed.
+- +18 performance: final code beats NumPy on both measured rows, but the
+  measured candidate itself had a 100k regression.
+- +15 reproducibility: same-host local FNP vs NumPy evidence is recorded, with
+  remote correctness evidence kept separate.
+- +15 ledger discipline: candidate loss/win, final-code rows, and retry
+  predicate are recorded.
+- +15 revert discipline: mixed/regressing production fast path removed.
+- -5 residual validation: fmt and UBS still have broad pre-existing
+  `fnp-ufunc` inventory outside this slice.
+
+Current release posture:
+- `franken_numpy-ixs5y.245` is **measured rejected for the parallel branch**, not
+  pending.
+- The serial exact int64 sidecar export path remains the accepted final code for
+  this workload and is faster than NumPy in the measured rows.
+
 ## 2026-06-19 - Ufunc Extract Rejection Slice
 
 Scope:

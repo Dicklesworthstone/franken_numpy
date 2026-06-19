@@ -51,7 +51,6 @@ const COUNT_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 19;
 const COUNT_NONZERO_PARALLEL_CHUNK_ELEMS: usize = 1 << 12;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
-const FLATNONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const INSERT_FLAT_SPLICE_MIN_WORK: usize = 1 << 14;
 const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PUT_MASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
@@ -27774,41 +27773,13 @@ impl UFuncArray {
         // its direct sidecar path instead of cloning/scanning/casting through
         // generic to_storage. Values stay as f64 positions for existing Rust
         // callers; shape, dtype, and ascending C-order positions are unchanged.
-        let sidecar: Vec<i64> = if self.dtype == DType::F64
-            && self.integer_sidecar.is_none()
-            && self.values.len() >= FLATNONZERO_PARALLEL_MIN_ELEMS
-        {
-            let chunk_len = FLATNONZERO_PARALLEL_MIN_ELEMS / 4;
-            let chunks: Vec<Vec<i64>> = self
-                .values
-                .par_chunks(chunk_len)
-                .enumerate()
-                .map(|(chunk_idx, chunk)| {
-                    let base = chunk_idx * chunk_len;
-                    let count = chunk.iter().filter(|&&value| value != 0.0).count();
-                    let mut indices = Vec::with_capacity(count);
-                    for (offset, &value) in chunk.iter().enumerate() {
-                        if value != 0.0 {
-                            indices.push((base + offset) as i64);
-                        }
-                    }
-                    indices
-                })
-                .collect();
-            let len = chunks.iter().map(Vec::len).sum();
-            let mut sidecar = Vec::with_capacity(len);
-            for chunk in chunks {
-                sidecar.extend(chunk);
-            }
-            sidecar
-        } else {
-            self.values
-                .iter()
-                .enumerate()
-                .filter(|&(_, v)| *v != 0.0)
-                .map(|(i, _)| i as i64)
-                .collect()
-        };
+        let sidecar: Vec<i64> = self
+            .values
+            .iter()
+            .enumerate()
+            .filter(|&(_, v)| *v != 0.0)
+            .map(|(i, _)| i as i64)
+            .collect();
         let n = sidecar.len();
         let values: Vec<f64> = sidecar.iter().map(|&i| i as f64).collect();
         Self {
@@ -65976,8 +65947,8 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn flatnonzero_f64_parallel_matches_serial_reference_and_golden_sha256() {
-        let n = super::FLATNONZERO_PARALLEL_MIN_ELEMS + 337;
+    fn flatnonzero_f64_matches_serial_reference_and_golden_sha256() {
+        let n = (1 << 14) + 337;
         let values: Vec<f64> = (0..n)
             .map(|i| {
                 if i % 173 == 0 {
@@ -66012,7 +65983,7 @@ print(json.dumps(payload))
         assert_eq!(actual.dtype(), DType::I64);
         assert!(actual.has_integer_sidecar());
         let ArrayStorage::I64(indices) = actual.to_storage().unwrap() else {
-            panic!("parallel flatnonzero should export int64 storage");
+            panic!("flatnonzero should export int64 storage");
         };
         assert_eq!(indices, expected);
 
@@ -66036,10 +66007,7 @@ print(json.dumps(payload))
         let empty = zeros.flatnonzero();
         assert_eq!(empty.shape(), &[0]);
         assert!(empty.values().is_empty());
-        assert_eq!(
-            empty.to_storage().unwrap(),
-            ArrayStorage::I64(Vec::new())
-        );
+        assert_eq!(empty.to_storage().unwrap(), ArrayStorage::I64(Vec::new()));
     }
 
     #[test]
