@@ -714,3 +714,47 @@ Notes:
 - `cargo fmt -p fnp-ufunc -- --check` still reports broad pre-existing formatting drift in `crates/fnp-ufunc/benches/elementwise.rs` and unrelated `crates/fnp-ufunc/src/lib.rs` regions; no workspace formatter was run.
 - `timeout 120s ubs --only=rust crates/fnp-ufunc/src/lib.rs` timed out with `UBS_EXIT:124`; keep `ubs_fnp_ufunc_lib.txt` as a tooling caveat, not a pass.
 - Retry condition: reopen only if a same-host NumPy rerun beats the final local FNP median on either row, if `putmask` semantics change away from position-index cycling, if compact bool-mask storage changes the measured loop body, or if larger rows above `1 << 20` show the raised Rayon threshold losing.
+
+## 2026-06-19 - Gauntlet Verify: FNP put_mask vs NumPy
+
+Artifact directory: `tests/artifacts/perf/2026-06-19_ufunc_put_mask_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.254`.
+- Subject before measured correction: F64/no-sidecar `put_mask` activated Rayon at `1 << 14` elements, so the 100k true-rank cycling-fill row paid segmented-prefix scheduler overhead and the serial fallback still routed every write through integer-mutation sidecar plumbing.
+- Final code: F64/no-sidecar `put_mask` uses an 8-lane SIMD mask scan and modulo-free value cycling below `1 << 20`; above that threshold it keeps the segmented-prefix Rayon path with a fixed 4K chunk size.
+- Subject API: direct Rust `fnp-ufunc` `UFuncArray::put_mask` Criterion row.
+- Oracle/reference: NumPy 2.4.3 on Python 3.13.7, timed with the same true-rank cycling formula.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-ufunc --bench elementwise put_mask_f64_masked_cycling -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- Python NumPy timing script in `numpy_put_mask_local.txt` using the same data formula.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-ufunc put_mask_f64_parallel_matches_serial_reference_and_golden_sha256 -- --nocapture`
+
+Triage scorecard:
+- Current fresh focused run vs refreshed NumPy median: win/loss/neutral = 1/1/0 across the two decision rows. The 100k row lost by 7.866x and was selected.
+- Final remote run vs refreshed NumPy median: win/loss/neutral = 2/0/0.
+- Earlier same-day same-worker ovh-a current snapshot to final ovh-a delta: 100k improved 81.857 us -> 15.858 us (5.16x); 1M improved 388.001 us -> 335.444 us (1.16x).
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.254` | Current code, fresh routing evidence | 100k current rch `hz2` | `baseline_fnp_put_mask_rch.txt`, `numpy_put_mask_local.txt` | 244.411 us | 31.069 us | 7.866x | Loss, selected |
+| `franken_numpy-ixs5y.254` | Current code, fresh routing evidence | 1M current rch `hz2` | `baseline_fnp_put_mask_rch.txt`, `numpy_put_mask_local.txt` | 483.383 us | 686.361 us | 0.704x | Existing win |
+| `franken_numpy-ixs5y.254` | Threshold/direct serial, no SIMD | 100k candidate rch `hz1` | `candidate_fnp_put_mask_rch_confirm.txt`, `numpy_put_mask_local.txt` | 76.797 us | 31.069 us | 2.472x | Rejected, still loses 100k |
+| `franken_numpy-ixs5y.254` | Threshold/direct serial, no SIMD | 1M candidate rch `hz1` | `candidate_fnp_put_mask_rch_confirm.txt`, `numpy_put_mask_local.txt` | 445.529 us | 686.361 us | 0.649x | Win but not enough |
+| `franken_numpy-ixs5y.254` | SIMD serial with `1 << 19` cutoff | 100k candidate rch `hz2` | `candidate_fnp_put_mask_simd_rch.txt`, `numpy_put_mask_local.txt` | 19.037 us | 31.069 us | 0.613x | Win |
+| `franken_numpy-ixs5y.254` | SIMD serial with `1 << 19` cutoff | 1M candidate rch `hz2` | `candidate_fnp_put_mask_simd_rch.txt`, `numpy_put_mask_local.txt` | 709.480 us | 686.361 us | 1.034x | Rejected, neutral/loss |
+| `franken_numpy-ixs5y.254` | Final SIMD serial with `1 << 20` cutoff | 100k final rch `ovh-a` | `final_fnp_put_mask_simd_threshold_rch.txt`, `numpy_put_mask_local.txt` | 15.858 us | 31.069 us | 0.510x | Keep |
+| `franken_numpy-ixs5y.254` | Final SIMD serial with `1 << 20` cutoff | 1M final rch `ovh-a` | `final_fnp_put_mask_simd_threshold_rch.txt`, `numpy_put_mask_local.txt` | 335.444 us | 686.361 us | 0.489x | Keep |
+
+Notes:
+- The threshold-only lever was insufficient: it improved 1M but still lost the 100k row by 2.472x versus the refreshed NumPy reference.
+- The first SIMD lever was too aggressive about re-entering Rayon at `1 << 19`: it won 100k but regressed the 1M row to a neutral/loss against NumPy. Raising the cutoff to `1 << 20` keeps both measured rows on the cache-local SIMD serial path.
+- The kept lever is the graveyard "constants kill you" correction plus vectorized mask extraction: use SCE/dtype proof to skip generic mutation machinery, use SIMD only to build sparse lane masks, and cycle values with an increment/reset index instead of `%` in each true lane.
+- The golden fixture digest changed intentionally as the threshold-crossing fixture moved to `PUT_MASK_PARALLEL_MIN_ELEMS + 421`; elementwise serial-reference comparison passed before the SHA assertion, and the updated digest `f8a49cce66312e0fb3fdfdbcc5e31b70662343eff3f8d49ae4f01ae828da3c0c` passed.
+- The sidecar fallback test fixture was corrected from `(1_i64 << 53) + 2` to `(1_i64 << 53) - 2`, staying within the crate's exact temporary F64 bridge contract while preserving the large-integer sidecar proof.
+- Final focused validation passed for `put_mask_f64_parallel_matches_serial_reference_and_golden_sha256`, `cargo check -p fnp-ufunc --all-targets`, `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`, and `git diff --check`.
+- `cargo fmt --check` still reports broad pre-existing workspace formatting drift outside this slice; the put_mask hunk was manually adjusted to match the targeted rustfmt diff and no unrelated formatting was applied.
+- `timeout 120s ubs --only=rust crates/fnp-ufunc/src/lib.rs` did not produce a completion summary before the wrapper returned, and zsh did not preserve the exit code in the artifact; keep `ubs_fnp_ufunc_lib.txt` as inconclusive, not a pass.
+- Retry condition: reopen only if a same-host NumPy rerun beats the final FNP median on either row, if compact bool-mask storage changes the loop body, or if rows above `1 << 20` show the retained segmented-prefix parallel path losing to the SIMD serial path.

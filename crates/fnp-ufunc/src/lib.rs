@@ -65,7 +65,8 @@ fn bool_chunk8_bitmask(chunk: &[bool]) -> u8 {
         | ((chunk[6] as u8) << 6)
         | ((chunk[7] as u8) << 7)
 }
-const PUT_MASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const PUT_MASK_PARALLEL_MIN_ELEMS: usize = 1 << 20;
+const PUT_MASK_PARALLEL_CHUNK_ELEMS: usize = 1 << 12;
 const PUTMASK_PARALLEL_MIN_ELEMS: usize = 1 << 20;
 const WHERE_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
@@ -28762,43 +28763,81 @@ impl UFuncArray {
                 "put_mask: values must not be empty".to_string(),
             ));
         }
-        if self.values.len() >= PUT_MASK_PARALLEL_MIN_ELEMS
-            && rayon::current_num_threads() >= 2
-            && self.dtype == DType::F64
+        if self.dtype == DType::F64
             && mask.dtype == DType::Bool
             && self.integer_sidecar.is_none()
             && mask.integer_sidecar.is_none()
         {
-            let chunk_len = PUT_MASK_PARALLEL_MIN_ELEMS / 4;
-            let counts: Vec<usize> = mask
-                .values
-                .par_chunks(chunk_len)
-                .map(|chunk| chunk.iter().filter(|&&m| m != 0.0).count())
-                .collect();
-            let mut starts = Vec::with_capacity(counts.len());
-            let mut total_true = 0usize;
-            for count in counts {
-                starts.push(total_true);
-                total_true += count;
-            }
-            if total_true == 0 {
+            let values_len = values.len();
+            if self.values.len() >= PUT_MASK_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2
+            {
+                let counts: Vec<usize> = mask
+                    .values
+                    .par_chunks(PUT_MASK_PARALLEL_CHUNK_ELEMS)
+                    .map(|chunk| chunk.iter().filter(|&&m| m != 0.0).count())
+                    .collect();
+                let mut starts = Vec::with_capacity(counts.len());
+                let mut total_true = 0usize;
+                for count in counts {
+                    starts.push(total_true);
+                    total_true += count;
+                }
+                if total_true == 0 {
+                    return Ok(());
+                }
+
+                self.values
+                    .par_chunks_mut(PUT_MASK_PARALLEL_CHUNK_ELEMS)
+                    .zip(mask.values.par_chunks(PUT_MASK_PARALLEL_CHUNK_ELEMS))
+                    .zip(starts.into_par_iter())
+                    .for_each(|((dst_chunk, mask_chunk), start)| {
+                        let mut value_index = start % values_len;
+                        for (dst, &m) in dst_chunk.iter_mut().zip(mask_chunk) {
+                            if m != 0.0 {
+                                *dst = values[value_index];
+                                value_index += 1;
+                                if value_index == values_len {
+                                    value_index = 0;
+                                }
+                            }
+                        }
+                    });
                 return Ok(());
             }
 
-            let values_len = values.len();
-            self.values
-                .par_chunks_mut(chunk_len)
-                .zip(mask.values.par_chunks(chunk_len))
-                .zip(starts.into_par_iter())
-                .for_each(|((dst_chunk, mask_chunk), start)| {
-                    let mut true_rank = start;
-                    for (dst, &m) in dst_chunk.iter_mut().zip(mask_chunk) {
-                        if m != 0.0 {
-                            *dst = values[true_rank % values_len];
-                            true_rank += 1;
-                        }
+            const LANES: usize = 8;
+            use std::simd::Simd;
+            use std::simd::cmp::SimdPartialEq;
+            type MaskVector = Simd<f64, LANES>;
+
+            let zero = MaskVector::splat(0.0);
+            let mut value_index = 0usize;
+            let mut dst_chunks = self.values.chunks_exact_mut(LANES);
+            let mut mask_chunks = mask.values.chunks_exact(LANES);
+            for (dst_chunk, mask_chunk) in dst_chunks.by_ref().zip(mask_chunks.by_ref()) {
+                let mut bitmask = MaskVector::from_slice(mask_chunk)
+                    .simd_ne(zero)
+                    .to_bitmask();
+                while bitmask != 0 {
+                    let lane = bitmask.trailing_zeros() as usize;
+                    dst_chunk[lane] = values[value_index];
+                    value_index += 1;
+                    if value_index == values_len {
+                        value_index = 0;
                     }
-                });
+                    bitmask &= bitmask - 1;
+                }
+            }
+            let dst_remainder = dst_chunks.into_remainder();
+            for (dst, &m) in dst_remainder.iter_mut().zip(mask_chunks.remainder()) {
+                if m != 0.0 {
+                    *dst = values[value_index];
+                    value_index += 1;
+                    if value_index == values_len {
+                        value_index = 0;
+                    }
+                }
+            }
             return Ok(());
         }
         let mut vi = 0;
@@ -69901,7 +69940,7 @@ print(json.dumps(payload))
             .collect();
         assert_eq!(
             digest_hex,
-            "5e97ef402b78f73d805c82e58283a8cf5ce21423b8d13a4084bd96dd4cee5d42"
+            "f8a49cce66312e0fb3fdfdbcc5e31b70662343eff3f8d49ae4f01ae828da3c0c"
         );
 
         let mut dst = UFuncArray::new(vec![n], vec![0.0; n], DType::F64).unwrap();
@@ -69910,14 +69949,16 @@ print(json.dumps(payload))
 
         let mut sidecar_dst =
             UFuncArray::from_storage(vec![4], ArrayStorage::I64(vec![1, 2, 3, 4])).unwrap();
-        let sidecar_mask =
-            UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 1.0], DType::Bool).unwrap();
+        let sidecar_mask = UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 1.0], DType::Bool).unwrap();
         sidecar_dst
-            .put_mask(&sidecar_mask, &[(1_i64 << 53) as f64, ((1_i64 << 53) + 2) as f64])
+            .put_mask(
+                &sidecar_mask,
+                &[(1_i64 << 53) as f64, ((1_i64 << 53) - 2) as f64],
+            )
             .unwrap();
         assert_eq!(
             sidecar_dst.to_storage().unwrap(),
-            ArrayStorage::I64(vec![1_i64 << 53, 2, (1_i64 << 53) + 2, 1_i64 << 53])
+            ArrayStorage::I64(vec![1_i64 << 53, 2, (1_i64 << 53) - 2, 1_i64 << 53])
         );
     }
 
