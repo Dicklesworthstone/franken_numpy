@@ -171,3 +171,37 @@ Current release posture:
 - `franken_numpy-ixs5y.246` is **measured keep after narrowing**, not pending.
 - Continue converting the remaining batch-test backlog into measured rows before
   claiming broader `fnp-ufunc` performance readiness.
+
+## 2026-06-19 - Ufunc Argwhere Verification Slice
+
+Scope:
+- Recent code-first pending backlog measured: `franken_numpy-ixs5y.248`.
+- Crate: `fnp-ufunc`.
+- Reference: NumPy 2.4.3.
+- Same-host decision machine: `thinkstation1`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS | Final code was 3.04x faster at 512x512 and 4.79x faster at 1024x1024. |
+| Noise discipline | PASS WITH CAVEAT | NumPy CV was above 10%, but NumPy minimum still exceeded the FNP Criterion upper bound on both rows. |
+| Targeted correctness | PASS | `argwhere_f64_parallel_matches_serial_reference_and_golden_sha256` passed. |
+| Crate compile health | PASS | `cargo check -p fnp-ufunc` passed with `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`. |
+| Clippy health | PASS | `cargo clippy -p fnp-ufunc --all-targets -- -D warnings` passed. |
+| Formatting health | WARN | `cargo fmt --check` still reports broad pre-existing workspace formatting drift outside this slice. |
+| Evidence durability | PASS | Results recorded in `docs/NEGATIVE_EVIDENCE.md` and `tests/artifacts/perf/2026-06-19_ufunc_argwhere_vs_numpy/`. |
+
+Cluster score: **86 / 100**
+
+Score rationale:
+- +38 performance: both measured rows clear NumPy by more than 3x.
+- +18 correctness: targeted interleaved-coordinate golden guard passed.
+- +15 reproducibility: same-host FNP and NumPy timings and explicit target dir
+  are recorded.
+- +15 ledger discipline: every row and retry predicate is recorded.
+- -14 project-wide release gap: this is one verified pending optimization, not a
+  full workspace gauntlet or global release certification.
+
+Current release posture:
+- `franken_numpy-ixs5y.248` is **measured keep**, not pending.
+- Continue converting the remaining batch-test backlog into measured rows before
+  claiming broader `fnp-ufunc` performance readiness.

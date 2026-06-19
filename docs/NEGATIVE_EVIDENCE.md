@@ -254,3 +254,36 @@ Notes:
 - Final focused validation passed for `cargo test -p fnp-ufunc count_nonzero_f64_parallel_matches_serial_reference_and_golden_sha256 -- --nocapture`, `cargo check -p fnp-ufunc`, and `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`.
 - `cargo fmt --check` still reports broad workspace formatting drift outside this slice; no workspace formatter was run.
 - Retry condition: do not restore `COUNT_NONZERO_PARALLEL_MIN_ELEMS = 1 << 14` unless same-host 100k evidence beats NumPy and stays inside the prior FNP CI. Reopen the final 1M path only if a same-host rerun shows the final median at or above NumPy's median, or if the golden guard changes again without an intentional threshold fixture update.
+
+## 2026-06-19 - Gauntlet Verify: FNP argwhere vs NumPy
+
+Artifact directory: `tests/artifacts/perf/2026-06-19_ufunc_argwhere_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.248`.
+- Subject code: code-first flat F64 `argwhere()` parallel interleaved coordinate gather candidate.
+- Final code: unchanged; no revert required.
+- Subject API: direct Rust `fnp-ufunc` `UFuncArray::argwhere` Criterion row.
+- Oracle/reference: NumPy 2.4.3 on Python 3.13.7.
+- Same-host decision machine: `thinkstation1`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `cargo test -p fnp-ufunc argwhere_f64_parallel_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `cargo bench -p fnp-ufunc --bench elementwise argwhere_f64_2d_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3`
+- Python NumPy timing script in `numpy_argwhere_local.txt` using the same data formula.
+- `cargo check -p fnp-ufunc`
+- `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`
+- `cargo fmt --check`
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.248` | Parallel F64 `argwhere` interleaved coordinate gather | 512x512 final | `criterion_argwhere_local.txt`, `numpy_argwhere_local.txt` | 392.63 us | 1195.008 us | 0.329x | Keep |
+| `franken_numpy-ixs5y.248` | Parallel F64 `argwhere` interleaved coordinate gather | 1024x1024 final | `criterion_argwhere_local.txt`, `numpy_argwhere_local.txt` | 1054.2 us | 5047.868 us | 0.209x | Keep |
+
+Notes:
+- The 512x512 row is 3.04x faster than NumPy; the 1024x1024 row is 4.79x faster.
+- NumPy CV was noisy at 12.06% and 12.21%, but the NumPy minima were still above the FNP Criterion upper bounds on both sizes, so the keep decision does not rest on a noisy median edge.
+- Final focused validation passed for `argwhere_f64_parallel_matches_serial_reference_and_golden_sha256`, `cargo check -p fnp-ufunc`, and `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`.
+- `cargo fmt --check` still reports broad workspace formatting drift outside this slice; no workspace formatter was run.
+- Retry condition: reopen only if a same-host rerun shows NumPy minimum below the FNP Criterion upper CI bound on either measured size, or if the interleaved C-order coordinate golden guard changes. Do not retry this as a standalone patch solely for lower NumPy-CV reruns.

@@ -1,0 +1,18 @@
+   Compiling fnp-ufunc v0.1.0 (/data/projects/franken_numpy/crates/fnp-ufunc)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 27.04s
+     Running benches/elementwise.rs (/data/projects/.rch-targets/franken_numpy-cod-b/release/deps/elementwise-36bd3df0e01f30c6)
+Gnuplot not found, using plotters backend
+Benchmarking argwhere_f64_2d_sparse/262144
+Benchmarking argwhere_f64_2d_sparse/262144: Warming up for 1.0000 s
+Benchmarking argwhere_f64_2d_sparse/262144: Collecting 20 samples in estimated 3.0558 s (7770 iterations)
+Benchmarking argwhere_f64_2d_sparse/262144: Analyzing
+argwhere_f64_2d_sparse/262144
+                        time:   [375.87 µs 392.63 µs 409.37 µs]
+                        thrpt:  [640.36 Melem/s 667.66 Melem/s 697.44 Melem/s]
+Benchmarking argwhere_f64_2d_sparse/1048576
+Benchmarking argwhere_f64_2d_sparse/1048576: Warming up for 1.0000 s
+Benchmarking argwhere_f64_2d_sparse/1048576: Collecting 20 samples in estimated 3.2104 s (3150 iterations)
+Benchmarking argwhere_f64_2d_sparse/1048576: Analyzing
+argwhere_f64_2d_sparse/1048576
+                        time:   [1.0283 ms 1.0542 ms 1.0750 ms]
+                        thrpt:  [975.42 Melem/s 994.64 Melem/s 1.0197 Gelem/s]
