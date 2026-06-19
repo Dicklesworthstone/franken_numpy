@@ -388,6 +388,90 @@ Notes:
   density matrix shows dense-mask regressions from the SIMD path, or if the
   representation bridge grows a true compact bool mask storage path that can
   remove the current f64-mask memory traffic entirely.
+- Follow-up bead `franken_numpy-ixs5y.262` adds independent cod-a same-worker
+  verification of the same SIMD source body; after rebase it keeps the upstream
+  source unchanged and records the extra proof bundle.
+
+## 2026-06-19 - BOLD-VERIFY Keep: FNP extract SIMD mask decode vs NumPy
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-19_ufunc_extract_simd_cod_a/`
+
+Run identity:
+- Verification bead: `franken_numpy-ixs5y.262`.
+- Parent gap: the first `franken_numpy-ixs5y.244` verification left the serial
+  1M `extract` row 1.74x slower than NumPy after reverting its per-chunk
+  `Vec<Vec<f64>>` candidate.
+- Baseline commit for the measured old FNP rows: `39bb1e78`.
+- Rebased parent carrying the same SIMD source body: `0d3be5d0`.
+- Final code after rebase: the upstream sidecar-free F64 `extract` SIMD
+  mask-count and bitmask decode fast path is retained unchanged; `.262` adds
+  independent cod-a verification artifacts and ledger evidence rather than an
+  extra source delta.
+- Subject API: direct Rust `fnp-ufunc` `UFuncArray::extract` Criterion row.
+- Oracle/reference: NumPy 2.4.3 on Python 3.13.7.
+- Same-worker decision machine: `hz2` for the FNP Criterion rows and the NumPy
+  timing probes.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+
+Commands:
+- `rch exec -- cargo bench -p fnp-ufunc --bench elementwise extract_f64_masked -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `rch exec -- python3 -` using the bool-mask NumPy extract timing probe in
+  `baseline_numpy_extract_bool_hz2.txt`.
+- `rch exec -- cargo bench -p fnp-ufunc --bench elementwise boolean_index_f64_masked_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `rch exec -- python3 -` using the bool-mask NumPy boolean-index timing probe in
+  `baseline_numpy_boolean_index_hz2.txt`.
+- `rch exec -- cargo test -p fnp-ufunc extract_f64_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `rch exec -- cargo test -p fnp-ufunc boolean_index_f64_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `rch exec -- cargo check -p fnp-ufunc --all-targets`
+- `rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings`
+- `cargo fmt -p fnp-ufunc -- --check`
+- `git diff --check`
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.262` | SIMD F64 `extract` mask count/decode | 100k candidate | `candidate_fnp_extract_hz2.txt`, `baseline_numpy_extract_bool_hz2.txt` | 46.853 us | 52.078 us | 0.900x | Keep |
+| `franken_numpy-ixs5y.262` | SIMD F64 `extract` mask count/decode | 1M candidate | `candidate_fnp_extract_hz2.txt`, `baseline_numpy_extract_bool_hz2.txt` | 485.711 us | 506.924 us | 0.958x | Borderline keep |
+| `franken_numpy-ixs5y.262` | Same `extract` fast path via `boolean_index` | 100k candidate | `candidate_fnp_boolean_index_hz2.txt`, `baseline_numpy_boolean_index_hz2.txt` | 43.993 us | 93.464 us | 0.471x | Keep |
+| `franken_numpy-ixs5y.262` | Same `extract` fast path via `boolean_index` | 1M candidate | `candidate_fnp_boolean_index_hz2.txt`, `baseline_numpy_boolean_index_hz2.txt` | 479.160 us | 896.004 us | 0.535x | Keep |
+
+Old-vs-new FNP extract delta on `hz2`:
+- 100k: 74.721 us -> 46.853 us, candidate/baseline 0.627x.
+- 1M: 793.914 us -> 485.711 us, candidate/baseline 0.612x.
+
+Win/loss/neutral score:
+- Head-to-head kept rows: 4 win / 0 loss / 0 neutral.
+- Old-vs-new direct extract rows: 2 win / 0 loss / 0 neutral.
+
+Notes:
+- The verified SIMD source body deliberately avoids the rejected `.244`
+  allocation shape: there are no per-chunk output vectors and no Rayon gather
+  merge. It uses one exact-capacity output vector after a SIMD count pass.
+- The retained `baseline_numpy_extract_hz2.txt` float-condition probe is not the
+  decision comparator. The fair comparator is the bool-mask NumPy row in
+  `baseline_numpy_extract_bool_hz2.txt`, matching the FNP `DType::Bool` bench
+  intent.
+- The 1M direct extract NumPy row has `cv_pct=12.21`, above the preferred 10%
+  noise bound. The candidate still beats the NumPy median and is below the NumPy
+  minimum (`485.711 us` vs `490.076 us`), so this is accepted as a borderline
+  keep rather than a neutral.
+- Focused validation passed for the two golden guards, `cargo check -p
+  fnp-ufunc --all-targets`, `cargo clippy -p fnp-ufunc --all-targets -- -D
+  warnings`, and `git diff --check`.
+- After rebasing onto parent `0d3be5d0`, the extract golden guard,
+  boolean-index golden guard, `cargo check -p fnp-ufunc --all-targets`, and
+  `cargo clippy -p fnp-ufunc --all-targets -- -D warnings` all passed again
+  through `rch`.
+- `cargo fmt -p fnp-ufunc -- --check` still reports broad pre-existing format
+  drift in `fnp-ufunc` benches and untouched `lib.rs` regions; no formatter was
+  run for this perf commit.
+- `ubs` completed on the touched subset with exit 1 against the existing broad
+  `fnp-ufunc/src/lib.rs` inventory; see `ubs_touched_subset_summary.md` for the
+  sampled pre-existing finding classes.
+- Retry condition: reopen only if a low-CV same-worker rerun shows NumPy median
+  or minimum at or below the candidate 1M direct extract row, if sidecar golden
+  behavior changes, or if a broader dtype-general path can prove wins without
+  regressing the sidecar-preserving scalar path.
 
 ## 2026-06-19 - Gauntlet Verify: FNP count_nonzero vs NumPy
 

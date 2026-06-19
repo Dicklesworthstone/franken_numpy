@@ -1,0 +1,271 @@
+  [2m2026-06-19T06:02:52.493669Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: hz2 at root@178.104.77.29 (1 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:866 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:02:52.844555Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_numpy-cod-a-20260619-0535 (hash: c05006d7594a7799)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:02:52.844612Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 11 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:02:54.332617Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker hz2...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:02:54.332690Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 pattern(s) from .rchignore (total: 39)[0m
+    [2;3mat[0m rch/src/transfer.rs:886 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:02:54.332698Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260619-0535 -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535 on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:02:56.974437Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2641ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:02:56.974541Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-conformance -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-conformance on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:02:58.893918Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1919ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:02:58.894071Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-dtype -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-dtype on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:00.744748Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1850ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:00.744864Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-io -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-io on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:02.628792Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1883ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:02.628868Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-iter -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-iter on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:04.533561Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1904ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:04.533634Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-linalg -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-linalg on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:06.358272Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1824ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:06.358340Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-ndarray -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-ndarray on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:08.257788Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1899ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:08.257865Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-python -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-python on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:10.112863Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1854ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:10.112950Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-random -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-random on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:11.953752Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1840ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:11.953834Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-runtime -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-runtime on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:13.824968Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1871ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:13.825040Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-ufunc -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-ufunc on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:15.705706Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1880ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:15.705760Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 4871 files, 147710 bytes in 21365ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:25.301634Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo check -p fnp-ufunc --all-targets[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:25.301687Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.rch-targets/franken_numpy-cod-a -> /data/projects/.scratch/franken_numpy-cod-a-20260619-0535/.rch-target-hz2-pool-599aa1693b320bf3107eb243c1799669[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded const-oid v0.10.2
+  Downloaded ciborium-io v0.2.2
+  Downloaded cast v0.3.0
+  Downloaded ciborium-ll v0.2.2
+  Downloaded bitflags v2.11.1
+  Downloaded clap_lex v1.1.0
+  Downloaded criterion v0.6.0
+  Downloaded wait-timeout v0.2.1
+  Downloaded itoa v1.0.18
+  Downloaded same-file v1.0.6
+  Downloaded anes v0.1.6
+  Downloaded errno v0.3.14
+  Downloaded autocfg v1.5.0
+  Downloaded rand_xorshift v0.4.0
+  Downloaded fnv v1.0.7
+  Downloaded quick-error v1.2.3
+  Downloaded crypto-common v0.2.1
+  Downloaded aho-corasick v1.1.4
+  Downloaded rusty-fork v0.3.1
+  Downloaded criterion-plot v0.5.0
+  Downloaded unarray v0.1.4
+  Downloaded plotters-backend v0.3.7
+  Downloaded digest v0.11.2
+  Downloaded zmij v1.0.21
+  Downloaded walkdir v2.5.0
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded rand_chacha v0.9.0
+  Downloaded tinytemplate v1.2.1
+  Downloaded quote v1.0.45
+  Downloaded sha2 v0.11.0
+  Downloaded rand_core v0.9.5
+  Downloaded oorandom v11.1.5
+  Downloaded either v1.15.0
+  Downloaded once_cell v1.21.4
+  Downloaded unicode-ident v1.0.24
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded tempfile v3.27.0
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded half v2.7.1
+  Downloaded serde_derive v1.0.228
+  Downloaded rayon-core v1.13.0
+  Downloaded proc-macro2 v1.0.106
+  Downloaded getrandom v0.4.2
+  Downloaded serde_core v1.0.228
+  Downloaded serde v1.0.228
+  Downloaded num-traits v0.2.19
+  Downloaded getrandom v0.3.4
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded rand v0.9.4
+  Downloaded typenum v1.20.0
+  Downloaded itertools v0.10.5
+  Downloaded memchr v2.8.0
+  Downloaded itertools v0.13.0
+  Downloaded plotters v0.3.7
+  Downloaded serde_json v1.0.149
+  Downloaded rayon v1.12.0
+  Downloaded proptest v1.11.0
+  Downloaded regex v1.12.3
+  Downloaded clap_builder v4.6.0
+  Downloaded zerocopy v0.8.48
+  Downloaded hybrid-array v0.4.10
+  Downloaded syn v2.0.117
+  Downloaded ciborium v0.2.2
+  Downloaded plotters-svg v0.3.7
+  Downloaded regex-syntax v0.8.10
+  Downloaded fastrand v2.4.1
+  Downloaded clap v4.6.1
+  Downloaded cpufeatures v0.3.0
+  Downloaded rustix v1.1.4
+  Downloaded bit-set v0.8.0
+  Downloaded bit-vec v0.8.0
+  Downloaded anstyle v1.0.14
+  Downloaded cfg-if v1.0.4
+  Downloaded block-buffer v0.12.0
+  Downloaded regex-automata v0.4.14
+  Downloaded libc v0.2.185
+  Downloaded linux-raw-sys v0.12.1
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+    Checking cfg-if v1.0.4
+   Compiling libc v0.2.185
+   Compiling zerocopy v0.8.48
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+    Checking either v1.15.0
+   Compiling getrandom v0.3.4
+   Compiling zmij v1.0.21
+   Compiling rayon-core v1.13.0
+   Compiling serde v1.0.228
+   Compiling autocfg v1.5.0
+   Compiling serde_json v1.0.149
+    Checking typenum v1.20.0
+   Compiling getrandom v0.4.2
+   Compiling rustix v1.1.4
+    Checking bitflags v2.11.1
+    Checking linux-raw-sys v0.12.1
+    Checking memchr v2.8.0
+    Checking itoa v1.0.18
+    Checking regex-syntax v0.8.10
+    Checking anstyle v1.0.14
+    Checking clap_lex v1.1.0
+   Compiling num-traits v0.2.19
+    Checking fastrand v2.4.1
+    Checking ciborium-io v0.2.2
+    Checking plotters-backend v0.3.7
+    Checking once_cell v1.21.4
+    Checking itertools v0.10.5
+    Checking cast v0.3.0
+    Checking clap_builder v4.6.0
+    Checking quick-error v1.2.3
+    Checking const-oid v0.10.2
+    Checking crossbeam-epoch v0.9.18
+    Checking same-file v1.0.6
+    Checking fnp-ndarray v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-ndarray)
+    Checking fnv v1.0.7
+    Checking plotters-svg v0.3.7
+    Checking bit-vec v0.8.0
+    Checking itertools v0.13.0
+    Checking walkdir v2.5.0
+    Checking anes v0.1.6
+    Checking crossbeam-deque v0.8.6
+    Checking unarray v0.1.4
+    Checking hybrid-array v0.4.10
+    Checking bit-set v0.8.0
+    Checking cpufeatures v0.3.0
+   Compiling syn v2.0.117
+    Checking fnp-runtime v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-runtime)
+    Checking oorandom v11.1.5
+    Checking wait-timeout v0.2.1
+    Checking rayon v1.12.0
+    Checking rand_core v0.9.5
+    Checking block-buffer v0.12.0
+    Checking crypto-common v0.2.1
+    Checking plotters v0.3.7
+    Checking rand v0.9.4
+    Checking rand_xorshift v0.4.0
+    Checking criterion-plot v0.5.0
+    Checking tempfile v3.27.0
+    Checking regex-automata v0.4.14
+    Checking clap v4.6.1
+    Checking digest v0.11.2
+    Checking rusty-fork v0.3.1
+    Checking sha2 v0.11.0
+    Checking fnp-linalg v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-linalg)
+    Checking regex v1.12.3
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+    Checking tinytemplate v1.2.1
+    Checking half v2.7.1
+    Checking ppv-lite86 v0.2.21
+    Checking ciborium-ll v0.2.2
+    Checking fnp-dtype v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-dtype)
+    Checking rand_chacha v0.9.0
+    Checking ciborium v0.2.2
+    Checking proptest v1.11.0
+    Checking fnp-ufunc v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260619-0535/crates/fnp-ufunc)
+    Checking criterion v0.6.0
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 17.69s
+  [2m2026-06-19T06:03:44.700464Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 19398ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:44.700713Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:44.700730Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/franken_numpy-cod-a-20260619-0535 on hz2[0m
+    [2;3mat[0m rch/src/transfer.rs:2246 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:44.700778Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 retrieval exclude pattern(s) from .rchignore (total: 5)[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:46.592539Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1891ms (1 files, 1280 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2301 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-19T06:03:46.592576Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 1280 bytes in 1891ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+
+[RCH] remote hz2 (54.1s)
