@@ -1985,6 +1985,18 @@ impl RngBackend {
         }
     }
 
+    fn try_fill_pcg_bytes(&mut self, out: &mut [u8]) -> Option<Option<u32>> {
+        match self {
+            Self::Pcg64(rng) => Some(fill_pcg_bytes_from_u64_words(rng, out)),
+            Self::Pcg64Dxsm(rng) => Some(fill_pcg_bytes_from_u64_words(rng, out)),
+            _ => None,
+        }
+    }
+
+    fn has_pcg_byte_fill(&self) -> bool {
+        matches!(self, Self::Pcg64(_) | Self::Pcg64Dxsm(_))
+    }
+
     fn jump_ahead(&mut self, steps: u64) {
         match self {
             Self::Deterministic(rng) => rng.jump_ahead(steps),
@@ -2068,7 +2080,6 @@ fn random_f64_from_core<R: ZigguratRngCore>(rng: &mut R, size: usize) -> Vec<f64
     (0..size).map(|_| rng.ziggurat_next_f64()).collect()
 }
 
-
 /// PCG-family cores that support O(log n) jump-ahead, enabling parallel
 /// fixed-consumption fills (one `next_u64` per output) with an identical stream.
 trait PcgAdvanceFill: Clone + Send + Sync {
@@ -2103,6 +2114,7 @@ impl_pcg_advance_fill!(Pcg64Rng, Pcg64DxsmRng);
 /// real 128-bit multiply + rotate per element (≈10 ns), so the rayon dispatch
 /// pays off well before the L3 cliff that gates pure memory-bound ops.
 const PCG_PARALLEL_MIN_LEN: usize = 1 << 16;
+const PCG_BYTES_DIRECT_MIN_LEN: usize = 1 << 18;
 
 /// Fill raw u64 words for PCG-family cores with the same jump-ahead chunking as
 /// fixed-consumption floating distributions. Each output consumes exactly one
@@ -2133,6 +2145,59 @@ fn parallel_pcg_u64_words<R: PcgAdvanceFill>(rng: &mut R, len: usize) -> Vec<u64
 
     rng.advance_by(len as u128);
     out
+}
+
+fn fill_pcg_bytes_serial<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> Option<u32> {
+    let mut offset = 0usize;
+    let mut buffered = None;
+    while offset < out.len() {
+        let word = rng.next_u64_word();
+        let bytes = word.to_le_bytes();
+        let take = (out.len() - offset).min(8);
+        out[offset..offset + take].copy_from_slice(&bytes[..take]);
+        offset += take;
+        buffered = (take <= 4).then_some((word >> 32) as u32);
+    }
+    buffered
+}
+
+fn fill_pcg_bytes_from_u64_words<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> Option<u32> {
+    use rayon::prelude::*;
+
+    let u32_count = out.len().div_ceil(4);
+    let words = u32_count.div_ceil(2);
+    let threads = rayon::current_num_threads();
+    if out.len() < PCG_BYTES_DIRECT_MIN_LEN || threads < 2 {
+        return fill_pcg_bytes_serial(rng, out);
+    }
+
+    let buffered = if u32_count % 2 == 1 {
+        let mut tail = rng.clone();
+        tail.advance_by((words - 1) as u128);
+        Some((tail.next_u64_word() >> 32) as u32)
+    } else {
+        None
+    };
+
+    let chunk_words = words.div_ceil(threads).max(1);
+    let chunk_bytes = chunk_words.saturating_mul(8).max(8);
+    out.par_chunks_mut(chunk_bytes)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start_word = chunk_idx * chunk_words;
+            let mut local = rng.clone();
+            local.advance_by(start_word as u128);
+            let mut offset = 0usize;
+            while offset < slice.len() {
+                let word = local.next_u64_word();
+                let bytes = word.to_le_bytes();
+                let take = (slice.len() - offset).min(8);
+                slice[offset..offset + take].copy_from_slice(&bytes[..take]);
+                offset += take;
+            }
+        });
+    rng.advance_by(words as u128);
+    buffered
 }
 
 /// Generate `size` uniform `[0,1)` doubles, parallelizing PCG/PCG-DXSM cores via
@@ -4766,6 +4831,42 @@ impl Generator {
     /// Mimics `rng.bytes(length)`. Returns `length` random bytes.
     #[must_use]
     pub fn bytes(&mut self, length: usize) -> Vec<u8> {
+        if length < PCG_BYTES_DIRECT_MIN_LEN + 4 || !self.bit_generator.rng.has_pcg_byte_fill() {
+            return self.bytes_from_uint32_stream(length);
+        }
+
+        let mut result = vec![0u8; length];
+        let mut offset = 0usize;
+        if self.u32_buf_ready {
+            let bytes = self.u32_buf.to_le_bytes();
+            let take = length.min(4);
+            result[..take].copy_from_slice(&bytes[..take]);
+            self.u32_buf_ready = false;
+            offset = take;
+        }
+        if length - offset >= PCG_BYTES_DIRECT_MIN_LEN
+            && let Some(buffered) = self
+                .bit_generator
+                .rng
+                .try_fill_pcg_bytes(&mut result[offset..])
+        {
+            if let Some(word) = buffered {
+                self.u32_buf = word;
+                self.u32_buf_ready = true;
+            }
+            return result;
+        }
+        while offset < length {
+            let word = self.next_uint32();
+            let bytes = word.to_le_bytes();
+            let take = (length - offset).min(4);
+            result[offset..offset + take].copy_from_slice(&bytes[..take]);
+            offset += take;
+        }
+        result
+    }
+
+    fn bytes_from_uint32_stream(&mut self, length: usize) -> Vec<u8> {
         if length == 0 {
             let _ = self.next_uint32();
             return Vec::new();

@@ -85,6 +85,58 @@ Notes:
 - `.257` is rejected and the production word-fill path was removed. The u64-word transcode approach allocated/interpreted an intermediate word buffer and lost to NumPy bytes on both measured rows.
 - Retry condition for `.257`: only revisit `Generator::bytes` if the candidate fills the final `Vec<u8>` directly from PCG state without an intermediate `Vec<u64>`, preserves the exact `next_uint32` half-buffer contract, and is remeasured head-to-head against NumPy on the same worker. Do not retry the removed `fill_u64(...).to_le_bytes()` transcode family.
 
+## 2026-06-19 - fnp-random PCG bytes direct final-buffer fill
+
+Artifact directory: `tests/artifacts/perf/2026-06-19_random_bytes_direct_fill/`
+
+Run identity:
+- Verification bead: `franken_numpy-ixs5y.261`.
+- Subject API: direct Rust `fnp-random` `Generator::bytes` Criterion rows.
+- Oracle/reference: NumPy `np.random.Generator(np.random.PCG64(42))` from the benchmark harness.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Same-worker A/B decision machine: `vmi1293453`.
+- Control worktree: `/data/projects/.scratch/franken_numpy-cod-a-baseline-20260619-0518` at `origin/main` (`3da8ac35`).
+- Candidate worktree: `/data/projects/.scratch/franken_numpy-cod-a-20260619-0505`.
+
+Commands:
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-random bytes_large_calls_match_serial_uint32_stream_state -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-random bytes_match_live_numpy_oracle_when_available -- --nocapture`
+- `RCH_WORKER=vmi1293453 RCH_WORKERS=vmi1293453 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-random --bench random_vs_numpy -- vs_numpy_pcg64_bytes --sample-size 10 --measurement-time 2 --warm-up-time 1 --output-format bencher`
+
+Decision rows:
+
+| Bead | Lever | Workload | Artifact | Old FNP | New FNP | FNP new/old | New NumPy | New FNP/NumPy | Verdict |
+|---|---|---:|---|---:|---:|---:|---:|---:|---|
+| `franken_numpy-ixs5y.261` | Direct PCG final `Vec<u8>` fill; small rows keep old append loop | 100k bytes, `vmi1293453` | `control_origin_main_vmi1293453.txt`, `candidate_threshold_direct_fill_vmi1149989.txt` | 186,767 ns | 184,751 ns | 0.989x | 425,145 ns | 0.435x | Neutral keep |
+| `franken_numpy-ixs5y.261` | Direct PCG final `Vec<u8>` fill via jump-ahead chunks | 1M bytes, `vmi1293453` | `control_origin_main_vmi1293453.txt`, `candidate_threshold_direct_fill_vmi1149989.txt` | 1,683,609 ns | 1,029,616 ns | 0.611x, 1.64x faster | 3,420,805 ns | 0.301x, 3.32x faster | Keep |
+
+Scorecard:
+- Win/loss/neutral versus old FNP: 1 win, 0 losses, 1 neutral.
+- Win/loss versus NumPy for the kept candidate rows: 2 wins, 0 losses.
+- The earlier `.257` post-revert open gap did not reproduce on today’s workers:
+  `vmi1153651` baseline was already faster than NumPy at 100k and 1M, and the
+  `vmi1293453` control was also faster than NumPy. Treat the old gap as
+  worker-sensitive routing evidence, not a current production loss.
+
+Notes:
+- `candidate_threshold_direct_fill_vmi1149989.txt` is the same-worker
+  candidate artifact used above; its filename records the attempted pin, while
+  the RCH transcript inside shows the actual selected worker was `vmi1293453`.
+- Kept code fills the final byte vector directly from PCG64/PCG64DXSM `u64`
+  words and never materializes the rejected intermediate `Vec<u64>` transcode.
+- The old serial append loop is still used below `PCG_BYTES_DIRECT_MIN_LEN` and
+  for non-PCG bit generators. A first unthresholded candidate regressed the 100k
+  row because safe Rust zero-initialized the final buffer; that artifact is
+  retained in `candidate_direct_fill_vs_numpy_pcg64_bytes.txt`.
+- Correctness gates passed for the large serial-stream state guard and live
+  NumPy byte oracle. The large guard exercises PCG64 and PCG64DXSM, prebuffered
+  and unbuffered `next_uint32` state, back-to-back byte calls, and post-call
+  `next_uint32` continuation.
+- Retry condition: do not retry the old word-fill transcode. Revisit bytes only
+  if a future same-worker head-to-head shows the direct-fill row losing to NumPy,
+  or if a broader random conformance gate finds a `next_uint32` half-buffer state
+  mismatch.
+
 ## 2026-06-19 - fnp-random PCG gumbel/laplace distribution cluster
 
 Artifact directory: `tests/artifacts/perf/2026-06-19_random_vs_numpy_pcg_distributions/`
