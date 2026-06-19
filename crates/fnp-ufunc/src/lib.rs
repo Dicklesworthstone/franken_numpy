@@ -53,6 +53,7 @@ const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
 const EXTRACT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const FLATNONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const INSERT_FLAT_SPLICE_MIN_WORK: usize = 1 << 14;
 const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PUT_MASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PUTMASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
@@ -10657,13 +10658,32 @@ impl UFuncArray {
         }
         match axis {
             None => {
-                let mut values = self.values.clone();
-                if index > values.len() {
+                let len = self.values.len();
+                if index > len {
                     return Err(UFuncError::Msg(format!(
                         "insert: index {index} out of bounds for size {}",
-                        values.len()
+                        len
                     )));
                 }
+                if len + insert_values.values.len() >= INSERT_FLAT_SPLICE_MIN_WORK
+                    && self.dtype == DType::F64
+                    && insert_values.dtype == DType::F64
+                    && self.integer_sidecar.is_none()
+                    && insert_values.integer_sidecar.is_none()
+                {
+                    let mut spliced = Vec::with_capacity(len + insert_values.values.len());
+                    spliced.extend_from_slice(&self.values[..index]);
+                    spliced.extend_from_slice(&insert_values.values);
+                    spliced.extend_from_slice(&self.values[index..]);
+                    let n = spliced.len();
+                    return Ok(Self {
+                        shape: vec![n],
+                        values: spliced,
+                        dtype: self.dtype,
+                        integer_sidecar: None,
+                    });
+                }
+                let mut values = self.values.clone();
                 let mut sidecar_vals = self.synthesized_integer_sidecar("insert")?;
                 let insert_sidecar = insert_values.synthesized_integer_sidecar("insert")?;
                 if sidecar_vals.is_some() && insert_sidecar.is_none() {
@@ -59529,6 +59549,113 @@ print(json.dumps(payload))
         let ins = UFuncArray::new(vec![2], vec![10.0, 20.0], DType::F64).unwrap();
         let r = a.insert(1, &ins, None).unwrap();
         assert_eq!(r.values(), &[1.0, 10.0, 20.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn insert_flat_f64_splice_matches_repeated_insert_and_golden_sha256() {
+        let n = super::INSERT_FLAT_SPLICE_MIN_WORK + 389;
+        let insert_len = 313;
+        let index = n / 2 + 17;
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 227 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_2000 | i as u64)
+                } else if i % 181 == 0 {
+                    -0.0
+                } else if i % 127 == 0 {
+                    f64::INFINITY
+                } else if i % 113 == 0 {
+                    f64::NEG_INFINITY
+                } else {
+                    ((i * 83 + 29) % 20011) as f64 / 31.0 - 1024.0
+                }
+            })
+            .collect();
+        let inserted_values: Vec<f64> = (0..insert_len)
+            .map(|i| {
+                if i % 53 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_4000 | i as u64)
+                } else if i % 47 == 0 {
+                    -0.0
+                } else if i % 41 == 0 {
+                    f64::NEG_INFINITY
+                } else {
+                    ((i * 97 + 31) % 4093) as f64 / 17.0 - 128.0
+                }
+            })
+            .collect();
+        let mut expected = values.clone();
+        for (offset, &value) in inserted_values.iter().enumerate() {
+            expected.insert(index + offset, value);
+        }
+
+        let a = UFuncArray::new(vec![n], values.clone(), DType::F64).unwrap();
+        let insert_values =
+            UFuncArray::new(vec![insert_len], inserted_values.clone(), DType::F64).unwrap();
+        let actual = a.insert(index, &insert_values, None).unwrap();
+        assert_eq!(actual.shape(), &[expected.len()]);
+        assert_eq!(actual.dtype(), DType::F64);
+        assert!(!actual.has_integer_sidecar());
+
+        let mut digest = Sha256::new();
+        for (idx, (&got, &want)) in actual.values().iter().zip(&expected).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "insert splice bit drift at index {idx}"
+            );
+            digest.update(got.to_bits().to_le_bytes());
+        }
+        let digest_hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest_hex,
+            "f91304cf27525c419199c5ac921d4dfcd611056fc049d07d66132b75447dfc5c"
+        );
+
+        let prefix = a.insert(0, &insert_values, None).unwrap();
+        for (&got, &want) in prefix.values()[..insert_len].iter().zip(&inserted_values) {
+            assert_eq!(got.to_bits(), want.to_bits());
+        }
+        let suffix = a.insert(n, &insert_values, None).unwrap();
+        for (&got, &want) in suffix.values()[n..].iter().zip(&inserted_values) {
+            assert_eq!(got.to_bits(), want.to_bits());
+        }
+
+        let empty = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();
+        let empty_err = a.insert(index, &empty, None).unwrap_err();
+        assert!(format!("{empty_err}").contains("insert_values must not be empty"));
+        let bounds_err = a.insert(n + 1, &insert_values, None).unwrap_err();
+        assert!(format!("{bounds_err}").contains(&format!("index {} out of bounds", n + 1)));
+
+        let sidecar_n = super::INSERT_FLAT_SPLICE_MIN_WORK + 11;
+        let sidecar_values: Vec<i64> = (0..sidecar_n)
+            .map(|i| (1_i64 << 53) + i as i64 * 23 - 5)
+            .collect();
+        let sidecar_insert_values = vec![-7_i64, (1_i64 << 54) + 3, 19_i64];
+        let sidecar =
+            UFuncArray::from_storage(vec![sidecar_n], ArrayStorage::I64(sidecar_values.clone()))
+                .unwrap();
+        let sidecar_insert = UFuncArray::from_storage(
+            vec![sidecar_insert_values.len()],
+            ArrayStorage::I64(sidecar_insert_values.clone()),
+        )
+        .unwrap();
+        let sidecar_index = sidecar_n / 3;
+        let sidecar_out = sidecar
+            .insert(sidecar_index, &sidecar_insert, None)
+            .unwrap();
+        let mut expected_sidecar = sidecar_values;
+        for (offset, value) in sidecar_insert_values.into_iter().enumerate() {
+            expected_sidecar.insert(sidecar_index + offset, value);
+        }
+        assert_eq!(
+            sidecar_out.to_storage().unwrap(),
+            ArrayStorage::I64(expected_sidecar)
+        );
     }
 
     #[test]

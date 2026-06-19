@@ -242,6 +242,24 @@ fn bench_delete_flat_f64_sparse_indices(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_insert_flat_f64_midpoint_many(c: &mut Criterion) {
+    let mut group = c.benchmark_group("insert_flat_f64_midpoint_many");
+    for size in [100_000usize, 1_000_000].iter() {
+        group.throughput(Throughput::Elements((*size + 313) as u64));
+        let arr = make_sign_array(*size);
+        let insert_values = make_sign_array(313);
+        let index = *size / 2 + 17;
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter(|| {
+                black_box(&arr)
+                    .insert(black_box(index), black_box(&insert_values), None)
+                    .unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
 fn bench_flatnonzero_f64_sparse(c: &mut Criterion) {
     let mut group = c.benchmark_group("flatnonzero_f64_sparse");
     for size in [100_000usize, 1_000_000].iter() {
@@ -497,6 +515,7 @@ criterion_group!(
     bench_compress_f64_bool_flat_sparse,
     bench_boolean_index_f64_masked_sparse,
     bench_delete_flat_f64_sparse_indices,
+    bench_insert_flat_f64_midpoint_many,
     bench_flatnonzero_f64_sparse,
     bench_count_nonzero_flat_f64_sparse,
     bench_where_nonzero_f64_2d_sparse,
