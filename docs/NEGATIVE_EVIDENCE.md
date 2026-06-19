@@ -318,6 +318,77 @@ Notes:
   100k and 1M sparse-mask rows, keeps NumPy timing CV below 10%, and separately
   remeasures the `boolean_index_f64_masked_sparse` dependent workload.
 
+## 2026-06-19 - BOLD-VERIFY: FNP extract SIMD mask decode keep
+
+Artifact directories:
+- `tests/artifacts/perf/2026-06-19_ufunc_extract_values_only_vs_numpy/`
+- `tests/artifacts/perf/2026-06-19_ufunc_boolean_index_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.244`.
+- Subject base before local edit: `f4cfc942`.
+- Final code: F64/no-integer-sidecar `extract` path counts and decodes the f64
+  bool mask with safe portable SIMD bitmasks, then pushes selected values in
+  lane order. The integer-sidecar and non-F64 paths keep the existing
+  source-index implementation.
+- Subject API: direct Rust `fnp-ufunc` `UFuncArray::extract`; dependent
+  `boolean_index` path reuses `extract`.
+- Same-worker FNP decision worker: `hz2`.
+- Same-host confirmation machine: `thinkstation1` for both local Criterion and
+  NumPy reference.
+- Oracle/reference: NumPy 2.4.3 on Python 3.13.7.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `rch exec -- cargo test -p fnp-ufunc extract_f64_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `rch exec -- cargo test -p fnp-ufunc boolean_index_f64_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `rch exec -- cargo bench -p fnp-ufunc --bench elementwise extract_f64_masked -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `rch exec -- cargo bench -p fnp-ufunc --bench elementwise boolean_index_f64_masked_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `cargo bench -p fnp-ufunc --bench elementwise extract_f64_masked -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `cargo bench -p fnp-ufunc --bench elementwise boolean_index_f64_masked_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `rch exec -- cargo check -p fnp-ufunc --all-targets`
+- `rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings`
+- `cargo fmt -p fnp-ufunc -- --check`
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.244` | One-pass F64 no-sidecar sparse-capacity candidate | 100k extract, `ovh-a` routing | terminal transcript | 100.348 us | 54.443 us | 1.843x | Reverted |
+| `franken_numpy-ixs5y.244` | One-pass F64 no-sidecar sparse-capacity candidate | 1M extract, `ovh-a` routing | terminal transcript | 1,171.660 us | 613.212 us | 1.911x | Reverted |
+| `franken_numpy-ixs5y.244` | SIMD f64-mask count/decode | 100k extract, `hz2` | `criterion_extract_simd_keep.txt`, `numpy_extract_local_baseline.txt` | 44.666 us | 54.443 us | 0.820x | Keep |
+| `franken_numpy-ixs5y.244` | SIMD f64-mask count/decode | 1M extract, `hz2` | `criterion_extract_simd_keep.txt`, `numpy_extract_local_baseline.txt` | 496.772 us | 613.212 us | 0.810x | Keep |
+| `franken_numpy-ixs5y.244` | SIMD f64-mask count/decode | 100k extract, local confirmation | `criterion_extract_simd_keep.txt`, `numpy_extract_local_baseline.txt` | 42.327 us | 54.443 us | 0.777x | Keep |
+| `franken_numpy-ixs5y.244` | SIMD f64-mask count/decode | 1M extract, local confirmation | `criterion_extract_simd_keep.txt`, `numpy_extract_local_baseline.txt` | 610.601 us | 613.212 us | 0.996x | Keep, borderline |
+| `franken_numpy-ixs5y.244` | Dependent `boolean_index` through SIMD extract | 100k boolean index, `hz2` | `criterion_boolean_index_simd_keep.txt`, `numpy_boolean_index_local_baseline.txt` | 45.643 us | 87.115 us | 0.524x | Keep |
+| `franken_numpy-ixs5y.244` | Dependent `boolean_index` through SIMD extract | 1M boolean index, `hz2` | `criterion_boolean_index_simd_keep.txt`, `numpy_boolean_index_local_baseline.txt` | 466.771 us | 976.900 us | 0.478x | Keep |
+| `franken_numpy-ixs5y.244` | Dependent `boolean_index` through SIMD extract | 100k boolean index, local confirmation | `criterion_boolean_index_simd_keep.txt`, `numpy_boolean_index_local_baseline.txt` | 46.343 us | 87.115 us | 0.532x | Keep |
+| `franken_numpy-ixs5y.244` | Dependent `boolean_index` through SIMD extract | 1M boolean index, local confirmation | `criterion_boolean_index_simd_keep.txt`, `numpy_boolean_index_local_baseline.txt` | 568.270 us | 976.900 us | 0.582x | Keep |
+
+Notes:
+- The scalar no-sidecar count/copy candidate improved over the original
+  source-index path on one remote routing run but still lost to NumPy; it was
+  not kept as the final lever.
+- The one-pass sparse-capacity candidate removed the count pass but regressed
+  badly, likely from realloc/capacity behavior plus scalar branch pressure; it
+  was reverted before final validation.
+- The final SIMD path preserves NumPy truthiness for this representation:
+  `NaN != 0.0` is selected, `-0.0 == 0.0` is false, and bitmask lanes are pushed
+  in ascending order to preserve output order.
+- `cargo fmt -p fnp-ufunc -- --check` still reports broad pre-existing format
+  drift in untouched benches, tests, imports, and polynomial/cross-product
+  regions. The edited block was manually adjusted to the rustfmt import/order
+  style shown for that block.
+- A fresh local NumPy rerun after the keep was slower than the earlier NumPy
+  reference, so the table uses the stricter earlier NumPy medians. The earlier
+  NumPy extract 1M CV was high, making the local 1M extract confirmation a
+  borderline keep despite clearing the median.
+- Final focused validation passed for both golden guards, package check, and
+  package clippy with `-D warnings`.
+- Retry condition: reopen `.244` if a low-CV same-host NumPy rerun shows NumPy
+  median at or below the local FNP median for 1M extract, if a broader extract
+  density matrix shows dense-mask regressions from the SIMD path, or if the
+  representation bridge grows a true compact bool mask storage path that can
+  remove the current f64-mask memory traffic entirely.
+
 ## 2026-06-19 - Gauntlet Verify: FNP count_nonzero vs NumPy
 
 Artifact directory: `tests/artifacts/perf/2026-06-19_ufunc_count_nonzero_vs_numpy/`

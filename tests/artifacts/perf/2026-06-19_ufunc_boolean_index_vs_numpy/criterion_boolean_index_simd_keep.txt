@@ -1,0 +1,20 @@
+Command:
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-ufunc --bench elementwise boolean_index_f64_masked_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher
+
+Worker:
+hz2
+
+Rows:
+boolean_index_f64_masked_sparse/100000  = 45,643 ns/iter (+/- 2,417)
+boolean_index_f64_masked_sparse/1000000 = 466,771 ns/iter (+/- 20,935)
+
+Local same-host confirmation:
+Command:
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b cargo bench -p fnp-ufunc --bench elementwise boolean_index_f64_masked_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher
+
+Rows:
+boolean_index_f64_masked_sparse/100000  = 46,343 ns/iter (+/- 3,842)
+boolean_index_f64_masked_sparse/1000000 = 568,270 ns/iter (+/- 99,863)
+
+Reference:
+numpy_boolean_index_local_baseline.txt

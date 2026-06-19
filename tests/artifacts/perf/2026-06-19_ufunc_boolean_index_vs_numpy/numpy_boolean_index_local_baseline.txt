@@ -1,0 +1,7 @@
+host=thinkstation1
+python=3.13.7
+numpy=2.4.3
+size=100000 selected=17659 checksum=110279064.000000
+size=100000 median_ns=87115 p95_ns=115724 mean_ns=94060 cv_pct=13.03 min_ns=86291 max_ns=125624
+size=1000000 selected=176591 checksum=11041530690.000000
+size=1000000 median_ns=976900 p95_ns=1114299 mean_ns=977250 cv_pct=10.67 min_ns=866737 max_ns=1290395

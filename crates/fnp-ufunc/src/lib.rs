@@ -16299,6 +16299,58 @@ impl UFuncArray {
                 arr.values.len()
             )));
         }
+        if arr.dtype == DType::F64 && arr.integer_sidecar.is_none() {
+            const LANES: usize = 8;
+            use std::simd::Simd;
+            use std::simd::cmp::SimdPartialEq;
+            type MaskVector = Simd<f64, LANES>;
+
+            let zero = MaskVector::splat(0.0);
+            let mut selected = 0usize;
+            let mut condition_chunks = condition.values.chunks_exact(LANES);
+            for chunk in condition_chunks.by_ref() {
+                selected += MaskVector::from_slice(chunk)
+                    .simd_ne(zero)
+                    .to_bitmask()
+                    .count_ones() as usize;
+            }
+            selected += condition_chunks
+                .remainder()
+                .iter()
+                .filter(|&&condition| condition != 0.0)
+                .count();
+
+            let mut values = Vec::with_capacity(selected);
+            let mut condition_chunks = condition.values.chunks_exact(LANES);
+            let mut value_chunks = arr.values.chunks_exact(LANES);
+            for (condition_chunk, value_chunk) in
+                condition_chunks.by_ref().zip(value_chunks.by_ref())
+            {
+                let mut mask = MaskVector::from_slice(condition_chunk)
+                    .simd_ne(zero)
+                    .to_bitmask();
+                while mask != 0 {
+                    let lane = mask.trailing_zeros() as usize;
+                    values.push(value_chunk[lane]);
+                    mask &= mask - 1;
+                }
+            }
+            for (&condition, &value) in condition_chunks
+                .remainder()
+                .iter()
+                .zip(value_chunks.remainder())
+            {
+                if condition != 0.0 {
+                    values.push(value);
+                }
+            }
+            return Ok(Self {
+                shape: vec![values.len()],
+                values,
+                dtype: arr.dtype,
+                integer_sidecar: None,
+            });
+        }
         let mut values = Vec::new();
         let mut source_indices = Vec::new();
         for (i, (c, v)) in condition.values.iter().zip(&arr.values).enumerate() {
