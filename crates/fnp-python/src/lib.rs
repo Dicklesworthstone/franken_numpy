@@ -17180,10 +17180,36 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // semantics are preserved exactly.
     let bound = a.bind(py);
     let numpy = py.import("numpy")?;
+    // numpy's LAPACK getrf (OpenBLAS) is the better-optimized LU below n~800, so the
+    // native det_nxn loses ~1.2-2.4x there; but OpenBLAS getrf hits a sharp
+    // degradation cliff above ~832 (n=768 ~12ms vs n=832 ~830ms here) where fnp's
+    // parallel blocked LU wins 25x+. Route the single-matrix native path only for
+    // large dims and delegate smaller ones to numpy (exact-parity, faster).
+    const DET_NATIVE_MIN_DIM: usize = 832;
+    // Fast pre-check: a small/medium 2-D square real-float ndarray is delegated to
+    // numpy below the cliff anyway, so peek its shape/dtype and pass it straight
+    // through — skipping the wasted extract→UFuncArray copy (true parity vs numpy).
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && bound.is_exact_instance(&ndarray_type)
+        && let Ok(shape) = bound
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+        && shape.len() == 2
+        && shape[0] == shape[1]
+        && shape[0] < DET_NATIVE_MIN_DIM
+        && bound
+            .getattr("dtype")
+            .and_then(|d| d.getattr("kind"))
+            .and_then(|k| k.extract::<String>())
+            .map(|k| k == "f")
+            .unwrap_or(false)
+    {
+        return Ok(numpy.getattr("linalg")?.getattr("det")?.call1((bound,))?.unbind());
+    }
     if let Ok(array) = extract_numeric_array(py, bound, "det(a)") {
         let shape = array.shape();
         let real = !matches!(array.dtype(), DType::Complex64 | DType::Complex128);
-        if shape.len() == 2 && shape[0] == shape[1] && real {
+        if shape.len() == 2 && shape[0] == shape[1] && real && shape[0] >= DET_NATIVE_MIN_DIM {
             let value = fnp_linalg::det_nxn(array.values(), shape[0]).map_err(map_ufunc_error)?;
             return Ok(numpy.getattr("float64")?.call1((value,))?.unbind());
         }
