@@ -2304,6 +2304,73 @@ fn parallel_pcg_logistic<R: PcgAdvanceFill>(
     out
 }
 
+fn pcg_gumbel_serial<R: PcgAdvanceFill>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(size);
+    let mut raw = [0.0f64; 1];
+    while out.len() < size {
+        rng.fill_uniform_f64(&mut raw);
+        if let Some(value) = gumbel_transform(raw[0], loc, scale) {
+            out.push(value);
+        }
+    }
+    out
+}
+
+/// Inverse-CDF Gumbel sampling for PCG-family cores. Accepted samples consume
+/// exactly one f64 uniform, so jump-ahead chunking preserves the scalar stream.
+/// The sole rejection case is an exact zero raw uniform; if any chunk observes
+/// that branch, replay the call through the saved serial state so later draws
+/// still match NumPy's retry semantics.
+fn parallel_pcg_gumbel<R: PcgAdvanceFill>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    use rayon::prelude::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let threads = rayon::current_num_threads();
+    if size < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        return pcg_gumbel_serial(rng, loc, scale, size);
+    }
+
+    let original = rng.clone();
+    let mut out = vec![0.0f64; size];
+    let rejected = AtomicBool::new(false);
+    let chunk = size.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            local.fill_uniform_f64(slice);
+            for slot in slice.iter_mut() {
+                if let Some(value) = gumbel_transform(*slot, loc, scale) {
+                    *slot = value;
+                } else {
+                    rejected.store(true, Ordering::Relaxed);
+                }
+            }
+        });
+
+    if rejected.load(Ordering::Relaxed) {
+        let mut serial = original;
+        let out = pcg_gumbel_serial(&mut serial, loc, scale, size);
+        *rng = serial;
+        return out;
+    }
+
+    rng.advance_by(size as u128);
+    out
+}
+
 #[inline]
 fn triangular_transform(
     u: f64,
@@ -2450,6 +2517,32 @@ fn logistic_from_core<R: ZigguratRngCore>(
     (0..size)
         .map(|_| logistic_transform(rng.ziggurat_next_f64(), loc, scale))
         .collect()
+}
+
+#[inline]
+fn gumbel_transform(raw_uniform: f64, loc: f64, scale: f64) -> Option<f64> {
+    let u = 1.0 - raw_uniform;
+    if u < 1.0 {
+        Some(loc - scale * (-u.ln()).ln())
+    } else {
+        None
+    }
+}
+
+#[inline]
+fn gumbel_from_core<R: ZigguratRngCore>(
+    rng: &mut R,
+    loc: f64,
+    scale: f64,
+    size: usize,
+) -> Vec<f64> {
+    let mut out = Vec::with_capacity(size);
+    while out.len() < size {
+        if let Some(value) = gumbel_transform(rng.ziggurat_next_f64(), loc, scale) {
+            out.push(value);
+        }
+    }
+    out
 }
 
 #[inline]
@@ -5485,16 +5578,19 @@ impl Generator {
         if scale < 0.0 || (scale == 0.0 && scale.is_sign_negative()) {
             return Err(RandomError::InvalidParameter);
         }
-        Ok((0..size)
-            .map(|_| {
-                loop {
-                    let u = 1.0 - self.next_f64();
-                    if u < 1.0 {
-                        return loc - scale * (-u.ln()).ln();
-                    }
-                }
-            })
-            .collect())
+        if size == 0 {
+            return Ok(Vec::new());
+        }
+
+        self.u32_buf_ready = false;
+        Ok(match &mut self.bit_generator.rng {
+            RngBackend::Deterministic(rng) => gumbel_from_core(rng, loc, scale, size),
+            RngBackend::Pcg64(rng) => parallel_pcg_gumbel(rng, loc, scale, size),
+            RngBackend::Pcg64Dxsm(rng) => parallel_pcg_gumbel(rng, loc, scale, size),
+            RngBackend::Mt19937(rng) => gumbel_from_core(rng, loc, scale, size),
+            RngBackend::Philox(rng) => gumbel_from_core(rng, loc, scale, size),
+            RngBackend::Sfc64(rng) => gumbel_from_core(rng, loc, scale, size),
+        })
     }
 
     /// Weibull distribution (matching NumPy: uses standard_exponential).
@@ -17915,6 +18011,68 @@ for child in rng.spawn(n_children):
         let zero_scale = buffered.logistic(loc, 0.0, n).unwrap();
         assert!(zero_scale.iter().all(|value| value.to_bits() == loc.to_bits()));
         assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
+    }
+
+    #[test]
+    fn parallel_pcg_gumbel_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+        let loc = -1.25;
+        let scale = 2.75;
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(9292);
+            let mut combined = parallel.gumbel(loc, scale, n).unwrap();
+            combined.extend(parallel.gumbel(loc, scale, n).unwrap());
+            let after_parallel: Vec<u64> =
+                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+
+            let mut serial = mk(9292);
+            let expected: Vec<f64> = (0..2 * n)
+                .map(|_| serial.gumbel(loc, scale, 1).unwrap()[0])
+                .collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_f64().to_bits()).collect();
+
+            assert_eq!(combined.len(), expected.len());
+            for (index, (got, want)) in combined.iter().zip(&expected).enumerate() {
+                assert_eq!(
+                    got.to_bits(),
+                    want.to_bits(),
+                    "dxsm={dxsm}: gumbel diverged at index {index}"
+                );
+            }
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-gumbel f64 state diverged"
+            );
+        }
+
+        let mut zero_scale = Generator::from_pcg64(3030).unwrap();
+        let mut serial_zero_scale = Generator::from_pcg64(3030).unwrap();
+        let got = zero_scale.gumbel(loc, 0.0, n).unwrap();
+        let want: Vec<f64> = (0..n)
+            .map(|_| serial_zero_scale.gumbel(loc, 0.0, 1).unwrap()[0])
+            .collect();
+        for (index, (got, want)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "zero-scale gumbel diverged at index {index}"
+            );
+        }
+        let after_got: Vec<u64> = (0..17).map(|_| zero_scale.next_f64().to_bits()).collect();
+        let after_want: Vec<u64> = (0..17)
+            .map(|_| serial_zero_scale.next_f64().to_bits())
+            .collect();
+        assert_eq!(after_got, after_want);
     }
 
     #[test]
