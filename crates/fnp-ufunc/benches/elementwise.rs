@@ -438,6 +438,34 @@ fn bench_place_f64_masked_cycling(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_put_mask_f64_masked_cycling(c: &mut Criterion) {
+    let mut group = c.benchmark_group("put_mask_f64_masked_cycling");
+    for size in [100_000usize, 1_000_000].iter() {
+        group.throughput(Throughput::Elements(*size as u64));
+        let dst_template = make_array(*size);
+        let values: Vec<f64> = make_sign_array(193).values().to_vec();
+        let mask = UFuncArray::new(
+            vec![*size],
+            (0..*size)
+                .map(|i| if matches!((i * 37 + 5) % 41, 0 | 3 | 11 | 17 | 29) { 1.0 } else { 0.0 })
+                .collect(),
+            DType::Bool,
+        )
+        .unwrap();
+        group.bench_with_input(BenchmarkId::from_parameter(size), size, |bench, _| {
+            bench.iter_batched(
+                || dst_template.clone(),
+                |mut dst| {
+                    dst.put_mask(black_box(&mask), black_box(&values)).unwrap();
+                    dst
+                },
+                BatchSize::LargeInput,
+            )
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_add,
@@ -457,6 +485,7 @@ criterion_group!(
     bench_argwhere_f64_2d_sparse,
     bench_copyto_equal_shape_masked,
     bench_putmask_f64_masked,
-    bench_place_f64_masked_cycling
+    bench_place_f64_masked_cycling,
+    bench_put_mask_f64_masked_cycling
 );
 criterion_main!(benches);

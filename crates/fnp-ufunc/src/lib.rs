@@ -53,6 +53,7 @@ const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const EXTRACT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const FLATNONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const PUT_MASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const PUTMASK_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const WHERE_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const CROSS_PARALLEL_MIN_BATCHES: usize = 1 << 15;
@@ -28689,6 +28690,45 @@ impl UFuncArray {
             return Err(UFuncError::Msg(
                 "put_mask: values must not be empty".to_string(),
             ));
+        }
+        if self.values.len() >= PUT_MASK_PARALLEL_MIN_ELEMS
+            && rayon::current_num_threads() >= 2
+            && self.dtype == DType::F64
+            && mask.dtype == DType::Bool
+            && self.integer_sidecar.is_none()
+            && mask.integer_sidecar.is_none()
+        {
+            let chunk_len = PUT_MASK_PARALLEL_MIN_ELEMS / 4;
+            let counts: Vec<usize> = mask
+                .values
+                .par_chunks(chunk_len)
+                .map(|chunk| chunk.iter().filter(|&&m| m != 0.0).count())
+                .collect();
+            let mut starts = Vec::with_capacity(counts.len());
+            let mut total_true = 0usize;
+            for count in counts {
+                starts.push(total_true);
+                total_true += count;
+            }
+            if total_true == 0 {
+                return Ok(());
+            }
+
+            let values_len = values.len();
+            self.values
+                .par_chunks_mut(chunk_len)
+                .zip(mask.values.par_chunks(chunk_len))
+                .zip(starts.into_par_iter())
+                .for_each(|((dst_chunk, mask_chunk), start)| {
+                    let mut true_rank = start;
+                    for (dst, &m) in dst_chunk.iter_mut().zip(mask_chunk) {
+                        if m != 0.0 {
+                            *dst = values[true_rank % values_len];
+                            true_rank += 1;
+                        }
+                    }
+                });
+            return Ok(());
         }
         let mut vi = 0;
         for (i, &m) in mask.values.iter().enumerate() {
@@ -69498,6 +69538,100 @@ print(json.dumps(payload))
         let mask = UFuncArray::new(vec![4], vec![1.0, 1.0, 1.0, 0.0], DType::Bool).unwrap();
         a.put_mask(&mask, &[10.0, 20.0]).unwrap();
         assert_eq!(a.values(), &[10.0, 20.0, 10.0, 4.0]);
+    }
+
+    #[test]
+    fn put_mask_f64_parallel_matches_serial_reference_and_golden_sha256() {
+        let n = super::PUT_MASK_PARALLEL_MIN_ELEMS + 421;
+        let original: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 223 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_1000 | i as u64)
+                } else if i % 101 == 0 {
+                    f64::NEG_INFINITY
+                } else if i % 79 == 0 {
+                    f64::INFINITY
+                } else if i % 37 == 0 {
+                    -0.0
+                } else {
+                    i as f64 * 0.0625 - 512.0
+                }
+            })
+            .collect();
+        let mask_values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 29 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_2000 | i as u64)
+                } else if i % 31 == 0 {
+                    -0.0
+                } else if matches!((i * 37 + 5) % 41, 0 | 3 | 11 | 17 | 29) {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let values: Vec<f64> = (0..193)
+            .map(|i| match i {
+                0 => -0.0,
+                1 => f64::from_bits(0x7ff8_0000_0000_abcd),
+                2 => f64::INFINITY,
+                3 => f64::NEG_INFINITY,
+                _ => i as f64 * 0.75 - 33.0,
+            })
+            .collect();
+
+        let mut expected = original.clone();
+        let mut true_rank = 0usize;
+        for (idx, &m) in mask_values.iter().enumerate() {
+            if m != 0.0 {
+                expected[idx] = values[true_rank % values.len()];
+                true_rank += 1;
+            }
+        }
+
+        let mut actual = UFuncArray::new(vec![n], original, DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![n], mask_values, DType::Bool).unwrap();
+        actual.put_mask(&mask, &values).unwrap();
+
+        assert_eq!(actual.values().len(), expected.len());
+        for (idx, (&got, &want)) in actual.values().iter().zip(&expected).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "parallel put_mask bit drift at index {idx}"
+            );
+        }
+
+        let mut digest = Sha256::new();
+        for &value in actual.values() {
+            digest.update(value.to_bits().to_le_bytes());
+        }
+        let digest_hex: String = digest
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        assert_eq!(
+            digest_hex,
+            "5e97ef402b78f73d805c82e58283a8cf5ce21423b8d13a4084bd96dd4cee5d42"
+        );
+
+        let mut dst = UFuncArray::new(vec![n], vec![0.0; n], DType::F64).unwrap();
+        let err = dst.put_mask(&mask, &[]).unwrap_err();
+        assert!(format!("{err}").contains("put_mask: values must not be empty"));
+
+        let mut sidecar_dst =
+            UFuncArray::from_storage(vec![4], ArrayStorage::I64(vec![1, 2, 3, 4])).unwrap();
+        let sidecar_mask =
+            UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 1.0], DType::Bool).unwrap();
+        sidecar_dst
+            .put_mask(&sidecar_mask, &[(1_i64 << 53) as f64, ((1_i64 << 53) + 2) as f64])
+            .unwrap();
+        assert_eq!(
+            sidecar_dst.to_storage().unwrap(),
+            ArrayStorage::I64(vec![1_i64 << 53, 2, (1_i64 << 53) + 2, 1_i64 << 53])
+        );
     }
 
     #[test]
