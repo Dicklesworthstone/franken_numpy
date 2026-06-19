@@ -16684,6 +16684,25 @@ fn matrix_rank(
         return fallback();
     }
 
+    // Native 2-D matrix_rank runs fnp's bidiagonal values-only SVD, which beats numpy
+    // only for tiny matrices (max(M,N) <= 16, where it skips numpy's per-call SVD
+    // overhead) and is ~1.4-2.6x slower from n=32 up (n=512 2.1x). Peek the shape of
+    // an ndarray input BEFORE the full extraction + finiteness scan so a large 2-D
+    // matrix defers straight to numpy's LAPACK at true parity (the scan alone is ~20%
+    // of numpy's runtime at n~32-128). Non-ndarray / batched / tiny inputs fall
+    // through to the extraction path below, which re-applies the same crossover.
+    const MATRIX_RANK_NATIVE_MAX_DIM: usize = 16;
+    if a.bind(py).is_instance(&numpy.getattr("ndarray")?)?
+        && let Ok(sh) = a
+            .bind(py)
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+        && sh.len() == 2
+        && sh[0].max(sh[1]) > MATRIX_RANK_NATIVE_MAX_DIM
+    {
+        return fallback();
+    }
+
     let array = match extract_precise_numeric_array(py, a.bind(py), "matrix_rank(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -16721,6 +16740,13 @@ fn matrix_rank(
         || array.has_integer_sidecar()
         || array.values().iter().any(|value| !value.is_finite())
     {
+        return fallback();
+    }
+
+    // Re-apply the small-matrix crossover for inputs that reached extraction (lists,
+    // promoted scalars, etc.): native bidiagonal SVD only beats numpy for
+    // max(M,N) <= MATRIX_RANK_NATIVE_MAX_DIM; defer larger 2-D to numpy's LAPACK.
+    if shape[0].max(shape[1]) > MATRIX_RANK_NATIVE_MAX_DIM {
         return fallback();
     }
 
