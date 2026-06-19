@@ -14938,10 +14938,19 @@ fn count_nonzero(
                 }
             }
         };
-        if axis_simple != Some(isize::MIN)
-            && let Some(out) = try_zerocopy_count_nonzero(py, a.bind(py), axis_simple, keepdims)?
-        {
-            return Ok(out);
+        if axis_simple != Some(isize::MIN) {
+            if keepdims && axis_simple.is_none() {
+                // Full count is one scalar; numpy keepdims=True returns it in an
+                // all-ones-shaped intp array. Take the fast path then reshape.
+                if let Some(out) = try_zerocopy_count_nonzero(py, a.bind(py), None, false)? {
+                    let numpy = py.import("numpy")?;
+                    return keepdims_reshape_scalar(py, &numpy, a.bind(py), out);
+                }
+            } else if let Some(out) =
+                try_zerocopy_count_nonzero(py, a.bind(py), axis_simple, keepdims)?
+            {
+                return Ok(out);
+            }
         }
     }
 
