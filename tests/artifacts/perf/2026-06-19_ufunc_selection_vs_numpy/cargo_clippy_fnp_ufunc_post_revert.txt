@@ -1,0 +1,25 @@
+    Checking fnp-ndarray v0.1.0 (/data/projects/franken_numpy/crates/fnp-ndarray)
+    Checking fnp-runtime v0.1.0 (/data/projects/franken_numpy/crates/fnp-runtime)
+    Checking fnp-dtype v0.1.0 (/data/projects/franken_numpy/crates/fnp-dtype)
+    Checking fnp-linalg v0.1.0 (/data/projects/franken_numpy/crates/fnp-linalg)
+    Checking fnp-ufunc v0.1.0 (/data/projects/franken_numpy/crates/fnp-ufunc)
+error: approximate value of `f{32, 64}::consts::FRAC_2_PI` found
+     --> crates/fnp-ufunc/src/lib.rs:60351:17
+      |
+60351 |                 0.636_619_772_4,
+      |                 ^^^^^^^^^^^^^^^
+      |
+      = help: consider using the constant directly
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#approx_constant
+      = note: `#[deny(clippy::approx_constant)]` on by default
+
+error: approximate value of `f{32, 64}::consts::FRAC_2_PI` found
+     --> crates/fnp-ufunc/src/lib.rs:60353:17
+      |
+60353 |                 0.636_619_772_4,
+      |                 ^^^^^^^^^^^^^^^
+      |
+      = help: consider using the constant directly
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#approx_constant
+
+error: could not compile `fnp-ufunc` (lib test) due to 2 previous errors

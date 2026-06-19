@@ -38,3 +38,33 @@ Current release posture:
 - Project-wide release certification remains **not certified** from this slice
   alone; continue converting `code-first batch-test pending` beads into measured
   ledger entries before claiming global performance dominance.
+
+## 2026-06-19 - Ufunc Compress Rejection Slice
+
+Scope:
+- Recent code-first pending backlog measured: `franken_numpy-ixs5y.249`.
+- Crate: `fnp-ufunc`.
+- Reference: NumPy 2.4.3.
+- Same-host decision machine: `thinkstation1`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | FAIL | Candidate was 7.15x slower at 100k and 2.05x slower at 1M. |
+| Revert discipline | PASS | Removed the `.249` parallel compress production fast path after measurement. |
+| Targeted correctness | PASS AFTER GUARD FIX | Bitwise guard passed remotely after replacing a `NaN`-unsafe assertion; post-revert compress tests passed locally. |
+| Crate compile health | PASS | `cargo check -p fnp-ufunc` passed with `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`. |
+| Clippy health | PASS | `cargo clippy -p fnp-ufunc --all-targets -- -D warnings` passed after replacing an approximate `2/pi` literal with `std::f64::consts::FRAC_2_PI`. |
+| Evidence durability | PASS | Results recorded in `docs/NEGATIVE_EVIDENCE.md` and `tests/artifacts/perf/2026-06-19_ufunc_selection_vs_numpy/`. |
+
+Cluster score: **64 / 100**
+
+Score rationale:
+- +20 correctness: candidate guard passed after the test fix and post-revert tests passed.
+- +14 reproducibility: same-host local FNP vs NumPy evidence is recorded, with remote routing evidence kept separate.
+- +15 ledger discipline: reject, final-code gap, and retry predicate are recorded.
+- +15 revert discipline: regressing production fast path removed.
+- -36 performance: the measured candidate lost to NumPy and regressed local Criterion history.
+
+Current release posture:
+- `franken_numpy-ixs5y.249` is **measured rejected**, not pending.
+- `compress(condition, axis=None)` remains an open performance gap versus NumPy.

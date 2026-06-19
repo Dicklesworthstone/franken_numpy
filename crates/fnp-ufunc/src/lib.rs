@@ -47,7 +47,6 @@ use serde::{Deserialize, Serialize};
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
 const BOOLEAN_SET_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const ARGWHERE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-const COMPRESS_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COUNT_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
@@ -15985,49 +15984,6 @@ impl UFuncArray {
     pub fn compress(&self, condition: &[bool], axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
             None => {
-                let active_len = condition.len().min(self.values.len());
-                if self.dtype == DType::F64
-                    && self.integer_sidecar.is_none()
-                    && active_len >= COMPRESS_PARALLEL_MIN_ELEMS
-                    && rayon::current_num_threads() >= 2
-                {
-                    if let Some(extra) = condition
-                        .iter()
-                        .enumerate()
-                        .skip(self.values.len())
-                        .find_map(|(idx, &selected)| selected.then_some(idx))
-                    {
-                        return Err(UFuncError::Msg(format!(
-                            "take: index {extra} out of bounds for size {}",
-                            self.values.len()
-                        )));
-                    }
-                    let chunk_len = COMPRESS_PARALLEL_MIN_ELEMS / 4;
-                    let chunks: Vec<Vec<f64>> = condition[..active_len]
-                        .par_chunks(chunk_len)
-                        .zip(self.values[..active_len].par_chunks(chunk_len))
-                        .map(|(condition_chunk, value_chunk)| {
-                            let mut selected = Vec::new();
-                            for (&keep, &value) in condition_chunk.iter().zip(value_chunk) {
-                                if keep {
-                                    selected.push(value);
-                                }
-                            }
-                            selected
-                        })
-                        .collect();
-                    let n: usize = chunks.iter().map(Vec::len).sum();
-                    let mut values = Vec::with_capacity(n);
-                    for chunk in chunks {
-                        values.extend(chunk);
-                    }
-                    return Ok(Self {
-                        shape: vec![values.len()],
-                        values,
-                        dtype: self.dtype,
-                        integer_sidecar: None,
-                    });
-                }
                 let indices: Vec<i64> = condition
                     .iter()
                     .enumerate()
@@ -53953,71 +53909,6 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn compress_f64_parallel_matches_serial_reference_and_golden_sha256() {
-        let n = super::COMPRESS_PARALLEL_MIN_ELEMS + 389;
-        let values: Vec<f64> = (0..n)
-            .map(|i| {
-                if i % 223 == 0 {
-                    f64::from_bits(0x7ff8_0000_0000_0099)
-                } else if i % 173 == 0 {
-                    -0.0
-                } else if i % 109 == 0 {
-                    f64::NEG_INFINITY
-                } else {
-                    ((i * 59 + 41) % 4099) as f64 / 31.0 - 64.0
-                }
-            })
-            .collect();
-        let condition: Vec<bool> = (0..n)
-            .map(|i| (i % 181 == 0) || matches!((i * 41 + 17) % 23, 0 | 3 | 8 | 13 | 21))
-            .chain(std::iter::repeat_n(false, 17))
-            .collect();
-        let expected: Vec<f64> = values
-            .iter()
-            .zip(&condition)
-            .filter_map(|(&value, &selected)| selected.then_some(value))
-            .collect();
-
-        let a = UFuncArray::new(vec![n], values, DType::F64).unwrap();
-        let result = a.compress(&condition, None).unwrap();
-        assert_eq!(result.shape(), &[expected.len()]);
-        assert_eq!(result.dtype(), DType::F64);
-        assert!(!result.has_integer_sidecar());
-
-        let mut digest = Sha256::new();
-        for (&got, &want) in result.values().iter().zip(&expected) {
-            assert_eq!(got.to_bits(), want.to_bits());
-            digest.update(want.to_bits().to_le_bytes());
-        }
-        let digest = digest.finalize();
-        let mut digest_hex = String::with_capacity(digest.len() * 2);
-        for byte in digest {
-            write!(&mut digest_hex, "{byte:02x}").expect("write digest hex");
-        }
-        assert_eq!(
-            digest_hex,
-            "435479efaac384ef711d7821e87cb3772cf6b754029818c4f30f19ac32975b0e"
-        );
-
-        let short = a.compress(&condition[..37], None).unwrap();
-        let short_expected: Vec<f64> = a.values()[..37]
-            .iter()
-            .zip(&condition[..37])
-            .filter_map(|(&value, &selected)| selected.then_some(value))
-            .collect();
-        assert_eq!(short.values(), short_expected.as_slice());
-
-        let empty = a.compress(&vec![false; n], None).unwrap();
-        assert_eq!(empty.shape(), &[0]);
-        assert!(empty.values().is_empty());
-
-        let mut extra_true = vec![false; n + 8];
-        extra_true[n + 5] = true;
-        let err = a.compress(&extra_true, None).unwrap_err();
-        assert!(format!("{err}").contains(&format!("index {} out of bounds", n + 5)));
-    }
-
-    #[test]
     fn boolean_index_mask() {
         let a = UFuncArray::new(vec![4], vec![10.0, 20.0, 30.0, 40.0], DType::F64).unwrap();
         let mask = UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 0.0], DType::Bool).unwrap();
@@ -60457,9 +60348,9 @@ print(json.dumps(payload))
             sinc.values(),
             &[
                 -0.212_206_590_8,
-                0.636_619_772_4,
+                std::f64::consts::FRAC_2_PI,
                 1.0,
-                0.636_619_772_4,
+                std::f64::consts::FRAC_2_PI,
                 -0.212_206_590_8,
             ],
             "sinc",

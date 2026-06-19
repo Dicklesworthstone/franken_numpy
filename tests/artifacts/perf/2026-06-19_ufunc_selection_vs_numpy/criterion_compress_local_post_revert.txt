@@ -1,0 +1,26 @@
+   Compiling fnp-ufunc v0.1.0 (/data/projects/franken_numpy/crates/fnp-ufunc)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 29.71s
+     Running benches/elementwise.rs (/data/projects/.rch-targets/franken_numpy-cod-b/release/deps/elementwise-36bd3df0e01f30c6)
+Gnuplot not found, using plotters backend
+Benchmarking compress_f64_bool_flat_sparse/100000
+Benchmarking compress_f64_bool_flat_sparse/100000: Warming up for 1.0000 s
+Benchmarking compress_f64_bool_flat_sparse/100000: Collecting 20 samples in estimated 3.0060 s (34k iterations)
+Benchmarking compress_f64_bool_flat_sparse/100000: Analyzing
+compress_f64_bool_flat_sparse/100000
+                        time:   [86.986 µs 90.800 µs 95.077 µs]
+                        thrpt:  [1.0518 Gelem/s 1.1013 Gelem/s 1.1496 Gelem/s]
+                 change:
+                        time:   [−82.048% −80.454% −78.860%] (p = 0.00 < 0.05)
+                        thrpt:  [+373.04% +411.60% +457.06%]
+                        Performance has improved.
+Benchmarking compress_f64_bool_flat_sparse/1000000
+Benchmarking compress_f64_bool_flat_sparse/1000000: Warming up for 1.0000 s
+Benchmarking compress_f64_bool_flat_sparse/1000000: Collecting 20 samples in estimated 3.0324 s (2730 iterations)
+Benchmarking compress_f64_bool_flat_sparse/1000000: Analyzing
+compress_f64_bool_flat_sparse/1000000
+                        time:   [1.0786 ms 1.1369 ms 1.1992 ms]
+                        thrpt:  [833.88 Melem/s 879.55 Melem/s 927.09 Melem/s]
+                 change:
+                        time:   [−1.4717% +5.5321% +12.583%] (p = 0.13 > 0.05)
+                        thrpt:  [−11.177% −5.2421% +1.4936%]
+                        No change in performance detected.

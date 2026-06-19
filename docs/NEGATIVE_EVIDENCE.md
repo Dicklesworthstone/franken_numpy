@@ -90,3 +90,39 @@ Action:
 - Do not retry the prior per-element `HashSet` scan for large flat F64 delete
   or repeated `Vec::insert` shifting for large flat F64 insert unless the retry
   predicates above fire.
+
+## 2026-06-19 - Gauntlet Verify: FNP compress bool-mask vs NumPy
+
+Artifact directory: `tests/artifacts/perf/2026-06-19_ufunc_selection_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.249`.
+- Subject commit before revert: `0442da80` plus the local candidate guard fix.
+- Final code: `.249` parallel compress fast path removed; serial `compress` path retained.
+- Subject API: direct Rust `fnp-ufunc` `UFuncArray::compress` Criterion row.
+- Oracle/reference: NumPy 2.4.3 on Python 3.13.7.
+- Same-host decision worker: `thinkstation1` for both local FNP Criterion and local NumPy timing.
+- Remote routing evidence: `vmi1149989` Criterion candidate run, not used as the keep/reject gate because the NumPy command could not be pinned to that worker.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `cargo test -p fnp-ufunc compress_f64_parallel_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `cargo bench -p fnp-ufunc --bench elementwise compress_f64_bool_flat_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3`
+- Python NumPy timing script in `numpy_compress_local.txt` using the same value and bool-mask formulas.
+- `cargo test -p fnp-ufunc compress -- --nocapture`
+- `cargo check -p fnp-ufunc`
+- `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | Ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.249` | Parallel F64 `compress` bool-mask gather candidate | 100k local candidate | `criterion_compress_local.txt`, `numpy_compress_local.txt` | 472.85 us | 66.147 us | 7.15x slower | Reverted |
+| `franken_numpy-ixs5y.249` | Parallel F64 `compress` bool-mask gather candidate | 1M local candidate | `criterion_compress_local.txt`, `numpy_compress_local.txt` | 1.0645 ms | 518.349 us | 2.05x slower | Reverted |
+| `franken_numpy-ixs5y.249` | Final serial `compress` after revert | 100k post-revert | `criterion_compress_local_post_revert.txt`, `numpy_compress_local.txt` | 90.800 us | 66.147 us | 1.37x slower | Open gap |
+| `franken_numpy-ixs5y.249` | Final serial `compress` after revert | 1M post-revert | `criterion_compress_local_post_revert.txt`, `numpy_compress_local.txt` | 1.1369 ms | 518.349 us | 2.19x slower | Open gap |
+
+Notes:
+- The first guard attempt failed because the test used `assert_eq!` on a selected slice containing `NaN`; after switching that edge assertion to bitwise comparison, the candidate guard passed.
+- Passing correctness was not enough: same-host local Criterion showed the parallel candidate regressed the local Criterion history by +339.69% at 100k and +66.84% at 1M, and it lost badly to NumPy on both measured sizes.
+- The production parallel fast path was removed. The remaining serial path is still slower than NumPy, but it is less bad at 100k and avoids keeping a regressing optimization.
+- Final focused validation passed for `cargo test -p fnp-ufunc compress`, `cargo check -p fnp-ufunc`, and `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`; `cargo fmt --check` still reports broad workspace format drift outside this slice.
+- Retry condition: retry `compress(condition, axis=None)` only if a new design avoids per-chunk `Vec<Vec<f64>>` allocation and proves same-host speed over NumPy on both 100k and 1M bool-mask rows with CV below 10%; do not retry this per-chunk parallel gather shape as a standalone patch.
