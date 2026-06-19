@@ -49,7 +49,7 @@ const BOOLEAN_SET_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const ARGWHERE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COUNT_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 19;
 const COUNT_NONZERO_PARALLEL_CHUNK_ELEMS: usize = 1 << 12;
-const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 20;
 const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
 const INSERT_FLAT_SPLICE_MIN_WORK: usize = 1 << 14;
 const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
@@ -28041,12 +28041,6 @@ impl UFuncArray {
                 src.dtype, self.dtype,
             )));
         }
-        let broadcast_src = src.broadcast_to(&self.shape).map_err(|_| {
-            UFuncError::Msg(format!(
-                "copyto: could not broadcast input array from shape {:?} into shape {:?}",
-                src.shape, self.shape
-            ))
-        })?;
         match mask {
             Some(m) => {
                 if m.dtype != DType::Bool {
@@ -28054,9 +28048,7 @@ impl UFuncArray {
                         "copyto: where mask must have boolean dtype".to_string(),
                     ));
                 }
-                if self.values.len() >= COPYTO_PARALLEL_MIN_ELEMS
-                    && rayon::current_num_threads() >= 2
-                    && self.dtype == DType::F64
+                if self.dtype == DType::F64
                     && src.dtype == DType::F64
                     && self.integer_sidecar.is_none()
                     && src.integer_sidecar.is_none()
@@ -28064,17 +28056,35 @@ impl UFuncArray {
                     && src.shape.as_slice() == self.shape.as_slice()
                     && m.shape.as_slice() == self.shape.as_slice()
                 {
-                    self.values
-                        .par_iter_mut()
-                        .zip(src.values.par_iter())
-                        .zip(m.values.par_iter())
-                        .for_each(|((dst, &src_value), &mask_value)| {
+                    if self.values.len() >= COPYTO_PARALLEL_MIN_ELEMS
+                        && rayon::current_num_threads() >= 2
+                    {
+                        self.values
+                            .par_iter_mut()
+                            .zip(src.values.par_iter())
+                            .zip(m.values.par_iter())
+                            .for_each(|((dst, &src_value), &mask_value)| {
+                                if mask_value != 0.0 {
+                                    *dst = src_value;
+                                }
+                            });
+                    } else {
+                        for ((dst, &src_value), &mask_value) in
+                            self.values.iter_mut().zip(&src.values).zip(&m.values)
+                        {
                             if mask_value != 0.0 {
                                 *dst = src_value;
                             }
-                        });
+                        }
+                    }
                     return Ok(());
                 }
+                let broadcast_src = src.broadcast_to(&self.shape).map_err(|_| {
+                    UFuncError::Msg(format!(
+                        "copyto: could not broadcast input array from shape {:?} into shape {:?}",
+                        src.shape, self.shape
+                    ))
+                })?;
                 let broadcast_mask = m.broadcast_to(&self.shape).map_err(|_| {
                     UFuncError::Msg(format!(
                         "copyto: could not broadcast where mask from shape {:?} into shape {:?}",
@@ -28095,6 +28105,12 @@ impl UFuncArray {
                 }
             }
             None => {
+                let broadcast_src = src.broadcast_to(&self.shape).map_err(|_| {
+                    UFuncError::Msg(format!(
+                        "copyto: could not broadcast input array from shape {:?} into shape {:?}",
+                        src.shape, self.shape
+                    ))
+                })?;
                 self.values.copy_from_slice(&broadcast_src.values);
                 for i in 0..self.values.len() {
                     self.write_integer_mutation(
@@ -66388,7 +66404,7 @@ print(json.dumps(payload))
             .collect();
         assert_eq!(
             digest_hex,
-            "1357fe611f8daf1a20cdd6839f09fa36f4ae0c15a0c9444360b9de7c3af30501"
+            "06e33bbab360d1001ba9b4ae915eb8ff51436912c49d0b38bfc547055a5d39a4"
         );
     }
 

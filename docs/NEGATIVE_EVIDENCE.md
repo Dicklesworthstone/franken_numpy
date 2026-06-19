@@ -543,3 +543,54 @@ Notes:
 - Final focused validation passed for `argwhere_f64_parallel_matches_serial_reference_and_golden_sha256`, `cargo check -p fnp-ufunc`, and `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`.
 - `cargo fmt --check` still reports broad workspace formatting drift outside this slice; no workspace formatter was run.
 - Retry condition: reopen only if a same-host rerun shows NumPy minimum below the FNP Criterion upper CI bound on either measured size, or if the interleaved C-order coordinate golden guard changes. Do not retry this as a standalone patch solely for lower NumPy-CV reruns.
+
+## 2026-06-19 - Gauntlet Verify: FNP masked copyto vs NumPy
+
+Artifact directory: `tests/artifacts/perf/2026-06-19_ufunc_remaining_masked_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.242`.
+- Subject before measured correction: equal-shape F64 masked `copyto` paid a full `broadcast_to` clone before the equal-shape fast path, then activated Rayon at `1 << 14` elements.
+- Final code: equal-shape F64/no-sidecar masked fast path is selected before source broadcasting; arrays below `1 << 20` elements use a direct serial fused mask/copy loop, with Rayon reserved for larger arrays.
+- Subject API: direct Rust `fnp-ufunc` `UFuncArray::copyto` Criterion row.
+- Oracle/reference: NumPy 2.4.3 on Python 3.13.7.
+- Same-host decision machine: `thinkstation1`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `cargo bench -p fnp-ufunc --bench elementwise 'where_nonzero_f64_2d_sparse|copyto_equal_shape_masked|putmask_f64_masked|place_f64_masked_cycling|put_mask_f64_masked_cycling' -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `cargo bench -p fnp-ufunc --bench elementwise copyto_equal_shape_masked -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- Python NumPy timing script in `numpy_remaining_masked_local.txt` using the same data formulas.
+- `cargo test -p fnp-ufunc copyto_masked_equal_shape_parallel_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `cargo check -p fnp-ufunc --all-targets`
+- `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`
+- `cargo fmt -p fnp-ufunc -- --check`
+- `git diff --check`
+- `timeout 120s ubs --only=rust crates/fnp-ufunc/src/lib.rs`
+
+Triage scorecard:
+- Current masked-family routing run vs local NumPy median: win/loss/neutral = 5/5/0 across 10 rows. The 2/2 copyto losses were selected because they were structural and fully inside this crate.
+- Final focused copyto run vs local NumPy median: win/loss/neutral = 2/0/0 across the two same-host decision rows.
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.242` | Current code, routing evidence | 100k current | `criterion_remaining_masked_current.txt`, `numpy_remaining_masked_local.txt` | 358.730 us | 198.643 us | 1.806x | Loss, selected |
+| `franken_numpy-ixs5y.242` | Current code, routing evidence | 1M current | `criterion_remaining_masked_current.txt`, `numpy_remaining_masked_local.txt` | 3438.882 us | 2253.369 us | 1.526x | Loss, selected |
+| `franken_numpy-ixs5y.242` | Defer source broadcast only | 100k local candidate | `criterion_copyto_after_defer_broadcast_local.txt`, `numpy_remaining_masked_local.txt` | 1174.983 us | 198.643 us | 5.915x | Rejected |
+| `franken_numpy-ixs5y.242` | Defer source broadcast only | 1M local candidate | `criterion_copyto_after_defer_broadcast_local.txt`, `numpy_remaining_masked_local.txt` | 2295.453 us | 2253.369 us | 1.019x | Rejected, neutral/loss |
+| `franken_numpy-ixs5y.242` | Defer source broadcast only | 100k remote probe | `criterion_copyto_after_defer_broadcast.txt`, `numpy_remaining_masked_local.txt` | 204.972 us | 198.643 us | 1.032x | Rejected, noisy neutral |
+| `franken_numpy-ixs5y.242` | Defer source broadcast only | 1M remote probe | `criterion_copyto_after_defer_broadcast.txt`, `numpy_remaining_masked_local.txt` | 2644.748 us | 2253.369 us | 1.174x | Rejected |
+| `franken_numpy-ixs5y.242` | Final serial gate below `1 << 20` | 100k final local | `criterion_copyto_after_serial_threshold_local.txt`, `numpy_remaining_masked_local.txt` | 42.961 us | 198.643 us | 0.216x | Keep |
+| `franken_numpy-ixs5y.242` | Final serial gate below `1 << 20` | 1M final local | `criterion_copyto_after_serial_threshold_local.txt`, `numpy_remaining_masked_local.txt` | 1316.171 us | 2253.369 us | 0.584x | Keep |
+| `franken_numpy-ixs5y.242` | Final serial gate below `1 << 20` | 100k remote confirmation | `criterion_copyto_after_serial_threshold_rch.txt`, `numpy_remaining_masked_local.txt` | 24.632 us | 198.643 us | 0.124x | Confirming signal |
+| `franken_numpy-ixs5y.242` | Final serial gate below `1 << 20` | 1M remote confirmation | `criterion_copyto_after_serial_threshold_rch.txt`, `numpy_remaining_masked_local.txt` | 908.107 us | 2253.369 us | 0.403x | Confirming signal |
+
+Notes:
+- The first exotic lever was only half-right: moving the broadcast out of the equal-shape path removed clone work, but it exposed that the `1 << 14` parallel threshold was still a bad morsel size for the 100k and 1M copyto rows.
+- The kept lever is the cache/simplex version of the graveyard lesson: keep the common equal-shape dense loop fused and serial until the loop body has enough work to amortize Rayon scheduling, and avoid materializing a broadcast array that the SCE shape equality already proves unnecessary.
+- The golden fixture digest changed intentionally because the threshold-crossing fixture moved below the new parallel activation point; elementwise reference comparison passed before the digest assertion, and the updated digest guard then passed.
+- Final focused validation passed for `copyto_masked_equal_shape_parallel_matches_serial_reference_and_golden_sha256`, `cargo check -p fnp-ufunc --all-targets`, `cargo clippy -p fnp-ufunc --all-targets -- -D warnings` on `ovh-a`, and `git diff --check`.
+- The first clippy attempt hit an rch worker missing `cargo-clippy` for `nightly-2026-02-20`; that environment failure is recorded in `cargo_clippy_fnp_ufunc.txt`, and the successful retry is recorded in `cargo_clippy_fnp_ufunc_retry_ovh_a.txt`.
+- `cargo fmt -p fnp-ufunc -- --check` still reports broad pre-existing formatting drift outside this slice; no workspace formatter was run.
+- `timeout 120s ubs --only=rust crates/fnp-ufunc/src/lib.rs` did not emit a completion summary before the cap; keep the incomplete `ubs_fnp_ufunc_lib.txt` artifact as a tooling caveat, not a pass.
+- Retry condition: reopen only if a same-host NumPy rerun beats the final local FNP median on either row, if compact bool-mask storage replaces the current f64 mask representation, or if a larger-copy workload shows the raised Rayon threshold losing above `1 << 20`.
