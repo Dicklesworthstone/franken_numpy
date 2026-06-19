@@ -16009,7 +16009,6 @@ impl UFuncArray {
 
     /// Boolean mask indexing (flat). Equivalent to `a[mask]`.
     pub fn boolean_index(&self, mask: &Self) -> Result<Self, UFuncError> {
-        // mask values: 0.0 = false, anything else = true
         if mask.values.len() != self.values.len() {
             return Err(UFuncError::Msg(format!(
                 "boolean_index: mask size {} != array size {}",
@@ -16017,8 +16016,7 @@ impl UFuncArray {
                 self.values.len()
             )));
         }
-        let condition: Vec<bool> = mask.values.iter().map(|&v| v != 0.0).collect();
-        self.compress(&condition, None)
+        Self::extract(mask, self)
     }
 
     /// Set elements by boolean mask (flat). Equivalent to `a[mask] = value`.
@@ -53907,6 +53905,90 @@ print(json.dumps(payload))
             UFuncArray::new(vec![2, 3], vec![0.0, 1.0, 0.0, 1.0, 0.0, 1.0], DType::Bool).unwrap();
         let r = a.boolean_index(&mask).unwrap();
         assert_eq!(r.values(), &[2.0, 4.0, 6.0]);
+    }
+
+    #[test]
+    fn boolean_index_f64_parallel_matches_serial_reference_and_golden_sha256() {
+        let n = super::EXTRACT_PARALLEL_MIN_ELEMS + 509;
+        let values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 229 == 0 {
+                    f64::from_bits(0x7ff8_0000_0000_0555)
+                } else if i % 191 == 0 {
+                    -0.0
+                } else if i % 137 == 0 {
+                    f64::INFINITY
+                } else {
+                    ((i * 67 + 13) % 8191) as f64 / 37.0 - 83.0
+                }
+            })
+            .collect();
+        let mask_values: Vec<f64> = (0..n)
+            .map(|i| {
+                if i % 197 == 0 {
+                    f64::NAN
+                } else if i % 173 == 0 {
+                    -0.0
+                } else if matches!((i * 43 + 11) % 29, 0 | 5 | 9 | 17 | 23) {
+                    2.0
+                } else {
+                    0.0
+                }
+            })
+            .collect();
+        let expected: Vec<f64> = values
+            .iter()
+            .zip(&mask_values)
+            .filter_map(|(&value, &mask_value)| (mask_value != 0.0).then_some(value))
+            .collect();
+
+        let a = UFuncArray::new(vec![n], values, DType::F64).unwrap();
+        let mask = UFuncArray::new(vec![n], mask_values, DType::Bool).unwrap();
+        let actual = a.boolean_index(&mask).unwrap();
+
+        assert_eq!(actual.shape(), &[expected.len()]);
+        assert_eq!(actual.dtype(), DType::F64);
+        assert!(!actual.has_integer_sidecar());
+
+        let mut digest = Sha256::new();
+        for (idx, (&got, &want)) in actual.values().iter().zip(&expected).enumerate() {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "parallel boolean_index bit drift at index {idx}"
+            );
+            digest.update(got.to_bits().to_le_bytes());
+        }
+        let mut digest_hex = String::with_capacity(64);
+        for byte in digest.finalize() {
+            let _ = write!(&mut digest_hex, "{byte:02x}");
+        }
+        assert_eq!(
+            digest_hex,
+            "6c2417ece528deb3c5ba552097de341772ae3b36d6384d1141053ce2b50c02bb"
+        );
+
+        let empty_mask = UFuncArray::new(vec![n], vec![0.0; n], DType::Bool).unwrap();
+        let empty = a.boolean_index(&empty_mask).unwrap();
+        assert_eq!(empty.shape(), &[0]);
+        assert!(empty.values().is_empty());
+
+        let sidecar = UFuncArray::from_storage(
+            vec![4],
+            ArrayStorage::I64(vec![1, (1_i64 << 53) + 5, -3, 9]),
+        )
+        .unwrap();
+        let sidecar_mask =
+            UFuncArray::new(vec![4], vec![1.0, 0.0, f64::NAN, -0.0], DType::Bool).unwrap();
+        let sidecar_out = sidecar.boolean_index(&sidecar_mask).unwrap();
+        assert_eq!(
+            sidecar_out.to_storage().unwrap(),
+            ArrayStorage::I64(vec![1, -3])
+        );
+
+        let short_mask = UFuncArray::new(vec![n - 1], vec![0.0; n - 1], DType::Bool).unwrap();
+        let err = a.boolean_index(&short_mask).unwrap_err();
+        assert!(format!("{err}").contains("boolean_index: mask size"));
     }
 
     #[test]
