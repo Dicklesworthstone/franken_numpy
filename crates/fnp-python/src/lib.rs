@@ -33181,6 +33181,99 @@ fn try_zerocopy_f64_average_axis(
     let outer: usize = shape[..ax].iter().product();
     let inner: usize = shape[ax + 1..].iter().product();
 
+    // Full-shape element-wise weights (w.shape == a.shape) along the contiguous LAST
+    // axis: numpy weights each element and the denominator is the PER-LANE weight sum
+    // (sum_j(a*w)/sum_j(w)), so the 1-D-weights path below (constant denominator)
+    // can't serve it. Compute per-lane numerator+denominator with the same
+    // 8-accumulator fold as the 1-D path, fanned across the rayon pool. A lane whose
+    // weights sum to zero defers the whole call to numpy (it raises ZeroDivisionError).
+    if let Some(w) = weights
+        && is_f64(w)?
+        && inner == 1
+        && w.getattr("shape")?.extract::<Vec<usize>>()? == shape
+    {
+        let Ok(ab) = PyBuffer::<f64>::get(a) else {
+            return Ok(None);
+        };
+        let Some(asl) = ab.as_slice(py) else {
+            return Ok(None);
+        };
+        let Ok(wb) = PyBuffer::<f64>::get(w) else {
+            return Ok(None);
+        };
+        let Some(wsl) = wb.as_slice(py) else {
+            return Ok(None);
+        };
+        if asl.len() != outer * axis_len || wsl.len() != outer * axis_len {
+            return Ok(None);
+        }
+        // SAFETY: read-only contiguous f64 buffers held under the GIL -> &[f64] (Sync).
+        let adata: &[f64] =
+            unsafe { std::slice::from_raw_parts(asl.as_ptr().cast::<f64>(), asl.len()) };
+        let wdata: &[f64] =
+            unsafe { std::slice::from_raw_parts(wsl.as_ptr().cast::<f64>(), wsl.len()) };
+        use rayon::prelude::*;
+        let lane_avg = |i: usize| -> (f64, f64) {
+            let a_lane = &adata[i * axis_len..i * axis_len + axis_len];
+            let w_lane = &wdata[i * axis_len..i * axis_len + axis_len];
+            let mut num = [0.0f64; 8];
+            let mut den = [0.0f64; 8];
+            let chunks = axis_len / 8;
+            for c in 0..chunks {
+                let b = c * 8;
+                for j in 0..8 {
+                    num[j] += a_lane[b + j] * w_lane[b + j];
+                    den[j] += w_lane[b + j];
+                }
+            }
+            let mut n = 0.0f64;
+            let mut d = 0.0f64;
+            for j in 0..8 {
+                n += num[j];
+                d += den[j];
+            }
+            for k in chunks * 8..axis_len {
+                n += a_lane[k] * w_lane[k];
+                d += w_lane[k];
+            }
+            (n, d)
+        };
+        let parallel = outer * axis_len >= (1 << 16) && rayon::current_num_threads() >= 2;
+        let pairs: Vec<(f64, f64)> = if parallel {
+            (0..outer).into_par_iter().map(lane_avg).collect()
+        } else {
+            (0..outer).map(lane_avg).collect()
+        };
+        if pairs.iter().any(|(_, d)| *d == 0.0) {
+            return Ok(None); // weights sum to zero on some lane — numpy raises; defer
+        }
+        let out_shape: Vec<usize> = shape[..ax].to_vec();
+        let avg: Vec<f64> = pairs.iter().map(|(n, d)| n / d).collect();
+        let avg_flat = numpy_array_from_slice(py, &numpy, &avg, "float64")?;
+        let avg_arr = avg_flat
+            .call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+        let avg_output = if out_shape.is_empty() {
+            avg_arr.get_item(())?
+        } else {
+            avg_arr
+        };
+        if returned {
+            let sow: Vec<f64> = pairs.iter().map(|(_, d)| *d).collect();
+            let sow_flat = numpy_array_from_slice(py, &numpy, &sow, "float64")?;
+            let sow_arr = sow_flat
+                .call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+            let sow_output = if out_shape.is_empty() {
+                sow_arr.get_item(())?
+            } else {
+                sow_arr
+            };
+            return Ok(Some(
+                PyTuple::new(py, [avg_output, sow_output])?.into_any().unbind(),
+            ));
+        }
+        return Ok(Some(avg_output.unbind()));
+    }
+
     let (weights_vec, denominator) = match weights {
         Some(w) => {
             if !is_f64(w)? {
