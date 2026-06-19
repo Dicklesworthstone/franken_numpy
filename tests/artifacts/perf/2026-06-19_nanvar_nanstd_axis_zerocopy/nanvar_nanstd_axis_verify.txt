@@ -1,0 +1,5 @@
+cases=84 fails=0
+nanstd_ax1         np= 152314.7us fnp=   2956.7us fnp/np=0.019
+nanvar_ax1         np= 146541.9us fnp=   2888.0us fnp/np=0.020
+nanstd_ax1_nonan   np= 145881.6us fnp=   2856.4us fnp/np=0.020
+nanstd_ax0         np= 153476.6us fnp=  90297.5us fnp/np=0.588
