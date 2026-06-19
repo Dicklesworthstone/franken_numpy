@@ -23089,62 +23089,9 @@ fn try_zerocopy_f64_nanprod_flat(
 // is the IEEE maxNum/minNum fold over the non-NaN values (or init = ±inf when the
 // slice is empty/all-NaN), and `saw_non_nan` is whether any non-NaN was seen.
 // Block-wise over a reused 64 KiB buffer so there is no whole-array allocation.
-const NANEXTREME_BLK: usize = 8192; // 64 KiB reused buffer size (multiple of 8)
-
-fn simd_nanextreme_raw(
-    cells: &[pyo3::buffer::ReadOnlyCell<f64>],
-    take_max: bool,
-    buf: &mut [f64],
-) -> (f64, bool) {
-    use std::simd::cmp::SimdPartialEq;
-    use std::simd::num::SimdFloat;
-    use std::simd::{Mask, Simd};
-    const L: usize = 8;
-    let blk = buf.len();
-    type V = Simd<f64, L>;
-    let init = if take_max {
-        f64::NEG_INFINITY
-    } else {
-        f64::INFINITY
-    };
-    let n = cells.len();
-    let mut acc = V::splat(init);
-    let mut vsaw = Mask::<i64, L>::splat(false);
-    let mut m_tail = init;
-    let mut saw_tail = false;
-    let mut base = 0usize;
-    while base < n {
-        let len = blk.min(n - base);
-        for (d, c) in buf[..len].iter_mut().zip(cells[base..base + len].iter()) {
-            *d = c.get();
-        }
-        let full = len - len % L;
-        let mut off = 0;
-        while off < full {
-            let c = V::from_slice(&buf[off..off + L]);
-            vsaw |= c.simd_eq(c); // non-NaN lanes (c == c)
-            acc = if take_max { acc.simd_max(c) } else { acc.simd_min(c) };
-            off += L;
-        }
-        for &v in &buf[full..len] {
-            if !v.is_nan() {
-                saw_tail = true;
-                m_tail = if take_max { m_tail.max(v) } else { m_tail.min(v) };
-            }
-        }
-        base += len;
-    }
-    let mut m = m_tail;
-    for &v in &acc.to_array() {
-        m = if take_max { m.max(v) } else { m.min(v) };
-    }
-    (m, vsaw.any() || saw_tail)
-}
-
-// Direct SIMD nan-extreme over a plain &[f64] (no per-block staging copy). Returns
-// (extreme, saw_nonnan). IEEE maxNum/minNum (simd_max/simd_min return the non-NaN
-// operand), so NaNs are skipped exactly as the staged `simd_nanextreme_raw` fold —
-// bit-identical, just without the memcpy into the reused buffer.
+// Direct SIMD nan-extreme over a plain &[f64]. Returns (extreme, saw_nonnan).
+// IEEE maxNum/minNum (simd_max/simd_min return the non-NaN operand), so NaNs are
+// skipped exactly; the fold is order-independent so it parallelizes/merges cleanly.
 fn simd_nanextreme_slice(data: &[f64], take_max: bool) -> (f64, bool) {
     use std::simd::cmp::SimdPartialEq;
     use std::simd::num::SimdFloat;
@@ -23325,73 +23272,137 @@ fn try_zerocopy_f64_nanextreme_axis(
     let inner: usize = shape[ax + 1..].iter().product();
     let mut any_all_nan = false;
     let mut deferred = false;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64 and `cells` is a
+    // read-only contiguous PyBuffer slice held for this call under the GIL, so
+    // reading it as &[f64] (Sync) for the parallel folds below is sound.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    use rayon::prelude::*;
+    const NANEXTREME_AXIS_PARALLEL_MIN: usize = 1 << 16;
+    let parallel = outer * axis_len * inner >= NANEXTREME_AXIS_PARALLEL_MIN
+        && rayon::current_num_threads() >= 2;
+    let init = if take_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
     let out: Vec<f64> = if inner == 1 {
-        // Contiguous last axis: each lane is a contiguous run, reduced with the
-        // existing SIMD nan-extreme kernel.
+        // Contiguous last axis: each lane is an independent contiguous run, reduced
+        // with the direct-SIMD nan-extreme kernel. numpy runs this single-threaded,
+        // so fan the per-lane reductions across the rayon pool. Order is preserved.
+        let per_lane: Vec<(f64, bool)> = if parallel {
+            data.par_chunks_exact(axis_len)
+                .map(|lane| simd_nanextreme_slice(lane, take_max))
+                .collect()
+        } else {
+            data.chunks_exact(axis_len)
+                .map(|lane| simd_nanextreme_slice(lane, take_max))
+                .collect()
+        };
         let mut out: Vec<f64> = Vec::with_capacity(outer);
-        let mut buf = vec![0.0f64; NANEXTREME_BLK.min(axis_len.max(1))];
-        for lane in cells.chunks_exact(axis_len) {
-            let (m, saw) = simd_nanextreme_raw(lane, take_max, &mut buf);
+        for (m, saw) in per_lane {
             if !saw {
                 out.push(f64::NAN);
                 any_all_nan = true;
             } else if m == 0.0 {
                 deferred = true;
-                break;
             } else {
                 out.push(m);
             }
         }
         out
     } else {
-        // Non-last axis (e.g. axis=0): the output is one (outer×inner) plane, and
-        // the reduction runs DOWN the axis with a per-inner running extreme +
-        // saw-nonnan accumulator. Walking the input row-by-row keeps it cache
-        // sequential (vs the strided per-column scan the native path does), and the
-        // inner update autovectorizes. NaN values are skipped (never update the
-        // accumulator), matching numpy's nanmax/nanmin. max/min are order-
-        // independent, so the result is bit-identical except the ±0-sign case,
-        // which (like the last-axis path) defers the whole call.
+        // Non-last axis (e.g. axis=0): reduce DOWN the axis into an (outer×inner)
+        // plane with a per-inner running extreme + saw-nonnan accumulator. Walking
+        // row-by-row keeps it cache sequential and the inner update autovectorizes:
+        // f64::max/min already skip NaN (return the other operand), so the fold is
+        // nan-skipping and order-independent (the ±0-sign tie defers). With ≥2 outer
+        // groups, fan across groups; a single group (2-D axis=0) privatizes across
+        // row-blocks and merges the planes elementwise.
         let lane = axis_len * inner;
-        let init = if take_max { f64::NEG_INFINITY } else { f64::INFINITY };
-        let mut out = vec![init; outer * inner];
-        let mut saw = vec![false; outer * inner];
-        for o in 0..outer {
-            let base = o * lane;
-            let acc = &mut out[o * inner..o * inner + inner];
-            let sw = &mut saw[o * inner..o * inner + inner];
+        let row_max = |mut acc: Vec<f64>, mut sw: Vec<bool>, base: usize| -> (Vec<f64>, Vec<bool>) {
             for r in 0..axis_len {
-                let row = &cells[base + r * inner..base + r * inner + inner];
-                // BRANCHLESS, vectorizable: f64::max/min already skip NaN — they
-                // return the OTHER argument when one is NaN, so `acc = acc.max(v)`
-                // leaves `acc` unchanged for a NaN `v` (exactly nan-skipping). The
-                // saw-nonnan flag updates via `v == v` (false only for NaN), an OR
-                // with no branch. This lets the compiler emit packed compares/blends
-                // instead of the ~unpredictable per-element NaN branch.
+                let row = &data[base + r * inner..base + r * inner + inner];
                 if take_max {
-                    for ((a_acc, a_sw), c) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
-                        let v = c.get();
+                    for ((a_acc, a_sw), &v) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
                         *a_acc = a_acc.max(v);
                         *a_sw |= v == v;
                     }
                 } else {
-                    for ((a_acc, a_sw), c) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
-                        let v = c.get();
+                    for ((a_acc, a_sw), &v) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
                         *a_acc = a_acc.min(v);
                         *a_sw |= v == v;
                     }
                 }
             }
-            for (slot, &seen) in acc.iter_mut().zip(sw.iter()) {
-                if !seen {
-                    *slot = f64::NAN;
-                    any_all_nan = true;
-                } else if *slot == 0.0 {
-                    deferred = true;
-                }
+            (acc, sw)
+        };
+        let group_plane =
+            |o: usize| -> (Vec<f64>, Vec<bool>) { row_max(vec![init; inner], vec![false; inner], o * lane) };
+        let mut out = vec![init; outer * inner];
+        let mut saw = vec![false; outer * inner];
+        if parallel && outer >= 2 {
+            let planes: Vec<(Vec<f64>, Vec<bool>)> =
+                (0..outer).into_par_iter().map(group_plane).collect();
+            for (o, (acc, sw)) in planes.into_iter().enumerate() {
+                out[o * inner..o * inner + inner].copy_from_slice(&acc);
+                saw[o * inner..o * inner + inner].copy_from_slice(&sw);
             }
-            if deferred {
-                break;
+        } else if parallel {
+            // Single group: privatize across row-blocks, merge planes elementwise.
+            let (acc, sw) = (0..axis_len)
+                .into_par_iter()
+                .fold(
+                    || (vec![init; inner], vec![false; inner]),
+                    |(mut acc, mut sw), r| {
+                        let row = &data[r * inner..r * inner + inner];
+                        if take_max {
+                            for ((a_acc, a_sw), &v) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
+                                *a_acc = a_acc.max(v);
+                                *a_sw |= v == v;
+                            }
+                        } else {
+                            for ((a_acc, a_sw), &v) in acc.iter_mut().zip(sw.iter_mut()).zip(row) {
+                                *a_acc = a_acc.min(v);
+                                *a_sw |= v == v;
+                            }
+                        }
+                        (acc, sw)
+                    },
+                )
+                .reduce(
+                    || (vec![init; inner], vec![false; inner]),
+                    |(mut a, mut asw), (b, bsw)| {
+                        if take_max {
+                            for (x, y) in a.iter_mut().zip(b.iter()) {
+                                *x = x.max(*y);
+                            }
+                        } else {
+                            for (x, y) in a.iter_mut().zip(b.iter()) {
+                                *x = x.min(*y);
+                            }
+                        }
+                        for (x, y) in asw.iter_mut().zip(bsw.iter()) {
+                            *x |= *y;
+                        }
+                        (a, asw)
+                    },
+                );
+            out[..inner].copy_from_slice(&acc);
+            saw[..inner].copy_from_slice(&sw);
+        } else {
+            for o in 0..outer {
+                let (acc, sw) = group_plane(o);
+                out[o * inner..o * inner + inner].copy_from_slice(&acc);
+                saw[o * inner..o * inner + inner].copy_from_slice(&sw);
+            }
+        }
+        for (slot, &seen) in out.iter_mut().zip(saw.iter()) {
+            if !seen {
+                *slot = f64::NAN;
+                any_all_nan = true;
+            } else if *slot == 0.0 {
+                deferred = true;
             }
         }
         out

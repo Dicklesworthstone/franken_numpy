@@ -36,3 +36,16 @@ n {7,8,100,1<<15,(1<<18)+3,1<<22} x nan-frac {0,0.001,0.5,0.999} x scale
 - nanmax_ax0 1.45x / nanmax_ax1 1.27x: the axis reduction path is still serial.
 - amax/amin 1.13-1.19x: routes to py_max (same as np.max which is at parity) —
   likely measurement noise; max_plain measured 0.94x same run.
+
+## FOLLOW-UP: axis reduction parallelized (same commit family)
+nanmax/nanmin along an axis was also serial: nanmax_ax0 1.45x, nanmax_ax1 1.27x slow.
+- Last axis (inner==1): independent contiguous lanes — par_chunks_exact across the pool,
+  each lane via simd_nanextreme_slice.
+- Non-last axis: privatized inner-wide (extreme, saw) plane fold. ≥2 outer groups fan
+  across groups; a single group (2-D axis=0) privatizes across row-blocks and merges
+  planes elementwise (order-independent min/max; ±0-sign tie still defers).
+- Replaced the now-dead staged simd_nanextreme_raw + NANEXTREME_BLK.
+
+MEASURED (4096x4096 f64): nanmax_ax0 1.45x->0.66x, ax1 1.27x->0.39x,
+nanmin_ax0 0.55x, ax1 0.44x. 160/160 axis differential cases bit-exact across
+9 shapes x all axes x 4 nan-fractions x {max,min}.

@@ -1,0 +1,5 @@
+cases=160 fails=0
+nanmax_ax0   np=  7233.4us fnp=  4303.4us fnp/np=0.595
+nanmax_ax1   np=  9514.2us fnp=  3222.1us fnp/np=0.339
+nanmin_ax0   np= 11934.2us fnp=  4827.5us fnp/np=0.405
+nanmin_ax1   np= 10573.3us fnp=  3147.1us fnp/np=0.298
