@@ -134,3 +134,40 @@ Score rationale:
 Current release posture:
 - `franken_numpy-ixs5y.249` is **measured rejected**, not pending.
 - `compress(condition, axis=None)` remains an open performance gap versus NumPy.
+
+## 2026-06-19 - Ufunc Count Nonzero Verification Slice
+
+Scope:
+- Recent code-first pending backlog measured: `franken_numpy-ixs5y.246`.
+- Crate: `fnp-ufunc`.
+- Reference: NumPy 2.4.3.
+- Same-host decision machine: `thinkstation1`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS AFTER NARROWING | Original 16k activation was 3.56x slower than NumPy at 100k; final threshold was 4.69x faster at 100k and 3.48x faster at 1M. |
+| Revert discipline | PASS | The regressing 16k activation threshold was removed; final code raises activation to `1 << 19` and keeps 4096-element chunks for large rows. |
+| Targeted correctness | PASS | `count_nonzero_f64_parallel_matches_serial_reference_and_golden_sha256` passed after the intentional threshold-fixture digest update. |
+| Crate compile health | PASS | `cargo check -p fnp-ufunc` passed with `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`. |
+| Clippy health | PASS | `cargo clippy -p fnp-ufunc --all-targets -- -D warnings` passed. |
+| Formatting health | WARN | `cargo fmt --check` still reports broad pre-existing workspace formatting drift outside this slice. |
+| Evidence durability | PASS | Results recorded in `docs/NEGATIVE_EVIDENCE.md` and `tests/artifacts/perf/2026-06-19_ufunc_count_nonzero_vs_numpy/`. |
+
+Cluster score: **84 / 100**
+
+Score rationale:
+- +34 performance: the final code beats NumPy on both measured rows, but the
+  first measurement found a real 100k regression that had to be narrowed away.
+- +20 correctness: targeted golden guard passed after the intentional fixture
+  digest update.
+- +15 reproducibility: same-host FNP and NumPy timings and explicit target dir
+  are recorded.
+- +15 ledger discipline: every win, loss, weakened neutral-ish correction, and
+  retry predicate is recorded.
+- -16 project-wide release gap: this is one verified pending optimization, not a
+  full workspace gauntlet or global release certification.
+
+Current release posture:
+- `franken_numpy-ixs5y.246` is **measured keep after narrowing**, not pending.
+- Continue converting the remaining batch-test backlog into measured rows before
+  claiming broader `fnp-ufunc` performance readiness.

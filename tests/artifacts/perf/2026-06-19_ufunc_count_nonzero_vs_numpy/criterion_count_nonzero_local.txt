@@ -1,0 +1,20 @@
+   Compiling fnp-ufunc v0.1.0 (/data/projects/franken_numpy/crates/fnp-ufunc)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 30.20s
+     Running benches/elementwise.rs (/data/projects/.rch-targets/franken_numpy-cod-b/release/deps/elementwise-36bd3df0e01f30c6)
+Gnuplot not found, using plotters backend
+Benchmarking count_nonzero_flat_f64_sparse/100000
+Benchmarking count_nonzero_flat_f64_sparse/100000: Warming up for 1.0000 s
+Benchmarking count_nonzero_flat_f64_sparse/100000: Collecting 20 samples in estimated 3.0081 s (21k iterations)
+Benchmarking count_nonzero_flat_f64_sparse/100000: Analyzing
+count_nonzero_flat_f64_sparse/100000
+                        time:   [133.50 µs 138.89 µs 146.90 µs]
+                        thrpt:  [680.72 Melem/s 719.99 Melem/s 749.05 Melem/s]
+Found 2 outliers among 20 measurements (10.00%)
+  2 (10.00%) high severe
+Benchmarking count_nonzero_flat_f64_sparse/1000000
+Benchmarking count_nonzero_flat_f64_sparse/1000000: Warming up for 1.0000 s
+Benchmarking count_nonzero_flat_f64_sparse/1000000: Collecting 20 samples in estimated 3.0036 s (30k iterations)
+Benchmarking count_nonzero_flat_f64_sparse/1000000: Analyzing
+count_nonzero_flat_f64_sparse/1000000
+                        time:   [88.858 µs 92.072 µs 95.240 µs]
+                        thrpt:  [10.500 Gelem/s 10.861 Gelem/s 11.254 Gelem/s]

@@ -1,0 +1,5 @@
+python=3.13.7
+numpy=2.4.3
+host=thinkstation1
+size=100000 expected=18236 median_us=39.006 p95_us=44.300 min_us=38.247 mean_us=40.182 cv_pct=5.82 checksum=2279554708
+size=1000000 expected=182374 median_us=384.147 p95_us=407.125 min_us=367.571 mean_us=385.403 cv_pct=2.67 checksum=4559897122

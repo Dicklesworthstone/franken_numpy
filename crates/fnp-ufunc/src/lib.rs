@@ -47,7 +47,8 @@ use serde::{Deserialize, Serialize};
 const COMPENSATED_SUM_MIN_LEN: usize = 1_000_000;
 const BOOLEAN_SET_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const ARGWHERE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
-const COUNT_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const COUNT_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 19;
+const COUNT_NONZERO_PARALLEL_CHUNK_ELEMS: usize = 1 << 12;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
 const FLATNONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
@@ -27396,7 +27397,7 @@ impl UFuncArray {
                     && self.values.len() >= COUNT_NONZERO_PARALLEL_MIN_ELEMS
                 {
                     self.values
-                        .par_chunks(COUNT_NONZERO_PARALLEL_MIN_ELEMS / 4)
+                        .par_chunks(COUNT_NONZERO_PARALLEL_CHUNK_ELEMS)
                         .map(|chunk| chunk.iter().filter(|&&v| v != 0.0).count())
                         .sum::<usize>() as f64
                 } else {
@@ -63621,7 +63622,7 @@ print(json.dumps(payload))
         }
         assert_eq!(
             digest_hex,
-            "5643d08050c0ea41be0f8f11bd0f49a48523de5493eaabdb228cd12a79af9d50"
+            "ccf35bad9f5068b19f2a99fa7e7671df24faff7ebef72400b6e0b4b73207a981"
         );
     }
 
