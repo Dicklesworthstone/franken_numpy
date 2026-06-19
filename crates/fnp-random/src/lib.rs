@@ -868,7 +868,7 @@ impl Pcg64Rng {
     /// Fill a vector with `len` random u64 values.
     #[must_use]
     pub fn fill_u64(&mut self, len: usize) -> Vec<u64> {
-        (0..len).map(|_| self.next_u64()).collect()
+        parallel_pcg_u64_words(self, len)
     }
 
     /// Advance the state by `delta` steps (jump-ahead).
@@ -1037,7 +1037,7 @@ impl Pcg64DxsmRng {
     /// Fill a vector with `len` random u64 values.
     #[must_use]
     pub fn fill_u64(&mut self, len: usize) -> Vec<u64> {
-        (0..len).map(|_| self.next_u64()).collect()
+        parallel_pcg_u64_words(self, len)
     }
 
     /// Advance the state by `delta` steps (jump-ahead).
@@ -1977,8 +1977,8 @@ impl RngBackend {
     fn fill_u64(&mut self, len: usize) -> Vec<u64> {
         match self {
             Self::Deterministic(rng) => rng.fill_u64(len),
-            Self::Pcg64(rng) => (0..len).map(|_| rng.next_u64()).collect(),
-            Self::Pcg64Dxsm(rng) => (0..len).map(|_| rng.next_u64()).collect(),
+            Self::Pcg64(rng) => rng.fill_u64(len),
+            Self::Pcg64Dxsm(rng) => rng.fill_u64(len),
             Self::Mt19937(rng) => (0..len).map(|_| rng.next_u64()).collect(),
             Self::Philox(rng) => (0..len).map(|_| rng.next_u64()).collect(),
             Self::Sfc64(rng) => (0..len).map(|_| rng.next_u64()).collect(),
@@ -2103,6 +2103,37 @@ impl_pcg_advance_fill!(Pcg64Rng, Pcg64DxsmRng);
 /// real 128-bit multiply + rotate per element (≈10 ns), so the rayon dispatch
 /// pays off well before the L3 cliff that gates pure memory-bound ops.
 const PCG_PARALLEL_MIN_LEN: usize = 1 << 16;
+
+/// Fill raw u64 words for PCG-family cores with the same jump-ahead chunking as
+/// fixed-consumption floating distributions. Each output consumes exactly one
+/// `next_u64`, so chunk `k` starts from the serial state after `k` draws.
+fn parallel_pcg_u64_words<R: PcgAdvanceFill>(rng: &mut R, len: usize) -> Vec<u64> {
+    use rayon::prelude::*;
+
+    let mut out = vec![0u64; len];
+    let threads = rayon::current_num_threads();
+    if len < PCG_PARALLEL_MIN_LEN || threads < 2 {
+        for slot in &mut out {
+            *slot = rng.next_u64_word();
+        }
+        return out;
+    }
+
+    let chunk = len.div_ceil(threads).max(1);
+    out.par_chunks_mut(chunk)
+        .enumerate()
+        .for_each(|(chunk_idx, slice)| {
+            let start = chunk_idx * chunk;
+            let mut local = rng.clone();
+            local.advance_by(start as u128);
+            for slot in slice {
+                *slot = local.next_u64_word();
+            }
+        });
+
+    rng.advance_by(len as u128);
+    out
+}
 
 /// Generate `size` uniform `[0,1)` doubles, parallelizing PCG/PCG-DXSM cores via
 /// jump-ahead. NumPy's RNG is single-threaded, so this both closes the serial gap
@@ -17925,6 +17956,40 @@ for child in rng.spawn(n_children):
             digest, "e1c8d1e42f6c0539cb9abf781bc22c7c87dd6cca8ed14723488479cd2d3e6d0c",
             "PCG64 uniform random golden stream changed"
         );
+    }
+
+    #[test]
+    fn parallel_pcg_fill_u64_matches_serial_stream_state() {
+        let n = 70_000usize;
+        assert!(n > super::PCG_PARALLEL_MIN_LEN);
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut parallel = mk(1919);
+            let mut combined = parallel.fill_u64(n);
+            combined.extend(parallel.fill_u64(n + 3));
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_u64()).collect();
+
+            let mut serial = mk(1919);
+            let expected: Vec<u64> = (0..combined.len()).map(|_| serial.next_u64()).collect();
+            let after_serial: Vec<u64> = (0..17).map(|_| serial.next_u64()).collect();
+
+            assert_eq!(
+                combined, expected,
+                "dxsm={dxsm}: raw fill_u64 stream diverged from serial next_u64"
+            );
+            assert_eq!(
+                after_parallel, after_serial,
+                "dxsm={dxsm}: post-fill_u64 state diverged"
+            );
+        }
     }
 
     #[test]

@@ -344,6 +344,29 @@ fn bench_bitgen_comparison(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_pcg_fill_u64_large(c: &mut Criterion) {
+    let mut group = c.benchmark_group("pcg_fill_u64_large");
+    let sizes = [1000usize, 100_000, 1_000_000];
+
+    for &size in &sizes {
+        group.throughput(Throughput::Elements(size as u64));
+
+        let ss = seed_sequence();
+        let mut rng = Pcg64Rng::from_seed_sequence(&ss).unwrap();
+        group.bench_with_input(BenchmarkId::new("pcg64", size), &size, |b, &size| {
+            b.iter(|| black_box(rng.fill_u64(size)))
+        });
+
+        let ss = seed_sequence();
+        let mut rng = Pcg64DxsmRng::from_seed_sequence(&ss).unwrap();
+        group.bench_with_input(BenchmarkId::new("pcg64dxsm", size), &size, |b, &size| {
+            b.iter(|| black_box(rng.fill_u64(size)))
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_pcg64_next_u64,
@@ -362,6 +385,7 @@ criterion_group!(
     bench_generator_triangular,
     bench_generator_vonmises,
     bench_bitgen_comparison,
+    bench_pcg_fill_u64_large,
 );
 
 criterion_main!(benches);
