@@ -4,6 +4,56 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-19 - BOLD-VERIFY Keep: fnp-random full-range uint8 integers byte stream
+
+Artifact directory: `tests/artifacts/perf/2026-06-19_random_uint8_full_range_byte_fill/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.264`.
+- Agent: `YellowElk` / `cod-a`.
+- Subject API: direct Rust `fnp-random` `Generator::integers_u8_shaped(0, 256, Some(&[size]), false)`.
+- Oracle/reference: NumPy `np.random.Generator(np.random.PCG64(42)).integers(0, 256, size=size, dtype=np.uint8)` inside the Criterion benchmark harness.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Coordination note: Agent Mail registration/reservation failed before edits because the local Agent Mail SQLite DB reported `database disk image is malformed`; work was isolated in a clean detached scratch worktree and avoided cod-b-owned `fnp-ufunc` / `fnp-linalg` surfaces.
+
+Lever:
+- Old path sent full-range byte integers through the buffered bounded-Lemire helper even though `rng == u8::MAX` has no rejection. The kept path emits the raw byte stream directly and applies the wrapping offset, using the existing direct PCG final-buffer byte fill for large arrays and a four-byte-per-`next_uint32` scalar writer below the direct-fill threshold.
+- Alien-graveyard mapping: Vectorized Execution / morsel-style final-buffer fill for the large PCG path, plus "constants kill you" for the 100k row where eliminating generic bounded-loop overhead mattered more than adding parallelism.
+
+Commands:
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-random --bench random_vs_numpy -- vs_numpy_pcg64_uint8_full_range --sample-size 10 --measurement-time 2 --warm-up-time 1 --output-format bencher`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-random full_range_byte_integers_match_scalar_narrow_stream_and_state -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-random narrow_width_integers_match_live_numpy_oracle_when_available -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo check -p fnp-random --all-targets`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo clippy -p fnp-random --all-targets -- -D warnings`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo build -p fnp-random --release`
+- `git diff --check`
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.264` | Baseline scalar bounded `uint8` loop | 100k, `hz2` | `scorecard.md` | 329,987 ns | 105,292 ns | 3.13x slower | Open gap confirmed |
+| `franken_numpy-ixs5y.264` | Baseline scalar bounded `uint8` loop | 1M, `hz2` | `scorecard.md` | 3,241,197 ns | 788,860 ns | 4.11x slower | Open gap confirmed |
+| `franken_numpy-ixs5y.264` | Candidate A, direct `bytes` reuse only | 100k, `hz2` | `scorecard.md` | 106,506 ns | 101,368 ns | 1.05x slower | Superseded |
+| `franken_numpy-ixs5y.264` | Candidate A, direct `bytes` reuse only | 1M, `hz2` | `scorecard.md` | 286,011 ns | 757,753 ns | 0.377x, 2.65x faster | Superseded |
+| `franken_numpy-ixs5y.264` | Candidate B kept, manual sub-threshold + direct large byte fill | 100k, `vmi1149989` | `scorecard.md` | 104,370 ns | 127,730 ns | 0.817x, 1.22x faster | Keep |
+| `franken_numpy-ixs5y.264` | Candidate B kept, manual sub-threshold + direct large byte fill | 1M, `vmi1149989` | `scorecard.md` | 725,711 ns | 1,155,285 ns | 0.628x, 1.59x faster | Keep |
+| `franken_numpy-ixs5y.264` | Candidate B supplemental long run | 100k, `vmi1149989` | `scorecard.md` | 88,959 ns | 118,758 ns | 0.749x, 1.34x faster | Confirmation |
+| `franken_numpy-ixs5y.264` | Candidate B supplemental long run | 1M, `vmi1149989` | `scorecard.md` | 432,705 ns | 1,092,147 ns | 0.396x, 2.52x faster | Confirmation |
+
+Scorecard:
+- Baseline vs NumPy: win/loss/neutral = 0/2/0.
+- Kept final vs NumPy decision rows: win/loss/neutral = 2/0/0.
+- Rejected/superseded candidate rows: win/loss/neutral = 1/1/0.
+- The final keep is based on same-run head-to-head Criterion rows where the Rust and embedded Python NumPy timings ran on the same remote worker process. Old-to-new absolute speedup is not used as a same-worker decision because RCH did not preserve a single worker across every exploratory run.
+
+Validation notes:
+- New scalar-stream/state guard passed for PCG64 and PCG64DXSM.
+- Existing live NumPy narrow-integer oracle shard passed on rerun. The first attempt selected `ovh-b` and failed before repository code with `zerocopy` build-script `SIGILL`; this is recorded as worker infra noise, not repo evidence.
+- `cargo check -p fnp-random --all-targets`, `cargo clippy -p fnp-random --all-targets -- -D warnings`, `cargo build -p fnp-random --release`, and `git diff --check` passed.
+- `cargo fmt --check -p fnp-random` still reports broad pre-existing rustfmt drift in unrelated `crates/fnp-random/src/lib.rs` sections; this commit keeps that out of the perf proof.
+- UBS on the changed-file set exited 1 after scanning the two Rust source files, with the crate's broad existing inventory (66 critical, 2141 warnings, 659 info); sampled findings were pre-existing `unwrap`/assert/direct-index/security-heuristic inventory outside the new full-range byte fast path.
+- Retry predicate: do not revisit generic bounded-loop tweaks for full-range byte integers. Retry only with same-run NumPy rows that preserve the scalar byte stream and beat the kept path at both 100k and 1M.
+
 ## 2026-06-19 - BOLD-VERIFY Keep: FNP compress direct bool-mask decode vs NumPy
 
 Artifact directory: `tests/artifacts/perf/2026-06-19_ufunc_compress_simd_cod_a/`

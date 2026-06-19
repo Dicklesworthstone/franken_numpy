@@ -14,6 +14,7 @@ const SEED: u32 = 42;
 const RAW_U64_SIZES: [usize; 2] = [100_000, 1_000_000];
 const BYTE_SIZES: [usize; 2] = [100_000, 1_000_000];
 const DIST_SIZES: [usize; 2] = [100_000, 1_000_000];
+const NARROW_INTEGER_SIZES: [usize; 2] = [100_000, 1_000_000];
 
 const NUMPY_RANDOM_RAW_SCRIPT: &str = r#"
 import sys, time
@@ -89,6 +90,25 @@ for _ in range(iters):
 elapsed = time.perf_counter() - start
 
 print(f"{elapsed:.12f} {checksum:.17g}")
+"#;
+
+const NUMPY_UINT8_FULL_RANGE_SCRIPT: &str = r#"
+import sys, time
+import numpy as np
+
+iters = int(sys.argv[1])
+size = int(sys.argv[2])
+rng = np.random.Generator(np.random.PCG64(42))
+checksum = 0
+
+start = time.perf_counter()
+for _ in range(iters):
+    values = rng.integers(0, 256, size=size, dtype=np.uint8)
+    checksum ^= int(values[0])
+    checksum ^= int(values[-1])
+elapsed = time.perf_counter() - start
+
+print(f"{elapsed:.12f} {checksum}")
 "#;
 
 fn seed_sequence() -> SeedSequence {
@@ -269,11 +289,50 @@ fn bench_pcg64_laplace_vs_numpy(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_pcg64_uint8_full_range_vs_numpy(c: &mut Criterion) {
+    let mut group = c.benchmark_group("vs_numpy_pcg64_uint8_full_range");
+
+    for &size in &NARROW_INTEGER_SIZES {
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("franken_uint8_full_range", size),
+            &size,
+            |b, &size| {
+                b.iter_custom(|iterations| {
+                    let mut generator = generator_from_pcg64();
+                    let start = Instant::now();
+                    for _ in 0..iterations {
+                        let output = generator
+                            .integers_u8_shaped(0, 256, Some(&[size]), false)
+                            .expect("uint8 full-range integers should build");
+                        black_box(output);
+                    }
+                    start.elapsed()
+                });
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("numpy_uint8_full_range", size),
+            &size,
+            |b, &size| {
+                b.iter_custom(|iterations| {
+                    run_numpy_timed(NUMPY_UINT8_FULL_RANGE_SCRIPT, iterations, size)
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_pcg64_random_raw_vs_numpy,
     bench_pcg64_bytes_vs_numpy,
     bench_pcg64_gumbel_vs_numpy,
     bench_pcg64_laplace_vs_numpy,
+    bench_pcg64_uint8_full_range_vs_numpy,
 );
 criterion_main!(benches);

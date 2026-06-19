@@ -4227,6 +4227,40 @@ impl Generator {
         off.wrapping_add(self.buffered_bounded_lemire_uint8(rng, bcnt, buf))
     }
 
+    fn full_range_u8_from_byte_stream(&mut self, off: u8, size: usize) -> Vec<u8> {
+        if size >= PCG_BYTES_DIRECT_MIN_LEN + 4 && self.bit_generator.rng.has_pcg_byte_fill() {
+            let mut values = self.bytes(size);
+            if off != 0 {
+                for value in &mut values {
+                    *value = value.wrapping_add(off);
+                }
+            }
+            return values;
+        }
+
+        let mut values = Vec::with_capacity(size);
+        let mut remaining = size;
+        while remaining >= 4 {
+            let word = self.next_uint32();
+            values.push((word as u8).wrapping_add(off));
+            values.push(((word >> 8) as u8).wrapping_add(off));
+            values.push(((word >> 16) as u8).wrapping_add(off));
+            values.push(((word >> 24) as u8).wrapping_add(off));
+            remaining -= 4;
+        }
+        if remaining > 0 {
+            let word = self.next_uint32();
+            values.push((word as u8).wrapping_add(off));
+            if remaining > 1 {
+                values.push(((word >> 8) as u8).wrapping_add(off));
+            }
+            if remaining > 2 {
+                values.push(((word >> 16) as u8).wrapping_add(off));
+            }
+        }
+        values
+    }
+
     /// NumPy-compatible bounded uint64 with automatic 32/64-bit dispatch.
     ///
     /// Returns a value in `[0, rng]` (inclusive).
@@ -4565,6 +4599,13 @@ impl Generator {
         )?;
         let off = (low as i8) as u8;
         let rng = (high - low) as u8;
+        if rng == u8::MAX {
+            return Ok(self
+                .full_range_u8_from_byte_stream(off, size)
+                .into_iter()
+                .map(|value| value as i8)
+                .collect());
+        }
         let mut bcnt = 0;
         let mut buf = 0;
         Ok((0..size)
@@ -4636,6 +4677,9 @@ impl Generator {
             Self::narrow_integer_high_inclusive(low, high, 0, i64::from(u8::MAX), endpoint)?;
         let off = low as u8;
         let rng = (high - low) as u8;
+        if rng == u8::MAX {
+            return Ok(self.full_range_u8_from_byte_stream(off, size));
+        }
         let mut bcnt = 0;
         let mut buf = 0;
         Ok((0..size)
@@ -16879,6 +16923,61 @@ for child in rng.spawn(n_children):
                 .1,
             vec![89u16, 125, 45, 121, 59, 249, 5, 26, 48, 78, 89, 73],
         );
+    }
+
+    #[test]
+    fn full_range_byte_integers_match_scalar_narrow_stream_and_state() {
+        let n = super::PCG_BYTES_DIRECT_MIN_LEN + 17;
+
+        for dxsm in [false, true] {
+            let mk = |seed: u64| {
+                if dxsm {
+                    Generator::from_pcg64_dxsm(seed).unwrap()
+                } else {
+                    Generator::from_pcg64(seed).unwrap()
+                }
+            };
+
+            let mut fast_u8 = mk(8181);
+            let got_u8 = fast_u8
+                .integers_u8_endpoint_mode(0, 256, n, false)
+                .unwrap();
+            let after_fast_u8: Vec<u32> = (0..17).map(|_| fast_u8.next_uint32()).collect();
+
+            let mut scalar_u8 = mk(8181);
+            let mut bcnt = 0;
+            let mut buf = 0;
+            let want_u8: Vec<u8> = (0..n)
+                .map(|_| scalar_u8.numpy_bounded_uint8(0, u8::MAX, &mut bcnt, &mut buf))
+                .collect();
+            let after_scalar_u8: Vec<u32> = (0..17).map(|_| scalar_u8.next_uint32()).collect();
+
+            assert_eq!(got_u8, want_u8, "dxsm={dxsm}: uint8 full range changed");
+            assert_eq!(
+                after_fast_u8, after_scalar_u8,
+                "dxsm={dxsm}: uint8 post-call stream changed"
+            );
+
+            let mut fast_i8 = mk(9191);
+            let got_i8 = fast_i8
+                .integers_i8_endpoint_mode(-128, 128, n, false)
+                .unwrap();
+            let after_fast_i8: Vec<u32> = (0..17).map(|_| fast_i8.next_uint32()).collect();
+
+            let mut scalar_i8 = mk(9191);
+            let mut bcnt = 0;
+            let mut buf = 0;
+            let want_i8: Vec<i8> = (0..n)
+                .map(|_| scalar_i8.numpy_bounded_uint8(128, u8::MAX, &mut bcnt, &mut buf) as i8)
+                .collect();
+            let after_scalar_i8: Vec<u32> = (0..17).map(|_| scalar_i8.next_uint32()).collect();
+
+            assert_eq!(got_i8, want_i8, "dxsm={dxsm}: int8 full range changed");
+            assert_eq!(
+                after_fast_i8, after_scalar_i8,
+                "dxsm={dxsm}: int8 post-call stream changed"
+            );
+        }
     }
 
     #[test]
