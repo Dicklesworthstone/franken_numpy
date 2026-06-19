@@ -299,6 +299,24 @@ fn bench_generator_vonmises(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_generator_bytes(c: &mut Criterion) {
+    let mut group = c.benchmark_group("generator_bytes");
+    let sizes = [1000usize, 100_000, 1_000_000];
+
+    for &size in &sizes {
+        let ss = seed_sequence();
+        let bg = BitGenerator::from_seed_sequence(BitGeneratorKind::Pcg64, &ss).unwrap();
+        let mut generator = Generator::from_bit_generator(bg);
+
+        group.throughput(Throughput::Bytes(size as u64));
+        group.bench_with_input(BenchmarkId::new("pcg64", size), &size, |b, &size| {
+            b.iter(|| black_box(generator.bytes(size)))
+        });
+    }
+
+    group.finish();
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Bit generator comparison (same operation across all generators)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -384,6 +402,7 @@ criterion_group!(
     bench_generator_laplace,
     bench_generator_triangular,
     bench_generator_vonmises,
+    bench_generator_bytes,
     bench_bitgen_comparison,
     bench_pcg_fill_u64_large,
 );

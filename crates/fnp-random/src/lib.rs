@@ -28,6 +28,13 @@ const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 const MIX_CONST1: u64 = 0xBF58_476D_1CE4_E5B9;
 const MIX_CONST2: u64 = 0x94D0_49BB_1331_11EB;
 const BETA_TINY_THRESHOLD: f64 = 3e-103;
+const BYTES_WORD_FILL_MIN_LEN: usize = 1 << 16;
+
+fn append_u32_bytes(out: &mut Vec<u8>, word: u32, target_len: usize) {
+    let remaining = target_len - out.len();
+    let bytes = word.to_le_bytes();
+    out.extend_from_slice(&bytes[..remaining.min(4)]);
+}
 
 fn wrap_angle_to_pi(angle: f64) -> f64 {
     (angle + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI
@@ -4770,6 +4777,9 @@ impl Generator {
             let _ = self.next_uint32();
             return Vec::new();
         }
+        if length >= BYTES_WORD_FILL_MIN_LEN {
+            return self.bytes_from_word_fill(length);
+        }
         let mut result = Vec::with_capacity(length);
         let mut remaining = length;
         while remaining > 0 {
@@ -4779,6 +4789,42 @@ impl Generator {
             result.extend_from_slice(&bytes[..take]);
             remaining -= take;
         }
+        result
+    }
+
+    fn bytes_from_word_fill(&mut self, length: usize) -> Vec<u8> {
+        debug_assert!(length > 0);
+        let mut result = Vec::with_capacity(length);
+        let mut remaining_u32_words = length.div_ceil(4);
+
+        if self.u32_buf_ready {
+            self.u32_buf_ready = false;
+            append_u32_bytes(&mut result, self.u32_buf, length);
+            remaining_u32_words -= 1;
+            if remaining_u32_words == 0 {
+                return result;
+            }
+        }
+
+        let raw_words = self.bit_generator.fill_u64(remaining_u32_words.div_ceil(2));
+        let mut consumed_u32_words = 0usize;
+        for raw in raw_words {
+            append_u32_bytes(&mut result, raw as u32, length);
+            consumed_u32_words += 1;
+            if consumed_u32_words == remaining_u32_words {
+                self.u32_buf = (raw >> 32) as u32;
+                self.u32_buf_ready = true;
+                break;
+            }
+
+            append_u32_bytes(&mut result, (raw >> 32) as u32, length);
+            consumed_u32_words += 1;
+            if consumed_u32_words == remaining_u32_words {
+                break;
+            }
+        }
+
+        debug_assert_eq!(result.len(), length);
         result
     }
 
@@ -13625,6 +13671,62 @@ for child in rng.spawn(n_children):
         let first = rng.bytes(3);
         let second = rng.bytes(3);
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn bytes_large_word_fill_matches_serial_uint32_stream_state() {
+        fn serial_bytes(rng: &mut Generator, length: usize) -> Vec<u8> {
+            if length == 0 {
+                let _ = rng.next_uint32();
+                return Vec::new();
+            }
+            let mut result = Vec::with_capacity(length);
+            let mut remaining = length;
+            while remaining > 0 {
+                let word = rng.next_uint32();
+                let bytes = word.to_le_bytes();
+                let take = remaining.min(4);
+                result.extend_from_slice(&bytes[..take]);
+                remaining -= take;
+            }
+            result
+        }
+
+        let n = BYTES_WORD_FILL_MIN_LEN + 17;
+        for dxsm in [false, true] {
+            for prebuffered in [false, true] {
+                let mk = |seed: u64| {
+                    if dxsm {
+                        Generator::from_pcg64_dxsm(seed).unwrap()
+                    } else {
+                        Generator::from_pcg64(seed).unwrap()
+                    }
+                };
+
+                let mut parallel = mk(515151);
+                let mut serial = mk(515151);
+                if prebuffered {
+                    assert_eq!(parallel.next_uint32(), serial.next_uint32());
+                }
+
+                let mut got = parallel.bytes(n);
+                got.extend(parallel.bytes(n + 5));
+                let mut want = serial_bytes(&mut serial, n);
+                want.extend(serial_bytes(&mut serial, n + 5));
+
+                assert_eq!(
+                    got, want,
+                    "dxsm={dxsm} prebuffered={prebuffered}: bytes stream diverged"
+                );
+
+                let after_parallel: Vec<u32> = (0..17).map(|_| parallel.next_uint32()).collect();
+                let after_serial: Vec<u32> = (0..17).map(|_| serial.next_uint32()).collect();
+                assert_eq!(
+                    after_parallel, after_serial,
+                    "dxsm={dxsm} prebuffered={prebuffered}: post-bytes u32 state diverged"
+                );
+            }
+        }
     }
 
     #[test]
