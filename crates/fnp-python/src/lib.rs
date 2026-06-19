@@ -16821,6 +16821,31 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let fallback =
         || -> PyResult<Py<PyAny>> { Ok(slogdet_fn.call1((a_for_fallback.bind(py),))?.unbind()) };
 
+    // Same OpenBLAS getrf cliff as det(): the native LU loses ~2.2-2.6x to numpy for
+    // a single matrix below n~800 but wins 25x+ above the cliff (see det). Peek the
+    // shape/dtype and delegate medium/small real-float 2-D square matrices straight
+    // to numpy, skipping the wasted extract. (Batched path below is unchanged.)
+    const SLOGDET_NATIVE_MIN_DIM: usize = 832;
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && let Ok(shape) = a
+            .bind(py)
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+        && shape.len() == 2
+        && shape[0] == shape[1]
+        && shape[0] < SLOGDET_NATIVE_MIN_DIM
+        && a
+            .bind(py)
+            .getattr("dtype")
+            .and_then(|d| d.getattr("kind"))
+            .and_then(|k| k.extract::<String>())
+            .map(|k| k == "f")
+            .unwrap_or(false)
+    {
+        return fallback();
+    }
+
     let array = match extract_precise_numeric_array(py, a.bind(py), "slogdet(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -16851,7 +16876,11 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
         }
         return fallback();
     }
-    if shape.len() != 2 || shape[0] != shape[1] || !real_f64_finite {
+    if shape.len() != 2
+        || shape[0] != shape[1]
+        || !real_f64_finite
+        || shape[0] < SLOGDET_NATIVE_MIN_DIM
+    {
         return fallback();
     }
 
