@@ -1,0 +1,376 @@
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:2442:16
+     |
+2442 |             && let Some(entry) = registry.resolve(ufunc_name, &[lhs.dtype(), rhs.dtype()])
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:2457:16
+     |
+2457 |             if let Some(signature) = fixed_signature
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:4209:16
+     |
+4209 |             if let Some(mask) = where_mask
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:5620:24
+     |
+5620 |         if endpoint && let Some(last) = values.last_mut() {
+     |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:6829:20
+     |
+6829 |                   && let (Some(l), Some(r)) = (
+     |  ____________________^
+6830 | |                     self.synthesized_integer_sidecar(op.name())?,
+6831 | |                     rhs.synthesized_integer_sidecar(op.name())?,
+6832 | |                 )
+     | |_________________^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:7833:16
+     |
+7833 |               && let (Some(l), Some(r)) = (
+     |  ________________^
+7834 | |                 self.synthesized_integer_sidecar(op.name())?,
+7835 | |                 rhs.synthesized_integer_sidecar(op.name())?,
+7836 | |             )
+     | |_____________^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:8540:16
+     |
+8540 |             && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("min")?
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:8586:16
+     |
+8586 |             && let Some(IntegerSidecar::U64(values)) = self.synthesized_integer_sidecar("min")?
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:8707:16
+     |
+8707 |             && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("max")?
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:8753:16
+     |
+8753 |             && let Some(IntegerSidecar::U64(values)) = self.synthesized_integer_sidecar("max")?
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:9145:16
+     |
+9145 |             && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("cumsum")?
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:9178:16
+     |
+9178 |             && let Some(IntegerSidecar::U64(values)) = self.synthesized_integer_sidecar("cumsum")?
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:9246:16
+     |
+9246 |               && let Some(IntegerSidecar::I64(values)) =
+     |  ________________^
+9247 | |                 self.synthesized_integer_sidecar("cumprod")?
+     | |____________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:9280:16
+     |
+9280 |               && let Some(IntegerSidecar::U64(values)) =
+     |  ________________^
+9281 | |                 self.synthesized_integer_sidecar("cumprod")?
+     | |____________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:9600:16
+     |
+9600 |             && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("argmin")?
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:9648:16
+     |
+9648 |             && let Some(IntegerSidecar::U64(values)) = self.synthesized_integer_sidecar("argmin")?
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:9766:16
+     |
+9766 |             && let Some(IntegerSidecar::I64(values)) = self.synthesized_integer_sidecar("argmax")?
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+    --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:9814:16
+     |
+9814 |             && let Some(IntegerSidecar::U64(values)) = self.synthesized_integer_sidecar("argmax")?
+     |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:10694:24
+      |
+10694 |                     if let Some(ref mut s) = sidecar_vals
+      |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:10695:28
+      |
+10695 |                         && let Some(ref ins_s) = insert_sidecar
+      |                            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:10766:36
+      |
+10766 | ...                   if let Some(ref mut s) = sidecar_vals
+      |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:10767:40
+      |
+10767 | ...                   && let Some(ref ins_s) = insert_sidecar
+      |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:10784:32
+      |
+10784 | ...                   if let Some(ref mut s) = sidecar_vals
+      |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:10785:36
+      |
+10785 | ...                   && let Some(ref self_s) = self.integer_sidecar
+      |                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:11444:24
+      |
+11444 |                     && let Some(values) = exact_i64_counting_sort_output(&self.values)
+      |                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:17718:16
+      |
+17718 |               && let Some(IntegerSidecar::I64(mut values)) =
+      |  ________________^
+17719 | |                 self.synthesized_integer_sidecar("mode")?
+      | |_________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:17745:16
+      |
+17745 |               && let Some(IntegerSidecar::U64(mut values)) =
+      |  ________________^
+17746 | |                 self.synthesized_integer_sidecar("mode")?
+      | |_________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:18611:12
+      |
+18611 |         if let Some(coords) = spacing
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:18957:12
+      |
+18957 |         if let Some(w) = weights
+      |            ^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:19258:16
+      |
+19258 |             && let Some(result) = self.bincount_unweighted_small_range(minlength)?
+      |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:22591:16
+      |
+22591 |               && let Some(result) =
+      |  ________________^
+22592 | |                 Self::einsum_single_operand_fast(input_subs[0], &output_labels, operands[0])?
+      | |_____________________________________________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:22761:16
+      |
+22761 |               && let Some(plan) =
+      |  ________________^
+22762 | |                 einsum_gemm_plan(&input_chars, &output_labels, &contracted, operands)
+      | |_____________________________________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:22914:16
+      |
+22914 |             && let Ok(folded) = Self::einsum_optimized(subscripts, operands, "greedy")
+      |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:23690:12
+      |
+23690 |         if let Ok(Some(IntegerSidecar::I64(values))) = self.synthesized_integer_sidecar("byteswap")
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:23701:12
+      |
+23701 |         if let Ok(Some(IntegerSidecar::U64(values))) = self.synthesized_integer_sidecar("byteswap")
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:23815:24
+      |
+23815 |                       && let Some(IntegerSidecar::I64(values)) =
+      |  ________________________^
+23816 | |                         self.synthesized_integer_sidecar("ptp")?
+      | |________________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:23842:24
+      |
+23842 |                       && let Some(IntegerSidecar::U64(values)) =
+      |  ________________________^
+23843 | |                         self.synthesized_integer_sidecar("ptp")?
+      | |________________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:24449:20
+      |
+24449 |                 && let Some(first_zero) = self.values.iter().copied().find(|value| *value == 0.0)
+      |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:24510:20
+      |
+24510 |                 if let Some(first_index) = first_indices.last_mut()
+      |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:24663:16
+      |
+24663 |               && let Some(IntegerSidecar::I64(values)) =
+      |  ________________^
+24664 | |                 self.synthesized_integer_sidecar("unique_axis")?
+      | |________________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:24681:20
+      |
+24681 |                 if let Some(group_idx) = groups.len().checked_sub(1)
+      |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:24736:16
+      |
+24736 |               && let Some(IntegerSidecar::U64(values)) =
+      |  ________________^
+24737 | |                 self.synthesized_integer_sidecar("unique_axis")?
+      | |________________________________________________________________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:24754:20
+      |
+24754 |                 if let Some(group_idx) = groups.len().checked_sub(1)
+      |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:24828:16
+      |
+24828 |             if let Some(group_idx) = groups.len().checked_sub(1)
+      |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:24889:16
+      |
+24889 |               && let (Ok(Some(IntegerSidecar::I64(values))), Ok(Some(IntegerSidecar::I64(set)))) = (
+      |  ________________^
+24890 | |                 self.synthesized_integer_sidecar("in1d"),
+24891 | |                 test_elements.synthesized_integer_sidecar("in1d"),
+24892 | |             )
+      | |_____________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:24904:16
+      |
+24904 |               && let (Ok(Some(IntegerSidecar::U64(values))), Ok(Some(IntegerSidecar::U64(set)))) = (
+      |  ________________^
+24905 | |                 self.synthesized_integer_sidecar("in1d"),
+24906 | |                 test_elements.synthesized_integer_sidecar("in1d"),
+24907 | |             )
+      | |_____________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:24966:16
+      |
+24966 |               && let (Ok(Some(IntegerSidecar::U64(mut a))), Ok(Some(IntegerSidecar::U64(b)))) = (
+      |  ________________^
+24967 | |                 self.synthesized_integer_sidecar("union1d"),
+24968 | |                 other.synthesized_integer_sidecar("union1d"),
+24969 | |             )
+      | |_____________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:25032:16
+      |
+25032 |               && let (Ok(Some(IntegerSidecar::U64(mut a))), Ok(Some(IntegerSidecar::U64(mut b)))) = (
+      |  ________________^
+25033 | |                 self.synthesized_integer_sidecar("intersect1d"),
+25034 | |                 other.synthesized_integer_sidecar("intersect1d"),
+25035 | |             )
+      | |_____________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:25116:16
+      |
+25116 |               && let (Ok(Some(IntegerSidecar::U64(mut a))), Ok(Some(IntegerSidecar::U64(mut b)))) = (
+      |  ________________^
+25117 | |                 self.synthesized_integer_sidecar("setdiff1d"),
+25118 | |                 other.synthesized_integer_sidecar("setdiff1d"),
+25119 | |             )
+      | |_____________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:25206:16
+      |
+25206 |               && let (Ok(Some(IntegerSidecar::U64(mut a))), Ok(Some(IntegerSidecar::U64(mut b)))) = (
+      |  ________________^
+25207 | |                 self.synthesized_integer_sidecar("setxor1d"),
+25208 | |                 other.synthesized_integer_sidecar("setxor1d"),
+25209 | |             )
+      | |_____________^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:26213:16
+      |
+26213 |             if let Some(last) = real_shape.last()
+      |                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:34897:12
+      |
+34897 |         if let Some(ref m) = mask
+      |            ^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:35465:25
+      |
+35465 |         if is_masked && let Some(mask) = self.mask.as_mut() {
+      |                         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error: let chains are only allowed in Rust 2024 or later
+     --> /data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc/src/lib.rs:36473:12
+      |
+36473 |         if let Some(m) = &self.mask
+      |            ^^^^^^^^^^^^^^^^^^^^^^^^
+

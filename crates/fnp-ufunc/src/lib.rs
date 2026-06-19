@@ -50,7 +50,6 @@ const ARGWHERE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COUNT_NONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
-const EXTRACT_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const FLATNONZERO_PARALLEL_MIN_ELEMS: usize = 1 << 14;
 const INSERT_FLAT_SPLICE_MIN_WORK: usize = 1 << 14;
 const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
@@ -16299,39 +16298,6 @@ impl UFuncArray {
                 condition.values.len(),
                 arr.values.len()
             )));
-        }
-        if arr.values.len() >= EXTRACT_PARALLEL_MIN_ELEMS
-            && rayon::current_num_threads() >= 2
-            && arr.dtype == DType::F64
-            && arr.integer_sidecar.is_none()
-            && condition.integer_sidecar.is_none()
-        {
-            let chunk_len = EXTRACT_PARALLEL_MIN_ELEMS / 4;
-            let chunks: Vec<Vec<f64>> = condition
-                .values
-                .par_chunks(chunk_len)
-                .zip(arr.values.par_chunks(chunk_len))
-                .map(|(condition_chunk, value_chunk)| {
-                    let mut selected = Vec::new();
-                    for (&c, &v) in condition_chunk.iter().zip(value_chunk) {
-                        if c != 0.0 {
-                            selected.push(v);
-                        }
-                    }
-                    selected
-                })
-                .collect();
-            let n: usize = chunks.iter().map(Vec::len).sum();
-            let mut values = Vec::with_capacity(n);
-            for chunk in chunks {
-                values.extend(chunk);
-            }
-            return Ok(Self {
-                shape: vec![n],
-                values,
-                dtype: arr.dtype,
-                integer_sidecar: None,
-            });
         }
         let mut values = Vec::new();
         let mut source_indices = Vec::new();
@@ -53928,8 +53894,8 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn boolean_index_f64_parallel_matches_serial_reference_and_golden_sha256() {
-        let n = super::EXTRACT_PARALLEL_MIN_ELEMS + 509;
+    fn boolean_index_f64_matches_serial_reference_and_golden_sha256() {
+        let n = (1 << 14) + 509;
         let values: Vec<f64> = (0..n)
             .map(|i| {
                 if i % 229 == 0 {
@@ -60653,8 +60619,8 @@ print(json.dumps(payload))
     }
 
     #[test]
-    fn extract_f64_parallel_matches_serial_reference_and_golden_sha256() {
-        let n = super::EXTRACT_PARALLEL_MIN_ELEMS + 313;
+    fn extract_f64_matches_serial_reference_and_golden_sha256() {
+        let n = (1 << 14) + 313;
         let arr_values: Vec<f64> = (0..n)
             .map(|i| {
                 if i % 211 == 0 {
@@ -60705,7 +60671,7 @@ print(json.dumps(payload))
             assert_eq!(
                 got.to_bits(),
                 want.to_bits(),
-                "parallel extract bit drift at index {idx}"
+                "extract bit drift at index {idx}"
             );
             digest.update(got.to_le_bytes());
         }

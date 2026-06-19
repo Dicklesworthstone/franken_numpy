@@ -1,0 +1,99 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.185
+   Compiling zerocopy v0.8.48
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+   Compiling getrandom v0.3.4
+   Compiling either v1.15.0
+   Compiling autocfg v1.5.0
+   Compiling serde v1.0.228
+   Compiling rayon-core v1.13.0
+   Compiling zmij v1.0.21
+   Compiling rustix v1.1.4
+   Compiling typenum v1.20.0
+   Compiling getrandom v0.4.2
+   Compiling serde_json v1.0.149
+   Compiling bitflags v2.11.1
+   Compiling linux-raw-sys v0.12.1
+   Compiling itoa v1.0.18
+   Compiling regex-syntax v0.8.10
+   Compiling memchr v2.8.0
+   Compiling fastrand v2.4.1
+   Compiling ciborium-io v0.2.2
+   Compiling once_cell v1.21.4
+   Compiling plotters-backend v0.3.7
+   Compiling clap_lex v1.1.0
+   Compiling anstyle v1.0.14
+   Compiling same-file v1.0.6
+   Compiling const-oid v0.10.2
+   Compiling quick-error v1.2.3
+   Compiling cast v0.3.0
+   Compiling fnv v1.0.7
+   Compiling fnp-ndarray v0.1.0 (/data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ndarray)
+   Compiling bit-vec v0.8.0
+   Compiling unarray v0.1.4
+   Compiling anes v0.1.6
+   Compiling fnp-runtime v0.1.0 (/data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-runtime)
+   Compiling oorandom v11.1.5
+   Compiling cpufeatures v0.3.0
+   Compiling walkdir v2.5.0
+   Compiling itertools v0.10.5
+   Compiling itertools v0.13.0
+   Compiling clap_builder v4.6.0
+   Compiling bit-set v0.8.0
+   Compiling plotters-svg v0.3.7
+   Compiling num-traits v0.2.19
+   Compiling crossbeam-epoch v0.9.18
+   Compiling hybrid-array v0.4.10
+   Compiling syn v2.0.117
+   Compiling crossbeam-deque v0.8.6
+   Compiling plotters v0.3.7
+   Compiling wait-timeout v0.2.1
+   Compiling crypto-common v0.2.1
+   Compiling block-buffer v0.12.0
+   Compiling rand_core v0.9.5
+   Compiling criterion-plot v0.5.0
+   Compiling rand_xorshift v0.4.0
+   Compiling rand v0.9.4
+   Compiling rayon v1.12.0
+   Compiling regex-automata v0.4.14
+   Compiling tempfile v3.27.0
+   Compiling digest v0.11.2
+   Compiling sha2 v0.11.0
+   Compiling clap v4.6.1
+   Compiling rusty-fork v0.3.1
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling regex v1.12.3
+   Compiling fnp-linalg v0.1.0 (/data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-linalg)
+   Compiling tinytemplate v1.2.1
+   Compiling half v2.7.1
+   Compiling ppv-lite86 v0.2.21
+   Compiling ciborium-ll v0.2.2
+   Compiling fnp-dtype v0.1.0 (/data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-dtype)
+   Compiling rand_chacha v0.9.0
+   Compiling ciborium v0.2.2
+   Compiling proptest v1.11.0
+   Compiling fnp-ufunc v0.1.0 (/data/projects/franken_numpy_cod_a_gauntlet2/crates/fnp-ufunc)
+   Compiling criterion v0.6.0
+    Finished `bench` profile [optimized + debuginfo] target(s) in 35.99s
+     Running benches/elementwise.rs (/data/projects/.rch-targets/franken_numpy-cod-a/release/deps/elementwise-bdcc39a09983876b)
+Gnuplot not found, using plotters backend
+Benchmarking extract_f64_masked/100000
+Benchmarking extract_f64_masked/100000: Warming up for 1.0000 s
+Benchmarking extract_f64_masked/100000: Collecting 20 samples in estimated 3.0088 s (11k iterations)
+Benchmarking extract_f64_masked/100000: Analyzing
+extract_f64_masked/100000
+                        time:   [270.03 µs 275.46 µs 281.33 µs]
+                        thrpt:  [355.45 Melem/s 363.02 Melem/s 370.33 Melem/s]
+Benchmarking extract_f64_masked/1000000
+Benchmarking extract_f64_masked/1000000: Warming up for 1.0000 s
+Benchmarking extract_f64_masked/1000000: Collecting 20 samples in estimated 3.0536 s (3780 iterations)
+Benchmarking extract_f64_masked/1000000: Analyzing
+extract_f64_masked/1000000
+                        time:   [635.64 µs 668.54 µs 706.89 µs]
+                        thrpt:  [1.4147 Gelem/s 1.4958 Gelem/s 1.5732 Gelem/s]
+

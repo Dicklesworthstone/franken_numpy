@@ -3,6 +3,44 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-19 - Ufunc Extract Rejection Slice
+
+Scope:
+- Recent code-first pending backlog measured: `franken_numpy-ixs5y.244` via
+  cod-a verification bead `franken_numpy-ixs5y.259`.
+- Crate: `fnp-ufunc`.
+- Reference: NumPy 2.4.3.
+- Same-host decision machine: `thinkstation1`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | FAIL | Candidate was 2.18x slower at 100k and 1.22x slower at 1M. |
+| Revert discipline | PASS | Removed the `.244` parallel extract production fast path after measurement. |
+| Targeted correctness | PASS | Post-revert extract and boolean-index golden guards passed remotely through `rch`. |
+| Crate compile health | PASS | `rch exec -- cargo check -p fnp-ufunc --all-targets` passed with `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`. |
+| Clippy health | PASS | `rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings` passed. |
+| Formatting health | KNOWN GAP | `cargo fmt --check` and `cargo fmt -p fnp-ufunc -- --check` still report broad pre-existing format drift in untouched regions. |
+| Evidence durability | PASS | Results recorded in `docs/NEGATIVE_EVIDENCE.md` and `tests/artifacts/perf/2026-06-19_ufunc_extract_vs_numpy/`. |
+
+Cluster score: **62 / 100**
+
+Score rationale:
+- +20 correctness: candidate and post-revert golden guards passed.
+- +14 reproducibility: same-host local FNP vs NumPy evidence is recorded, with
+  remote correctness/build evidence kept separate.
+- +15 ledger discipline: reject, final-code gap, and retry predicate are recorded.
+- +15 revert discipline: losing production fast path removed.
+- -38 performance: the measured candidate lost to NumPy on both rows; the final
+  serial path is still slower than NumPy at 1M.
+- -4 formatting residual: package/workspace fmt drift remains outside this
+  slice.
+
+Current release posture:
+- `franken_numpy-ixs5y.244` is **measured rejected**, not pending.
+- `extract(condition, arr)` is acceptable only as the reverted serial path for
+  this slice; the 1M sparse-mask row remains an open performance gap versus
+  NumPy.
+
 ## 2026-06-19 - Random PCG Distribution Verification Slice
 
 Scope:

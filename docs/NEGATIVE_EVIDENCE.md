@@ -161,3 +161,58 @@ Notes:
 - The production parallel fast path was removed. The remaining serial path is still slower than NumPy, but it is less bad at 100k and avoids keeping a regressing optimization.
 - Final focused validation passed for `cargo test -p fnp-ufunc compress`, `cargo check -p fnp-ufunc`, and `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`; `cargo fmt --check` still reports broad workspace format drift outside this slice.
 - Retry condition: retry `compress(condition, axis=None)` only if a new design avoids per-chunk `Vec<Vec<f64>>` allocation and proves same-host speed over NumPy on both 100k and 1M bool-mask rows with CV below 10%; do not retry this per-chunk parallel gather shape as a standalone patch.
+
+## 2026-06-19 - Gauntlet Verify: FNP extract masked gather vs NumPy
+
+Artifact directory: `tests/artifacts/perf/2026-06-19_ufunc_extract_vs_numpy/`
+
+Run identity:
+- Verification bead: `franken_numpy-ixs5y.259`.
+- Original optimization bead: `franken_numpy-ixs5y.244`.
+- Subject commit before revert: `298f05dd`.
+- Final code: `.244` parallel F64 `extract` masked-gather fast path removed; serial `extract` path retained.
+- Subject API: direct Rust `fnp-ufunc` `UFuncArray::extract` Criterion row.
+- Oracle/reference: NumPy 2.4.3 on Python 3.13.7.
+- Same-host decision machine: `thinkstation1` for both local FNP Criterion and local NumPy timing.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+
+Commands:
+- `rch exec -- cargo test -p fnp-ufunc extract_f64_parallel_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `cargo bench -p fnp-ufunc --bench elementwise extract_f64_masked -- --sample-size 20 --warm-up-time 1 --measurement-time 3`
+- Python NumPy timing scripts in `numpy_extract_local.txt` and `numpy_extract_local_rerun.txt` using the same value and bool-mask formulas.
+- `rch exec -- cargo test -p fnp-ufunc extract_f64_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `rch exec -- cargo test -p fnp-ufunc boolean_index_f64_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `rch exec -- cargo check -p fnp-ufunc --all-targets`
+- `rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings`
+- `cargo fmt --check`
+
+Decision ratios use the longer `numpy_extract_local_rerun.txt` reference with
+GC disabled.
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | Ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.244` | Parallel F64 `extract` per-chunk gather candidate | 100k local candidate | `criterion_extract_local.txt`, `numpy_extract_local_rerun.txt` | 275.46 us | 126.540 us | 2.18x slower | Reverted |
+| `franken_numpy-ixs5y.244` | Parallel F64 `extract` per-chunk gather candidate | 1M local candidate | `criterion_extract_local.txt`, `numpy_extract_local_rerun.txt` | 668.54 us | 547.298 us | 1.22x slower | Reverted |
+| `franken_numpy-ixs5y.244` | Final serial `extract` after revert | 100k post-revert | `criterion_extract_local_post_revert.txt`, `numpy_extract_local_rerun.txt` | 79.896 us | 126.540 us | 1.58x faster | Final code |
+| `franken_numpy-ixs5y.244` | Final serial `extract` after revert | 1M post-revert | `criterion_extract_local_post_revert.txt`, `numpy_extract_local_rerun.txt` | 951.42 us | 547.298 us | 1.74x slower | Open gap |
+
+Notes:
+- The candidate passed the golden guard, but correctness was not enough: it lost
+  to NumPy on both measured rows and was 3.45x slower than the final serial path
+  at 100k.
+- The candidate was faster than serial at 1M, but still 1.22x slower than NumPy
+  and therefore did not clear the gauntlet's neutral/regression rule.
+- Removing the parallel `extract` branch also removes the implicit parallel
+  acceleration that `boolean_index` reached through `extract`; the boolean-index
+  golden guard was rerun post-revert and passed. `boolean_index` remains a
+  separate open benchmark target rather than an unmeasured keep.
+- Final focused validation passed for the two golden guards, `cargo check -p
+  fnp-ufunc --all-targets`, and `cargo clippy -p fnp-ufunc --all-targets -- -D
+  warnings`.
+- `cargo fmt --check` and package-scoped `cargo fmt -p fnp-ufunc -- --check`
+  still report broad pre-existing format drift in untouched regions; the
+  extract revert itself is compiled and clippy-clean.
+- Retry condition: retry `extract(condition, arr)` only with a design that avoids
+  per-chunk `Vec<Vec<f64>>` allocation, proves same-host speed over NumPy at both
+  100k and 1M sparse-mask rows, keeps NumPy timing CV below 10%, and separately
+  remeasures the `boolean_index_f64_masked_sparse` dependent workload.

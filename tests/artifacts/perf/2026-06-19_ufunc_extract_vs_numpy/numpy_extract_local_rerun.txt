@@ -1,0 +1,6 @@
+host=thinkstation1
+python=3.13.7
+numpy=2.4.3
+gc=disabled
+size=100000 loops=500 selected=21053 median_us=126.540 p95_us=148.121 min_us=65.444 mean_us=105.699 cv_pct=34.01 checksum=0
+size=1000000 loops=100 selected=210527 median_us=547.298 p95_us=815.786 min_us=481.122 mean_us=614.109 cv_pct=31.76 checksum=0
