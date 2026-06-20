@@ -44153,7 +44153,7 @@ fn argextreme_typed<'py, T>(
     take_max: bool,
 ) -> PyResult<Option<Py<PyAny>>>
 where
-    T: pyo3::buffer::Element + Copy + Ord,
+    T: pyo3::buffer::Element + Copy + Ord + Sync + Send,
 {
     let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
         return Ok(None);
@@ -44164,15 +44164,58 @@ where
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    if input.is_empty() {
+    let n = input.len();
+    if n == 0 {
         return Ok(None);
     }
-    let extreme = if take_max {
-        input.iter().map(|c| c.get()).max().unwrap()
-    } else {
-        input.iter().map(|c| c.get()).min().unwrap()
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only contiguous buffer
+    // under the GIL -> &[T] (Sync+Send, T a POD integer).
+    let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
+    // SINGLE-PASS (value, first-index) fold — the old `.max()` then `.position()` was
+    // two full scans; numpy's int argmax is one SIMD pass. Parallel reduce keeps the
+    // FIRST occurrence on ties (higher value wins; equal value -> lower index), so it
+    // is bit-identical to numpy's first-occurrence argmax.
+    let chunk_arg = |base: usize, chunk: &[T]| -> (T, usize) {
+        let mut best_v = chunk[0];
+        let mut best_i = base;
+        if take_max {
+            for (j, &v) in chunk.iter().enumerate().skip(1) {
+                if v > best_v {
+                    best_v = v;
+                    best_i = base + j;
+                }
+            }
+        } else {
+            for (j, &v) in chunk.iter().enumerate().skip(1) {
+                if v < best_v {
+                    best_v = v;
+                    best_i = base + j;
+                }
+            }
+        }
+        (best_v, best_i)
     };
-    let idx = input.iter().position(|c| c.get() == extreme).unwrap();
+    let combine = |a: (T, usize), b: (T, usize)| -> (T, usize) {
+        let better = if take_max { b.0 > a.0 } else { b.0 < a.0 };
+        if better || (b.0 == a.0 && b.1 < a.1) {
+            b
+        } else {
+            a
+        }
+    };
+    use rayon::prelude::*;
+    const ARGEXTREME_PARALLEL_MIN: usize = 1 << 16;
+    const CHUNK: usize = 1 << 14;
+    let idx = if n >= ARGEXTREME_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        data.par_chunks(CHUNK)
+            .enumerate()
+            .map(|(ci, chunk)| chunk_arg(ci * CHUNK, chunk))
+            .reduce_with(combine)
+            .unwrap()
+            .1
+    } else {
+        chunk_arg(0, data).1
+    };
     let scalar = numpy.getattr("intp")?.call1((idx,))?;
     Ok(Some(scalar.unbind()))
 }
@@ -44200,13 +44243,17 @@ fn try_zerocopy_int_argextreme(
         return Ok(None);
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    // Narrow ints (1/2-byte): numpy's SIMD argmax processes 16-64 lanes per
+    // instruction, which the scalar (even parallel) fold can't beat — delegate to
+    // numpy (still bit-identical first-occurrence). Wide ints (4/8-byte): the parallel
+    // single-pass (value, first-index) fold beats numpy's narrower wide-int SIMD.
+    if itemsize <= 2 {
+        let op = if take_max { "argmax" } else { "argmin" };
+        return Ok(Some(numpy.getattr(op)?.call1((a,))?.unbind()));
+    }
     match (kind.as_str(), itemsize) {
-        ("i", 1) => argextreme_typed::<i8>(py, &numpy, a, take_max),
-        ("i", 2) => argextreme_typed::<i16>(py, &numpy, a, take_max),
         ("i", 4) => argextreme_typed::<i32>(py, &numpy, a, take_max),
         ("i", 8) => argextreme_typed::<i64>(py, &numpy, a, take_max),
-        ("u", 1) => argextreme_typed::<u8>(py, &numpy, a, take_max),
-        ("u", 2) => argextreme_typed::<u16>(py, &numpy, a, take_max),
         ("u", 4) => argextreme_typed::<u32>(py, &numpy, a, take_max),
         ("u", 8) => argextreme_typed::<u64>(py, &numpy, a, take_max),
         _ => Ok(None),
