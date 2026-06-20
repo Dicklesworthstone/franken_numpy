@@ -44450,8 +44450,8 @@ fn ptp_axis_typed<'py, T, FS>(
     sub: FS,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
 where
-    T: pyo3::buffer::Element + Copy + Ord,
-    FS: Fn(T, T) -> T,
+    T: pyo3::buffer::Element + Copy + Ord + Sync + Send,
+    FS: Fn(T, T) -> T + Sync,
 {
     let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
         return Ok(None);
@@ -44489,43 +44489,129 @@ where
             return Ok(None);
         };
         let lane = axis_len * inner;
+        // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only buffer under
+        // the GIL -> &[T] (Sync) for the parallel folds (wide ints only; narrow ints
+        // delegated to numpy in the caller). min/max/sub are order-independent.
+        let data: &[T] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+        use rayon::prelude::*;
+        let parallel = outer * axis_len * inner >= (1 << 16) && rayon::current_num_threads() >= 2;
         if inner == 1 {
-            for o in 0..outer {
-                let l = &input[o * lane..o * lane + axis_len];
-                let mx = l.iter().map(|c| c.get()).max().unwrap();
-                let mn = l.iter().map(|c| c.get()).min().unwrap();
-                output[o].set(sub(mx, mn));
+            let lane_ptp = |l: &[T]| -> T {
+                let mut mx = l[0];
+                let mut mn = l[0];
+                for &v in &l[1..] {
+                    mx = if v > mx { v } else { mx };
+                    mn = if v < mn { v } else { mn };
+                }
+                sub(mx, mn)
+            };
+            if outer >= 2 {
+                let results: Vec<T> = if parallel {
+                    data.par_chunks_exact(axis_len).map(&lane_ptp).collect()
+                } else {
+                    data.chunks_exact(axis_len).map(&lane_ptp).collect()
+                };
+                for (slot, v) in output.iter().zip(results) {
+                    slot.set(v);
+                }
+            } else {
+                // Single big run (1-D ptp): chunk-reduce (max, min) then sub.
+                let (mx, mn) = if parallel {
+                    data.par_chunks(1 << 14)
+                        .map(|c| {
+                            let mut mx = c[0];
+                            let mut mn = c[0];
+                            for &v in &c[1..] {
+                                mx = if v > mx { v } else { mx };
+                                mn = if v < mn { v } else { mn };
+                            }
+                            (mx, mn)
+                        })
+                        .reduce_with(|(amx, amn), (bmx, bmn)| {
+                            (
+                                if bmx > amx { bmx } else { amx },
+                                if bmn < amn { bmn } else { amn },
+                            )
+                        })
+                        .unwrap()
+                } else {
+                    let mut mx = data[0];
+                    let mut mn = data[0];
+                    for &v in &data[1..] {
+                        mx = if v > mx { v } else { mx };
+                        mn = if v < mn { v } else { mn };
+                    }
+                    (mx, mn)
+                };
+                output[0].set(sub(mx, mn));
             }
         } else {
-            // Strided (non-last axis): reduce along the axis but keep per-inner running
-            // max/min accumulators so the slab update vectorizes ACROSS inner (an
-            // indexed per-i strided scan does not — it was ~4-18x behind numpy).
-            let mut mxv: Vec<T> = Vec::with_capacity(inner);
-            let mut mnv: Vec<T> = Vec::with_capacity(inner);
-            for o in 0..outer {
+            // Non-last axis: per-inner running (max, min) plane down the axis. ≥2 outer
+            // groups fan across the pool; a single group (2-D axis=0) privatizes across
+            // row-blocks, merging the (max,min) planes elementwise.
+            let group_plane = |o: usize| -> Vec<T> {
                 let obase = o * lane;
-                mxv.clear();
-                mnv.clear();
-                for c in &input[obase..obase + inner] {
-                    let v = c.get();
-                    mxv.push(v);
-                    mnv.push(v);
-                }
+                let mut mxv: Vec<T> = data[obase..obase + inner].to_vec();
+                let mut mnv: Vec<T> = mxv.clone();
                 for a_idx in 1..axis_len {
-                    let slab = &input[obase + a_idx * inner..obase + a_idx * inner + inner];
-                    for ((m, n), c) in mxv.iter_mut().zip(mnv.iter_mut()).zip(slab.iter()) {
-                        let v = c.get();
-                        // Branchless max/min so LLVM lowers to vectorized pmaxs/pmins
-                        // (the `if v > *m { *m = v }` mutation form did NOT vectorize,
-                        // leaving narrow-int ptp element-bound ~19x behind numpy's SIMD).
+                    let slab = &data[obase + a_idx * inner..obase + a_idx * inner + inner];
+                    for ((m, n), &v) in mxv.iter_mut().zip(mnv.iter_mut()).zip(slab) {
                         *m = if v > *m { v } else { *m };
                         *n = if v < *n { v } else { *n };
                     }
                 }
-                let outl = &output[o * inner..o * inner + inner];
-                for ((slot, &m), &n) in outl.iter().zip(mxv.iter()).zip(mnv.iter()) {
-                    slot.set(sub(m, n));
+                mxv.iter().zip(&mnv).map(|(&m, &n)| sub(m, n)).collect()
+            };
+            let planes: Vec<T> = if parallel && outer >= 2 {
+                let ps: Vec<Vec<T>> = (0..outer).into_par_iter().map(group_plane).collect();
+                let mut out = vec![data[0]; out_elems];
+                for (o, p) in ps.into_iter().enumerate() {
+                    out[o * inner..o * inner + inner].copy_from_slice(&p);
                 }
+                out
+            } else if parallel {
+                // Single group: privatize (max,min) across row-blocks, merge, then sub.
+                let (mxv, mnv) = (0..axis_len)
+                    .into_par_iter()
+                    .fold(
+                        || None::<(Vec<T>, Vec<T>)>,
+                        |acc, k| {
+                            let row = &data[k * inner..k * inner + inner];
+                            match acc {
+                                None => Some((row.to_vec(), row.to_vec())),
+                                Some((mut mx, mut mn)) => {
+                                    for ((m, n), &v) in mx.iter_mut().zip(mn.iter_mut()).zip(row) {
+                                        *m = if v > *m { v } else { *m };
+                                        *n = if v < *n { v } else { *n };
+                                    }
+                                    Some((mx, mn))
+                                }
+                            }
+                        },
+                    )
+                    .reduce(
+                        || None::<(Vec<T>, Vec<T>)>,
+                        |a, b| match (a, b) {
+                            (None, x) | (x, None) => x,
+                            (Some((mut amx, mut amn)), Some((bmx, bmn))) => {
+                                for (m, v) in amx.iter_mut().zip(bmx) {
+                                    *m = if v > *m { v } else { *m };
+                                }
+                                for (n, v) in amn.iter_mut().zip(bmn) {
+                                    *n = if v < *n { v } else { *n };
+                                }
+                                Some((amx, amn))
+                            }
+                        },
+                    )
+                    .unwrap_or_else(|| (vec![data[0]; inner], vec![data[0]; inner]));
+                mxv.iter().zip(&mnv).map(|(&m, &n)| sub(m, n)).collect()
+            } else {
+                (0..outer).flat_map(group_plane).collect()
+            };
+            for (slot, &v) in output.iter().zip(planes.iter()) {
+                slot.set(v);
             }
         }
     }
@@ -44552,6 +44638,14 @@ fn try_zerocopy_int_ptp_axis(
         return Ok(None);
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    // Narrow ints (1/2-byte) along an axis: numpy's SIMD max/min (16-64 lanes per
+    // instruction) beats the scalar fold; delegate to numpy's ptp. Wide ints
+    // (4/8-byte) use the parallel native fold below.
+    if itemsize <= 2 {
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", axis)?;
+        return Ok(Some(numpy.getattr("ptp")?.call((a,), Some(&kwargs))?.unbind()));
+    }
     let result = match (kind.as_str(), itemsize) {
         ("i", 1) => ptp_axis_typed::<i8, _>(py, &numpy, a, axis, "int8", |x, y| x.wrapping_sub(y))?,
         ("i", 2) => ptp_axis_typed::<i16, _>(py, &numpy, a, axis, "int16", |x, y| x.wrapping_sub(y))?,
