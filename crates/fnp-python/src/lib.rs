@@ -13767,6 +13767,23 @@ fn where_py(
         return fallback();
     }
 
+    // Non-contiguous (transposed/strided) ndarray operands bail the zero-copy select
+    // into the cold extract → rebuild (~7x slower than numpy's strided where).
+    // Delegate when any operand is a non-contiguous ndarray.
+    let is_noncontig = |v: &Bound<'_, PyAny>| -> PyResult<bool> {
+        Ok(v.is_exact_instance(&ndarray_type)
+            && !v
+                .getattr("flags")?
+                .getattr("c_contiguous")?
+                .extract::<bool>()?)
+    };
+    if is_noncontig(condition_bound)?
+        || (args.len() == 2
+            && (is_noncontig(&args.get_item(0)?)? || is_noncontig(&args.get_item(1)?)?))
+    {
+        return fallback();
+    }
+
     let condition = match extract_precise_numeric_array(py, condition_bound, "where(condition)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -15507,6 +15524,19 @@ fn clip(
     // dtype matches numpy; skips the cold (and for wide ints lossy) f64 extract.
     if let Some(out) = try_zerocopy_int_clip(py, a.bind(py), a_min.bind(py), a_max.bind(py))? {
         return Ok(out);
+    }
+
+    // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
+    // zero-copy clip into the cold extract → rebuild (~5x slower than numpy's strided
+    // clip). Delegate them to numpy.
+    if a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback();
     }
 
     let array = match extract_precise_numeric_array(py, a.bind(py), "clip(a)") {
@@ -17533,6 +17563,18 @@ fn isnan_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     // kernel and raises TypeError, so delegate complex inputs to numpy (the oracle).
     if numpy_dtype_is_complex(x) {
         let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("isnan")?.call1((x,))?.unbind());
+    }
+    // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
+    // predicate fast paths into the cold extract → rebuild (transpose-copy, ~100x
+    // slower than numpy's strided isnan). Delegate them to numpy.
+    let numpy = py.import("numpy")?;
+    if x.is_exact_instance(&numpy.getattr("ndarray")?)
+        && !x
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
         return Ok(numpy.getattr("isnan")?.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, "isnan(x)")?;
@@ -26816,6 +26858,17 @@ fn native_unary_elementwise(
         }
         return Ok(output);
     }
+    // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
+    // zero-copy fast paths into the cold extract → rebuild, which transpose-copies the
+    // input (~4-5x slower than numpy's strided ufunc). Delegate them to numpy.
+    if x.is_exact_instance(&numpy.getattr("ndarray")?)
+        && !x
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback(py);
+    }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
         return fallback(py);
     };
@@ -26913,6 +26966,17 @@ fn native_unary_promoting(
             return Ok(output.bind(py).get_item(())?.unbind());
         }
         return Ok(output);
+    }
+    // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
+    // zero-copy fast paths into the cold extract → rebuild (transpose-copy, ~4-5x
+    // slower than numpy's strided ufunc). Delegate them to numpy.
+    if x.is_exact_instance(&numpy.getattr("ndarray")?)
+        && !x
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback(py);
     }
     let Ok(native) = extract_precise_numeric_array(py, x, context) else {
         return fallback(py);
@@ -44783,6 +44847,18 @@ fn around(
         if kind == "b" || (kind == "f" && itemsize == 2) {
             return fallback();
         }
+    }
+    // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
+    // zero-copy paths into the cold extract → rebuild (~4.6x slower than numpy's
+    // strided rounding). Delegate them to numpy.
+    if a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback();
     }
     let array = match extract_precise_numeric_array(py, a.bind(py), "around(a)") {
         Ok(arr) => arr,

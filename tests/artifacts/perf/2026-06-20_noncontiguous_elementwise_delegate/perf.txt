@@ -1,0 +1,8 @@
+op           fnp/np
+isnan_T      1.019
+negative_T   1.001
+abs_T        1.006
+sqrt_T       0.990
+round_T      1.010
+clip_T       1.028
+where_T      0.999
