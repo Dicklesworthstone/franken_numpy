@@ -1,0 +1,10 @@
+Invalid timing attempt, not counted.
+
+The local zsh command rejected the inline Python f-string before the script
+reached `ssh hz1`:
+
+```text
+zsh:1: no matches found: min_ns={samples[0]:.0f}
+```
+
+Counted NumPy evidence is in `numpy_batch_matrix_norm_fro_hz1_success.txt`.

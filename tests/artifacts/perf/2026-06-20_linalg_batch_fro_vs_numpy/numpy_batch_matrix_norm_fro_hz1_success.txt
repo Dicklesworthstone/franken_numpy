@@ -1,0 +1,5 @@
+host hz1
+python 3.14.4
+numpy 2.3.5
+batch_matrix_norm_fro/shape/4096x8x8: median_ns=234973 min_ns=224558 p95_ns=243944 max_ns=258314 inner=20 samples=31
+batch_matrix_norm_fro/shape/1024x32x32: median_ns=581466 min_ns=570937 p95_ns=627085 max_ns=642193 inner=8 samples=31

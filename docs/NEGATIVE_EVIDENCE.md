@@ -1043,3 +1043,34 @@ Notes:
 - The first stack candidate was not kept as-is because direct `hz1` evidence showed a small `one/256` regression. The final code gates stack scratch to the measured 512-1024 column range and keeps the heap path elsewhere.
 - `numpy_column_vmi_rch.txt` is an invalid probe artifact only: RCH warned that the command was non-compilation and the Python quoting failed before timing. It is not counted in any ratio.
 - Remaining gap: NumPy is still faster for 256 through 1024 column reductions on `hz2`. Next deeper lever should be vectorized absolute-value accumulation or multiple-column strip mining that preserves per-column scalar addition order, not another allocation-only retune.
+
+## 2026-06-20 - Gauntlet Verify: `fnp-linalg` batched Frobenius norm lane fill
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_fro_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.238`.
+- Subject before measured closeout: `batch_matrix_norm(..., ord="fro")` already had the direct lane-fill path from the code-first child, but it had not been put through a same-worker NumPy ratio gate.
+- Kept lever: direct batched Frobenius lane fill after one shape/data validation; each lane uses the same row-major `v * v` accumulation and final `sqrt` as the per-lane `matrix_norm_nxn(..., "fro")` reference.
+- No new source edit was made in this closeout. The measured decision is keep/close, not another speculative tweak.
+- Worker: `hz1`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'batch_matrix_norm_fro' -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- Direct Python NumPy comparator on `hz1` in `numpy_batch_matrix_norm_fro_hz1_success.txt`.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg batch_matrix_norm_fro_direct_lane_fill_matches_per_lane_reference_bits -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo build -p fnp-linalg --release`
+
+Triage scorecard:
+- Final same-worker `hz1` FNP vs NumPy: win/loss/neutral = 2/0/0.
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy ns | NumPy ns | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.238` | Direct batched Frobenius lane fill | `4096x8x8` on `hz1` | `fnp_batch_matrix_norm_fro_current.txt`, `numpy_batch_matrix_norm_fro_hz1_success.txt` | 76177 | 234973 | 0.324x | Keep, 3.08x faster |
+| `franken_numpy-ixs5y.238` | Direct batched Frobenius lane fill | `1024x32x32` on `hz1` | same | 218772 | 581466 | 0.376x | Keep, 2.66x faster |
+
+Notes:
+- The focused bit-preservation guard passed for `batch_matrix_norm_fro_direct_lane_fill_matches_per_lane_reference_bits`, covering serial and threshold-crossing batch shapes plus NaN, Inf, and signed-zero inputs against the old per-lane reference.
+- `numpy_batch_matrix_norm_fro_hz1.txt` is an invalid shell-quote attempt and is not counted in the ratio table. The counted comparator is `numpy_batch_matrix_norm_fro_hz1_success.txt` on Python 3.14.4 / NumPy 2.3.5 on `hz1`.
+- This bead should not be reopened for another Frobenius micro-retune unless a same-worker NumPy rerun beats either final Rust median, or a future change alters the accumulation order, batch parallel threshold, or matrix-norm dispatch path.
