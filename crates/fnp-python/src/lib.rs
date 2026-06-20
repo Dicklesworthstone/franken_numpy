@@ -22082,12 +22082,159 @@ fn median(
 // Core: returns the (n_vars x n_vars) covariance matrix flat + n_vars for the eligible
 // rowvar=True / contiguous-float64 case, or None to defer. Shared by cov (builds the array)
 // and corrcoef (normalizes the matrix first).
+// Symmetric covariance Gram from a row-major `centered` buffer (n_vars rows of
+// n_obs already mean-subtracted observations). Fills the lower triangle (each cell
+// is one independent length-n_obs dot) then mirrors. Each cell's dot order is fixed
+// regardless of scheduling, so serial and parallel forms are BIT-IDENTICAL to each
+// other. The 8-accumulator dot breaks the dependent FP-add chain so LLVM packs it
+// into AVX registers (numpy-class throughput); the reorder makes the result allclose
+// (not bit-identical) to a single-accumulator sum for n_obs >= 8, but for n_obs < 8
+// (the only sizes the exact-repr cov/corrcoef unit tests use) chunks_exact(8) is empty
+// so it is the original left-to-right sum and those tests stay green. The large-Gram
+// conformance goldens are re-pinned to this order (allclose-verified).
+fn cov_gram_from_centered(centered: &[f64], n_vars: usize, n_obs: usize, ddof: usize) -> Vec<f64> {
+    use rayon::prelude::*;
+    let inv_fact = 1.0_f64 / (n_obs - ddof) as f64;
+    let dot8 = |ci: &[f64], cj: &[f64]| -> f64 {
+        let mut acc = [0.0f64; 8];
+        let mut ca = ci.chunks_exact(8);
+        let mut cb = cj.chunks_exact(8);
+        for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
+            acc[0] += ga[0] * gb[0];
+            acc[1] += ga[1] * gb[1];
+            acc[2] += ga[2] * gb[2];
+            acc[3] += ga[3] * gb[3];
+            acc[4] += ga[4] * gb[4];
+            acc[5] += ga[5] * gb[5];
+            acc[6] += ga[6] * gb[6];
+            acc[7] += ga[7] * gb[7];
+        }
+        let mut s =
+            ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
+        for (&a, &b) in ca.remainder().iter().zip(cb.remainder()) {
+            s += a * b;
+        }
+        s
+    };
+    let row_dot = |i: usize, row_out: &mut [f64]| {
+        let ci = &centered[i * n_obs..(i + 1) * n_obs];
+        for (j, slot) in row_out.iter_mut().enumerate().take(i + 1) {
+            let cj = &centered[j * n_obs..(j + 1) * n_obs];
+            *slot = dot8(ci, cj) * inv_fact;
+        }
+    };
+    let mut result = vec![0.0f64; n_vars * n_vars];
+    // Below ~1<<18 multiply-adds the rayon dispatch dwarfs the work, and below 32 rows
+    // there are too few row tasks to amortize fan-out. Above both gates fan out over
+    // rows. Each cell is its own dot8, so serial and parallel agree.
+    let work = (n_vars as u64) * (n_vars as u64) * (n_obs as u64);
+    if n_vars >= 32 && work >= (1 << 18) && rayon::current_num_threads() >= 2 {
+        result
+            .par_chunks_mut(n_vars)
+            .enumerate()
+            .for_each(|(i, row_out)| row_dot(i, row_out));
+    } else {
+        result
+            .chunks_mut(n_vars)
+            .enumerate()
+            .for_each(|(i, row_out)| row_dot(i, row_out));
+    }
+    for i in 0..n_vars {
+        for j in (i + 1)..n_vars {
+            result[i * n_vars + j] = result[j * n_vars + i];
+        }
+    }
+    result
+}
+
+// Read an exact-f64-ndarray's contiguous buffer as (rows, n_obs) where a 1-D array
+// is a single row. Returns None for non-f64 / non-ndarray / >2-D / non-contiguous.
+fn cov_rowvar_buffer_rows<'a>(
+    py: Python<'a>,
+    arr: &Bound<'a, PyAny>,
+    ndarray_type: &Bound<'a, PyAny>,
+) -> PyResult<Option<(PyBuffer<f64>, usize, usize)>> {
+    if !arr.is_exact_instance(ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = arr.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(buf) = PyBuffer::<f64>::get(arr) else {
+        return Ok(None);
+    };
+    let shape = buf.shape();
+    let (rows, n_obs) = match shape.len() {
+        1 => (1usize, shape[0]),
+        2 => (shape[0], shape[1]),
+        _ => return Ok(None),
+    };
+    if buf.as_slice(py).is_none() {
+        return Ok(None); // non-contiguous
+    }
+    Ok(Some((buf, rows, n_obs)))
+}
+
+// Zero-copy fast path for the `np.cov(m, y)` two-operand form with rowvar=True.
+// numpy.cov(m, y) is exactly cov(concatenate([rows(m), rows(y)])); the existing
+// single-operand fast path is gated on `y is None`, so the two-operand idiom
+// (`np.cov(a, b)` for two series — extremely common) fell through to the slow
+// extract+concatenate+generic native_cov_unweighted path (measured 9-17x slower
+// than numpy). Here we center the rows of m and y DIRECTLY from their own buffers
+// into one `centered` array (no stacking copy of the raw inputs) and reuse the
+// shared autovectorized Gram — byte-for-byte the same arithmetic the single-operand
+// path uses, so it inherits its allclose-verified conformance.
+fn try_zerocopy_cov_two_rowvar_f64(
+    py: Python<'_>,
+    m: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+    ddof: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let Some((m_buf, m_rows, n_obs)) = cov_rowvar_buffer_rows(py, m, &ndarray_type)? else {
+        return Ok(None);
+    };
+    let Some((y_buf, y_rows, y_obs)) = cov_rowvar_buffer_rows(py, y, &ndarray_type)? else {
+        return Ok(None);
+    };
+    if n_obs != y_obs || n_obs == 0 || n_obs <= ddof {
+        return Ok(None); // shape mismatch (numpy errors) / empty / DoF<=0: defer.
+    }
+    let n_vars = m_rows + y_rows;
+    let (Some(m_slice), Some(y_slice)) = (m_buf.as_slice(py), y_buf.as_slice(py)) else {
+        return Ok(None);
+    };
+    // Center every variable row (from whichever source buffer) by its own mean,
+    // matching cov_gram_rowvar_f64's per-row centering exactly.
+    let mut centered = vec![0.0f64; n_vars * n_obs];
+    let center_into = |src: &[pyo3::buffer::ReadOnlyCell<f64>], dst: &mut [f64]| {
+        let mean = src.iter().map(|c| c.get()).sum::<f64>() / n_obs as f64;
+        for (o, c) in dst.iter_mut().zip(src) {
+            *o = c.get() - mean;
+        }
+    };
+    for r in 0..m_rows {
+        let src = &m_slice[r * n_obs..(r + 1) * n_obs];
+        center_into(src, &mut centered[r * n_obs..(r + 1) * n_obs]);
+    }
+    for r in 0..y_rows {
+        let src = &y_slice[r * n_obs..(r + 1) * n_obs];
+        let dst_row = m_rows + r;
+        center_into(src, &mut centered[dst_row * n_obs..(dst_row + 1) * n_obs]);
+    }
+    let result = cov_gram_from_centered(&centered, n_vars, n_obs, ddof);
+    build_square_f64_matrix(py, &numpy, result, n_vars)
+}
+
 fn cov_gram_rowvar_f64(
     py: Python<'_>,
     m: &Bound<'_, PyAny>,
     ddof: usize,
 ) -> PyResult<Option<(Vec<f64>, usize)>> {
-    use rayon::prelude::*;
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !m.is_exact_instance(&ndarray_type) {
@@ -22126,71 +22273,7 @@ fn cov_gram_rowvar_f64(
         }
     }
 
-    let inv_fact = 1.0_f64 / (n_obs - ddof) as f64;
-    // Symmetric Gram: fill the lower triangle (each cell is one independent dot),
-    // then mirror. Each cell's dot order is fixed regardless of scheduling, so the
-    // serial and parallel forms are BIT-IDENTICAL. The triangle costs ~n_vars²·n_obs/2
-    // multiply-adds; below ~1<<18 that is microseconds and the rayon dispatch is pure
-    // overhead (numpy never parallelizes a small Gram), so e.g. cov([10,100]) was ~5x
-    // numpy. Gate the fan-out on the work estimate; keep small Grams serial.
-    // Each Gram cell is a length-n_obs dot. The old single-accumulator `.sum()` is one
-    // dependent FP-add chain (latency-bound, ~3 GFLOP/s); numpy's dsyrk is vectorized
-    // (~11 GFLOP/s). Eight independent accumulators break the dependency chain and let
-    // LLVM pack them into AVX registers (autovectorized), reaching numpy-class throughput.
-    // The reorder makes the result allclose (not bit-identical) for n_obs >= 8; for
-    // n_obs < 8 (the only sizes the exact-repr cov/corrcoef unit tests use) chunks_exact(8)
-    // is empty so the fold is the original left-to-right sum and those tests stay green.
-    // The large-Gram conformance goldens are re-pinned to this order (allclose-verified).
-    let dot8 = |ci: &[f64], cj: &[f64]| -> f64 {
-        let mut acc = [0.0f64; 8];
-        let mut ca = ci.chunks_exact(8);
-        let mut cb = cj.chunks_exact(8);
-        for (ga, gb) in ca.by_ref().zip(cb.by_ref()) {
-            acc[0] += ga[0] * gb[0];
-            acc[1] += ga[1] * gb[1];
-            acc[2] += ga[2] * gb[2];
-            acc[3] += ga[3] * gb[3];
-            acc[4] += ga[4] * gb[4];
-            acc[5] += ga[5] * gb[5];
-            acc[6] += ga[6] * gb[6];
-            acc[7] += ga[7] * gb[7];
-        }
-        let mut s =
-            ((acc[0] + acc[1]) + (acc[2] + acc[3])) + ((acc[4] + acc[5]) + (acc[6] + acc[7]));
-        for (&a, &b) in ca.remainder().iter().zip(cb.remainder()) {
-            s += a * b;
-        }
-        s
-    };
-    let row_dot = |i: usize, row_out: &mut [f64]| {
-        let ci = &centered[i * n_obs..(i + 1) * n_obs];
-        for (j, slot) in row_out.iter_mut().enumerate().take(i + 1) {
-            let cj = &centered[j * n_obs..(j + 1) * n_obs];
-            *slot = dot8(ci, cj) * inv_fact;
-        }
-    };
-    let mut result = vec![0.0f64; n_vars * n_vars];
-    // Below ~1<<18 multiply-adds the rayon dispatch dwarfs the work (cov([10,100]) was ~5x
-    // numpy from fanning out microseconds), and below 32 rows there are too few row tasks
-    // to amortize fan-out even for long observations. Above both gates, fan out over rows.
-    // Each cell is its own dot8, so serial and parallel agree.
-    let work = (n_vars as u64) * (n_vars as u64) * (n_obs as u64);
-    if n_vars >= 32 && work >= (1 << 18) && rayon::current_num_threads() >= 2 {
-        result
-            .par_chunks_mut(n_vars)
-            .enumerate()
-            .for_each(|(i, row_out)| row_dot(i, row_out));
-    } else {
-        result
-            .chunks_mut(n_vars)
-            .enumerate()
-            .for_each(|(i, row_out)| row_dot(i, row_out));
-    }
-    for i in 0..n_vars {
-        for j in (i + 1)..n_vars {
-            result[i * n_vars + j] = result[j * n_vars + i];
-        }
-    }
+    let result = cov_gram_from_centered(&centered, n_vars, n_obs, ddof);
     Ok(Some((result, n_vars)))
 }
 
@@ -22541,6 +22624,16 @@ fn cov(
     if rowvar
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_zerocopy_cov_rowvar_f64(py, m_bound, resolved_ddof)?
+    {
+        return Ok(out);
+    }
+    // Two-operand rowvar form np.cov(m, y): center m's and y's rows directly from
+    // their buffers and reuse the shared Gram (no extract/stack copy). Closes the
+    // 9-17x gap vs numpy on the common np.cov(a, b) two-series idiom.
+    if rowvar
+        && let Some(y_val) = y_binding
+        && !y_val.is_none()
+        && let Some(out) = try_zerocopy_cov_two_rowvar_f64(py, m_bound, y_val, resolved_ddof)?
     {
         return Ok(out);
     }

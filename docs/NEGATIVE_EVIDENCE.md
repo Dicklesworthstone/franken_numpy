@@ -4,6 +4,49 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Win: fnp-python cov(m,y) two-operand zero-copy Gram (4-17x loss -> 0.6-0.9x win)
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_python_cov_two_operand_vs_numpy/`
+
+Run identity:
+- Agent: `BlackThrush` / `cod-b`. Under directive `franken_numpy-ixs5y`.
+- Subject: `np.cov(a, b)` two-operand form (`crates/fnp-python/src/lib.rs`).
+- Reference: NumPy 2.4.3 on `thinkstation1`, load ~6, OMP/OPENBLAS=1.
+- Decision: SHIP.
+
+LOSE-gap: `np.cov(a, b)` (covariance of two series — very common idiom) was
+4-17x slower than numpy (10k 17.4x, 100k 10.4x, 1M 4.45x). `cov` had zero-copy
+fast paths (SIMD 16<=n_vars<128 + general `cov_gram_rowvar_f64`) but BOTH gated
+on `y is None`; the two-operand form fell to `native_cov_unweighted` which
+extracts both operands + concatenates (copies) + generic Gram.
+`np.cov(a,b) == np.cov(concatenate([rows(a),rows(b)]))`.
+
+Lever (zero-copy two-buffer Gram): extracted the autovectorized 8-accumulator
+Gram into shared `cov_gram_from_centered(centered,n_vars,n_obs,ddof)` (single-
+operand path now calls it, verified byte-identical). Added
+`try_zerocopy_cov_two_rowvar_f64`: reads m and y f64 PyBuffers directly, centers
+each variable row from its own buffer into one `centered` array (no raw-input
+stack copy), reuses the shared Gram. Same arithmetic as the single-operand fast
+path -> inherits its allclose conformance.
+
+After: 4/0/0 win (10k 0.596x, 100k 0.898x, 1M 0.918x, 4M 0.808x); two-operand
+correctness 0/160 random cases (offset means + ddof 0/1/2, allclose rtol 1e-10);
+single-operand byte-identity preserved; conformance_statistics 28 pass.
+
+REUSABLE: zero-copy PyBuffer fast paths gated on a SCALAR/None optional operand
+(`y is None`, default=scalar, etc.) leave the OTHER form (array y / two-operand)
+to a slow extract+concat fallback — extend by reading the extra buffer(s)
+directly and reusing the shared kernel. Same pattern as np.select array-default
+and np.where scalar-branch. Grep cov/corrcoef/... fast paths for `is_none()`/
+`y is None` gates.
+
+PRE-EXISTING (not introduced; proven RED on HEAD with this change stashed):
+`cov_corrcoef_python_container_keyword_outcomes_match_numpy` "cov y ddof" case
+is 1-ULP off (`cov([1,2,4],y=[2,1,0],ddof=0)[0][0]` 1.5555555555555554 vs numpy
+...556) in the untouched `native_cov_unweighted` list path — numpy-BLAS-bit-exact
+(FMA) reduction, separate concern. Also pre-existing: `cov(a,b,rowvar=False)`
+wrongly returns a scalar instead of 2x2 (native path) — file separately.
+
 ## 2026-06-20 - BOLD-VERIFY No-Ship: medium Cholesky lower-triangular update threshold
 
 Artifact directory:

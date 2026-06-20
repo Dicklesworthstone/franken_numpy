@@ -1,0 +1,9 @@
+host thinkstation1 numpy 2.4.3
+=== np.cov(a,b) two-series head-to-head (BEFORE: 4-17x LOSS) ===
+     nobs   NumPy_us     FNP_us   FNP/NP verdict match
+    10000       50.7       30.3    0.596     WIN True
+   100000      293.0      263.0    0.898     WIN True
+  1000000     4836.4     4438.3    0.918     WIN True
+  4000000    62737.5    50713.2    0.808     WIN True
+=== robust correctness (allclose vs numpy, 40 random cases) ===
+two-operand cov bad: 0 /160 (allclose rtol 1e-10)
