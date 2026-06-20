@@ -22197,6 +22197,15 @@ fn cov_gram_from_centered(centered: &[f64], n_vars: usize, n_obs: usize, ddof: u
     result
 }
 
+// True only when `obj` is an ndarray (or array-like exposing `.ndim`) of rank 1.
+// Any error (e.g. a Python list with no `.ndim`) yields false, so callers defer.
+fn ndim_is_1(obj: &Bound<'_, PyAny>) -> bool {
+    obj.getattr("ndim")
+        .and_then(|n| n.extract::<usize>())
+        .map(|n| n == 1)
+        .unwrap_or(false)
+}
+
 // Read an exact-f64-ndarray's contiguous buffer as (rows, n_obs) where a 1-D array
 // is a single row. Returns None for non-f64 / non-ndarray / >2-D / non-contiguous.
 fn cov_rowvar_buffer_rows<'a>(
@@ -22720,12 +22729,17 @@ fn cov(
     {
         return Ok(out);
     }
-    // Two-operand rowvar form np.cov(m, y): center m's and y's rows directly from
-    // their buffers and reuse the shared Gram (no extract/stack copy). Closes the
-    // 9-17x gap vs numpy on the common np.cov(a, b) two-series idiom.
-    if rowvar
-        && let Some(y_val) = y_binding
+    // Two-operand form np.cov(m, y): center m's and y's rows directly from their
+    // buffers and reuse the shared Gram (no extract/stack copy). Closes the 9-17x
+    // gap vs numpy on np.cov(a, b). For rowvar=True this is always valid; for
+    // rowvar=False it is valid ONLY when both operands are 1-D, where numpy ignores
+    // rowvar (each 1-D array is one variable, no transpose) — this also FIXES the
+    // pre-existing bug where cov(a,b,rowvar=False) on two 1-D arrays returned a
+    // scalar instead of the 2x2 matrix. 2-D rowvar=False needs a transpose, so it
+    // still defers to numpy below.
+    if let Some(y_val) = y_binding
         && !y_val.is_none()
+        && (rowvar || (ndim_is_1(m_bound) && ndim_is_1(y_val)))
         && let Some(out) = try_zerocopy_cov_two_rowvar_f64(py, m_bound, y_val, resolved_ddof)?
     {
         return Ok(out);
@@ -22804,10 +22818,13 @@ fn corrcoef(
     {
         return Ok(out);
     }
-    // Two-operand rowvar form np.corrcoef(x, y): zero-copy two-buffer Gram + normalize.
-    if rowvar
-        && let Some(y_val) = y_binding
+    // Two-operand form np.corrcoef(x, y): zero-copy two-buffer Gram + normalize.
+    // Same rowvar handling as cov: rowvar=False is valid here only for two 1-D
+    // operands (numpy ignores rowvar for 1-D), which also fixes the scalar-shape
+    // bug for corrcoef(a,b,rowvar=False).
+    if let Some(y_val) = y_binding
         && !y_val.is_none()
+        && (rowvar || (ndim_is_1(x_bound) && ndim_is_1(y_val)))
         && let Some(out) = try_zerocopy_corrcoef_two_rowvar_f64(py, x_bound, y_val)?
     {
         return Ok(out);

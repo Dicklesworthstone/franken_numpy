@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Correctness fix: cov/corrcoef(a,b,rowvar=False) two-1-D scalar-shape bug
+
+Agent: `BlackThrush` / `cod-b`. Closes part of `deadlock-audit-c7nvs`.
+
+`np.cov(a, b, rowvar=False)` / `corrcoef(a, b, rowvar=False)` with two 1-D arrays
+must return a 2x2 matrix (numpy ignores rowvar for 1-D — each is one variable, no
+transpose). fnp returned a SCALAR (native_cov_unweighted rowvar=False path).
+Verified earlier: `f.cov(a,b,rowvar=False)` -> 0.4127 scalar vs numpy 2x2.
+
+Fix: extended the two-operand fast-path gate from `rowvar` to
+`rowvar || (ndim_is_1(m) && ndim_is_1(y))` for both cov and corrcoef. For two
+genuinely-1-D operands the two-buffer Gram yields the correct 2x2 regardless of
+rowvar; 2-D rowvar=False (needs transpose) still defers to numpy. New
+`ndim_is_1` helper returns false on non-arrays (lists) so they defer.
+
+Verified: cov/corrcoef(a,b,rowvar=False) now 2x2 == numpy (+ddof variants);
+rowvar=True, 2-D, single-operand, 1-D-scalar all unchanged; conformance_statistics
+28 pass (the lone fail is still the SEPARATE pre-existing 1-ULP "cov y ddof"
+native-list case — not addressed here). Edit clippy-clean.
+
 ## 2026-06-20 - BOLD-VERIFY Loss-confirmed (no fix this slice): convolve/correlate SHORT-kernel large-N tail
 
 Agent: `BlackThrush` / `cod-b`. Subject: `np.convolve`/`np.correlate` 1-D f64,
