@@ -1548,6 +1548,10 @@ fn bench_linalg_boundary(c: &mut Criterion) {
             .expect("numpy.linalg.slogdet");
         let fnp_solve = module.getattr("solve").expect("fnp_python.solve");
         let numpy_solve = numpy_linalg.getattr("solve").expect("numpy.linalg.solve");
+        let fnp_cholesky = module.getattr("cholesky").expect("fnp_python.cholesky");
+        let numpy_cholesky = numpy_linalg
+            .getattr("cholesky")
+            .expect("numpy.linalg.cholesky");
 
         group.bench_function("fnp_slogdet_f64_batch8192_4x4", |bench| {
             bench.iter(|| {
@@ -1602,6 +1606,60 @@ fn bench_linalg_boundary(c: &mut Criterion) {
                 black_box(result);
             });
         });
+
+        let make_cholesky_stack = |batch: usize, dim: usize| {
+            let rng = numpy
+                .getattr("random")
+                .expect("numpy.random")
+                .call_method1("default_rng", (0xC401_u64 + dim as u64,))
+                .expect("cholesky rng");
+            let raw = rng
+                .call_method1("standard_normal", ((batch, dim, dim),))
+                .expect("stacked normal matrix")
+                .call_method1("astype", ("float64",))
+                .expect("stacked f64 matrix");
+            let transposed = raw
+                .call_method1("swapaxes", (-1_i64, -2_i64))
+                .expect("stacked transpose");
+            let gram = numpy
+                .getattr("matmul")
+                .expect("numpy.matmul")
+                .call1((&raw, &transposed))
+                .expect("stacked gram matrix");
+            let eye = numpy
+                .call_method1("eye", (dim,))
+                .expect("cholesky identity")
+                .call_method1("__mul__", (dim as f64 + 1.0_f64,))
+                .expect("scaled cholesky identity");
+            gram.call_method1("__add__", (&eye,))
+                .expect("stacked SPD matrix")
+        };
+
+        for (label, input) in [
+            ("batch10000_4x4", make_cholesky_stack(10_000, 4)),
+            ("batch4000_8x8", make_cholesky_stack(4_000, 8)),
+            ("batch2000_16x16", make_cholesky_stack(2_000, 16)),
+            ("batch1000_32x32", make_cholesky_stack(1_000, 32)),
+            ("batch500_64x64", make_cholesky_stack(500, 64)),
+        ] {
+            group.bench_function(format!("fnp_cholesky_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_cholesky
+                        .call1((&input,))
+                        .expect("fnp cholesky benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_cholesky_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_cholesky
+                        .call1((&input,))
+                        .expect("numpy cholesky benchmark call");
+                    black_box(result);
+                });
+            });
+        }
     });
 
     group.finish();

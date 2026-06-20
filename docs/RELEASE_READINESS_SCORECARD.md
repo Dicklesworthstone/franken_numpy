@@ -85,6 +85,51 @@ Current release posture:
   beats the scalar panel solve, or a LAPACK-class blocked Cholesky kernel with
   same-host NumPy capture and zero medium-row regressions.
 
+## 2026-06-20 - Python Stacked Cholesky Delegate Keep Slice
+
+Scope:
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-python` / `fnp.linalg.cholesky` stacked-SPD arrays.
+- Worker proof: same-worker baseline and final candidate on `vmi1152480`.
+- Artifact:
+  `tests/artifacts/perf/2026-06-20_linalg_cholesky_python_delegate_cod_a/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS | Final candidate is 4 wins / 0 material losses / 1 neutral versus NumPy. FNP/NumPy ratios: 4x4 `0.700x`, 8x8 `0.944x`, 16x16 `0.988x`, 32x32 `1.026x` neutral/noisy, 64x64 `0.966x`. |
+| Old/new FNP regression gate | PASS | Final candidate is faster than old FNP on every measured row, with New/Old FNP ratios from `0.267x` to `0.837x`. |
+| Targeted correctness | PASS | `rch exec -- cargo test -p fnp-python --test conformance_linalg_decomp cholesky -- --nocapture` passed 6/6 after adding the stacked 4x4 SPD route. |
+| Crate compile health | PASS WITH WARNINGS | `rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface` passed; local post-format rerun passed. Three inherited `fnp-python` warnings remain. |
+| Release build health | PASS WITH WARNINGS | `rch exec -- cargo build -p fnp-python --release` passed with the same inherited warnings. |
+| Clippy health | KNOWN GAP | RCH selected a worker missing clippy for the pinned nightly; local clippy with `-D warnings` failed on broad pre-existing `fnp-python` lint inventory outside this hunk. |
+| Formatting health | KNOWN GAP | `cargo fmt -p fnp-python -- --check` fails on broad pre-existing crate drift; the touched Cholesky hunk was manually aligned with rustfmt output. |
+| UBS | KNOWN GAP | UBS over the changed files completed nonzero with broad existing findings in `fnp-python`, not a new Cholesky-specific finding. |
+| Evidence durability | PASS | Baseline, intermediate rejects, final candidate, conformance, check, release build, clippy/fmt/UBS caveats, ratios, and retry predicates are recorded in the artifact bundle and negative-evidence ledger. |
+
+Cluster score: **84 / 100**
+
+Score rationale:
+- +36 performance: the selected stacked-Cholesky loss class moved from 0/5
+  wins versus NumPy to 4/0/1, and every row improved versus old FNP.
+- +18 correctness: the focused linalg decomposition conformance shard passed
+  including the optimized stacked 4x4 route.
+- +14 build health: per-crate check and release build pass.
+- +12 evidence discipline: same-worker baseline/candidate proof, intermediate
+  negative evidence, exact ratios, and retry predicates are recorded.
+- +8 source discipline: the route is gated to exact stacked NumPy ndarrays with
+  default lower-triangle semantics; upper and unsupported inputs retain fallback
+  behavior.
+- -4 residual performance: the 32x32 row is a noise-band neutral rather than a
+  clean win.
+- -20 residual hygiene: broad `fnp-python` lib-test, clippy, rustfmt, and UBS
+  debt remains outside this hunk.
+
+Current release posture:
+- Python stacked `fnp.linalg.cholesky` at the measured 4x4..64x64 sizes is now
+  a measured keep for this slice and no longer a current material NumPy loss.
+- `fnp-python` is still not globally release-clean because unrelated lib-test
+  compile errors and broad lint/format/UBS debt remain open.
+
 ## 2026-06-20 - Small-N Cholesky Ordered-Dot Mixed Slice
 
 Scope:

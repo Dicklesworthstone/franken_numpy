@@ -17007,6 +17007,23 @@ fn qr(py: Python<'_>, a: Py<PyAny>, mode: &str) -> PyResult<Py<PyAny>> {
     Ok(qr_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
 }
 
+fn should_delegate_stacked_cholesky_to_numpy(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    if !is_exact_numpy_ndarray(py, a)? {
+        return Ok(false);
+    }
+    let shape_obj = a.getattr("shape")?;
+    let shape = shape_obj.cast::<PyTuple>()?;
+    if shape.len() < 3 {
+        return Ok(false);
+    }
+    let n = shape.get_item(shape.len() - 1)?.extract::<usize>()?;
+    let m = shape.get_item(shape.len() - 2)?.extract::<usize>()?;
+    Ok(n >= 4 && n == m)
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn cholesky(
@@ -17028,17 +17045,25 @@ fn cholesky(
         }
     }
 
-    let numpy = py.import("numpy")?;
-    let cholesky_fn = numpy.getattr("linalg")?.getattr("cholesky")?;
+    static NUMPY_LINALG_CHOLESKY: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    let cholesky_fn = NUMPY_LINALG_CHOLESKY.get_or_try_init(py, || -> PyResult<Py<PyAny>> {
+        Ok(py
+            .import("numpy")?
+            .getattr("linalg")?
+            .getattr("cholesky")?
+            .unbind())
+    })?;
     let a = args.get_item(0)?.unbind();
-    let call_kwargs = PyDict::new(py);
+    let mut call_kwargs: Option<Bound<'_, PyDict>> = None;
     let mut saw_upper = false;
     if let Some(kwargs) = kwargs {
         for (key, value) in kwargs.iter() {
             let name = key.extract::<String>()?;
             match name.as_str() {
                 "upper" => {
-                    call_kwargs.set_item("upper", value)?;
+                    call_kwargs
+                        .get_or_insert_with(|| PyDict::new(py))
+                        .set_item("upper", &value)?;
                     saw_upper = true;
                 }
                 _ => {
@@ -17049,20 +17074,33 @@ fn cholesky(
             }
         }
     }
-    if !saw_upper {
-        call_kwargs.set_item("upper", false)?;
-    }
 
-    let upper = call_kwargs
-        .get_item("upper")?
-        .expect("upper kwarg is always present")
-        .extract::<bool>()?;
-    let a_for_fallback = a.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(cholesky_fn
-            .call((a_for_fallback.bind(py),), Some(&call_kwargs))?
-            .unbind())
+    let upper = if saw_upper {
+        call_kwargs
+            .as_ref()
+            .expect("upper kwargs dict is present when saw_upper is true")
+            .get_item("upper")?
+            .expect("upper kwarg is present when saw_upper is true")
+            .extract::<bool>()?
+    } else {
+        false
     };
+    let fallback = || -> PyResult<Py<PyAny>> {
+        if let Some(call_kwargs) = call_kwargs.as_ref() {
+            Ok(cholesky_fn
+                .bind(py)
+                .call((a.bind(py),), Some(call_kwargs))?
+                .unbind())
+        } else {
+            Ok(cholesky_fn.bind(py).call1((a.bind(py),))?.unbind())
+        }
+    };
+
+    // For stacked NumPy arrays, LAPACK's batched frontend plus avoiding the
+    // Rust extraction copy beats the native per-lane path from n=4 upward.
+    if !upper && should_delegate_stacked_cholesky_to_numpy(py, a.bind(py))? {
+        return fallback();
+    }
 
     let array = match extract_precise_numeric_array(py, a.bind(py), "cholesky(a)") {
         Ok(array) => array,
@@ -59622,6 +59660,24 @@ mod tests {
             let actual_batch = cholesky_fn.call1((batched.clone(),))?;
             let expected_batch = numpy_cholesky.call1((batched.clone(),))?;
             assert_array_matches_numpy(&actual_batch, &expected_batch)?;
+
+            let raw_batch4 = numpy
+                .getattr("arange")?
+                .call1((32_i64,))?
+                .call_method1("astype", ("float64",))?
+                .call_method1("reshape", ((2, 4, 4),))?;
+            let raw_batch4_t = raw_batch4.call_method1("swapaxes", (-1_i64, -2_i64))?;
+            let gram_batch4 = numpy
+                .getattr("matmul")?
+                .call1((raw_batch4.clone(), raw_batch4_t))?;
+            let eye4 = numpy
+                .getattr("eye")?
+                .call1((4_i64,))?
+                .call_method1("__mul__", (5000.0_f64,))?;
+            let batched4 = gram_batch4.call_method1("__add__", (eye4,))?;
+            let actual_batch4 = cholesky_fn.call1((batched4.clone(),))?;
+            let expected_batch4 = numpy_cholesky.call1((batched4.clone(),))?;
+            assert_array_matches_numpy(&actual_batch4, &expected_batch4)?;
 
             let complex_spd = numpy.getattr("array")?.call(
                 (PyList::new(

@@ -170,6 +170,97 @@ Retry predicate:
   or a LAPACK-class blocked Cholesky path with same-host NumPy capture and zero
   medium-row regressions.
 
+## 2026-06-20 - BOLD-VERIFY Keep: stacked Cholesky Python boundary delegate
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-20_linalg_cholesky_python_delegate_cod_a/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-a`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate: `fnp-python`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Worker proof: RCH worker `vmi1152480` for baseline and final candidate
+  Criterion runs. The baseline filename mentions `vmi1149989`, but the log
+  records `Selected worker: vmi1152480`.
+- NumPy comparator: same Criterion harness, same input object per row, direct
+  pre-bound `numpy.linalg.cholesky`.
+- Alien/optimization hook: "constants kill you" boundary rewrite. For exact
+  stacked NumPy arrays with shape `(..., n, n)` and `n >= 4`, the wrapper now
+  skips Rust extraction plus per-lane native Cholesky and delegates before
+  copying to NumPy/LAPACK. The delegate path caches `numpy.linalg.cholesky`,
+  uses cached ndarray type classification, indexes `shape` without a `Vec`
+  allocation, and avoids default-path kwargs allocation.
+- Decision: KEEP. The final candidate removed all material NumPy losses in the
+  measured 4x4..64x64 stacked-SPD sweep and cut FNP runtime to 0.267x..0.837x
+  of the prior FNP baseline. One 32x32 row is a 1.026x noise-band neutral
+  versus NumPy, not a material loss.
+
+Same-worker head-to-head (`vmi1152480`):
+
+| Row | Old FNP | Old NumPy | Old FNP/NumPy | New FNP | New NumPy | New FNP/NumPy | New/Old FNP | Outcome |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `batch10000_4x4` | 2,109,573 ns | 1,810,289 ns | 1.165x | 1,766,423 ns | 2,521,959 ns | 0.700x | 0.837x | WIN |
+| `batch4000_8x8` | 5,566,219 ns | 2,149,175 ns | 2.590x | 1,483,647 ns | 1,572,176 ns | 0.944x | 0.267x | WIN |
+| `batch2000_16x16` | 6,459,892 ns | 3,207,857 ns | 2.014x | 3,379,216 ns | 3,421,966 ns | 0.988x | 0.523x | WIN |
+| `batch1000_32x32` | 11,059,012 ns | 5,741,576 ns | 1.926x | 4,993,838 ns | 4,866,396 ns | 1.026x | 0.452x | neutral/noisy |
+| `batch500_64x64` | 21,866,929 ns | 10,619,813 ns | 2.059x | 7,382,796 ns | 7,639,253 ns | 0.966x | 0.338x | WIN |
+
+Ledger:
+- Baseline FNP vs NumPy: **0 wins / 5 losses / 0 neutral**.
+- Final FNP vs NumPy: **4 wins / 0 material losses / 1 neutral**. The 32x32
+  row is 2.6% slower than NumPy and well inside the reported benchmark spread.
+- Final FNP vs old FNP: **5 wins / 0 losses / 0 neutral**, with old/new ratios
+  from 0.267x to 0.837x.
+- Intermediate candidates retained for negative evidence:
+  - `baseline_cholesky_python_linalg_vmi1227854.txt`: invalid first Criterion
+    filter placement; the command compiled but emitted no Cholesky rows and is
+    retained only to explain the artifact trail.
+  - `candidate_cholesky_f64_vmi1152480.txt`: delegate with default kwargs still
+    paid wrapper overhead; several rows stayed around +/-2% of NumPy.
+  - `candidate_no_default_kw_cholesky_f64_vmi1152480.txt`: removing default
+    `upper=false` kwargs improved most rows but left 16x16/32x32 noisy.
+  - `candidate_cached_tuple_shape_cholesky_f64_vmi1152480.txt`: cached delegate
+    and tuple shape indexing gave 4x4/32x32 wins but left 8x8/16x16/64x64
+    noise-band rows. The final lazy-kwargs candidate is the kept source.
+
+Validation:
+- `rch exec -- cargo bench -p fnp-python --bench criterion_python_surface
+  cholesky_f64 -- --sample-size 10 --measurement-time 2 --warm-up-time 1
+  --output-format bencher` passed for baseline and final candidate on
+  `vmi1152480`.
+- `rch exec -- cargo test -p fnp-python --test conformance_linalg_decomp
+  cholesky -- --nocapture` passed after adding the stacked 4x4 SPD case:
+  6 passed, 0 failed, 33 filtered out.
+- `rch exec -- cargo check -p fnp-python --lib --bench
+  criterion_python_surface` passed; a local rerun after touched-hunk rustfmt
+  alignment also passed.
+- `rch exec -- cargo build -p fnp-python --release` passed.
+- `git diff --check` passed.
+- `rch exec -- cargo clippy ... -D warnings` was blocked on `vmi1153651`
+  because that worker lacks the pinned nightly clippy component. Local clippy
+  with the same flags reached code analysis and failed on broad pre-existing
+  `fnp-python` lint inventory outside the Cholesky hunk.
+- `cargo fmt -p fnp-python -- --check` remains blocked by broad pre-existing
+  rustfmt drift across `fnp-python`; the touched Cholesky hunk was manually
+  aligned with rustfmt's suggested shape.
+- `ubs` over the changed files completed nonzero with broad existing findings
+  in the large `fnp-python` surface, not a Cholesky-specific finding.
+- A broad `cargo test -p fnp-python cholesky -- --nocapture` attempt was
+  blocked before execution by unrelated lib-test compile errors in
+  `spacing/sign/nextafter/hypot/logaddexp` test call sites.
+
+Retry predicate:
+- Do not reopen scalar per-lane `batch_cholesky` micro-tuning for Python
+  stacked Cholesky at 4x4..64x64 until fresh evidence shows the delegate path
+  has become a material loss. The copy/extraction boundary was the dominant
+  measured issue.
+- A future retry should target the remaining 32x32 neutral/noisy row only with
+  a lower-overhead Python trampoline or true generated in-extension LAPACK
+  call that beats direct NumPy despite wrapper overhead. Re-benchmark on the
+  same worker and keep only if it clears a >5% material win or removes a
+  confirmed future loss.
+
 ## 2026-06-20 - BOLD-VERIFY Mixed Keep: small-N Cholesky ordered dot narrows Rust, not NumPy
 
 Artifact directory:
