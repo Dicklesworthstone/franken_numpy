@@ -39523,10 +39523,13 @@ fn try_zerocopy_int_minmax(
         return Ok(None);
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
-    // Narrow ints (1/2-byte): numpy's SIMD min/max processes 16-64 lanes per
-    // instruction, which the scalar (even parallel) fold can't beat — delegate to
-    // numpy (flat and per-axis). Wide ints (4/8-byte) use the parallel native fold.
-    if itemsize <= 2 {
+    // numpy's SIMD min/max processes 16-64 narrow-int lanes per instruction; a scalar
+    // (even parallel) fold can't beat it for NARROW ints (1/2-byte) at any size, nor
+    // for WIDE ints (4/8-byte) below ~4M elements where the parallel native fold's
+    // 64-core bandwidth advantage hasn't yet overtaken SIMD. Delegate both to numpy;
+    // large wide ints fall through to the parallel native fold.
+    let size: usize = a.getattr("size").and_then(|s| s.extract()).unwrap_or(0);
+    if itemsize <= 2 || size < (1 << 23) {
         let op = if take_min { "min" } else { "max" };
         let kwargs = PyDict::new(py);
         if let Some(ax) = axis {
@@ -44525,6 +44528,7 @@ where
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
         use rayon::prelude::*;
         let parallel = outer * axis_len * inner >= (1 << 16) && rayon::current_num_threads() >= 2;
+        let parallel_nonlast = parallel;
         if inner == 1 {
             let lane_ptp = |l: &[T]| -> T {
                 let mut mx = l[0];
@@ -44592,14 +44596,14 @@ where
                 }
                 mxv.iter().zip(&mnv).map(|(&m, &n)| sub(m, n)).collect()
             };
-            let planes: Vec<T> = if parallel && outer >= 2 {
+            let planes: Vec<T> = if parallel_nonlast && outer >= 2 {
                 let ps: Vec<Vec<T>> = (0..outer).into_par_iter().map(group_plane).collect();
                 let mut out = vec![data[0]; out_elems];
                 for (o, p) in ps.into_iter().enumerate() {
                     out[o * inner..o * inner + inner].copy_from_slice(&p);
                 }
                 out
-            } else if parallel {
+            } else if parallel_nonlast {
                 // Single group: privatize (max,min) across row-blocks, merge, then sub.
                 let (mxv, mnv) = (0..axis_len)
                     .into_par_iter()
@@ -44667,10 +44671,12 @@ fn try_zerocopy_int_ptp_axis(
         return Ok(None);
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
-    // Narrow ints (1/2-byte) along an axis: numpy's SIMD max/min (16-64 lanes per
-    // instruction) beats the scalar fold; delegate to numpy's ptp. Wide ints
-    // (4/8-byte) use the parallel native fold below.
-    if itemsize <= 2 {
+    // numpy's SIMD max/min beats the scalar fold for NARROW ints (any size) and for
+    // WIDE ints below ~4M elements (where the parallel fold's bandwidth edge hasn't
+    // overtaken SIMD). Delegate both to numpy's ptp; large wide ints fall through to
+    // the parallel native fold below.
+    let size: usize = a.getattr("size").and_then(|s| s.extract()).unwrap_or(0);
+    if itemsize <= 2 || size < (1 << 23) {
         let kwargs = PyDict::new(py);
         kwargs.set_item("axis", axis)?;
         return Ok(Some(numpy.getattr("ptp")?.call((a,), Some(&kwargs))?.unbind()));
