@@ -17768,7 +17768,21 @@ fn spacing(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn sign(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // out=/where=/dtype= etc → numpy passthrough (full ufunc kwarg surface, matching
+    // np.sign which accepts out=). Bare single-arg call uses the native fast paths below.
+    if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1) {
+        return core_numpy_passthrough(py, "sign", args, kwargs);
+    }
+    let x: Py<PyAny> = args.get_item(0)?.unbind();
     let numpy = py.import("numpy")?;
     let arr = numpy.call_method1("asarray", (x.bind(py),))?;
     let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
@@ -28340,9 +28354,18 @@ fn contains_nan_value(array: &UFuncArray) -> bool {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn square(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_elementwise(py, x.bind(py), UnaryOp::Square, "square", "square(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn square(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Bare call → native fast path; out=/where=/dtype= etc → numpy passthrough (full
+    // ufunc kwarg surface, matching np.square which accepts out=).
+    native_unary_elementwise_or_passthrough(py, args, kwargs, UnaryOp::Square, "square", "square(x)")
 }
 
 #[pyfunction]

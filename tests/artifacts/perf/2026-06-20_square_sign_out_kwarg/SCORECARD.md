@@ -1,0 +1,1 @@
+np.square/np.sign are ufuncs accepting out=/where=/dtype=; fnp's square/sign had signature (x,) -> TypeError on out=. Switched to (*args,**kwargs): bare call keeps native fast path, any ufunc kwarg routes to numpy passthrough. 43 cases (out buffer+identity, where=, bare across f64/int/f32/bool/complex/uint/list) 0 fails. Found via out= differential under load 146.
