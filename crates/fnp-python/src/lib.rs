@@ -39824,6 +39824,20 @@ fn cumsum(
         return Ok(result);
     }
 
+    // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
+    // zero-copy paths into the cold extract → native scan (~3x slower than numpy's
+    // strided accumulate). Delegate them to numpy.
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback();
+    }
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "cumsum(a)") {
         Ok(arr) => arr,
