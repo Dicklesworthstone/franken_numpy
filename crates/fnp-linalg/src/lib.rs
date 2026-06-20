@@ -3839,7 +3839,43 @@ fn matrix_norm_column_sum_cache_linear_fill_simd(
 
         type Lane = Simd<f64, MATRIX_NORM_COLUMN_SUM_SIMD_LANES>;
         let simd_cols = n / MATRIX_NORM_COLUMN_SUM_SIMD_LANES * MATRIX_NORM_COLUMN_SUM_SIMD_LANES;
-        for row in a.chunks_exact(n) {
+        let mut row_blocks = a.chunks_exact(n * 4);
+        for rows in &mut row_blocks {
+            let (row0, rows) = rows.split_at(n);
+            let (row1, rows) = rows.split_at(n);
+            let (row2, row3) = rows.split_at(n);
+            let mut col = 0;
+            while col < simd_cols {
+                let sums =
+                    Lane::from_slice(&col_sums[col..col + MATRIX_NORM_COLUMN_SUM_SIMD_LANES]);
+                let values0 =
+                    Lane::from_slice(&row0[col..col + MATRIX_NORM_COLUMN_SUM_SIMD_LANES]).abs();
+                let values1 =
+                    Lane::from_slice(&row1[col..col + MATRIX_NORM_COLUMN_SUM_SIMD_LANES]).abs();
+                let values2 =
+                    Lane::from_slice(&row2[col..col + MATRIX_NORM_COLUMN_SUM_SIMD_LANES]).abs();
+                let values3 =
+                    Lane::from_slice(&row3[col..col + MATRIX_NORM_COLUMN_SUM_SIMD_LANES]).abs();
+                (((sums + values0) + values1) + values2 + values3)
+                    .copy_to_slice(&mut col_sums[col..col + MATRIX_NORM_COLUMN_SUM_SIMD_LANES]);
+                col += MATRIX_NORM_COLUMN_SUM_SIMD_LANES;
+            }
+            for col in simd_cols..n {
+                let sum = &mut col_sums[col];
+                let value0 = row0[col];
+                let value1 = row1[col];
+                let value2 = row2[col];
+                let value3 = row3[col];
+                if value0.is_nan() || value1.is_nan() || value2.is_nan() || value3.is_nan() {
+                    return f64::NAN;
+                }
+                *sum += value0.abs();
+                *sum += value1.abs();
+                *sum += value2.abs();
+                *sum += value3.abs();
+            }
+        }
+        for row in row_blocks.remainder().chunks_exact(n) {
             let mut col = 0;
             while col < simd_cols {
                 let sums =

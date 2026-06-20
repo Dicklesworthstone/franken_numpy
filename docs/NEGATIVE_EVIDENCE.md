@@ -4,6 +4,78 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Keep: linalg column norm 4-row SIMD accumulator
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-20_linalg_column_norm_rowblock_cod_b/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-b`.
+- Bead: `franken_numpy-ixs5y.274`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg::matrix_norm_nxn` for `ord="1"` and `ord="-1"`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Performance worker: `hz2` for fresh old FNP, final FNP, and direct NumPy rows.
+- Alien/optimization hook: vectorized execution and cache-sized numeric kernels
+  from the graveyard docs. The kept lever is a row-blocked SIMD accumulator:
+  load each `col_sums` vector once, add four adjacent row vectors in original
+  per-column row order, then store once.
+- Decision: SHIP. The fresh baseline already beat NumPy on this lane, but the
+  candidate widened the lead and improved every measured Rust row.
+
+Targeted gap:
+- Older scorecard evidence showed 256-1024 `ord=1/-1` column reductions behind
+  NumPy. A fresh same-host baseline on current `origin/main` showed that this
+  lane had already moved to a NumPy win: **6 wins / 0 losses / 0 neutral** versus
+  NumPy. The keep gate therefore became stricter: beat fresh Rust baseline and
+  preserve the NumPy win on all six rows.
+
+Same-worker benchmark ledger:
+
+| Row | Baseline FNP ns | Final FNP ns | NumPy ns | Baseline/NumPy | Final/Old | Final/NumPy | Outcome |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `one/256` | 11441 | 5337 | 33589 | 0.341x win | 0.466x win | 0.159x win | keep |
+| `neg_one/256` | 9268 | 5093 | 33875 | 0.274x win | 0.550x win | 0.150x win | keep |
+| `one/512` | 37970 | 28409 | 96297 | 0.394x win | 0.748x win | 0.295x win | keep |
+| `neg_one/512` | 37477 | 28023 | 92790 | 0.404x win | 0.748x win | 0.302x win | keep |
+| `one/1024` | 151777 | 123032 | 342892 | 0.443x win | 0.811x win | 0.359x win | keep |
+| `neg_one/1024` | 152666 | 123074 | 341621 | 0.447x win | 0.806x win | 0.360x win | keep |
+
+Repeat proof:
+- First candidate pass also won all rows: 0.462x, 0.576x, 0.731x, 0.758x,
+  0.794x, and 0.793x candidate/old for the table above.
+- Repeat candidate pass is the counted final table.
+
+Kept proof:
+- Final old/new gate: **6 wins / 0 losses / 0 neutral** versus fresh FNP
+  baseline on `hz2`.
+- Final head-to-head NumPy gate: **6 wins / 0 losses / 0 neutral** on the same
+  `hz2` host.
+- The implementation preserves per-column row-order addition for each four-row
+  block: `sum += abs(row0[col]); sum += abs(row1[col]); sum += abs(row2[col]);
+  sum += abs(row3[col])`. Remainder rows use the prior one-row SIMD path.
+
+Validation:
+- `rch exec -- cargo test -p fnp-linalg matrix_norm_column_reduction_matches_strided_reference_bits -- --nocapture` passed on `hz2`.
+- `rch exec -- cargo check -p fnp-linalg --all-targets` passed on `hz2`.
+- `rch exec -- cargo build -p fnp-linalg --release` passed on `hz2`.
+- `rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed on `hz2`.
+- `git diff --check` passed.
+- `cargo fmt -p fnp-linalg -- --check` fails on broad pre-existing
+  `fnp-linalg` formatting drift in benches/examples and unrelated `lib.rs`
+  sections; the edited SIMD hunk was not reported by rustfmt.
+- `ubs crates/fnp-linalg/src/lib.rs docs/NEGATIVE_EVIDENCE.md
+  docs/RELEASE_READINESS_SCORECARD.md
+  tests/artifacts/perf/2026-06-20_linalg_column_norm_rowblock_cod_b/scorecard.md`
+  exited nonzero from broad existing `fnp-linalg` whole-file inventory; no
+  finding was reported against the edited row-block SIMD hunk.
+
+Retry predicate:
+- Do not continue spending no-gaps effort on `matrix_norm_nxn_orders/(one|neg_one)/(256|512|1024)`
+  unless a fresh same-host benchmark shows a new NumPy loss or a regression from
+  this keep. The next credible linalg target should return to current measured
+  losses in deeper SVD/eig/solve kernels with same-host NumPy capture first.
+
 ## 2026-06-20 - BOLD-VERIFY Keep: Python compress axis=None bitmask gather
 
 Artifact directory:

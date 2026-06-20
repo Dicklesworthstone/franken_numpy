@@ -3,6 +3,54 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - Linalg Column Norm Row-Block SIMD Keep Slice
+
+Scope:
+- Bead: `franken_numpy-ixs5y.274`.
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg::matrix_norm_nxn` for `ord="1"` and `ord="-1"`.
+- Worker proof: same-worker old FNP, final FNP, and NumPy rows on `hz2`.
+- Artifact:
+  `tests/artifacts/perf/2026-06-20_linalg_column_norm_rowblock_cod_b/`.
+- Candidate: process four row-major rows per SIMD column lane, reducing
+  `col_sums` load/store traffic while preserving per-column row-order addition.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS / DOMINATES | Final NumPy ratios are 0.159x, 0.150x, 0.295x, 0.302x, 0.359x, and 0.360x across the six `256/512/1024` `ord=1/-1` rows. |
+| Old/new FNP regression gate | PASS | Repeat candidate won all rows versus fresh Rust baseline: 0.466x, 0.550x, 0.748x, 0.748x, 0.811x, and 0.806x. |
+| Stale-gap correction | PASS | Fresh current-main baseline already beat NumPy on all six rows, replacing the older scorecard's 256-1024 loss classification. |
+| Targeted correctness | PASS | `rch exec -- cargo test -p fnp-linalg matrix_norm_column_reduction_matches_strided_reference_bits -- --nocapture` passed on `hz2`. |
+| Crate compile health | PASS | `rch exec -- cargo check -p fnp-linalg --all-targets` passed on `hz2`. |
+| Release build health | PASS | `rch exec -- cargo build -p fnp-linalg --release` passed on `hz2`. |
+| Clippy health | PASS | `rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed on `hz2`. |
+| Formatting health | KNOWN GAP | `cargo fmt -p fnp-linalg -- --check` reports broad pre-existing `fnp-linalg` drift in benches/examples and unrelated `lib.rs` sections; rustfmt did not report the edited SIMD hunk. |
+| UBS | KNOWN GAP | UBS exited nonzero from broad existing `fnp-linalg` whole-file inventory; no finding was reported against the edited row-block SIMD hunk. |
+| Whitespace | PASS | `git diff --check` passed. |
+| Evidence durability | PASS | Fresh baseline, fresh NumPy, first candidate, repeat candidate, test/check/clippy/fmt/diff logs, ratios, and retry predicate are recorded. |
+
+Cluster score: **94 / 100**
+
+Score rationale:
+- +35 performance: the kept hunk turns an already-winning current baseline into
+  a clear 2.8x-6.7x NumPy lead for this row family.
+- +20 old/new discipline: all six measured rows improved versus fresh Rust
+  baseline, and a repeat run confirmed the direction.
+- +18 correctness/build: focused bit guard, crate check, and clippy all passed.
+- +12 evidence discipline: same-host NumPy, same-worker RCH, raw artifacts, and
+  retry predicates are durable.
+- +9 source discipline: the change stays inside the existing SIMD fill path and
+  preserves row-order accumulation plus NaN behavior.
+- -6 hygiene: crate-level rustfmt and UBS remain blocked by pre-existing
+  unrelated whole-file inventory.
+
+Current release posture:
+- `matrix_norm_nxn_orders/(one|neg_one)/(256|512|1024)` is no longer a
+  meaningful NumPy performance gap on `hz2`; it should remain in Criterion as a
+  regression guard.
+- Next no-gaps linalg effort should move to a fresh measured loss, likely deeper
+  SVD/eig/solve kernels, rather than reworking this now-dominant lane.
+
 ## 2026-06-20 - Python Compress Axis=None Bitmask-Gather Keep Slice
 
 Scope:
