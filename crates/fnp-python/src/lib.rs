@@ -17379,6 +17379,18 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .call1((bound,))?
             .unbind())
     };
+    // numpy's getrf+getri beats the native inv_nxn for small 2-D systems but cliffs
+    // sharply at n~100 (n<=96 ~1.7x faster; n>=100 native wins up to 25x). Shape-peek
+    // before the extract — which would otherwise dominate a tiny inv — and delegate
+    // small systems to numpy. Mirrors the solve gesv-cliff size-gate.
+    if bound.is_exact_instance(&numpy.getattr("ndarray")?)
+        && let Ok(shape) = bound.getattr("shape").and_then(|s| s.extract::<Vec<usize>>())
+        && shape.len() == 2
+        && shape[0] == shape[1]
+        && shape[0] < 100
+    {
+        return fallback();
+    }
     if let Ok(array) = extract_numeric_array(py, bound, "inv(a)") {
         let shape = array.shape();
         let real = !matches!(array.dtype(), DType::Complex64 | DType::Complex128);
