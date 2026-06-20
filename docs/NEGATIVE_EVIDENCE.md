@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY DEFINITIVE diagnosis: convolve loss = wrapper copies, kernel is PARITY
+
+Agent: `BlackThrush` / `cod-b`. Supersedes the "needs profiling" note on the
+convolve short-kernel loss with a measured per-step breakdown.
+
+Method: ran the pure-kernel criterion bench `cargo bench -p fnp-ufunc --bench
+convolve -- prod_convolve` (n=1M, m=8, 'full', NO Python) -> **1.35ms**; and
+temporarily instrumented the fnp-python `convolve` wrapper with `Instant` timing
+around each step (built, measured, reverted). Per-step at n=1M m=8 'full' (warm):
+- extract_numeric_array(a)+(v): ~4.75 ms
+- result_type asarray dance: ~7.5 us (negligible)
+- convolve_mode kernel: ~1.38 ms (== bench == NumPy's 1.40 ms -> PARITY)
+- build_numpy_array_from_ufunc: ~5.5 ms
+
+So the 9-15x Python-level loss is ENTIRELY two full-array copies the wrapper does
+and NumPy does not: extract copies the input ndarray into an owned Vec, and build
+copies the result Vec into a fresh numpy array (each ~5ms/8MB ~ 1.6 GB/s — well
+below memcpy, dominated by numpy alloc + PyBuffer protocol + first-touch faults).
+The SIMD gather kernel itself is already at NumPy parity.
+
+CEILING: PARITY, not a win. convolve short-kernel is memory-bound and the kernel
+already matches NumPy's C loop; parallelizing it does not help (bandwidth-bound).
+The only gain available is eliminating the two wrapper copies to reach ~1x.
+
+Retry predicate (to close the loss to parity): a zero-copy in/out path — read a,v
+as `&[f64]` via PyBuffer (no extract Vec), allocate the numpy output once and get
+its buffer as `&mut [f64]`, and run the gather writing DIRECTLY into it (refactor
+`convolve_mode`'s SIMD gather into a free `fn ..._into(a:&[f64], k:&[f64], mode,
+out:&mut[f64])` shared by both convolve_mode and the wrapper). That removes both
+~5ms copies -> ~kernel time (parity). It is a 2-crate (fnp-ufunc + fnp-python)
+refactor touching a core numerics kernel; do it as a focused task with the 243-case
+exhaustive oracle (recorded earlier) + the existing convolve goldens, NOT a rushed
+end-of-session change. Do NOT reattempt the naive collect+scalar-gather wrapper
+(it ADDS the same copies plus a slow kernel — already reverted).
+
 ## 2026-06-20 - BOLD-VERIFY REVERTED regression: naive zero-copy short-kernel convolve/correlate
 
 Agent: `BlackThrush` / `cod-b`. Follow-up to the convolve short-kernel loss entry.
