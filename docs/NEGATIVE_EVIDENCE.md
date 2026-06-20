@@ -4,6 +4,82 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Keep: fnp-python einsum reduce-all scalar builder
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-20_python_einsum_reduce_all_scalar_cod_a/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-a`.
+- Bead: `franken_numpy-ixs5y.276`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-python` / `einsum("ij->", exact contiguous float64 ndarray)`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Performance worker: `vmi1149989` for both counted baseline and candidate
+  `python_einsum_boundary` Criterion runs.
+- Alien/optimization hook: Python-boundary scalar specialization from the
+  gauntlet was treated as a scalar-materialization lever, not a new numerical
+  algorithm: keep only if it flips the live NumPy row while preserving the
+  existing f64 reduction golden SHA.
+- Decision: SHIP. The `EinsumSingleReduction2dKind::All` branch now returns
+  directly through the cached `numpy.float64` scalar builder after the streaming
+  sum, avoiding a temporary 0-D `UFuncArray` and generic scalar/array builder.
+
+Same-worker benchmark ledger:
+
+| Row | Baseline FNP ns | Baseline NumPy ns | Baseline FNP/NumPy | Candidate FNP ns | Candidate NumPy ns | Candidate FNP/NumPy | Candidate/Old FNP | Outcome |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| `fnp_einsum_trace_f64_4000` / `numpy_einsum_trace_f64_4000` | 5,431 | 8,017 | 0.677x win | 5,102 | 6,763 | 0.754x win | 0.939x win | guard win |
+| `fnp_einsum_diag_f64_4000` / `numpy_einsum_diag_f64_4000` | 1,045 | 1,158 | 0.902x win | 833 | 1,075 | 0.775x win | 0.797x win | guard win |
+| `fnp_einsum_reduce_all_f64_1000` / `numpy_einsum_reduce_all_f64_1000` | 119,524 | 115,252 | 1.037x loss | 100,778 | 104,427 | 0.965x win | 0.843x win | keep target |
+| `fnp_einsum_reduce_rows_f64_1000` / `numpy_einsum_reduce_rows_f64_1000` | 105,463 | 165,079 | 0.639x win | 103,688 | 100,144 | 1.035x loss | 0.983x win | noisy NumPy-side guard loss |
+| `fnp_einsum_reduce_cols_f64_1000` / `numpy_einsum_reduce_cols_f64_1000` | 148,799 | 489,469 | 0.304x win | 113,290 | 323,885 | 0.350x win | 0.761x win | guard win |
+
+Measurement notes:
+- Counted baseline command:
+  `rch exec -- cargo bench -p fnp-python --bench criterion_python_surface -- python_einsum_boundary --sample-size 10 --measurement-time 3 --warm-up-time 1 --output-format bencher`
+  with `RCH` selecting `vmi1149989`.
+- Counted candidate command used the same command with
+  `RCH_WORKER=vmi1149989 RCH_WORKERS=vmi1149989`.
+- The target row improved from a 1.037x NumPy loss to a 0.965x NumPy win and
+  ran at 0.843x of the fresh Rust baseline.
+- The row-reduction guard row is recorded as a candidate-run NumPy loss because
+  NumPy's measured row moved from 165,079 ns to 100,144 ns between runs while
+  FNP itself improved slightly. The source edit is confined to the `All` branch;
+  do not treat this as a proven row-reduction source regression without a
+  fresh paired row-only rerun.
+
+Validation:
+- `rch exec -- cargo test -p fnp-python --test conformance_einsum` attempted a
+  fixed-worker run; RCH had no admissible workers and failed open locally.
+  Result: 28 tests passed, including
+  `einsum_f64_single_operand_reduction_fast_path_golden_sha256` and
+  `einsum_scalar_return_type_matches_numpy`.
+- `rch exec -- cargo build -p fnp-python --release` passed on `hz1`.
+- `rch exec -- cargo check -p fnp-python --all-targets` failed on `hz1` due to
+  pre-existing lib-test call sites for `spacing`, `sign`, `nextafter`, `hypot`,
+  `logaddexp`, and `logaddexp2` still using the old direct `Py<PyAny>` call
+  shape instead of the current `(py, args, kwargs)` wrapper signature.
+- `rch exec -- cargo clippy -p fnp-python --all-targets -- -D warnings` failed
+  on the same pre-existing all-targets errors plus existing dead-code/style
+  lints. No failure was introduced on the edited scalar-return line.
+- `cargo fmt --package fnp-python --check` failed on broad pre-existing
+  formatting drift across `fnp-python`; formatter was not applied to avoid
+  unrelated churn.
+- `ubs crates/fnp-python/src/lib.rs ...` exited nonzero after 202s on broad
+  existing `fnp-python` inventory (panic/assert/unsafe/cast/security heuristics);
+  no finding was specific to the edited scalar-return line.
+- `git diff --check` passed.
+
+Retry predicate:
+- Keep this scalar builder path for exact contiguous f64 `einsum("ij->")`.
+- Do not broaden this bead into row/column reduction work. If the
+  `reduce_rows_f64_1000` NumPy-side guard loss repeats in a focused same-worker
+  row-only A/B, file or claim a separate `fnp-python` einsum row-reduction bead.
+- Future `einsum` scalar work should target a different measured loss class,
+  such as multi-operand full contractions, not another wrapper-only pass over
+  this now-winning single-operand reduce-all path.
+
 ## 2026-06-20 - BOLD-VERIFY No-Ship: linalg symmetric spectral gap, batch eigvalsh verified win
 
 Artifact directory:

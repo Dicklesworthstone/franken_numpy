@@ -42415,7 +42415,7 @@ fn try_zerocopy_f64_einsum_single_reduction_2d(
             for value in chunks.remainder() {
                 sum += value.get();
             }
-            UFuncArray::new(vec![], vec![sum], DType::F64)
+            return Ok(Some(build_f64_scalar(py, sum)?));
         }
         EinsumSingleReduction2dKind::KeepFirstLabel => {
             if ncols == 0 {

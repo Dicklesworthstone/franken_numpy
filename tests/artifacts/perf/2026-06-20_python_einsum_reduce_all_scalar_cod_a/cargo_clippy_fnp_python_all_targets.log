@@ -1,0 +1,1141 @@
+  [2m2026-06-20T21:18:56.363484Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: hz1 at root@87.99.133.171 (4 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:921 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:56.627314Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_numpy-cod-a-20260620T205523Z (hash: 4fce2f4ad23eac8e)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:56.627349Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 11 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:57.316696Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker hz1...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:57.316750Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 pattern(s) from .rchignore (total: 39)[0m
+    [2;3mat[0m rch/src/transfer.rs:886 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:57.316758Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:57.970770Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 653ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:57.970847Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-conformance -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-conformance on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:58.508912Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 538ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:58.509032Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-dtype -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-dtype on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:59.056198Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 547ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:59.056273Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-io -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-io on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:59.549685Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 493ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:18:59.549765Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-iter -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-iter on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:00.028703Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 478ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:00.028788Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-linalg -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-linalg on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:00.561598Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 532ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:00.561676Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ndarray -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ndarray on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:01.061211Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 499ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:01.061288Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-python -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-python on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:01.553994Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 492ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:01.554076Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-random -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-random on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:02.070413Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 516ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:02.070503Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-runtime -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-runtime on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:02.587988Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 517ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:02.588100Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ufunc -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ufunc on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:03.069315Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 481ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:03.069356Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 4871 files, 143334 bytes in 5746ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:06.124919Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo clippy -p fnp-python --all-targets -- -D warnings[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:19:06.124967Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.rch-targets/franken_numpy-cod-a -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/.rch-target-hz1-pool-2a96c7b531229140f057e9056579f01e[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded cfg-if v1.0.4
+  Downloaded adler2 v2.0.1
+  Downloaded ciborium-ll v0.2.2
+  Downloaded cast v0.3.0
+  Downloaded ciborium-io v0.2.2
+  Downloaded anes v0.1.6
+  Downloaded clap v4.6.1
+  Downloaded walkdir v2.5.0
+  Downloaded bytemuck v1.25.0
+  Downloaded zmij v1.0.21
+  Downloaded quote v1.0.45
+  Downloaded tinytemplate v1.2.1
+  Downloaded unicode-ident v1.0.24
+  Downloaded serde_core v1.0.228
+  Downloaded pyo3-macros-backend v0.28.3
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded plotters v0.3.7
+  Downloaded regex v1.12.3
+  Downloaded serde_json v1.0.149
+  Downloaded clap_builder v4.6.0
+  Downloaded rayon v1.12.0
+  Downloaded zerocopy v0.8.48
+  Downloaded itertools v0.13.0
+  Downloaded criterion v0.6.0
+  Downloaded syn v2.0.117
+  Downloaded itertools v0.10.5
+  Downloaded aho-corasick v1.1.4
+  Downloaded getrandom v0.3.4
+  Downloaded regex-syntax v0.8.10
+  Downloaded flate2 v1.1.9
+  Downloaded serde v1.0.228
+  Downloaded rayon-core v1.13.0
+  Downloaded once_cell v1.21.4
+  Downloaded num-traits v0.2.19
+  Downloaded half v2.7.1
+  Downloaded crc32fast v1.5.0
+  Downloaded serde_derive v1.0.228
+  Downloaded pyo3-ffi v0.28.3
+  Downloaded proc-macro2 v1.0.106
+  Downloaded miniz_oxide v0.8.9
+  Downloaded memchr v2.8.0
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded regex-automata v0.4.14
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded simd-adler32 v0.3.9
+  Downloaded pyo3-build-config v0.28.3
+  Downloaded either v1.15.0
+  Downloaded criterion-plot v0.5.0
+  Downloaded clap_lex v1.1.0
+  Downloaded target-lexicon v0.13.5
+  Downloaded plotters-backend v0.3.7
+  Downloaded itoa v1.0.18
+  Downloaded heck v0.5.0
+  Downloaded same-file v1.0.6
+  Downloaded libc v0.2.185
+  Downloaded pyo3-macros v0.28.3
+  Downloaded plotters-svg v0.3.7
+  Downloaded oorandom v11.1.5
+  Downloaded ciborium v0.2.2
+  Downloaded anstyle v1.0.14
+  Downloaded autocfg v1.5.0
+  Downloaded pyo3 v0.28.3
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling target-lexicon v0.13.5
+    Checking cfg-if v1.0.4
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+    Checking either v1.15.0
+   Compiling zerocopy v0.8.48
+   Compiling zmij v1.0.21
+   Compiling rayon-core v1.13.0
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling libc v0.2.185
+    Checking itoa v1.0.18
+    Checking memchr v2.8.0
+   Compiling crc32fast v1.5.0
+   Compiling autocfg v1.5.0
+    Checking adler2 v2.0.1
+    Checking crossbeam-epoch v0.9.18
+   Compiling pyo3-build-config v0.28.3
+    Checking crossbeam-deque v0.8.6
+   Compiling getrandom v0.3.4
+   Compiling syn v2.0.117
+   Compiling num-traits v0.2.19
+   Compiling heck v0.5.0
+    Checking simd-adler32 v0.3.9
+    Checking fnp-ndarray v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ndarray)
+    Checking miniz_oxide v0.8.9
+    Checking ciborium-io v0.2.2
+    Checking regex-syntax v0.8.10
+    Checking rayon v1.12.0
+    Checking anstyle v1.0.14
+    Checking plotters-backend v0.3.7
+    Checking clap_lex v1.1.0
+    Checking flate2 v1.1.9
+    Checking clap_builder v4.6.0
+    Checking plotters-svg v0.3.7
+    Checking itertools v0.10.5
+    Checking regex-automata v0.4.14
+   Compiling pyo3-macros-backend v0.28.3
+   Compiling pyo3-ffi v0.28.3
+   Compiling pyo3 v0.28.3
+    Checking cast v0.3.0
+    Checking fnp-runtime v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-runtime)
+    Checking same-file v1.0.6
+    Checking once_cell v1.21.4
+    Checking bytemuck v1.25.0
+    Checking walkdir v2.5.0
+    Checking criterion-plot v0.5.0
+    Checking plotters v0.3.7
+    Checking fnp-io v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-io)
+    Checking itertools v0.13.0
+    Checking clap v4.6.1
+    Checking anes v0.1.6
+    Checking oorandom v11.1.5
+    Checking regex v1.12.3
+    Checking fnp-linalg v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-linalg)
+    Checking fnp-random v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-random)
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+    Checking fnp-iter v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-iter)
+    Checking tinytemplate v1.2.1
+   Compiling pyo3-macros v0.28.3
+    Checking half v2.7.1
+    Checking ciborium-ll v0.2.2
+    Checking fnp-dtype v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-dtype)
+    Checking ciborium v0.2.2
+    Checking fnp-ufunc v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ufunc)
+    Checking criterion v0.6.0
+    Checking fnp-python v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-python)
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:63517:26
+      |
+63517 |             let actual = spacing(py, values.clone().unbind())?;
+      |                          ^^^^^^^----------------------------- argument #3 of type `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:63517:38
+      |
+63517 |             let actual = spacing(py, values.clone().unbind())?;
+      |                                      ^^^^^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17830:4
+      |
+17830 | fn spacing(
+      |    ^^^^^^^
+17831 |     py: Python<'_>,
+17832 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17833 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+63517 -             let actual = spacing(py, values.clone().unbind())?;
+63517 +             let actual = spacing(py, /* &pyo3::Bound<'_, pyo3::types::PyTuple> */, /* std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>> */)?;
+      |
+
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:63542:28
+      |
+63542 |                 let ours = spacing(py, values.clone().unbind())?;
+      |                            ^^^^^^^----------------------------- argument #3 of type `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:63542:40
+      |
+63542 |                 let ours = spacing(py, values.clone().unbind())?;
+      |                                        ^^^^^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17830:4
+      |
+17830 | fn spacing(
+      |    ^^^^^^^
+17831 |     py: Python<'_>,
+17832 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17833 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+63542 -                 let ours = spacing(py, values.clone().unbind())?;
+63542 +                 let ours = spacing(py, /* &pyo3::Bound<'_, pyo3::types::PyTuple> */, /* std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>> */)?;
+      |
+
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:63572:26
+      |
+63572 |             let actual = spacing(py, values.clone().unbind())?;
+      |                          ^^^^^^^----------------------------- argument #3 of type `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:63572:38
+      |
+63572 |             let actual = spacing(py, values.clone().unbind())?;
+      |                                      ^^^^^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17830:4
+      |
+17830 | fn spacing(
+      |    ^^^^^^^
+17831 |     py: Python<'_>,
+17832 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17833 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+63572 -             let actual = spacing(py, values.clone().unbind())?;
+63572 +             let actual = spacing(py, /* &pyo3::Bound<'_, pyo3::types::PyTuple> */, /* std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>> */)?;
+      |
+
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:63604:26
+      |
+63604 |             let actual = sign(py, values.clone().unbind())?;
+      |                          ^^^^----------------------------- argument #3 of type `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:63604:35
+      |
+63604 |             let actual = sign(py, values.clone().unbind())?;
+      |                                   ^^^^^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17882:4
+      |
+17882 | fn sign(
+      |    ^^^^
+17883 |     py: Python<'_>,
+17884 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17885 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+63604 -             let actual = sign(py, values.clone().unbind())?;
+63604 +             let actual = sign(py, /* &pyo3::Bound<'_, pyo3::types::PyTuple> */, /* std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>> */)?;
+      |
+
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:63628:26
+      |
+63628 |             let actual = sign(py, values.clone().unbind())?;
+      |                          ^^^^----------------------------- argument #3 of type `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:63628:35
+      |
+63628 |             let actual = sign(py, values.clone().unbind())?;
+      |                                   ^^^^^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17882:4
+      |
+17882 | fn sign(
+      |    ^^^^
+17883 |     py: Python<'_>,
+17884 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17885 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+63628 -             let actual = sign(py, values.clone().unbind())?;
+63628 +             let actual = sign(py, /* &pyo3::Bound<'_, pyo3::types::PyTuple> */, /* std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>> */)?;
+      |
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64150:26
+      |
+64150 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64150:40
+      |
+64150 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                        ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64150:61
+      |
+64150 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                             ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>`
+               found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18152:4
+      |
+18152 | fn nextafter(
+      |    ^^^^^^^^^
+18153 |     py: Python<'_>,
+18154 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18155 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64175:26
+      |
+64175 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64175:40
+      |
+64175 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                        ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64175:61
+      |
+64175 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                             ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>`
+               found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18152:4
+      |
+18152 | fn nextafter(
+      |    ^^^^^^^^^
+18153 |     py: Python<'_>,
+18154 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18155 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64201:26
+      |
+64201 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64201:36
+      |
+64201 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                    ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64201:57
+      |
+64201 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                         ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>`
+               found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18190:4
+      |
+18190 | fn hypot(
+      |    ^^^^^
+18191 |     py: Python<'_>,
+18192 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18193 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64226:26
+      |
+64226 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64226:36
+      |
+64226 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                    ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64226:57
+      |
+64226 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                         ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>`
+               found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18190:4
+      |
+18190 | fn hypot(
+      |    ^^^^^
+18191 |     py: Python<'_>,
+18192 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18193 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64328:26
+      |
+64328 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64328:40
+      |
+64328 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                        ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64328:61
+      |
+64328 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                             ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>`
+               found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18248:4
+      |
+18248 | fn logaddexp(
+      |    ^^^^^^^^^
+18249 |     py: Python<'_>,
+18250 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18251 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64362:26
+      |
+64362 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64362:40
+      |
+64362 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                        ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64362:61
+      |
+64362 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                             ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>`
+               found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18248:4
+      |
+18248 | fn logaddexp(
+      |    ^^^^^^^^^
+18249 |     py: Python<'_>,
+18250 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18251 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64388:26
+      |
+64388 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64388:41
+      |
+64388 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                         ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64388:62
+      |
+64388 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                              ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>`
+               found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18288:4
+      |
+18288 | fn logaddexp2(
+      |    ^^^^^^^^^^
+18289 |     py: Python<'_>,
+18290 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18291 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64422:26
+      |
+64422 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64422:41
+      |
+64422 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                         ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64422:62
+      |
+64422 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                              ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>`
+               found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18288:4
+      |
+18288 | fn logaddexp2(
+      |    ^^^^^^^^^^
+18289 |     py: Python<'_>,
+18290 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18291 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:67370:23
+      |
+67370 |             let got = sign(py, td.clone().unbind())?;
+      |                       ^^^^------------------------- argument #3 of type `std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:67370:32
+      |
+67370 |             let got = sign(py, td.clone().unbind())?;
+      |                                ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, pyo3::types::PyTuple>`
+                    found struct `pyo3::Py<pyo3::PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17882:4
+      |
+17882 | fn sign(
+      |    ^^^^
+17883 |     py: Python<'_>,
+17884 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17885 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+67370 -             let got = sign(py, td.clone().unbind())?;
+67370 +             let got = sign(py, /* &pyo3::Bound<'_, pyo3::types::PyTuple> */, /* std::option::Option<&pyo3::Bound<'_, pyo3::types::PyDict>> */)?;
+      |
+
+error: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2519:5
+     |
+2516 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2519 |     Depth,
+     |     ^^^^^
+2520 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `-D dead-code` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5151:4
+     |
+5151 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+error: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5173:4
+     |
+5173 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+error: the loop variable `o` is used to index `output`
+     --> crates/fnp-python/src/lib.rs:14470:30
+      |
+14470 |                     for o in 0..outer {
+      |                              ^^^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_range_loop
+      = note: `-D clippy::needless-range-loop` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::needless_range_loop)]`
+help: consider using an iterator and enumerate()
+      |
+14470 -                     for o in 0..outer {
+14470 +                     for (o, <item>) in output.iter().enumerate().take(outer) {
+      |
+
+error: this function has too many arguments (8/7)
+     --> crates/fnp-python/src/lib.rs:15447:1
+      |
+15447 | / fn clip(
+15448 | |     py: Python<'_>,
+15449 | |     a: Py<PyAny>,
+15450 | |     a_min: Option<Py<PyAny>>,
+...     |
+15455 | |     kwargs: Option<&Bound<'_, PyDict>>,
+15456 | | ) -> PyResult<Py<PyAny>> {
+      | |________________________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+      = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: manual `!Range::contains` implementation
+     --> crates/fnp-python/src/lib.rs:22394:8
+      |
+22394 |       if n_vars < MIN_VARS
+      |  ________^
+22395 | |         || n_vars >= MAX_SIMD_VARS_EXCLUSIVE
+      | |____________________________________________^ help: use: `!(MIN_VARS..MAX_SIMD_VARS_EXCLUSIVE).contains(&n_vars)`
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_range_contains
+      = note: `-D clippy::manual-range-contains` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::manual_range_contains)]`
+
+error: equal expressions as operands to `==`
+     --> crates/fnp-python/src/lib.rs:24120:34
+      |
+24120 |                         *a_sw |= v == v;
+      |                                  ^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+      = note: `#[deny(clippy::eq_op)]` on by default
+
+error: equal expressions as operands to `==`
+     --> crates/fnp-python/src/lib.rs:24125:34
+      |
+24125 |                         *a_sw |= v == v;
+      |                                  ^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `==`
+     --> crates/fnp-python/src/lib.rs:24153:42
+      |
+24153 | ...                   *a_sw |= v == v;
+      |                                ^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `==`
+     --> crates/fnp-python/src/lib.rs:24158:42
+      |
+24158 | ...                   *a_sw |= v == v;
+      |                                ^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:25070:5
+      |
+25070 | /     if axis.is_none() {
+25071 | |         if let Ok(qs) = q.bind(py).extract::<Vec<f64>>() {
+25072 | |             let result = match a.percentiles_axis_none(&qs) {
+25073 | |                 Ok(result) => result,
+...     |
+25078 | |     }
+      | |_____^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+      = note: `-D clippy::collapsible-if` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+      |
+25070 ~     if axis.is_none()
+25071 ~         && let Ok(qs) = q.bind(py).extract::<Vec<f64>>() {
+25072 |             let result = match a.percentiles_axis_none(&qs) {
+  ...
+25076 |             return build_numpy_array_from_ufunc(py, &result);
+25077 ~         }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:33540:5
+      |
+33540 | /     if let Some(mode) = svd_mode {
+33541 | |         if let Ok(array) = extract_numeric_array(py, x.bind(py), "matrix_norm(x)") {
+33542 | |             let shape = array.shape();
+33543 | |             if shape.len() >= 3
+...     |
+33577 | |     }
+      | |_____^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+33540 ~     if let Some(mode) = svd_mode
+33541 ~         && let Ok(array) = extract_numeric_array(py, x.bind(py), "matrix_norm(x)") {
+33542 |             let shape = array.shape();
+  ...
+33575 |             }
+33576 ~         }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:33552:17
+      |
+33552 | /                 if k >= 1 {
+33553 | |                     if let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape) {
+33554 | |                         let batch = sigmas.len() / k;
+33555 | |                         let mut out = Vec::with_capacity(batch);
+...     |
+33574 | |                 }
+      | |_________________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+33552 ~                 if k >= 1
+33553 ~                     && let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape) {
+33554 |                         let batch = sigmas.len() / k;
+  ...
+33572 |                         return build_numpy_array_from_ufunc(py, &result);
+33573 ~                     }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:35720:5
+      |
+35720 | /     if axis.is_none() {
+35721 | |         if let Ok(qs) = q.bind(py).extract::<Vec<f64>>() {
+35722 | |             let result = match a.quantiles_axis_none(&qs) {
+35723 | |                 Ok(result) => result,
+...     |
+35728 | |     }
+      | |_____^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+35720 ~     if axis.is_none()
+35721 ~         && let Ok(qs) = q.bind(py).extract::<Vec<f64>>() {
+35722 |             let result = match a.quantiles_axis_none(&qs) {
+  ...
+35726 |             return build_numpy_array_from_ufunc(py, &result);
+35727 ~         }
+      |
+
+error: redundant guard
+     --> crates/fnp-python/src/lib.rs:37354:22
+      |
+37354 |             Ok(f) if f == 2.0 => Some(2),
+      |                      ^^^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_guards
+      = note: `-D clippy::redundant-guards` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::redundant_guards)]`
+help: try
+      |
+37354 -             Ok(f) if f == 2.0 => Some(2),
+37354 +             Ok(2.0) => Some(2),
+      |
+
+error: redundant guard
+     --> crates/fnp-python/src/lib.rs:37355:22
+      |
+37355 |             Ok(f) if f == -2.0 => Some(-2),
+      |                      ^^^^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_guards
+help: try
+      |
+37355 -             Ok(f) if f == -2.0 => Some(-2),
+37355 +             Ok(-2.0) => Some(-2),
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37359:5
+      |
+37359 | /     if let Some(mode) = p_mode {
+37360 | |         if let Ok(array) = extract_numeric_array(py, x.bind(py), "cond(x)") {
+37361 | |             let shape = array.shape();
+37362 | |             if shape.len() >= 3
+...     |
+37398 | |     }
+      | |_____^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37359 ~     if let Some(mode) = p_mode
+37360 ~         && let Ok(array) = extract_numeric_array(py, x.bind(py), "cond(x)") {
+37361 |             let shape = array.shape();
+  ...
+37396 |             }
+37397 ~         }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37371:17
+      |
+37371 | /                 if k >= 1 {
+37372 | |                     if let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape) {
+37373 | |                         let batch = sigmas.len() / k;
+37374 | |                         let mut out = Vec::with_capacity(batch);
+...     |
+37395 | |                 }
+      | |_________________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37371 ~                 if k >= 1
+37372 ~                     && let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape) {
+37373 |                         let batch = sigmas.len() / k;
+  ...
+37393 |                         return build_numpy_array_from_ufunc(py, &result);
+37394 ~                     }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37494:5
+      |
+37494 | /     if let (Some(ord_val), Some(axis_val)) = (ord.as_ref(), axis.as_ref()) {
+37495 | |         if let Some(mode) = svd_matrix_norm_mode(py, ord_val) {
+37496 | |             if let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>() {
+37497 | |                 if let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)") {
+...     |
+37519 | |     }
+      | |_____^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37494 ~     if let (Some(ord_val), Some(axis_val)) = (ord.as_ref(), axis.as_ref())
+37495 ~         && let Some(mode) = svd_matrix_norm_mode(py, ord_val) {
+37496 |             if let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>() {
+  ...
+37517 |             }
+37518 ~         }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37495:9
+      |
+37495 | /         if let Some(mode) = svd_matrix_norm_mode(py, ord_val) {
+37496 | |             if let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>() {
+37497 | |                 if let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)") {
+37498 | |                     let nd = array.shape().len() as i64;
+...     |
+37518 | |         }
+      | |_________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37495 ~         if let Some(mode) = svd_matrix_norm_mode(py, ord_val)
+37496 ~             && let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>() {
+37497 |                 if let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)") {
+  ...
+37516 |                 }
+37517 ~             }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37496:13
+      |
+37496 | /             if let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>() {
+37497 | |                 if let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)") {
+37498 | |                     let nd = array.shape().len() as i64;
+37499 | |                     let resolve = |a: i64| if a < 0 { a + nd } else { a };
+...     |
+37517 | |             }
+      | |_____________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37496 ~             if let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>()
+37497 ~                 && let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)") {
+37498 |                     let nd = array.shape().len() as i64;
+  ...
+37515 |                     }
+37516 ~                 }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37509:21
+      |
+37509 | /                     if trailing {
+37510 | |                         if let Some(result) =
+37511 | |                             try_batched_svd_matrix_norm(py, &array, mode, keepdims)?
+...     |
+37515 | |                     }
+      | |_____________________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37509 ~                     if trailing
+37510 ~                         && let Some(result) =
+37511 |                             try_batched_svd_matrix_norm(py, &array, mode, keepdims)?
+37512 |                         {
+37513 |                             return Ok(result);
+37514 ~                         }
+      |
+
+error: redundant closure
+     --> crates/fnp-python/src/lib.rs:39624:38
+      |
+39624 |                         .reduce_with(|a, b| fold(a, b))
+      |                                      ^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `&fold`
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+      = note: `-D clippy::redundant-closure` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::redundant_closure)]`
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:41323:24
+      |
+41323 |             any_nan |= v != v;
+      |                        ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:41332:32
+      |
+41332 |                     any_nan |= v != v;
+      |                                ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:41340:32
+      |
+41340 |                     any_nan |= v != v;
+      |                                ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: manual checked division
+     --> crates/fnp-python/src/lib.rs:42659:24
+      |
+42659 |         let block = if n_groups == 0 { 0 } else { total / n_groups };
+      |                        ^^^^^^^^^^^^^              ---------------- division performed here
+      |                        |
+      |                        check performed here
+      |
+      = help: consider using `checked_div`
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_checked_ops
+      = note: `-D clippy::manual-checked-ops` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::manual_checked_ops)]`
+
+error: you should use the `starts_with` method
+     --> crates/fnp-python/src/lib.rs:42778:14
+      |
+42778 |         1 if out.chars().next() == Some(kept) => true,
+      |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: like this: `out.starts_with(kept)`
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#chars_next_cmp
+      = note: `-D clippy::chars-next-cmp` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::chars_next_cmp)]`
+
+error: this function has too many arguments (8/7)
+     --> crates/fnp-python/src/lib.rs:44529:1
+      |
+44529 | / fn prod_axis_typed<'py, T, A, FC, FM>(
+44530 | |     py: Python<'py>,
+44531 | |     numpy: &Bound<'py, PyModule>,
+44532 | |     a: &Bound<'py, PyAny>,
+...     |
+44542 | |     FC: Fn(T) -> A,
+44543 | |     FM: Fn(A, A) -> A,
+      | |______________________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+error: the loop variable `o` is used to index `output`
+     --> crates/fnp-python/src/lib.rs:44582:22
+      |
+44582 |             for o in 0..outer {
+      |                      ^^^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+      |
+44582 -             for o in 0..outer {
+44582 +             for (o, <item>) in output.iter().enumerate().take(outer) {
+      |
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:45206:35
+      |
+45206 |                 let mut any_nan = first != first;
+      |                                   ^^^^^^^^^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:45208:32
+      |
+45208 |                     any_nan |= v != v;
+      |                                ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:45233:86
+      |
+45233 |                 let mut nanv: Vec<bool> = data[obase..obase + inner].iter().map(|&v| v != v).collect();
+      |                                                                                      ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:45242:32
+      |
+45242 |                         *nf |= v != v;
+      |                                ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:45282:39
+      |
+45282 | ...                   *f |= v != v;
+      |                             ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: could not compile `fnp-python` (lib) due to 35 previous errors
+warning: build failed, waiting for other jobs to finish...
+Some errors have detailed explanations: E0061, E0308.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `fnp-python` (lib test) due to 14 previous errors
+  [2m2026-06-20T21:20:14.348230Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=101 in 68223ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+[RCH] remote hz1 failed (exit 101)

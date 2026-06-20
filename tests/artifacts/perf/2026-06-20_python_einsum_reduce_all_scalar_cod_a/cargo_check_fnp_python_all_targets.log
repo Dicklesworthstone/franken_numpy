@@ -1,0 +1,682 @@
+  [2m2026-06-20T21:15:08.726030Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: hz1 at root@87.99.133.171 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:921 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:08.941023Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_numpy-cod-a-20260620T205523Z (hash: 4fce2f4ad23eac8e)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:08.941072Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 11 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:09.629557Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker hz1...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:09.629616Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 pattern(s) from .rchignore (total: 39)[0m
+    [2;3mat[0m rch/src/transfer.rs:886 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:09.629623Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:10.994558Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1364ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:10.994641Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-conformance -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-conformance on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:11.424767Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 430ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:11.424824Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-dtype -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-dtype on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:11.878718Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 453ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:11.878792Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-io -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-io on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:12.278185Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 399ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:12.278257Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-iter -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-iter on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:12.743515Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 465ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:12.743585Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-linalg -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-linalg on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:13.261398Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 517ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:13.261465Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ndarray -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ndarray on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:13.825981Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 564ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:13.826051Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-python -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-python on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:14.363374Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 537ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:14.363440Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-random -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-random on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:14.776672Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 413ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:14.776736Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-runtime -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-runtime on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:15.222551Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 445ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:15.222619Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ufunc -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ufunc on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:15.652308Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 429ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:15.652342Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 4871 files, 16344818 bytes in 6016ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:18.364054Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo check -p fnp-python --all-targets[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T21:15:18.364088Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.rch-targets/franken_numpy-cod-a -> /data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/.rch-target-hz1-pool-2a96c7b531229140f057e9056579f01e[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded cast v0.3.0
+  Downloaded ciborium-io v0.2.2
+  Downloaded adler2 v2.0.1
+  Downloaded ciborium v0.2.2
+  Downloaded heck v0.5.0
+  Downloaded same-file v1.0.6
+  Downloaded itoa v1.0.18
+  Downloaded clap_lex v1.1.0
+  Downloaded pyo3-macros v0.28.3
+  Downloaded cfg-if v1.0.4
+  Downloaded ciborium-ll v0.2.2
+  Downloaded plotters-svg v0.3.7
+  Downloaded anes v0.1.6
+  Downloaded bytemuck v1.25.0
+  Downloaded criterion-plot v0.5.0
+  Downloaded walkdir v2.5.0
+  Downloaded zmij v1.0.21
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded unicode-ident v1.0.24
+  Downloaded serde_derive v1.0.228
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded pyo3-macros-backend v0.28.3
+  Downloaded memchr v2.8.0
+  Downloaded criterion v0.6.0
+  Downloaded serde_json v1.0.149
+  Downloaded regex v1.12.3
+  Downloaded rayon v1.12.0
+  Downloaded plotters v0.3.7
+  Downloaded clap_builder v4.6.0
+  Downloaded aho-corasick v1.1.4
+  Downloaded itertools v0.13.0
+  Downloaded zerocopy v0.8.48
+  Downloaded syn v2.0.117
+  Downloaded itertools v0.10.5
+  Downloaded flate2 v1.1.9
+  Downloaded regex-syntax v0.8.10
+  Downloaded serde v1.0.228
+  Downloaded rayon-core v1.13.0
+  Downloaded pyo3-ffi v0.28.3
+  Downloaded miniz_oxide v0.8.9
+  Downloaded half v2.7.1
+  Downloaded clap v4.6.1
+  Downloaded serde_core v1.0.228
+  Downloaded proc-macro2 v1.0.106
+  Downloaded num-traits v0.2.19
+  Downloaded getrandom v0.3.4
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded pyo3-build-config v0.28.3
+  Downloaded once_cell v1.21.4
+  Downloaded crc32fast v1.5.0
+  Downloaded regex-automata v0.4.14
+  Downloaded autocfg v1.5.0
+  Downloaded anstyle v1.0.14
+  Downloaded tinytemplate v1.2.1
+  Downloaded target-lexicon v0.13.5
+  Downloaded simd-adler32 v0.3.9
+  Downloaded quote v1.0.45
+  Downloaded plotters-backend v0.3.7
+  Downloaded oorandom v11.1.5
+  Downloaded either v1.15.0
+  Downloaded libc v0.2.185
+  Downloaded pyo3 v0.28.3
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling target-lexicon v0.13.5
+    Checking cfg-if v1.0.4
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+    Checking either v1.15.0
+   Compiling zerocopy v0.8.48
+   Compiling rayon-core v1.13.0
+   Compiling serde v1.0.228
+   Compiling zmij v1.0.21
+   Compiling serde_json v1.0.149
+   Compiling libc v0.2.185
+    Checking memchr v2.8.0
+    Checking itoa v1.0.18
+   Compiling autocfg v1.5.0
+   Compiling pyo3-build-config v0.28.3
+    Checking crossbeam-epoch v0.9.18
+   Compiling crc32fast v1.5.0
+   Compiling syn v2.0.117
+    Checking crossbeam-deque v0.8.6
+   Compiling num-traits v0.2.19
+    Checking simd-adler32 v0.3.9
+    Checking fnp-ndarray v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ndarray)
+    Checking adler2 v2.0.1
+   Compiling heck v0.5.0
+   Compiling getrandom v0.3.4
+    Checking miniz_oxide v0.8.9
+    Checking regex-syntax v0.8.10
+    Checking rayon v1.12.0
+    Checking plotters-backend v0.3.7
+    Checking anstyle v1.0.14
+    Checking ciborium-io v0.2.2
+    Checking clap_lex v1.1.0
+    Checking flate2 v1.1.9
+    Checking clap_builder v4.6.0
+    Checking plotters-svg v0.3.7
+    Checking itertools v0.10.5
+    Checking regex-automata v0.4.14
+   Compiling pyo3-ffi v0.28.3
+   Compiling pyo3-macros-backend v0.28.3
+   Compiling pyo3 v0.28.3
+    Checking fnp-runtime v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-runtime)
+    Checking same-file v1.0.6
+    Checking once_cell v1.21.4
+    Checking bytemuck v1.25.0
+    Checking cast v0.3.0
+    Checking walkdir v2.5.0
+    Checking fnp-io v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-io)
+    Checking plotters v0.3.7
+    Checking criterion-plot v0.5.0
+    Checking clap v4.6.1
+    Checking itertools v0.13.0
+    Checking oorandom v11.1.5
+    Checking anes v0.1.6
+    Checking regex v1.12.3
+    Checking fnp-linalg v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-linalg)
+    Checking fnp-random v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-random)
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+    Checking fnp-iter v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-iter)
+    Checking tinytemplate v1.2.1
+   Compiling pyo3-macros v0.28.3
+    Checking half v2.7.1
+    Checking fnp-dtype v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-dtype)
+    Checking ciborium-ll v0.2.2
+    Checking ciborium v0.2.2
+    Checking fnp-ufunc v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-ufunc)
+    Checking criterion v0.6.0
+    Checking fnp-python v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-20260620T205523Z/crates/fnp-python)
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:63517:26
+      |
+63517 |             let actual = spacing(py, values.clone().unbind())?;
+      |                          ^^^^^^^----------------------------- argument #3 of type `Option<&pyo3::Bound<'_, PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:63517:38
+      |
+63517 |             let actual = spacing(py, values.clone().unbind())?;
+      |                                      ^^^^^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17830:4
+      |
+17830 | fn spacing(
+      |    ^^^^^^^
+17831 |     py: Python<'_>,
+17832 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17833 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+63517 -             let actual = spacing(py, values.clone().unbind())?;
+63517 +             let actual = spacing(py, /* &pyo3::Bound<'_, PyTuple> */, /* Option<&pyo3::Bound<'_, PyDict>> */)?;
+      |
+
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:63542:28
+      |
+63542 |                 let ours = spacing(py, values.clone().unbind())?;
+      |                            ^^^^^^^----------------------------- argument #3 of type `Option<&pyo3::Bound<'_, PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:63542:40
+      |
+63542 |                 let ours = spacing(py, values.clone().unbind())?;
+      |                                        ^^^^^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17830:4
+      |
+17830 | fn spacing(
+      |    ^^^^^^^
+17831 |     py: Python<'_>,
+17832 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17833 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+63542 -                 let ours = spacing(py, values.clone().unbind())?;
+63542 +                 let ours = spacing(py, /* &pyo3::Bound<'_, PyTuple> */, /* Option<&pyo3::Bound<'_, PyDict>> */)?;
+      |
+
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:63572:26
+      |
+63572 |             let actual = spacing(py, values.clone().unbind())?;
+      |                          ^^^^^^^----------------------------- argument #3 of type `Option<&pyo3::Bound<'_, PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:63572:38
+      |
+63572 |             let actual = spacing(py, values.clone().unbind())?;
+      |                                      ^^^^^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17830:4
+      |
+17830 | fn spacing(
+      |    ^^^^^^^
+17831 |     py: Python<'_>,
+17832 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17833 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+63572 -             let actual = spacing(py, values.clone().unbind())?;
+63572 +             let actual = spacing(py, /* &pyo3::Bound<'_, PyTuple> */, /* Option<&pyo3::Bound<'_, PyDict>> */)?;
+      |
+
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:63604:26
+      |
+63604 |             let actual = sign(py, values.clone().unbind())?;
+      |                          ^^^^----------------------------- argument #3 of type `Option<&pyo3::Bound<'_, PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:63604:35
+      |
+63604 |             let actual = sign(py, values.clone().unbind())?;
+      |                                   ^^^^^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17882:4
+      |
+17882 | fn sign(
+      |    ^^^^
+17883 |     py: Python<'_>,
+17884 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17885 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+63604 -             let actual = sign(py, values.clone().unbind())?;
+63604 +             let actual = sign(py, /* &pyo3::Bound<'_, PyTuple> */, /* Option<&pyo3::Bound<'_, PyDict>> */)?;
+      |
+
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:63628:26
+      |
+63628 |             let actual = sign(py, values.clone().unbind())?;
+      |                          ^^^^----------------------------- argument #3 of type `Option<&pyo3::Bound<'_, PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:63628:35
+      |
+63628 |             let actual = sign(py, values.clone().unbind())?;
+      |                                   ^^^^^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17882:4
+      |
+17882 | fn sign(
+      |    ^^^^
+17883 |     py: Python<'_>,
+17884 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17885 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+63628 -             let actual = sign(py, values.clone().unbind())?;
+63628 +             let actual = sign(py, /* &pyo3::Bound<'_, PyTuple> */, /* Option<&pyo3::Bound<'_, PyDict>> */)?;
+      |
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64150:26
+      |
+64150 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64150:40
+      |
+64150 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                        ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64150:61
+      |
+64150 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                             ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `Option<&pyo3::Bound<'_, PyDict>>`
+               found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18152:4
+      |
+18152 | fn nextafter(
+      |    ^^^^^^^^^
+18153 |     py: Python<'_>,
+18154 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18155 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64175:26
+      |
+64175 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64175:40
+      |
+64175 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                        ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64175:61
+      |
+64175 |             let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                             ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `Option<&pyo3::Bound<'_, PyDict>>`
+               found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18152:4
+      |
+18152 | fn nextafter(
+      |    ^^^^^^^^^
+18153 |     py: Python<'_>,
+18154 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18155 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64201:26
+      |
+64201 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64201:36
+      |
+64201 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                    ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64201:57
+      |
+64201 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                         ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `Option<&pyo3::Bound<'_, PyDict>>`
+               found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18190:4
+      |
+18190 | fn hypot(
+      |    ^^^^^
+18191 |     py: Python<'_>,
+18192 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18193 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64226:26
+      |
+64226 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64226:36
+      |
+64226 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                    ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64226:57
+      |
+64226 |             let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                         ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `Option<&pyo3::Bound<'_, PyDict>>`
+               found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18190:4
+      |
+18190 | fn hypot(
+      |    ^^^^^
+18191 |     py: Python<'_>,
+18192 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18193 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64328:26
+      |
+64328 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64328:40
+      |
+64328 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                        ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64328:61
+      |
+64328 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                             ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `Option<&pyo3::Bound<'_, PyDict>>`
+               found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18248:4
+      |
+18248 | fn logaddexp(
+      |    ^^^^^^^^^
+18249 |     py: Python<'_>,
+18250 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18251 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64362:26
+      |
+64362 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64362:40
+      |
+64362 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                        ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64362:61
+      |
+64362 |             let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                             ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `Option<&pyo3::Bound<'_, PyDict>>`
+               found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18248:4
+      |
+18248 | fn logaddexp(
+      |    ^^^^^^^^^
+18249 |     py: Python<'_>,
+18250 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18251 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64388:26
+      |
+64388 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64388:41
+      |
+64388 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                         ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64388:62
+      |
+64388 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                              ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `Option<&pyo3::Bound<'_, PyDict>>`
+               found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18288:4
+      |
+18288 | fn logaddexp2(
+      |    ^^^^^^^^^^
+18289 |     py: Python<'_>,
+18290 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18291 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0308]: arguments to this function are incorrect
+     --> crates/fnp-python/src/lib.rs:64422:26
+      |
+64422 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                          ^^^^^^^^^^
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64422:41
+      |
+64422 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                         ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: expected `Option<&Bound<'_, PyDict>>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:64422:62
+      |
+64422 |             let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+      |                                                              ^^^^^^^^^^^^^^^^^^^
+      = note: expected enum `Option<&pyo3::Bound<'_, PyDict>>`
+               found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:18288:4
+      |
+18288 | fn logaddexp2(
+      |    ^^^^^^^^^^
+18289 |     py: Python<'_>,
+18290 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+18291 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+
+error[E0061]: this function takes 3 arguments but 2 arguments were supplied
+     --> crates/fnp-python/src/lib.rs:67370:23
+      |
+67370 |             let got = sign(py, td.clone().unbind())?;
+      |                       ^^^^------------------------- argument #3 of type `Option<&pyo3::Bound<'_, PyDict>>` is missing
+      |
+note: expected `&Bound<'_, PyTuple>`, found `Py<PyAny>`
+     --> crates/fnp-python/src/lib.rs:67370:32
+      |
+67370 |             let got = sign(py, td.clone().unbind())?;
+      |                                ^^^^^^^^^^^^^^^^^^^
+      = note: expected reference `&pyo3::Bound<'_, PyTuple>`
+                    found struct `pyo3::Py<PyAny>`
+note: function defined here
+     --> crates/fnp-python/src/lib.rs:17882:4
+      |
+17882 | fn sign(
+      |    ^^^^
+17883 |     py: Python<'_>,
+17884 |     args: &Bound<'_, PyTuple>,
+      |     -------------------------
+17885 |     kwargs: Option<&Bound<'_, PyDict>>,
+      |     ----------------------------------
+help: provide the argument
+      |
+67370 -             let got = sign(py, td.clone().unbind())?;
+67370 +             let got = sign(py, /* &pyo3::Bound<'_, PyTuple> */, /* Option<&pyo3::Bound<'_, PyDict>> */)?;
+      |
+
+warning: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2519:5
+     |
+2516 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2519 |     Depth,
+     |     ^^^^^
+2520 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5151:4
+     |
+5151 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5173:4
+     |
+5173 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `fnp-python` (lib) generated 3 warnings
+Some errors have detailed explanations: E0061, E0308.
+For more information about an error, try `rustc --explain E0061`.
+error: could not compile `fnp-python` (lib test) due to 14 previous errors
+  [2m2026-06-20T21:16:05.707158Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=101 in 47342ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+[RCH] remote hz1 failed (exit 101)

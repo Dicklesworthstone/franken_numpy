@@ -3,6 +3,40 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-20 fnp-python Einsum Reduce-All Scalar Builder
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `fnp_einsum_reduce_all_f64_1000` | 8/10 | Release-ready current win for this worker |
+| Existing f64 single-operand reduction conformance | 9/10 | Golden SHA and scalar parity green |
+| Adjacent `reduce_rows_f64_1000` guard | 4/10 | Needs separate focused recheck; candidate run was 1.035x slower than NumPy |
+| `fnp-python` all-targets/clippy/fmt hygiene | 3/10 | Blocked by pre-existing unrelated crate debt |
+
+Evidence:
+- Artifact: `tests/artifacts/perf/2026-06-20_python_einsum_reduce_all_scalar_cod_a/`.
+- Same-worker `vmi1149989` target row:
+  baseline `119,524 ns` vs NumPy `115,252 ns` (`1.037x` loss);
+  candidate `100,778 ns` vs NumPy `104,427 ns` (`0.965x` win);
+  candidate/old FNP `0.843x`.
+- Guard rows from the same Criterion group:
+  trace `0.754x`, diagonal `0.775x`, reduce rows `1.035x`, reduce cols `0.350x`
+  candidate FNP/NumPy.
+- `cargo test -p fnp-python --test conformance_einsum` passed after RCH failed
+  open locally; `cargo build -p fnp-python --release` passed on `hz1`.
+- `cargo check -p fnp-python --all-targets`, clippy, and fmt remain blocked by
+  pre-existing unrelated `fnp-python` debt recorded in the artifact logs.
+- Bounded UBS on the changed Rust file exited nonzero from broad existing
+  `fnp-python` inventory; `git diff --check` passed.
+
+Decision:
+- Keep the exact-contiguous-f64 `einsum("ij->")` scalar builder fast path.
+- Treat this single-operand reduce-all row as a current measured win rather than
+  an active gap.
+- Recheck row reductions separately before acting on the candidate-run
+  row-guard loss; this patch does not alter that branch's source path.
+
+---
+
 ## 2026-06-20 Linalg Symmetric Spectral / Batch Eigvalsh Bold-Verify
 
 | Area | Score | Verdict |

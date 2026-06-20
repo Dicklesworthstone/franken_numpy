@@ -3,6 +3,54 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - fnp-python Einsum Reduce-All Scalar Builder Keep Slice
+
+Scope:
+- Bead: `franken_numpy-ixs5y.276`.
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-python` / `einsum("ij->", exact contiguous float64 ndarray)`.
+- Worker proof: baseline and candidate Criterion `python_einsum_boundary` rows
+  on `vmi1149989`.
+- Artifact:
+  `tests/artifacts/perf/2026-06-20_python_einsum_reduce_all_scalar_cod_a/`.
+- Candidate: bypass the temporary 0-D `UFuncArray` in the single-operand f64
+  reduce-all fast path and return through the cached `numpy.float64` builder.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Target head-to-head performance vs NumPy | PASS | `fnp_einsum_reduce_all_f64_1000` moved from 119,524 ns vs NumPy 115,252 ns (`1.037x` slower) to 100,778 ns vs NumPy 104,427 ns (`0.965x` win). |
+| Old/new FNP regression gate | PASS | Target candidate ran at `0.843x` of the fresh Rust baseline. |
+| Guard rows | MIXED / RECORDED | Trace, diagonal, and column reductions remained NumPy wins; row reduction measured `1.035x` slower than NumPy in the candidate run while FNP itself improved to `0.983x` of old. Treat as noisy guard evidence, not a source regression. |
+| Focused conformance | PASS | `cargo test -p fnp-python --test conformance_einsum` passed locally after RCH had no admissible worker: 28 tests, including the f64 reduction golden SHA and scalar-return parity. |
+| Release build | PASS | `rch exec -- cargo build -p fnp-python --release` passed on `hz1`. |
+| Per-crate all-targets check | KNOWN GAP | `cargo check -p fnp-python --all-targets` failed on pre-existing lib-test wrapper call signatures unrelated to this edit. |
+| Clippy | KNOWN GAP | `cargo clippy -p fnp-python --all-targets -- -D warnings` failed on the same pre-existing all-targets errors plus existing lints. |
+| Formatting | KNOWN GAP | `cargo fmt --package fnp-python --check` reports broad pre-existing `fnp-python` drift; rustfmt was not applied. |
+| UBS | KNOWN GAP | Bounded UBS on the changed Rust file exited nonzero from broad existing `fnp-python` inventory; no finding was specific to the edited scalar-return line. |
+| Whitespace | PASS | `git diff --check` passed. |
+| Evidence durability | PASS | Baseline/candidate RCH logs, validation logs, ratios, and retry predicates are recorded. |
+
+Cluster score: **86 / 100**
+
+Score rationale:
+- +34 target performance: a measured NumPy loss flipped to a measured NumPy win
+  and improved 15.7% versus fresh Rust baseline.
+- +16 correctness: focused conformance and the existing f64 reduction golden
+  stayed green.
+- +12 build: release build passed under RCH.
+- +12 source discipline: the source change is one branch in the existing
+  zero-copy f64 fast path and does not alter row/column array returns.
+- +12 evidence discipline: same-worker baseline/candidate rows and raw logs are
+  retained.
+- -14 hygiene: `fnp-python` all-targets check, clippy, and formatting remain
+  blocked by pre-existing unrelated debt.
+
+Current release posture:
+- `python_einsum_boundary/fnp_einsum_reduce_all_f64_1000` is no longer a
+  current measured NumPy loss on `vmi1149989`.
+- The adjacent `reduce_rows_f64_1000` candidate-run loss should be rechecked in
+  a separate focused row-reduction bead before any source action.
+
 ## 2026-06-20 - Linalg Symmetric Spectral / Batch Eigvalsh No-Ship Slice
 
 Scope:
