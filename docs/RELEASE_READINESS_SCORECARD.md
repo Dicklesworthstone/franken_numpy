@@ -3,6 +3,45 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - Linalg Kron Identity Verification Slice
+
+Scope:
+- Recent code-first pending backlog measured: `franken_numpy-ixs5y.236`.
+- Crate: `fnp-linalg`.
+- Reference: NumPy 2.3.5.
+- Same-worker decision host: `hz2` / `hetzner2`.
+- Evidence: `tests/artifacts/perf/2026-06-20_linalg_kron_identity_vs_numpy/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS | 2/2 measured rows faster than NumPy; speedups were 5.72x and 3.72x. |
+| Noise discipline | PASS | FNP Criterion ran on `hz2`; NumPy comparator ran directly on `hz2` and reported host/version metadata. |
+| Targeted correctness | PASS | `cargo test -p fnp-linalg kron_ -- --nocapture` passed 4 focused kron tests. |
+| Crate compile health | PASS | Same no-source linalg tree passed `cargo check -p fnp-linalg --all-targets` in the preceding verification slice. |
+| Clippy health | PASS | Same no-source linalg tree passed `cargo clippy -p fnp-linalg --all-targets -- -D warnings`. |
+| Release build health | PASS | Same no-source linalg tree passed `cargo build -p fnp-linalg --release`. |
+| Formatting health | KNOWN GAP | `cargo fmt --package fnp-linalg -- --check` reports broad pre-existing drift outside this no-source verification slice. |
+| Evidence durability | PASS | Results recorded in `docs/NEGATIVE_EVIDENCE.md` and the per-run scorecard. |
+
+Cluster score: **86 / 100**
+
+Score rationale:
+- +35 performance: both target rows beat NumPy decisively.
+- +20 correctness: focused identity, fallback, scalar, and golden kron tests
+  passed.
+- +15 reproducibility: same-worker FNP and NumPy evidence.
+- +15 ledger discipline: all rows, validation, retry predicate, and artifact
+  path recorded.
+- +3 no-source discipline: existing implementation verified without extra churn.
+- -2 residual validation: format drift remains in untouched `fnp-linalg`
+  regions and was not normalized in this slice.
+
+Current release posture:
+- `franken_numpy-ixs5y.236` is **measured keep**, not pending.
+- Structured identity-RHS `kron_nxn` is ahead of NumPy for the measured block
+  operator shapes; generic kron and other structured RHS classes remain separate
+  future work.
+
 ## 2026-06-20 - Linalg Batched Column-Sum Norm Verification Slice
 
 Scope:

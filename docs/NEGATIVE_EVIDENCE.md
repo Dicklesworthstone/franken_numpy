@@ -4,6 +4,65 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Keep: fnp-linalg kron identity RHS specialization
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_kron_identity_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.236`.
+- Agent: `BlackThrush` / `cod-b`.
+- Subject API: direct Rust `fnp-linalg` `kron_nxn` with an exact `4x4`
+  identity RHS.
+- Reference: NumPy 2.3.5 on `hz2` / `hetzner2` through explicit `ssh hz2`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Decision: keep the existing guarded nonnegative identity-RHS specialization;
+  no source hunk was added in this verification slice.
+
+Lever:
+- The landed path recognizes exact square identity RHS matrices and finite,
+  nonnegative LHS matrices, then writes only the block diagonal output.
+- It falls back to the dense product for signed zero, negative values, NaN, Inf,
+  non-square RHS, or non-identity RHS so NumPy multiplication semantics stay
+  intact.
+- Alien-graveyard mapping: exploit exact algebraic structure to change the
+  constant and effective work class for a common block-operator shape, with a
+  constants-kill-you guard around the domain predicate.
+
+Commands:
+- `RCH_WORKER=hz2 RCH_REQUIRE_REMOTE=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg kron_nxn -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `ssh hz2 'cd /data/projects/franken_numpy && OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 python3 - <<PY ... PY'`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg kron_ -- --nocapture`
+
+| Workload | Worker | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---:|---:|---|
+| `kron_64x64_4x4_eye` | `hz2` | 30,314 ns | 173,371 ns | 0.175x, 5.72x faster | Win |
+| `kron_128x128_4x4_eye_nonnegative_fast_path` | `hz2` | 230,786 ns | 859,101 ns | 0.269x, 3.72x faster | Win |
+
+Scorecard:
+- Candidate vs NumPy: win/loss/neutral = 2/0/0.
+- Same-worker proof: FrankenNumPy Criterion ran through RCH on `hz2`; NumPy
+  comparator ran directly on `hz2` and reported host `hetzner2`, Python 3.14.4,
+  NumPy 2.3.5.
+- Consistency check: the fresh rows are consistent with the older
+  `tests/artifacts/perf/2026-06-20_linalg_batch_vs_numpy/` kron rows.
+
+Validation notes:
+- Focused kron tests passed: `kron_identity_rhs_fast_path_matches_dense_reference_and_fallbacks`,
+  `kron_parallel_matches_serial_reference_and_golden`, `kron_identity_identity`,
+  and `kron_scalar`.
+- The same no-source linalg tree already passed
+  `cargo check -p fnp-linalg --all-targets`,
+  `cargo clippy -p fnp-linalg --all-targets -- -D warnings`, and
+  `cargo build -p fnp-linalg --release` during the immediately preceding
+  column-sum verification.
+- `cargo fmt --package fnp-linalg -- --check` remains blocked by broad
+  pre-existing rustfmt drift in untouched `fnp-linalg` benches, examples, and
+  source regions.
+- Retry predicate: do not retest generic dense kron or RHS identity detection
+  alone. A next kron lever needs a new structured RHS/LHS class, for example
+  diagonal RHS, sparse block masks, or separable Kronecker chains, and must keep
+  fallback semantics bit-preserving.
+
 ## 2026-06-20 - BOLD-VERIFY Keep: fnp-linalg batched column-sum norm lane fill
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_column_sum_vs_numpy/`
