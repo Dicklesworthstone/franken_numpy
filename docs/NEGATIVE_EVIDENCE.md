@@ -4,6 +4,58 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY No-Ship: medium Cholesky lower-triangular update threshold
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-20_linalg_cholesky_triangular_medium_cod_b/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-b`.
+- Bead: `franken_numpy-ixs5y.271`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate: `fnp-linalg`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Worker proof: RCH worker `vmi1264463`.
+- Candidate: lower `SYRK_MID_TRIANGULAR_MIN_TRAIL` from 384 to 64 so medium
+  Cholesky panels use the existing lower-triangular packed trailing update
+  instead of the full `trail x trail` product.
+- Decision: NO-SHIP. Candidate source was reverted before commit.
+
+Same-worker old/new gate:
+
+| Row | Baseline FNP | Candidate FNP | Candidate/Baseline | NumPy ratio | Outcome |
+|---|---:|---:|---:|---:|---|
+| `batch_cholesky/shape/64x128x128` | 31,931,504 ns | 66,366,114 ns | 2.078x | not counted; SSH auth blocked same-host Python | loss |
+| `batch_cholesky/shape/16x256x256` | 114,361,825 ns | 174,294,182 ns | 1.524x | not counted; SSH auth blocked same-host Python | loss |
+
+Ledger:
+- Candidate same-worker Rust gate: **0 wins / 2 losses / 0 neutral**.
+- Candidate vs NumPy: **0 wins / 0 losses / 2 not measured**. Direct Python
+  comparator attempts on `root@38.242.209.154` and
+  `ubuntu@38.242.209.154` both failed with SSH authentication denial. No
+  `rch exec -- python3` fallback is counted because that path runs locally.
+- Because the candidate regressed both old/new rows, no NumPy keep rerun was
+  justified. Existing same-day evidence still records current `batch_cholesky`
+  as a confirmed NumPy gap.
+
+Validation:
+- Candidate golden-output guard passed: `rch exec -- cargo test -p fnp-linalg
+  cholesky_mid_panel -- --nocapture` reported 2 passed, 0 failed.
+- An earlier command using a regex-like Cargo test filter ran zero tests; it is
+  retained as an invalid artifact and is not counted.
+- Post-revert focused test passed: `rch exec -- cargo test -p fnp-linalg
+  batch_cholesky -- --nocapture` reported 2 passed, 0 failed, 1 ignored.
+- Post-revert source diff for `crates/fnp-linalg/src/lib.rs` is empty.
+
+Retry predicate:
+- Do not retry medium Cholesky by simply lowering the existing triangular-update
+  threshold; the packed lower-triangular path was slower on both medium batch
+  rows despite preserving golden output.
+- A credible retry still needs a deeper kernel change: generated size-specific
+  batched panels, a safe SIMD dot primitive that beats the scalar panel solve,
+  or a LAPACK-class blocked Cholesky path with same-host NumPy capture and zero
+  medium-row regressions.
+
 ## 2026-06-20 - BOLD-VERIFY Mixed Keep: small-N Cholesky ordered dot narrows Rust, not NumPy
 
 Artifact directory:

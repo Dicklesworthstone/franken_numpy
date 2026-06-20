@@ -3,6 +3,45 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - Medium Cholesky Lower-Triangular Threshold No-Ship Slice
+
+Scope:
+- Bead: `franken_numpy-ixs5y.271`.
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg::batch_cholesky`.
+- Worker proof: `vmi1264463`.
+- Artifact: `tests/artifacts/perf/2026-06-20_linalg_cholesky_triangular_medium_cod_b/`.
+- Candidate: route medium Cholesky trailing updates with `trail >= 64` through
+  the existing lower-triangular packed update instead of the full square product.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Candidate correctness | PASS | `cholesky_mid_panel` golden guards passed with 2 tests, 0 failed. |
+| Candidate performance | FAIL | Same-worker candidate regressed both target rows: 2.078x and 1.524x candidate/baseline. |
+| NumPy comparison | BLOCKED / NOT COUNTED | Direct Python attempts to `root@38.242.209.154` and `ubuntu@38.242.209.154` failed with SSH authentication denial; no local Python fallback is counted. |
+| Revert discipline | PASS | Candidate source was reverted; `crates/fnp-linalg/src/lib.rs` has no remaining diff. |
+| Post-revert correctness | PASS | `rch exec -- cargo test -p fnp-linalg batch_cholesky -- --nocapture` passed 2 tests, 0 failed, 1 ignored. |
+| Evidence durability | PASS | Raw baseline/candidate logs, blocked NumPy attempts, validation logs, ratios, and retry predicate are recorded. |
+
+Cluster score: **54 / 100**
+
+Score rationale:
+- +18 correctness: candidate golden guards passed and post-revert batch tests
+  are green.
+- +16 evidence discipline: same-worker old/new rows and failed same-host NumPy
+  capture attempts are recorded.
+- +10 revert hygiene: no regressing production hunk remains.
+- +10 routing clarity: medium-trail threshold lowering is now ruled out.
+- -46 performance: both measured target rows regressed and no NumPy keep proof
+  was warranted.
+
+Current release posture:
+- `batch_cholesky` remains a confirmed high-priority gap.
+- Do not retry this as triangular-update threshold lowering. The next credible
+  route is generated fixed-size batched panels, a safe SIMD dot primitive that
+  beats the scalar panel solve, or a LAPACK-class blocked Cholesky kernel with
+  same-host NumPy capture and zero medium-row regressions.
+
 ## 2026-06-20 - Small-N Cholesky Ordered-Dot Mixed Slice
 
 Scope:
