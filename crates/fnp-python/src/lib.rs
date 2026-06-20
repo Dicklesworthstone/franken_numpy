@@ -39447,6 +39447,19 @@ fn try_zerocopy_int_minmax(
         return Ok(None);
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    // Narrow ints (1/2-byte) along an AXIS: numpy's SIMD axis reduction processes
+    // 16-64 lanes per instruction, which the scalar per-lane fold can't beat.
+    // Delegate to numpy. Flat (axis=None) narrow-int min/max stays native (memory-
+    // bound, already at parity).
+    if itemsize <= 2
+        && let Some(ax) = axis
+    {
+        let op = if take_min { "min" } else { "max" };
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", ax)?;
+        kwargs.set_item("keepdims", keepdims)?;
+        return Ok(Some(numpy.getattr(op)?.call((a,), Some(&kwargs))?.unbind()));
+    }
     match (kind.as_str(), itemsize) {
         ("i", 1) => minmax_int_typed::<i8>(py, &numpy, a, axis, keepdims, take_min),
         ("i", 2) => minmax_int_typed::<i16>(py, &numpy, a, axis, keepdims, take_min),
