@@ -45049,6 +45049,13 @@ fn ptp(
         return fallback();
     }
 
+    // Bool → numpy raises TypeError ("numpy boolean subtract ... not supported") because
+    // ptp is max−min; the native max−min instead returns a bool. Delegate so numpy
+    // raises the same error (parity for bool list and bool ndarray inputs alike).
+    if matches!(array.dtype(), DType::Bool) {
+        return fallback();
+    }
+
     // Call native Rust ptp
     let result = match array.ptp(axis_val) {
         Ok(r) => r,
@@ -45448,6 +45455,13 @@ fn around(
     };
 
     if matches!(array.dtype(), DType::Complex64 | DType::Complex128) {
+        return fallback();
+    }
+
+    // Bool reaching here came from a non-ndarray input (e.g. a Python bool list, which
+    // skips the ndarray-gated bool delegate above): numpy.around PROMOTES bool to
+    // float16, but the native Rint path returns a bool array. Delegate for parity.
+    if matches!(array.dtype(), DType::Bool) {
         return fallback();
     }
 
