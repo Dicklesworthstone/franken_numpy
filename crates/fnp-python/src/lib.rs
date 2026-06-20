@@ -40764,7 +40764,7 @@ fn trace(
                     }
                 }
             }
-            return build_numpy_scalar_or_array(py, &UFuncArray::scalar(sum, DType::F64));
+            return build_f64_scalar(py, sum);
         }
     }
 
@@ -42062,7 +42062,12 @@ fn is_exact_numpy_ndarray(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<
 }
 
 fn build_f64_scalar(py: Python<'_>, value: f64) -> PyResult<Py<PyAny>> {
-    build_numpy_scalar_or_array(py, &UFuncArray::scalar(value, DType::F64))
+    static NUMPY_FLOAT64_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+    let float64_type = NUMPY_FLOAT64_TYPE.get_or_try_init(py, || -> PyResult<Py<PyType>> {
+        let ty = py.import("numpy")?.getattr("float64")?;
+        Ok(ty.cast_into::<PyType>()?.unbind())
+    })?;
+    Ok(float64_type.bind(py).call1((value,))?.unbind())
 }
 
 fn try_buffered_f64_einsum_single_diagonal(
