@@ -41224,6 +41224,21 @@ fn argmax(
     if let Some(out) = try_zerocopy_f64_argextreme(py, a.bind(py), axis_val, true)? {
         return Ok(out);
     }
+    // Narrow ints (1/2-byte) along an axis: numpy's SIMD argmax (16-64 lanes per
+    // instruction) beats the scalar per-lane scan; delegate. (Flat narrow ints are
+    // split in try_zerocopy_int_argextreme above.)
+    if axis_val.is_some()
+        && let Ok(dt) = a.bind(py).getattr("dtype")
+        && let Ok(k) = dt.getattr("kind").and_then(|x| x.extract::<String>())
+        && (k == "i" || k == "u")
+        && dt
+            .getattr("itemsize")
+            .and_then(|x| x.extract::<usize>())
+            .map(|s| s <= 2)
+            .unwrap_or(false)
+    {
+        return fallback();
+    }
     // Zero-copy contiguous last-axis fast path (f64 SIMD + every int width): the
     // per-axis extract_precise → reduce_argmax path was ~3x (f64) to ~50x (int64)
     // slower than numpy.
@@ -41348,6 +41363,20 @@ fn argmin(
     // extract_precise → reduce_argmin scalar scan (NaN arrays defer to numpy).
     if let Some(out) = try_zerocopy_f64_argextreme(py, a.bind(py), axis_val, false)? {
         return Ok(out);
+    }
+    // Narrow ints (1/2-byte) along an axis: numpy's SIMD argmin beats the scalar
+    // per-lane scan; delegate. (Flat narrow ints are split in try_zerocopy_int_argextreme.)
+    if axis_val.is_some()
+        && let Ok(dt) = a.bind(py).getattr("dtype")
+        && let Ok(k) = dt.getattr("kind").and_then(|x| x.extract::<String>())
+        && (k == "i" || k == "u")
+        && dt
+            .getattr("itemsize")
+            .and_then(|x| x.extract::<usize>())
+            .map(|s| s <= 2)
+            .unwrap_or(false)
+    {
+        return fallback();
     }
     // Zero-copy contiguous last-axis fast path (f64 SIMD + every int width): the
     // per-axis extract_precise → reduce_argmin path was ~3x (f64) to ~50x (int64)
