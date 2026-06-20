@@ -1074,3 +1074,34 @@ Notes:
 - The focused bit-preservation guard passed for `batch_matrix_norm_fro_direct_lane_fill_matches_per_lane_reference_bits`, covering serial and threshold-crossing batch shapes plus NaN, Inf, and signed-zero inputs against the old per-lane reference.
 - `numpy_batch_matrix_norm_fro_hz1.txt` is an invalid shell-quote attempt and is not counted in the ratio table. The counted comparator is `numpy_batch_matrix_norm_fro_hz1_success.txt` on Python 3.14.4 / NumPy 2.3.5 on `hz1`.
 - This bead should not be reopened for another Frobenius micro-retune unless a same-worker NumPy rerun beats either final Rust median, or a future change alters the accumulation order, batch parallel threshold, or matrix-norm dispatch path.
+
+## 2026-06-20 - Gauntlet Verify: `fnp-linalg` batched trace lane fill
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_trace_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.237`.
+- Subject before measured closeout: `batch_trace` already had the direct lane-fill path from the code-first child, but the earlier routing table had one small `1024x32x32` loss on a different run window.
+- Kept lever: direct batched trace lane fill after one shape/data validation; each lane sums diagonal entries in ascending order with the same `trace_nxn` schedule, including NaN and signed-zero behavior.
+- No new source edit was made in this closeout. The measured decision is keep/close, not another speculative trace tweak.
+- Worker: `hz1`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `RCH_WORKER=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'batch_trace' -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- Direct Python NumPy comparator on `hz1` in `numpy_batch_trace_hz1.txt`.
+- `RCH_WORKER=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg batch_trace_direct_lane_fill_matches_per_lane_reference_bits -- --nocapture`
+- `RCH_WORKER=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo build -p fnp-linalg --release`
+
+Triage scorecard:
+- Final same-worker `hz1` FNP vs NumPy: win/loss/neutral = 2/0/0.
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy ns | NumPy ns | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.237` | Direct batched trace lane fill | `4096x8x8` on `hz1` | `fnp_batch_trace_current_hz1.txt`, `numpy_batch_trace_hz1.txt` | 47188 | 102977 | 0.458x | Keep, 2.18x faster |
+| `franken_numpy-ixs5y.237` | Direct batched trace lane fill | `1024x32x32` on `hz1` | same | 47184 | 61381 | 0.769x | Keep, 1.30x faster |
+
+Notes:
+- The focused bit-preservation guard passed for `batch_trace_direct_lane_fill_matches_per_lane_reference_bits`, covering serial and threshold-crossing batch shapes plus NaN and signed-zero propagation against the old per-lane reference.
+- Graveyard mapping: cache-local vectorized execution plus constants-kill-you discipline. The fresh measurement shows the existing direct lane-fill path already clears the NumPy gate, so no additional parallel-threshold or unrolled-diagonal lever was justified.
+- This bead should not be reopened for another trace micro-retune unless a same-worker NumPy rerun beats either final Rust median, or a future change alters the diagonal accumulation order, batch parallel threshold, or trace dispatch path.
