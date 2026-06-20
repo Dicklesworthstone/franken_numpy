@@ -1,0 +1,5 @@
+Warning: Permanently added '109.123.245.77' (ED25519) to the list of known hosts.
+host vmi1227854
+numpy 2.4.6
+eigvalsh_nxn/size/128 median_ns 435883 min_ns 419219 max_ns 466379
+cond_nxn/size/128 median_ns 724139 min_ns 590315 max_ns 760148

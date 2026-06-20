@@ -1,6 +1,38 @@
 # Performance Release Readiness Scorecard
 
-Scope: 2026-06-19 gauntlet verification of recent `fnp-random` PCG backlog against original NumPy.
+Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
+against original NumPy.
+
+## 2026-06-20 Linalg Spectral Bold-Verify
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Current `batch_cholesky` 64/128/256 rows | 9/10 | Release-ready current win |
+| `eigvalsh_nxn/128` | 2/10 | Not release-ready; 3.051x slower than NumPy |
+| `cond_nxn/128` | 4/10 | Not release-ready; 1.583x slower than NumPy |
+| Small-threshold / sort / cond-extrema probes | 0/10 | Rejected and reverted |
+
+Evidence:
+- Artifact: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_cod_a/`.
+- Current batch Cholesky FNP/NumPy ratios: `0.281x`, `0.226x`, `0.152x`.
+- Current spectral FNP/NumPy ratios on `vmi1227854`: `eigvalsh_nxn/128 = 3.051x`,
+  `cond_nxn/128 = 1.583x`.
+- Rejected probes:
+  `TRIDIAG_BLOCK_MIN=192` failed golden digest,
+  `cond_nxn` direct extrema regressed paired A/B by `1.026x`,
+  `eigvalsh_nxn sort_unstable_by` regressed paired A/B by `1.113x`.
+- Production `crates/fnp-linalg/src/lib.rs` source returned to baseline after
+  rejected probes.
+
+Decision:
+- Keep no new linalg source from this slice.
+- Preserve the batch-Cholesky benchmark evidence as a current win.
+- Route next spectral work to a deeper tridiagonal reduction/QR primitive; do
+  not retry threshold, sort, or post-processing-only levers for this loss class.
+
+---
+
+## 2026-06-19 Random PCG Backlog
 
 ## Summary
 

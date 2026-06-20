@@ -51,6 +51,48 @@ Current release posture:
 - Next no-gaps linalg effort should move to a fresh measured loss, likely deeper
   SVD/eig/solve kernels, rather than reworking this now-dominant lane.
 
+## 2026-06-20 - Linalg Spectral Bold-Verify No-Ship Slice
+
+Scope:
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg` / `eigvalsh_nxn`, `cond_nxn`, and `batch_cholesky`.
+- Artifact:
+  `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_cod_a/`.
+- Decision: no production linalg source kept. Batch Cholesky is already a
+  measured NumPy win; `eigvalsh_nxn/128` and `cond_nxn/128` remain release
+  blockers for this spectral slice.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Current batch Cholesky vs NumPy | PASS | Exact same-data comparator on `vmi1149989`: FNP/NumPy ratios `0.281x`, `0.226x`, `0.152x` for 500x64x64, 64x128x128, and 16x256x256. |
+| Current spectral vs NumPy | FAIL | Same-worker `vmi1227854`: `eigvalsh_nxn/128` is `3.051x` slower than NumPy; `cond_nxn/128` is `1.583x` slower. |
+| Small-threshold unblocked reduction probe | FAIL | `TRIDIAG_BLOCK_MIN=192` failed the tridiagonal golden digest gate before benchmarking. |
+| Private `cond` extrema scan probe | FAIL | Paired same-worker A/B on `vmi1227854`: candidate regressed `cond_nxn/128` by `1.026x`. |
+| Public `sort_unstable_by` eigvalsh probe | FAIL | Paired `hz1` A/B: `eigvalsh_nxn/128` regressed by `1.113x`; not kept despite a noisy `cond` swing. |
+| Revert discipline | PASS | `crates/fnp-linalg/src/lib.rs` has no remaining production diff after rejected probes. |
+| Evidence durability | PASS | Baselines, NumPy comparators, candidate logs, failed-gate details, ratios, and retry predicates are recorded in the ledger and artifact bundle. |
+
+Cluster score: **61 / 100**
+
+Score rationale:
+- +16 current win proof: batch Cholesky is materially faster than NumPy on the
+  exact benchmark data for the measured sizes.
+- +16 evidence discipline: same-worker spectral baselines, NumPy comparators,
+  paired A/B checks, and raw logs are durable.
+- +12 revert hygiene: all regressing production source hunks were reverted.
+- +10 correctness discipline: candidates were blocked by focused golden/tests
+  before keep decisions.
+- +7 routing clarity: three low-value spectral micro-levers are now ruled out.
+- -39 performance: the primary spectral rows still lose badly to NumPy and no
+  kept source lever moved them.
+
+Current release posture:
+- `batch_cholesky` is not the current measured linalg blocker for the checked
+  64/128/256 rows.
+- Symmetric spectral work remains not release-ready. The next attempt must be a
+  deeper `eigvalsh_nxn/128` reduction/QR lever with same-worker NumPy proof,
+  not sort/threshold/post-processing changes.
+
 ## 2026-06-20 - Python Compress Axis=None Bitmask-Gather Keep Slice
 
 Scope:

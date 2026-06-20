@@ -76,6 +76,87 @@ Retry predicate:
   this keep. The next credible linalg target should return to current measured
   losses in deeper SVD/eig/solve kernels with same-host NumPy capture first.
 
+## 2026-06-20 - BOLD-VERIFY No-Ship: linalg spectral small-lever sweep, batch Cholesky verified win
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_cod_a/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-a`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg` / `eigvalsh_nxn`, `cond_nxn`, `batch_cholesky`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Worker proof:
+  - `vmi1227854` for the primary `eigvalsh_nxn/128` and `cond_nxn/128`
+    current-loss baseline, NumPy comparator, and direct-cond-extrema A/B.
+  - `hz1` for the `sort_unstable_by` A/B after rch did not honor the requested
+    `vmi1227854` worker; a matching NumPy comparator was captured on `hz1`.
+  - `vmi1149989` for current `batch_cholesky` Rust-vs-NumPy proof with the exact
+    Criterion batch diagonal-bump pattern.
+- Alien/optimization hook: small-size routing, output-order specialization, and
+  allocation/sort-elision probes from `/alien-graveyard`,
+  `/alien-artifact-coding` numerical-linear-algebra guidance, and
+  `/extreme-software-optimization`. All production source probes were reverted.
+- Decision: NO-SHIP for new source. Current `batch_cholesky` is already a
+  measured NumPy win; current symmetric spectral `eigvalsh_nxn/128` and
+  `cond_nxn/128` remain measured NumPy losses.
+
+Current head-to-head baseline:
+
+| Row | FNP | NumPy | FNP/NumPy | Outcome |
+|---|---:|---:|---:|---|
+| `batch_cholesky/shape/500x64x64` | 4,879,321 ns | 17,379,269 ns | 0.281x | current win |
+| `batch_cholesky/shape/64x128x128` | 3,808,040 ns | 16,877,623 ns | 0.226x | current win |
+| `batch_cholesky/shape/16x256x256` | 4,152,904 ns | 27,276,163 ns | 0.152x | current win |
+| `eigvalsh_nxn/size/128` | 1,330,011 ns | 435,883 ns | 3.051x | current loss |
+| `cond_nxn/size/128` | 1,146,114 ns | 724,139 ns | 1.583x | current loss |
+
+Notes:
+- The initial NumPy batch-Cholesky comparator accidentally reused identical
+  batch lanes. It was superseded by
+  `numpy_batch_cholesky_exact_vmi1149989.txt`, which matches Criterion's
+  per-lane diagonal bump `(b % 7) * 0.25`.
+- The spectral NumPy comparator uses the same deterministic
+  `generate_spd_matrix(128)` as the Criterion benchmark.
+
+Rejected probes:
+
+| Probe | Worker | Baseline | Candidate | Candidate/Baseline | Candidate/NumPy | Outcome |
+|---|---|---:|---:|---:|---:|---|
+| `TRIDIAG_BLOCK_MIN=192` route 128 back to unblocked reduction | `hz1` correctness gate | not counted | not counted | not counted | not counted | failed golden digest before benchmarking |
+| `cond_nxn` direct extrema scan after tridiag QR, skipping public `eigvalsh` sort | `vmi1227854` | 1,161,511 ns | 1,191,551 ns | 1.026x | 1.646x loss | no-ship |
+| `eigvalsh_nxn` `sort_unstable_by(total_cmp)` | `hz1` | 1,888,909 ns | 2,101,688 ns | 1.113x | 2.263x loss | no-ship |
+| `cond_nxn` under same `sort_unstable_by` public eigvalsh path | `hz1` | 2,361,274 ns | 1,455,330 ns | 0.616x | 1.020x neutral/noisy loss | not kept because public eigvalsh regressed |
+
+Correctness / validation:
+- `TRIDIAG_BLOCK_MIN=192` rejected at
+  `tridiag_rank2k_fused_update_preserves_spectra_and_golden_sha256`: digest
+  drifted to `dbb1977a78b174e300410ac329a0b3d2f1a07881074a0cbe6d9dc905e56111c4`
+  vs expected `d8a5154cdf2b005605b832840983ece912dac6252c0d6b59452f47256b8cb2f8`.
+- Direct-cond-extrema candidate passed:
+  `cargo test -p fnp-linalg cond_p_spectral_symmetric --release` and
+  `cargo test -p fnp-linalg tridiag_rank2k_fused_update_preserves_spectra_and_golden_sha256 --release`.
+- `sort_unstable_by` candidate passed:
+  `cargo test -p fnp-linalg eigvalsh --release` and
+  `cargo test -p fnp-linalg cond_p_spectral_symmetric --release`.
+- Production source diff after reverts: empty for `crates/fnp-linalg/src/lib.rs`.
+
+Retry predicate:
+- Do not retry small-threshold unblocked routing for `eigvalsh_nxn/128` unless
+  the golden digest is intentionally re-pinned behind stronger NumPy and
+  reconstructive proof; this run failed before it deserved a performance keep.
+- Do not retry the private `cond_nxn` direct-extrema scan as a standalone lever.
+  It looked like a 4-5% win on an unpaired run, then regressed by 2.6% in the
+  paired same-worker A/B.
+- Do not switch public `eigvalsh_nxn` sorting to `sort_unstable_by` for this
+  loss class. It produced a tempting `cond` swing on `hz1` but regressed the
+  actual public `eigvalsh` row by 11.3%, and `eigvalsh/128` is the larger
+  measured NumPy loss.
+- The next credible spectral route must attack the reduction/QR work itself,
+  not post-processing: a profiled values-only tridiagonal QR primitive, a
+  provably equivalent small-size symmetric eigensolver, or a blocked reduction
+  change that keeps the golden stream and improves `eigvalsh_nxn/128` against
+  the same-worker NumPy comparator.
 ## 2026-06-20 - BOLD-VERIFY Keep: Python compress axis=None bitmask gather
 
 Artifact directory:
