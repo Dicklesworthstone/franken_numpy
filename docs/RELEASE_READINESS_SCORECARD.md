@@ -3,6 +3,50 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - Small-N Cholesky Ordered-Dot Mixed Slice
+
+Scope:
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg::cholesky_nxn`, plus Python `fnp.linalg.cholesky`
+  stacked-SPD comparator.
+- Source commit under verification: `856c38cb`.
+- Worker proof: Rust parent/current pair on `vmi1153651`; Python extension build
+  on `vmi1152480`; Python comparator local with the built current-head `.so`.
+- Artifact: `tests/artifacts/perf/2026-06-20_linalg_cholesky_right_looking_cod_a/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Owned Rust performance | PASS | `cholesky_nxn/16` and `/32` improved to 0.870x and 0.879x of parent on `vmi1153651`. |
+| Head-to-head performance vs NumPy | FAILING RESIDUAL | Current Python stacked Cholesky remains 1 win / 6 losses vs NumPy; owned d=16 and d=32 rows are still 6.46x and 5.46x slower. |
+| Broad regression guardrail | MIXED/NOISY | Non-owned blocked and batch rows were noisy, including apparent losses on paths the helper does not route through. They are recorded but not attributed as causal wins. |
+| Correctness | PASS | `rch exec -- cargo test -p fnp-linalg cholesky_ -- --nocapture` passed current-head unit, conformance, golden, metamorphic, and solve rows; Python comparator reported `match=True` for every measured row. |
+| Crate compile health | PASS | `rch exec -- cargo check -p fnp-linalg --all-targets` passed. |
+| Clippy health | PASS | `rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed. |
+| Release build health | PASS WITH WARNINGS | `rch exec -- cargo build -p fnp-linalg --release` passed. `rch exec -- cargo build -p fnp-python --release --features python-extension` also passed, with three pre-existing `fnp-python` warnings. |
+| Evidence durability | PASS | Parent/current Rust logs, current-head Python comparator, extension build log, win/loss ratios, and retry predicate are in the artifact bundle and negative-evidence ledger. |
+
+Cluster score: **62 / 100**
+
+Score rationale:
+- +18 performance: the owned Rust direct rows improved by about 12-13%.
+- +16 correctness/build: Python extension build passed and all comparator rows
+  matched NumPy.
+- +14 evidence discipline: same-worker Rust parent/current proof and Python
+  NumPy ratios are recorded.
+- +8 source discipline: the helper is gated to n=16..32 and leaves larger
+  blocked Cholesky routing alone.
+- +6 routing clarity: scalar micro-tuning is now separated from the real
+  stacked-SPD NumPy gap.
+- -38 residual performance: current Python stacked Cholesky still loses badly to
+  NumPy on 6 of 7 rows, including the owned d=16/d=32 cases.
+
+Current release posture:
+- `cholesky_nxn` small-N ordered dot is a narrow Rust keep already present in
+  `main`, not a release-level NumPy performance closeout.
+- `batch_cholesky` / Python stacked `fnp.linalg.cholesky` remains a confirmed
+  high-priority gap. Next work should target batched layout or generated
+  fixed-size kernels, not another scalar-loop micro-tweak.
+
 ## 2026-06-20 - Linalg Column-Norm SIMD Keep Slice
 
 Scope:

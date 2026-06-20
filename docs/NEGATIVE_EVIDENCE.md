@@ -4,6 +4,86 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Mixed Keep: small-N Cholesky ordered dot narrows Rust, not NumPy
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-20_linalg_cholesky_right_looking_cod_a/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-a`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate: `fnp-linalg` plus Python-surface comparator through `fnp-python`.
+- Source under verification: already-present commit `856c38cb`
+  (`perf(fnp-linalg): ordered 4-wide dot for small-N unblocked Cholesky (N=16..32)`).
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Alien/optimization hook: dependency-chain break for tiny dot products from
+  profile-first numeric-kernel tuning; no layout/JIT/arena rewrite shipped.
+- Directory name note: the artifact directory keeps the initial
+  `right_looking` hypothesis name, but the verified source is the ordered-dot
+  helper only.
+- Decision: KEEP AS NARROW RUST MICRO-WIN ALREADY IN `main`, but do **not**
+  claim NumPy domination. Current Python stacked Cholesky is still a visible
+  NumPy loss, including the owned d=16 and d=32 rows.
+
+Same-worker Rust Criterion (`vmi1153651`, parent `586f3459` vs current
+`856c38cb`):
+
+| Row | Parent | Current | Current/Parent | Ownership | Outcome |
+|---|---:|---:|---:|---|---|
+| `cholesky_nxn/size/16` | 2,186 ns | 1,901 ns | 0.870x | ordered-dot path | WIN |
+| `cholesky_nxn/size/32` | 11,091 ns | 9,747 ns | 0.879x | ordered-dot path | WIN |
+| `cholesky_nxn/size/64` | 70,817 ns | 70,754 ns | 0.999x | not routed | neutral |
+| `cholesky_nxn/size/128` | 319,742 ns | 306,706 ns | 0.959x | blocked path, not routed | noisy neutral |
+| `cholesky_nxn/size/256` | 1,868,544 ns | 2,052,584 ns | 1.098x | blocked path, not routed | noisy neutral/loss |
+| `cholesky_nxn/size/512` | 35,042,224 ns | 24,653,195 ns | 0.704x | blocked path, not routed | noisy neutral |
+| `cholesky_nxn/size/768` | 107,262,958 ns | 96,512,158 ns | 0.900x | blocked path, not routed | noisy neutral |
+| `batch_cholesky/64x128x128` | 20,565,511 ns | 24,253,715 ns | 1.179x | blocked path, not routed | noisy neutral/loss |
+| `batch_cholesky/16x256x256` | 22,245,367 ns | 78,519,429 ns | 3.529x | blocked path, not routed | noisy loss |
+
+Ledger:
+- Owned Rust rows vs parent: **2 wins / 0 losses / 0 neutral**.
+- Non-owned broad Rust guardrails: **0 claimed wins / 2 losses-or-noisy-loss /
+  5 neutral-or-noisy**. The d=128/d=256 batch guardrails are not causally
+  affected by the helper because they route through `cholesky_blocked`.
+- Current Python `fnp.linalg.cholesky` vs NumPy: **1 win / 6 losses / 0
+  neutral**. Rows: d=4 `0.75x` win; d=8 `1.11x` loss; d=16 `6.46x` loss;
+  d=32 `5.46x` loss; d=64 `6.27x` loss; d=100 `1.46x` loss; d=200 `1.67x`
+  loss. All rows matched NumPy numerically.
+- Owned Python-facing rows vs NumPy: **0 wins / 2 losses / 0 neutral**
+  (`d=16`, `d=32`). This is not a release-level performance closeout.
+- Prior same-day local Python comparator is retained only as routing evidence:
+  d=16 moved from a recorded `19.65x` loss to `6.46x`, while d=32 remains a
+  large loss (`4.67x` prior, `5.46x` current). Different run windows mean this
+  is not scored as same-worker old/new proof.
+
+Validation:
+- `rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg
+  'cholesky_nxn|batch_cholesky' -- --sample-size 20 --warm-up-time 1
+  --measurement-time 3 --output-format bencher` passed on current head (`hz2`)
+  and in a same-worker parent/current pair on `vmi1153651`.
+- `rch exec -- cargo test -p fnp-linalg cholesky_ -- --nocapture` passed on
+  `vmi1293453`: 21 unit tests, 4 conformance tests, 2 golden tests, 1
+  metamorphic test, and 4 solve tests passed.
+- `rch exec -- cargo check -p fnp-linalg --all-targets` passed on `hz1`.
+- `rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings`
+  passed on `hz1`.
+- `rch exec -- cargo build -p fnp-linalg --release` passed on `vmi1149989`.
+- `rch exec -- cargo build -p fnp-python --release --features
+  python-extension` passed on `vmi1152480`; it emitted three pre-existing
+  `fnp-python` warnings.
+- Python comparator loaded the current-head extension built from
+  `/data/projects/.rch-targets/franken_numpy-cod-a/release/libfnp_python.so`;
+  all measured rows reported `match=True`.
+
+Retry predicate:
+- Do not reopen small-N scalar Cholesky unroll/const-specialization as the main
+  route to NumPy parity. It can narrow direct Rust microbenchmarks but does not
+  change the Python stacked-SPD loss class.
+- Next credible Cholesky lever needs a different complexity/layout class:
+  SoA batched panels across lanes, packed-panel batched `dpotrf` shape,
+  communication-avoiding panel/SYRK fusion, or JIT/generated fixed-size kernels
+  for d=16/32 with same-window NumPy proof and explicit regression guardrails.
+
 ## 2026-06-20 - BOLD-VERIFY Keep: fnp-linalg column-norm SIMD lane accumulation
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_column_norm_simd_cod_a/`
