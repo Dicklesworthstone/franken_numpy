@@ -39200,7 +39200,7 @@ fn minmax_int_typed<'py, T>(
     take_min: bool,
 ) -> PyResult<Option<Py<PyAny>>>
 where
-    T: pyo3::buffer::Element + Copy + Ord + IntoPyObject<'py>,
+    T: pyo3::buffer::Element + Copy + Ord + IntoPyObject<'py> + Sync + Send,
 {
     let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
         return Ok(None);
@@ -39267,32 +39267,108 @@ where
             return Ok(None);
         };
         if inner == 1 {
-            for (o, slot) in output.iter().enumerate() {
-                let base = o * axis_len;
-                let mut acc = input[base].get();
-                for k in 1..axis_len {
-                    acc = fold(acc, input[base + k].get());
+            // Each output cell reduces a contiguous run of `axis_len`. SAFETY:
+            // repr-transparent read-only buffer under the GIL -> &[T] (Sync).
+            let data: &[T] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+            use rayon::prelude::*;
+            let lane_fold = |lane: &[T]| -> T {
+                let mut acc = lane[0];
+                for &v in &lane[1..] {
+                    acc = fold(acc, v);
                 }
-                slot.set(acc);
+                acc
+            };
+            let parallel = outer * axis_len >= (1 << 16) && rayon::current_num_threads() >= 2;
+            if outer >= 2 {
+                // Many independent contiguous lanes (last axis): fan across the pool.
+                let results: Vec<T> = if parallel {
+                    data.par_chunks_exact(axis_len).map(&lane_fold).collect()
+                } else {
+                    data.chunks_exact(axis_len).map(&lane_fold).collect()
+                };
+                for (slot, v) in output.iter().zip(results) {
+                    slot.set(v);
+                }
+            } else {
+                // Single big run (full reduction): chunk + reduce (min/max associative).
+                let acc = if parallel {
+                    data.par_chunks(1 << 14)
+                        .map(&lane_fold)
+                        .reduce_with(|a, b| fold(a, b))
+                        .unwrap()
+                } else {
+                    lane_fold(data)
+                };
+                output[0].set(acc);
             }
         } else {
+            // Non-last axis: per-inner running min/max accumulator down the axis,
+            // walking rows in order (cache-sequential). numpy runs this single-threaded,
+            // so parallelize: ≥2 outer groups fan across the pool; a single group (2-D
+            // axis=0) privatizes across ROW-BLOCKS and merges the inner-wide planes by
+            // elementwise fold. min/max is order-independent, so the result is identical.
             let lane = axis_len * inner;
-            let mut accs: Vec<T> = vec![input[0].get(); out_elems];
-            for o in 0..outer {
-                let obase = o * inner;
+            // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only buffer held
+            // under the GIL -> &[T] (Sync) for the parallel folds.
+            let data: &[T] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+            let group_plane = |o: usize| -> Vec<T> {
                 let ibase = o * lane;
-                let arow = &mut accs[obase..obase + inner];
-                for (i, ac) in arow.iter_mut().enumerate() {
-                    *ac = input[ibase + i].get();
-                }
+                let mut acc: Vec<T> = data[ibase..ibase + inner].to_vec();
                 for k in 1..axis_len {
                     let in_a = ibase + k * inner;
-                    let arow = &mut accs[obase..obase + inner];
-                    for (i, ac) in arow.iter_mut().enumerate() {
-                        *ac = fold(*ac, input[in_a + i].get());
+                    for (i, ac) in acc.iter_mut().enumerate() {
+                        *ac = fold(*ac, data[in_a + i]);
                     }
                 }
-            }
+                acc
+            };
+            use rayon::prelude::*;
+            let parallel =
+                outer * axis_len * inner >= (1 << 16) && rayon::current_num_threads() >= 2;
+            let accs: Vec<T> = if parallel && outer >= 2 {
+                let planes: Vec<Vec<T>> = (0..outer).into_par_iter().map(group_plane).collect();
+                let mut accs = vec![data[0]; out_elems];
+                for (o, p) in planes.into_iter().enumerate() {
+                    accs[o * inner..o * inner + inner].copy_from_slice(&p);
+                }
+                accs
+            } else if parallel {
+                // Single group (axis=0): privatize across row-blocks, merge planes.
+                (0..axis_len)
+                    .into_par_iter()
+                    .fold(
+                        || None::<Vec<T>>,
+                        |acc_opt, k| {
+                            let row = &data[k * inner..k * inner + inner];
+                            match acc_opt {
+                                None => Some(row.to_vec()),
+                                Some(mut acc) => {
+                                    for (ac, &v) in acc.iter_mut().zip(row) {
+                                        *ac = fold(*ac, v);
+                                    }
+                                    Some(acc)
+                                }
+                            }
+                        },
+                    )
+                    .reduce(
+                        || None::<Vec<T>>,
+                        |a, b| match (a, b) {
+                            (None, x) | (x, None) => x,
+                            (Some(mut a), Some(b)) => {
+                                for (ac, v) in a.iter_mut().zip(b) {
+                                    *ac = fold(*ac, v);
+                                }
+                                Some(a)
+                            }
+                        },
+                    )
+                    .unwrap_or_else(|| vec![data[0]; out_elems])
+            } else {
+                (0..outer).flat_map(group_plane).collect()
+            };
             for (slot, &v) in output.iter().zip(accs.iter()) {
                 slot.set(v);
             }
@@ -39447,16 +39523,15 @@ fn try_zerocopy_int_minmax(
         return Ok(None);
     }
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
-    // Narrow ints (1/2-byte) along an AXIS: numpy's SIMD axis reduction processes
-    // 16-64 lanes per instruction, which the scalar per-lane fold can't beat.
-    // Delegate to numpy. Flat (axis=None) narrow-int min/max stays native (memory-
-    // bound, already at parity).
-    if itemsize <= 2
-        && let Some(ax) = axis
-    {
+    // Narrow ints (1/2-byte): numpy's SIMD min/max processes 16-64 lanes per
+    // instruction, which the scalar (even parallel) fold can't beat — delegate to
+    // numpy (flat and per-axis). Wide ints (4/8-byte) use the parallel native fold.
+    if itemsize <= 2 {
         let op = if take_min { "min" } else { "max" };
         let kwargs = PyDict::new(py);
-        kwargs.set_item("axis", ax)?;
+        if let Some(ax) = axis {
+            kwargs.set_item("axis", ax)?;
+        }
         kwargs.set_item("keepdims", keepdims)?;
         return Ok(Some(numpy.getattr(op)?.call((a,), Some(&kwargs))?.unbind()));
     }
