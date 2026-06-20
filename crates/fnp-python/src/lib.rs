@@ -33494,12 +33494,16 @@ fn average(
         return Ok(out);
     }
 
-    // Non-contiguous (transposed/strided) ndarrays bail the zero-copy paths into the
-    // cold extract → rebuild (transpose-copy, ~45x slower). Delegate to numpy.
+    // Non-contiguous (transposed/strided) operands bail into the cold extract (~45x
+    // slower); a tuple (multi-axis) reduction extracts then falls back on the axis
+    // re-parse below (~10x wasted). Delegate both to numpy up front.
     if noncontiguous_ndarray(&numpy, a.bind(py))?
         || weights
             .as_ref()
             .is_some_and(|w| noncontiguous_ndarray(&numpy, w.bind(py)).unwrap_or(false))
+        || axis
+            .as_ref()
+            .is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok())
     {
         return fallback();
     }
