@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Broad sweep (no new gaps): ~50 ops across 7 families parity/win
+
+Agent: `BlackThrush` / `cod-b`. NumPy 2.4.3 thinkstation1, load ~8-10 (other
+projects benching concurrently — only >2x gaps treated as actionable).
+
+Swept for stable LOSE-gaps after the cov/corrcoef wins; all PARITY or WIN, no new
+actionable loss:
+- Reductions with `where=`/`initial`: sum/mean/max/prod (0.97-1.05x).
+- `linalg.norm` axis/ord=1/inf/fro/nuc (0.87-1.01x).
+- diff n=3, percentile method=lower, quantile method=midpoint,
+  histogram_bin_edges(auto), searchsorted(sorter) (0.99-1.20x).
+- nan-axis reductions: nanmean_ax1 0.27x, nanmax_ax0 0.58x (WIN).
+- Broadcasting binary: (N,1)+(1,M) outer, row/col/scalar (0.91-1.01x).
+- N-D (3-D) reductions sum/mean/max/std/argmax over each axis & axis-pairs
+  (argmax_3d 0.44x WIN; rest 0.82-1.56x, the 1.56x sum_3d_ax0 load-noise).
+- Small (100-elem) add/sum/dot/sort: sub-us, ratios are dispatch noise not real.
+- moveaxis/swapaxes return views (numpy .copy() in the probe forced a copy ->
+  apparent huge win; not a real perf delta).
+
+Conclusion: the fnp-python surface is comprehensively optimized; remaining known
+losses are the documented hard ones (convolve short-kernel large-N tail;
+batch_cholesky scalar kernel) requiring profiling / bit-exactness decisions, not
+fresh fast paths. Retry predicate: do not re-sweep these families for >2x gaps.
+
 ## 2026-06-20 - BOLD-VERIFY Correctness fix: cov/corrcoef(a,b,rowvar=False) two-1-D scalar-shape bug
 
 Agent: `BlackThrush` / `cod-b`. Closes part of `deadlock-audit-c7nvs`.
