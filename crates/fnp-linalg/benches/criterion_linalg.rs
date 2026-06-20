@@ -369,7 +369,13 @@ fn bench_batch_eigvalsh(c: &mut Criterion) {
 fn bench_batch_cholesky(c: &mut Criterion) {
     let mut group = c.benchmark_group("batch_cholesky");
 
-    for (batch, n) in [(64usize, 128usize), (16, 256)] {
+    for (batch, n) in [
+        (2000usize, 16usize),
+        (1000, 32),
+        (500, 64),
+        (64, 128),
+        (16, 256),
+    ] {
         let (data, shape) = generate_batch_spd(batch, n);
         let id = format!("{batch}x{n}x{n}");
         group.bench_with_input(BenchmarkId::new("shape", id), &shape, |bench, shape| {

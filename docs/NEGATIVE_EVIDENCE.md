@@ -4,6 +4,77 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY No-Ship: batch_cholesky 8-lane SoA generated micro-kernel probe
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_generated_cod_b/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-b`.
+- Bead: `franken_numpy-ixs5y.272`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate: `fnp-linalg`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Alien/optimization hook: vectorized execution / template-specialized numeric
+  kernel layout from `/data/projects/alien_cs_graveyard/alien_cs_graveyard.md`
+  plus numerical linear algebra family 34. The attempted lever transformed one
+  group of eight batch lanes into a temporary SoA register layout so each inner
+  Cholesky dot used SIMD lanes without per-k gather/scatter.
+- Decision: NO-SHIP. Candidate source was reverted before commit. The retained
+  harness change only adds the d=16/32/64 batch rows that expose this loss class.
+
+Candidate proof:
+- Candidate compile passed: `rch exec -- cargo check -p fnp-linalg --lib`.
+- Candidate bit proof passed: `rch exec -- cargo test -p fnp-linalg
+  batch_cholesky_soa8_matches_per_lane_cholesky_nxn_bits -- --nocapture`
+  reported 1 passed, 0 failed on `hz2`.
+
+Same-worker old/new gate on `hz1`:
+
+| Row | Old-path FNP | Candidate FNP | Candidate/Old | NumPy ratio | Outcome |
+|---|---:|---:|---:|---:|---|
+| `batch_cholesky/shape/2000x16x16` | 1,283,500 ns | 1,198,602 ns | 0.934x | not counted; SSH auth blocked same-host Python | small win |
+| `batch_cholesky/shape/1000x32x32` | 2,610,096 ns | 4,308,668 ns | 1.651x | not counted; SSH auth blocked same-host Python | loss |
+| `batch_cholesky/shape/500x64x64` | 8,147,905 ns | 9,213,859 ns | 1.131x | not counted; SSH auth blocked same-host Python | loss |
+| `batch_cholesky/shape/64x128x128` | 4,970,534 ns | 9,130,164 ns | 1.837x | not counted; not routed by candidate | noisy guardrail loss |
+| `batch_cholesky/shape/16x256x256` | 6,607,140 ns | 9,491,297 ns | 1.437x | not counted; not routed by candidate | noisy guardrail loss |
+
+Ledger:
+- Candidate same-worker Rust gate on target routed rows: **1 win / 2 losses /
+  0 neutral**.
+- Full observed same-worker sweep: **1 win / 4 losses / 0 neutral**.
+- Candidate vs NumPy: **0 wins / 0 losses / 5 blocked**. Direct same-host
+  NumPy on `root@87.99.133.171` failed with SSH authentication denial. Local
+  Python has NumPy 2.4.3 but no importable `fnp_python`, so no local FNP/NumPy
+  comparator was counted.
+- Existing same-day current-head Python stacked Cholesky evidence remains the
+  active NumPy gap context: **1 win / 6 losses / 0 neutral** versus NumPy
+  (`d=16` 6.46x slower, `d=32` 5.46x slower, `d=64` 6.27x slower).
+
+Validation after revert:
+- Production source diff for `crates/fnp-linalg/src/lib.rs` is empty.
+- `rch exec -- cargo test -p fnp-linalg batch_cholesky -- --nocapture`
+  passed after revert: 2 passed, 0 failed, 1 ignored.
+- `rch exec -- cargo check -p fnp-linalg --benches` passed after revert,
+  proving the retained focused batch_cholesky benchmark rows compile.
+- Invalid probe retained: `cargo bench ... --release` failed because this Cargo
+  invocation does not accept `--release`; Criterion cargo bench already uses the
+  bench profile.
+
+Retry predicate:
+- Do not retry the temporary 8-lane SoA register-layout Cholesky kernel as a
+  standalone lever. It removed per-k gather/scatter but still regressed d=32
+  and d=64, so the conversion/scatter footprint and vector codegen cost exceed
+  the saved scalar reduction work beyond d=16.
+- Do not retry allocation elimination, gate tuning, threshold-only changes,
+  finite-validation hoists, const specialization, ordered scalar dot expansion,
+  or portable-SIMD gather/scatter across lanes for this gap.
+- A credible retry needs a different primitive: true packed-panel batched
+  Cholesky with reusable SoA panels across the whole factorization, a safe
+  vector dot primitive that wins d=32 and d=64 in serial first, or a LAPACK-class
+  blocked per-lane kernel. It must clear a same-worker old/new gate on
+  d=16/32/64 plus n>=128 guardrails before any NumPy keep claim.
+
 ## 2026-06-20 - BOLD-VERIFY Win: fnp-python cov(m,y) two-operand zero-copy Gram (4-17x loss -> 0.6-0.9x win)
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_python_cov_two_operand_vs_numpy/`

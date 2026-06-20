@@ -3,6 +3,49 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - Batch Cholesky 8-Lane SoA No-Ship Slice
+
+Scope:
+- Bead: `franken_numpy-ixs5y.272`.
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg::batch_cholesky`.
+- Worker proof: `hz1` for same-worker old/new Criterion; `hz2` for bit proof.
+- Artifact: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_generated_cod_b/`.
+- Candidate: temporary 8-lane SoA SIMD layout for `n=16/32/64` batched
+  Cholesky groups, intended to avoid the prior per-k gather/scatter SIMD failure.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Candidate correctness | PASS | SoA route matched per-lane `cholesky_nxn` bits for d=16/32/64. |
+| Candidate performance | FAIL | Same-worker target rows were 1 win / 2 losses: 0.934x, 1.651x, and 1.131x candidate/old. |
+| Guardrails | FAIL / NOISY | Non-routed n=128 and n=256 rows were also slower in the same run window: 1.837x and 1.437x candidate/old. |
+| NumPy comparison | BLOCKED / NOT COUNTED | Direct same-host Python on `hz1` failed with SSH authentication denial; local Python lacks importable `fnp_python`. |
+| Revert discipline | PASS | Candidate source was reverted; `crates/fnp-linalg/src/lib.rs` has no remaining diff. |
+| Post-revert correctness | PASS | `rch exec -- cargo test -p fnp-linalg batch_cholesky -- --nocapture` passed 2 tests, 0 failed, 1 ignored. |
+| Bench health | PASS | `rch exec -- cargo check -p fnp-linalg --benches` passed with the retained d=16/32/64 batch benchmark rows. |
+| Evidence durability | PASS | Baseline/candidate logs, blocked NumPy attempt, compile/test logs, ratios, and retry predicate are recorded. |
+
+Cluster score: **58 / 100**
+
+Score rationale:
+- +18 correctness: the candidate's bit-equivalence test passed before revert.
+- +16 evidence discipline: same-worker old/new rows and the blocked NumPy
+  comparator are recorded.
+- +10 revert hygiene: no regressing production source remains.
+- +8 benchmark coverage: d=16/32/64 batch Cholesky rows now stay visible in the
+  per-crate Criterion harness.
+- +6 routing clarity: temporary SoA register layout is ruled out.
+- -40 performance: two of three routed rows regressed, and the non-routed
+  guardrails were worse in the same run window.
+
+Current release posture:
+- `batch_cholesky` / Python stacked `fnp.linalg.cholesky` remains a confirmed
+  high-priority NumPy gap.
+- Do not retry temporary SoA lane grouping or per-k gather/scatter SIMD. The
+  next credible route needs a true packed-panel batched layout, a serial-winning
+  safe vector dot primitive for d=32/d=64, or a LAPACK-class blocked per-lane
+  kernel with same-host NumPy capture.
+
 ## 2026-06-20 - Medium Cholesky Lower-Triangular Threshold No-Ship Slice
 
 Scope:
