@@ -3,6 +3,69 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - Linalg Column-Norm SIMD Keep Slice
+
+Scope:
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate: `fnp-linalg`.
+- Worker proof: `vmi1227854`.
+- Artifact: `tests/artifacts/perf/2026-06-20_linalg_column_norm_simd_cod_a/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS | Target rows `n>=256` are 6/6 wins vs same-host NumPy, with New/NumPy ratios from 0.255x to 0.334x. |
+| Old/new regression gate | PASS WITH NOISY GUARDRAIL | 7/8 observed rows improved vs old FNP; `neg_one/128` moved 1.047x slower but stayed faster than NumPy and is below the SIMD threshold. |
+| Targeted correctness | PASS | `rch exec -- cargo test -p fnp-linalg matrix_norm_column_reduction_matches_strided_reference_bits -- --nocapture` passed. |
+| Crate compile health | PASS | `rch exec -- cargo check -p fnp-linalg --all-targets` passed. |
+| Clippy health | PASS | `rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed. |
+| Release build health | PASS | `rch exec -- cargo build -p fnp-linalg --release` passed. |
+| Formatting health | KNOWN GAP | Crate formatting remains blocked by broad pre-existing rustfmt drift; the touched SIMD line was manually adjusted to rustfmt's reported shape. |
+| UBS | KNOWN GAP | `ubs crates/fnp-linalg/src/lib.rs` reports broad pre-existing inventory unrelated to the matrix-norm helper; UBS internal fmt/clippy/check sub-gates were green. |
+| Evidence durability | PASS | Win/loss/neutral ratios, NumPy comparator metadata, validation commands, no-ship Cholesky probe, and retry predicates are recorded in `docs/NEGATIVE_EVIDENCE.md` and per-run scorecards. |
+
+Cluster score: **88 / 100**
+
+Score rationale:
+- +36 performance: the selected residual moved from losing to NumPy at
+  256/512/1024 to a clear same-host win.
+- +18 correctness: the bit-reference matrix norm test passed after the final
+  selector split.
+- +14 compile health: check, clippy, and release build are green crate-scoped.
+- +12 evidence discipline: same-worker old/new proof and same-host NumPy
+  comparator are recorded with ratios.
+- +8 source discipline: the SIMD helper is isolated so sub-256 scalar routing
+  stays outside the widened lane.
+- -12 residual hygiene: crate-wide fmt and UBS still have broad pre-existing
+  debt outside this hunk.
+
+Current release posture:
+- `matrix_norm_nxn_orders` 1/-1 rows at 256, 512, and 1024 are **measured
+  keep** for this slice and now beat same-host NumPy.
+- Cholesky remains a gap; the const-specialization probe was reverted as too
+  small/noisy.
+
+## 2026-06-20 - Cholesky Const-Specialization No-Ship Slice
+
+Scope:
+- Crate: `fnp-linalg`.
+- API: `cholesky_nxn` / `batch_cholesky`.
+- Evidence: `tests/artifacts/perf/2026-06-20_linalg_cholesky_const_specialize_cod_a/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Candidate correctness | PASS | Focused bit-reference test passed while the candidate existed. |
+| Candidate compile health | PASS | `cargo check -p fnp-linalg --all-targets` passed while the candidate existed. |
+| Candidate performance | NO-SHIP | Owned small-N rows improved only 4.9%-8.1%; broader apparent wins were treated as worker noise because they were not routed through the const-specialized path. |
+| NumPy comparison | NOT RUN | The old/new proof was too small/noisy to justify a NumPy keep claim. |
+| Revert discipline | PASS | Candidate source and test were removed before commit; no Cholesky source hunk remains. |
+
+Cluster score: **61 / 100**
+
+Current release posture:
+- Do not retry small fixed-N Cholesky const specialization.
+- Next Cholesky work must be an actual medium-matrix layout/algorithm change
+  with same-window Rust and NumPy proof.
+
 ## 2026-06-20 - Python Einsum Trace Scalar-Builder Keep Slice
 
 Scope:

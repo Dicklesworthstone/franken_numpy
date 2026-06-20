@@ -16,6 +16,7 @@
 //! Uses `#![forbid(unsafe_code)]` - implemented in safe Rust.
 
 #![forbid(unsafe_code)]
+#![feature(portable_simd)]
 
 use core::fmt;
 use rayon::prelude::*;
@@ -3734,6 +3735,8 @@ pub fn matrix_norm_frobenius(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
 }
 
 const MATRIX_NORM_CACHE_LINEAR_COLUMN_SUM_MIN_ELEMS: usize = 4096;
+const MATRIX_NORM_COLUMN_SUM_SIMD_MIN_COLS: usize = 256;
+const MATRIX_NORM_COLUMN_SUM_SIMD_LANES: usize = 8;
 const MATRIX_NORM_COLUMN_SUM_STACK_MIN_COLS: usize = 512;
 const MATRIX_NORM_COLUMN_SUM_STACK_MAX_COLS: usize = 1024;
 
@@ -3792,7 +3795,46 @@ fn matrix_norm_column_sum_cache_linear_fill(
     matrix_norm_column_sum_cache_linear_select(col_sums, use_min)
 }
 
-fn matrix_norm_column_sum_cache_linear(a: &[f64], n: usize, use_min: bool) -> f64 {
+#[inline(never)]
+fn matrix_norm_column_sum_cache_linear_fill_simd(
+    a: &[f64],
+    n: usize,
+    use_min: bool,
+    col_sums: &mut [f64],
+) -> f64 {
+    if n >= MATRIX_NORM_COLUMN_SUM_SIMD_MIN_COLS {
+        use std::simd::Simd;
+        use std::simd::num::SimdFloat;
+
+        type Lane = Simd<f64, MATRIX_NORM_COLUMN_SUM_SIMD_LANES>;
+        let simd_cols = n / MATRIX_NORM_COLUMN_SUM_SIMD_LANES * MATRIX_NORM_COLUMN_SUM_SIMD_LANES;
+        for row in a.chunks_exact(n) {
+            let mut col = 0;
+            while col < simd_cols {
+                let sums =
+                    Lane::from_slice(&col_sums[col..col + MATRIX_NORM_COLUMN_SUM_SIMD_LANES]);
+                let values =
+                    Lane::from_slice(&row[col..col + MATRIX_NORM_COLUMN_SUM_SIMD_LANES]).abs();
+                (sums + values)
+                    .copy_to_slice(&mut col_sums[col..col + MATRIX_NORM_COLUMN_SUM_SIMD_LANES]);
+                col += MATRIX_NORM_COLUMN_SUM_SIMD_LANES;
+            }
+            for (sum, &value) in col_sums[simd_cols..n].iter_mut().zip(&row[simd_cols..]) {
+                if value.is_nan() {
+                    return f64::NAN;
+                }
+                *sum += value.abs();
+            }
+        }
+        if col_sums[..n].iter().any(|value| value.is_nan()) {
+            return f64::NAN;
+        }
+        return matrix_norm_column_sum_cache_linear_select(col_sums, use_min);
+    }
+    matrix_norm_column_sum_cache_linear_fill(a, n, use_min, col_sums)
+}
+
+fn matrix_norm_column_sum_cache_linear_scalar(a: &[f64], n: usize, use_min: bool) -> f64 {
     if (MATRIX_NORM_COLUMN_SUM_STACK_MIN_COLS..=MATRIX_NORM_COLUMN_SUM_STACK_MAX_COLS).contains(&n)
     {
         let mut col_sums = [0.0_f64; MATRIX_NORM_COLUMN_SUM_STACK_MAX_COLS];
@@ -3803,9 +3845,24 @@ fn matrix_norm_column_sum_cache_linear(a: &[f64], n: usize, use_min: bool) -> f6
     }
 }
 
+fn matrix_norm_column_sum_cache_linear_simd(a: &[f64], n: usize, use_min: bool) -> f64 {
+    if (MATRIX_NORM_COLUMN_SUM_STACK_MIN_COLS..=MATRIX_NORM_COLUMN_SUM_STACK_MAX_COLS).contains(&n)
+    {
+        let mut col_sums = [0.0_f64; MATRIX_NORM_COLUMN_SUM_STACK_MAX_COLS];
+        matrix_norm_column_sum_cache_linear_fill_simd(a, n, use_min, &mut col_sums[..n])
+    } else {
+        let mut col_sums = vec![0.0_f64; n];
+        matrix_norm_column_sum_cache_linear_fill_simd(a, n, use_min, &mut col_sums)
+    }
+}
+
 fn matrix_norm_column_sum(a: &[f64], m: usize, n: usize, use_min: bool) -> f64 {
     if a.len() >= MATRIX_NORM_CACHE_LINEAR_COLUMN_SUM_MIN_ELEMS {
-        matrix_norm_column_sum_cache_linear(a, n, use_min)
+        if n >= MATRIX_NORM_COLUMN_SUM_SIMD_MIN_COLS {
+            matrix_norm_column_sum_cache_linear_simd(a, n, use_min)
+        } else {
+            matrix_norm_column_sum_cache_linear_scalar(a, n, use_min)
+        }
     } else {
         matrix_norm_column_sum_strided(a, m, n, use_min)
     }

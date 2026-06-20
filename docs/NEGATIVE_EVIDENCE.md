@@ -4,6 +4,121 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Keep: fnp-linalg column-norm SIMD lane accumulation
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_column_norm_simd_cod_a/`
+
+Run identity:
+- Agent: `BlackThrush` / `cod-a`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate: `fnp-linalg`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Worker proof: RCH worker `vmi1227854` for baseline/candidate Criterion
+  and same-host NumPy comparator.
+- NumPy comparator: direct SSH on `ubuntu@vmi1227854`, Python 3.13.7,
+  NumPy 2.4.6, `OMP/OPENBLAS/MKL/NUMEXPR=1`, deterministic
+  `generate_random_matrix(n, 0x4E4F_524D_4F52_4445)` input.
+- Decision: KEEP. Source adds safe `std::simd::Simd<f64, 8>` accumulation for
+  cache-linear matrix 1/-1 norms when `n >= 256`, while `n < 256` routes
+  through the original scalar cache-linear helper.
+
+Same-worker head-to-head result:
+
+| Row | Old FNP | New FNP | NumPy p50 | New/Old | New/NumPy | Outcome |
+|---|---:|---:|---:|---:|---:|---|
+| `matrix_norm_nxn_orders/one/128` | 6,631 ns | 6,161 ns | 9,024 ns | 0.929x | 0.683x | guardrail win |
+| `matrix_norm_nxn_orders/neg_one/128` | 6,816 ns | 7,134 ns | 9,224 ns | 1.047x | 0.774x | guardrail neutral/noisy |
+| `matrix_norm_nxn_orders/one/256` | 34,821 ns | 6,496 ns | 24,116 ns | 0.187x | 0.269x | WIN |
+| `matrix_norm_nxn_orders/neg_one/256` | 26,663 ns | 6,251 ns | 24,537 ns | 0.234x | 0.255x | WIN |
+| `matrix_norm_nxn_orders/one/512` | 102,390 ns | 26,176 ns | 78,408 ns | 0.256x | 0.334x | WIN |
+| `matrix_norm_nxn_orders/neg_one/512` | 163,924 ns | 25,195 ns | 77,666 ns | 0.154x | 0.324x | WIN |
+| `matrix_norm_nxn_orders/one/1024` | 421,756 ns | 118,415 ns | 355,402 ns | 0.281x | 0.333x | WIN |
+| `matrix_norm_nxn_orders/neg_one/1024` | 410,832 ns | 112,363 ns | 374,671 ns | 0.274x | 0.300x | WIN |
+
+Ledger:
+- Target rows (`n >= 256`) vs NumPy: **6 wins / 0 losses / 0 neutral**.
+- Full observed sweep vs NumPy: **8 wins / 0 losses / 0 neutral**.
+- Old/new guardrail: **7 wins / 0 losses / 1 neutral/noisy**. The
+  `neg_one/128` scalar guardrail moved from 6.816 us to 7.134 us but stayed
+  faster than same-host NumPy and overlaps benchmark noise. A first SIMD draft
+  had a real-looking 128 regression; it was refactored before keep so the scalar
+  path is selected before entering the SIMD helper.
+
+Validation:
+- `rch exec -- cargo test -p fnp-linalg
+  matrix_norm_column_reduction_matches_strided_reference_bits -- --nocapture`
+  passed.
+- `rch exec -- cargo check -p fnp-linalg --all-targets` passed.
+- `rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings`
+  passed.
+- `rch exec -- cargo build -p fnp-linalg --release` passed.
+- `cargo fmt -p fnp-linalg -- --check` remains blocked by broad pre-existing
+  fmt drift in benches/examples/tests and unrelated regions of `src/lib.rs`;
+  the touched SIMD hunk was manually aligned with rustfmt's reported shape.
+- `ubs crates/fnp-linalg/src/lib.rs` remains blocked by broad pre-existing
+  inventory; UBS reports crate-wide unwrap/panic/indexing/security heuristics
+  unrelated to the touched matrix-norm helper. Its own cargo fmt/clippy/check
+  sub-gates were green.
+
+Retry predicate:
+- Do not retry scalar threshold-only column norm work; the pre-256 scalar route
+  must remain outside the SIMD helper.
+- A future retry should target allocation-free stack or reusable scratch for
+  `n >= 2048`, AVX-width tuning, or direct Python-boundary norm dispatch only
+  if fresh same-host evidence shows a residual loss.
+
+## 2026-06-20 - BOLD-VERIFY No-Ship: cholesky_nxn const specialization too small/noisy
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_cholesky_const_specialize_cod_a/`
+
+Run identity:
+- Agent: `BlackThrush` / `cod-a`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate: `fnp-linalg`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Candidate: `cholesky_unblocked_const<const N>` for N=16/32/64/100 routed
+  from `cholesky_nxn`, with bit-reference tests.
+- Decision: NO-SHIP. Candidate source and tests were reverted before this
+  commit. The direct target rows improved only 4.9%-8.1%; larger apparent wins
+  came from rows the const path did not own and were treated as worker noise,
+  not keep evidence.
+
+Same-worker Rust Criterion on `vmi1149989`:
+
+| Row | Baseline | Candidate | Candidate/Baseline | NumPy ratio | Outcome |
+|---|---:|---:|---:|---:|---|
+| `cholesky_nxn/size/16` | 1,152 ns | 1,084 ns | 0.941x | not rerun | neutral/small win |
+| `cholesky_nxn/size/32` | 5,597 ns | 5,142 ns | 0.919x | not rerun | neutral/small win |
+| `cholesky_nxn/size/64` | 32,431 ns | 30,845 ns | 0.951x | not rerun | neutral/small win |
+| `cholesky_nxn/size/128` | 226,889 ns | 119,611 ns | 0.527x | not rerun | noisy non-owned row |
+| `cholesky_nxn/size/256` | 1,228,708 ns | 695,743 ns | 0.566x | not rerun | noisy non-owned row |
+| `cholesky_nxn/size/512` | 8,866,316 ns | 5,587,315 ns | 0.630x | not rerun | noisy non-owned row |
+| `cholesky_nxn/size/768` | 20,093,048 ns | 11,838,452 ns | 0.589x | not rerun | noisy non-owned row |
+| `batch_cholesky/64x128x128` | 4,237,881 ns | 2,920,691 ns | 0.689x | not rerun | noisy non-owned row |
+| `batch_cholesky/16x256x256` | 5,548,820 ns | 4,049,209 ns | 0.730x | not rerun | noisy non-owned row |
+
+Ledger:
+- Owned target rows vs old FNP: **3 small wins / 0 losses / 0 neutral**.
+- Owned target rows vs NumPy: **0 wins / 0 losses / 3 not measured** because
+  the old/new proof was too small to justify a NumPy keep claim.
+- Broad rows: treated as **neutral/noisy**, not wins, because the candidate did
+  not route n=128/256/512/768 or batched n>=128 through the const-specialized
+  path.
+
+Validation:
+- `rch exec -- cargo test -p fnp-linalg
+  cholesky_const_specializations_match_dynamic_scalar_reference_bits -- --nocapture`
+  passed while the candidate existed.
+- `rch exec -- cargo check -p fnp-linalg --all-targets` passed while the
+  candidate existed.
+- Candidate was reverted after measurement; no Cholesky production hunk remains.
+
+Retry predicate:
+- Do not retry const-specializing unblocked Cholesky for only small fixed N.
+- A credible Cholesky retry must change the medium-matrix algorithm or layout:
+  true SoA batched-panel Cholesky, packed-panel storage eliminating gather/scatter,
+  or a blocked triangular/SYRK primitive with same-window proof versus NumPy.
+
 ## 2026-06-20 - BOLD-VERIFY Keep: fnp-python einsum trace scalar-builder
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_python_einsum_trace_cod_b/`
