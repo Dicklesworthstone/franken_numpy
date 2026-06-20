@@ -41253,9 +41253,9 @@ fn argmax(
     if let Some(out) = try_zerocopy_int_argextreme_axis(py, a.bind(py), axis_val, true)? {
         return Ok(out);
     }
-    // f32 argmax: numpy's SIMD argextreme beats a widening native scan; delegate
-    // instead of the cold extract->f64-widen path (~35x slower than numpy).
-    if numpy_dtype_is_f32(a.bind(py)) {
+    // f32/f16 argmax: numpy's native argextreme beats fnp's widening extract->scan
+    // (~1.3-35x slower); delegate.
+    if numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py)) {
         return fallback();
     }
 
@@ -41394,9 +41394,9 @@ fn argmin(
     if let Some(out) = try_zerocopy_int_argextreme_axis(py, a.bind(py), axis_val, false)? {
         return Ok(out);
     }
-    // f32 argmin: numpy's SIMD argextreme beats a widening native scan; delegate
-    // instead of the cold extract->f64-widen path (~34x slower than numpy).
-    if numpy_dtype_is_f32(a.bind(py)) {
+    // f32/f16 argmin: numpy's native argextreme beats fnp's widening extract->scan
+    // (~1.3-34x slower); delegate.
+    if numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py)) {
         return fallback();
     }
 
