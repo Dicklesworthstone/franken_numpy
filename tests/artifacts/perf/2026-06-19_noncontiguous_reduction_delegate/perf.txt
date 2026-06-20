@@ -1,0 +1,5 @@
+case                fnp/np
+ptp_T_ax1          1.020
+nanmax_strided1d   1.021
+nansum_strided1d   1.008
+nanmean_T_ax1      0.963

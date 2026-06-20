@@ -22671,6 +22671,19 @@ fn nanmean(
         }
         return Ok(out);
     }
+    // Non-contiguous (transposed/strided) ndarrays bail out of the zero-copy paths
+    // into the cold extract → scalar scan (3-9x slower than numpy's cache-blocked
+    // strided reduction). Delegate them to numpy (same parity).
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanmean(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -23054,6 +23067,19 @@ fn nansum(
             return keepdims_expand_axis(py, &numpy, out, ax_i, ndim);
         }
         return Ok(out);
+    }
+    // Non-contiguous (transposed/strided) ndarrays bail out of the zero-copy paths
+    // into the cold extract → scalar scan (3-9x slower than numpy's cache-blocked
+    // strided reduction). Delegate them to numpy (same parity).
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback();
     }
     let a = match extract_numeric_array(py, a.bind(py), "nansum(a)") {
         Ok(array) => array,
@@ -23781,6 +23807,19 @@ fn nanmax(
         }
         return Ok(out);
     }
+    // Non-contiguous (transposed/strided) ndarrays bail out of the zero-copy paths
+    // into the cold extract → scalar scan (slower than numpy's cache-blocked strided
+    // reduction). Delegate them to numpy (same parity).
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanmax(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -23867,6 +23906,19 @@ fn nanmin(
             return keepdims_expand_axis(py, &numpy, out, ax_i, ndim);
         }
         return Ok(out);
+    }
+    // Non-contiguous (transposed/strided) ndarrays bail out of the zero-copy paths
+    // into the cold extract → scalar scan (slower than numpy's cache-blocked strided
+    // reduction). Delegate them to numpy (same parity).
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback();
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanmin(a)") {
         Ok(array) => array,
@@ -44101,6 +44153,20 @@ fn ptp(
     // (8vdtg ceiling, same as f64); delegate instead of the cold extract->f64-widen
     // path (~12x slower than numpy).
     if numpy_dtype_is_f32(a.bind(py)) {
+        return fallback();
+    }
+
+    // Non-contiguous (transposed / strided) ndarrays bail out of every zero-copy
+    // path above into the cold extract → native reduction, which is ~22x slower than
+    // numpy's cache-blocked strided ptp. Delegate them to numpy (byte-identical).
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
         return fallback();
     }
 
