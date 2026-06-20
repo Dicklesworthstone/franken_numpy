@@ -1993,6 +1993,14 @@ impl RngBackend {
         }
     }
 
+    fn try_append_pcg_bytes(&mut self, out: &mut Vec<u8>, len: usize) -> Option<Option<u32>> {
+        match self {
+            Self::Pcg64(rng) => Some(append_pcg_bytes_serial(rng, out, len)),
+            Self::Pcg64Dxsm(rng) => Some(append_pcg_bytes_serial(rng, out, len)),
+            _ => None,
+        }
+    }
+
     fn has_pcg_byte_fill(&self) -> bool {
         matches!(self, Self::Pcg64(_) | Self::Pcg64Dxsm(_))
     }
@@ -2156,6 +2164,24 @@ fn fill_pcg_bytes_serial<R: PcgAdvanceFill>(rng: &mut R, out: &mut [u8]) -> Opti
         let take = (out.len() - offset).min(8);
         out[offset..offset + take].copy_from_slice(&bytes[..take]);
         offset += take;
+        buffered = (take <= 4).then_some((word >> 32) as u32);
+    }
+    buffered
+}
+
+fn append_pcg_bytes_serial<R: PcgAdvanceFill>(
+    rng: &mut R,
+    out: &mut Vec<u8>,
+    len: usize,
+) -> Option<u32> {
+    let mut remaining = len;
+    let mut buffered = None;
+    while remaining > 0 {
+        let word = rng.next_u64_word();
+        let bytes = word.to_le_bytes();
+        let take = remaining.min(8);
+        out.extend_from_slice(&bytes[..take]);
+        remaining -= take;
         buffered = (take <= 4).then_some((word >> 32) as u32);
     }
     buffered
@@ -4875,8 +4901,30 @@ impl Generator {
     /// Mimics `rng.bytes(length)`. Returns `length` random bytes.
     #[must_use]
     pub fn bytes(&mut self, length: usize) -> Vec<u8> {
-        if length < PCG_BYTES_DIRECT_MIN_LEN + 4 || !self.bit_generator.rng.has_pcg_byte_fill() {
+        if length == 0 || !self.bit_generator.rng.has_pcg_byte_fill() {
             return self.bytes_from_uint32_stream(length);
+        }
+
+        if length < PCG_BYTES_DIRECT_MIN_LEN + 4 {
+            let mut result = Vec::with_capacity(length);
+            if self.u32_buf_ready {
+                let bytes = self.u32_buf.to_le_bytes();
+                let take = length.min(4);
+                result.extend_from_slice(&bytes[..take]);
+                self.u32_buf_ready = false;
+            }
+            let remaining = length - result.len();
+            if remaining > 0
+                && let Some(buffered) = self
+                    .bit_generator
+                    .rng
+                    .try_append_pcg_bytes(&mut result, remaining)
+                && let Some(word) = buffered
+            {
+                self.u32_buf = word;
+                self.u32_buf_ready = true;
+            }
+            return result;
         }
 
         let mut result = vec![0u8; length];

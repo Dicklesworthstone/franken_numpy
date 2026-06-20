@@ -4,6 +4,55 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Keep: fnp-random small PCG bytes direct append fill
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_random_bytes_small_direct_append/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.265`.
+- Agent: `BlackThrush` / `cod-a`.
+- Subject API: direct Rust `fnp-random` `Generator::bytes(length)`.
+- Oracle/reference: NumPy `np.random.Generator(np.random.PCG64(42)).bytes(length)` inside the Criterion benchmark harness.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+
+Lever:
+- For sub-threshold PCG byte requests, append directly into the final byte vector from `next_u64` words.
+- Preserve the exact `next_uint32` low/high half-buffer contract by consuming pending `u32_buf` first and buffering the high half only when the final direct append consumed a low half.
+- This is not the rejected `.257` intermediate `Vec<u64>` transcode; no intermediate word vector is allocated.
+- Alien-graveyard mapping: final-buffer/vectorized execution under a constants-kill-you threshold, with an artifact-level RNG state invariant as the proof obligation.
+
+Commands:
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-random --bench random_vs_numpy -- vs_numpy_pcg64_bytes --sample-size 10 --measurement-time 2 --warm-up-time 1 --output-format bencher`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-random bytes_large_calls_match_serial_uint32_stream_state -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-random bytes_match_live_numpy_oracle_when_available -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-random`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo check -p fnp-random --all-targets`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo clippy -p fnp-random --all-targets -- -D warnings`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo build --release -p fnp-random`
+- `git diff --check`
+
+| Bead | Lever | Workload | Worker | Artifact | FrankenNumPy | NumPy | FNP/NumPy ratio | Old-to-new ratio | Verdict |
+|---|---|---:|---|---|---:|---:|---:|---:|---|
+| `franken_numpy-ixs5y.265` | Origin/main baseline | 100k bytes | `ovh-a` | `scorecard.md` | 87,044 ns | 94,154 ns | 0.925x, 1.08x faster | - | Baseline |
+| `franken_numpy-ixs5y.265` | Direct final-Vec append | 100k bytes | `ovh-a` | `scorecard.md` | 32,920 ns | 47,212 ns | 0.697x, 1.43x faster | 0.378x, 2.64x faster | Keep |
+| `franken_numpy-ixs5y.265` | Origin/main baseline | 1M bytes | `ovh-a` | `scorecard.md` | 154,618 ns | 429,977 ns | 0.360x, 2.78x faster | - | Baseline |
+| `franken_numpy-ixs5y.265` | Direct final-Vec append | 1M bytes | `ovh-a` | `scorecard.md` | 122,926 ns | 427,988 ns | 0.287x, 3.48x faster | 0.795x, 1.26x faster | Keep |
+| `franken_numpy-ixs5y.265` | Final source supplemental | 100k bytes | `vmi1153651` | `scorecard.md` | 85,242 ns | 465,151 ns | 0.183x, 5.46x faster | - | Noisy confirmation |
+| `franken_numpy-ixs5y.265` | Final source supplemental | 1M bytes | `vmi1153651` | `scorecard.md` | 2,410,257 ns | 4,857,309 ns | 0.496x, 2.02x faster | - | Noisy confirmation |
+
+Scorecard:
+- Same-worker old-to-new: win/loss/neutral = 2/0/0.
+- Candidate vs NumPy decisive rows: win/loss/neutral = 2/0/0.
+- Candidate vs NumPy including supplemental rows: win/loss/neutral = 8/0/0.
+- The `hz1` fresh-origin control reproduced the 100k loss class at 131,543 ns FNP vs 73,649 ns NumPy; the kept same-worker candidate moved the row to a win.
+
+Validation notes:
+- Focused stream-state and live NumPy oracle tests passed.
+- Full `cargo test -p fnp-random` passed: 431 unit tests, 12 golden tests, 16 metamorphic tests.
+- `cargo check -p fnp-random --all-targets`, `cargo clippy -p fnp-random --all-targets -- -D warnings`, `cargo build --release -p fnp-random`, and `git diff --check` passed.
+- `cargo fmt --check` and `cargo fmt -p fnp-random --check` remain blocked by pre-existing broad rustfmt drift outside this perf hunk.
+- Retry predicate: do not retry intermediate word-vector transcodes for PCG bytes. Retry only with a same-worker candidate that preserves the half-buffer invariant and beats this direct append path at both 100k and 1M.
+
 ## 2026-06-19 - BOLD-VERIFY Keep: fnp-random full-range uint8 integers byte stream
 
 Artifact directory: `tests/artifacts/perf/2026-06-19_random_uint8_full_range_byte_fill/`
