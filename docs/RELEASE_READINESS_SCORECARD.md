@@ -732,3 +732,36 @@ Score rationale:
 Current release posture:
 - The column-norm residual remains **open**.
 - Do not retry scalar manual strip mining. The next credible route is a real SIMD lane or generated size-specialized column microkernel with same-host NumPy capture and zero target-row regressions.
+
+## 2026-06-20 - Batch Cholesky Blocked Ordered-Dot Reject Slice
+
+Scope:
+- Parent bead measured: `franken_numpy-ixs5y`; child bead: `franken_numpy-ixs5y.270`.
+- Crate: `fnp-linalg`.
+- Artifact: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_ordered_dot_cod_b/`.
+- Candidate: extend ordered 4-wide scalar dot helpers into blocked Cholesky diagonal and panel updates for `batch_cholesky`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Candidate vs current FNP | FAIL | Same-worker `vmi1153651` Criterion was mixed: `64x128x128` improved to 0.914x baseline, but `16x256x256` regressed to 1.064x baseline. |
+| Head-to-head performance vs NumPy | BLOCKED / NOT COUNTED | Direct Python on `vmi1153651` failed with SSH authentication denial; `rch exec -- python3` ran locally on `thinkstation1`, so no same-host NumPy ratio is counted. |
+| Targeted correctness | PASS | `rch exec -- cargo test -p fnp-linalg cholesky_ -- --nocapture` passed on `vmi1153651`, including the Cholesky golden and metamorphic filtered tests. |
+| Crate compile/lint health | PASS | `rch exec -- cargo check -p fnp-linalg --all-targets` passed on `vmi1149989`; `rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed on `vmi1227854`. |
+| Formatting health | WARN | `cargo fmt -p fnp-linalg -- --check` reports pre-existing formatting drift across `fnp-linalg` benches/examples and `src/lib.rs`; no formatter was run to avoid unrelated churn. |
+| Revert discipline | PASS | The candidate source hunk was removed; `crates/fnp-linalg/src/lib.rs` has no cod-b diff after the run. |
+| Evidence durability | PASS | The no-ship table is recorded in `docs/NEGATIVE_EVIDENCE.md` and the artifact scorecard. |
+
+Cluster score: **49 / 100**
+
+Score rationale:
+- +18 correctness: focused Cholesky unit, golden, and metamorphic filters passed.
+- +10 reproducibility: same-worker RCH baseline and candidate numbers are recorded, but raw local `tee` artifacts were not preserved by the RCH wrapper.
+- +15 ledger discipline: the win, loss, blocked NumPy comparator, and retry predicate are recorded.
+- +10 crate health: `fnp-linalg` check and clippy pass.
+- +15 revert discipline: no mixed-regression source remains.
+- -9 performance: one target row regressed, and no same-host NumPy comparator was captured.
+- -10 formatting drift: existing `fnp-linalg` rustfmt drift prevents a clean format gate for this slice.
+
+Current release posture:
+- `batch_cholesky` remains **open**.
+- Do not retry allocation elimination, gate tuning, validation hoist, small const specialization, f64x4 across-lane gather/scatter, or the blocked-path ordered scalar helper as standalone levers. The next credible route is a real blocked/batched panel kernel, generated size-specialized microkernel, or safe SIMD dot primitive with same-host NumPy capture and zero target-row regressions.

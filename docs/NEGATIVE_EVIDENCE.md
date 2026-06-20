@@ -2048,3 +2048,35 @@ Focused conformance:
 Negative retry predicate:
 - Do not retry the scalar 8-column manual strip mine as a standalone lever.
 - A credible retry needs either actual SIMD absolute-value lanes or generated size-specialized column microkernels, same-host NumPy capture, and zero row regressions across `256/512/1024` for both `ord="1"` and `ord="-1"`.
+
+## 2026-06-20 - BOLD-VERIFY Reject: `fnp-linalg` batch Cholesky blocked ordered-dot helper
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_ordered_dot_cod_b/`
+
+Run identity:
+- Parent bead: `franken_numpy-ixs5y`; child bead: `franken_numpy-ixs5y.270`.
+- Agent: `YellowElk` / `cod-b`.
+- Crate scope: `fnp-linalg` only.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Candidate: extend ordered 4-wide dot helpers beyond the small-N unblocked Cholesky path into the blocked diagonal and panel update loops.
+- Baseline HEAD moved during the run to `856c38cb`; the candidate was applied on top of that source state, then reverted so the production file again matches HEAD.
+- RCH selected `vmi1153651` for both the baseline and candidate Criterion runs. The requested `RCH_WORKER=hz1` did not bind the worker, so only the same-worker `vmi1153651` Rust delta is counted.
+
+Decision:
+- Rejected and reverted. Focused Cholesky correctness passed, but the performance result was mixed and noisy: one target row improved by 8.6%, while the larger row regressed by 6.4%.
+- Direct NumPy comparator capture on `vmi1153651` was blocked by SSH authentication. `rch exec -- python3` runs on local `thinkstation1`, so no new same-host NumPy ratio is counted for this attempt.
+- Because this was not a zero-regression result and the NumPy comparator was unavailable, no production source change was kept.
+
+Measured Rust delta on `vmi1153651`:
+
+| Workload | Baseline FNP ns | Candidate FNP ns | Candidate/Baseline | NumPy comparator | Verdict |
+|---|---:|---:|---:|---|---|
+| `batch_cholesky/shape/64x128x128` | 14844832 | 13567919 | 0.914x | not counted; SSH auth blocked same-host Python | mixed win |
+| `batch_cholesky/shape/16x256x256` | 20811194 | 22141744 | 1.064x | not counted; SSH auth blocked same-host Python | loss |
+
+Focused conformance:
+- `rch exec -- cargo test -p fnp-linalg cholesky_ -- --nocapture`: pass on `vmi1153651`; 21 unit tests passed, 2 ignored, 303 filtered, and the Cholesky golden/metamorphic integration filters passed.
+
+Negative retry predicate:
+- Do not retry the blocked-path ordered 4-wide scalar dot helper as a standalone lever.
+- A credible retry needs a deeper algorithmic or generated-kernel change: for example a real safe SIMD dot primitive that preserves required bit contracts, a size-specialized blocked/batched panel kernel, or a generated microkernel with same-host NumPy capture and no regressions across both medium batch rows.
