@@ -23387,6 +23387,11 @@ fn nanprod(
         }
         return Ok(out);
     }
+    // Non-contiguous (transposed/strided) ndarrays bail the zero-copy paths into the
+    // cold extract → rebuild (transpose-copy). Delegate to numpy.
+    if noncontiguous_ndarray(&numpy, a.bind(py))? {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanprod(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
