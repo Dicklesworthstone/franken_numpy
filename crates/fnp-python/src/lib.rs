@@ -23662,7 +23662,7 @@ fn simd_nanextreme_f64(cells: &[pyo3::buffer::ReadOnlyCell<f64>], take_max: bool
     // (NaN-skipping min/max, and the ±0-sign tie defers below), so a parallel fold
     // across the rayon pool exploits the extra memory channels and beats it. The +1
     // identity for an empty chunk is the same init value, so the merge is exact.
-    const NANEXTREME_PARALLEL_MIN: usize = 1 << 18;
+    const NANEXTREME_PARALLEL_MIN: usize = 1 << 20;
     let (m, saw) = if n >= NANEXTREME_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
         const CHUNK: usize = 1 << 15; // 256 KiB of f64 per task
@@ -23799,7 +23799,7 @@ fn try_zerocopy_f64_nanextreme_axis(
     let data: &[f64] =
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
     use rayon::prelude::*;
-    const NANEXTREME_AXIS_PARALLEL_MIN: usize = 1 << 16;
+    const NANEXTREME_AXIS_PARALLEL_MIN: usize = 1 << 20;
     let parallel = outer * axis_len * inner >= NANEXTREME_AXIS_PARALLEL_MIN
         && rayon::current_num_threads() >= 2;
     let init = if take_max {
@@ -44772,7 +44772,7 @@ fn try_zerocopy_f64_ptp_axis(
         let data: &[f64] =
             unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
         use rayon::prelude::*;
-        const PTP_AXIS_PARALLEL_MIN: usize = 1 << 16;
+        const PTP_AXIS_PARALLEL_MIN: usize = 1 << 21;
         let parallel = outer * axis_len * inner >= PTP_AXIS_PARALLEL_MIN
             && rayon::current_num_threads() >= 2;
         let lane = axis_len * inner;
@@ -44979,6 +44979,19 @@ fn ptp(
         && let Some(result) = try_zerocopy_int_ptp_axis(py, a.bind(py), ax)?
     {
         return Ok(result);
+    }
+    // Small f64 per-axis ptp: numpy's SIMD max−min beats both the serial scalar column
+    // fold and the parallel privatized plane (thread overhead) below ~4M elements; the
+    // native parallel only out-runs numpy past that. Delegate small arrays to numpy.
+    if axis_val.is_some()
+        && numpy_dtype_is_f64(py, a.bind(py))
+        && a.bind(py)
+            .getattr("size")
+            .and_then(|s| s.extract::<usize>())
+            .map(|s| s < (1 << 22))
+            .unwrap_or(false)
+    {
+        return fallback();
     }
     // Zero-copy per-axis float64 ptp (explicit axis): the native kernel is already
     // at numpy parity, but extract_precise_numeric_array copies the whole input
