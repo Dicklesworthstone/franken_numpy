@@ -4,6 +4,35 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Loss-confirmed (no fix this slice): convolve/correlate SHORT-kernel large-N tail
+
+Agent: `BlackThrush` / `cod-b`. Subject: `np.convolve`/`np.correlate` 1-D f64,
+short kernel (k<=~8), large N (2,000,000). Reference NumPy 2.4.3 thinkstation1.
+
+Measured (fnp/numpy, 'same' unless noted; correct/match=True throughout):
+- convolve k=3 5-9x, k=5 8-10x, k=16 ~par, k=64 0.7-0.8x WIN (all modes).
+- correlate k=5 ~8-9.6x. fnp time is ~FIXED ~18ms regardless of k=3..64 while
+  numpy scales with k (1.7ms k=3 -> 25ms k=64); fnp wins only once numpy's
+  direct O(N*k) exceeds fnp's fixed cost.
+
+Diagnostic: `convolve_mode` (fnp-ufunc) already has the short-kernel GATHER + an
+FFT cost-gate; for full_len>=1<<19 it runs the PARALLEL gather. Serial-vs-parallel
+(RAYON_NUM_THREADS=1): serial is WORSE (k=3 22x, k=5 15x) than parallel (k=3 7x,
+k=5 5x) -> parallelism helps but the per-output gather kernel is anomalously slow
+at large N even though short-kernel reads are contiguous/local. This is the
+KNOWN-OPEN "large-N (>=1M) convolve tail (cache, needs perf profiling)" recorded
+with the original short-kernel gather work (fnp-ufunc 8f01473). Plus the
+fnp-python wrapper pays an extract(16MB)+rebuild(16MB) round-trip.
+
+No fix shipped: the lever requires real profiling of the large-N gather (cache
+blocking / a zero-copy direct-conv fast path in the wrapper that bypasses
+extract+convolve_mode), in the contended fnp-ufunc crate — not a blind constant
+tweak. Retry predicate: do NOT retry by flipping the parallel gather threshold
+(serial is strictly worse here); a credible fix is a profiled cache-blocked
+gather OR a zero-copy fnp-python short-kernel direct convolution that writes each
+output once from PyBuffers (gate min(na,nv)<=~16, bit-exact i-ascending order,
+defer non-f64/multi-D). Verify serial first.
+
 ## 2026-06-20 - BOLD-VERIFY Win: fnp-python corrcoef(m,y) two-operand zero-copy Gram (5-12x loss -> 0.4-0.9x win)
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_python_corrcoef_two_operand_vs_numpy/`
