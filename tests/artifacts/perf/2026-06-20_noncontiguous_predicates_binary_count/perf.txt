@@ -1,0 +1,12 @@
+op               fnp/np
+count_nonzero_T  1.026
+isfinite_T       1.021
+isinf_T          1.009
+signbit_T        1.013
+trunc_T          1.003
+ceil_T           1.025
+sign_T           1.003
+hypot_TT         1.001
+arctan2_TT       0.999
+logaddexp_TT     1.002
+mod_TT           0.998

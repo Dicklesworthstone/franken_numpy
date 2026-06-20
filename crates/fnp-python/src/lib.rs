@@ -14971,6 +14971,22 @@ fn count_nonzero(
         }
     }
 
+    // Non-contiguous (transposed/strided) ndarrays bail the zero-copy count into the
+    // cold extract → rebuild (transpose-copy, ~340x slower than numpy's strided count).
+    // Delegate to numpy.
+    {
+        let numpy = py.import("numpy")?;
+        if a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+            && !a
+                .bind(py)
+                .getattr("flags")?
+                .getattr("c_contiguous")?
+                .extract::<bool>()?
+        {
+            return fallback();
+        }
+    }
+
     let a_array = match extract_numeric_array(py, a.bind(py), "count_nonzero(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -17525,7 +17541,10 @@ fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
         if x.is_exact_instance(&numpy.getattr("ndarray")?) {
             let kind: String = x.getattr("dtype")?.getattr("kind")?.extract()?;
-            if kind == "i" || kind == "u" {
+            // int/uint canonicalize lossy; non-contiguous bails the fast path into the
+            // transpose-copy extract (~55x slower). Delegate both to numpy.
+            let c_contiguous = x.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()?;
+            if kind == "i" || kind == "u" || !c_contiguous {
                 return Ok(numpy.getattr("signbit")?.call1((x,))?.unbind());
             }
         }
@@ -17605,8 +17624,18 @@ fn isinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     }
     // Complex: numpy applies the predicate per-component (isinf(z)=isinf(re)|isinf(im)).
     // The real-valued kernel raises TypeError on complex, so delegate to numpy.
+    let numpy = py.import("numpy")?;
     if numpy_dtype_is_complex(x) {
-        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("isinf")?.call1((x,))?.unbind());
+    }
+    // Non-contiguous (transposed/strided) ndarrays bail the predicate fast paths into
+    // the cold extract → rebuild (transpose-copy, ~100x slower). Delegate to numpy.
+    if x.is_exact_instance(&numpy.getattr("ndarray")?)
+        && !x
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
         return Ok(numpy.getattr("isinf")?.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, "isinf(x)")?;
@@ -17637,8 +17666,18 @@ fn isfinite_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
     }
     // Complex: numpy ANDs the components (isfinite(z)=isfinite(re)&isfinite(im)).
     // The real-valued kernel raises TypeError on complex, so delegate to numpy.
+    let numpy = py.import("numpy")?;
     if numpy_dtype_is_complex(x) {
-        let numpy = py.import("numpy")?;
+        return Ok(numpy.getattr("isfinite")?.call1((x,))?.unbind());
+    }
+    // Non-contiguous (transposed/strided) ndarrays bail the predicate fast paths into
+    // the cold extract → rebuild (transpose-copy, ~100x slower). Delegate to numpy.
+    if x.is_exact_instance(&numpy.getattr("ndarray")?)
+        && !x
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
         return Ok(numpy.getattr("isfinite")?.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, "isfinite(x)")?;
@@ -17730,6 +17769,17 @@ fn sign(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if !numpy_dtype_is_f64(py, x.bind(py)) {
         return Ok(numpy.getattr("sign")?.call1((arr,))?.unbind());
     }
+    // Non-contiguous (transposed/strided) ndarrays bail the zero-copy path into the
+    // cold extract → rebuild (transpose-copy, ~5.6x slower). Delegate to numpy.
+    if x.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+        && !x
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(numpy.getattr("sign")?.call1((arr,))?.unbind());
+    }
     let x = extract_numeric_array(py, x.bind(py), "sign(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Sign))
 }
@@ -17750,6 +17800,18 @@ fn native_rounding_unary(
     }
     if let Some(out) = try_zerocopy_f64_unary(py, x, op)? {
         return Ok(out);
+    }
+    // Non-contiguous (transposed/strided) ndarrays bail the zero-copy path into the
+    // cold extract → rebuild (transpose-copy, ~6x slower than numpy's strided ufunc).
+    // Delegate them to numpy.
+    let numpy = py.import("numpy")?;
+    if x.is_exact_instance(&numpy.getattr("ndarray")?)
+        && !x
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(numpy.getattr(numpy_name)?.call1((x,))?.unbind());
     }
     let x = extract_numeric_array(py, x, extract_label)?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(op))
@@ -17963,6 +18025,13 @@ fn hypot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Hypot)? {
         return Ok(out);
     }
+    // Non-contiguous operand → delegate (the transpose-copy extract is ~5x slower).
+    if noncontiguous_ndarray(&numpy, x1.bind(py))? || noncontiguous_ndarray(&numpy, x2.bind(py))? {
+        return Ok(numpy
+            .getattr("hypot")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
+    }
     let x1 = extract_numeric_array(py, x1.bind(py), "hypot(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "hypot(x2)")?;
     let result = ufunc_hypot(&x1, &x2).map_err(map_ufunc_error)?;
@@ -18001,6 +18070,12 @@ fn logaddexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
         try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Logaddexp)?
     {
         return Ok(out);
+    }
+    if noncontiguous_ndarray(&numpy, x1.bind(py))? || noncontiguous_ndarray(&numpy, x2.bind(py))? {
+        return Ok(numpy
+            .getattr("logaddexp")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
     }
     let x1 = extract_numeric_array(py, x1.bind(py), "logaddexp(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "logaddexp(x2)")?;
@@ -22963,6 +23038,18 @@ fn keepdims_reshape_scalar(
 // length-1 axis re-inserted at the (normalized) reduced position. np.expand_dims does
 // exactly that, so the single-axis zero-copy fast paths can run unchanged (producing
 // the reduced-shape result) and we restore the kept axis here.
+// True when `x` is an ndarray that is NOT C-contiguous (transposed / strided / sliced
+// view). Such inputs bail out of the contiguous-only zero-copy fast paths into the
+// cold extract → rebuild that transpose-copies the data — far slower than numpy's
+// strided ufunc kernels — so callers delegate them to numpy instead.
+fn noncontiguous_ndarray(numpy: &Bound<'_, PyModule>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
+    Ok(x.is_exact_instance(&numpy.getattr("ndarray")?)
+        && !x
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?)
+}
+
 fn keepdims_expand_axis(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
@@ -27059,6 +27146,12 @@ fn native_binary_arctan2_or_passthrough(
         {
             return Ok(out);
         }
+        let numpy = py.import("numpy")?;
+        if noncontiguous_ndarray(&numpy, &args.get_item(0)?)?
+            || noncontiguous_ndarray(&numpy, &args.get_item(1)?)?
+        {
+            return core_numpy_passthrough(py, "arctan2", args, kwargs);
+        }
         let x1 = extract_numeric_array(py, &args.get_item(0)?, "arctan2(x1)")?;
         let x2 = extract_numeric_array(py, &args.get_item(1)?, "arctan2(x2)")?;
         let result = ufunc_arctan2(&x1, &x2).map_err(map_ufunc_error)?;
@@ -27247,6 +27340,12 @@ fn native_binary_remainder_or_passthrough(
         // ints/floats, so defer anything but float64 to numpy.
         if !numpy_dtype_is_f64(py, &args.get_item(0)?)
             || !numpy_dtype_is_f64(py, &args.get_item(1)?)
+        {
+            return core_numpy_passthrough(py, "remainder", args, kwargs);
+        }
+        let numpy = py.import("numpy")?;
+        if noncontiguous_ndarray(&numpy, &args.get_item(0)?)?
+            || noncontiguous_ndarray(&numpy, &args.get_item(1)?)?
         {
             return core_numpy_passthrough(py, "remainder", args, kwargs);
         }
