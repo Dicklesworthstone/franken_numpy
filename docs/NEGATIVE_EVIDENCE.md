@@ -1370,3 +1370,46 @@ Notes:
 - The prefilter doubled memory traffic and made every targeted 256-1024 column-norm row materially worse.
 - The stack-threshold-only retry found one modest `neg_one/256` improvement, but it was not broad enough and regressed `neg_one/512` and `one/1024`; this is below the keep threshold.
 - Do not retry a whole-matrix NaN prefilter for this path unless the scan is fused with another required pass. Do not retry 256-column stack scratch as a standalone lever. The next credible attempt needs SIMD or strip-mined multi-column accumulation that preserves column-addition order and NaN behavior.
+
+## 2026-06-20 - Gauntlet Keep: `fnp-python` cached-buffer einsum diagonal
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_python_einsum_diag_cod_a/`
+
+Run identity:
+- Parent bead: `franken_numpy-ixs5y`.
+- Agent: `BlackThrush` / `cod-a`.
+- Crate: `fnp-python`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Target gap: `fnp_einsum_diag_f64_4000`, a Python-boundary loss versus `numpy.einsum("ii->i", a)`.
+
+Lever attempts:
+- Kept `cached-buffer+interned-names`: an early exact-NumPy-ndarray f64 single-operand diagonal/trace gate before dtype-policy probing, using `PyBuffer<f64>` metadata, cached `numpy.ndarray` type identity, and interned Python names for `diagonal`, `setflags`, and `write`.
+- Rejected as standalone `buffered-string-type`: `PyBuffer<f64>` plus type-name/module string checks improved the path but still lost to NumPy.
+- Rejected as standalone `cached-type-no-intern`: cached ndarray type identity reduced the residual to near-neutral, but still did not beat NumPy locally.
+
+Triage scorecard:
+- Initial local FNP vs NumPy: win/loss/neutral = 0/2/0 for trace and diagonal.
+- Final local FNP vs NumPy: win/loss/neutral = 2/0/0 for trace and diagonal.
+- Final rch FNP vs NumPy on `vmi1227854`: win/loss/neutral = 1/1/0 for trace and diagonal. The diagonal keep is replicated remotely; the trace row remains residual negative evidence on that worker.
+- Focused conformance: `rch exec -- cargo test -p fnp-python --test conformance_einsum` passed 28/28.
+
+| Workload | Evidence | Baseline FNP | Final FNP | NumPy | Final/Baseline | Final/NumPy | Verdict |
+|---|---|---:|---:|---:|---:|---:|---|
+| `fnp_einsum_trace_f64_4000` | local baseline/final | 18.425 us | 15.296 us | 15.852 us | 0.830x | 0.965x | keep locally |
+| `fnp_einsum_diag_f64_4000` | local baseline/final | 4.5756 us | 883.98 ns | 1.0942 us | 0.193x | 0.808x | keep |
+| `fnp_einsum_trace_f64_4000` | final rch `vmi1227854` | n/a | 5.9900 us | 5.2275 us | n/a | 1.146x | residual loss |
+| `fnp_einsum_diag_f64_4000` | final rch `vmi1227854` | n/a | 805.39 ns | 889.51 ns | n/a | 0.905x | keep |
+
+Intermediate candidate evidence:
+
+| Candidate | Diagonal FNP | NumPy | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `buffered-string-type` | 1.2799 us | 1.0142 us | 1.262x | no standalone keep |
+| `cached-type-no-intern` | 1.0609 us | 1.0194 us | 1.041x | neutral/slight loss |
+| `cached-buffer+interned-names` | 883.98 ns | 1.0942 us | 0.808x | keep |
+
+Notes:
+- The previous pre-policy diagonal shortcut family is superseded: moving the old helper earlier was not enough; the measured win required avoiding dtype-policy probing, avoiding per-call ndarray string type checks, and avoiding per-call Python string allocation for method/keyword names.
+- The kept diagonal path still delegates view construction to NumPy's `diagonal()` and explicitly restores writability with `setflags(write=True)` when the operand is writable, preserving NumPy `einsum("ii->i")` view semantics.
+- `cargo check -p fnp-python --lib --bench criterion_python_surface` passed, with pre-existing `fnp-python` warnings. `cargo check -p fnp-python --benches` and `cargo fmt -p fnp-python -- --check` are blocked by unrelated pre-existing lib-test call-site drift and formatting drift; no formatter was run to avoid unrelated rewrites.
+- Retry predicate: do not retry wrapper-level pre-policy diagonal dispatch. The next credible diagonal retry must remove or bypass the remaining `diagonal()+setflags(write=True)` method dispatch while preserving writable-view semantics. Treat the rch trace residual as a separate trace path issue, not a reason to revert the diagonal keep.

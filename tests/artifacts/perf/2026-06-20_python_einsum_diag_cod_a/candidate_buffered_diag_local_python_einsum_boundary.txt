@@ -1,0 +1,121 @@
+   Compiling fnp-python v0.1.0 (/data/projects/franken_numpy/crates/fnp-python)
+warning: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2518:5
+     |
+2515 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2518 |     Depth,
+     |     ^^^^^
+2519 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5150:4
+     |
+5150 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5172:4
+     |
+5172 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `fnp-python` (lib) generated 3 warnings
+    Finished `bench` profile [optimized + debuginfo] target(s) in 1m 15s
+     Running benches/criterion_python_surface.rs (/data/projects/.rch-targets/franken_numpy-cod-a/release/deps/criterion_python_surface-d9c2e40b9216b86e)
+Gnuplot not found, using plotters backend
+Benchmarking python_einsum_boundary/fnp_einsum_trace_f64_4000
+Benchmarking python_einsum_boundary/fnp_einsum_trace_f64_4000: Warming up for 1.0000 s
+Benchmarking python_einsum_boundary/fnp_einsum_trace_f64_4000: Collecting 10 samples in estimated 3.0001 s (183k iterations)
+Benchmarking python_einsum_boundary/fnp_einsum_trace_f64_4000: Analyzing
+python_einsum_boundary/fnp_einsum_trace_f64_4000
+                        time:   [14.940 µs 15.587 µs 16.153 µs]
+                        change: [−20.213% −16.592% −12.841%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking python_einsum_boundary/numpy_einsum_trace_f64_4000
+Benchmarking python_einsum_boundary/numpy_einsum_trace_f64_4000: Warming up for 1.0000 s
+Benchmarking python_einsum_boundary/numpy_einsum_trace_f64_4000: Collecting 10 samples in estimated 3.0006 s (193k iterations)
+Benchmarking python_einsum_boundary/numpy_einsum_trace_f64_4000: Analyzing
+python_einsum_boundary/numpy_einsum_trace_f64_4000
+                        time:   [15.301 µs 15.761 µs 16.091 µs]
+                        change: [−4.8538% +0.0919% +4.8714%] (p = 0.98 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) low mild
+Benchmarking python_einsum_boundary/fnp_einsum_diag_f64_4000
+Benchmarking python_einsum_boundary/fnp_einsum_diag_f64_4000: Warming up for 1.0000 s
+Benchmarking python_einsum_boundary/fnp_einsum_diag_f64_4000: Collecting 10 samples in estimated 3.0000 s (2.2M iterations)
+Benchmarking python_einsum_boundary/fnp_einsum_diag_f64_4000: Analyzing
+python_einsum_boundary/fnp_einsum_diag_f64_4000
+                        time:   [1.2300 µs 1.2799 µs 1.3491 µs]
+                        change: [−72.008% −70.012% −68.005%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking python_einsum_boundary/numpy_einsum_diag_f64_4000
+Benchmarking python_einsum_boundary/numpy_einsum_diag_f64_4000: Warming up for 1.0000 s
+Benchmarking python_einsum_boundary/numpy_einsum_diag_f64_4000: Collecting 10 samples in estimated 3.0001 s (2.8M iterations)
+Benchmarking python_einsum_boundary/numpy_einsum_diag_f64_4000: Analyzing
+python_einsum_boundary/numpy_einsum_diag_f64_4000
+                        time:   [989.06 ns 1.0142 µs 1.0442 µs]
+                        change: [−6.9347% −3.1723% +1.2187%] (p = 0.19 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_all_f64_1000
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_all_f64_1000: Warming up for 1.0000 s
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_all_f64_1000: Collecting 10 samples in estimated 3.0057 s (27k iterations)
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_all_f64_1000: Analyzing
+python_einsum_boundary/fnp_einsum_reduce_all_f64_1000
+                        time:   [108.66 µs 112.73 µs 116.74 µs]
+                        change: [+3.2965% +8.0027% +12.537%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_all_f64_1000
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_all_f64_1000: Warming up for 1.0000 s
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_all_f64_1000: Collecting 10 samples in estimated 3.0036 s (25k iterations)
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_all_f64_1000: Analyzing
+python_einsum_boundary/numpy_einsum_reduce_all_f64_1000
+                        time:   [111.59 µs 114.61 µs 117.67 µs]
+                        change: [−11.148% −0.1973% +10.129%] (p = 0.98 > 0.05)
+                        No change in performance detected.
+Found 3 outliers among 10 measurements (30.00%)
+  1 (10.00%) low mild
+  2 (20.00%) high mild
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_rows_f64_1000
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_rows_f64_1000: Warming up for 1.0000 s
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_rows_f64_1000: Collecting 10 samples in estimated 3.0039 s (30k iterations)
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_rows_f64_1000: Analyzing
+python_einsum_boundary/fnp_einsum_reduce_rows_f64_1000
+                        time:   [93.541 µs 98.018 µs 101.52 µs]
+                        change: [−16.199% −11.376% −6.0713%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_rows_f64_1000
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_rows_f64_1000: Warming up for 1.0000 s
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_rows_f64_1000: Collecting 10 samples in estimated 3.0027 s (26k iterations)
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_rows_f64_1000: Analyzing
+python_einsum_boundary/numpy_einsum_reduce_rows_f64_1000
+                        time:   [115.24 µs 121.98 µs 126.45 µs]
+                        change: [−1.0981% +4.2007% +9.5384%] (p = 0.15 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high mild
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_cols_f64_1000
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_cols_f64_1000: Warming up for 1.0000 s
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_cols_f64_1000: Collecting 10 samples in estimated 3.0057 s (19k iterations)
+Benchmarking python_einsum_boundary/fnp_einsum_reduce_cols_f64_1000: Analyzing
+python_einsum_boundary/fnp_einsum_reduce_cols_f64_1000
+                        time:   [120.11 µs 126.48 µs 137.00 µs]
+                        change: [−15.262% −9.1242% −3.1021%] (p = 0.02 < 0.05)
+                        Performance has improved.
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_cols_f64_1000
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_cols_f64_1000: Warming up for 1.0000 s
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_cols_f64_1000: Collecting 10 samples in estimated 3.0080 s (17k iterations)
+Benchmarking python_einsum_boundary/numpy_einsum_reduce_cols_f64_1000: Analyzing
+python_einsum_boundary/numpy_einsum_reduce_cols_f64_1000
+                        time:   [177.56 µs 184.84 µs 195.21 µs]
+                        change: [+2.6799% +6.4189% +10.441%] (p = 0.01 < 0.05)
+                        Performance has regressed.

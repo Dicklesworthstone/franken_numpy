@@ -388,3 +388,36 @@ Score rationale:
 Current release posture:
 - The column-norm residual remains **open**.
 - Do not retry whole-matrix NaN prefilter or stack256-only. A future keep needs SIMD or strip-mined multi-column accumulation with same-worker proof against NumPy and no target-row regressions.
+
+## 2026-06-20 - Python Einsum Diagonal Keep Slice
+
+Scope:
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate: `fnp-python`.
+- Worker proof: final remote bench on `vmi1227854`; local baseline/final in `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Artifact: `tests/artifacts/perf/2026-06-20_python_einsum_diag_cod_a/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS FOR DIAGONAL | Local final diagonal is 0.808x NumPy time; rch final diagonal is 0.905x NumPy time. |
+| Candidate vs current FNP | PASS | Local final diagonal is 0.193x baseline FNP time; local trace is 0.830x baseline FNP time. |
+| Negative evidence discipline | PASS | Two intermediate candidates and the rch trace residual are recorded in `docs/NEGATIVE_EVIDENCE.md`. |
+| Targeted correctness | PASS | `rch exec -- cargo test -p fnp-python --test conformance_einsum` passed 28/28. |
+| Crate compile health | PASS WITH WARNINGS | `cargo check -p fnp-python --lib --bench criterion_python_surface` passed locally and `rch exec -- cargo build -p fnp-python --release` passed on `vmi1149989`; pre-existing warnings remain. |
+| Formatting health | WARN | `cargo fmt -p fnp-python -- --check` reports broad pre-existing formatting drift; no formatter was run because it would rewrite unrelated files. |
+| Broader all-target health | WARN | `cargo check -p fnp-python --benches` reaches unrelated pre-existing lib-test call-site drift. |
+| Evidence durability | PASS | Baseline, candidates, rch conformance, final rch bench, and artifact scorecard are stored under the artifact directory. |
+
+Cluster score: **82 / 100**
+
+Score rationale:
+- +32 performance: the target diagonal row now beats NumPy locally and on rch; trace improves locally but remains slower than NumPy on the rch worker.
+- +18 correctness: focused einsum conformance and writable-view golden tests passed.
+- +15 reproducibility: local baseline/final and final rch paired FNP-vs-NumPy rows are recorded.
+- +15 ledger discipline: every candidate and residual loss is recorded.
+- +2 integration hygiene: compile passes for the non-test library and exact bench target, but pre-existing warnings and drift block broader clean claims.
+- -18 project-wide release gap: this is one verified Python-boundary keep, not a full workspace release certification.
+
+Current release posture:
+- `fnp_einsum_diag_f64_4000` is **measured keep**, not pending.
+- The rch trace residual is **not closed**; future work should only target trace if it removes remaining scalar construction or view/fallback overhead without weakening diagonal writability semantics.

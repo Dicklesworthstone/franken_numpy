@@ -61,7 +61,8 @@ use pyo3::exceptions::{
     PyZeroDivisionError,
 };
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyBool, PyBytes, PyComplex, PyDict, PyList, PyModule, PyTuple};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyAny, PyBool, PyBytes, PyComplex, PyDict, PyList, PyModule, PyTuple, PyType};
 use pyo3::wrap_pyfunction;
 use pyo3::{Bound, IntoPyObject};
 
@@ -41877,6 +41878,9 @@ fn einsum(
     if let Some(view) = try_einsum_transpose_view(py, args, kwargs)? {
         return Ok(view);
     }
+    if let Some(view) = try_buffered_f64_einsum_single_diagonal(py, args, kwargs)? {
+        return Ok(view);
+    }
     // Route the common case (string subscripts, real-float operands, no special
     // kwargs) through our native UFuncArray::einsum — which sends GEMM-shaped
     // contractions through the cache-blocked, register-tiled matmul_accumulate —
@@ -42030,6 +42034,90 @@ fn parse_single_operand_reduction_2d_einsum(
         [c] if *c == labels[0] => Some(EinsumSingleReduction2dKind::KeepFirstLabel),
         [c] if *c == labels[1] => Some(EinsumSingleReduction2dKind::KeepSecondLabel),
         _ => None,
+    }
+}
+
+fn einsum_kwargs_are_native_eligible(kwargs: Option<&Bound<'_, PyDict>>) -> PyResult<bool> {
+    if let Some(kw) = kwargs {
+        for key in kw.keys() {
+            let name: String = key.extract()?;
+            if name != "optimize" {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+fn is_exact_numpy_ndarray(py: Python<'_>, value: &Bound<'_, PyAny>) -> PyResult<bool> {
+    static NUMPY_NDARRAY_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+    let ndarray_type = NUMPY_NDARRAY_TYPE.get_or_try_init(py, || -> PyResult<Py<PyType>> {
+        let ty = py.import("numpy")?.getattr("ndarray")?;
+        Ok(ty.cast_into::<PyType>()?.unbind())
+    })?;
+    Ok(value.get_type().is(ndarray_type.bind(py)))
+}
+
+fn build_f64_scalar(py: Python<'_>, value: f64) -> PyResult<Py<PyAny>> {
+    build_numpy_scalar_or_array(py, &UFuncArray::scalar(value, DType::F64))
+}
+
+fn try_buffered_f64_einsum_single_diagonal(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if args.len() != 2 || !einsum_kwargs_are_native_eligible(kwargs)? {
+        return Ok(None);
+    }
+    let Ok(subscripts) = args.get_item(0)?.extract::<String>() else {
+        return Ok(None);
+    };
+    let Some(kind) = parse_single_operand_diagonal_einsum(&subscripts) else {
+        return Ok(None);
+    };
+    let operand = args.get_item(1)?;
+    if !is_exact_numpy_ndarray(py, &operand)? {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(&operand) else {
+        return Ok(None);
+    };
+    if buffer.dimensions() != 2 {
+        return Ok(None);
+    }
+    let shape = buffer.shape();
+    if shape[0] != shape[1] {
+        return Ok(None);
+    }
+
+    match kind {
+        EinsumSingleDiagonalKind::Diagonal => {
+            let Ok(diag_view) = operand.call_method0(pyo3::intern!(py, "diagonal")) else {
+                return Ok(None);
+            };
+            if !buffer.readonly() {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item(pyo3::intern!(py, "write"), true)?;
+                diag_view.call_method(pyo3::intern!(py, "setflags"), (), Some(&kwargs))?;
+            }
+            Ok(Some(diag_view.unbind()))
+        }
+        EinsumSingleDiagonalKind::Trace => {
+            if !buffer.is_c_contiguous() {
+                return Ok(None);
+            }
+            let Some(input) = buffer.as_slice(py) else {
+                return Ok(None);
+            };
+            let n = shape[0];
+            let stride = n + 1;
+            let mut total = 0.0f64;
+            for i in 0..n {
+                total += input[i * stride].get();
+            }
+            Ok(Some(build_f64_scalar(py, total)?))
+        }
     }
 }
 
@@ -42634,14 +42722,11 @@ fn einsum_native(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if let Some(kw) = kwargs {
+    if !einsum_kwargs_are_native_eligible(kwargs)? {
         // Only `optimize` is acceptable here; out=/dtype=/order=/casting= go to numpy.
-        for key in kw.keys() {
-            let name: String = key.extract()?;
-            if name != "optimize" {
-                return Ok(None);
-            }
-        }
+        return Ok(None);
+    }
+    if let Some(kw) = kwargs {
         // Our native kernel does a single simultaneous multi-operand contraction
         // and does NOT optimize the pairwise contraction PATH. For >=3 operands
         // with `optimize` explicitly requested (True/'greedy'/'optimal'/a path
