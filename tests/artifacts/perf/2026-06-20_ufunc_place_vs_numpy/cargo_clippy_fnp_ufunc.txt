@@ -1,0 +1,197 @@
+CMD: CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings
+  [2m2026-06-20T03:24:08.510818Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ovh-b at ubuntu@37.187.75.150 (1 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:921 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:08.823955Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_numpy (hash: f8416174b04438a4)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:08.823989Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 11 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:10.378821Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker ovh-b...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:10.378880Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 pattern(s) from .rchignore (total: 39)[0m
+    [2;3mat[0m rch/src/transfer.rs:886 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:10.378888Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy -> /data/projects/franken_numpy on ovh-b[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:14.278234Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3899ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:14.278306Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-conformance -> /data/projects/franken_numpy/crates/fnp-conformance on ovh-b[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:15.909798Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1631ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:15.909888Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-dtype -> /data/projects/franken_numpy/crates/fnp-dtype on ovh-b[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:17.527243Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1617ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:17.527330Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-io -> /data/projects/franken_numpy/crates/fnp-io on ovh-b[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:19.533749Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2006ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:19.533833Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-iter -> /data/projects/franken_numpy/crates/fnp-iter on ovh-b[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:21.138449Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1604ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:21.138526Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-linalg -> /data/projects/franken_numpy/crates/fnp-linalg on ovh-b[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:22.744808Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1606ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:22.744880Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-ndarray -> /data/projects/franken_numpy/crates/fnp-ndarray on ovh-b[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:24.368059Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1623ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:24.368138Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-python -> /data/projects/franken_numpy/crates/fnp-python on ovh-b[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:25.929737Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1561ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:25.929818Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-random -> /data/projects/franken_numpy/crates/fnp-random on ovh-b[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:27.425338Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1495ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:27.425418Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-runtime -> /data/projects/franken_numpy/crates/fnp-runtime on ovh-b[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:28.927861Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1502ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:28.927953Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-ufunc -> /data/projects/franken_numpy/crates/fnp-ufunc on ovh-b[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:30.866014Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1938ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:30.866066Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 25501 files, 1418443 bytes in 20482ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:39.160209Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo clippy -p fnp-ufunc --all-targets -- -D warnings[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T03:24:39.160258Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.rch-targets/franken_numpy-cod-b -> /data/projects/franken_numpy/.rch-target-ovh-b-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded cast v0.3.0
+  Downloaded cfg-if v1.0.4
+  Downloaded bit-set v0.8.0
+  Downloaded ciborium-io v0.2.2
+  Downloaded block-buffer v0.12.0
+  Downloaded crypto-common v0.2.1
+  Downloaded cpufeatures v0.3.0
+  Downloaded autocfg v1.5.0
+  Downloaded anstyle v1.0.14
+  Downloaded anes v0.1.6
+  Downloaded clap_lex v1.1.0
+  Downloaded ciborium-ll v0.2.2
+  Downloaded itoa v1.0.18
+  Downloaded ciborium v0.2.2
+  Downloaded bitflags v2.11.1
+  Downloaded plotters-backend v0.3.7
+  Downloaded errno v0.3.14
+  Downloaded rand_xorshift v0.4.0
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded rand_core v0.9.5
+  Downloaded fastrand v2.4.1
+  Downloaded unarray v0.1.4
+  Downloaded wait-timeout v0.2.1
+  Downloaded fnv v1.0.7
+  Downloaded bit-vec v0.8.0
+  Downloaded same-file v1.0.6
+  Downloaded quote v1.0.45
+  Downloaded zmij v1.0.21
+  Downloaded walkdir v2.5.0
+  Downloaded either v1.15.0
+  Downloaded tinytemplate v1.2.1
+  Downloaded getrandom v0.4.2
+  Downloaded unicode-ident v1.0.24
+  Downloaded serde_derive v1.0.228
+  Downloaded serde_core v1.0.228
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded typenum v1.20.0
+  Downloaded plotters v0.3.7
+  Downloaded serde_json v1.0.149
+  Downloaded regex v1.12.3
+  Downloaded rayon v1.12.0
+  Downloaded proptest v1.11.0
+  Downloaded itertools v0.13.0
+  Downloaded zerocopy v0.8.48
+  Downloaded clap_builder v4.6.0
+  Downloaded criterion v0.6.0
+  Downloaded aho-corasick v1.1.4
+  Downloaded syn v2.0.117
+  Downloaded regex-syntax v0.8.10
+  Downloaded rand v0.9.4
+  Downloaded itertools v0.10.5
+  Downloaded memchr v2.8.0
+  Downloaded serde v1.0.228
+  Downloaded rayon-core v1.13.0
+  Downloaded rustix v1.1.4
+  Downloaded proc-macro2 v1.0.106
+  Downloaded half v2.7.1
+  Downloaded num-traits v0.2.19
+  Downloaded hybrid-array v0.4.10
+  Downloaded getrandom v0.3.4
+  Downloaded const-oid v0.10.2
+  Downloaded tempfile v3.27.0
+  Downloaded sha2 v0.11.0
+  Downloaded rand_chacha v0.9.0
+  Downloaded regex-automata v0.4.14
+  Downloaded once_cell v1.21.4
+  Downloaded rusty-fork v0.3.1
+  Downloaded ppv-lite86 v0.2.21
+  Downloaded plotters-svg v0.3.7
+  Downloaded oorandom v11.1.5
+  Downloaded digest v0.11.2
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded clap v4.6.1
+  Downloaded quick-error v1.2.3
+  Downloaded criterion-plot v0.5.0
+  Downloaded libc v0.2.185
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded linux-raw-sys v0.12.1
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+    Checking cfg-if v1.0.4
+   Compiling libc v0.2.185
+   Compiling zerocopy v0.8.48
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+    Checking either v1.15.0
+   Compiling getrandom v0.3.4
+   Compiling serde v1.0.228
+   Compiling zmij v1.0.21
+   Compiling rayon-core v1.13.0
+   Compiling autocfg v1.5.0
+error: failed to run custom build command for `zerocopy v0.8.48`
+
+Caused by:
+  process didn't exit successfully: `/data/projects/franken_numpy/.rch-target-ovh-b-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/build/zerocopy-15b041286676babd/build-script-build` (signal: 4, SIGILL: illegal instruction)
+  --- stdout
+  cargo:rerun-if-changed=build.rs
+  cargo:rerun-if-changed=Cargo.toml
+warning: build failed, waiting for other jobs to finish...
+  [2m2026-06-20T03:24:47.362207Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=101 in 8201ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ovh-b failed (exit 101)

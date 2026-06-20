@@ -52,7 +52,8 @@ const COUNT_NONZERO_PARALLEL_CHUNK_ELEMS: usize = 1 << 12;
 const COPYTO_PARALLEL_MIN_ELEMS: usize = 1 << 20;
 const DELETE_FLAT_SPAN_COPY_MIN_ELEMS: usize = 1 << 14;
 const INSERT_FLAT_SPLICE_MIN_WORK: usize = 1 << 14;
-const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 14;
+const PLACE_PARALLEL_MIN_ELEMS: usize = 1 << 20;
+const PLACE_PARALLEL_CHUNK_ELEMS: usize = 1 << 12;
 
 #[inline(always)]
 fn bool_chunk8_bitmask(chunk: &[bool]) -> u8 {
@@ -16435,46 +16436,83 @@ impl UFuncArray {
         if vals.values.is_empty() {
             return Err(UFuncError::Msg("place: vals must not be empty".to_string()));
         }
-        if self.values.len() >= PLACE_PARALLEL_MIN_ELEMS
-            && rayon::current_num_threads() >= 2
-            && self.dtype == DType::F64
+        if self.dtype == DType::F64
             && mask.dtype == DType::Bool
             && vals.dtype == DType::F64
             && self.integer_sidecar.is_none()
             && mask.integer_sidecar.is_none()
             && vals.integer_sidecar.is_none()
         {
-            let chunk_len = PLACE_PARALLEL_MIN_ELEMS / 4;
-            let counts: Vec<usize> = mask
-                .values
-                .par_chunks(chunk_len)
-                .map(|chunk| chunk.iter().filter(|&&m| m != 0.0).count())
-                .collect();
-            let mut starts = Vec::with_capacity(counts.len());
-            let mut total_true = 0usize;
-            for count in counts {
-                starts.push(total_true);
-                total_true += count;
-            }
-            if total_true == 0 {
+            let vals_values = &vals.values;
+            let vals_len = vals_values.len();
+            if self.values.len() >= PLACE_PARALLEL_MIN_ELEMS && rayon::current_num_threads() >= 2 {
+                let counts: Vec<usize> = mask
+                    .values
+                    .par_chunks(PLACE_PARALLEL_CHUNK_ELEMS)
+                    .map(|chunk| chunk.iter().filter(|&&m| m != 0.0).count())
+                    .collect();
+                let mut starts = Vec::with_capacity(counts.len());
+                let mut total_true = 0usize;
+                for count in counts {
+                    starts.push(total_true);
+                    total_true += count;
+                }
+                if total_true == 0 {
+                    return Ok(());
+                }
+
+                self.values
+                    .par_chunks_mut(PLACE_PARALLEL_CHUNK_ELEMS)
+                    .zip(mask.values.par_chunks(PLACE_PARALLEL_CHUNK_ELEMS))
+                    .zip(starts.into_par_iter())
+                    .for_each(|((dst_chunk, mask_chunk), start)| {
+                        let mut value_index = start % vals_len;
+                        for (dst, &m) in dst_chunk.iter_mut().zip(mask_chunk) {
+                            if m != 0.0 {
+                                *dst = vals_values[value_index];
+                                value_index += 1;
+                                if value_index == vals_len {
+                                    value_index = 0;
+                                }
+                            }
+                        }
+                    });
                 return Ok(());
             }
 
-            let vals_values = &vals.values;
-            let vals_len = vals_values.len();
-            self.values
-                .par_chunks_mut(chunk_len)
-                .zip(mask.values.par_chunks(chunk_len))
-                .zip(starts.into_par_iter())
-                .for_each(|((dst_chunk, mask_chunk), start)| {
-                    let mut true_rank = start;
-                    for (dst, &m) in dst_chunk.iter_mut().zip(mask_chunk) {
-                        if m != 0.0 {
-                            *dst = vals_values[true_rank % vals_len];
-                            true_rank += 1;
-                        }
+            const LANES: usize = 8;
+            use std::simd::Simd;
+            use std::simd::cmp::SimdPartialEq;
+            type MaskVector = Simd<f64, LANES>;
+
+            let zero = MaskVector::splat(0.0);
+            let mut value_index = 0usize;
+            let mut dst_chunks = self.values.chunks_exact_mut(LANES);
+            let mut mask_chunks = mask.values.chunks_exact(LANES);
+            for (dst_chunk, mask_chunk) in dst_chunks.by_ref().zip(mask_chunks.by_ref()) {
+                let mut bitmask = MaskVector::from_slice(mask_chunk)
+                    .simd_ne(zero)
+                    .to_bitmask();
+                while bitmask != 0 {
+                    let lane = bitmask.trailing_zeros() as usize;
+                    dst_chunk[lane] = vals_values[value_index];
+                    value_index += 1;
+                    if value_index == vals_len {
+                        value_index = 0;
                     }
-                });
+                    bitmask &= bitmask - 1;
+                }
+            }
+            let dst_remainder = dst_chunks.into_remainder();
+            for (dst, &m) in dst_remainder.iter_mut().zip(mask_chunks.remainder()) {
+                if m != 0.0 {
+                    *dst = vals_values[value_index];
+                    value_index += 1;
+                    if value_index == vals_len {
+                        value_index = 0;
+                    }
+                }
+            }
             return Ok(());
         }
         let mut vi = 0;
@@ -60995,7 +61033,7 @@ print(json.dumps(payload))
             .collect();
         assert_eq!(
             digest_hex,
-            "76116b6db531a47a1948ad56e8cc42cd64d511a9e69520f2ce77ab5fe2c3f459"
+            "41ebf3fa471d4b7c9b29ddc1cde3e96b7b972072359d9ed98ac53ee806bf7add"
         );
 
         let empty = UFuncArray::new(vec![0], vec![], DType::F64).unwrap();

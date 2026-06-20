@@ -1,0 +1,10 @@
+Extracted immediately after the fresh pre-change rch Criterion baseline and before the candidate bench overwrote Criterion's `new/estimates.json`.
+
+baseline worker: hz1
+target dir: CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b
+
+place_f64_masked_cycling/100000
+median_ns=87094.12641117052 lower=84469.46590909091 upper=88740.17234848485
+
+place_f64_masked_cycling/1000000
+median_ns=441318.3898148148 lower=438561.7643939394 upper=455494.2733333333

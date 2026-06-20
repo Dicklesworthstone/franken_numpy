@@ -1,0 +1,4 @@
+numpy_version=2.4.3
+python=3.13.7
+place_f64_masked_cycling/100000: median_ns=66616 p95_ns=71091 mean_ns=67725 cv_pct=2.98 min_ns=66252 max_ns=73690 samples=41 inner=3
+place_f64_masked_cycling/1000000: median_ns=815936 p95_ns=893663 mean_ns=826633 cv_pct=5.83 min_ns=751343 max_ns=947815 samples=41 inner=1

@@ -1,0 +1,1 @@
+CMD: git diff --check

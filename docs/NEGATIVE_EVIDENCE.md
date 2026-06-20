@@ -959,3 +959,46 @@ Notes:
 - `cargo fmt --check` still reports broad pre-existing workspace formatting drift outside this slice; the put_mask hunk was manually adjusted to match the targeted rustfmt diff and no unrelated formatting was applied.
 - `timeout 120s ubs --only=rust crates/fnp-ufunc/src/lib.rs` did not produce a completion summary before the wrapper returned, and zsh did not preserve the exit code in the artifact; keep `ubs_fnp_ufunc_lib.txt` as inconclusive, not a pass.
 - Retry condition: reopen only if a same-host NumPy rerun beats the final FNP median on either row, if compact bool-mask storage changes the loop body, or if rows above `1 << 20` show the retained segmented-prefix parallel path losing to the SIMD serial path.
+
+## 2026-06-20 - Gauntlet Verify: FNP place vs NumPy
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_ufunc_place_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.252`.
+- Subject before measured correction: F64/no-sidecar `place` activated Rayon at `1 << 14` elements, so the 100k true-rank cycling-fill row paid segmented-prefix scheduler overhead and the serial fallback still routed every write through integer-mutation sidecar plumbing.
+- Final code: F64/no-sidecar `place` uses an 8-lane SIMD mask scan and modulo-free value cycling below `1 << 20`; above that threshold it keeps the segmented-prefix Rayon path with a fixed 4K chunk size.
+- Subject API: direct Rust `fnp-ufunc` `UFuncArray::place` Criterion row.
+- Oracle/reference: NumPy 2.4.3 on Python 3.13.7, timed with the same mask and cyclic value formula.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-ufunc --bench elementwise place_f64_masked_cycling -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- Python NumPy timing script in `numpy_place_local.txt` using the same data formula.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-ufunc place_f64_parallel_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo check -p fnp-ufunc --all-targets`
+- `RCH_WORKER=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings`
+- `cargo fmt -p fnp-ufunc -- --check`
+- `git diff --check`
+- `timeout 120s ubs --only=rust crates/fnp-ufunc/src/lib.rs`
+
+Triage scorecard:
+- Current focused run vs refreshed NumPy median: win/loss/neutral = 1/1/0 across the two decision rows. The 100k row lost by 1.307x and was selected.
+- Final remote run vs refreshed NumPy median: win/loss/neutral = 2/0/0.
+
+| Bead | Lever | Workload | Artifact | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.252` | Current code, fresh routing evidence | 100k current rch `hz1` | `baseline_estimates_extracted_before_candidate.txt`, `numpy_place_local.txt` | 87.094 us | 66.616 us | 1.307x | Loss, selected |
+| `franken_numpy-ixs5y.252` | Current code, fresh routing evidence | 1M current rch `hz1` | `baseline_estimates_extracted_before_candidate.txt`, `numpy_place_local.txt` | 441.318 us | 815.936 us | 0.541x | Existing win |
+| `franken_numpy-ixs5y.252` | Final SIMD serial with `1 << 20` cutoff | 100k final rch `hz2` | `candidate_fnp_place_rch.txt`, `numpy_place_local.txt` | 21.050 us | 66.616 us | 0.316x | Keep |
+| `franken_numpy-ixs5y.252` | Final SIMD serial with `1 << 20` cutoff | 1M final rch `hz2` | `candidate_fnp_place_rch.txt`, `numpy_place_local.txt` | 273.974 us | 815.936 us | 0.336x | Keep |
+
+Notes:
+- This is the same successful "constants kill you" correction as `copyto`, `putmask`, and `put_mask`, but applied to `place`'s true-rank cyclic semantics: avoid tiny Rayon morsels and integer-sidecar mutation machinery when dtype and sidecar checks prove a flat F64/no-sidecar loop.
+- The SIMD serial path scans F64 mask chunks as 8-lane vectors, emits a bitmask of nonzero lanes, and advances the cyclic value index with increment/reset rather than `%` on every write.
+- The golden fixture digest changed intentionally after the threshold-crossing fixture moved below the new parallel activation point; elementwise serial-reference comparison passed before the SHA assertion, and the updated digest `41ebf3fa471d4b7c9b29ddc1cde3e96b7b972072359d9ed98ac53ee806bf7add` passed.
+- Final focused validation passed for `place_f64_parallel_matches_serial_reference_and_golden_sha256`, `cargo check -p fnp-ufunc --all-targets`, `cargo clippy -p fnp-ufunc --all-targets -- -D warnings` on retry worker `hz1`, and `git diff --check`.
+- Initial clippy on `ovh-b` failed in a dependency build script with `SIGILL`; the retry on `hz1` is the passing clippy gate.
+- `cargo fmt -p fnp-ufunc -- --check` still reports broad pre-existing formatting drift outside this slice; no workspace formatter was run.
+- `timeout 120s ubs --only=rust crates/fnp-ufunc/src/lib.rs` timed out after starting the Rust scan; keep `ubs_fnp_ufunc_lib.txt` as inconclusive, not a pass.
+- Retry condition: reopen only if a same-host NumPy rerun beats the final FNP median on either row, if compact bool-mask storage changes the loop body, or if rows above `1 << 20` show the retained segmented-prefix parallel path losing to the SIMD serial path.
