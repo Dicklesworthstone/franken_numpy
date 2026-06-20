@@ -12144,6 +12144,9 @@ fn build_numpy_masked_array(py: Python<'_>, array: &MaskedArray) -> PyResult<Py<
         .unbind())
 }
 
+// Retained for a future robust native eigvals; `eigvals` currently delegates to
+// NumPy's LAPACK geev because the native QR solver did not reliably converge.
+#[allow(dead_code)]
 fn build_numpy_eigvals_vector_from_flat_interleaved(
     py: Python<'_>,
     values: &[f64],
@@ -16718,29 +16721,17 @@ fn pinv(
 #[pyfunction]
 fn eigvals(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
-    let arr = numpy.call_method1("asarray", (a.bind(py),))?;
-    let dtype_kind = arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
-
-    // Complex arrays must fall back to numpy
-    if dtype_kind == "c" {
-        return Ok(numpy
-            .getattr("linalg")?
-            .getattr("eigvals")?
-            .call1((a.bind(py),))?
-            .unbind());
-    }
-
-    let array = extract_numeric_array(py, a.bind(py), "eigvals(a)")?;
-    let shape = array.shape();
-    if shape.len() == 2 && shape[0] == shape[1] {
-        let result = array.eigvals().map_err(map_ufunc_error)?;
-        return build_numpy_eigvals_vector_from_flat_interleaved(
-            py,
-            result.values(),
-            array.dtype(),
-        );
-    }
-
+    // Real general (non-symmetric) eigenvalues need a robust unsymmetric
+    // eigensolver. The native Francis double-shift QR (`eig_nxn`) does NOT
+    // reliably converge: across random real matrices it returns wrong
+    // eigenvalues for ~9% of inputs (the trace/first power-sum is preserved but
+    // higher power-sums diverge — e.g. d=32 sum(λ³) relerr ~15), and the failure
+    // is matrix-dependent (it can miss even on a symmetric matrix), so there is
+    // no safe size gate. It is also slower than LAPACK above n~140 (n=600 was
+    // ~1.7x, n=800 ~2.4x). Route all `eigvals` to NumPy's LAPACK `geev`, which
+    // is robust and faster on the large sizes; the tiny-matrix native "win" was
+    // on an unreliable path. (`eigvalsh` keeps its separate, reliable symmetric
+    // QR path; `eig` already delegates to numpy.)
     Ok(numpy
         .getattr("linalg")?
         .getattr("eigvals")?

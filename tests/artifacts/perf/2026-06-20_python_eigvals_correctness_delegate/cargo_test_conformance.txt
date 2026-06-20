@@ -1,0 +1,20 @@
+test lstsq_overdetermined ... ok
+test svdvals_rank_deficient ... ok
+test inv_basic ... ok
+test inv_identity ... ok
+test cholesky_reconstruction ... ok
+test lstsq_basic ... ok
+test solve_batched ... ok
+test qr_square ... ok
+test svdvals_complex ... ok
+test inv_batched ... ok
+test multi_dot_basic ... ok
+test solve_verify ... ok
+test qr_empty_raises_valueerror ... ok
+test solve_basic ... ok
+test multi_dot_chain ... ok
+test qr_basic ... ok
+test eig_non_square_raises_linalgerror ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.69s
+

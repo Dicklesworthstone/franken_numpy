@@ -4,6 +4,54 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Fix: fnp-python eigvals CORRECTNESS bug (~9% wrong) + perf loss -> delegate to LAPACK
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_python_eigvals_correctness_delegate/`
+
+Run identity:
+- Agent: `BlackThrush` / `cod-b`.
+- Subject API: `fnp.eigvals` real 2-D square (`crates/fnp-python/src/lib.rs`).
+- Reference: NumPy 2.4.3 on `thinkstation1` (local, load ~4); `hz2` (NumPy 2.3.5)
+  saturated at load ~33/16-core. Fix is a delegation -> reference-independent.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Decision: SHIP. Correctness fix (also removes a large-n perf loss).
+
+Bug class (CORRECTNESS, found via perf sweep):
+- `fnp.eigvals` real 2-D ran the native Francis double-shift QR
+  (`eig_nxn`/`hessenberg_qr_iter`). It does NOT reliably converge: when the
+  iteration budget (`EIGEN_QR_ITERATION_COEFF*n*n`) is exhausted it silently
+  returns the unconverged diagonal. Order-independent power-sum invariants
+  (sum(λ^k)==trace(A^k), k=1,2,3) over 120 random real matrices: **11/120 wrong**,
+  worst relerr 15.2 (d=32 seed=13: trace OK 4.6e-15 but sum(λ³) relerr 15.2).
+- WHY THE SUITE MISSED IT: the trace (k=1 power sum) is preserved even when the
+  spectrum is wrong, so a `sum(eig)==trace` smoke test passes; the conformance
+  eigvals tests only use symmetric/diagonal/small/complex matrices that happen
+  to converge. Failures are matrix-dependent (a symmetric 64x64 also missed) ->
+  NO safe size gate.
+- Also a perf loss: d=200 ran 39.78x slower (and wrong), d=600 1.73x, d=800
+  2.36x. The small-d native "win" (0.6-0.8x) was a fast wrong answer.
+
+Lever:
+- Delegate all real 2-D `eigvals` to NumPy LAPACK `geev` (robust + faster on
+  large n). `eig` already delegated; `eigvalsh` keeps its reliable symmetric QR.
+  Dead complex-output helper kept behind `#[allow(dead_code)]`.
+- REUSABLE METHOD: order-independent invariants (power sums vs trace(A^k)) are
+  the correct eigenvalue-set comparator; do NOT use sorted element-wise diff
+  (sort_complex misaligns conjugate pairs -> false positives) NOR greedy
+  nearest-neighbor matching (cascading mis-assignment -> false positives). A
+  native iterative solver with a fixed iteration budget that returns on timeout
+  is a silent-wrong-answer hazard; sweep it with random + adversarial corpora.
+
+Result: power-sum invariants 0/120 bad (worst relerr 5.6e-13); perf d=200
+39.78x->1.03x, d=600 1.73x->0.93x, d=800 2.36x->1.00x; conformance
+conformance_linalg_advanced 29/29 + conformance_linalg_decomp 38/38 PASS;
+non-square LinAlgError preserved; release build clean.
+
+Retry predicate: do not re-enable native `eig_nxn` for eigvals without proving
+Francis QR converges to LAPACK tolerance with 0 failures on a large random +
+adversarial (defective/clustered/near-symmetric) corpus. A robust native
+unsymmetric eigensolver is a separate large effort, not a wrapper tweak.
+
 ## 2026-06-20 - BOLD-VERIFY Fix: fnp-python pinv 2-D size-gate (215x loss -> parity)
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_python_pinv_2d_sizegate_vs_numpy/`

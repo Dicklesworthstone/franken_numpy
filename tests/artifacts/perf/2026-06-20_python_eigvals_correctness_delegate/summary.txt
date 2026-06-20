@@ -1,0 +1,23 @@
+# eigvals correctness + perf evidence (NumPy 2.4.3, thinkstation1, load ~4)
+
+## BEFORE (native Francis-QR eig_nxn) - power-sum invariants k=1,2,3 vs trace(A^k)
+robust order-independent check across 120 random real matrices (d=16,32,64,128):
+  bad=11/120  worst_relerr=1.52e+01  (worst d=32 seed=13: sum(lambda^3) relerr 15.2)
+  => native path returns WRONG eigenvalues for ~9% of random real matrices
+  perf at d=200 was 39.78x slower AND wrong; d=600 1.73x; d=800 2.36x slower
+
+## AFTER (delegate real 2-D eigvals to numpy LAPACK geev)
+power-sum invariants k=1,2,3: bad=0/120 worst_relerr=5.58e-13
+worstcase (d,seed,e1,e2,e3): (128, 4, 9.694725551943309e-15, 5.577960356289756e-13, 6.912138029356254e-14)
+
+## perf head-to-head after (ratio ~1.0 = delegation parity)
+d=  16 np=    0.04ms fnp=    0.04ms ratio=  0.96   par match=True
+d=  32 np=    0.13ms fnp=    0.13ms ratio=  1.01   par match=True
+d=  64 np=    0.62ms fnp=    0.62ms ratio=  1.00   par match=True
+d=  96 np=    2.23ms fnp=    2.08ms ratio=  0.93   WIN match=True
+d= 128 np=    3.99ms fnp=    4.46ms ratio=  1.12   par match=True
+d= 200 np=   13.23ms fnp=   11.97ms ratio=  0.90   WIN match=True
+d= 300 np=   25.79ms fnp=   25.48ms ratio=  0.99   par match=True
+d= 450 np=   64.74ms fnp=   65.14ms ratio=  1.01   par match=True
+d= 600 np=  174.86ms fnp=  175.64ms ratio=  1.00   par match=True
+d= 800 np=  277.82ms fnp=  279.54ms ratio=  1.01   par match=True
