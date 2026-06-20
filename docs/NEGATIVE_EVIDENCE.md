@@ -1002,3 +1002,44 @@ Notes:
 - `cargo fmt -p fnp-ufunc -- --check` still reports broad pre-existing formatting drift outside this slice; no workspace formatter was run.
 - `timeout 120s ubs --only=rust crates/fnp-ufunc/src/lib.rs` timed out after starting the Rust scan; keep `ubs_fnp_ufunc_lib.txt` as inconclusive, not a pass.
 - Retry condition: reopen only if a same-host NumPy rerun beats the final FNP median on either row, if compact bool-mask storage changes the loop body, or if rows above `1 << 20` show the retained segmented-prefix parallel path losing to the SIMD serial path.
+
+## 2026-06-20 - Gauntlet Verify: `fnp-linalg` matrix norm column reductions
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.235`.
+- Subject before measured correction: `matrix_norm_nxn_orders` already scanned row-major for large `ord=1/-1` matrices, but allocated the column-sum scratch buffer on the heap for every call.
+- Kept lever: stack-resident scratch for 512 through 1024 columns, with the existing heap path retained outside that measured window.
+- No-ship lever: an unrolled Frobenius accumulator was tested and reverted after batch Frobenius rows regressed.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'batch_trace|batch_matrix_norm|matrix_norm_nxn_orders|kron_nxn' -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'matrix_norm_nxn_orders/(one|neg_one)' -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg matrix_norm_column_reduction_matches_strided_reference_bits -- --nocapture`
+- Direct Python NumPy comparator on `hz2` in `numpy_linalg_hz2.txt`.
+
+Triage scorecard:
+- Current `hz2` FNP vs NumPy: win/loss/neutral = 1/7/0 across the eight column norm rows. The `one/128` row was effectively neutral/loss at 1.005x, and the 256 through 1024 rows were clear losses.
+- Final `hz2` FNP vs old `hz2` FNP: win/loss/neutral = 8/0/0.
+- Final `hz2` FNP vs NumPy: win/loss/neutral = 2/6/0. This is a kept gap-narrowing lever, not a full NumPy domination closeout.
+
+| Bead | Lever | Workload | Artifact | Old FNP ns | Final FNP ns | NumPy ns | Final/Old | Final/NumPy | Verdict |
+|---|---|---:|---|---:|---:|---:|---:|---:|---|
+| `franken_numpy-ixs5y.235` | Stack scratch 512-1024 cols | `one/128` on `hz2` | `criterion_linalg_current.txt`, `criterion_linalg_column_stack_gated_candidate_hz1.txt`, `numpy_linalg_hz2.txt` | 9603 | 7544 | 9553 | 0.786x | 0.790x | Keep/supporting win |
+| `franken_numpy-ixs5y.235` | Stack scratch 512-1024 cols | `neg_one/128` on `hz2` | same | 9375 | 7484 | 9574 | 0.798x | 0.782x | Keep/supporting win |
+| `franken_numpy-ixs5y.235` | Stack scratch 512-1024 cols | `one/256` on `hz2` | same | 38032 | 30444 | 27712 | 0.800x | 1.099x | Keep, still loses |
+| `franken_numpy-ixs5y.235` | Stack scratch 512-1024 cols | `neg_one/256` on `hz2` | same | 37675 | 29924 | 28312 | 0.794x | 1.057x | Keep, still loses |
+| `franken_numpy-ixs5y.235` | Stack scratch 512-1024 cols | `one/512` on `hz2` | same | 154304 | 116333 | 103667 | 0.754x | 1.122x | Keep, still loses |
+| `franken_numpy-ixs5y.235` | Stack scratch 512-1024 cols | `neg_one/512` on `hz2` | same | 152028 | 116827 | 102987 | 0.768x | 1.134x | Keep, still loses |
+| `franken_numpy-ixs5y.235` | Stack scratch 512-1024 cols | `one/1024` on `hz2` | same | 615716 | 458082 | 397192 | 0.744x | 1.153x | Keep, still loses |
+| `franken_numpy-ixs5y.235` | Stack scratch 512-1024 cols | `neg_one/1024` on `hz2` | same | 603420 | 466084 | 393621 | 0.772x | 1.184x | Keep, still loses |
+| `franken_numpy-ixs5y.235` | Frobenius unroll | `batch_matrix_norm_fro/4096x8x8` on `hz1` | `criterion_linalg_fro_head_baseline.txt`, `criterion_linalg_fro_unroll_candidate.txt` | 76821 | 84812 | n/a | 1.104x | n/a | Reverted |
+| `franken_numpy-ixs5y.235` | Frobenius unroll | `batch_matrix_norm_fro/1024x32x32` on `hz1` | same | 194123 | 221803 | n/a | 1.143x | n/a | Reverted |
+
+Notes:
+- The stack path preserves the old scalar addition order per column; the focused test compares both a heap-cache case and a stack-cache case against the former strided reference bits, including NaN propagation through `1`, `-1`, `inf`, and `-inf`.
+- The first stack candidate was not kept as-is because direct `hz1` evidence showed a small `one/256` regression. The final code gates stack scratch to the measured 512-1024 column range and keeps the heap path elsewhere.
+- `numpy_column_vmi_rch.txt` is an invalid probe artifact only: RCH warned that the command was non-compilation and the Python quoting failed before timing. It is not counted in any ratio.
+- Remaining gap: NumPy is still faster for 256 through 1024 column reductions on `hz2`. Next deeper lever should be vectorized absolute-value accumulation or multiple-column strip mining that preserves per-column scalar addition order, not another allocation-only retune.

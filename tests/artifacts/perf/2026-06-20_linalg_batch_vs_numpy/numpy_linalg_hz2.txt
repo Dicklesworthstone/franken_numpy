@@ -1,0 +1,29 @@
+host hetzner2
+python 3.14.4
+numpy 2.3.5
+kron_nxn/kron_64x64_4x4_eye: median_ns=154814 p95_ns=159434 mean_ns=159810 cv_pct=18.49 min_ns=149767 max_ns=320668 samples=31 inner=3
+kron_nxn/kron_128x128_4x4_eye_nonnegative_fast_path: median_ns=582219 p95_ns=590359 mean_ns=602233 cv_pct=17.25 min_ns=577499 max_ns=1170205 samples=31 inner=3
+matrix_norm_nxn_orders/one/128: median_ns=9553 p95_ns=10336 mean_ns=9827 cv_pct=7.03 min_ns=9405 max_ns=13093 samples=31 inner=20
+matrix_norm_nxn_orders/neg_one/128: median_ns=9574 p95_ns=10181 mean_ns=9734 cv_pct=2.64 min_ns=9511 max_ns=10436 samples=31 inner=20
+matrix_norm_nxn_orders/fro/128: median_ns=7956 p95_ns=8519 mean_ns=8121 cv_pct=3.26 min_ns=7918 max_ns=8922 samples=31 inner=20
+matrix_norm_nxn_orders/one/256: median_ns=27712 p95_ns=29045 mean_ns=27856 cv_pct=3.06 min_ns=26770 max_ns=30123 samples=31 inner=10
+matrix_norm_nxn_orders/neg_one/256: median_ns=28312 p95_ns=31796 mean_ns=28631 cv_pct=5.47 min_ns=27035 max_ns=32755 samples=31 inner=10
+matrix_norm_nxn_orders/fro/256: median_ns=26910 p95_ns=27847 mean_ns=26811 cv_pct=2.36 min_ns=25942 max_ns=28061 samples=31 inner=10
+matrix_norm_nxn_orders/one/512: median_ns=103667 p95_ns=106174 mean_ns=103279 cv_pct=2.04 min_ns=99257 max_ns=106837 samples=31 inner=3
+matrix_norm_nxn_orders/neg_one/512: median_ns=102987 p95_ns=106327 mean_ns=102886 cv_pct=2.05 min_ns=100140 max_ns=108300 samples=31 inner=3
+matrix_norm_nxn_orders/fro/512: median_ns=98587 p95_ns=101344 mean_ns=98853 cv_pct=2.94 min_ns=95950 max_ns=111671 samples=31 inner=3
+matrix_norm_nxn_orders/one/1024: median_ns=397192 p95_ns=428662 mean_ns=457690 cv_pct=68.31 min_ns=380582 max_ns=2167850 samples=31 inner=1
+matrix_norm_nxn_orders/neg_one/1024: median_ns=393621 p95_ns=417783 mean_ns=398328 cv_pct=3.57 min_ns=377522 max_ns=443243 samples=31 inner=1
+matrix_norm_nxn_orders/fro/1024: median_ns=381432 p95_ns=401232 mean_ns=383143 cv_pct=3.12 min_ns=364962 max_ns=412003 samples=31 inner=1
+batch_trace/shape/4096x8x8: median_ns=82925 p95_ns=84100 mean_ns=82951 cv_pct=1.16 min_ns=80993 max_ns=85231 samples=31 inner=20
+batch_trace/shape/1024x32x32: median_ns=51509 p95_ns=53737 mean_ns=52065 cv_pct=2.70 min_ns=50984 max_ns=58116 samples=31 inner=20
+batch_matrix_norm_fro/shape/4096x8x8: median_ns=205692 p95_ns=211186 mean_ns=206882 cv_pct=1.59 min_ns=204215 max_ns=220091 samples=31 inner=10
+batch_matrix_norm_row_sum/shape/inf_4096x8x8: median_ns=791630 p95_ns=821606 mean_ns=796544 cv_pct=1.48 min_ns=784598 max_ns=825863 samples=31 inner=10
+batch_matrix_norm_row_sum/shape/-inf_4096x8x8: median_ns=831268 p95_ns=851846 mean_ns=834773 cv_pct=1.36 min_ns=826000 max_ns=879976 samples=31 inner=10
+batch_matrix_norm_column_sum/shape/1_4096x8x8: median_ns=875972 p95_ns=890835 mean_ns=879409 cv_pct=1.74 min_ns=859565 max_ns=939258 samples=31 inner=10
+batch_matrix_norm_column_sum/shape/-1_4096x8x8: median_ns=918863 p95_ns=929609 mean_ns=921119 cv_pct=1.61 min_ns=900495 max_ns=994742 samples=31 inner=10
+batch_matrix_norm_fro/shape/1024x32x32: median_ns=422252 p95_ns=487952 mean_ns=434513 cv_pct=5.96 min_ns=410816 max_ns=493620 samples=31 inner=5
+batch_matrix_norm_row_sum/shape/inf_1024x32x32: median_ns=1024629 p95_ns=1060851 mean_ns=1028347 cv_pct=4.21 min_ns=990002 max_ns=1237031 samples=31 inner=5
+batch_matrix_norm_row_sum/shape/-inf_1024x32x32: median_ns=1027617 p95_ns=1050939 mean_ns=1033559 cv_pct=2.66 min_ns=1007933 max_ns=1168637 samples=31 inner=5
+batch_matrix_norm_column_sum/shape/1_1024x32x32: median_ns=900486 p95_ns=942582 mean_ns=907496 cv_pct=5.28 min_ns=871358 max_ns=1085017 samples=31 inner=5
+batch_matrix_norm_column_sum/shape/-1_1024x32x32: median_ns=899578 p95_ns=931288 mean_ns=922118 cv_pct=10.97 min_ns=881764 max_ns=1464943 samples=31 inner=5

@@ -3734,6 +3734,8 @@ pub fn matrix_norm_frobenius(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
 }
 
 const MATRIX_NORM_CACHE_LINEAR_COLUMN_SUM_MIN_ELEMS: usize = 4096;
+const MATRIX_NORM_COLUMN_SUM_STACK_MIN_COLS: usize = 512;
+const MATRIX_NORM_COLUMN_SUM_STACK_MAX_COLS: usize = 1024;
 
 fn matrix_norm_spectral_precheck(a: &[f64]) -> Result<Option<f64>, LinAlgError> {
     if a.iter().any(|value| value.is_nan()) {
@@ -3765,8 +3767,20 @@ fn matrix_norm_column_sum_strided(a: &[f64], m: usize, n: usize, use_min: bool) 
     selected
 }
 
-fn matrix_norm_column_sum_cache_linear(a: &[f64], n: usize, use_min: bool) -> f64 {
-    let mut col_sums = vec![0.0_f64; n];
+fn matrix_norm_column_sum_cache_linear_select(col_sums: &[f64], use_min: bool) -> f64 {
+    if use_min {
+        col_sums.iter().copied().fold(f64::INFINITY, f64::min)
+    } else {
+        col_sums.iter().copied().fold(0.0_f64, f64::max)
+    }
+}
+
+fn matrix_norm_column_sum_cache_linear_fill(
+    a: &[f64],
+    n: usize,
+    use_min: bool,
+    col_sums: &mut [f64],
+) -> f64 {
     for row in a.chunks_exact(n) {
         for (sum, &value) in col_sums.iter_mut().zip(row) {
             if value.is_nan() {
@@ -3775,10 +3789,17 @@ fn matrix_norm_column_sum_cache_linear(a: &[f64], n: usize, use_min: bool) -> f6
             *sum += value.abs();
         }
     }
-    if use_min {
-        col_sums.into_iter().fold(f64::INFINITY, f64::min)
+    matrix_norm_column_sum_cache_linear_select(col_sums, use_min)
+}
+
+fn matrix_norm_column_sum_cache_linear(a: &[f64], n: usize, use_min: bool) -> f64 {
+    if (MATRIX_NORM_COLUMN_SUM_STACK_MIN_COLS..=MATRIX_NORM_COLUMN_SUM_STACK_MAX_COLS).contains(&n)
+    {
+        let mut col_sums = [0.0_f64; MATRIX_NORM_COLUMN_SUM_STACK_MAX_COLS];
+        matrix_norm_column_sum_cache_linear_fill(a, n, use_min, &mut col_sums[..n])
     } else {
-        col_sums.into_iter().fold(0.0_f64, f64::max)
+        let mut col_sums = vec![0.0_f64; n];
+        matrix_norm_column_sum_cache_linear_fill(a, n, use_min, &mut col_sums)
     }
 }
 
@@ -12824,29 +12845,29 @@ mod tests {
 
     #[test]
     fn matrix_norm_column_reduction_matches_strided_reference_bits() {
-        let m = 67;
-        let n = 73;
-        let a: Vec<f64> = (0..m * n)
-            .map(|i| (((i * 29 + 17) % 113) as f64 - 56.0) / 13.0)
-            .collect();
-        assert!(a.len() >= super::MATRIX_NORM_CACHE_LINEAR_COLUMN_SUM_MIN_ELEMS);
+        for (m, n) in [(67, 73), (9, 512)] {
+            let a: Vec<f64> = (0..m * n)
+                .map(|i| (((i * 29 + 17) % 113) as f64 - 56.0) / 13.0)
+                .collect();
+            assert!(a.len() >= super::MATRIX_NORM_CACHE_LINEAR_COLUMN_SUM_MIN_ELEMS);
 
-        for (ord, use_min) in [("1", false), ("-1", true)] {
-            let expected = matrix_norm_column_sum_strided_reference(&a, m, n, use_min);
-            let actual = matrix_norm_nxn(&a, m, n, ord).expect("matrix norm");
-            assert_eq!(
-                actual.to_bits(),
-                expected.to_bits(),
-                "cache-linear {ord} reduction must preserve the former strided sum bits"
-            );
+            for (ord, use_min) in [("1", false), ("-1", true)] {
+                let expected = matrix_norm_column_sum_strided_reference(&a, m, n, use_min);
+                let actual = matrix_norm_nxn(&a, m, n, ord).expect("matrix norm");
+                assert_eq!(
+                    actual.to_bits(),
+                    expected.to_bits(),
+                    "cache-linear {ord} reduction must preserve the former strided sum bits for {m}x{n}"
+                );
+            }
+
+            let mut with_nan = a.clone();
+            with_nan[n + 5] = f64::NAN;
+            assert!(matrix_norm_nxn(&with_nan, m, n, "1").unwrap().is_nan());
+            assert!(matrix_norm_nxn(&with_nan, m, n, "-1").unwrap().is_nan());
+            assert!(matrix_norm_nxn(&with_nan, m, n, "inf").unwrap().is_nan());
+            assert!(matrix_norm_nxn(&with_nan, m, n, "-inf").unwrap().is_nan());
         }
-
-        let mut with_nan = a.clone();
-        with_nan[n + 5] = f64::NAN;
-        assert!(matrix_norm_nxn(&with_nan, m, n, "1").unwrap().is_nan());
-        assert!(matrix_norm_nxn(&with_nan, m, n, "-1").unwrap().is_nan());
-        assert!(matrix_norm_nxn(&with_nan, m, n, "inf").unwrap().is_nan());
-        assert!(matrix_norm_nxn(&with_nan, m, n, "-inf").unwrap().is_nan());
     }
 
     #[test]
@@ -15469,7 +15490,8 @@ mod tests {
             assert_eq!(g.to_bits(), w.to_bits(), "public kron bit drift at {idx}");
         }
 
-        let fallback_cases: &[(&[f64], &[f64], usize, usize, usize, usize)] = &[
+        type FallbackCase<'a> = (&'a [f64], &'a [f64], usize, usize, usize, usize);
+        let fallback_cases: &[FallbackCase<'_>] = &[
             (&[-1.0, 2.0], &eye3, 1, 2, 3, 3),
             (&[-0.0, 2.0], &eye3, 1, 2, 3, 3),
             (&[f64::NAN, 2.0], &eye3, 1, 2, 3, 3),

@@ -1,0 +1,9 @@
+host hetzner1
+python 3.14.4
+numpy 2.3.5
+matrix_norm_nxn_orders/fro/128: median_ns=11231 p95_ns=13684 mean_ns=11689 cv_pct=7.85 min_ns=10895 max_ns=13932 samples=31 inner=20
+matrix_norm_nxn_orders/fro/256: median_ns=35547 p95_ns=40332 mean_ns=37072 cv_pct=12.69 min_ns=31827 max_ns=58556 samples=31 inner=10
+matrix_norm_nxn_orders/fro/512: median_ns=127711 p95_ns=140729 mean_ns=139773 cv_pct=37.63 min_ns=123239 max_ns=423760 samples=31 inner=3
+matrix_norm_nxn_orders/fro/1024: median_ns=516194 p95_ns=567280 mean_ns=559226 cv_pct=44.33 min_ns=483743 max_ns=1911628 samples=31 inner=1
+batch_matrix_norm_fro/shape/4096x8x8: median_ns=234290 p95_ns=238789 mean_ns=234524 cv_pct=1.49 min_ns=229739 max_ns=247814 samples=31 inner=10
+batch_matrix_norm_fro/shape/1024x32x32: median_ns=582373 p95_ns=592051 mean_ns=585170 cv_pct=2.48 min_ns=573939 max_ns=657020 samples=31 inner=5
