@@ -1105,3 +1105,41 @@ Notes:
 - The focused bit-preservation guard passed for `batch_trace_direct_lane_fill_matches_per_lane_reference_bits`, covering serial and threshold-crossing batch shapes plus NaN and signed-zero propagation against the old per-lane reference.
 - Graveyard mapping: cache-local vectorized execution plus constants-kill-you discipline. The fresh measurement shows the existing direct lane-fill path already clears the NumPy gate, so no additional parallel-threshold or unrolled-diagonal lever was justified.
 - This bead should not be reopened for another trace micro-retune unless a same-worker NumPy rerun beats either final Rust median, or a future change alters the diagonal accumulation order, batch parallel threshold, or trace dispatch path.
+
+## 2026-06-20 - Gauntlet Verify: `fnp-linalg` symmetric spectral cond fast path
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_cond_values_sort_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.234`.
+- Subject before measured correction: the values-only SVD in-place singular sort and `cond_nxn` bench row already existed, but same-worker head-to-head proof showed `cond_nxn` still lost badly to NumPy.
+- Kept lever: exact-symmetric finite spectral condition numbers now route through `eigvalsh_nxn` because singular values of a real symmetric matrix are the absolute eigenvalues. This avoids a full values-only SVD for the measured symmetric `cond_nxn` workload while preserving the old paths for non-symmetric, rectangular, NaN, Inf, and non-spectral orders.
+- Worker: `hz1`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `RCH_WORKER=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'cond_nxn/size/(64|128|256)' -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- `RCH_WORKER=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'cond_nxn' -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- Direct Python NumPy comparator on `hz1` in `numpy_cond_nxn_hz1.txt`.
+- `RCH_WORKER=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg cond_p_spectral_symmetric -- --nocapture`
+- `RCH_WORKER=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg values_only_svd_in_place_sort_matches_former_index_schedule -- --nocapture`
+- `RCH_WORKER=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo build -p fnp-linalg --release`
+- `RCH_WORKER=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings`
+
+Triage scorecard:
+- Initial same-worker FNP vs NumPy: win/loss/neutral = 0/4/0. The old 512 row did not finish in the full run and was interrupted; NumPy completed the same 512 comparator in 121812521 ns.
+- Final same-worker FNP vs NumPy: win/loss/neutral = 3/1/0.
+- Final same-worker FNP vs old FNP: win/loss/neutral = 4/0/0, counting 512 as timeout-to-completed.
+
+| Bead | Lever | Workload | Artifact | Old FNP ns | Final FNP ns | NumPy ns | Final/Old | Final/NumPy | Verdict |
+|---|---|---:|---|---:|---:|---:|---:|---:|---|
+| `franken_numpy-ixs5y.234` | Exact-symmetric cond via `eigvalsh_nxn` | `cond_nxn/64` on `hz1` | `fnp_cond_nxn_64_128_256_hz1.txt`, `fnp_cond_nxn_symmetric_fast_path_hz1.txt`, `numpy_cond_nxn_hz1.txt` | 51961635 | 215148 | 229157 | 0.004x | 0.939x | Keep, beats NumPy |
+| `franken_numpy-ixs5y.234` | Exact-symmetric cond via `eigvalsh_nxn` | `cond_nxn/128` on `hz1` | same | 287303721 | 1746263 | 1388876 | 0.006x | 1.257x | Keep, residual loss |
+| `franken_numpy-ixs5y.234` | Exact-symmetric cond via `eigvalsh_nxn` | `cond_nxn/256` on `hz1` | same | 1715056173 | 10107470 | 15179317 | 0.006x | 0.666x | Keep, beats NumPy |
+| `franken_numpy-ixs5y.234` | Exact-symmetric cond via `eigvalsh_nxn` | `cond_nxn/512` on `hz1` | same | timeout | 60907729 | 121812521 | n/a | 0.500x | Keep, beats NumPy |
+
+Notes:
+- This is not another SVD sort retune. The baseline proved the sort allocation was not the dominant NumPy gap; the successful lever changed the complexity surface for finite exact-symmetric matrices from values-only SVD to symmetric eigensolve.
+- The focused symmetric tests compare the fast path to the SVD reference and cover `p="2"` and `p="-2"` absolute-eigenvalue semantics. The original values-only in-place sort bit guard also passed.
+- `cargo fmt -p fnp-linalg -- --check` still fails on broad pre-existing formatting drift in `fnp-linalg` benches/examples and older source regions; no formatter was run because it would rewrite unrelated files.
+- Remaining gap: `cond_nxn/128` is still 1.257x slower than NumPy. Retry only if a same-worker `eigvalsh_nxn` profile identifies the exact 128-size frame, or if a broader symmetric spectral primitive can improve 128 without regressing the 64/256/512 wins. Do not reopen this bead for SVD sort allocation, right-Vt, row-Householder, packed-GEMM tile, or SBR/bulge-chase microfamilies.

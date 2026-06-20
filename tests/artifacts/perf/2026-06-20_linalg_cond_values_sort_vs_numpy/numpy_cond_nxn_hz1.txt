@@ -1,0 +1,7 @@
+host hz1
+python 3.14.4
+numpy 2.3.5
+cond_nxn/size/64: median_ns=229157 min_ns=224304 p95_ns=240707 max_ns=242050 mean_ns=230888 cv_pct=2.30 inner=64 samples=21
+cond_nxn/size/128: median_ns=1388876 min_ns=1366008 p95_ns=1402091 max_ns=1442484 mean_ns=1387138 cv_pct=1.14 inner=64 samples=21
+cond_nxn/size/256: median_ns=15179317 min_ns=14964048 p95_ns=15280874 max_ns=15448693 mean_ns=15171174 cv_pct=0.68 inner=4 samples=21
+cond_nxn/size/512: median_ns=121812521 min_ns=120201852 p95_ns=124798797 max_ns=125835683 mean_ns=122061310 cv_pct=1.20 inner=1 samples=21

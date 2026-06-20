@@ -5876,6 +5876,45 @@ pub fn cond_nxn(a: &[f64], n: usize) -> Result<f64, LinAlgError> {
     cond_p_nxn(a, n, None)
 }
 
+#[inline]
+fn is_exact_symmetric_nxn(a: &[f64], n: usize) -> bool {
+    for i in 0..n {
+        for j in (i + 1)..n {
+            if a[i * n + j] != a[j * n + i] {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn symmetric_cond_from_eigvalsh(
+    a: &[f64],
+    n: usize,
+    reciprocal: bool,
+) -> Result<f64, LinAlgError> {
+    let eigvals = eigvalsh_nxn(a, n)?;
+    let mut sigma_min = f64::INFINITY;
+    let mut sigma_max = 0.0f64;
+    for eig in eigvals {
+        let sigma = eig.abs();
+        sigma_min = sigma_min.min(sigma);
+        sigma_max = sigma_max.max(sigma);
+    }
+
+    if reciprocal {
+        if sigma_max == 0.0 {
+            Ok(f64::INFINITY)
+        } else {
+            Ok(sigma_min / sigma_max)
+        }
+    } else if sigma_min == 0.0 {
+        Ok(f64::INFINITY)
+    } else {
+        Ok(sigma_max / sigma_min)
+    }
+}
+
 /// Condition number for rectangular MxN matrices (np.linalg.cond).
 /// Only the 2-norm is supported for non-square matrices.
 /// Returns sigma_max / sigma_min from SVD.
@@ -5967,6 +6006,9 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
             if has_inf {
                 return Ok(f64::INFINITY);
             }
+            if !has_nan && is_exact_symmetric_nxn(a, n) {
+                return symmetric_cond_from_eigvalsh(a, n, false);
+            }
             let sigmas = svd_nxn(a, n)?;
             let sigma_max = sigmas.first().copied().unwrap_or(0.0);
             let sigma_min = sigmas.last().copied().unwrap_or(0.0);
@@ -5978,6 +6020,9 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
         "-2" => {
             if has_inf {
                 return Ok(f64::INFINITY);
+            }
+            if !has_nan && is_exact_symmetric_nxn(a, n) {
+                return symmetric_cond_from_eigvalsh(a, n, true);
             }
             let sigmas = svd_nxn(a, n)?;
             let sigma_max = sigmas.first().copied().unwrap_or(0.0);
@@ -15333,6 +15378,34 @@ mod tests {
         let c1 = cond_nxn(&a, 2).unwrap();
         let c2 = cond_p_nxn(&a, 2, None).unwrap();
         assert!((c1 - c2).abs() < 1e-10);
+    }
+
+    #[test]
+    fn cond_p_spectral_symmetric_uses_absolute_eigenvalues() {
+        let a = [2.0, 0.0, 0.0, -4.0];
+        let c = cond_p_nxn(&a, 2, Some("2")).unwrap();
+        assert!((c - 2.0).abs() < 1e-12, "cond_2 symmetric diag={c}");
+
+        let reciprocal = cond_p_nxn(&a, 2, Some("-2")).unwrap();
+        assert!(
+            (reciprocal - 0.5).abs() < 1e-12,
+            "cond_-2 symmetric diag={reciprocal}"
+        );
+    }
+
+    #[test]
+    fn cond_p_spectral_symmetric_matches_svd_reference() {
+        let a = [
+            5.0, 0.25, -0.5, 0.75, 0.25, 4.0, 0.125, -0.25, -0.5, 0.125, 3.0, 0.5,
+            0.75, -0.25, 0.5, 2.0,
+        ];
+        let fast = cond_nxn(&a, 4).unwrap();
+        let sigmas = svd_nxn(&a, 4).unwrap();
+        let expected = sigmas[0] / sigmas[sigmas.len() - 1];
+        assert!(
+            (fast - expected).abs() <= 1e-8 * expected.abs().max(1.0),
+            "symmetric cond fast path {fast} diverged from SVD reference {expected}"
+        );
     }
 
     #[test]
