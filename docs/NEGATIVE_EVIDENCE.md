@@ -1199,3 +1199,37 @@ Notes:
 - The focused symmetric tests compare the fast path to the SVD reference and cover `p="2"` and `p="-2"` absolute-eigenvalue semantics. The original values-only in-place sort bit guard also passed.
 - `cargo fmt -p fnp-linalg -- --check` still fails on broad pre-existing formatting drift in `fnp-linalg` benches/examples and older source regions; no formatter was run because it would rewrite unrelated files.
 - Remaining gap: `cond_nxn/128` is still 1.257x slower than NumPy. Retry only if a same-worker `eigvalsh_nxn` profile identifies the exact 128-size frame, or if a broader symmetric spectral primitive can improve 128 without regressing the 64/256/512 wins. Do not reopen this bead for SVD sort allocation, right-Vt, row-Householder, packed-GEMM tile, or SBR/bulge-chase microfamilies.
+
+## 2026-06-20 - Gauntlet Reject: `fnp-linalg` matrix column norm NaN prefilter and stack256
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_column_norm_prefilter_stack256/`
+
+Run identity:
+- Parent bead: `franken_numpy-ixs5y`.
+- Agent: `BlackThrush` / `cod-a`.
+- Worker: `hz2`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Crate scope: `fnp-linalg` only.
+
+Lever attempts:
+- Rejected `branchless-prefilter+stack256`: a whole-matrix NaN prefilter plus branchless cache-linear absolute column accumulation and 256-column stack scratch.
+- Rejected `stack256-only`: lower the stack scratch threshold from 512 to 256 columns with the original NaN branch preserved.
+
+Triage scorecard:
+- Both candidates passed the focused column-reduction bit reference test.
+- Both candidates failed the performance keep gate and were reverted.
+- Same-worker final code still has the previously measured 256-1024 column-norm losses against NumPy; this run records failed attempts, not a keep.
+
+| Workload | NumPy ns | Baseline FNP ns | Prefilter+stack256 FNP ns | Stack256-only FNP ns | Baseline/NumPy | Prefilter/NumPy | Stack256/NumPy | Stack256/Baseline | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `one/256` | 27712 | 29785 | 45590 | 29766 | 1.075x | 1.645x | 1.074x | 0.999x | no-ship, reverted |
+| `neg_one/256` | 28312 | 30303 | 44570 | 29630 | 1.070x | 1.574x | 1.047x | 0.978x | no-ship, reverted |
+| `one/512` | 103667 | 115964 | 182591 | 114610 | 1.119x | 1.761x | 1.106x | 0.988x | no-ship, reverted |
+| `neg_one/512` | 102987 | 113597 | 183733 | 119919 | 1.103x | 1.784x | 1.164x | 1.056x | no-ship, reverted |
+| `one/1024` | 397192 | 457106 | 723751 | 465194 | 1.151x | 1.822x | 1.171x | 1.018x | no-ship, reverted |
+| `neg_one/1024` | 393621 | 458114 | 727149 | 456385 | 1.164x | 1.848x | 1.159x | 0.996x | no-ship, reverted |
+
+Notes:
+- The prefilter doubled memory traffic and made every targeted 256-1024 column-norm row materially worse.
+- The stack-threshold-only retry found one modest `neg_one/256` improvement, but it was not broad enough and regressed `neg_one/512` and `one/1024`; this is below the keep threshold.
+- Do not retry a whole-matrix NaN prefilter for this path unless the scan is fused with another required pass. Do not retry 256-column stack scratch as a standalone lever. The next credible attempt needs SIMD or strip-mined multi-column accumulation that preserves column-addition order and NaN behavior.

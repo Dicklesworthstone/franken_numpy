@@ -283,3 +283,32 @@ Current release posture:
 - `franken_numpy-ixs5y.248` is **measured keep**, not pending.
 - Continue converting the remaining batch-test backlog into measured rows before
   claiming broader `fnp-ufunc` performance readiness.
+
+## 2026-06-20 - Linalg Column Norm Reject Slice
+
+Scope:
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate: `fnp-linalg`.
+- Worker: `hz2`.
+- Artifact: `tests/artifacts/perf/2026-06-20_linalg_column_norm_prefilter_stack256/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | FAIL | Existing final code still loses to NumPy on the 256-1024 `ord=1/-1` matrix norm rows; the rejected candidates were 1.047x-1.848x NumPy time. |
+| Candidate vs current FNP | FAIL | Whole-matrix NaN prefilter regressed all target rows; stack256-only regressed `neg_one/512` by 1.056x and `one/1024` by 1.018x while giving only a small `neg_one/256` gain. |
+| Targeted correctness | PASS | `matrix_norm_column_reduction_matches_strided_reference_bits` passed for both candidates. |
+| Revert discipline | PASS | Both production source changes were removed after measurement. |
+| Evidence durability | PASS | No-ship table is recorded in `docs/NEGATIVE_EVIDENCE.md` and the artifact scorecard. |
+
+Cluster score: **54 / 100**
+
+Score rationale:
+- +20 correctness: focused column-reduction reference test passed.
+- +14 reproducibility: same-worker `hz2` FNP and NumPy rows are recorded with crate-scoped RCH commands.
+- +15 ledger discipline: both failed levers and retry predicates are recorded.
+- +15 revert discipline: no regressing source remains in production.
+- -10 performance: no kept win; the 256-1024 column-norm gap remains open.
+
+Current release posture:
+- The column-norm residual remains **open**.
+- Do not retry whole-matrix NaN prefilter or stack256-only. A future keep needs SIMD or strip-mined multi-column accumulation with same-worker proof against NumPy and no target-row regressions.
