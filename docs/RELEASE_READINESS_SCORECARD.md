@@ -3,6 +3,43 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - Linalg Batched Row-Sum Norm Verification Slice
+
+Scope:
+- Recent code-first pending backlog measured: `franken_numpy-ixs5y.239`.
+- Crate: `fnp-linalg`.
+- Reference: NumPy 2.3.5.
+- Same-worker decision host: `hz1` / `hetzner1`.
+- Evidence: `tests/artifacts/perf/2026-06-20_linalg_batch_row_sum_vs_numpy/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS | 4/4 measured rows faster than NumPy; speedups ranged from 7.29x to 12.40x. |
+| Noise discipline | PASS | FNP Criterion ran on `hz1`; NumPy comparator ran directly on `hz1` and reported host/version metadata. |
+| Targeted correctness | PASS | `batch_matrix_norm_row_sum_direct_lane_fill_matches_per_lane_reference_bits` passed. |
+| Crate compile health | PASS | `cargo check -p fnp-linalg --all-targets` passed through RCH. |
+| Clippy health | PASS | `cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed through RCH. |
+| Release build health | PASS | `cargo build -p fnp-linalg --release` passed through RCH. |
+| Formatting health | KNOWN GAP | `cargo fmt -p fnp-linalg -- --check` reports broad pre-existing drift outside this no-source verification slice. |
+| Evidence durability | PASS | Results recorded in `docs/NEGATIVE_EVIDENCE.md` and the per-run scorecard. |
+
+Cluster score: **88 / 100**
+
+Score rationale:
+- +40 performance: all target rows beat NumPy decisively.
+- +20 correctness: focused bit-preservation guard passed.
+- +15 reproducibility: same-worker FNP and NumPy evidence, with the invalid
+  `rch exec -- python3` comparator attempt excluded.
+- +15 ledger discipline: all rows, validation, retry predicate, and artifact
+  path recorded.
+- -2 residual validation: format drift remains in untouched `fnp-linalg`
+  regions and was not normalized in this slice.
+
+Current release posture:
+- `franken_numpy-ixs5y.239` is **measured keep**, not pending.
+- This slice improves confidence in stacked matrix norm diagnostics; it is not
+  project-wide release certification.
+
 ## 2026-06-19 - Ufunc Flatnonzero Rejection Slice
 
 Scope:

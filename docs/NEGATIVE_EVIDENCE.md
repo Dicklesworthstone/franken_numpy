@@ -4,6 +4,62 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Keep: fnp-linalg batched row-sum norm lane fill
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_row_sum_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.239`.
+- Agent: `BlackThrush` / `cod-b`.
+- Subject API: direct Rust `fnp-linalg` `batch_matrix_norm(..., ord="inf")`
+  and `ord="-inf"`.
+- Reference: NumPy 2.3.5 on `hz1` / `hetzner1` through explicit `ssh hz1`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Decision: keep the existing direct batched row-sum lane-fill path; no source
+  hunk was added in this verification slice.
+
+Lever:
+- The landed path specializes `batch_matrix_norm` for `ord="inf"` and
+  `ord="-inf"` after one batch shape/data validation.
+- Each lane sums rows in the same row-major order as `matrix_norm_nxn`, then
+  applies the same max/min row-sum selection semantics.
+- Alien-graveyard mapping: constants-kill-you removal of per-lane validation
+  and `Result` plumbing over cache-local stacked matrices.
+
+Commands:
+- `RCH_WORKER=hz1 RCH_WORKERS=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg batch_matrix_norm_row_sum -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `ssh hz1 'python3 -c ...'`
+- `RCH_WORKER=hz1 RCH_WORKERS=hz1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg batch_matrix_norm_row_sum_direct_lane_fill_matches_per_lane_reference_bits -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo check -p fnp-linalg --all-targets`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo build -p fnp-linalg --release`
+
+| Workload | Worker | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---:|---:|---|
+| `inf_4096x8x8` | `hz1` | 86,647 ns | 1,021,869 ns | 0.085x, 11.79x faster | Win |
+| `inf_1024x32x32` | `hz1` | 180,783 ns | 1,347,235 ns | 0.134x, 7.45x faster | Win |
+| `-inf_4096x8x8` | `hz1` | 84,239 ns | 1,044,963 ns | 0.081x, 12.40x faster | Win |
+| `-inf_1024x32x32` | `hz1` | 181,321 ns | 1,320,966 ns | 0.137x, 7.29x faster | Win |
+
+Scorecard:
+- Candidate vs NumPy: win/loss/neutral = 4/0/0.
+- Same-worker proof: FrankenNumPy Criterion ran through RCH on `hz1`; NumPy
+  comparator ran directly on `hz1` and reported host `hetzner1`, Python 3.14.4,
+  NumPy 2.3.5.
+- Discarded attempt: `rch exec -- python3 -c ...` emitted the RCH
+  non-compilation warning and did not report a selected worker. Those timings
+  are routing evidence only and are not counted.
+
+Validation notes:
+- Focused bit-preservation test passed.
+- `cargo check -p fnp-linalg --all-targets`, `cargo clippy -p fnp-linalg --all-targets -- -D warnings`,
+  and `cargo build -p fnp-linalg --release` passed through RCH.
+- `cargo fmt -p fnp-linalg -- --check` remains blocked by broad pre-existing
+  rustfmt drift in untouched `fnp-linalg` benches, examples, and source regions.
+- Retry predicate: do not retry this row-sum direct lane-fill bead unless future
+  same-worker evidence regresses the current path, or a new row-sum shape opens
+  a fresh NumPy loss.
+
 ## 2026-06-20 - BOLD-VERIFY No-Ship: fnp-python pre-policy f64 einsum diagonal shortcut
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_python_einsum_diag_pre_policy/`
