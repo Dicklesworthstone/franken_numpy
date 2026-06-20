@@ -39336,6 +39336,21 @@ fn py_min(
         return fallback();
     }
 
+    // Non-contiguous (transposed/strided) ndarrays can't use the zero-copy fold and
+    // make the cold extract → native scan ~19-32x slower than numpy's cache-blocked
+    // strided reduction. Delegate to numpy up front (before the any-NaN scan inside
+    // the f64 fast path, which itself is O(n) on a non-contiguous array).
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback();
+    }
+
     // Parse axis: None, integer, or tuple → fallback for tuple
     let axis_val: Option<isize> = match &axis {
         None => None,
@@ -39435,6 +39450,21 @@ fn py_max(
         || out.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || initial.as_ref().is_some_and(|v| !v.bind(py).is_none())
         || where_.as_ref().is_some_and(|v| !v.is_none())
+    {
+        return fallback();
+    }
+
+    // Non-contiguous (transposed/strided) ndarrays can't use the zero-copy fold and
+    // make the cold extract → native scan ~19-32x slower than numpy's cache-blocked
+    // strided reduction. Delegate to numpy up front (before the any-NaN scan inside
+    // the f64 fast path, which itself is O(n) on a non-contiguous array).
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
     {
         return fallback();
     }
@@ -40676,6 +40706,20 @@ fn argmax(
         return fallback();
     }
 
+    // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
+    // fast paths into the cold extract → native scan (~1.4-2.8x slower than numpy's
+    // strided argextreme). Delegate them to numpy.
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback();
+    }
+
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "argmax(a)") {
         Ok(arr) => arr,
@@ -40786,6 +40830,20 @@ fn argmin(
     // f32 argmin: numpy's SIMD argextreme beats a widening native scan; delegate
     // instead of the cold extract->f64-widen path (~34x slower than numpy).
     if numpy_dtype_is_f32(a.bind(py)) {
+        return fallback();
+    }
+
+    // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
+    // fast paths into the cold extract → native scan (~1.4-2.8x slower than numpy's
+    // strided argextreme). Delegate them to numpy.
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
         return fallback();
     }
 
