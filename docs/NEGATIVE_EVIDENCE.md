@@ -60,6 +60,57 @@ Retry predicate:
   or a LAPACK-class blocked per-lane kernel. It must prove medium rows and the
   broad n>=128 rows in the same run window before any NumPy keep claim.
 
+## 2026-06-20 - BOLD-VERIFY Keep: fnp-ufunc boolean_index F64 masked gather vs NumPy
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_ufunc_boolean_index_vs_numpy_cod_b/`
+
+Run identity:
+- Agent: `BlackThrush` / `cod-b`. Bead: `franken_numpy-ixs5y.251`.
+- Subject: `UFuncArray::boolean_index` on flat F64 arrays with sparse Bool mask
+  values where `NaN` is truthy and signed zero is false.
+- Decision host for performance: `vmi1149989`.
+- FNP command: `rch exec -- cargo bench -p fnp-ufunc --bench elementwise boolean_index_f64_masked_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`.
+- NumPy comparator: direct SSH on the same host, `ubuntu@vmi1149989`, NumPy
+  2.2.4, Python 3.13.7, `OMP/OPENBLAS/MKL/NUMEXPR=1`.
+- Decision: KEEP. No source hunk in this closeout; this verifies the existing
+  direct masked-gather path as a standalone same-host win.
+
+Head-to-head result (FNP/NumPy, lower is better):
+
+| Row | FNP ns/iter | NumPy median ns | Ratio vs NumPy | Decision |
+|---|---:|---:|---:|---|
+| `boolean_index_f64_masked_sparse/100000` | 43,634 | 99,813 | 0.437x (2.29x faster) | WIN |
+| `boolean_index_f64_masked_sparse/1000000` | 628,093 | 1,355,257 | 0.463x (2.16x faster) | WIN |
+
+Win/loss/neutral ledger: **2 / 0 / 0**.
+
+Validation:
+- `cargo test -p fnp-ufunc boolean_index -- --nocapture` via RCH on
+  `vmi1149989`: PASS, 4 focused tests including
+  `boolean_index_f64_matches_serial_reference_and_golden_sha256`.
+- `cargo test -p fnp-ufunc` via RCH on `hz2`: PASS, 2244 passed, 0 failed, 41
+  ignored, integration tests green, doctests ignored as expected.
+- `cargo check -p fnp-ufunc --all-targets` via RCH on `vmi1153651`: PASS.
+- `cargo build -p fnp-ufunc --release` via RCH on `vmi1153651`: PASS.
+- `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`: first RCH attempt
+  on `vmi1149989` failed because the pinned nightly was missing the clippy
+  component; after `rustup component add --toolchain nightly-2026-02-20 clippy`
+  on that worker, the same crate-scoped clippy command passed.
+
+Invalid probes recorded:
+- `numpy_boolean_index_vmi1149989.txt`: failed before timing from shell quoting
+  stripping the Python `USER` literal.
+- `numpy_boolean_index_vmi1149989_retry.txt`: failed before timing from an
+  escaped f-string expression.
+- Neither invalid probe entered the ratio table.
+
+Retry predicate: do not revisit `boolean_index` wrapper/delegation or the same
+F64 extract mask-gather family without new losing evidence. The next credible
+route must attack a deeper primitive, such as compact Bool mask representation,
+mask decode traffic, or a distinct sidecar-preserving gather path, and must
+preserve NumPy truthiness (`NaN` true, signed zero false), flat-order output,
+dtype/shape, mismatch error class, and the all-false/sidecar fallbacks.
+
 ## 2026-06-20 - BOLD-VERIFY No-Ship: batch_cholesky 5-8x loss; alloc-elimination DISPROVEN, kernel is the wall
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_noship/`

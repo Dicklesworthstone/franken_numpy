@@ -35,6 +35,49 @@ Current release posture:
   different layout or blocked batched-panel algorithm with same-window proof
   across medium and n>=128 rows.
 
+## 2026-06-20 - UFunc Boolean-Index Verification Slice
+
+Scope:
+- Recent code-first pending backlog measured and closed:
+  `franken_numpy-ixs5y.251`.
+- Crate: `fnp-ufunc`.
+- Reference: NumPy 2.2.4.
+- Same-worker decision host: `vmi1149989`.
+- Evidence: `tests/artifacts/perf/2026-06-20_ufunc_boolean_index_vs_numpy_cod_b/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS | 2/2 measured rows faster than NumPy; speedups were 2.29x and 2.16x. |
+| Noise discipline | PASS | FNP Criterion ran through RCH on `vmi1149989`; NumPy comparator ran directly on the same host and reported host/version/load metadata. |
+| Targeted correctness | PASS | Focused `boolean_index` test filter passed 4/4 tests including the golden SHA-256 bit-parity guard. |
+| Full crate conformance | PASS | `cargo test -p fnp-ufunc` passed via RCH: 2244 passed, 0 failed, 41 ignored, integration tests green, doctests ignored as expected. |
+| Crate compile health | PASS | `cargo check -p fnp-ufunc --all-targets` passed through RCH. |
+| Clippy health | PASS | `cargo clippy -p fnp-ufunc --all-targets -- -D warnings` passed on `vmi1149989` after installing the missing pinned nightly clippy component there. |
+| Release build health | PASS | `cargo build -p fnp-ufunc --release` passed through RCH. |
+| Formatting health | NOT RERUN | No source files were edited in this verification slice; prior broad formatting drift was outside this evidence closeout. |
+| Evidence durability | PASS | Results recorded in `docs/NEGATIVE_EVIDENCE.md` and the per-run scorecard. |
+
+Cluster score: **90 / 100**
+
+Score rationale:
+- +35 performance: both target rows beat NumPy by more than 2x on the same host.
+- +20 correctness: focused boolean-index SHA guard and the full `fnp-ufunc`
+  suite passed.
+- +15 reproducibility: same-host FNP and NumPy timing evidence with host,
+  version, and load metadata.
+- +15 ledger discipline: wins, invalid probes, validation, retry predicate, and
+  artifact path recorded.
+- +8 no-source discipline: existing implementation verified without new
+  implementation churn.
+- -3 residual validation: formatting was not rerun because this closeout edited
+  only docs/artifacts/bead state.
+
+Current release posture:
+- `franken_numpy-ixs5y.251` is **measured keep**, not pending.
+- Large flat F64 `a[mask]` with sparse truthy mask is ahead of NumPy for the
+  measured rows; future work should move below this wrapper into mask storage or
+  gather-core primitives only if fresh profiles expose a loss.
+
 ## 2026-06-20 - UFunc where_nonzero Verification Slice
 
 Scope:

@@ -1,0 +1,3 @@
+host=vmi1149989 user=ubuntu python=3.13.7 numpy=2.2.4 load=(4.39404296875, 4.95751953125, 3.98046875)
+boolean_index_f64_masked_sparse/100000: median_ns=99813 mean_ns=101244 p95_ns=118566 min_ns=77327 max_ns=203760 cv_pct=20.41 samples=43 inner=20 selected=17562 checksum2048_u64=3058295990705455104
+boolean_index_f64_masked_sparse/1000000: median_ns=1355257 mean_ns=1344074 p95_ns=1453205 min_ns=882706 max_ns=1901102 cv_pct=11.71 samples=43 inner=3 selected=175625 checksum2048_u64=3058295990705455104
