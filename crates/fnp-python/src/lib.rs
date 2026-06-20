@@ -13676,6 +13676,21 @@ fn trapezoid_impl(
     dx: f64,
     axis: isize,
 ) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    // Non-contiguous (transposed/strided) y/x bail into the cold transpose-copy extract
+    // (~2.8x slower than numpy's strided trapezoid). Delegate to numpy.
+    if noncontiguous_ndarray(&numpy, y.bind(py))?
+        || x.as_ref()
+            .is_some_and(|xv| noncontiguous_ndarray(&numpy, xv.bind(py)).unwrap_or(false))
+    {
+        let kwargs = PyDict::new(py);
+        if let Some(xv) = x.as_ref() {
+            kwargs.set_item("x", xv.bind(py))?;
+        }
+        kwargs.set_item("dx", dx)?;
+        kwargs.set_item("axis", axis)?;
+        return Ok(numpy.getattr(name)?.call((y.bind(py),), Some(&kwargs))?.unbind());
+    }
     let y = extract_numeric_array(py, y.bind(py), &format!("{name}(y)"))?;
     let result = match x {
         Some(x) => {
@@ -14134,6 +14149,11 @@ fn take(
     // otherwise routed through the cold extract→ndarray.take path (30-100x slower).
     if let Some(out) = try_zerocopy_take_axis(py, a.bind(py), indices.bind(py), axis, mode)? {
         return Ok(out);
+    }
+    // Non-contiguous (transposed/strided) source ndarrays bail into the cold extract;
+    // delegate to numpy's strided take.
+    if noncontiguous_ndarray(&numpy, a.bind(py))? {
+        return fallback();
     }
     let a = extract_numeric_array(py, a.bind(py), "take(a)")?;
     let (indices_shape, flat_indices) =
@@ -24343,6 +24363,9 @@ fn nanstd(
     {
         return Ok(out);
     }
+    if noncontiguous_ndarray(&numpy, a.bind(py))? {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanstd(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -24475,6 +24498,9 @@ fn nanvar(
         )?
     {
         return Ok(out);
+    }
+    if noncontiguous_ndarray(&numpy, a.bind(py))? {
+        return fallback();
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanvar(a)") {
         Ok(array) => array,
@@ -28485,6 +28511,10 @@ fn tile(py: Python<'_>, a: Py<PyAny>, reps: Py<PyAny>) -> PyResult<Py<PyAny>> {
         return Ok(out);
     }
 
+    // Non-contiguous (transposed/strided) ndarrays bail into the cold extract; delegate.
+    if noncontiguous_ndarray(&numpy, a.bind(py))? {
+        return fallback();
+    }
     let array = match extract_precise_numeric_array(py, a.bind(py), "tile(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -33374,6 +33404,15 @@ fn average(
         return Ok(out);
     }
 
+    // Non-contiguous (transposed/strided) ndarrays bail the zero-copy paths into the
+    // cold extract → rebuild (transpose-copy, ~45x slower). Delegate to numpy.
+    if noncontiguous_ndarray(&numpy, a.bind(py))?
+        || weights
+            .as_ref()
+            .is_some_and(|w| noncontiguous_ndarray(&numpy, w.bind(py)).unwrap_or(false))
+    {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "average(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -40232,6 +40271,11 @@ fn cumprod(
         return Ok(result);
     }
 
+    // Non-contiguous (transposed/strided) ndarrays bail the zero-copy paths into the
+    // cold extract → rebuild (transpose-copy). Delegate to numpy.
+    if noncontiguous_ndarray(&numpy, a.bind(py))? {
+        return fallback();
+    }
     // Extract input array
     let array = match extract_precise_numeric_array(py, a.bind(py), "cumprod(a)") {
         Ok(arr) => arr,
@@ -45390,6 +45434,10 @@ fn isclose(
     if let Some(out) = try_zerocopy_f32_isclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
     {
         return Ok(out);
+    }
+    // Non-contiguous (transposed/strided) operands bail into the cold extract; delegate.
+    if noncontiguous_ndarray(&numpy, a.bind(py))? || noncontiguous_ndarray(&numpy, b.bind(py))? {
+        return fallback();
     }
 
     let arr_a = match extract_precise_numeric_array(py, a.bind(py), "isclose(a)") {
