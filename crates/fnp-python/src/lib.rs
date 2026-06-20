@@ -17110,6 +17110,24 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .unbind())
     };
 
+    // Shape-peek BEFORE extracting: numpy's gesv beats the native LU for small 2-D
+    // square systems (n<104), and copying both operands into UFuncArrays first would
+    // dominate that tiny solve (n=16 was 2.7x slow even when the post-extract gate
+    // delegated). Delegate without extracting. Larger / non-2-D / non-ndarray inputs
+    // fall through to the native path (whose own size-gate backstops list inputs).
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && let Ok(shape) = a
+            .bind(py)
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+        && shape.len() == 2
+        && shape[0] == shape[1]
+        && shape[0] < 104
+    {
+        return fallback();
+    }
+
     let a = match extract_precise_numeric_array(py, a.bind(py), "solve(a, b)") {
         Ok(array) => array,
         Err(_) => return fallback(),
