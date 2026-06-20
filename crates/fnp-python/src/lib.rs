@@ -18051,7 +18051,21 @@ fn copysign(
 }
 
 #[pyfunction]
-fn nextafter(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn nextafter(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // out=/where=/dtype= etc → numpy passthrough (matches np.nextafter accepting out=).
+    if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2) {
+        return core_numpy_passthrough(py, "nextafter", args, kwargs);
+    }
+    let x1: Py<PyAny> = args.get_item(0)?.unbind();
+    let x2: Py<PyAny> = args.get_item(1)?.unbind();
     let numpy = py.import("numpy")?;
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
         return Ok(numpy
@@ -18075,7 +18089,21 @@ fn nextafter(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
 }
 
 #[pyfunction]
-fn hypot(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn hypot(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // out=/where=/dtype= etc → numpy passthrough (matches np.hypot accepting out=).
+    if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2) {
+        return core_numpy_passthrough(py, "hypot", args, kwargs);
+    }
+    let x1: Py<PyAny> = args.get_item(0)?.unbind();
+    let x2: Py<PyAny> = args.get_item(1)?.unbind();
     let numpy = py.import("numpy")?;
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
         return Ok(numpy
@@ -18119,7 +18147,21 @@ fn ldexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-fn logaddexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn logaddexp(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // out=/where=/dtype= etc → numpy passthrough (matches np.logaddexp accepting out=).
+    if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2) {
+        return core_numpy_passthrough(py, "logaddexp", args, kwargs);
+    }
+    let x1: Py<PyAny> = args.get_item(0)?.unbind();
+    let x2: Py<PyAny> = args.get_item(1)?.unbind();
     let numpy = py.import("numpy")?;
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
         return Ok(numpy
@@ -18145,7 +18187,21 @@ fn logaddexp(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
 }
 
 #[pyfunction]
-fn logaddexp2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x1, x2, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn logaddexp2(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // out=/where=/dtype= etc → numpy passthrough (matches np.logaddexp2 accepting out=).
+    if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2) {
+        return core_numpy_passthrough(py, "logaddexp2", args, kwargs);
+    }
+    let x1: Py<PyAny> = args.get_item(0)?.unbind();
+    let x2: Py<PyAny> = args.get_item(1)?.unbind();
     let numpy = py.import("numpy")?;
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
         return Ok(numpy
