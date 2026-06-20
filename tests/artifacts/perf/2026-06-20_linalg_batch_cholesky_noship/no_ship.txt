@@ -1,0 +1,30 @@
+# batched cholesky vs NumPy - NO-SHIP negative evidence
+# host thinkstation1, NumPy 2.4.3, load ~3, OMP/OPENBLAS=1
+
+## Loss (B,d,d) batched cholesky, fnp/numpy ratio (>1 = fnp slower):
+B=4000 d=8   0.89-1.14x  (ok, tiny lanes)
+B=2000 d=16  5.85-7.24x  LOSS
+B=1000 d=32  4.98-6.06x  LOSS
+B=500  d=64  4.57-5.93x  LOSS
+B=200  d=100 1.42-1.53x  loss
+B=64   d=200 1.37-1.47x  loss
+B=10000 d=4  1.01-1.10x  ok
+
+## DISPROVEN hypothesis: per-lane allocation in batch_map_lanes.
+Extended the direct-write path (cholesky_nxn_into_out, byte-identical, zero
+per-lane alloc) from n<16 to n<CHOL_MID_MIN(128). Rebuilt + measured: NO
+improvement (d=16 still 6.3x). Alloc/copy is NOT the bottleneck. REVERTED.
+
+## TRUE root cause: scalar per-lane unblocked Cholesky kernel.
+RAYON_NUM_THREADS=1 (serial) fnp is 6.3-8.6x slower than numpy:
+  d=16 6.32x, d=32 7.80x, d=64 8.58x  (serial)
+=> fnp's scalar triple-loop cholesky_nxn is ~6x slower PER LANE than LAPACK
+   dpotrf (loop-carried dot-product reduction does not vectorize; numpy's
+   gufunc calls tuned LAPACK per lane). Parallelism only partly compensates
+   and is high-variance (d=16 ranged 1.6x-6.3x across runs) - memory-bandwidth
+   / rayon-granularity bound, NOT achieving ~16x core scaling.
+
+## Real lever (separate, larger effort): a SIMD/blocked per-lane Cholesky
+kernel matching LAPACK dpotrf throughput, or batched panel factorization
+across lanes (lane = SIMD vector). Must stay byte-identical to cholesky_nxn
+golden. High-risk in contended fnp-linalg; not a wrapper/gate tweak.

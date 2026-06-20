@@ -4,6 +4,48 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY No-Ship: batch_cholesky 5-8x loss; alloc-elimination DISPROVEN, kernel is the wall
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_noship/`
+
+Run identity:
+- Agent: `BlackThrush` / `cod-b`. Subject: `fnp_linalg::batch_cholesky` via
+  `fnp.cholesky` on stacked (B,n,n) real-f64 SPD.
+- Reference: NumPy 2.4.3 on `thinkstation1`, load ~3, OMP/OPENBLAS=1.
+- Decision: NO-SHIP. Hypothesis disproven by measurement; change REVERTED so
+  fnp-linalg working tree matches HEAD.
+
+Loss (fnp/numpy, >1 = slower): d=8 0.89-1.14x ok; **d=16 5.85-7.24x, d=32
+4.98-6.06x, d=64 4.57-5.93x LOSS**; d=100 1.42x, d=200 1.37x; d=4 ~1.0x.
+Correct (L@Lᵀ==A, match=True) throughout — pure perf.
+
+DISPROVEN hypothesis: the n>=16 batched path calls per-lane `cholesky_nxn`
+(`vec![0.0;n*n]` per lane) via `batch_map_lanes` then flatten-copies (Vec<Vec>),
+unlike the n<16 path which writes directly into the pre-zeroed output. I assumed
+per-lane allocation under rayon was an allocator-contention storm. FIX TRIED:
+raise the direct-write gate from `n<16` to `n<CHOL_MID_MIN(128)` (using
+`cholesky_nxn_into_out`, byte-identical to the unblocked formula for n<128).
+Rebuilt + measured: **NO improvement** (d=16 still ~6.3x). Allocation/copy is NOT
+the bottleneck. Reverted.
+
+TRUE root cause (measured with `RAYON_NUM_THREADS=1`): SERIAL fnp is **6.3-8.6x**
+slower than numpy (d=16 6.32x, d=32 7.80x, d=64 8.58x). The scalar triple-loop
+`cholesky_nxn` is ~6x slower PER LANE than LAPACK `dpotrf` — its inner
+dot-product `sum += out[ri+k]*out[rj+k]` is a loop-carried reduction that does
+not autovectorize, while numpy's gufunc calls tuned LAPACK per lane. Parallelism
+only partly compensates and is HIGH-VARIANCE (d=16 ranged 1.6x-6.3x across runs;
+bandwidth / rayon-granularity bound, not achieving ~16x core scaling).
+
+Real lever (separate, larger, high-risk in contended fnp-linalg): a SIMD/blocked
+per-lane Cholesky kernel matching dpotrf throughput, or batched panel
+factorization with lane-as-SIMD-vector. Must stay byte-identical to the
+`cholesky_nxn` golden. NOT a wrapper/gate tweak.
+
+Retry predicate: do NOT retry batch_cholesky via alloc-elimination, gate tuning,
+or parallel-threshold changes (all measured neutral). Only a vectorized/BLAS
+per-lane kernel (or SIMD-across-lanes) can close this; verify serial speedup
+FIRST (RAYON_NUM_THREADS=1) since the parallel numbers are too noisy to A/B.
+
 ## 2026-06-20 - BOLD-VERIFY Fix: fnp-python eigvals CORRECTNESS bug (~9% wrong) + perf loss -> delegate to LAPACK
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_python_eigvals_correctness_delegate/`
