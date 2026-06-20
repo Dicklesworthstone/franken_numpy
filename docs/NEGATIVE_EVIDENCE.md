@@ -4,6 +4,69 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Keep: fnp-python einsum trace scalar-builder
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_python_einsum_trace_cod_b/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-b`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate: `fnp-python`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Target gap: residual `fnp_einsum_trace_f64_4000` from the cached-buffer
+  diagonal keep; the same-worker `vmi1227854` row was 5.9900 us FNP vs
+  5.2275 us NumPy, or 1.146x slower.
+- Decision: KEEP. Source commit `eb64c4d5` replaces f64 scalar-return
+  materialization through a temporary 0-D ndarray with a cached `numpy.float64`
+  constructor and routes direct f64 `trace` through that helper.
+
+Head-to-head result on RCH worker `vmi1227854`:
+
+| Row | FNP | NumPy | FNP/NumPy | Outcome |
+|---|---:|---:|---:|---|
+| `einsum_trace_f64_4000` | 4,838 ns | 6,242 ns | 0.775x | WIN |
+| `einsum_diag_f64_4000` | 860 ns | 939 ns | 0.916x | WIN |
+| `einsum_reduce_all_f64_1000` | 95,143 ns | 94,139 ns | 1.011x | neutral/loss, non-target |
+| `einsum_reduce_rows_f64_1000` | 90,580 ns | 93,613 ns | 0.968x | WIN |
+| `einsum_reduce_cols_f64_1000` | 109,933 ns | 198,288 ns | 0.554x | WIN |
+
+Ledger:
+- Target-decision rows: **2 wins / 0 losses / 0 neutral** for trace plus the
+  diagonal preservation row.
+- Full observed boundary sweep: **4 wins / 1 loss-or-neutral / 0 neutral** if
+  the non-target `reduce_all` near-loss is counted strictly.
+- The trace row moved from 1.146x slower than NumPy to 0.775x of NumPy on the
+  same RCH worker. FNP trace old/new improved from 5.990 us to 4.838 us, or
+  0.808x of the prior FNP time.
+- The diagonal support row remains faster than NumPy; its FNP absolute time
+  moved from 805.39 ns to 860 ns, or 1.068x of the prior FNP row, so this is
+  recorded as preserved-win noise rather than a new diagonal improvement.
+
+Validation:
+- `rch exec -- cargo test -p fnp-python --test conformance_einsum` passed 28/28,
+  including trace edge bits, scalar return type, diagonal view/trace golden, and
+  keyword/path outcome tests.
+- `rch exec -- cargo check -p fnp-python --lib --bench
+  criterion_python_surface` passed with the crate's pre-existing warnings.
+- `rch exec -- cargo build -p fnp-python --release` passed with the same
+  pre-existing warnings.
+- `rch exec -- cargo clippy -p fnp-python --lib --bench
+  criterion_python_surface -- -D warnings` remains blocked by broad pre-existing
+  `fnp-python` lint debt; the log does not mention `build_f64_scalar` or
+  `NUMPY_FLOAT64_TYPE`.
+- `cargo fmt -p fnp-python -- --check` remains blocked by broad pre-existing
+  rustfmt drift; the log does not mention the touched scalar-builder helper.
+- `git diff --check` passed. `ubs crates/fnp-python/src/lib.rs` did not finish
+  within the interactive window for the single large source file and was
+  interrupted after more than three minutes with no emitted finding.
+
+Retry predicate:
+- Do not retry this scalar-builder lever unless the retry uses a distinct scalar
+  construction mechanism or adds stronger scalar-return contract proof.
+- Treat `einsum_reduce_all_f64_1000` as the next visible Python-boundary einsum
+  residual from this sweep; do not reopen the diagonal pre-policy shortcut or
+  cached-buffer dispatch families without fresh losing evidence.
+
 ## 2026-06-20 - BOLD-VERIFY No-Ship: batch_cholesky f64x4 across-lanes SIMD regressed broad gate
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_simd_cod_a/`

@@ -3,6 +3,49 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - Python Einsum Trace Scalar-Builder Keep Slice
+
+Scope:
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate: `fnp-python`.
+- Worker proof: `vmi1227854`.
+- Artifact: `tests/artifacts/perf/2026-06-20_python_einsum_trace_cod_b/`.
+- Source commit: `eb64c4d5`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS | Trace moved from a prior 1.146x slower residual to 0.775x NumPy time on `vmi1227854`; diagonal remains faster at 0.916x NumPy time. |
+| Full observed boundary sweep | MIXED | 4 wins and 1 non-target loss-or-neutral: trace, diagonal, reduce-rows, and reduce-cols win; reduce-all is 1.011x slower than NumPy. |
+| Targeted correctness | PASS | `rch exec -- cargo test -p fnp-python --test conformance_einsum` passed 28/28. |
+| Crate compile health | PASS WITH WARNINGS | `rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface` and `rch exec -- cargo build -p fnp-python --release` passed with pre-existing warnings. |
+| Clippy health | KNOWN GAP | Crate-scoped clippy remains blocked by broad pre-existing `fnp-python` lint debt; the log does not mention the scalar-builder helper. |
+| Formatting health | KNOWN GAP | `cargo fmt -p fnp-python -- --check` reports broad pre-existing rustfmt drift; the touched helper is not in the fmt diff. |
+| UBS | TIMED OUT | `ubs crates/fnp-python/src/lib.rs` ran for more than three minutes on the single large file and was interrupted with no emitted finding. |
+| Evidence durability | PASS | RCH benchmark, conformance, check, release build, clippy/fmt/UBS caveats, diff check, and per-run scorecard are stored under the artifact directory. |
+
+Cluster score: **84 / 100**
+
+Score rationale:
+- +34 performance: the targeted trace residual now beats NumPy on the same RCH
+  worker, and the diagonal support row remains a win.
+- +18 correctness: focused einsum conformance passed all scalar, trace, view,
+  and keyword/path tests.
+- +14 reproducibility: same-worker prior residual, candidate RCH proof, target
+  directory, and exact commands are recorded.
+- +14 ledger discipline: wins, non-target loss, old/new ratio, validation
+  caveats, and retry predicate are recorded.
+- +4 source discipline: a narrow scalar-builder hunk replaced a temporary 0-D
+  ndarray construction path without widening dispatch semantics.
+- -16 residual health: `reduce_all` is still a visible Python-boundary near-loss,
+  and broad `fnp-python` clippy/fmt/UBS health remains blocked by pre-existing
+  inventory.
+
+Current release posture:
+- `fnp_einsum_trace_f64_4000` is **measured keep** for this scalar-builder pass.
+- `einsum_reduce_all_f64_1000` remains the next visible residual in the observed
+  boundary sweep; deeper einsum kernel work should target that or a fresh loser,
+  not the superseded diagonal shortcut family.
+
 ## 2026-06-20 - Batch Cholesky SIMD-Across-Lanes No-Ship Slice
 
 Scope:
