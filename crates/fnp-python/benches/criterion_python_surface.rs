@@ -1365,6 +1365,75 @@ fn bench_statistics_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_compress_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_compress_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_compress = module.getattr("compress").expect("fnp_python.compress");
+        let numpy_compress = numpy.getattr("compress").expect("numpy.compress");
+        let logical_or = numpy.getattr("logical_or").expect("numpy.logical_or");
+
+        for size in [100_000_i64, 1_000_000_i64] {
+            let index = numpy
+                .call_method1("arange", (size,))
+                .expect("compress index");
+            let arr = index
+                .call_method1("astype", ("float64",))
+                .expect("compress f64 input")
+                .call_method1("__sub__", (size as f64 / 2.0,))
+                .expect("centered compress input");
+            let every_181 = index
+                .call_method1("__mod__", (181_i64,))
+                .expect("compress mod 181")
+                .call_method1("__eq__", (0_i64,))
+                .expect("compress mod 181 mask");
+            let residue = index
+                .call_method1("__mul__", (41_i64,))
+                .expect("compress mask multiply")
+                .call_method1("__add__", (17_i64,))
+                .expect("compress mask add")
+                .call_method1("__mod__", (23_i64,))
+                .expect("compress mod 23");
+            let residue_mask = numpy
+                .getattr("isin")
+                .expect("numpy.isin")
+                .call1((&residue, vec![0_i64, 3, 8, 13, 21]))
+                .expect("compress residue mask");
+            let condition = logical_or
+                .call1((&every_181, &residue_mask))
+                .expect("compress bool mask");
+
+            group.bench_function(format!("fnp_compress_f64_axis_none_{size}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_compress
+                        .call1((&condition, &arr))
+                        .expect("fnp compress benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_compress_f64_axis_none_{size}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_compress
+                        .call1((&condition, &arr))
+                        .expect("numpy compress benchmark call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_einsum_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_einsum_boundary");
     group.sample_size(10);
@@ -1688,6 +1757,7 @@ criterion_group!(
     bench_histogram_boundary,
     bench_setops_boundary,
     bench_statistics_boundary,
+    bench_compress_boundary,
     bench_einsum_boundary,
     bench_linalg_boundary
 );

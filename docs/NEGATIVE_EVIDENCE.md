@@ -4,6 +4,84 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Keep: Python compress axis=None bitmask gather
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-20_python_compress_axis_none_cod_a/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-a`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-python` / `np.compress(condition, a)` with `axis=None`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Performance worker: `vmi1167313` for the counted old/new and NumPy rows.
+- Alien/optimization hook: mask-first stream compaction from
+  `/data/projects/alien_cs_graveyard/alien_cs_graveyard.md` numeric kernel
+  archetype plus branchless/block coding from `extreme-software-optimization`.
+  The retained lever changes the typed flat compaction loop from speculative
+  per-element stores into 8-lane mask construction plus trailing-zero selected
+  lane gathers.
+- Decision: SHIP. The sparse branch and NumPy delegate probes were reverted.
+
+Targeted gap:
+- The existing `axis=None` zerocopy compress route still lost to NumPy at the
+  100k flat row while winning at 1M. Baseline same-worker ratios were:
+  **1 win / 1 loss / 0 neutral** versus NumPy.
+
+Same-worker benchmark ledger:
+
+| Row | Baseline FNP | Baseline FNP/NumPy | Sparse branch | Sparse/Old | Delegate | Delegate/Old | Final bitmask | Final/Old | Final/NumPy | Outcome |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| `compress_f64_axis_none_100000` | 167,603 ns | 1.215x loss | 180,973 ns | 1.080x loss | 172,647 ns | 1.030x loss | 142,735 ns | 0.852x win | 1.015x neutral/noisy raw loss | keep |
+| `compress_f64_axis_none_1000000` | 1,902,857 ns | 0.792x win | 1,985,899 ns | 1.044x loss | 1,986,693 ns | 1.044x loss | 1,853,998 ns | 0.974x win | 0.805x win | keep |
+
+Rejected probes:
+- Sparse branch for `count * 2 <= m`: **0 wins / 2 losses / 0 neutral** versus
+  old FNP. NumPy ratios were 1.272x loss at 100k and 0.861x win at 1M, but both
+  old/new FNP rows regressed.
+- Small NumPy delegate for `condition.size <= 200000`: **0 wins / 2 losses /
+  0 neutral** versus old FNP. Raw NumPy ratios were 0.969x and 0.833x, but the
+  apparent 100k NumPy win came from a slower NumPy rerun and the FNP old/new
+  gate regressed both rows. A pinned local-fallback attempt was interrupted and
+  is retained as a not-counted artifact.
+
+Kept proof:
+- Final bitmask old/new gate: **2 wins / 0 losses / 0 neutral** versus old FNP.
+- Final head-to-head NumPy gate: **1 win / 0 losses / 1 neutral**. The 100k row
+  is a 1.015x raw FNP/NumPy ratio, inside the observed timing noise; the 1M row
+  remains a clear 0.805x win versus NumPy.
+- The 100k loss class moved from 21.5% slower than NumPy to 1.5% raw slower,
+  while the 1M row improved versus both old FNP and NumPy.
+
+Validation:
+- `rch exec -- cargo test -p fnp-python --test conformance_compress_choose_diagonal
+  compress -- --nocapture` passed: 13 passed, 0 failed.
+- `rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface`
+  passed with three inherited `fnp-python` warnings.
+- `rch exec -- cargo build -p fnp-python --release` passed with the same three
+  inherited warnings.
+- `cargo fmt -p fnp-python -- --check` reports broad pre-existing rustfmt drift
+  in `fnp-python`; the new benchmark hunk was manually aligned with rustfmt's
+  suggested local formatting.
+- `rch exec -- cargo clippy -p fnp-python --lib --bench
+  criterion_python_surface -- -D warnings` failed on 35 existing `fnp-python`
+  lint errors outside this compaction hunk.
+- `ubs crates/fnp-python/src/lib.rs crates/fnp-python/benches/criterion_python_surface.rs
+  docs/NEGATIVE_EVIDENCE.md docs/RELEASE_READINESS_SCORECARD.md
+  tests/artifacts/perf/2026-06-20_python_compress_axis_none_cod_a/SUMMARY.md`
+  completed and recorded the broad existing `fnp-python` scanner inventory; it
+  did not identify a focused new blocker for this compaction hunk.
+- `git diff --check` passed.
+
+Retry predicate:
+- Do not retry sparse kept-only branching or threshold-gated NumPy delegation
+  for this row family; both failed the old/new FNP gate.
+- Re-profile deeper only if future masks are dense enough that selected-lane
+  trailing-zero iteration loses to speculative stores, or if an architecture
+  with stronger SIMD compress-store support is available behind a safe,
+  target-gated implementation. A credible retry must keep the 100k row below
+  the old FNP 0.852x ratio and preserve the 1M NumPy win.
+
 ## 2026-06-20 - BOLD-VERIFY No-Ship: batch_cholesky 8-lane SoA generated micro-kernel probe
 
 Artifact directory:

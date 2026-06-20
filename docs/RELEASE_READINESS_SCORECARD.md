@@ -3,6 +3,55 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - Python Compress Axis=None Bitmask-Gather Keep Slice
+
+Scope:
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-python` / `np.compress(condition, a)` flat `axis=None`.
+- Worker proof: same-worker baseline, rejects, final candidate, and NumPy rows
+  on `vmi1167313`.
+- Artifact:
+  `tests/artifacts/perf/2026-06-20_python_compress_axis_none_cod_a/`.
+- Candidate: replace speculative per-element flat compaction stores with an
+  8-lane condition mask and trailing-zero selected-lane gather loop.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS / NARROW | Final NumPy ratios are 1 win / 0 losses / 1 neutral: 100k is 1.015x raw FNP/NumPy and within noise; 1M is 0.805x win. |
+| Old/new FNP regression gate | PASS | Final candidate is faster on both measured rows: 0.852x at 100k and 0.974x at 1M versus old FNP. |
+| Rejected probes | PASS | Sparse branch and small NumPy delegate probes were both reverted after old/new FNP regressions on both rows. |
+| Targeted correctness | PASS | `rch exec -- cargo test -p fnp-python --test conformance_compress_choose_diagonal compress -- --nocapture` passed 13/13. |
+| Crate compile health | PASS WITH WARNINGS | `rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface` passed with three inherited warnings. |
+| Release build health | PASS WITH WARNINGS | `rch exec -- cargo build -p fnp-python --release` passed with the same inherited warnings. |
+| Formatting health | KNOWN GAP | `cargo fmt -p fnp-python -- --check` reports broad pre-existing rustfmt drift; the new benchmark hunk was manually aligned. |
+| Clippy health | KNOWN GAP | `rch exec -- cargo clippy -p fnp-python --lib --bench criterion_python_surface -- -D warnings` failed on 35 existing `fnp-python` lint errors outside this hunk. |
+| UBS | KNOWN GAP | UBS completed on the changed source/doc paths and recorded broad existing `fnp-python` findings; no focused new blocker changed this keep decision. |
+| Whitespace | PASS | `git diff --check` passed. |
+| Evidence durability | PASS | Baseline, two rejected probes, final candidate, conformance, check, release build, fmt, clippy logs, ratios, and retry predicate are recorded. |
+
+Cluster score: **86 / 100**
+
+Score rationale:
+- +30 performance: the selected 100k loss class moved from 1.215x slower than
+  NumPy to a 1.015x noisy/neutral raw ratio, and 1M stayed a 0.805x NumPy win.
+- +18 old/new discipline: both final rows improved versus old FNP, while two
+  regressing probes were rejected and reverted.
+- +18 correctness/build: focused compress conformance, per-crate check, and
+  release build passed.
+- +12 evidence discipline: same-worker proof, exact ratios, raw artifacts, and
+  retry predicates are durable.
+- +8 source discipline: the implementation stays inside the existing typed flat
+  compaction core and does not change Python dispatch semantics.
+- -14 hygiene: crate-wide fmt, clippy, and UBS gates still have existing debt
+  outside this performance slice.
+
+Current release posture:
+- Flat `compress(axis=None)` is no longer a material measured NumPy loss for
+  this mask family; keep it in the benchmark harness so future compaction
+  changes must preserve both the near-parity 100k row and the 1M win.
+- Remaining `fnp-python` release readiness is limited by existing lint/format
+  debt and by other NumPy gap families, not by this compact loop change.
+
 ## 2026-06-20 - Batch Cholesky 8-Lane SoA No-Ship Slice
 
 Scope:

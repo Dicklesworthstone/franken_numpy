@@ -1,0 +1,715 @@
+  [2m2026-06-20T19:40:31.351430Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1227854 at root@109.123.245.77 (5 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:921 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:31.614179Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_numpy-cod-a-bold-verify-20260620b (hash: b76a6c419f6621ba)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:31.614245Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 11 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:33.181894Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker vmi1227854...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:33.181970Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 pattern(s) from .rchignore (total: 39)[0m
+    [2;3mat[0m rch/src/transfer.rs:886 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:33.181979Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:36.752657Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 3570ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:36.752716Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-conformance -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-conformance on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:38.627768Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1875ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:38.627829Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-dtype -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-dtype on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:40.427539Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1799ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:40.427604Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-io -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-io on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:42.226117Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1798ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:42.226186Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-iter -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-iter on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:44.084923Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1858ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:44.085018Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-linalg -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-linalg on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:45.952584Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1867ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:45.952644Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-ndarray -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-ndarray on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:47.913641Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1960ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:47.913713Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:49.792828Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1879ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:49.792911Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-random -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-random on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:51.590610Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1797ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:51.590683Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-runtime -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-runtime on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:53.437211Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1846ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:53.437300Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-ufunc -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-ufunc on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:55.463296Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2025ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:40:55.463334Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 4871 files, 16336199 bytes in 22274ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:41:05.255840Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo clippy -p fnp-python --lib --bench criterion_python_surface -- -D warnings[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T19:41:05.255911Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.rch-targets/franken_numpy-cod-a -> /data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/.rch-target-vmi1227854-pool-956a893b857e55c7be37cd001d6bab2f[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded ciborium v0.2.2
+  Downloaded clap v4.6.1
+  Downloaded pyo3-build-config v0.28.3
+  Downloaded cast v0.3.0
+  Downloaded num-traits v0.2.19
+  Downloaded ciborium-io v0.2.2
+  Downloaded anes v0.1.6
+  Downloaded cfg-if v1.0.4
+  Downloaded autocfg v1.5.0
+  Downloaded plotters v0.3.7
+  Downloaded adler2 v2.0.1
+  Downloaded bytemuck v1.25.0
+  Downloaded serde_derive v1.0.228
+  Downloaded zmij v1.0.21
+  Downloaded target-lexicon v0.13.5
+  Downloaded anstyle v1.0.14
+  Downloaded regex-automata v0.4.14
+  Downloaded walkdir v2.5.0
+  Downloaded plotters-backend v0.3.7
+  Downloaded heck v0.5.0
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded clap_lex v1.1.0
+  Downloaded simd-adler32 v0.3.9
+  Downloaded same-file v1.0.6
+  Downloaded quote v1.0.45
+  Downloaded tinytemplate v1.2.1
+  Downloaded criterion-plot v0.5.0
+  Downloaded pyo3-macros v0.28.3
+  Downloaded oorandom v11.1.5
+  Downloaded itoa v1.0.18
+  Downloaded unicode-ident v1.0.24
+  Downloaded miniz_oxide v0.8.9
+  Downloaded serde_core v1.0.228
+  Downloaded regex v1.12.3
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded proc-macro2 v1.0.106
+  Downloaded crc32fast v1.5.0
+  Downloaded rayon-core v1.13.0
+  Downloaded serde_json v1.0.149
+  Downloaded rayon v1.12.0
+  Downloaded itertools v0.10.5
+  Downloaded clap_builder v4.6.0
+  Downloaded pyo3-ffi v0.28.3
+  Downloaded syn v2.0.117
+  Downloaded itertools v0.13.0
+  Downloaded criterion v0.6.0
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded pyo3-macros-backend v0.28.3
+  Downloaded getrandom v0.3.4
+  Downloaded zerocopy v0.8.48
+  Downloaded memchr v2.8.0
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded serde v1.0.228
+  Downloaded plotters-svg v0.3.7
+  Downloaded regex-syntax v0.8.10
+  Downloaded flate2 v1.1.9
+  Downloaded once_cell v1.21.4
+  Downloaded half v2.7.1
+  Downloaded either v1.15.0
+  Downloaded aho-corasick v1.1.4
+  Downloaded ciborium-ll v0.2.2
+  Downloaded libc v0.2.185
+  Downloaded pyo3 v0.28.3
+   Compiling proc-macro2 v1.0.106
+   Compiling unicode-ident v1.0.24
+   Compiling quote v1.0.45
+   Compiling target-lexicon v0.13.5
+    Checking cfg-if v1.0.4
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+   Compiling zerocopy v0.8.48
+    Checking either v1.15.0
+   Compiling zmij v1.0.21
+   Compiling serde v1.0.228
+   Compiling rayon-core v1.13.0
+   Compiling serde_json v1.0.149
+   Compiling libc v0.2.185
+    Checking memchr v2.8.0
+    Checking itoa v1.0.18
+   Compiling crc32fast v1.5.0
+   Compiling autocfg v1.5.0
+    Checking simd-adler32 v0.3.9
+   Compiling getrandom v0.3.4
+    Checking fnp-ndarray v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-ndarray)
+    Checking crossbeam-epoch v0.9.18
+    Checking adler2 v2.0.1
+   Compiling heck v0.5.0
+    Checking miniz_oxide v0.8.9
+   Compiling num-traits v0.2.19
+    Checking crossbeam-deque v0.8.6
+   Compiling pyo3-build-config v0.28.3
+    Checking clap_lex v1.1.0
+   Compiling syn v2.0.117
+    Checking plotters-backend v0.3.7
+    Checking regex-syntax v0.8.10
+    Checking ciborium-io v0.2.2
+    Checking anstyle v1.0.14
+    Checking flate2 v1.1.9
+    Checking plotters-svg v0.3.7
+    Checking rayon v1.12.0
+    Checking itertools v0.10.5
+    Checking clap_builder v4.6.0
+    Checking same-file v1.0.6
+    Checking cast v0.3.0
+    Checking once_cell v1.21.4
+    Checking fnp-runtime v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-runtime)
+    Checking bytemuck v1.25.0
+    Checking plotters v0.3.7
+    Checking fnp-io v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-io)
+    Checking walkdir v2.5.0
+    Checking regex-automata v0.4.14
+    Checking itertools v0.13.0
+    Checking criterion-plot v0.5.0
+    Checking oorandom v11.1.5
+    Checking anes v0.1.6
+   Compiling pyo3-ffi v0.28.3
+   Compiling pyo3-macros-backend v0.28.3
+   Compiling pyo3 v0.28.3
+    Checking clap v4.6.1
+    Checking fnp-linalg v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-linalg)
+    Checking fnp-random v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-random)
+    Checking regex v1.12.3
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+    Checking fnp-iter v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-iter)
+    Checking tinytemplate v1.2.1
+   Compiling pyo3-macros v0.28.3
+    Checking half v2.7.1
+    Checking ciborium-ll v0.2.2
+    Checking fnp-dtype v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-dtype)
+    Checking ciborium v0.2.2
+    Checking fnp-ufunc v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-ufunc)
+    Checking criterion v0.6.0
+    Checking fnp-python v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-bold-verify-20260620b/crates/fnp-python)
+error: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2519:5
+     |
+2516 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2519 |     Depth,
+     |     ^^^^^
+2520 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `-D dead-code` implied by `-D warnings`
+     = help: to override `-D warnings` add `#[expect(dead_code)]` or `#[allow(dead_code)]`
+
+error: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5151:4
+     |
+5151 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+error: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5173:4
+     |
+5173 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+error: the loop variable `o` is used to index `output`
+     --> crates/fnp-python/src/lib.rs:14470:30
+      |
+14470 |                     for o in 0..outer {
+      |                              ^^^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_range_loop
+      = note: `-D clippy::needless-range-loop` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::needless_range_loop)]`
+help: consider using an iterator and enumerate()
+      |
+14470 -                     for o in 0..outer {
+14470 +                     for (o, <item>) in output.iter().enumerate().take(outer) {
+      |
+
+error: this function has too many arguments (8/7)
+     --> crates/fnp-python/src/lib.rs:15447:1
+      |
+15447 | / fn clip(
+15448 | |     py: Python<'_>,
+15449 | |     a: Py<PyAny>,
+15450 | |     a_min: Option<Py<PyAny>>,
+...     |
+15455 | |     kwargs: Option<&Bound<'_, PyDict>>,
+15456 | | ) -> PyResult<Py<PyAny>> {
+      | |________________________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+      = note: `-D clippy::too-many-arguments` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::too_many_arguments)]`
+
+error: manual `!Range::contains` implementation
+     --> crates/fnp-python/src/lib.rs:22394:8
+      |
+22394 |       if n_vars < MIN_VARS
+      |  ________^
+22395 | |         || n_vars >= MAX_SIMD_VARS_EXCLUSIVE
+      | |____________________________________________^ help: use: `!(MIN_VARS..MAX_SIMD_VARS_EXCLUSIVE).contains(&n_vars)`
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_range_contains
+      = note: `-D clippy::manual-range-contains` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::manual_range_contains)]`
+
+error: equal expressions as operands to `==`
+     --> crates/fnp-python/src/lib.rs:24120:34
+      |
+24120 |                         *a_sw |= v == v;
+      |                                  ^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+      = note: `#[deny(clippy::eq_op)]` on by default
+
+error: equal expressions as operands to `==`
+     --> crates/fnp-python/src/lib.rs:24125:34
+      |
+24125 |                         *a_sw |= v == v;
+      |                                  ^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `==`
+     --> crates/fnp-python/src/lib.rs:24153:42
+      |
+24153 | ...                   *a_sw |= v == v;
+      |                                ^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `==`
+     --> crates/fnp-python/src/lib.rs:24158:42
+      |
+24158 | ...                   *a_sw |= v == v;
+      |                                ^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:25070:5
+      |
+25070 | /     if axis.is_none() {
+25071 | |         if let Ok(qs) = q.bind(py).extract::<Vec<f64>>() {
+25072 | |             let result = match a.percentiles_axis_none(&qs) {
+25073 | |                 Ok(result) => result,
+...     |
+25078 | |     }
+      | |_____^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+      = note: `-D clippy::collapsible-if` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::collapsible_if)]`
+help: collapse nested if block
+      |
+25070 ~     if axis.is_none()
+25071 ~         && let Ok(qs) = q.bind(py).extract::<Vec<f64>>() {
+25072 |             let result = match a.percentiles_axis_none(&qs) {
+  ...
+25076 |             return build_numpy_array_from_ufunc(py, &result);
+25077 ~         }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:33540:5
+      |
+33540 | /     if let Some(mode) = svd_mode {
+33541 | |         if let Ok(array) = extract_numeric_array(py, x.bind(py), "matrix_norm(x)") {
+33542 | |             let shape = array.shape();
+33543 | |             if shape.len() >= 3
+...     |
+33577 | |     }
+      | |_____^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+33540 ~     if let Some(mode) = svd_mode
+33541 ~         && let Ok(array) = extract_numeric_array(py, x.bind(py), "matrix_norm(x)") {
+33542 |             let shape = array.shape();
+  ...
+33575 |             }
+33576 ~         }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:33552:17
+      |
+33552 | /                 if k >= 1 {
+33553 | |                     if let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape) {
+33554 | |                         let batch = sigmas.len() / k;
+33555 | |                         let mut out = Vec::with_capacity(batch);
+...     |
+33574 | |                 }
+      | |_________________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+33552 ~                 if k >= 1
+33553 ~                     && let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape) {
+33554 |                         let batch = sigmas.len() / k;
+  ...
+33572 |                         return build_numpy_array_from_ufunc(py, &result);
+33573 ~                     }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:35720:5
+      |
+35720 | /     if axis.is_none() {
+35721 | |         if let Ok(qs) = q.bind(py).extract::<Vec<f64>>() {
+35722 | |             let result = match a.quantiles_axis_none(&qs) {
+35723 | |                 Ok(result) => result,
+...     |
+35728 | |     }
+      | |_____^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+35720 ~     if axis.is_none()
+35721 ~         && let Ok(qs) = q.bind(py).extract::<Vec<f64>>() {
+35722 |             let result = match a.quantiles_axis_none(&qs) {
+  ...
+35726 |             return build_numpy_array_from_ufunc(py, &result);
+35727 ~         }
+      |
+
+error: redundant guard
+     --> crates/fnp-python/src/lib.rs:37354:22
+      |
+37354 |             Ok(f) if f == 2.0 => Some(2),
+      |                      ^^^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_guards
+      = note: `-D clippy::redundant-guards` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::redundant_guards)]`
+help: try
+      |
+37354 -             Ok(f) if f == 2.0 => Some(2),
+37354 +             Ok(2.0) => Some(2),
+      |
+
+error: redundant guard
+     --> crates/fnp-python/src/lib.rs:37355:22
+      |
+37355 |             Ok(f) if f == -2.0 => Some(-2),
+      |                      ^^^^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_guards
+help: try
+      |
+37355 -             Ok(f) if f == -2.0 => Some(-2),
+37355 +             Ok(-2.0) => Some(-2),
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37359:5
+      |
+37359 | /     if let Some(mode) = p_mode {
+37360 | |         if let Ok(array) = extract_numeric_array(py, x.bind(py), "cond(x)") {
+37361 | |             let shape = array.shape();
+37362 | |             if shape.len() >= 3
+...     |
+37398 | |     }
+      | |_____^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37359 ~     if let Some(mode) = p_mode
+37360 ~         && let Ok(array) = extract_numeric_array(py, x.bind(py), "cond(x)") {
+37361 |             let shape = array.shape();
+  ...
+37396 |             }
+37397 ~         }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37371:17
+      |
+37371 | /                 if k >= 1 {
+37372 | |                     if let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape) {
+37373 | |                         let batch = sigmas.len() / k;
+37374 | |                         let mut out = Vec::with_capacity(batch);
+...     |
+37395 | |                 }
+      | |_________________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37371 ~                 if k >= 1
+37372 ~                     && let Ok(sigmas) = fnp_linalg::batch_svd(array.values(), &owned_shape) {
+37373 |                         let batch = sigmas.len() / k;
+  ...
+37393 |                         return build_numpy_array_from_ufunc(py, &result);
+37394 ~                     }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37494:5
+      |
+37494 | /     if let (Some(ord_val), Some(axis_val)) = (ord.as_ref(), axis.as_ref()) {
+37495 | |         if let Some(mode) = svd_matrix_norm_mode(py, ord_val) {
+37496 | |             if let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>() {
+37497 | |                 if let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)") {
+...     |
+37519 | |     }
+      | |_____^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37494 ~     if let (Some(ord_val), Some(axis_val)) = (ord.as_ref(), axis.as_ref())
+37495 ~         && let Some(mode) = svd_matrix_norm_mode(py, ord_val) {
+37496 |             if let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>() {
+  ...
+37517 |             }
+37518 ~         }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37495:9
+      |
+37495 | /         if let Some(mode) = svd_matrix_norm_mode(py, ord_val) {
+37496 | |             if let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>() {
+37497 | |                 if let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)") {
+37498 | |                     let nd = array.shape().len() as i64;
+...     |
+37518 | |         }
+      | |_________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37495 ~         if let Some(mode) = svd_matrix_norm_mode(py, ord_val)
+37496 ~             && let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>() {
+37497 |                 if let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)") {
+  ...
+37516 |                 }
+37517 ~             }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37496:13
+      |
+37496 | /             if let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>() {
+37497 | |                 if let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)") {
+37498 | |                     let nd = array.shape().len() as i64;
+37499 | |                     let resolve = |a: i64| if a < 0 { a + nd } else { a };
+...     |
+37517 | |             }
+      | |_____________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37496 ~             if let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>()
+37497 ~                 && let Ok(array) = extract_numeric_array(py, x.bind(py), "norm(x)") {
+37498 |                     let nd = array.shape().len() as i64;
+  ...
+37515 |                     }
+37516 ~                 }
+      |
+
+error: this `if` statement can be collapsed
+     --> crates/fnp-python/src/lib.rs:37509:21
+      |
+37509 | /                     if trailing {
+37510 | |                         if let Some(result) =
+37511 | |                             try_batched_svd_matrix_norm(py, &array, mode, keepdims)?
+...     |
+37515 | |                     }
+      | |_____________________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#collapsible_if
+help: collapse nested if block
+      |
+37509 ~                     if trailing
+37510 ~                         && let Some(result) =
+37511 |                             try_batched_svd_matrix_norm(py, &array, mode, keepdims)?
+37512 |                         {
+37513 |                             return Ok(result);
+37514 ~                         }
+      |
+
+error: redundant closure
+     --> crates/fnp-python/src/lib.rs:39624:38
+      |
+39624 |                         .reduce_with(|a, b| fold(a, b))
+      |                                      ^^^^^^^^^^^^^^^^^ help: replace the closure with the function itself: `&fold`
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#redundant_closure
+      = note: `-D clippy::redundant-closure` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::redundant_closure)]`
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:41323:24
+      |
+41323 |             any_nan |= v != v;
+      |                        ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:41332:32
+      |
+41332 |                     any_nan |= v != v;
+      |                                ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:41340:32
+      |
+41340 |                     any_nan |= v != v;
+      |                                ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: manual checked division
+     --> crates/fnp-python/src/lib.rs:42659:24
+      |
+42659 |         let block = if n_groups == 0 { 0 } else { total / n_groups };
+      |                        ^^^^^^^^^^^^^              ---------------- division performed here
+      |                        |
+      |                        check performed here
+      |
+      = help: consider using `checked_div`
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#manual_checked_ops
+      = note: `-D clippy::manual-checked-ops` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::manual_checked_ops)]`
+
+error: you should use the `starts_with` method
+     --> crates/fnp-python/src/lib.rs:42778:14
+      |
+42778 |         1 if out.chars().next() == Some(kept) => true,
+      |              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ help: like this: `out.starts_with(kept)`
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#chars_next_cmp
+      = note: `-D clippy::chars-next-cmp` implied by `-D warnings`
+      = help: to override `-D warnings` add `#[allow(clippy::chars_next_cmp)]`
+
+error: this function has too many arguments (8/7)
+     --> crates/fnp-python/src/lib.rs:44529:1
+      |
+44529 | / fn prod_axis_typed<'py, T, A, FC, FM>(
+44530 | |     py: Python<'py>,
+44531 | |     numpy: &Bound<'py, PyModule>,
+44532 | |     a: &Bound<'py, PyAny>,
+...     |
+44542 | |     FC: Fn(T) -> A,
+44543 | |     FM: Fn(A, A) -> A,
+      | |______________________^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#too_many_arguments
+
+error: the loop variable `o` is used to index `output`
+     --> crates/fnp-python/src/lib.rs:44582:22
+      |
+44582 |             for o in 0..outer {
+      |                      ^^^^^^^^
+      |
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#needless_range_loop
+help: consider using an iterator and enumerate()
+      |
+44582 -             for o in 0..outer {
+44582 +             for (o, <item>) in output.iter().enumerate().take(outer) {
+      |
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:45206:35
+      |
+45206 |                 let mut any_nan = first != first;
+      |                                   ^^^^^^^^^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:45208:32
+      |
+45208 |                     any_nan |= v != v;
+      |                                ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:45233:86
+      |
+45233 |                 let mut nanv: Vec<bool> = data[obase..obase + inner].iter().map(|&v| v != v).collect();
+      |                                                                                      ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:45242:32
+      |
+45242 |                         *nf |= v != v;
+      |                                ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: equal expressions as operands to `!=`
+     --> crates/fnp-python/src/lib.rs:45282:39
+      |
+45282 | ...                   *f |= v != v;
+      |                             ^^^^^^
+      |
+      = note: if you intended to check if the operand is NaN, use `.is_nan()` instead
+      = help: for further information visit https://rust-lang.github.io/rust-clippy/master/index.html#eq_op
+
+error: could not compile `fnp-python` (lib) due to 35 previous errors
+  [2m2026-06-20T19:41:34.657239Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=101 in 29401ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+[RCH] remote vmi1227854 failed (exit 101)

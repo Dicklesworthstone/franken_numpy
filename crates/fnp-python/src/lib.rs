@@ -9612,17 +9612,29 @@ fn compact_typed<'py, T: pyo3::buffer::Element + Copy>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        // Branchless compaction: always store arr[i] at output[w], then advance w
-        // only when kept (the unkept store is overwritten by the next kept one).
-        // Avoids the ~50% branch-mispredict of `if cond { ...; w += 1 }`. The
-        // store is guarded so trailing-unkept writes (w == count) stay in bounds.
+        // Build an 8-bit mask per condition chunk, then gather only selected
+        // lanes with trailing-zero iteration. This avoids both per-element branch
+        // mispredicts and speculative stores for unkept lanes.
         let mut w = 0usize;
-        for i in 0..m {
-            let v = arr_in[i].get();
-            if w < count {
-                output[w].set(v);
+        let mut base = 0usize;
+        while base + 8 <= m {
+            let mut mask = 0u8;
+            for lane in 0..8 {
+                mask |= ((cond_in[base + lane].get() != 0) as u8) << lane;
             }
-            w += (cond_in[i].get() != 0) as usize;
+            while mask != 0 {
+                let lane = mask.trailing_zeros() as usize;
+                output[w].set(arr_in[base + lane].get());
+                w += 1;
+                mask &= mask - 1;
+            }
+            base += 8;
+        }
+        for i in base..m {
+            if cond_in[i].get() != 0 {
+                output[w].set(arr_in[i].get());
+                w += 1;
+            }
         }
     }
     Ok(Some(flat.unbind()))
