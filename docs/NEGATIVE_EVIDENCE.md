@@ -2791,3 +2791,54 @@ Focused conformance and crate health:
 Retry predicate:
 - Do not retry direct-write allocation elimination below `n=16`; that family is now extended through `n=32`.
 - A future Cholesky attempt should either improve the Python stacked boundary directly or target `n >= 64` with a separate branch-specific kernel. It must not use this noisy `n>=64` guard-table drift as proof that the direct-write `n<=32` branch regressed those sizes.
+
+## 2026-06-20 - BOLD-VERIFY Keep: `fnp-linalg` eigvalsh mid-band row-dot reducer
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_eigvalsh_values_cod_b/`
+
+Run identity:
+- Parent bead: `franken_numpy-ixs5y`; child bead: `franken_numpy-ixs5y.275`.
+- Agent: `YellowElk` / `cod-b`.
+- Crate scope: `fnp-linalg` only.
+- Worker proof: `hz1` for Rust Criterion and direct NumPy comparator.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Candidate: use a full contiguous row-dot serial panel matvec only for `192 <= n < 384`; below and above that range keep the old half-symmetric scatter walk.
+
+Decision:
+- Kept, narrowly. The direct row-dot formulation is bit-identical to the old half-symmetric walk for mirrored dense symmetric work matrices, and it materially improves the 256-class eigvalsh reducer.
+- The ungated row-dot probe was rejected because it regressed 64/128 and made 512 much worse. The final hunk gates the lever to the measured mid-band only.
+- This does not close the NumPy gap: `eigvalsh_nxn/256` improves 0.735x versus old FNP but still runs 1.757x NumPy on `hz1`. `eigvalsh_nxn/128` remains a residual loss and is below the row-dot gate.
+
+Primary same-worker evidence on `hz1`:
+
+| Workload | Baseline FNP ns | Final FNP ns | NumPy median ns | Final/Baseline | Final/NumPy | Verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `eigvalsh_nxn/size/64` | 261856 | 270106 | 254157 | 1.032x | 1.063x | neutral/noise; below row-dot gate |
+| `eigvalsh_nxn/size/128` | 1995299 | 1896797 | 1280690 | 0.951x | 1.481x | residual loss; below row-dot gate |
+| `eigvalsh_nxn/size/256` | 17636268 | 12969460 | 7380748 | 0.735x | 1.757x | keep win vs old FNP; residual NumPy loss |
+| `eigvalsh_nxn/size/512` | not rebaselined | 59840882 | 49987519 | n/a | 1.197x | guard row; row-dot disabled |
+
+Rejected probes and negative evidence:
+
+| Probe | Workload | Probe FNP ns | Comparator ns | Ratio | Verdict |
+|---|---:|---:|---:|---:|---|
+| Ungated row-dot | `eigvalsh_nxn/size/64` | 287434 | 261856 baseline | 1.098x | reject regression |
+| Ungated row-dot | `eigvalsh_nxn/size/128` | 2103644 | 1995299 baseline | 1.054x | reject regression |
+| Ungated row-dot | `eigvalsh_nxn/size/256` | 12580950 | 17636268 baseline | 0.713x | useful signal, too broad |
+| Row-dot enabled at 512 | `eigvalsh_nxn/size/512` | 88449167 | 59840882 final old-path guard | 1.478x | reject; upper gate required |
+
+Profile context:
+- `rch exec -- cargo test -p fnp-linalg tridiag_eigvals_qr_perf_report --release -- --ignored --nocapture` on `hz1`: QR scaled-hypot path is already faster than the old libm-`hypot` path by 1.30x, 1.31x, and 1.27x at n=256/512/768. The remaining end-to-end loss is reducer-side.
+
+Focused conformance and crate health:
+- `rch exec -- cargo test -p fnp-linalg tridiag --release`: pass on RCH-selected `vmi1153651`; 7 passed, 0 failed, 4 ignored. This includes `tridiag_symmetric_matvec_serial_matches_full_row_dot_bits`, blocked/unblocked checks, parallel-matvec check, and `tridiag_rank2k_fused_update_preserves_spectra_and_golden_sha256`.
+- `rch exec -- cargo check -p fnp-linalg --all-targets`: pass on RCH-selected `vmi1152480`.
+- `rch exec -- cargo build -p fnp-linalg --release`: pass on RCH-selected `vmi1152480`.
+- `rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings`: pass on `hz1`.
+- `git diff --check`: pass.
+- `cargo fmt -p fnp-linalg -- --check` still reports broad pre-existing rustfmt drift in benches/examples and unrelated source regions; no formatting churn was kept.
+- `ubs` over the changed source/doc paths still exits nonzero from broad existing `fnp-linalg/src/lib.rs` inventory, not from a row-dot-hunk-specific finding.
+
+Retry predicate:
+- Do not retry ungated full row-dot matvec. It helps the 256-class dense reducer but loses at 64/128 and 512.
+- A credible next eigvalsh attempt needs a deeper values-only tridiagonal reducer, true band-stage primitive, or generated 128-specific reducer that improves `eigvalsh_nxn/128` / `cond_nxn/128` without reopening rejected panel-width, active-window deflation, or sub-1024 Rayon matvec families.

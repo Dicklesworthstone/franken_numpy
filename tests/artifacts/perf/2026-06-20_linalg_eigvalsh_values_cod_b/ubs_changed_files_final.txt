@@ -1,0 +1,606 @@
+ℹ Preparing shadow workspace for 5 specified file(s)
+ℹ Scanning shadow workspace at /data/tmp/tmp.Oi9foUxX44/files_scan
+
+╔══════════════════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗              ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝              ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗                ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝                ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗              ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝              ║
+║                                                                              ║
+║  ██████╗ ██╗   ██╗ ██████╗         __       __                               ║
+║  ██╔══██╗██║   ██║██╔════╝         \ `-'"-'` /                               ║
+║  ██████╔╝██║   ██║██║  ███╗        / \_   _/ \                               ║
+║  ██╔══██╗██║   ██║██║   ██║        |  d\_/b  |                               ║
+║  ██████╔╝╚██████╔╝╚██████╔╝       .'\   V   /'.                              ║
+║  ╚═════╝  ╚═════╝  ╚═════╝        /   '-...-'   \                            ║
+║                                  | /         \ |                             ║
+║                                  \/\         /\/                             ║
+║                                  ==(||)---(||)==                             ║
+║                                                                              ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗              ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗             ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝             ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗             ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║             ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝                  ║
+║                                                                              ║
+║   JS / TS • PYTHON • C / C++ • RUST • GO • JAVA • RUBY                       ║
+║   SWIFT • C# • ELIXIR                                                        ║
+║                    UBS: ULTIMATE BUG SCANNER • SARIF FUSION ☄️               ║
+║                                                                              ║
+║                                                                              ║
+║                     Night Owl QA                                             ║
+║                     “We see bugs before you do.”                             ║
+╚══════════════════════════════════════════════════════════════════════════════╝
+
+UBS Meta-Runner v5.3.2  2026-06-20 16:56:14
+Project: /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024
+Format:  text
+Detected: rust
+Scanning rust...
+Finished rust (47s)
+
+──────── rust ────────
+
+╔═══════════════════════════════════════════════════════════════════╗
+║  ██╗   ██╗██╗  ████████╗██╗███╗   ███╗ █████╗ ████████╗███████╗   ║
+║  ██║   ██║██║  ╚══██╔══╝██║████╗ ████║██╔══██╗╚══██╔══╝██╔════╝   ║
+║  ██║   ██║██║     ██║   ██║██╔████╔██║███████║   ██║   █████╗     ║
+║  ██║   ██║██║     ██║   ██║██║╚██╔╝██║██╔══██║   ██║   ██╔══╝     ║
+║  ╚██████╔╝███████╗██║   ██║██║ ╚═╝ ██║██║  ██║   ██║   ███████╗   ║
+║   ╚═════╝ ╚══════╝╚═╝   ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝   ╚═╝   ╚══════╝   ║
+║                                            /\                     ║
+║  ██████╗ ██╗   ██╗ ██████╗                ( /   @ @    ()         ║
+║  ██╔══██╗██║   ██║██╔════╝                 \  __| |__  /          ║
+║  ██████╔╝██║   ██║██║  ███╗                 -/   "   \-           ║
+║  ██╔══██╗██║   ██║██║   ██║                /-|       |-\          ║
+║  ██████╔╝╚██████╔╝╚██████╔╝               / /-\     /-\ \         ║
+║  ╚═════╝  ╚═════╝  ╚═════╝                 / /-`---'-\\ \          ║
+║                                             /         \           ║
+║                                                                   ║
+║  ███████╗  ██████╗   █████╗ ███╗   ██╗███╗   ██╗███████╗██████╗   ║
+║  ██╔════╝  ██╔═══╝  ██╔══██╗████╗  ██║████╗  ██║██╔════╝██╔══██╗  ║
+║  ███████╗  ██║      ███████║██╔██╗ ██║██╔██╗ ██║█████╗  ██████╔╝  ║
+║  ╚════██║  ██║      ██╔══██║██║╚██╗██║██║╚██╗██║██╔══╝  ██╔══██╗  ║
+║  ███████║  ██████╗  ██║  ██║██║ ╚████║██║ ╚████║███████╗██║  ██║  ║
+║  ╚══════╝  ╚═════╝  ╚═╝╚═╝  ╚═══╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝       ║
+║                                                                   ║
+║  Rust module • ownership sanity, unsafe & async spotlights        ║
+║  UBS module: rust • cargo-aware targeting, low-noise caching      ║
+║  ASCII homage: Ferris crab (ASCII Art Archive)                    ║
+║  Run standalone: modules/ubs-rust.sh --help                       ║
+║                                                                   ║
+║  Night Owl QA                                                     ║
+║  “We see bugs before you do.”                                     ║
+╚═══════════════════════════════════════════════════════════════════╝
+
+
+Project:  /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024
+Started:  2026-06-20 16:56:14
+Files:    1 source files (rs)
+
+✓ ast-grep available (ast-grep) - full AST analysis enabled
+✓ cargo detected
+  ✓ clippy available
+  ✓ rustfmt available
+  ✓ cargo-audit available
+  ✓ cargo-deny available
+  ⚠ cargo-udeps not installed
+  ⚠ cargo-outdated not installed
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. OWNERSHIP & ERROR HANDLING MACROS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unwrap/expect, panic/unreachable/todo/unimplemented, dbg/println
+Panic-prone and debug macros frequently leak into production and cause crashes
+
+• unwrap()/expect() usage
+  ⚠ Warning (479 found)
+    Potential panics via unwrap/expect
+    Prefer `?` or match to propagate/handle errors
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:8080 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L8080)
+                              let mut slot = first_err.lock().unwrap();
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:8091 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L8091)
+                  if let Some((_, e)) = first_err.into_inner().unwrap() {
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:8140 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L8140)
+                                  let mut slot = first_err.lock().unwrap();
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:8152 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L8152)
+                  if let Some((_, e)) = first_err.into_inner().unwrap() {
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:8200 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L8200)
+                                      let mut slot = first_err.lock().unwrap();
+
+• panic!/unreachable!/todo!/unimplemented!
+  🔥 CRITICAL (4 found)
+    panic! macro(s) present
+    Avoid panic! in library code
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:15590 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L15590)
+                      .unwrap_or_else(|_| panic!("singular cond order {ord} should not error"));
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:17754 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L17754)
+                  _ => panic!("unknown oracle payload kind: {kind}"),
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:17834 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L17834)
+                  _ => panic!("unknown oracle payload kind: {kind}"),
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:17877 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L17877)
+                  _ => panic!("{label}: outcome kind mismatch actual={actual:?} expected={expected:?}"),
+
+• dbg!/println!/eprintln!
+  ℹ Info (16 found)
+    println! found - prefer logging
+  ℹ Info (16 found)
+    eprintln! found - prefer logging
+
+• Guard clauses that still unwrap later
+  ✓ OK No guard/unwrap mismatches detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+2. UNSAFE & MEMORY OPERATIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: unsafe blocks, transmute/uninitialized/zeroed/forget, raw ffi hazards
+These patterns may introduce UB, memory leaks, or hard-to-debug crashes
+
+• unsafe { ... } blocks
+  ✓ OK No unsafe blocks detected
+
+• transmute, uninitialized, zeroed, assume_init, forget
+
+• CStr::from_bytes_with_nul_unchecked
+
+• get_unchecked / from_utf8_unchecked / from_raw_parts
+
+• Unsafe Send/Sync impls
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+3. CONCURRENCY & ASYNC PITFALLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: Arc<Mutex>, Rc<RefCell>, blocking ops in async, await-in-loop, spawn misuse
+Concurrency misuse leads to deadlocks, head-of-line blocking, and performance issues
+
+• Arc<Mutex<..>> / Rc<RefCell<..>> / RwLock
+
+• Mutex::lock().unwrap()/expect()
+  ⚠ Warning (10 found)
+    Poisoned lock handling via unwrap/expect
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:8080 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L8080)
+                              let mut slot = first_err.lock().unwrap();
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:8140 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L8140)
+                                  let mut slot = first_err.lock().unwrap();
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:8200 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L8200)
+                                      let mut slot = first_err.lock().unwrap();
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:8353 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L8353)
+                              let mut slot = first_err.lock().unwrap();
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:8571 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L8571)
+                          let mut slot = first_err.lock().unwrap();
+
+• await inside loops (sequentialism)
+
+• Blocking ops inside async (thread::sleep, std::fs)
+
+• block_on within async context
+
+• std::thread::spawn within async
+
+• tokio::spawn usage (heuristic for detached tasks)
+
+• Async error path coverage
+  ✓ OK No tokio::spawn usage detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+4. NUMERIC & FLOATING-POINT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: float equality, division/modulo by variable, potential overflow hints
+Numeric bugs cause subtle logic errors or panics in debug builds (overflow)
+
+• Floating-point equality comparisons
+  ℹ Info (66 found)
+    Float equality/inequality check
+    Consider epsilon comparisons
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:380 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L380)
+          if det == 0.0 {
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:431 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L431)
+          if det == 0.0 {
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:655 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L655)
+                      if lrp != 0.0 {
+
+• Division/modulo by variable (verify non-zero)
+  ℹ Info (146 found)
+    Division by variables - guard zero divisors
+  ℹ Info (30 found)
+    Modulo by variables - guard zero divisors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+5. COLLECTIONS & ITERATORS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: clone in loops, collect then iterate, nth(0), length checks
+Iterator misuse often leads to unnecessary allocations or slow paths
+
+• clone() occurrences & clone() in loops
+  ℹ Info (20 found)
+    clone() usages - audit for necessity
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:6249 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L6249)
+                          result = cur.clone();
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:6459 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L6459)
+          let mut x_power = x.clone(); // X^1
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:9713 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L9713)
+                  let mut cur = a.clone();
+  ⚠ Warning (17 found)
+    clone() inside loops - potential perf hit
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:6249 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L6249)
+      result = cur.clone();
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:12663 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L12663)
+      let (mut d_old, mut e_old) = (d_ref.clone(), e_ref.clone());
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:12666 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L12666)
+      let (mut d_new, mut e_new) = (d_ref.clone(), e_ref.clone());
+
+• collect::<Vec<_>>() then for
+  ℹ Info (10 found)
+    collect::<Vec<_>>() usage - consider streaming
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:16063 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L16063)
+              let actual_bits = values
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:16064 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L16064)
+                  .iter()
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:16065 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L16065)
+                  .map(|value| value.to_bits())
+
+• nth(0) → next()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+6. STRING & ALLOCATION SMELLS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: needless allocations, format!(literal), to_owned().to_string()
+Unnecessary allocations and conversions reduce performance
+
+• to_owned().to_string() chain
+
+• format!("literal") with no placeholders
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+7. FILESYSTEM & PROCESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: blocking std::fs in async, process::Command usage heuristics
+I/O misuse or command construction from untrusted input can be risky
+
+• std::fs usage (general inventory)
+
+• std::process::Command usage
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+8. SECURITY FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TLS verification disabled, weak hash algos, security-sensitive non-crypto randomness, timing-unsafe secret comparisons, JWT verification bypasses, shell command injection, request-derived response headers/open redirects/host-header absolute URLs/outbound URLs/SQL/regex, unbounded request body reads, credentialed CORS, HTTP URLs, secrets
+Security misconfigurations can lead to credential leaks, command injection, and MITM attacks
+
+• Weak hash algorithms (MD5/SHA1)
+  ✓ OK No MD5/SHA1 found
+
+• TLS verification disabled
+
+• Security-sensitive non-crypto randomness
+  ✓ OK No security-sensitive non-crypto randomness detected
+
+• Secret/token comparisons without timing-safe equality
+  🔥 CRITICAL (69 found)
+    Secret, signature, or token compared with ==/!=
+    Use subtle::ConstantTimeEq, ring::constant_time::verify_slices_are_equal, crypto_memcmp, or a reviewed constant-time helper for bearer tokens, HMACs, CSRF values, reset secrets, API keys, and signatures
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:370 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L370)
+      if rows != cols {
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:698 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L698)
+      if row != col {
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:1173 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L1173)
+      out[i * n + col] = if p_i == col { 1.0 } else { 0.0 };
+
+• JWT decode, validation bypass, or missing claim binding
+  ✓ OK No JWT decode/validation bypass patterns detected
+
+• Shell command execution through -c/-lc
+  🔥 CRITICAL (11 found)
+    Shell command execution via -c/-lc
+    Avoid shell interpreters; pass argv directly or strictly validate/allowlist input
+
+• Command::new executable from untrusted-looking value
+
+• Path join/push with untrusted-looking segment
+
+• Archive entry paths joined into extraction destination
+
+• Predictable temp-file writes
+
+• Request-derived open redirects
+  ✓ OK No request-derived open redirect sinks detected
+
+• Host header used for absolute URL construction
+  ✓ OK No Host-header-derived absolute URL construction detected
+
+• Request-derived response headers
+  ✓ OK No request-derived response header values detected
+
+• Request-derived outbound HTTP URLs
+  ✓ OK No request-derived outbound HTTP URL sinks detected
+
+• Request-derived SQL construction
+  ✓ OK No request-derived SQL construction sinks detected
+
+• Request-controlled regex patterns
+  ✓ OK No request-controlled regex compilation detected
+
+• Unbounded request body reads
+  ✓ OK No unbounded request body reads detected
+
+• CORS credential policy
+  ✓ OK No unsafe CORS credential policy detected
+
+• Plain http:// URLs
+
+• Hardcoded secrets/credentials
+  ✓ OK No hardcoded secrets detected
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+9. CODE QUALITY MARKERS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: TODO, FIXME, HACK, NOTE
+Technical debt markers indicate incomplete or problematic code
+  ✓ OK No TODO/FIXME/HACK markers found
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+10. MODULE & VISIBILITY ISSUES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pub use wildcards, glob imports, re-exports
+Overly broad visibility complicates API stability and encapsulation
+
+• Wildcard imports (use crate::* or ::*)
+  ℹ Info (6 found)
+    Wildcard imports found; prefer explicit names
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:22 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L22)
+      use rayon::prelude::*;
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:11302 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L11302)
+              use rayon::prelude::*;
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:11434 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L11434)
+              use rayon::prelude::*;
+
+• pub use re-exports (inventory)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+11. TESTS & BENCHES HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: ignored tests, todo! in tests, println!/dbg! in tests
+Ensure tests do not hide failures or produce noisy output
+
+• #[ignore] tests
+
+• todo!/unimplemented! in tests
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+12. LINTS & STYLE (fmt/clippy)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo fmt -- --check, cargo clippy
+Formatter and lints help maintain consistent style and catch many issues
+  ✓ OK Formatting is clean
+  ✓ OK No clippy warnings/errors
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+13. BUILD HEALTH (check/test)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo check, cargo test --no-run
+Ensures the project compiles and tests build
+  ✓ OK cargo check clean
+  ✓ OK Tests build clean
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+14. DEPENDENCY HYGIENE
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Runs: cargo audit, cargo deny check, cargo udeps, cargo outdated
+Keeps dependencies safe, minimal, and up-to-date
+  ✓ OK No known advisories (cargo-audit)
+  ✓ OK cargo-deny clean
+  ℹ Info (1 found)
+    cargo-udeps not installed; skipping unused dep scan
+  ℹ Info (1 found)
+    cargo-outdated not installed; skipping update report
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+15. API MISUSE (COMMON)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: nth(0), DefaultHasher, expect_err/unwrap_err, Option::unwrap_or_default in hot paths
+Common footguns and readability hazards
+
+• std::collections::hash_map::DefaultHasher
+
+• unwrap_err()/expect_err() usage inventory
+  ℹ Info (58 found)
+    unwrap_err/expect_err present - ensure test-only or justified
+
+• Option::unwrap_or_default inventory
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+16. DOMAIN-SPECIFIC HEURISTICS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: reqwest builder, SQL string concatenation (heuristic), serde_json::from_str without context
+Domain patterns that often hint at bugs
+
+• reqwest::ClientBuilder inventory
+
+• serde_json::from_str without error context (heuristic)
+
+• SQL string concatenation (heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+17. AST-GREP RULE PACK FINDINGS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  ℹ Info (0 found)
+    AST rule pack staged
+    Run with --format=sarif to emit SARIF from the rule pack
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+18. META STATISTICS & INVENTORY
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: crate counts, bin/lib targets, feature flags (Cargo.toml heuristic)
+High-level view of the project layout
+
+• Cargo.toml features (heuristic count)
+  ℹ Info (1 found)
+    No Cargo.toml at project root (workspace? set PROJECT_DIR accordingly)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+19. RESOURCE LIFECYCLE CORRELATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: std::thread::spawn without join, tokio::spawn without await, TcpStream without shutdown
+Rust relies on explicit joins/shutdowns even with RAII—leaks create zombie work
+
+• Resource lifecycle correlation
+  ✓ OK All tracked resource acquisitions have matching cleanups
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+20. ASYNC LOCKING ACROSS AWAIT
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: locks acquired in async fns and potentially held across await
+Holding locks across await can deadlock, starve tasks, and cause latency spikes; std::sync locks can block executor threads
+
+• std::sync lock usage inside async fn (blocking risk)
+  ✓ OK No obvious std::sync lock usage inside async fns
+
+• Potential std::sync guard held across await (heuristic)
+
+• Potential async lock guard held across await (tokio/async locks heuristic)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+21. PANIC SURFACES & UNWINDING
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: assert macros, direct indexing, unreachable_unchecked/unwrap_unchecked, panic/unwrap inside Drop
+Panics in destructors or UB hints can crash/abort in subtle ways; these can slip past linting depending on cfg/features
+
+• assert!/assert_eq!/assert_ne! inventory
+  ⚠ Warning (996 found)
+    assert! macros present (panic surface)
+    If these are runtime invariants, consider explicit error handling; ensure not reachable by untrusted input
+
+• unreachable_unchecked / unwrap_unchecked
+
+• direct indexing / slicing panic surfaces
+  ⚠ Warning (1730 found)
+    Direct indexing/slicing may panic
+    Use get()/get_mut(), checked ranges, or prior bounds checks when indexes can come from input
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:333 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L333)
+          let rows = shape[shape.len() - 2];
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:334 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L334)
+          let cols = shape[shape.len() - 1];
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:344 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L344)
+              1 => shape[0],
+
+• panic!/unwrap/expect inside Drop
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+22. SUSPICIOUS CASTS & TRUNCATION
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: pervasive `as` casts, try_into().unwrap, numeric narrowing patterns
+`as` casts can silently truncate or change sign; conversion panics may be missed in uncommon input paths
+
+• `as` cast inventory
+  ℹ Info (117 found)
+    `as` casts present (possible truncation/sign bugs)
+    Prefer TryFrom/TryInto for correctness or document invariants
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:6311 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L6311)
+              (norm1.log2().ceil().max(0.0) as u32) + 1
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:5833 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L5833)
+                          + (dims[i] as u64) * (dims[k + 1] as u64) * (dims[j + 1] as u64);
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:12648 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L12648)
+                  let mut s = 0x9e3779b97f4a7c15u64 ^ (n as u64).wrapping_mul(0x100000001b3);
+
+• len()/count() narrowed via `as`
+
+• try_into().unwrap()/expect() (panic on conversion failure)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+23. PARSING & VALIDATION ROBUSTNESS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: parse/from_str/env-var unwraps, decode unwraps, missing error context
+Parsing and decoding failures often happen in prod on edge inputs; unwrap/expect turns them into panics
+
+• parse::<T>().unwrap()/expect()
+  ⚠ Warning (7 found)
+    parse::<T>().unwrap()/expect() present
+    Validate input or propagate errors with context
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:17665 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L17665)
+              String::from_utf8(output.stdout)
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:17666 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L17666)
+                  .expect("oracle stdout must be utf-8")
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:17667 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L17667)
+                  .trim()
+
+• serde/toml deserialization unwrap()/expect()
+
+• env::var(...).unwrap()/expect()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+24. PERF/DoS HOTSPOTS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+▓▓▓ Detects: regex compilation in loops, chars().nth(n), format!/allocations in loops
+Some perf pitfalls become DoS risks on large inputs or hot paths; these often evade linting in non-bench builds
+
+• Regex::new occurrences and in-loop compilation
+  ✓ OK No regex::Regex::new detected
+
+• chars().nth(n)/nth_back(n) (O(n))
+
+• format!/to_string/allocations inside loops (heuristic)
+  ⚠ Warning (16 found)
+    String allocation inside loop
+    Consider preallocating buffers, using write!, or restructuring to reduce allocations
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:11279:ts_utc: "2026-02-16T00:00 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L11279)
+      00Z".to_string(),
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:11280 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L11280)
+      suite_id: "fnp-linalg::tests".to_string(),
+      /data/projects/.scratch/franken_numpy-cod-b-bold-verify-20260620-2024/crates/fnp-linalg/src/lib.rs:11281 (https://github.com/Dicklesworthstone/franken_numpy/blob/eb9004b36c129455f09e7322ef8bc1a88399f4e1/crates/fnp-linalg/src/lib.rs#L11281)
+      test_id: format!("UP-008-{idx}"),
+
+═══════════════════════════════════════════════════════════════════════════
+                    🎯 SCAN COMPLETE 🎯
+═══════════════════════════════════════════════════════════════════════════
+
+Summary Statistics:
+  Files scanned:    1
+  Critical issues:  84
+  Warning issues:   3255
+  Info items:       488
+
+Priority Actions:
+  🔥 FIX CRITICAL ISSUES IMMEDIATELY
+  These cause crashes, security vulnerabilities, or data corruption
+  ⚠ Review and fix WARNING items
+  These cause bugs, performance issues, or maintenance problems
+  ℹ Consider INFO suggestions
+  Code quality improvements and best practices
+
+Scan completed at: 2026-06-20 16:57:01
+
+Tip: Run with -v/--verbose for more code samples per finding.
+Add to CI: ./ubs --ci --fail-on-warning . > rust-bug-scan.txt
+
+
+──────── Combined Summary ────────
+Files: 1
+Critical: 84
+Warning: 3255
+Info: 488

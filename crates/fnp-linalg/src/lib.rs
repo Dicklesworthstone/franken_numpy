@@ -4158,6 +4158,8 @@ const TRIDIAG_PANEL_NB: usize = 64;
 const SBR_STAGE1_BAND_WIDTH: usize = 96;
 const SBR_STAGE1_PANEL_NB: usize = 128;
 type SbrStage1Result = (Vec<f64>, Vec<f64>, Vec<f64>);
+const TRIDIAG_SERIAL_ROWDOT_MIN_N: usize = 192;
+const TRIDIAG_SERIAL_ROWDOT_MAX_N: usize = 384;
 // Minimum trailing-block height for the parallel symmetric panel matvec (u = A·v).
 // Each matvec is only O(h²) work split across rows, so the rayon dispatch +
 // work-stealing setup (~tens of µs, worse under machine load) dominates until h is
@@ -4177,6 +4179,29 @@ fn tridiag_symmetric_matvec_serial(
     debug_assert_eq!(work.len(), n * n);
     debug_assert_eq!(v.len(), n);
     debug_assert_eq!(u.len(), n);
+
+    if (TRIDIAG_SERIAL_ROWDOT_MIN_N..TRIDIAG_SERIAL_ROWDOT_MAX_N).contains(&n) {
+        let v_tail = &v[start..n];
+        for i in start..n {
+            let row = &work[i * n + start..i * n + n];
+            let mut ui = 0.0;
+            let mut offset = 0usize;
+            while offset + 4 <= v_tail.len() {
+                ui += row[offset] * v_tail[offset];
+                ui += row[offset + 1] * v_tail[offset + 1];
+                ui += row[offset + 2] * v_tail[offset + 2];
+                ui += row[offset + 3] * v_tail[offset + 3];
+                offset += 4;
+            }
+            while offset < v_tail.len() {
+                ui += row[offset] * v_tail[offset];
+                offset += 1;
+            }
+            u[i] = ui;
+        }
+        return;
+    }
+
     for ui in &mut u[start..n] {
         *ui = 0.0;
     }
@@ -14014,37 +14039,41 @@ mod tests {
 
     #[test]
     fn tridiag_symmetric_matvec_serial_matches_full_row_dot_bits() {
-        let n = 96usize;
-        let start = 13usize;
-        let mut a = vec![0.0f64; n * n];
-        for i in 0..n {
-            for j in i..n {
-                let value = if i == j {
-                    (n + i + 1) as f64
-                } else {
-                    ((i * 131 + j * 17 + 7) % 97) as f64 / 97.0 - 0.5
-                };
-                a[i * n + j] = value;
-                a[j * n + i] = value;
+        for (n, start) in [(96usize, 13usize), (224, 17)] {
+            let mut a = vec![0.0f64; n * n];
+            for i in 0..n {
+                for j in i..n {
+                    let value = if i == j {
+                        (n + i + 1) as f64
+                    } else {
+                        ((i * 131 + j * 17 + 7) % 97) as f64 / 97.0 - 0.5
+                    };
+                    a[i * n + j] = value;
+                    a[j * n + i] = value;
+                }
             }
-        }
-        let mut v = vec![0.0f64; n];
-        for (i, vi) in v.iter_mut().enumerate().skip(start) {
-            *vi = ((i * 19 + 3) % 43) as f64 / 23.0 - 0.8;
-        }
-        let mut half = vec![123.0f64; n];
-        let mut full = vec![123.0f64; n];
-        super::tridiag_symmetric_matvec_serial(&a, n, start, &v, &mut half);
-        for i in start..n {
-            let row = &a[i * n + start..i * n + n];
-            let mut s = 0.0;
-            for (offset, &entry) in row.iter().enumerate() {
-                s += entry * v[start + offset];
+            let mut v = vec![0.0f64; n];
+            for (i, vi) in v.iter_mut().enumerate().skip(start) {
+                *vi = ((i * 19 + 3) % 43) as f64 / 23.0 - 0.8;
             }
-            full[i] = s;
-        }
-        for i in start..n {
-            assert_eq!(half[i].to_bits(), full[i].to_bits(), "row {i} drifted");
+            let mut half = vec![123.0f64; n];
+            let mut full = vec![123.0f64; n];
+            super::tridiag_symmetric_matvec_serial(&a, n, start, &v, &mut half);
+            for i in start..n {
+                let row = &a[i * n + start..i * n + n];
+                let mut s = 0.0;
+                for (offset, &entry) in row.iter().enumerate() {
+                    s += entry * v[start + offset];
+                }
+                full[i] = s;
+            }
+            for i in start..n {
+                assert_eq!(
+                    half[i].to_bits(),
+                    full[i].to_bits(),
+                    "n={n} row {i} drifted"
+                );
+            }
         }
     }
 

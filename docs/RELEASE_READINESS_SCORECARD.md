@@ -50,6 +50,55 @@ Current release posture:
   reduction/eigensolver primitive, not on post-sort or fixed-iteration
   approximations.
 
+## 2026-06-20 - Linalg Eigvalsh Mid-Band Row-Dot Keep Slice
+
+Scope:
+- Bead: `franken_numpy-ixs5y.275`.
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg::eigvalsh_nxn`.
+- Worker proof: same-worker old FNP, final FNP, and NumPy rows on `hz1`.
+- Artifact:
+  `tests/artifacts/perf/2026-06-20_linalg_eigvalsh_values_cod_b/`.
+- Candidate: route the serial tridiagonal panel matvec through a contiguous
+  full row-dot only for `192 <= n < 384`, leaving the old half-symmetric walk
+  in place below 192 and at 384+.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | FAIL / RESIDUAL | Final ratios remain slower than NumPy: 1.063x, 1.481x, 1.757x, and 1.197x for 64/128/256/512. |
+| Old/new FNP regression gate | PASS / NARROW | The kept 256 row improves 0.735x versus old FNP. 64 is neutral/noise at 1.032x and is below the row-dot gate; 128 is also below the gate. |
+| Rejected probes | PASS | Ungated row-dot regressed 64 and 128, and row-dot at 512 was 1.478x slower than the final guarded old path. Both were rejected. |
+| Profile attribution | PASS | `tridiag_eigvals_qr_perf_report` showed the QR scaled-hypot path is already 1.27x-1.31x faster than old QR; remaining end-to-end loss is reducer-side. |
+| Targeted correctness | PASS | `cargo test -p fnp-linalg tridiag --release` passed on RCH-selected `vmi1153651`, including the full-row-dot bit-equivalence test and rank2k/eigvalsh golden. |
+| Crate compile health | PASS | `cargo check -p fnp-linalg --all-targets` passed on RCH-selected `vmi1152480`. |
+| Release build health | PASS | `cargo build -p fnp-linalg --release` passed on RCH-selected `vmi1152480`. |
+| Clippy health | PASS | `cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed on `hz1`. |
+| Formatting health | KNOWN GAP | `cargo fmt -p fnp-linalg -- --check` still reports broad pre-existing rustfmt drift in benches/examples and unrelated source regions; accidental formatter churn was manually removed. |
+| UBS | KNOWN GAP | `ubs` over the changed source/doc paths exited nonzero from broad existing `fnp-linalg/src/lib.rs` inventory, not a row-dot-hunk-specific finding. |
+| Whitespace | PASS | `git diff --check` passed. |
+| Evidence durability | PASS | Baseline, NumPy comparator, rejects, QR profile, test/check/build/clippy/fmt/UBS logs, ratios, and retry predicate are recorded. |
+
+Cluster score: **78 / 100**
+
+Score rationale:
+- +20 performance: the 256-class row moved from 17.64 ms to 12.97 ms.
+- +14 old/new discipline: ungated regressions were rejected and the 512 loss
+  was fenced out with an upper gate.
+- +16 correctness: the bit-equivalence test covers both the old and row-dot
+  paths, and the existing tridiag/eigvalsh golden remained green.
+- +14 evidence discipline: same-worker Rust and NumPy rows plus negative
+  evidence are durable.
+- +8 source discipline: the change is local to the existing tridiag matvec.
+- -22 residual performance: every measured row still loses to NumPy, so this is
+  a reducer improvement, not a no-gaps close.
+
+Current release posture:
+- `eigvalsh_nxn/256` is less bad but still a material NumPy gap.
+- `eigvalsh_nxn/128` / the earlier `cond_nxn/128` residual remains open for a
+  deeper values-only reducer or size-specific spectral primitive. Do not retry
+  panel-width, active-window deflation, sub-1024 Rayon matvec, or ungated
+  row-dot variants.
+
 ## 2026-06-20 - Linalg Column Norm Row-Block SIMD Keep Slice
 
 Scope:
