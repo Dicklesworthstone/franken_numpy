@@ -4,6 +4,62 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Fix: fnp-python pinv 2-D size-gate (215x loss -> parity)
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_python_pinv_2d_sizegate_vs_numpy/`
+
+Run identity:
+- Agent: `BlackThrush` / `cod-b`.
+- Subject API: `fnp.pinv` (`crates/fnp-python/src/lib.rs`, 2-D branch).
+- Reference: NumPy 2.4.3 on `thinkstation1` (local, load ~5.5). `hz2` (the usual
+  NumPy 2.3.5 comparator) was saturated at load ~33/16-core and unusable for
+  clean A/B; the fix is a delegation so the post-fix ~1.0x ratio is
+  reference-version-independent.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Decision: SHIP. One-line guard change.
+
+Bug class:
+- `fnp.pinv` of a 2-D matrix routed ALL non-hermitian shapes (and hermitian
+  squares) through the pure-Rust dense path `pinv_mxn`/`svd_mxn_full` (resp.
+  `pinv_hermitian_nxn`). That pure-Rust SVD/eigensolve only beats LAPACK for
+  tiny matrices; above max-dim ~40 it scales far worse and for larger
+  RECTANGULAR matrices it is catastrophic: `pinv((600,400))` ran ~8.8s vs NumPy
+  ~41ms (~215x); `(400,600)` ~233x; hermitian (600) ~7x. Standalone `fnp.svd`
+  (LAPACK-backed) is at parity, so the loss was entirely in the native 2-D pinv
+  dense-SVD path, not SVD itself.
+
+Lever:
+- Gate the native 2-D pinv block to `max(m,n) <= 32` (the regime where the
+  pure-Rust path measurably wins by dodging numpy/LAPACK dispatch overhead, both
+  hermitian and non-hermitian); let larger 2-D fall through to the existing
+  numpy `linalg.pinv` (LAPACK gesdd) delegation. Batched (>=3-D) pinv untouched
+  (it wins decisively, 0.27-0.62x). REUSABLE: a native dense-linalg fast path
+  that wins only at small sizes must be size-gated; the catastrophic regime here
+  is rectangular (max-dim large, both dims moderate), which the standalone-SVD
+  parity check did NOT reveal because the pinv WRAPPER, not svd, owns the dense
+  reconstruction-via-pure-SVD path.
+
+Head-to-head (after): 5 win / 0 loss / 3 neutral. `(600,400)` 215x->1.028x,
+`(400,600)` 233x->0.945x, `(128,128)` 2.75x->1.023x, `(64,64)` 1.45x->1.051x;
+small native (<=32) 0.29-0.96x and batched 0.31x all preserved; all values match
+NumPy (allclose rtol 1e-9).
+
+Validation: `cargo test -p fnp-python --test conformance_linalg_advanced` 29/29
+PASS; 22-case pinv conformance + gate-boundary probe (dim 32 vs 33, rectangular,
+rcond/rtol, hermitian, complex, singular, batched) 0 fails; `cargo build
+-p fnp-python --release` clean; edit region clippy-clean (only pre-existing
+`eq_op`/dead-code warnings elsewhere).
+
+Commands:
+- `RCH_MIN_LOCAL_TIME_MS=999999999 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b cargo build -p fnp-python --release --lib`
+- `RCH_MIN_LOCAL_TIME_MS=999999999 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b cargo test -p fnp-python --release --test conformance_linalg_advanced`
+- `OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONPATH=$PWD/.probe python3 tests/artifacts/perf/2026-06-20_python_pinv_2d_sizegate_vs_numpy/pinv_head_to_head.py`
+
+Retry predicate: do not re-tune the 32 threshold or re-test the dense-SVD pinv
+path as a standalone lever. Closing the mid-size (33-63, now ~1.0-1.1x via the
+numpy-delegation wrapper) residual requires a blocked/LAPACK-class replacement
+for the pure-Rust `svd_mxn_full` — a separate, large effort.
+
 ## 2026-06-20 - BOLD-VERIFY Keep: fnp-ufunc where_nonzero coordinate gather
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_ufunc_where_nonzero_vs_numpy/`

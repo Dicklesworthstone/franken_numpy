@@ -16645,7 +16645,19 @@ fn pinv(
     let array = extract_numeric_array(py, a.bind(py), "pinv(a)")?;
     let shape = array.shape();
 
-    if shape.len() == 2 && (!hermitian || shape[0] == shape[1]) {
+    // The native 2-D pinv uses a pure-Rust dense SVD (`svd_mxn_full`) /
+    // Hermitian eigensolve. Those beat NumPy's LAPACK only for small matrices,
+    // where they dodge the numpy/LAPACK dispatch overhead; above max-dim ~40 the
+    // pure-Rust SVD scales far worse than LAPACK gesdd (rectangular cases are
+    // catastrophic: a 600x400 native pinv ran ~8.7s vs numpy ~40ms, ~215x).
+    // Gate the native path to max-dim <= 32 (all clearly-measured wins,
+    // hermitian and non-hermitian) and let larger 2-D fall through to the numpy
+    // delegation below. Batched (>=3-D) pinv stays native (it wins decisively).
+    const PINV_NATIVE_MAX_2D_DIM: usize = 32;
+    if shape.len() == 2
+        && (!hermitian || shape[0] == shape[1])
+        && shape[0].max(shape[1]) <= PINV_NATIVE_MAX_2D_DIM
+    {
         let values = if hermitian {
             pinv_hermitian_nxn_with_tolerance_aliases(
                 array.values(),

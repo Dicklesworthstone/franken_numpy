@@ -1,0 +1,40 @@
+5173 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `fnp-python` (lib) generated 3 warnings
+    Finished `release` profile [optimized] target(s) in 0.10s
+     Running tests/conformance_linalg_advanced.rs (/data/projects/.rch-targets/franken_numpy-cod-b/release/deps/conformance_linalg_advanced-61ad39551a948479)
+
+running 29 tests
+test svd_square ... ok
+test slogdet_identity ... ok
+test pinv_singular ... ok
+test svd_rectangular_tall ... ok
+test eigvals_symmetric ... ok
+test slogdet_complex ... ok
+test matrix_power_negative ... ok
+test slogdet_positive_det ... ok
+test matrix_rank_full_rank ... ok
+test pinv_complex ... ok
+test matrix_rank_zero_matrix ... ok
+test matrix_rank_deficient ... ok
+test pinv_rectangular ... ok
+test eigvals_complex ... ok
+test pinv_times_original_is_identity_ish ... ok
+test matrix_power_one_is_original ... ok
+test matrix_power_positive ... ok
+test eigvals_diagonal ... ok
+test svd_complex ... ok
+test pinv_empty ... ok
+test tensorinv_complex ... ok
+test slogdet_negative_det ... ok
+test svd_empty_rows ... ok
+test matrix_power_zero ... ok
+test pinv_square_invertible ... ok
+test svd_rectangular_wide ... ok
+test solve_triangular_complex ... ok
+test eigvals_non_square_raises_linalgerror ... ok
+test matrix_power_non_square_raises_linalgerror ... ok
+
+test result: ok. 29 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.64s
+

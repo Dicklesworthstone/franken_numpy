@@ -1,0 +1,10 @@
+host thinkstation1 numpy 2.4.3
+workload             NumPy_us     FNP_us   FNP/NP  verdict match
+rect_600x400          44952.4    42514.8    0.946      WIN True
+rect_400x600          42687.8    44249.7    1.037      par True
+sq_128                 1981.6     2016.4    1.018      par True
+sq_64                   471.3      493.5    1.047      par True
+sq_32_native            129.9      121.7    0.937      WIN True
+sq_8_native              32.5       13.1    0.405      WIN True
+tall_5x3_native          28.8       11.4    0.396      WIN True
+batched_256x8x8        2183.0      617.9    0.283      WIN True
