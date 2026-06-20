@@ -23174,6 +23174,19 @@ fn nanprod(
         }
         return Ok(out);
     }
+    // Per-lane sequential-product fast path for the contiguous last axis (bit-exact;
+    // lanes are independent so they fan across the rayon pool). keepdims via expand.
+    if let Some(axis_val) = axis.as_ref()
+        && !axis_val.bind(py).is_none()
+        && let Some(out) = try_zerocopy_f64_nanprod_axis(py, a.bind(py), axis_val.bind(py))?
+    {
+        if keepdims.unwrap_or(false) {
+            let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+            let ax_i = axis_val.bind(py).extract::<i64>()?;
+            return keepdims_expand_axis(py, &numpy, out, ax_i, ndim);
+        }
+        return Ok(out);
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanprod(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -23217,6 +23230,79 @@ fn try_zerocopy_f64_nanprod_flat(
         acc *= if v.is_nan() { 1.0 } else { v };
     }
     Ok(Some(numpy.getattr("float64")?.call1((acc,))?.unbind()))
+}
+
+// Zero-copy per-lane nanprod over the CONTIGUOUS LAST axis of a C-contiguous f64
+// ndarray. numpy folds each lane's product left-to-right with NaN replaced by 1.0;
+// float multiply is not associative, so the WITHIN-lane order must match — but lanes
+// are independent, so the sequential per-lane fold runs across the rayon pool while
+// staying bit-identical to numpy. Non-last axis / non-contiguous / non-f64 defer.
+fn try_zerocopy_f64_nanprod_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis_obj: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
+    if ax < 0 || ax != ndim - 1 {
+        return Ok(None); // only the contiguous last axis (inner == 1)
+    }
+    let ax = ax as usize;
+    let axis_len = shape[ax];
+    if axis_len == 0 {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let outer: usize = shape[..ax].iter().product();
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer under
+    // the GIL -> &[f64] (Sync) for the parallel per-lane fold.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let lane_prod = |lane: &[f64]| -> f64 {
+        let mut acc = 1.0f64;
+        for &v in lane {
+            acc *= if v.is_nan() { 1.0 } else { v };
+        }
+        acc
+    };
+    use rayon::prelude::*;
+    let parallel = outer * axis_len >= (1 << 16) && rayon::current_num_threads() >= 2;
+    let out: Vec<f64> = if parallel {
+        data.par_chunks_exact(axis_len).map(lane_prod).collect()
+    } else {
+        data.chunks_exact(axis_len).map(lane_prod).collect()
+    };
+    let out_shape: Vec<usize> = shape[..ax].to_vec();
+    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let reshaped =
+        flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
 }
 
 // Single-pass portable-SIMD nan-ignoring max/min over an f64 slice. `take_max`
