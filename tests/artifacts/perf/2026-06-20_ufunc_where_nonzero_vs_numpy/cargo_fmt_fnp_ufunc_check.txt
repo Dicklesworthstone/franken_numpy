@@ -138,7 +138,7 @@ Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:14440:
 [m[32m+                    });
 [m                 return Self::from_values_with_dtype(out_shape, values, dtype);
              }
- 
+
 Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:20956:
              ));
          }
@@ -236,7 +236,7 @@ Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:54274:
 [m[32m+                },
 [m[32m+            )
 [m             .collect();
- 
+
          let mut actual = UFuncArray::new(vec![n], original, DType::F64).unwrap();
 Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:58397:
      fn polynomial_2poly_matches_numpy_golden() {
@@ -344,7 +344,7 @@ Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:60908:
 [m[32m+                },
 [m[32m+            )
 [m             .collect();
- 
+
          let condition = UFuncArray::new(vec![n], condition_values, DType::Bool).unwrap();
 Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:61044:
          let large = (1_i64 << 53) + 17;

@@ -1,7 +1,7 @@
 # 2026-06-20 fnp-ufunc where_nonzero vs NumPy
 
-Bead: `franken_numpy-ixs5y.247`  
-Agent: `BlackThrush` / `cod-b`  
+Bead: `franken_numpy-ixs5y.247`
+Agent: `BlackThrush` / `cod-b`
 Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`
 
 ## Decision
