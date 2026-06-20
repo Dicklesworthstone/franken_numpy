@@ -20417,85 +20417,22 @@ impl UFuncArray {
         {
             fft_linear_convolve(a, k, full_len)
         } else if m <= CONVOLVE_GATHER_MAX_M {
-            use std::simd::Simd;
-            const LANES: usize = 4;
-            type V = Simd<f64, LANES>;
+            // Pre-reversed kernel; the SIMD-across-outputs gather lives in the shared
+            // free fn `convolve_gather_fill` (also used by the fnp-python zero-copy
+            // wrapper). Splitting the output band across threads is conflict-free and
+            // bit-identical for any chunking (each output written once, ascending-i).
             let kr: Vec<f64> = k.iter().rev().copied().collect();
-            // Fill an output band [lo, lo+out.len()) via the gather dot. Each output
-            // index is computed independently and written once, so splitting the
-            // output range across threads is conflict-free and cannot change any
-            // per-output accumulation order — bit-identical for any chunking.
-            let fill = |out: &mut [f64], lo: usize| {
-                let hi = lo + out.len();
-                // Bit-exact scalar gather for a single output (used at the band's two
-                // partial-window edges and the SIMD remainder). Sums the overlap in
-                // ASCENDING input order, matching the scatter reference exactly.
-                let scalar = |p: usize| -> f64 {
-                    let i0 = p.saturating_sub(m - 1);
-                    let i1 = p.min(n - 1);
-                    // kr index for input i is `i + (m-1) - p`; at i=i0 it is >= 0.
-                    let kr0 = i0 + (m - 1) - p;
-                    let len = i1 - i0 + 1;
-                    let aw = &a[i0..i0 + len];
-                    let kw = &kr[kr0..kr0 + len];
-                    let mut acc = 0.0f64;
-                    for t in 0..len {
-                        acc += aw[t] * kw[t];
-                    }
-                    acc
-                };
-                // Interior outputs p in [m-1, n-1] each have the FULL m-tap window
-                // a[p-m+1..=p]·kr[0..m]. Process LANES of them at once: lane l holds
-                // output (p+l) = Σ_t a[p-m+1+l+t]·kr[t], accumulated over t ASCENDING —
-                // the identical order (and identical separate mul-then-add roundings,
-                // since `acc += av*kv` is NOT contracted to an FMA) as the scalar dot,
-                // so the SIMD result is bit-for-bit identical to the scatter reference.
-                // Vectorizing ACROSS independent outputs (not within a reduction) is
-                // what preserves the per-output order while still using SIMD lanes.
-                let int_lo = (m - 1).max(lo);
-                let int_hi = n.min(hi); // interior p exclusive upper bound is n
-                let mut p = lo;
-                while p < int_lo.min(hi) {
-                    out[p - lo] = scalar(p);
-                    p += 1;
-                }
-                if int_hi > int_lo {
-                    while p + LANES <= int_hi {
-                        let base = p - (m - 1);
-                        // Single bounds-checked slice of the (m-1+LANES)-wide input
-                        // window; the per-tap loads and the kr read below then index
-                        // local slices of known length, hoisting the per-tap checks
-                        // out of the hot reduction.
-                        let win = &a[base..p + LANES];
-                        let mut acc = V::splat(0.0);
-                        for (t, &kv) in kr.iter().enumerate() {
-                            let av = V::from_slice(&win[t..t + LANES]);
-                            acc += av * V::splat(kv);
-                        }
-                        out[p - lo..p - lo + LANES].copy_from_slice(&acc.to_array());
-                        p += LANES;
-                    }
-                    while p < int_hi {
-                        out[p - lo] = scalar(p);
-                        p += 1;
-                    }
-                }
-                while p < hi {
-                    out[p - lo] = scalar(p);
-                    p += 1;
-                }
-            };
             let mut full = vec![0.0f64; full_len];
             if full_len >= CONVOLVE_GATHER_PAR_MIN_FULL_LEN && rayon::current_num_threads() >= 2 {
                 let threads = rayon::current_num_threads();
                 let chunk = (full_len / threads).max(32_768);
                 full.par_chunks_mut(chunk)
                     .enumerate()
-                    .for_each(|(c, out)| fill(out, c * chunk));
+                    .for_each(|(c, out)| convolve_gather_fill(a, &kr, n, m, out, c * chunk));
             } else {
                 // For small/medium short-kernel outputs, rayon dispatch and per-chunk
                 // edge work dominate. One streaming pass keeps the input window hot.
-                fill(&mut full, 0);
+                convolve_gather_fill(a, &kr, n, m, &mut full, 0);
             }
             full
         } else if full_len >= CONVOLVE_PARALLEL_MIN_ELEMS
@@ -34108,6 +34045,67 @@ fn fft_pow2_butterflies<const FINITE: bool>(
             start += len4;
         }
         len = len4;
+    }
+}
+
+/// Fill the output band `[lo, lo + out.len())` of the full convolution
+/// `full[p] = Σ_i a[i]·k[p-i]` (n = a.len, m = k.len, full length n+m-1) using the
+/// PRE-REVERSED kernel `kr` (`kr[t] = k[m-1-t]`). Each output is written exactly
+/// once, accumulating the overlap in ASCENDING input order, so the result is
+/// bit-for-bit identical to the scatter reference for ANY band split. Interior
+/// outputs (full m-tap window) use a LANES-wide SIMD gather across independent
+/// outputs (which preserves each output's accumulation order); the two partial-
+/// window edges and the SIMD remainder use the scalar gather.
+///
+/// Shared by `convolve_mode` (writes the whole `full` buffer, lo=0) and the
+/// fnp-python zero-copy convolve/correlate wrapper, which writes a mode region
+/// (lo = mode offset) straight into the NumPy output buffer — skipping the
+/// extract-input and build-output copies the UFuncArray path pays.
+pub fn convolve_gather_fill(a: &[f64], kr: &[f64], n: usize, m: usize, out: &mut [f64], lo: usize) {
+    use std::simd::Simd;
+    const LANES: usize = 4;
+    type V = Simd<f64, LANES>;
+    let hi = lo + out.len();
+    let scalar = |p: usize| -> f64 {
+        let i0 = p.saturating_sub(m - 1);
+        let i1 = p.min(n - 1);
+        let kr0 = i0 + (m - 1) - p;
+        let len = i1 - i0 + 1;
+        let aw = &a[i0..i0 + len];
+        let kw = &kr[kr0..kr0 + len];
+        let mut acc = 0.0f64;
+        for t in 0..len {
+            acc += aw[t] * kw[t];
+        }
+        acc
+    };
+    let int_lo = (m - 1).max(lo);
+    let int_hi = n.min(hi); // interior p exclusive upper bound is n
+    let mut p = lo;
+    while p < int_lo.min(hi) {
+        out[p - lo] = scalar(p);
+        p += 1;
+    }
+    if int_hi > int_lo {
+        while p + LANES <= int_hi {
+            let base = p - (m - 1);
+            let win = &a[base..p + LANES];
+            let mut acc = V::splat(0.0);
+            for (t, &kv) in kr.iter().enumerate() {
+                let av = V::from_slice(&win[t..t + LANES]);
+                acc += av * V::splat(kv);
+            }
+            out[p - lo..p - lo + LANES].copy_from_slice(&acc.to_array());
+            p += LANES;
+        }
+        while p < int_hi {
+            out[p - lo] = scalar(p);
+            p += 1;
+        }
+    }
+    while p < hi {
+        out[p - lo] = scalar(p);
+        p += 1;
     }
 }
 

@@ -46145,6 +46145,109 @@ fn unique_values(
     core_numpy_passthrough(py, "unique_values", args, kwargs)
 }
 
+// Zero-copy short-kernel convolve/correlate. The fnp-ufunc `convolve_mode` SIMD
+// gather is already at NumPy parity (~1.4 ns/elem), but the wrapper paid two
+// full-array copies NumPy avoids: extract_numeric_array copies the input ndarray
+// into an owned Vec (~5 ms/8 MB at 1 M), and build copies the result Vec into a
+// fresh numpy array (~5 ms) — a measured 9-15x Python-level loss. This path reads
+// both f64 1-D buffers as `&[f64]` (no copy), allocates the numpy output once, and
+// runs the shared `convolve_gather_fill` writing the mode region DIRECTLY into the
+// output buffer — one input read + one output write, like NumPy's C loop.
+// Convolve is commutative (signal = longer operand, kernel = shorter, reversed);
+// correlate is NOT, so it requires len(a) >= len(v) and uses the kernel as-is
+// (correlate(a,v) == convolve(a, v[::-1]); the gather pre-reverses, so kr = v).
+// Gated to the pure-gather regime (kernel <= 48 < the FFT min of 64) so it never
+// shadows convolve_mode's FFT/scatter paths for long kernels.
+fn try_zerocopy_conv_corr_f64(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    v: &Bound<'_, PyAny>,
+    mode: &str,
+    is_correlate: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    use rayon::prelude::*;
+    const GATHER_MAX_M: usize = 48;
+    const MIN_SIGNAL: usize = 256;
+    if !matches!(mode, "full" | "same" | "valid") {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let is_f64_1d = |o: &Bound<'_, PyAny>| -> PyResult<bool> {
+        if !o.is_exact_instance(&ndarray_type) {
+            return Ok(false);
+        }
+        let dt = o.getattr("dtype")?;
+        Ok(dt.getattr("kind")?.extract::<String>()? == "f"
+            && dt.getattr("itemsize")?.extract::<usize>()? == 8
+            && o.getattr("ndim")?.extract::<usize>()? == 1)
+    };
+    if !is_f64_1d(a)? || !is_f64_1d(v)? {
+        return Ok(None);
+    }
+    let (Ok(a_buf), Ok(v_buf)) = (PyBuffer::<f64>::get(a), PyBuffer::<f64>::get(v)) else {
+        return Ok(None);
+    };
+    let (Some(a_cells), Some(v_cells)) = (a_buf.as_slice(py), v_buf.as_slice(py)) else {
+        return Ok(None); // non-contiguous
+    };
+    let (la, lv) = (a_cells.len(), v_cells.len());
+    if la == 0 || lv == 0 {
+        return Ok(None); // numpy raises on empty: defer for exact error parity.
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; under the GIL these
+    // input buffers are not mutated for the duration of the call. Zero-copy view.
+    let a_vals: &[f64] = unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), la) };
+    let v_vals: &[f64] = unsafe { std::slice::from_raw_parts(v_cells.as_ptr().cast::<f64>(), lv) };
+    let (sig, kr): (&[f64], Vec<f64>) = if is_correlate {
+        if la < lv {
+            return Ok(None); // correlate not commutative; La<Lv has distinct centering — defer.
+        }
+        (a_vals, v_vals.to_vec())
+    } else if la >= lv {
+        (a_vals, v_vals.iter().rev().copied().collect())
+    } else {
+        (v_vals, a_vals.iter().rev().copied().collect())
+    };
+    let (ns, mk) = (sig.len(), kr.len());
+    if mk > GATHER_MAX_M || ns < MIN_SIGNAL || mk > ns {
+        return Ok(None); // long kernel (convolve_mode wins) / tiny signal: defer.
+    }
+    // Mode region over the full convolution (length ns+mk-1). Since ns>=mk,
+    // max(ns,mk)=ns and min(ns,mk)=mk (matches convolve_mode's trim formulas).
+    let (off, out_len) = match mode {
+        "full" => (0usize, ns + mk - 1),
+        "same" => ((mk - 1) / 2, ns),
+        "valid" => (mk - 1, ns - mk + 1),
+        _ => return Ok(None),
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out_arr = numpy.call_method("empty", (out_len,), Some(&kwargs))?;
+    {
+        let out_buf = PyBuffer::<f64>::get(&out_arr)?;
+        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: out_arr is freshly allocated by numpy.empty and unaliased; Cell<f64>
+        // is repr(transparent) over f64. We write each output exactly once.
+        let out: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, out_len) };
+        const PAR_MIN: usize = 1 << 19;
+        if out_len >= PAR_MIN && rayon::current_num_threads() >= 2 {
+            let threads = rayon::current_num_threads();
+            let chunk = (out_len / threads).max(32_768);
+            out.par_chunks_mut(chunk).enumerate().for_each(|(c, sub)| {
+                // sub's first element is full-conv index off + c*chunk.
+                fnp_ufunc::convolve_gather_fill(sig, &kr, ns, mk, sub, off + c * chunk);
+            });
+        } else {
+            fnp_ufunc::convolve_gather_fill(sig, &kr, ns, mk, out, off);
+        }
+    }
+    Ok(Some(out_arr.unbind()))
+}
+
 // Convolution / correlation / isclose (3).
 #[pyfunction]
 #[pyo3(signature = (a, v, mode="full"))]
@@ -46163,6 +46266,13 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
             )?
             .unbind())
     };
+
+    // Zero-copy short-kernel direct path: reads buffers + writes the numpy output
+    // in place, skipping the extract+build copies. Closes the 9-15x short-kernel
+    // loss to parity. Falls through for long kernels / non-f64 / non-contiguous.
+    if let Some(out) = try_zerocopy_conv_corr_f64(py, a.bind(py), v.bind(py), mode, false)? {
+        return Ok(out);
+    }
 
     // Fast path: 1D f64 arrays with standard modes
     let a_arr = match extract_numeric_array(py, a.bind(py), "convolve(a)") {
@@ -46224,6 +46334,12 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
             )?
             .unbind())
     };
+
+    // Zero-copy short-kernel direct path (defers when len(a)<len(v): correlate is
+    // not commutative). Closes the 9-15x short-kernel loss to parity.
+    if let Some(out) = try_zerocopy_conv_corr_f64(py, a.bind(py), v.bind(py), mode, true)? {
+        return Ok(out);
+    }
 
     // Fast path: 1D f64 arrays with standard modes
     let a_arr = match extract_numeric_array(py, a.bind(py), "correlate(a)") {

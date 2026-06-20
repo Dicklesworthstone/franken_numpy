@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY WIN: convolve/correlate zero-copy short-kernel (9-38x loss -> up to 16x WIN)
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_python_convolve_zerocopy_vs_numpy/`
+
+Agent: `BlackThrush` / `cod-b`. Under directive `franken_numpy-ixs5y`. SHIP.
+Implements the recipe from the "DEFINITIVE diagnosis" entry below.
+
+LOSE-gap closed: `np.convolve`/`np.correlate` short-kernel (k<=48) 1-D f64 was
+9-38x slower than numpy. The diagnosis proved the SIMD gather KERNEL was already
+at parity (1.38ms@1M) and the loss was two full-array copies (extract input->Vec
+~4.75ms + build Vec->numpy ~5.5ms).
+
+Lever: extracted `convolve_mode`'s SIMD-across-outputs gather into a shared
+`fnp_ufunc::convolve_gather_fill(a,kr,n,m,out,lo)` (bit-identical refactor, 19
+fnp-ufunc convolve tests green). Added fnp-python `try_zerocopy_conv_corr_f64`:
+reads both f64 1-D buffers as `&[f64]` (from_raw_parts, no copy), allocates the
+numpy output once, runs the gather writing the mode region DIRECTLY into the
+output buffer (output band split across cores for large out). 1 read + 1 write,
+like numpy's C loop. convolve commutative (signal=longer, kr=shorter reversed);
+correlate requires La>=Lv else defers (kr=v as-is). Gated kernel<=48 (pure-gather,
+never shadows FFT). Non-f64/non-contig/long-kernel/list defer unchanged.
+
+Result: WIN or parity across the whole grid (was all loss). 'same': N=2M k=16
+**0.06x (16x faster)**, k=32 0.09x; N=1M k=16 0.09x; k=3 large-N ~1.0-1.1x parity;
+tiny-N k=3 ~1.2x (6us dispatch floor). fnp beats numpy because numpy convolve is
+serial O(N*k) while fnp parallelizes+SIMDs the gather. Correctness: 0 fails/243
+exhaustive size×mode×(conv+corr) cases (incl swap+boundaries); 9/9 defer cases
+match; conformance_convolution PASS; both crates build+clippy clean (pre-existing
+eq_op unchanged).
+
+REUSABLE: generalizes the zero-copy-PyBuffer pattern (cov/corrcoef/where/select)
+to convolve. When a kernel is already fast but the op loses at the Python level,
+the culprit is the UFuncArray wrapper's extract(input)+build(output) copies; a
+zero-copy in/out path (read &[f64], write straight into numpy.empty's buffer via a
+shared fill that takes `out: &mut [f64]`) eliminates both. Grep other wrappers
+that call extract_numeric_array + build_numpy_array_from_ufunc on large 1-D f64.
+
 ## 2026-06-20 - BOLD-VERIFY DEFINITIVE diagnosis: convolve loss = wrapper copies, kernel is PARITY
 
 Agent: `BlackThrush` / `cod-b`. Supersedes the "needs profiling" note on the
