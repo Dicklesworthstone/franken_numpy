@@ -23244,11 +23244,13 @@ fn try_zerocopy_f64_nanprod_flat(
     Ok(Some(numpy.getattr("float64")?.call1((acc,))?.unbind()))
 }
 
-// Zero-copy per-lane nanprod over the CONTIGUOUS LAST axis of a C-contiguous f64
-// ndarray. numpy folds each lane's product left-to-right with NaN replaced by 1.0;
-// float multiply is not associative, so the WITHIN-lane order must match — but lanes
-// are independent, so the sequential per-lane fold runs across the rayon pool while
-// staying bit-identical to numpy. Non-last axis / non-contiguous / non-f64 defer.
+// Zero-copy nanprod along any axis of a C-contiguous f64 ndarray. numpy folds the
+// product DOWN the axis with NaN replaced by 1.0; float multiply is not associative,
+// so the along-axis order must match. Last axis (inner==1): each contiguous lane folds
+// sequentially, lanes fan across the rayon pool. Non-last axis: a per-inner running
+// product accumulator walks the rows in order (down-axis order preserved → bit-exact),
+// one cache-sequential pass vs numpy's NaN→1 temp; ≥2 outer groups fan across groups.
+// Non-contiguous / non-f64 defer.
 fn try_zerocopy_f64_nanprod_axis(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -23271,8 +23273,8 @@ fn try_zerocopy_f64_nanprod_axis(
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
     let ndim = shape.len() as i64;
     let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
-    if ax < 0 || ax != ndim - 1 {
-        return Ok(None); // only the contiguous last axis (inner == 1)
+    if ax < 0 || ax >= ndim {
+        return Ok(None);
     }
     let ax = ax as usize;
     let axis_len = shape[ax];
@@ -23289,25 +23291,61 @@ fn try_zerocopy_f64_nanprod_axis(
         return Ok(None);
     };
     let outer: usize = shape[..ax].iter().product();
+    let inner: usize = shape[ax + 1..].iter().product();
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer under
-    // the GIL -> &[f64] (Sync) for the parallel per-lane fold.
+    // the GIL -> &[f64] (Sync) for the parallel folds below.
     let data: &[f64] =
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
-    let lane_prod = |lane: &[f64]| -> f64 {
-        let mut acc = 1.0f64;
-        for &v in lane {
-            acc *= if v.is_nan() { 1.0 } else { v };
-        }
-        acc
-    };
     use rayon::prelude::*;
-    let parallel = outer * axis_len >= (1 << 16) && rayon::current_num_threads() >= 2;
-    let out: Vec<f64> = if parallel {
-        data.par_chunks_exact(axis_len).map(lane_prod).collect()
+    let out: Vec<f64> = if inner == 1 {
+        // Last axis: each contiguous lane folds sequentially; fan lanes across the pool.
+        let lane_prod = |lane: &[f64]| -> f64 {
+            let mut acc = 1.0f64;
+            for &v in lane {
+                acc *= if v.is_nan() { 1.0 } else { v };
+            }
+            acc
+        };
+        let parallel = outer * axis_len >= (1 << 16) && rayon::current_num_threads() >= 2;
+        if parallel {
+            data.par_chunks_exact(axis_len).map(lane_prod).collect()
+        } else {
+            data.chunks_exact(axis_len).map(lane_prod).collect()
+        }
     } else {
-        data.chunks_exact(axis_len).map(lane_prod).collect()
+        // Non-last axis: per-inner running product down the axis (NaN→1.0). Walking
+        // rows in order preserves numpy's along-axis multiply order → bit-exact, in a
+        // single cache-sequential pass. ≥2 outer groups fan across the pool.
+        let lane = axis_len * inner;
+        let group_prod = |o: usize| -> Vec<f64> {
+            let base = o * lane;
+            let mut acc = vec![1.0f64; inner];
+            for r in 0..axis_len {
+                let row = &data[base + r * inner..base + r * inner + inner];
+                for (a_acc, &v) in acc.iter_mut().zip(row) {
+                    *a_acc *= if v.is_nan() { 1.0 } else { v };
+                }
+            }
+            acc
+        };
+        let parallel =
+            outer >= 2 && outer * axis_len * inner >= (1 << 16) && rayon::current_num_threads() >= 2;
+        let mut out = vec![0.0f64; outer * inner];
+        if parallel {
+            let planes: Vec<Vec<f64>> = (0..outer).into_par_iter().map(group_prod).collect();
+            for (o, p) in planes.into_iter().enumerate() {
+                out[o * inner..o * inner + inner].copy_from_slice(&p);
+            }
+        } else {
+            for o in 0..outer {
+                let p = group_prod(o);
+                out[o * inner..o * inner + inner].copy_from_slice(&p);
+            }
+        }
+        out
     };
-    let out_shape: Vec<usize> = shape[..ax].to_vec();
+    let mut out_shape = shape.clone();
+    out_shape.remove(ax);
     let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
     let reshaped =
         flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
