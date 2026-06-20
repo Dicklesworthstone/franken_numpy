@@ -22660,11 +22660,15 @@ fn nanmean(
     }
     // Per-lane pairwise fast path for the contiguous last axis (~5.7x faster than
     // the extract → native scan; all-NaN lanes -> NaN + "Mean of empty slice").
-    if !keepdims
-        && let Some(axis_val) = axis.as_ref()
+    if let Some(axis_val) = axis.as_ref()
         && !axis_val.bind(py).is_none()
         && let Some(out) = try_zerocopy_f64_nanmean_axis(py, a.bind(py), axis_val.bind(py))?
     {
+        if keepdims {
+            let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+            let ax_i = axis_val.bind(py).extract::<i64>()?;
+            return keepdims_expand_axis(py, &numpy, out, ax_i, ndim);
+        }
         return Ok(out);
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanmean(a)") {
@@ -22888,6 +22892,24 @@ fn keepdims_reshape_scalar(
         .unbind())
 }
 
+// numpy keepdims=True for a SINGLE-int-axis reduction == the reduced result with a
+// length-1 axis re-inserted at the (normalized) reduced position. np.expand_dims does
+// exactly that, so the single-axis zero-copy fast paths can run unchanged (producing
+// the reduced-shape result) and we restore the kept axis here.
+fn keepdims_expand_axis(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    out: Py<PyAny>,
+    axis: i64,
+    ndim: usize,
+) -> PyResult<Py<PyAny>> {
+    let norm = if axis < 0 { axis + ndim as i64 } else { axis };
+    Ok(numpy
+        .getattr("expand_dims")?
+        .call1((out.bind(py), norm))?
+        .unbind())
+}
+
 fn try_zerocopy_f64_nanmean_flat(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -23022,11 +23044,15 @@ fn nansum(
         }
         return Ok(out);
     }
-    if !keepdims
-        && let Some(axis_val) = axis.as_ref()
+    if let Some(axis_val) = axis.as_ref()
         && !axis_val.bind(py).is_none()
         && let Some(out) = try_zerocopy_f64_nansum_axis(py, a.bind(py), axis_val.bind(py))?
     {
+        if keepdims {
+            let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+            let ax_i = axis_val.bind(py).extract::<i64>()?;
+            return keepdims_expand_axis(py, &numpy, out, ax_i, ndim);
+        }
         return Ok(out);
     }
     let a = match extract_numeric_array(py, a.bind(py), "nansum(a)") {
@@ -23744,11 +23770,15 @@ fn nanmax(
     }
     // Zero-copy SIMD per-lane fast path for the contiguous last axis (~12x faster
     // than the extract → native scan; all-NaN/±0 lanes defer to numpy).
-    if !keepdims.unwrap_or(false)
-        && let Some(axis_val) = axis.as_ref()
+    if let Some(axis_val) = axis.as_ref()
         && !axis_val.bind(py).is_none()
         && let Some(out) = try_zerocopy_f64_nanextreme_axis(py, a.bind(py), axis_val.bind(py), true)?
     {
+        if keepdims.unwrap_or(false) {
+            let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+            let ax_i = axis_val.bind(py).extract::<i64>()?;
+            return keepdims_expand_axis(py, &numpy, out, ax_i, ndim);
+        }
         return Ok(out);
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanmax(a)") {
@@ -23827,11 +23857,15 @@ fn nanmin(
     }
     // Zero-copy SIMD per-lane fast path for the contiguous last axis (~12x faster
     // than the extract → native scan; all-NaN/±0 lanes defer to numpy).
-    if !keepdims.unwrap_or(false)
-        && let Some(axis_val) = axis.as_ref()
+    if let Some(axis_val) = axis.as_ref()
         && !axis_val.bind(py).is_none()
         && let Some(out) = try_zerocopy_f64_nanextreme_axis(py, a.bind(py), axis_val.bind(py), false)?
     {
+        if keepdims.unwrap_or(false) {
+            let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+            let ax_i = axis_val.bind(py).extract::<i64>()?;
+            return keepdims_expand_axis(py, &numpy, out, ax_i, ndim);
+        }
         return Ok(out);
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanmin(a)") {
