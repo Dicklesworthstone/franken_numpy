@@ -22907,6 +22907,11 @@ fn nanmean(
     {
         return fallback();
     }
+    // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+    // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanmean(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -23316,6 +23321,11 @@ fn nansum(
     {
         return fallback();
     }
+    // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+    // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nansum(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -23425,6 +23435,11 @@ fn nanprod(
     // Non-contiguous (transposed/strided) ndarrays bail the zero-copy paths into the
     // cold extract → rebuild (transpose-copy). Delegate to numpy.
     if noncontiguous_ndarray(&numpy, a.bind(py))? {
+        return fallback();
+    }
+    // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+    // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
         return fallback();
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanprod(a)") {
@@ -24184,6 +24199,11 @@ fn nanmax(
     {
         return fallback();
     }
+    // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+    // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
+        return fallback();
+    }
     let a = match extract_numeric_array(py, a.bind(py), "nanmax(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -24282,6 +24302,11 @@ fn nanmin(
             .getattr("c_contiguous")?
             .extract::<bool>()?
     {
+        return fallback();
+    }
+    // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+    // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
         return fallback();
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanmin(a)") {
@@ -24404,6 +24429,11 @@ fn nanstd(
         return Ok(out);
     }
     if noncontiguous_ndarray(&numpy, a.bind(py))? {
+        return fallback();
+    }
+    // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+    // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
         return fallback();
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanstd(a)") {
@@ -24540,6 +24570,11 @@ fn nanvar(
         return Ok(out);
     }
     if noncontiguous_ndarray(&numpy, a.bind(py))? {
+        return fallback();
+    }
+    // Multi-axis (tuple) reductions extract the whole array then fall back to numpy
+    // on the axis re-parse below (wasteful 8x bool-bridge / f64 copy). Delegate up front.
+    if axis.as_ref().is_some_and(|ax| ax.bind(py).cast::<PyTuple>().is_ok()) {
         return fallback();
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanvar(a)") {
