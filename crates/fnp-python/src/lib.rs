@@ -24975,6 +24975,21 @@ fn lexsort(py: Python<'_>, keys: Py<PyAny>, axis: i64) -> PyResult<Py<PyAny>> {
         Ok(lexsort_fn.call((keys_bound,), Some(&kwargs))?.unbind())
     };
 
+    // numpy's lexsort uses a radix sort for integer/bool keys (int8 ~20x faster than
+    // our comparison-based native lexsort); delegate integer keys to numpy. Float keys
+    // keep the native path (which beats numpy for multi-key float). asarray on a
+    // tuple of same-length int arrays yields an integer 2-D array; mixed int/float
+    // promotes to float and stays native.
+    if let Ok(keys_arr) = numpy.call_method1("asarray", (keys_bound,))
+        && let Ok(kind) = keys_arr
+            .getattr("dtype")
+            .and_then(|d| d.getattr("kind"))
+            .and_then(|k| k.extract::<String>())
+        && matches!(kind.as_str(), "i" | "u" | "b")
+    {
+        return fallback(py);
+    }
+
     // Collect the key arrays. numpy accepts (a) a tuple/list of 1-D arrays
     // or (b) a 2-D array whose rows are keys (last row = primary).
     let mut key_arrays: Vec<UFuncArray> = Vec::new();
