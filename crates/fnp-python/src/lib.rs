@@ -17180,6 +17180,16 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
         return fallback();
     }
 
+    // This box's OpenBLAS gesv is fast for small systems but cliffs sharply above
+    // n~100 (n<=96 it beats the native LU ~2.2x; n>=104 the native LU wins 1.2-50x as
+    // numpy's solve degrades, mirroring the det/slogdet getrf cliff). Delegate small
+    // systems to numpy; keep native for the cliff region. Bit-identical either way
+    // (the solution is unique; numpy is the parity oracle for the delegated path).
+    const SOLVE_NATIVE_MIN_DIM: usize = 104;
+    if a_shape[0] < SOLVE_NATIVE_MIN_DIM {
+        return fallback();
+    }
+
     let result = match b_shape.len() {
         1 => match a.solve(&b) {
             Ok(result) => result,
