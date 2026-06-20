@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY WIN x3: array-API aliases reuse their optimized twins
+
+Artifact: inline (this entry). Agent: `BlackThrush` / `cod-b`. Directive `franken_numpy-ixs5y`. SHIP.
+
+Pattern (found by grepping pyfunctions that call extract_numeric_array +
+build_numpy_array_from_ufunc without a try_zerocopy path): several ARRAY-API
+ALIASES were implemented with a naive extract+build instead of delegating to their
+already-optimized numpy-name twins, so they paid the two-full-copy wrapper tax
+(see the convolve diagnosis) the twin avoids.
+
+1. `matrix_transpose`: was extract+materialize a C-order COPY -> ~18,000x slower
+   on 2000x2000 (numpy ~1us strided VIEW vs ~13ms copy) AND a SEMANTICS bug (result
+   no longer aliased the input: shares_memory False vs numpy True). Fix: delegate
+   to numpy.linalg.matrix_transpose (a transpose is never faster materialized than
+   as numpy's view). 18000x -> view parity + correct aliasing/writeable semantics.
+2. `atan2` (alias of arctan2): used extract+build; arctan2 has a zero-copy parallel
+   binary fast path (try_zerocopy_f64_binary). Routed atan2 ->
+   native_binary_arctan2_or_passthrough. 2.29x -> 0.45x WIN (bit-identical kernel).
+3. `concat` (alias of concatenate): extracted every operand + UFuncArray::concatenate
+   + build = 3 copies vs numpy's 1 (~23x at 4M). concatenate has a zero-copy
+   byte-concat fast path that already beats numpy (0.89x). Routed concat ->
+   concatenate. 23x -> 0.90x WIN.
+
+Validation: matrix_transpose now shares_memory==True + values/3-D match; atan2
+vals+scalar match arctan2; concat vals/axis/axis=None/list match numpy; 0/9
+correctness fails. conformance: arctan2 12, concat_append 29, block_concat 15,
+trig_math 17, linalg 1 — all PASS. Both crates build + clippy clean.
+
+REUSABLE: audit array-API alias pyfunctions (atan2/concat/matrix_transpose/...,
+the names added for numpy 2.0 array-API) — they often reimplement instead of
+delegating to the optimized numpy-name function, inheriting the extract+build tax.
+Grep extract_numeric_array + build_numpy_array_from_ufunc with no try_zerocopy.
+STILL OPEN from the same grep: `svdvals` 2-D 3.23x (native pure-Rust SVD, same
+class as the pinv 2-D loss — size-gate/delegate, needs small-n characterization).
+
 ## 2026-06-20 - BOLD-VERIFY WIN: convolve/correlate zero-copy short-kernel (9-38x loss -> up to 16x WIN)
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_python_convolve_zerocopy_vs_numpy/`

@@ -34719,20 +34719,18 @@ fn testing_assert_array_equal(
 #[pyfunction]
 #[pyo3(signature = (x,))]
 fn matrix_transpose(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    // numpy.matrix_transpose swaps the last two axes and returns a strided VIEW
+    // (shares memory, writeable). The native path extracted to UFuncArray and
+    // materialized a fresh C-order copy — ~18000x slower on a 2000x2000 (numpy ~1us
+    // view vs ~13ms copy) AND a semantics divergence (the result no longer aliased
+    // the input). A transpose is never faster materialized than as numpy's view, so
+    // delegate unconditionally — restores both the view semantics and the speed.
     let numpy = py.import("numpy")?;
-    let matrix_transpose_fn = numpy.getattr("linalg")?.getattr("matrix_transpose")?;
-    let fallback =
-        || -> PyResult<Py<PyAny>> { Ok(matrix_transpose_fn.call1((x.bind(py),))?.unbind()) };
-
-    let x = match extract_numeric_array(py, x.bind(py), "matrix_transpose(x)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let result = match x.matrix_transpose() {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(numpy
+        .getattr("linalg")?
+        .getattr("matrix_transpose")?
+        .call1((x.bind(py),))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -43540,39 +43538,12 @@ fn concat(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
-    let concat_fn = numpy.getattr("concat")?;
-    let fallback = || -> PyResult<Py<PyAny>> { Ok(concat_fn.call(args, kwargs)?.unbind()) };
-
-    // Fall back for empty args, extra positional args, or any kwargs
-    if args.is_empty() || args.len() > 2 || kwargs.is_some_and(|k| !k.is_empty()) {
-        return fallback();
-    }
-
-    // Parse arrays sequence and optional axis
-    let arrays_seq = args.get_item(0)?;
-    let axis: isize = if args.len() == 2 {
-        args.get_item(1)?.extract().unwrap_or(0)
-    } else {
-        0
-    };
-
-    let arrays = match extract_numeric_array_sequence(py, &arrays_seq, "concat") {
-        Ok(a) => a,
-        Err(_) => return fallback(),
-    };
-
-    // Fall back if any array has sidecars
-    if arrays.iter().any(|a| a.has_integer_sidecar()) {
-        return fallback();
-    }
-
-    let refs: Vec<&UFuncArray> = arrays.iter().collect();
-    let result = match UFuncArray::concatenate(&refs, axis) {
-        Ok(r) => r,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    // `concat` is the array-API alias of `concatenate` (numpy.concat IS
+    // numpy.concatenate, incl axis=None flattening). The old native path extracted
+    // every operand + ran UFuncArray::concatenate + build — three full copies vs
+    // numpy's one (~23x slower at 4M). Reuse `concatenate`'s zero-copy byte-concat
+    // fast path (which already BEATS numpy ~0.89x) and its exact numpy fallback.
+    concatenate(py, args, kwargs)
 }
 
 #[pyfunction]
@@ -43737,14 +43708,11 @@ fn atan2(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "atan2(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "atan2(x2)")?;
-        let result = ufunc_arctan2(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_array_from_ufunc(py, &result)
-    } else {
-        core_numpy_passthrough(py, "atan2", args, kwargs)
-    }
+    // atan2 is the array-API alias of arctan2 (identical op). Reuse arctan2's
+    // zero-copy parallel binary fast path instead of the naive extract+build, which
+    // was ~2.3x slower than numpy (the extract/build marshalling dominated, not the
+    // atan2). Bit-identical — same ufunc_arctan2 kernel underneath.
+    native_binary_arctan2_or_passthrough(py, args, kwargs)
 }
 
 #[pyfunction]
