@@ -19678,11 +19678,17 @@ fn histogram_f32(
     };
     let mut mn = s[0].get();
     let mut mx = mn;
+    let mut prev = mn;
+    let mut sorted_non_decreasing = true;
     for c in s.iter() {
         let v = c.get();
         if !v.is_finite() {
             return Ok(None);
         }
+        if v < prev {
+            sorted_non_decreasing = false;
+        }
+        prev = v;
         if v < mn {
             mn = v;
         }
@@ -19709,10 +19715,10 @@ fn histogram_f32(
         Some(&edge_kwargs),
     )?;
     // Counts: numpy bins float32 data using float32 arithmetic against the float32
-    // edges (this genuinely differs from an f64 computation at extreme scales), so
-    // compute the same O(1) affine index + edge corrections the f64/integer path
-    // uses, but in float32 — replacing the previous O(n log nbins) per-element binary
-    // search. first32/last32 are the float32 edge endpoints used for the linspace.
+    // edges (this genuinely differs from an f64 computation at extreme scales).
+    // Monotone inputs can classify with a streaming edge pointer; unsorted inputs
+    // use the same O(1) affine index + edge corrections as the f64/integer path.
+    // first32/last32 are the float32 edge endpoints used for the linspace.
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "int64")?;
     let counts = numpy.call_method("zeros", (nbins,), Some(&kwargs))?;
@@ -19730,37 +19736,58 @@ fn histogram_f32(
                 return Ok(None);
             }
         }
+        let norm_denom = last32 - first32;
+        let norm_numerator = nbins as f32;
         let Ok(cbuf) = PyBuffer::<i64>::get(&counts) else {
             return Ok(None);
         };
         let Some(cs) = cbuf.as_mut_slice(py) else {
             return Ok(None);
         };
-        let norm_denom = last32 - first32;
-        let norm_numerator = nbins as f32;
-        for c in s.iter() {
-            let x = c.get();
-            if x < first32 || x > last32 {
-                continue;
+        if sorted_non_decreasing {
+            let mut local_counts = vec![0i64; nbins];
+            let mut idx = 0usize;
+            for c in s.iter() {
+                let x = c.get();
+                if x < first32 {
+                    continue;
+                }
+                if x > last32 {
+                    break;
+                }
+                while idx != nbins - 1 && x >= es[idx + 1].get() {
+                    idx += 1;
+                }
+                local_counts[idx] += 1;
             }
-            let mut idx = (((x - first32) / norm_denom) * norm_numerator) as usize;
-            if idx > nbins {
-                return Ok(None);
+            for (slot, value) in cs.iter().zip(local_counts) {
+                slot.set(value);
             }
-            if idx == nbins {
-                idx -= 1;
-            }
-            if x < es[idx].get() {
-                if idx == 0 {
+        } else {
+            for c in s.iter() {
+                let x = c.get();
+                if x < first32 || x > last32 {
+                    continue;
+                }
+                let mut idx = (((x - first32) / norm_denom) * norm_numerator) as usize;
+                if idx > nbins {
                     return Ok(None);
                 }
-                idx -= 1;
+                if idx == nbins {
+                    idx -= 1;
+                }
+                if x < es[idx].get() {
+                    if idx == 0 {
+                        return Ok(None);
+                    }
+                    idx -= 1;
+                }
+                if idx != nbins - 1 && x >= es[idx + 1].get() {
+                    idx += 1;
+                }
+                let slot = &cs[idx];
+                slot.set(slot.get() + 1);
             }
-            if idx != nbins - 1 && x >= es[idx + 1].get() {
-                idx += 1;
-            }
-            let slot = &cs[idx];
-            slot.set(slot.get() + 1);
         }
     }
     Ok(Some(
@@ -79777,6 +79804,31 @@ mod tests {
                 }),
             )?;
             assert_index_tuple_matches_numpy(&actual_empty, &expected_empty)?;
+
+            // Float32 uses a dedicated edge + count path; keep it pinned because
+            // bin-edge arithmetic differs from the f64/integer histogram core.
+            let f32_values = numpy
+                .getattr("linspace")?
+                .call1((-1000.0_f64, 1000.0_f64, 100_000_usize))?
+                .call_method1("astype", ("float32",))?;
+            assert_index_tuple_matches_numpy(
+                &histogram_fn.call(
+                    (f32_values.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 50_i64)?;
+                        kw
+                    }),
+                )?,
+                &numpy_histogram.call(
+                    (f32_values.clone(),),
+                    Some(&{
+                        let kw = PyDict::new(py);
+                        kw.set_item("bins", 50_i64)?;
+                        kw
+                    }),
+                )?,
+            )?;
 
             Ok(())
         });

@@ -4,6 +4,61 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Keep: fnp-python sorted f32 histogram edge-pointer
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_python_histogram_f32_sorted_edges/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.268`.
+- Agent: `BlackThrush` / `cod-a`.
+- Subject API: Python-boundary `fnp.histogram` through `criterion_python_surface`.
+- Oracle/reference: NumPy inside the same Criterion harness process.
+- Decision worker: `hz2`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+
+Lever:
+- Detect monotone nondecreasing `float32` histogram inputs during the existing finite min/max pass.
+- Classify monotone data with a streaming pointer over the existing `float32` edge array, reducing the sorted case to `O(n + bins)` and removing per-element affine division.
+- Preserve fallback, strict edge validation, float32 edge construction, and the unsorted scalar classifier.
+- Alien-graveyard mapping: sorted-stream cursoring / merge-path style specialization plus constants-kill-you removal of hot scalar division when input order gives a stronger invariant.
+
+Commands:
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --bench criterion_python_surface -- 'python_histogram_boundary|python_setops_boundary|python_statistics_boundary|python_einsum_boundary|python_linalg_boundary|python_char_ascii_boundary' --sample-size 10 --measurement-time 2 --warm-up-time 1 --output-format bencher`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a RCH_WORKER=hz2 RCH_WORKERS=hz2 rch exec -- cargo bench -p fnp-python --bench criterion_python_surface -- python_histogram_boundary --sample-size 10 --measurement-time 2 --warm-up-time 1 --output-format bencher`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a RCH_WORKER=hz2 RCH_WORKERS=hz2 rch exec -- cargo test -p fnp-python histogram_matches_numpy_across_bins_range_density_weights_and_empty -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo check -p fnp-python --all-targets`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo build --release -p fnp-python`
+- `git diff --check`
+
+| Bead | Lever | Workload | Worker | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---|---:|---:|---:|---|
+| `franken_numpy-ixs5y.266` | Origin/main routing baseline | `histogram_i64_100k_50` | `hz2` | 599,955 ns | 861,321 ns | 0.697x, 1.44x faster | Baseline win |
+| `franken_numpy-ixs5y.266` | Origin/main routing baseline | `histogram_f32_100k_50` | `hz2` | 668,179 ns | 613,046 ns | 1.09x slower | Open gap |
+| `franken_numpy-ixs5y.266` | Raise parallel threshold | `histogram_i64_100k_50` | `hz2` | 845,866 ns | 867,590 ns | 0.975x, 1.03x faster | No-ship: i64 margin collapsed |
+| `franken_numpy-ixs5y.266` | Raise parallel threshold | `histogram_f32_100k_50` | `hz2` | 673,497 ns | 590,563 ns | 1.14x slower | No-ship: f32 still lost |
+| `franken_numpy-ixs5y.267` | Local count accumulator | `histogram_i64_100k_50` | `hz2` | 878,361 ns | 830,049 ns | 1.06x slower | No-ship |
+| `franken_numpy-ixs5y.267` | Local count accumulator | `histogram_f32_100k_50` | `hz2` | 686,940 ns | 608,869 ns | 1.13x slower | No-ship |
+| `franken_numpy-ixs5y.268` | Sorted edge-pointer count | `histogram_i64_100k_50` | `hz2` | 651,730 ns | 840,532 ns | 0.775x, 1.29x faster | Keep |
+| `franken_numpy-ixs5y.268` | Sorted edge-pointer count | `histogram_f32_100k_50` | `hz2` | 449,882 ns | 584,574 ns | 0.770x, 1.30x faster | Keep |
+
+Scorecard:
+- Routing baseline vs NumPy on histogram rows: win/loss/neutral = 1/1/0.
+- Threshold candidate vs NumPy: win/loss/neutral = 1/1/0, rejected because f32 still lost and i64 regressed vs origin baseline.
+- Local-count candidate vs NumPy: win/loss/neutral = 0/2/0, rejected.
+- Sorted edge-pointer candidate vs NumPy: win/loss/neutral = 2/0/0, kept.
+- Primary targeted gap moved from 1.09x slower than NumPy to 0.770x of NumPy time; FrankenNumPy f32 histogram old-to-new improved 668,179 ns to 449,882 ns (0.673x, 1.49x faster).
+
+Validation notes:
+- Focused histogram parity test passed, including a new sorted `float32` 100k, 50-bin case.
+- Supplemental `cargo test -p fnp-python` cleared 531 inline tests plus early conformance shards, then failed outside this path in `conformance_argwhere::argwhere_python_container_surfaces_match_numpy` because the NumPy oracle script emitted an `IndentationError`.
+- `cargo check -p fnp-python --all-targets` passed on RCH with the crate's pre-existing three dead-code warnings.
+- `cargo build --release -p fnp-python` passed on RCH worker `vmi1149989` with the same three warnings.
+- `git diff --check` passed.
+- `ubs crates/fnp-python/src/lib.rs` completed in 198s and exited 1 with broad file-wide inventory (`473` critical heuristic findings, `3661` warnings, `4554` info); no hunk-local histogram finding was identified.
+- `cargo fmt -p fnp-python -- --check` remains blocked by broad pre-existing rustfmt drift in `fnp-python`, outside this perf hunk.
+- `cargo clippy -p fnp-python --all-targets -- -D warnings` remains blocked by broad pre-existing fnp-python lint debt, outside this histogram path.
+- Retry predicate: do not retry the parallel-threshold or local-count-only variants for this f32 histogram row. Deeper retries should exploit data order, edge layout, or a broader zero-copy histogram primitive and must beat 449,882 ns on the same head-to-head harness.
+
 ## 2026-06-20 - BOLD-VERIFY Keep: fnp-random small PCG bytes direct append fill
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_random_bytes_small_direct_append/`
