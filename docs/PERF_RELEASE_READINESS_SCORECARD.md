@@ -3,6 +3,42 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-20 Linalg Symmetric Spectral / Batch Eigvalsh Bold-Verify
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `batch_eigvalsh` 64x128x128 and 16x256x256 rows | 9/10 | Release-ready current win |
+| `cond_nxn` 128 and 512 exact-symmetric rows | 8/10 | Current win on this worker |
+| `cond_nxn` 64 and 256 exact-symmetric rows | 3/10 | Not release-ready; still slower than NumPy |
+| `eigvalsh_nxn/128` | 2/10 | Not release-ready; 3.081x slower than NumPy |
+| Lanczos/power extremal-cond shortcut | 0/10 | Rejected before source edit; clustered spectra made residuals too loose |
+
+Evidence:
+- Artifact: `tests/artifacts/perf/2026-06-20_linalg_cond_lanczos_cod_a/`.
+- Same-worker `vmi1227854` current FNP/NumPy ratios:
+  `eigvalsh_nxn/128 = 3.081x`,
+  `cond_nxn/64 = 1.409x`,
+  `cond_nxn/128 = 0.859x`,
+  `cond_nxn/256 = 1.428x`,
+  `cond_nxn/512 = 0.431x`,
+  `batch_eigvalsh/64x128x128 = 0.577x`,
+  `batch_eigvalsh/16x256x256 = 0.0057x`.
+- The initial Python comparator file is retained but invalid because `rch exec`
+  ran it locally; counted NumPy rows come from direct SSH on `vmi1227854`.
+- Fresh QR profile passed and reported the current scaled-hypot values-only QR
+  path remains 1.24x-1.25x faster than the old libm-hypot path.
+- Production `crates/fnp-linalg/src/lib.rs` source remains unchanged.
+
+Decision:
+- Keep no new linalg source from this slice.
+- Treat batch eigvalsh as a current measured win, not a gap.
+- Route the remaining spectral work to a deeper reduction/eigensolver primitive:
+  dsytrd-class blocked Householder, two-stage tridiagonalization, or a fully
+  convergent tridiagonal eigensolver. Do not repeat sort, threshold,
+  direct-extrema, or fixed-iteration extremal shortcuts for this class.
+
+---
+
 ## 2026-06-20 Linalg Spectral Bold-Verify
 
 | Area | Score | Verdict |

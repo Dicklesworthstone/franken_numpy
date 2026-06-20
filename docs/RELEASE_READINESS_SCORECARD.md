@@ -3,6 +3,53 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - Linalg Symmetric Spectral / Batch Eigvalsh No-Ship Slice
+
+Scope:
+- Bead: `deadlock-audit-yy5qp`.
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg` / `eigvalsh_nxn`, `cond_nxn`, and `batch_eigvalsh`.
+- Worker proof: same-worker Rust Criterion, direct SSH NumPy comparators, and
+  QR profile on `vmi1227854`.
+- Artifact:
+  `tests/artifacts/perf/2026-06-20_linalg_cond_lanczos_cod_a/`.
+- Decision: no production source kept. `batch_eigvalsh` is a current measured
+  NumPy win; `eigvalsh_nxn/128` and some `cond_nxn` sizes remain spectral
+  release blockers.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Current `batch_eigvalsh` vs NumPy | PASS / DOMINATES | FNP/NumPy ratios are `0.577x` for 64x128x128 and `0.0057x` for 16x256x256. |
+| Current `cond_nxn` vs NumPy | MIXED | Same-worker ratios are `1.409x`, `0.859x`, `1.428x`, and `0.431x` for 64/128/256/512. |
+| Current `eigvalsh_nxn/128` vs NumPy | FAIL | Same-worker ratio is `3.081x` slower than NumPy. |
+| Rejected radical shortcut | PASS / REJECTED | Fixed-iteration extremal-cond idea was stopped before source edit because clustered spectra left residuals around `1e-4` to `1e-3`. |
+| QR profile | PASS | Current scaled-hypot values-only QR remains 1.24x-1.25x faster than the old libm-hypot path; the remaining loss is not a cheap QR-tail fix. |
+| Per-crate release tests | PASS | `cargo test -p fnp-linalg --release` passed locally after RCH had no admissible workers: 313 unit, 37 conformance, 19 golden, 19 metamorphic, 4 solve perf, and doctests. |
+| Per-crate check/clippy | PASS | `cargo check -p fnp-linalg --all-targets` and `cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed on `vmi1227854`. |
+| Revert discipline | PASS | No `crates/fnp-linalg/src/lib.rs` production diff survived. |
+| Evidence durability | PASS | Counted and invalid comparator logs, Criterion rows, QR profile, ratios, and retry predicates are recorded. |
+
+Cluster score: **64 / 100**
+
+Score rationale:
+- +18 current win proof: both batch eigvalsh rows materially beat NumPy.
+- +16 evidence discipline: Rust and NumPy rows were captured on the same worker,
+  and the invalid local comparator is retained but explicitly excluded.
+- +12 revert/source discipline: no unproven linalg source was kept.
+- +10 profiling clarity: the fresh QR profile confirms the already-shipped
+  scaled-hypot QR improvement and points away from cheap QR-tail work.
+- +8 routing clarity: fixed-iteration extremal cond, sort, direct-extrema, and
+  threshold microlevers are excluded for this gap.
+- -36 performance: `eigvalsh_nxn/128`, `cond_nxn/64`, and `cond_nxn/256` still
+  lose to NumPy on the counted worker.
+
+Current release posture:
+- `batch_eigvalsh/shape/(64x128x128|16x256x256)` should remain as a regression
+  guard rather than an active NumPy-gap target.
+- Symmetric spectral release readiness still depends on a deeper
+  reduction/eigensolver primitive, not on post-sort or fixed-iteration
+  approximations.
+
 ## 2026-06-20 - Linalg Column Norm Row-Block SIMD Keep Slice
 
 Scope:

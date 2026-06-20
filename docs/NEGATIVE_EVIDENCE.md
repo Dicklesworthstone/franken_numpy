@@ -4,6 +4,93 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY No-Ship: linalg symmetric spectral gap, batch eigvalsh verified win
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-20_linalg_cond_lanczos_cod_a/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-a`.
+- Bead: `deadlock-audit-yy5qp`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg` / `eigvalsh_nxn`, `cond_nxn`, and `batch_eigvalsh`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Performance worker: `vmi1227854` for all counted FNP Criterion rows, the
+  direct SSH NumPy comparators, and the current QR profile probe.
+- Alien/optimization hook: frontier numerical kernels and exotic specialization
+  ideas from `/alien-graveyard`, `/alien-artifact-coding`, and
+  `/extreme-software-optimization` were filtered through the gauntlet rule:
+  only source that beats fresh same-worker Rust and NumPy survives.
+- Decision: NO-SHIP for production source. Current `batch_eigvalsh` is already
+  a measured NumPy win on both checked batch rows. The remaining honest loss is
+  single `eigvalsh_nxn/128`; prior negative evidence already rules out
+  threshold, sort, and post-processing-only levers, while a Lanczos/power-style
+  extremal-cond shortcut was rejected before implementation because clustered
+  spectra left residuals around `1e-4` to `1e-3` after 10 iterations.
+
+Current head-to-head ledger:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Outcome |
+|---|---:|---:|---:|---|
+| `eigvalsh_nxn/size/128` | 1,172,682 | 380,630 | 3.081x | current loss |
+| `cond_nxn/size/64` | 165,033 | 117,136 | 1.409x | current loss |
+| `cond_nxn/size/128` | 919,355 | 1,070,705 | 0.859x | current win |
+| `cond_nxn/size/256` | 6,340,763 | 4,440,063 | 1.428x | current loss |
+| `cond_nxn/size/512` | 41,765,364 | 96,972,744 | 0.431x | current win |
+| `batch_eigvalsh/shape/64x128x128` | 10,513,359 | 18,205,409 | 0.577x | current win |
+| `batch_eigvalsh/shape/16x256x256` | 17,286,747 | 3,043,820,218 | 0.0057x | current win |
+
+Measurement notes:
+- Counted Rust rows come from `rch exec -- cargo bench -p fnp-linalg --bench
+  criterion_linalg ... --output-format bencher` pinned to `vmi1227854`.
+- Counted NumPy rows were run by direct SSH on the same `vmi1227854` checkout,
+  with Python 3.13.7 and NumPy 2.4.6. Matrix setup was outside the timed loop.
+- `numpy_cond_eigvalsh_vmi1227854.txt` is deliberately retained as invalid
+  evidence: `rch exec` declined to offload that non-compilation Python command
+  and it ran locally. It is not counted in any ratio above.
+- Fresh QR profiling via
+  `cargo test -p fnp-linalg tridiag_eigvals_qr_perf_report --release -- --ignored --nocapture`
+  passed and reported the current values-only QR path remains 1.24x-1.25x
+  faster than the old libm-hypot path:
+  n256 `1.906 -> 1.527 ms`, n512 `7.295 -> 5.836 ms`, n768 `15.166 -> 12.187 ms`.
+
+Rejected / not-implemented probes:
+
+| Probe | Evidence | Outcome |
+|---|---|---|
+| Lanczos / power extremal symmetric cond shortcut | Offline residual probe on the deterministic SPD benchmark family stayed around `1e-4` to `1e-3` after 10 iterations because the spectrum is tightly clustered. | rejected before source edit |
+| Post-sort / direct-extrema `cond` scan | Already measured earlier in this ledger as a paired regression for this loss class. | do not retry |
+| Public `eigvalsh` sort swap | Already measured earlier in this ledger as a public `eigvalsh_nxn/128` regression. | do not retry |
+| Lower blocked-tridiag threshold / matvec parallel threshold | Prior golden and threshold-sweep evidence rejected these cheap reduction knobs. | do not retry without a new proof class |
+
+Validation:
+- `rch exec -- cargo test -p fnp-linalg tridiag_eigvals_qr_perf_report --release -- --ignored --nocapture`
+  passed on `vmi1227854`.
+- `rch exec -- cargo test -p fnp-linalg --release` attempted the per-crate
+  release conformance gate through RCH; RCH reported no admissible workers and
+  failed open locally. Result: 313 unit tests, 37 conformance tests, 19 golden
+  tests, 19 metamorphic tests, 4 solve perf tests, and doctests passed.
+- `rch exec -- cargo check -p fnp-linalg --all-targets` passed on `vmi1227854`.
+- `rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings`
+  passed on `vmi1227854`.
+- `git diff --check` passed.
+- `ubs` on the changed markdown evidence files exited 0 with "no recognizable
+  languages", expected for this docs-only slice.
+- Production source diff for `crates/fnp-linalg/src/lib.rs`: empty. No
+  regressing source survived this slice.
+
+Retry predicate:
+- Do not spend more BOLD-VERIFY time on `batch_eigvalsh/shape/(64x128x128|16x256x256)`
+  until a same-worker comparator shows a regression; both rows already dominate
+  NumPy.
+- Do not reopen the symmetric `cond_nxn` 128 gap with a post-processing, sort,
+  direct-extrema, or fixed-iteration extremal-eigenvalue shortcut. The next
+  credible source attempt must replace or materially accelerate the
+  Householder reduction itself with a dsytrd-class blocked primitive, a
+  communication-avoiding/two-stage tridiagonalization that preserves the
+  existing spectral contracts, or a fully convergent tridiagonal eigensolver
+  with focused golden and NumPy proof.
+
 ## 2026-06-20 - BOLD-VERIFY Keep: linalg column norm 4-row SIMD accumulator
 
 Artifact directory:
