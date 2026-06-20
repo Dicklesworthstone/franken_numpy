@@ -17729,7 +17729,20 @@ fn isfinite(
 }
 
 #[pyfunction]
-fn spacing(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn spacing(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // out=/where=/dtype= etc → numpy passthrough (matches np.spacing accepting out=).
+    if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1) {
+        return core_numpy_passthrough(py, "spacing", args, kwargs);
+    }
+    let x: Py<PyAny> = args.get_item(0)?.unbind();
     // NumPy's spacing returns a float result whose width follows numpy's type
     // resolution: float32 -> float32, float16 -> float16, and integer inputs map to
     // float16 (int8/uint8), float32 (int16/uint16), or float64 (wider ints).
@@ -26967,8 +26980,20 @@ fn positive(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn reciprocal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn reciprocal(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // out=/where=/dtype= etc → numpy passthrough (matches np.reciprocal accepting out=).
+    if !(kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 1) {
+        return core_numpy_passthrough(py, "reciprocal", args, kwargs);
+    }
+    let x: Py<PyAny> = args.get_item(0)?.unbind();
     // Integer reciprocal is exact only for ±1: numpy yields 0 for |n|>1 and the
     // platform integer-minimum (with a divide-by-zero RuntimeWarning) for n==0. The
     // native integer path returns 0 for n==0 instead, diverging from numpy. Defer all
@@ -28369,9 +28394,16 @@ fn square(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn cbrt(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Cbrt, "cbrt", "cbrt(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn cbrt(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Cbrt, "cbrt", "cbrt(x)")
 }
 
 #[pyfunction]
@@ -28397,15 +28429,29 @@ fn isreal(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn expm1(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Expm1, "expm1", "expm1(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn expm1(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Expm1, "expm1", "expm1(x)")
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn log1p(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    native_unary_promoting(py, x.bind(py), UnaryOp::Log1p, "log1p", "log1p(x)")
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn log1p(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Log1p, "log1p", "log1p(x)")
 }
 
 #[pyfunction]
@@ -28427,13 +28473,21 @@ fn deg2rad(
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn fabs(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn fabs(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
     // np.fabs is element-wise absolute value for real-valued arrays only.
     // Unlike np.abs, numpy.fabs rejects complex inputs with TypeError.
     // Integer input promotes to float. native_unary_promoting falls back
-    // to numpy for complex (which raises TypeError) and integer promotion.
-    native_unary_promoting(py, x.bind(py), UnaryOp::Fabs, "fabs", "fabs(x)")
+    // to numpy for complex (which raises TypeError) and integer promotion;
+    // out=/where=/dtype= route to numpy passthrough.
+    native_unary_promoting_or_passthrough(py, args, kwargs, UnaryOp::Fabs, "fabs", "fabs(x)")
 }
 
 #[pyfunction]
@@ -28505,13 +28559,19 @@ fn floor_divide(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyA
 }
 
 #[pyfunction]
-#[pyo3(signature = (x,))]
-fn invert(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.invert (bitwise NOT for integer and boolean
-    // dtypes; aliased as bitwise_not). Rejects float/complex with a
-    // TypeError that must surface identically.
-    let numpy = py.import("numpy")?;
-    Ok(numpy.getattr("invert")?.call1((x.bind(py),))?.unbind())
+#[pyo3(
+    signature = (*args, **kwargs),
+    text_signature = "(x, /, out=None, *, where=True, casting='same_kind', order='K', dtype=None, subok=True, signature=None)"
+)]
+fn invert(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Py<PyAny>> {
+    // Passthrough to np.invert (bitwise NOT for integer and boolean dtypes; aliased as
+    // bitwise_not). Rejects float/complex with a TypeError that must surface
+    // identically; out=/where=/dtype= forwarded for full ufunc parity.
+    core_numpy_passthrough(py, "invert", args, kwargs)
 }
 
 #[pyfunction]
