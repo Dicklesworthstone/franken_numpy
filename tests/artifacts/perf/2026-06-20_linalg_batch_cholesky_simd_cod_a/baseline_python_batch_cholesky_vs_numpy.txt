@@ -1,0 +1,7 @@
+B=  4000 d=   8 np=   1.07ms fnp=   3.33ms ratio= 3.12 match=True
+B=  2000 d=  16 np=   2.18ms fnp=  42.92ms ratio=19.65 match=True
+B=  1000 d=  32 np=   4.57ms fnp=  21.32ms ratio= 4.67 match=True
+B=   500 d=  64 np=   6.37ms fnp=  38.89ms ratio= 6.10 match=True
+B=   200 d= 100 np=   7.27ms fnp=  10.81ms ratio= 1.49 match=True
+B=    64 d= 200 np=  10.32ms fnp=  14.07ms ratio= 1.36 match=True
+B= 10000 d=   4 np=   1.16ms fnp=   2.81ms ratio= 2.42 match=True

@@ -4,6 +4,62 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY No-Ship: batch_cholesky f64x4 across-lanes SIMD regressed broad gate
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_simd_cod_a/`
+
+Run identity:
+- Agent: `BlackThrush` / `cod-a`.
+- Worktree: clean scratch branch `cod-a-batch-cholesky-simd-20260620` from
+  `origin/main` at `64ad3a25`.
+- Target: `fnp_linalg::batch_cholesky`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Decision: NO-SHIP. Candidate source was reverted; no production code kept.
+
+Baseline loss versus NumPy:
+- Local ABI Python extension build, NumPy 2.4.3, `OMP_NUM_THREADS=1`,
+  `OPENBLAS_NUM_THREADS=1`, `MKL_NUM_THREADS=1`, `NUMEXPR_NUM_THREADS=1`.
+- Existing code vs NumPy was 0 wins / 7 losses / 0 neutral in this sweep:
+  B=4000 d=8 3.12x slower; B=2000 d=16 19.65x slower; B=1000 d=32
+  4.67x slower; B=500 d=64 6.10x slower; B=200 d=100 1.49x slower;
+  B=64 d=200 1.36x slower; B=10000 d=4 2.42x slower.
+
+Candidate:
+- Safe Rust `std::simd::Simd<f64, 4>` across four independent batch lanes for
+  `16 <= n < 128`, preserving the scalar `k` accumulation order inside each
+  matrix. Tail lanes used `cholesky_nxn_into_out`.
+- Correctness proof passed: `rch exec -- cargo test -p fnp-linalg
+  batch_cholesky_ -- --nocapture` reported 3 passed, 0 failed, 1 ignored; the
+  candidate bit-proof covered n=16/32/64 against per-lane `cholesky_nxn`.
+
+Same-worker broad gate:
+- Baseline RCH Criterion on `ovh-a`:
+  - `batch_cholesky/shape/64x128x128`: 1.6258 ms center.
+  - `batch_cholesky/shape/16x256x256`: 3.2794 ms center.
+- Candidate RCH Criterion on the same worker `ovh-a`:
+  - `64x128x128`: 2.3148 ms center, +45.662% regression.
+  - `16x256x256`: 3.8253 ms center, +16.109% regression.
+- Candidate broad gate: 0 wins / 2 losses / 0 neutral. NumPy candidate rerun
+  was skipped because the same-worker Rust broad gate already failed.
+
+Why this failed:
+- The lane-gather pattern packs four strided matrices into SIMD vectors inside
+  the innermost Cholesky dot product, then scatters scalar results back. The
+  proof is clean, but the gather/scatter and codegen footprint cost more than
+  the recovered vector lanes, and the change regressed the existing blocked
+  n>=128 Criterion rows despite the runtime gate excluding n=128/256 from the
+  candidate path.
+
+Retry predicate:
+- Do NOT retry portable-SIMD f64x4 gather/scatter across batch lanes as a
+  standalone Cholesky lever.
+- Do NOT retry allocation elimination, gate tuning, or threshold-only changes;
+  those were already disproven by the prior no-ship.
+- A credible retry must be a distinct algorithm/layout: true SoA batched-panel
+  Cholesky, a packed-panel representation that eliminates per-k gather/scatter,
+  or a LAPACK-class blocked per-lane kernel. It must prove medium rows and the
+  broad n>=128 rows in the same run window before any NumPy keep claim.
+
 ## 2026-06-20 - BOLD-VERIFY No-Ship: batch_cholesky 5-8x loss; alloc-elimination DISPROVEN, kernel is the wall
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_noship/`

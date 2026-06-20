@@ -3,6 +3,38 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - Batch Cholesky SIMD-Across-Lanes No-Ship Slice
+
+Scope:
+- Crate: `fnp-linalg`.
+- API: `batch_cholesky` / Python `fnp.cholesky` stacked SPD matrices.
+- Evidence: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_simd_cod_a/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Baseline vs NumPy | FAILING BASELINE | Existing code lost 0/7 measured Python rows vs NumPy 2.4.3, with medium rows 4.67x-19.65x slower. |
+| Candidate correctness | PASS | Focused RCH test passed 3 batch_cholesky tests, including bit-exact n=16/32/64 proof against scalar per-lane `cholesky_nxn`. |
+| Candidate performance | FAIL | Same-worker RCH Criterion on `ovh-a` regressed `64x128x128` by 45.662% and `16x256x256` by 16.109%. |
+| Revert discipline | PASS | Candidate source was removed before commit; no production change kept. |
+| Ledger discipline | PASS | Win/loss/neutral ratios, commands, failure reason, and retry predicate recorded in `docs/NEGATIVE_EVIDENCE.md`. |
+
+Cluster score: **58 / 100**
+
+Score rationale:
+- +20 correctness: the candidate preserved scalar Cholesky bits on focused tests.
+- +20 evidence discipline: baseline, candidate, and retry predicate are recorded.
+- +10 revert hygiene: no regressing source was kept.
+- +8 reproducibility: RCH target dir and same-worker Criterion rows are recorded.
+- -42 performance: the candidate regressed the broad Rust gate and did not earn
+  a NumPy rerun.
+
+Current release posture:
+- `batch_cholesky` remains a confirmed performance gap for medium stacked SPD
+  matrices.
+- Do not retry f64x4 gather/scatter SIMD. The next Cholesky attempt needs a
+  different layout or blocked batched-panel algorithm with same-window proof
+  across medium and n>=128 rows.
+
 ## 2026-06-20 - UFunc where_nonzero Verification Slice
 
 Scope:

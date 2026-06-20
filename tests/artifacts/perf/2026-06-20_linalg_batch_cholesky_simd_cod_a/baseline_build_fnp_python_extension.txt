@@ -1,0 +1,231 @@
+  [2m2026-06-20T10:43:19.546607Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: hz1 at root@87.99.133.171 (2 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:921 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:19.760576Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_numpy-cod-a-batch-cholesky-simd-20260620 (hash: d08a3ae5393aeed1)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:19.760619Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 11 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:20.344134Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker hz1...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:20.344187Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 pattern(s) from .rchignore (total: 39)[0m
+    [2;3mat[0m rch/src/transfer.rs:886 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:20.344197Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620 -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620 on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:21.514414Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1170ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:21.514478Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-conformance -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-conformance on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:21.917126Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 402ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:21.917196Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-dtype -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-dtype on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:22.334143Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 416ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:22.334215Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-io -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-io on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:22.731111Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 396ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:22.731173Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-iter -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-iter on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:23.147059Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 415ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:23.147128Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-linalg -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-linalg on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:23.599874Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 452ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:23.599952Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-ndarray -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-ndarray on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:24.037351Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 437ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:24.037413Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-python -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-python on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:24.470380Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 432ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:24.470451Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-random -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-random on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:24.913971Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 443ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:24.914047Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-runtime -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-runtime on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:25.329041Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 414ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:25.329111Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-ufunc -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-ufunc on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:25.752528Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 423ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:25.752563Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 4871 files, 16310831 bytes in 5400ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:28.146226Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo build -p fnp-python --release --features python-extension[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:43:28.146260Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.rch-targets/franken_numpy-cod-a -> /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/.rch-target-hz1-pool-a8ab74326c4d0e5fa03da0ec0c00e927[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded cfg-if v1.0.4
+  Downloaded adler2 v2.0.1
+  Downloaded heck v0.5.0
+  Downloaded itoa v1.0.18
+  Downloaded crc32fast v1.5.0
+  Downloaded pyo3-macros v0.28.3
+  Downloaded target-lexicon v0.13.5
+  Downloaded zmij v1.0.21
+  Downloaded unicode-ident v1.0.24
+  Downloaded rayon-core v1.13.0
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded serde v1.0.228
+  Downloaded pyo3-ffi v0.28.3
+  Downloaded serde_json v1.0.149
+  Downloaded memchr v2.8.0
+  Downloaded pyo3-macros-backend v0.28.3
+  Downloaded rayon v1.12.0
+  Downloaded miniz_oxide v0.8.9
+  Downloaded flate2 v1.1.9
+  Downloaded proc-macro2 v1.0.106
+  Downloaded serde_derive v1.0.228
+  Downloaded zerocopy v0.8.48
+  Downloaded serde_core v1.0.228
+  Downloaded syn v2.0.117
+  Downloaded quote v1.0.45
+  Downloaded pyo3-build-config v0.28.3
+  Downloaded once_cell v1.21.4
+  Downloaded half v2.7.1
+  Downloaded getrandom v0.3.4
+  Downloaded bytemuck v1.25.0
+  Downloaded simd-adler32 v0.3.9
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded either v1.15.0
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded libc v0.2.185
+  Downloaded pyo3 v0.28.3
+   Compiling proc-macro2 v1.0.106
+   Compiling target-lexicon v0.13.5
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling crossbeam-utils v0.8.21
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.185
+   Compiling serde_core v1.0.228
+   Compiling rayon-core v1.13.0
+   Compiling zmij v1.0.21
+   Compiling zerocopy v0.8.48
+   Compiling crc32fast v1.5.0
+   Compiling serde_json v1.0.149
+   Compiling serde v1.0.228
+   Compiling either v1.15.0
+   Compiling pyo3-build-config v0.28.3
+   Compiling fnp-ndarray v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-ndarray)
+   Compiling simd-adler32 v0.3.9
+   Compiling crossbeam-epoch v0.9.18
+   Compiling getrandom v0.3.4
+   Compiling syn v2.0.117
+   Compiling crossbeam-deque v0.8.6
+   Compiling memchr v2.8.0
+   Compiling adler2 v2.0.1
+   Compiling heck v0.5.0
+   Compiling itoa v1.0.18
+   Compiling miniz_oxide v0.8.9
+   Compiling once_cell v1.21.4
+   Compiling rayon v1.12.0
+   Compiling flate2 v1.1.9
+   Compiling pyo3-macros-backend v0.28.3
+   Compiling pyo3-ffi v0.28.3
+   Compiling pyo3 v0.28.3
+   Compiling fnp-runtime v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-runtime)
+   Compiling bytemuck v1.25.0
+   Compiling fnp-io v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-io)
+   Compiling fnp-linalg v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-linalg)
+   Compiling fnp-random v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-random)
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling fnp-iter v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-iter)
+   Compiling pyo3-macros v0.28.3
+   Compiling half v2.7.1
+   Compiling fnp-dtype v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-dtype)
+   Compiling fnp-ufunc v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-ufunc)
+   Compiling fnp-python v0.1.0 (/data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/crates/fnp-python)
+warning: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2519:5
+     |
+2516 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2519 |     Depth,
+     |     ^^^^^
+2520 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5151:4
+     |
+5151 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5173:4
+     |
+5173 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `fnp-python` (lib) generated 3 warnings
+    Finished `release` profile [optimized] target(s) in 2m 14s
+  [2m2026-06-20T10:45:43.453266Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 135306ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:45:43.453552Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:45:43.453572Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620 on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:2246 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:45:43.453628Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 retrieval exclude pattern(s) from .rchignore (total: 5)[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:45:43.855341Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 401ms (1 files, 1180 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2301 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:45:43.855360Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 1180 bytes in 401ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:45:43.855468Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/.scratch/franken_numpy-cod-a-batch-cholesky-simd-20260620/.rch-target-hz1-pool-a8ab74326c4d0e5fa03da0ec0c00e927 on hz1[0m
+    [2;3mat[0m rch/src/transfer.rs:2246 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:45:45.422227Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 1566ms (97 files, 554831 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2301 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-20T10:45:45.422250Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mCustom CARGO_TARGET_DIR artifacts retrieved: 97 files, 554831 bytes in 1566ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:859 [2;3mon[0m ThreadId(1)
+
+[RCH] remote hz1 (145.9s)
