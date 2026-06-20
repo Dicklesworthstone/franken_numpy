@@ -39882,10 +39882,9 @@ fn py_min(
         return Ok(out);
     }
 
-    // f32 min: numpy's SIMD reduction beats a widening native fold (8vdtg ceiling,
-    // same as f64); delegate instead of paying the cold extract->f64-widen scan
-    // (~20x slower than numpy).
-    if numpy_dtype_is_f32(a.bind(py)) {
+    // f32/f16 min: numpy's native reduction beats fnp's widening extract->f64 scan
+    // (8vdtg ceiling, ~1.5-20x slower); delegate.
+    if numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py)) {
         return fallback();
     }
 
@@ -40000,10 +39999,9 @@ fn py_max(
         return Ok(out);
     }
 
-    // f32 max: numpy's SIMD reduction beats a widening native fold (8vdtg ceiling,
-    // same as f64); delegate instead of paying the cold extract->f64-widen scan
-    // (~20x slower than numpy).
-    if numpy_dtype_is_f32(a.bind(py)) {
+    // f32/f16 max: numpy's native reduction beats fnp's widening extract->f64 scan
+    // (8vdtg ceiling, ~1.5-20x slower); delegate.
+    if numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py)) {
         return fallback();
     }
 
@@ -45007,10 +45005,9 @@ fn ptp(
         }
     }
 
-    // f32 ptp (any axis): numpy's fused SIMD ptp beats a widening native max−min
-    // (8vdtg ceiling, same as f64); delegate instead of the cold extract->f64-widen
-    // path (~12x slower than numpy).
-    if numpy_dtype_is_f32(a.bind(py)) {
+    // f32/f16 ptp (any axis): numpy's fused SIMD ptp beats fnp's widening native
+    // max−min (8vdtg ceiling, ~1.5-12x slower); delegate.
+    if numpy_dtype_is_f32(a.bind(py)) || numpy_dtype_is_f16(a.bind(py)) {
         return fallback();
     }
 
