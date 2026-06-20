@@ -65,7 +65,67 @@ Current release posture:
 - Do not retry small fixed-N Cholesky const specialization.
 - Next Cholesky work must be an actual medium-matrix layout/algorithm change
   with same-window Rust and NumPy proof.
+## 2026-06-20 - Batch Cholesky Validation-Hoist No-Ship Slice
 
+Scope:
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate: `fnp-linalg`.
+- Evidence: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_validation_hoist_cod_b/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Candidate performance | FAIL | Same-worker `vmi1153651` broad gate regressed both rows: 1.150x and 3.451x candidate/baseline. |
+| Candidate correctness compile | PASS | `rch exec -- cargo check -p fnp-linalg --lib` passed before revert. |
+| Revert discipline | PASS | Candidate source was reverted; `crates/fnp-linalg/src/lib.rs` has no remaining diff. |
+| Post-revert correctness | PASS | `rch exec -- cargo test -p fnp-linalg batch_cholesky_ -- --nocapture` passed 2 tests, 0 failed, 1 ignored. |
+| Post-revert build | PASS | `rch exec -- cargo build -p fnp-linalg --release` passed. |
+| Ledger discipline | PASS | Negative evidence records win/loss/neutral, old/new ratios, validation, and retry predicate. |
+
+Cluster score: **56 / 100**
+
+Score rationale:
+- +18 correctness/build: candidate compiled; post-revert focused tests and
+  release build passed.
+- +18 evidence discipline: same-worker baseline and candidate rows are stored.
+- +10 revert hygiene: no regressing source was kept.
+- +10 retry clarity: finite-scan hoisting is now ruled out alongside prior
+  allocation, threshold, and f64x4 gather/scatter no-ships.
+- -44 performance: the candidate regressed both measured rows and did not earn
+  a NumPy rerun.
+
+Current release posture:
+- `batch_cholesky` remains a confirmed medium stacked-SPD performance gap.
+- Next attempt needs a structurally different Cholesky kernel with same-window
+  proof across medium rows and n>=128 rows.
+
+## 2026-06-20 - Python Einsum Reduce-All Current-Head Rerun Slice
+
+Scope:
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate: `fnp-python`.
+- Worker proof: `vmi1293453`.
+- Evidence: `tests/artifacts/perf/2026-06-20_python_einsum_reduce_all_cod_b/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS | Current-head rerun was 5/0/0 versus NumPy; `einsum_reduce_all_f64_1000` was 0.730x NumPy time. |
+| Source discipline | PASS | No source edit was made because the target was already a current win. |
+| Routing discipline | PASS | Former near-loss was removed from the active target list and rerouted to deeper measured losers. |
+| Evidence durability | PASS | RCH benchmark log and per-run scorecard are stored under the artifact directory. |
+
+Cluster score: **78 / 100**
+
+Score rationale:
+- +35 performance: all observed einsum boundary rows beat NumPy on this worker.
+- +18 evidence discipline: exact ratios and worker are recorded.
+- +15 source discipline: no speculative source change was made after baseline
+  invalidated the target gap.
+- +10 routing clarity: scalar-builder and diagonal families are not reopened
+  without fresh losing evidence.
+
+Current release posture:
+- `einsum_reduce_all_f64_1000` is not an active current-head gap from this rerun.
+- Continue targeting confirmed losers such as `batch_cholesky`, not this row.
 ## 2026-06-20 - Python Einsum Trace Scalar-Builder Keep Slice
 
 Scope:

@@ -118,7 +118,82 @@ Retry predicate:
 - A credible Cholesky retry must change the medium-matrix algorithm or layout:
   true SoA batched-panel Cholesky, packed-panel storage eliminating gather/scatter,
   or a blocked triangular/SYRK primitive with same-window proof versus NumPy.
+## 2026-06-20 - BOLD-VERIFY No-Ship: batch_cholesky finite-validation hoist
 
+Artifact directory:
+`tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_validation_hoist_cod_b/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-b`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate: `fnp-linalg`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Candidate: hoist `batch_cholesky` finite validation to one full-batch scan and
+  call finite-unchecked internal Cholesky helpers only when every input value is
+  finite; otherwise fall back to the original checked per-lane path.
+- Decision: NO-SHIP. Candidate source was reverted before commit.
+
+Same-worker broad gate on RCH worker `vmi1153651`:
+
+| Row | Baseline | Candidate | Candidate/Baseline | Verdict |
+|---|---:|---:|---:|---|
+| `batch_cholesky/shape/64x128x128` | 18,102,653 ns | 20,809,809 ns | 1.150x | loss |
+| `batch_cholesky/shape/16x256x256` | 12,748,878 ns | 44,004,085 ns | 3.451x | loss |
+
+Ledger:
+- Candidate same-worker Rust gate: **0 wins / 2 losses / 0 neutral**.
+- Candidate NumPy rerun was intentionally skipped because the same-worker Rust
+  broad gate already regressed badly. The existing same-day NumPy evidence still
+  has current `batch_cholesky` at **0 wins / 7 losses / 0 neutral** versus NumPy,
+  with medium stacked SPD rows 4.67x-19.65x slower.
+- Post-revert source diff is empty for `crates/fnp-linalg/src/lib.rs`.
+
+Validation:
+- Candidate compile check passed: `rch exec -- cargo check -p fnp-linalg --lib`.
+- Post-revert focused test passed: `rch exec -- cargo test -p fnp-linalg
+  batch_cholesky_ -- --nocapture` reported 2 passed, 0 failed, 1 ignored.
+- Post-revert release build passed: `rch exec -- cargo build -p fnp-linalg
+  --release`.
+
+Retry predicate:
+- Do not retry finite-scan hoisting, allocation elimination, threshold tuning,
+  or f64x4 gather/scatter across batch lanes for `batch_cholesky`.
+- A credible retry needs a structurally different Cholesky kernel - blocked or
+  batched panels, or a dot-product kernel that preserves the Cholesky bit
+  contracts and proves medium rows plus n>=128 rows in the same run window.
+
+## 2026-06-20 - BOLD-VERIFY Routing: einsum reduce-all current-head rerun is already a win
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-20_python_einsum_reduce_all_cod_b/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-b`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate: `fnp-python`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- RCH worker selected: `vmi1293453`.
+- Purpose: rerun the prior visible `einsum_reduce_all_f64_1000` near-loss before
+  attempting a source change.
+
+Current-head head-to-head:
+
+| Row | FNP | NumPy | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `einsum_trace_f64_4000` | 97,103 ns | 107,426 ns | 0.904x | win |
+| `einsum_diag_f64_4000` | 2,244 ns | 2,483 ns | 0.904x | win |
+| `einsum_reduce_all_f64_1000` | 438,624 ns | 600,537 ns | 0.730x | win |
+| `einsum_reduce_rows_f64_1000` | 323,154 ns | 544,627 ns | 0.594x | win |
+| `einsum_reduce_cols_f64_1000` | 624,904 ns | 732,167 ns | 0.854x | win |
+
+Ledger:
+- Current-head rerun: **5 wins / 0 losses / 0 neutral** versus NumPy.
+- No source edit was made. The former `reduce_all` near-loss is no longer a
+  current actionable gap on this worker.
+
+Retry predicate:
+- Do not reopen the scalar-builder, diagonal shortcut, or reduce-all wrapper
+  families without fresh losing evidence. Move to a different measured loser.
 ## 2026-06-20 - BOLD-VERIFY Keep: fnp-python einsum trace scalar-builder
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_python_einsum_trace_cod_b/`
