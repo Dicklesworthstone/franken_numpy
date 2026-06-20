@@ -4,6 +4,78 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Keep: fnp-ufunc where_nonzero coordinate gather
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_ufunc_where_nonzero_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.247`.
+- Agent: `BlackThrush` / `cod-b`.
+- Subject API: direct Rust `fnp-ufunc` `where_nonzero` for large F64 2-D
+  arrays without integer sidecars.
+- Reference: NumPy 2.3.5 on `hz2` / `hetzner2` through explicit `ssh hz2`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Decision: keep the existing guarded Rayon chunk coordinate-gather path; no
+  production performance hunk was added in this verification slice.
+
+Lever:
+- The landed path divides large flat F64 buffers into contiguous morsels, counts
+  truthy lanes with the same NumPy predicate (`v != 0.0`, so NaN is truthy and
+  signed zero is false), then materializes each dimension's coordinate array in
+  C-order.
+- It falls back to the serial path for sidecar-backed arrays, non-F64 arrays,
+  scalar paths, and small arrays, preserving dtype and coordinate-order
+  contracts.
+- Alien-graveyard mapping: morsel-driven parallelism plus cache-local
+  coordinate emission for a memory-bandwidth-bound gather. The radical lever is
+  not new math; it is changing the loop from one monolithic serial scan into
+  independently counted and filled chunks without weakening coordinate order.
+
+Commands:
+- `RCH_WORKER=hz2 RCH_REQUIRE_REMOTE=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-ufunc --bench elementwise where_nonzero_f64_2d_sparse -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `ssh hz2 'cd /data/projects/franken_numpy && OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 python3 - <<PY ... PY'`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-ufunc where_nonzero_f64_parallel_matches_serial_reference_and_golden_sha256 -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-ufunc`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo clippy -p fnp-ufunc --all-targets -- -D warnings`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo build -p fnp-ufunc --release`
+
+| Workload | Worker | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---:|---:|---|
+| `where_nonzero_f64_2d_sparse/262144` | `hz2` | 290,959 ns | 1,162,745 ns | 0.250x, 4.00x faster | Win |
+| `where_nonzero_f64_2d_sparse/1048576` | `hz2` | 677,198 ns | 4,658,292 ns | 0.145x, 6.88x faster | Win |
+
+Scorecard:
+- Candidate vs NumPy: win/loss/neutral = 2/0/0.
+- Same-worker proof: FrankenNumPy Criterion ran through RCH on `hz2`; NumPy
+  comparator ran directly on `hz2` and reported host `hetzner2`, Python 3.14.4,
+  NumPy 2.3.5.
+- Noise discipline: the full-suite conformance rerun was allowed to land on
+  `vmi1227854`; it is not used for performance scoring.
+
+Validation notes:
+- Focused where_nonzero golden test passed:
+  `where_nonzero_f64_parallel_matches_serial_reference_and_golden_sha256`.
+- Full crate conformance passed after repairing a rounded Legendre polynomial
+  test golden exposed by the first full-suite run:
+  `cargo test -p fnp-ufunc` reported 2244 passed, 0 failed, 41 ignored, plus
+  green integration tests and doctests.
+- The Legendre repair is test-only: NumPy reports
+  `legmul([1,2,3,4], [0.5,-1,2])` coefficients at full f64 precision; the old
+  six-decimal expected row was outside the local `poly_close` tolerance.
+- `cargo check -p fnp-ufunc --all-targets`, `cargo clippy -p fnp-ufunc --all-targets -- -D warnings`,
+  and `cargo build -p fnp-ufunc --release` passed through RCH.
+- First clippy attempt failed before linting because `cargo-clippy` was missing
+  on `vmi1153651`; the retry passed on `hz1`, and a post-test-fix clippy pass
+  also passed on `hz1`.
+- `cargo fmt --package fnp-ufunc -- --check` remains blocked by broad
+  pre-existing rustfmt drift in untouched benches and source regions; the new
+  Legendre row is not singled out by the refreshed format artifact.
+- Retry predicate: do not retest generic F64 where/nonzero chunk gathering or
+  threshold-only tuning as standalone work. A next credible `where`/`nonzero`
+  lever must be a distinct primitive, for example division-free 2-D coordinate
+  reconstruction or row-run tables, and must preserve C-order coordinates,
+  sidecar fallback, NaN truth, and signed-zero false behavior.
+
 ## 2026-06-20 - BOLD-VERIFY Keep: fnp-linalg kron identity RHS specialization
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_kron_identity_vs_numpy/`

@@ -1,0 +1,381 @@
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/benches/elementwise.rs:131:
+         let mask = UFuncArray::new(
+             vec![*size],
+             (0..*size)
+[31m-                .map(|i| if matches!(i % 17, 0 | 4 | 9 | 15) { 1.0 } else { 0.0 })
+[m[32m+                .map(|i| {
+[m[32m+                    if matches!(i % 17, 0 | 4 | 9 | 15) {
+[m[32m+                        1.0
+[m[32m+                    } else {
+[m[32m+                        0.0
+[m[32m+                    }
+[m[32m+                })
+[m                 .collect(),
+             DType::Bool,
+         )
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/benches/elementwise.rs:397:
+         let mask = UFuncArray::new(
+             vec![*size],
+             (0..*size)
+[31m-                .map(|i| if matches!(i % 11, 0 | 3 | 7) { 1.0 } else { 0.0 })
+[m[32m+                .map(|i| {
+[m[32m+                    if matches!(i % 11, 0 | 3 | 7) {
+[m[32m+                        1.0
+[m[32m+                    } else {
+[m[32m+                        0.0
+[m[32m+                    }
+[m[32m+                })
+[m                 .collect(),
+             DType::Bool,
+         )
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/benches/elementwise.rs:426:
+         let mask = UFuncArray::new(
+             vec![*size],
+             (0..*size)
+[31m-                .map(|i| if matches!(i % 13, 0 | 2 | 8) { 1.0 } else { 0.0 })
+[m[32m+                .map(|i| {
+[m[32m+                    if matches!(i % 13, 0 | 2 | 8) {
+[m[32m+                        1.0
+[m[32m+                    } else {
+[m[32m+                        0.0
+[m[32m+                    }
+[m[32m+                })
+[m                 .collect(),
+             DType::Bool,
+         )
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/benches/elementwise.rs:454:
+         let mask = UFuncArray::new(
+             vec![*size],
+             (0..*size)
+[31m-                .map(|i| if matches!(i % 19, 3 | 7 | 11) { 1.0 } else { 0.0 })
+[m[32m+                .map(|i| {
+[m[32m+                    if matches!(i % 19, 3 | 7 | 11) {
+[m[32m+                        1.0
+[m[32m+                    } else {
+[m[32m+                        0.0
+[m[32m+                    }
+[m[32m+                })
+[m                 .collect(),
+             DType::Bool,
+         )
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/benches/elementwise.rs:482:
+         let mask = UFuncArray::new(
+             vec![*size],
+             (0..*size)
+[31m-                .map(|i| if matches!((i * 37 + 5) % 41, 0 | 3 | 11 | 17 | 29) { 1.0 } else { 0.0 })
+[m[32m+                .map(|i| {
+[m[32m+                    if matches!((i * 37 + 5) % 41, 0 | 3 | 11 | 17 | 29) {
+[m[32m+                        1.0
+[m[32m+                    } else {
+[m[32m+                        0.0
+[m[32m+                    }
+[m[32m+                })
+[m                 .collect(),
+             DType::Bool,
+         )
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:14440:
+         if out_batch_count >= CROSS_PARALLEL_MIN_BATCHES && rayon::current_num_threads() >= 2 {
+             if vector_output {
+                 let mut values = vec![0.0; out_len];
+[31m-                values.par_chunks_mut(3).enumerate().for_each(|(flat, out)| {
+[m[31m-                    let (a_base, b_base) = cross_bases(
+[m[31m-                        flat,
+[m[31m-                        &out_batch,
+[m[31m-                        &out_strides,
+[m[31m-                        &a_steps,
+[m[31m-                        &b_steps,
+[m[31m-                        a_len,
+[m[31m-                        b_len,
+[m[31m-                    );
+[m[31m-                    let ax = self.values[a_base];
+[m[31m-                    let ay = self.values[a_base + 1];
+[m[31m-                    let az = if a_len == 3 {
+[m[31m-                        self.values[a_base + 2]
+[m[31m-                    } else {
+[m[31m-                        0.0
+[m[31m-                    };
+[m[31m-                    let bx = other.values[b_base];
+[m[31m-                    let by = other.values[b_base + 1];
+[m[31m-                    let bz = if b_len == 3 {
+[m[31m-                        other.values[b_base + 2]
+[m[31m-                    } else {
+[m[31m-                        0.0
+[m[31m-                    };
+[m[31m-                    out[0] = ay * bz - az * by;
+[m[31m-                    out[1] = az * bx - ax * bz;
+[m[31m-                    out[2] = ax * by - ay * bx;
+[m[31m-                });
+[m[32m+                values
+[m[32m+                    .par_chunks_mut(3)
+[m[32m+                    .enumerate()
+[m[32m+                    .for_each(|(flat, out)| {
+[m[32m+                        let (a_base, b_base) = cross_bases(
+[m[32m+                            flat,
+[m[32m+                            &out_batch,
+[m[32m+                            &out_strides,
+[m[32m+                            &a_steps,
+[m[32m+                            &b_steps,
+[m[32m+                            a_len,
+[m[32m+                            b_len,
+[m[32m+                        );
+[m[32m+                        let ax = self.values[a_base];
+[m[32m+                        let ay = self.values[a_base + 1];
+[m[32m+                        let az = if a_len == 3 {
+[m[32m+                            self.values[a_base + 2]
+[m[32m+                        } else {
+[m[32m+                            0.0
+[m[32m+                        };
+[m[32m+                        let bx = other.values[b_base];
+[m[32m+                        let by = other.values[b_base + 1];
+[m[32m+                        let bz = if b_len == 3 {
+[m[32m+                            other.values[b_base + 2]
+[m[32m+                        } else {
+[m[32m+                            0.0
+[m[32m+                        };
+[m[32m+                        out[0] = ay * bz - az * by;
+[m[32m+                        out[1] = az * bx - ax * bz;
+[m[32m+                        out[2] = ax * by - ay * bx;
+[m[32m+                    });
+[m                 return Self::from_values_with_dtype(out_shape, values, dtype);
+             }
+ 
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:20956:
+             ));
+         }
+         let roots_values = &roots.values;
+[31m-        let eval_point =
+[m[31m-            |&x: &f64| roots_values.iter().fold(1.0, |acc, &r| acc * (x - r));
+[m[31m-        let result_vals: Vec<f64> = if self
+[m[31m-            .values
+[m[31m-            .len()
+[m[31m-            .saturating_mul(roots_values.len())
+[m[32m+        let eval_point = |&x: &f64| roots_values.iter().fold(1.0, |acc, &r| acc * (x - r));
+[m[32m+        let result_vals: Vec<f64> = if self.values.len().saturating_mul(roots_values.len())
+[m             >= POLYVALFROMROOTS_PARALLEL_MIN_WORK
+             && roots_values.len() >= 2
+             && rayon::current_num_threads() >= 2
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:21018:
+             && deg_x.saturating_mul(deg_y) >= 4
+             && rayon::current_num_threads() >= 2
+         {
+[31m-            (0..x.values.len()).into_par_iter().map(eval_point).collect()
+[m[32m+            (0..x.values.len())
+[m[32m+                .into_par_iter()
+[m[32m+                .map(eval_point)
+[m[32m+                .collect()
+[m         } else {
+             (0..x.values.len()).map(eval_point).collect()
+         };
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:21076:
+             && deg_x.saturating_mul(deg_y).saturating_mul(deg_z) >= 4
+             && rayon::current_num_threads() >= 2
+         {
+[31m-            (0..x.values.len()).into_par_iter().map(eval_point).collect()
+[m[32m+            (0..x.values.len())
+[m[32m+                .into_par_iter()
+[m[32m+                .map(eval_point)
+[m[32m+                .collect()
+[m         } else {
+             (0..x.values.len()).map(eval_point).collect()
+         };
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:41753:
+         frompyfunc_python_import_with_interpreter, frompyfunc_python_with_interpreter, gcd_arrays,
+         geterr, herm2poly, hermadd, hermder, hermdiv, herme2poly, hermeadd, hermeder, hermediv,
+         hermefit, hermefromroots, hermeint, hermemul, hermeroots, hermesub, hermeval, hermfit,
+[31m-        hermfromroots, hermint,
+[m[31m-        hermmul, hermroots, hermsub, hermval, hypot, interpolate_percentile, is_busday, isnat,
+[m[31m-        isneginf, isposinf, lag2poly, lagadd, lagder, lagdiv, lagfit, lagfromroots, lagint, lagmul,
+[m[31m-        lagroots, lagsub, lagval, lcm_arrays, ldexp, leg2poly, legadd, legder, legdiv, legfit,
+[m[31m-        legfromroots, legint, legmul, legroots, legsub, legval, logaddexp, logaddexp2, ma_is_mask,
+[m[31m-        ma_is_masked, ma_make_mask, ma_mask_or, ma_maximum_fill_value,
+[m[31m-        ma_maximum_fill_value_for_dtype, ma_minimum_fill_value, ma_minimum_fill_value_for_dtype,
+[m[31m-        matmul_accumulate_serial, mediate_ufunc_runtime_policy, modf, nextafter,
+[m[31m-        normalize_fixed_signature_keywords, normalize_signature_keywords, note_unary_float_errors,
+[m[31m-        pad_empty, pad_linear_ramp, pad_stat, parse_fixed_signature_string, parse_gufunc_signature,
+[m[31m-        plan_binary_dispatch, plan_binary_dispatch_with_registry,
+[m[31m-        plan_binary_dispatch_with_signature, poly2cheb, poly2herm, poly2herme, poly2lag, poly2leg,
+[m[31m-        reduce_frompyfunc_values, resolve_override_dispatch, scimath_arccos, scimath_arcsin,
+[m[31m-        scimath_arctanh, scimath_log, scimath_log2, scimath_log10, scimath_logn, scimath_power,
+[m[31m-        scimath_sqrt, seterr, seterr_state, seterrcall, signbit, sort_complex, spacing,
+[m[31m-        take_float_error_events, transpose_tiled, unique_all, unique_counts, unique_inverse,
+[m[31m-        unique_values, validate_override_payload_class, where_nonzero,
+[m[32m+        hermfromroots, hermint, hermmul, hermroots, hermsub, hermval, hypot,
+[m[32m+        interpolate_percentile, is_busday, isnat, isneginf, isposinf, lag2poly, lagadd, lagder,
+[m[32m+        lagdiv, lagfit, lagfromroots, lagint, lagmul, lagroots, lagsub, lagval, lcm_arrays, ldexp,
+[m[32m+        leg2poly, legadd, legder, legdiv, legfit, legfromroots, legint, legmul, legroots, legsub,
+[m[32m+        legval, logaddexp, logaddexp2, ma_is_mask, ma_is_masked, ma_make_mask, ma_mask_or,
+[m[32m+        ma_maximum_fill_value, ma_maximum_fill_value_for_dtype, ma_minimum_fill_value,
+[m[32m+        ma_minimum_fill_value_for_dtype, matmul_accumulate_serial, mediate_ufunc_runtime_policy,
+[m[32m+        modf, nextafter, normalize_fixed_signature_keywords, normalize_signature_keywords,
+[m[32m+        note_unary_float_errors, pad_empty, pad_linear_ramp, pad_stat,
+[m[32m+        parse_fixed_signature_string, parse_gufunc_signature, plan_binary_dispatch,
+[m[32m+        plan_binary_dispatch_with_registry, plan_binary_dispatch_with_signature, poly2cheb,
+[m[32m+        poly2herm, poly2herme, poly2lag, poly2leg, reduce_frompyfunc_values,
+[m[32m+        resolve_override_dispatch, scimath_arccos, scimath_arcsin, scimath_arctanh, scimath_log,
+[m[32m+        scimath_log2, scimath_log10, scimath_logn, scimath_power, scimath_sqrt, seterr,
+[m[32m+        seterr_state, seterrcall, signbit, sort_complex, spacing, take_float_error_events,
+[m[32m+        transpose_tiled, unique_all, unique_counts, unique_inverse, unique_values,
+[m[32m+        validate_override_payload_class, where_nonzero,
+[m     };
+     use fnp_dtype::{ArrayStorage, DType, StructuredField, StructuredStorage, f16, promote};
+     use fnp_ndarray::broadcast_shape;
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:54274:
+         let expected: Vec<f64> = original
+             .iter()
+             .zip(&mask_values)
+[31m-            .map(|(&current, &mask_value)| {
+[m[31m-                if mask_value != 0.0 {
+[m[31m-                    value
+[m[31m-                } else {
+[m[31m-                    current
+[m[31m-                }
+[m[31m-            })
+[m[32m+            .map(
+[m[32m+                |(&current, &mask_value)| {
+[m[32m+                    if mask_value != 0.0 { value } else { current }
+[m[32m+                },
+[m[32m+            )
+[m             .collect();
+ 
+         let mut actual = UFuncArray::new(vec![n], original, DType::F64).unwrap();
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:58397:
+     fn polynomial_2poly_matches_numpy_golden() {
+         // numpy.polynomial.*.{X}2poly([1,2,3,4,5]) — basis -> power-series conversion.
+         let c = [1.0, 2.0, 3.0, 4.0, 5.0];
+[31m-        poly_close_vec(&cheb2poly(&c), &[3.0, -10.0, -34.0, 16.0, 40.0], "cheb2poly");
+[m         poly_close_vec(
+[32m+            &cheb2poly(&c),
+[m[32m+            &[3.0, -10.0, -34.0, 16.0, 40.0],
+[m[32m+            "cheb2poly",
+[m[32m+        );
+[m[32m+        poly_close_vec(
+[m             &leg2poly(&c),
+             &[1.375, -4.0, -14.25, 10.0, 21.875],
+             "leg2poly",
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:58497:
+         );
+         poly_close_vec(
+             &hermint(&c, 2),
+[31m-            &[
+[m[31m-                4.5,
+[m[31m-                -2.5,
+[m[31m-                0.125,
+[m[31m-                0.083_333_33,
+[m[31m-                0.0625,
+[m[31m-                0.05,
+[m[31m-                0.041_666_67,
+[m[31m-            ],
+[m[32m+            &[4.5, -2.5, 0.125, 0.083_333_33, 0.0625, 0.05, 0.041_666_67],
+[m             "hermint2",
+         );
+         poly_close_vec(
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:58519:
+     fn polynomial_fromroots_matches_numpy_golden() {
+         // numpy.polynomial.*.{X}fromroots([-1.5, 0.5, 2.0]).
+         let r = [-1.5, 0.5, 2.0];
+[31m-        poly_close_vec(&chebfromroots(&r), &[1.0, -2.0, -0.5, 0.25], "chebfromroots");
+[m         poly_close_vec(
+[32m+            &chebfromroots(&r),
+[m[32m+            &[1.0, -2.0, -0.5, 0.25],
+[m[32m+            "chebfromroots",
+[m[32m+        );
+[m[32m+        poly_close_vec(
+[m             &legfromroots(&r),
+             &[1.166_666_67, -2.15, -0.666_666_67, 0.4],
+             "legfromroots",
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:58659:
+         );
+         poly_close_vec(
+             &hermeint(&c, 2),
+[31m-            &[
+[m[31m-                2.25,
+[m[31m-                -2.0,
+[m[31m-                0.5,
+[m[31m-                0.333_333_33,
+[m[31m-                0.25,
+[m[31m-                0.2,
+[m[31m-                0.166_666_67,
+[m[31m-            ],
+[m[32m+            &[2.25, -2.0, 0.5, 0.333_333_33, 0.25, 0.2, 0.166_666_67],
+[m             "hermeint2",
+         );
+         // der undoes int (the constant is removed by differentiation).
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:59636:
+         let sidecar_values: Vec<i64> = (0..sidecar_n)
+             .map(|i| (1_i64 << 53) + i as i64 * 17 - 9)
+             .collect();
+[31m-        let sidecar = UFuncArray::from_storage(
+[m[31m-            vec![sidecar_n],
+[m[31m-            ArrayStorage::I64(sidecar_values.clone()),
+[m[31m-        )
+[m[31m-        .unwrap();
+[m[31m-        let sidecar_out = sidecar.delete(&[0, sidecar_n / 2, sidecar_n - 1, 0], None).unwrap();
+[m[32m+        let sidecar =
+[m[32m+            UFuncArray::from_storage(vec![sidecar_n], ArrayStorage::I64(sidecar_values.clone()))
+[m[32m+                .unwrap();
+[m[32m+        let sidecar_out = sidecar
+[m[32m+            .delete(&[0, sidecar_n / 2, sidecar_n - 1, 0], None)
+[m[32m+            .unwrap();
+[m         let expected_sidecar: Vec<i64> = sidecar_values
+             .iter()
+             .enumerate()
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:59648:
+             .filter_map(|(idx, &value)| {
+[31m-                (idx != 0 && idx != sidecar_n / 2 && idx != sidecar_n - 1)
+[m[31m-                    .then_some(value)
+[m[32m+                (idx != 0 && idx != sidecar_n / 2 && idx != sidecar_n - 1).then_some(value)
+[m             })
+             .collect();
+         assert_eq!(
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:60915:
+         let expected: Vec<f64> = condition_values
+             .iter()
+             .zip(&arr_values)
+[31m-            .filter_map(|(&condition, &value)| {
+[m[31m-                if condition != 0.0 {
+[m[31m-                    Some(value)
+[m[31m-                } else {
+[m[31m-                    None
+[m[31m-                }
+[m[31m-            })
+[m[32m+            .filter_map(
+[m[32m+                |(&condition, &value)| {
+[m[32m+                    if condition != 0.0 { Some(value) } else { None }
+[m[32m+                },
+[m[32m+            )
+[m             .collect();
+ 
+         let condition = UFuncArray::new(vec![n], condition_values, DType::Bool).unwrap();
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:61051:
+         let large = (1_i64 << 53) + 17;
+         let mut sidecar_dst =
+             UFuncArray::from_storage(vec![4], ArrayStorage::I64(vec![1, 2, 3, 4])).unwrap();
+[31m-        let sidecar_mask =
+[m[31m-            UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 1.0], DType::Bool).unwrap();
+[m[32m+        let sidecar_mask = UFuncArray::new(vec![4], vec![1.0, 0.0, 1.0, 1.0], DType::Bool).unwrap();
+[m         let sidecar_vals =
+             UFuncArray::from_storage(vec![2], ArrayStorage::I64(vec![large, large + 1])).unwrap();
+         sidecar_dst.place(&sidecar_mask, &sidecar_vals).unwrap();
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:63563:
+             // Parseval.
+             let energy_time: f64 = x.iter().map(|v| v * v).sum();
+             let energy_freq: f64 = (0..n)
+[31m-                .map(|k| fx.values[2 * k] * fx.values[2 * k] + fx.values[2 * k + 1] * fx.values[2 * k + 1])
+[m[32m+                .map(|k| {
+[m[32m+                    fx.values[2 * k] * fx.values[2 * k]
+[m[32m+                        + fx.values[2 * k + 1] * fx.values[2 * k + 1]
+[m[32m+                })
+[m                 .sum();
+             assert!(
+                 (n as f64 * energy_time - energy_freq).abs() <= 1e-8 * (1.0 + energy_freq.abs()),
+Diff in /data/projects/franken_numpy/crates/fnp-ufunc/src/lib.rs:66418:
+         let cond2_vals: Vec<f64> = (0..n)
+             .map(|i| if ((i * 7 + 5) % 13) < 4 { 1.0 } else { 0.0 })
+             .collect();
+[31m-        let cond3_vals: Vec<f64> = (0..n)
+[m[31m-            .map(|i| if i % 5 == 0 { 1.0 } else { 0.0 })
+[m[31m-            .collect();
+[m[32m+        let cond3_vals: Vec<f64> = (0..n).map(|i| if i % 5 == 0 { 1.0 } else { 0.0 }).collect();
+[m         let choice1_vals: Vec<f64> = (0..n)
+             .map(|i| {
+                 if i % 101 == 0 {

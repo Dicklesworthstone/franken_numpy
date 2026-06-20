@@ -3,6 +3,47 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-20 - UFunc where_nonzero Verification Slice
+
+Scope:
+- Recent code-first pending backlog measured and closed: `franken_numpy-ixs5y.247`.
+- Crate: `fnp-ufunc`.
+- Reference: NumPy 2.3.5.
+- Same-worker decision host: `hz2` / `hetzner2`.
+- Evidence: `tests/artifacts/perf/2026-06-20_ufunc_where_nonzero_vs_numpy/`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS | 2/2 measured rows faster than NumPy; speedups were 4.00x and 6.88x. |
+| Noise discipline | PASS | FNP Criterion ran on `hz2`; NumPy comparator ran directly on `hz2` and reported host/version metadata. |
+| Targeted correctness | PASS | `where_nonzero_f64_parallel_matches_serial_reference_and_golden_sha256` passed. |
+| Full crate conformance | PASS | `cargo test -p fnp-ufunc` passed after the rounded Legendre golden was repaired: 2244 passed, 0 failed, 41 ignored, plus green integration tests and doctests. |
+| Crate compile health | PASS | `cargo check -p fnp-ufunc --all-targets` passed through RCH. |
+| Clippy health | PASS | `cargo clippy -p fnp-ufunc --all-targets -- -D warnings` passed on `hz1` after one worker missing-component miss. |
+| Release build health | PASS | `cargo build -p fnp-ufunc --release` passed through RCH. |
+| Formatting health | KNOWN GAP | `cargo fmt --package fnp-ufunc -- --check` reports broad pre-existing drift outside this slice; the refreshed artifact does not flag the new Legendre row. |
+| Evidence durability | PASS | Results recorded in `docs/NEGATIVE_EVIDENCE.md` and the per-run scorecard. |
+
+Cluster score: **91 / 100**
+
+Score rationale:
+- +35 performance: both target rows beat NumPy decisively.
+- +20 correctness: focused where_nonzero SHA guard and the full `fnp-ufunc`
+  suite passed.
+- +15 reproducibility: same-worker FNP and NumPy evidence.
+- +15 ledger discipline: all rows, validation, retry predicate, and artifact
+  path recorded.
+- +8 test hygiene: the full-suite failure was traced to a rounded NumPy golden
+  row and repaired with full f64 coefficients.
+- -2 residual validation: format drift remains in untouched `fnp-ufunc`
+  regions and was not normalized in this slice.
+
+Current release posture:
+- `franken_numpy-ixs5y.247` is **measured keep**, not pending.
+- Large F64 2-D `where_nonzero` coordinate gather is ahead of NumPy for the
+  measured sparse shapes; future work should target a distinct coordinate
+  primitive rather than retuning this same chunk-gather family.
+
 ## 2026-06-20 - Linalg Kron Identity Verification Slice
 
 Scope:
