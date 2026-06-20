@@ -18004,6 +18004,12 @@ fn nextafter(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>
             .call1((x1.bind(py), x2.bind(py)))?
             .unbind());
     }
+    if noncontiguous_ndarray(&numpy, x1.bind(py))? || noncontiguous_ndarray(&numpy, x2.bind(py))? {
+        return Ok(numpy
+            .getattr("nextafter")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
+    }
     if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Nextafter)? {
         return Ok(out);
     }
@@ -19970,6 +19976,13 @@ fn roll(
             )?
             .unbind())
     };
+
+    // Non-contiguous (transposed/strided) ndarrays can't use the contiguous block-copy
+    // fast paths and otherwise reach the cold extract → rebuild (~3.5x slower than
+    // numpy's strided roll). Delegate them to numpy up front.
+    if noncontiguous_ndarray(&numpy, a.bind(py))? {
+        return fallback();
+    }
 
     // Zero-copy flatten roll for C-contiguous f64 ndarrays (axis=None any ndim,
     // or 1-D with axis 0/-1); skips the cold extract/build Vecs. Bit-identical;
@@ -28523,6 +28536,12 @@ fn array_equal(
             .into_any()
             .unbind());
     }
+    // Non-contiguous (transposed/strided) ndarray operands bail the zero-copy
+    // early-exit fold into the cold extract → rebuild (transpose-copy, ~45x slower).
+    // Delegate to numpy.
+    if noncontiguous_ndarray(&numpy, a1.bind(py))? || noncontiguous_ndarray(&numpy, a2.bind(py))? {
+        return fallback();
+    }
     let array_a = match extract_precise_numeric_array(py, a1.bind(py), "array_equal(a1)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -28739,6 +28758,10 @@ fn array_equiv(py: Python<'_>, a1: Py<PyAny>, a2: Py<PyAny>) -> PyResult<Py<PyAn
             .to_owned()
             .into_any()
             .unbind());
+    }
+    // Non-contiguous (transposed/strided) operands bail into the cold extract; delegate.
+    if noncontiguous_ndarray(&numpy, a1.bind(py))? || noncontiguous_ndarray(&numpy, a2.bind(py))? {
+        return fallback(py);
     }
     let array_a = match extract_precise_numeric_array(py, a1.bind(py), "array_equiv(a1)") {
         Ok(value) => value,
@@ -30356,6 +30379,10 @@ fn allclose(
         try_zerocopy_f32_allclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
     {
         return Ok(numpy.getattr("bool_")?.call1((verdict,))?.unbind());
+    }
+    // Non-contiguous (transposed/strided) operands bail into the cold extract; delegate.
+    if noncontiguous_ndarray(&numpy, a.bind(py))? || noncontiguous_ndarray(&numpy, b.bind(py))? {
+        return fallback();
     }
     let array_a = match extract_precise_numeric_array(py, a.bind(py), "allclose(a)") {
         Ok(array) => array,
