@@ -4,6 +4,84 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Keep: fnp-linalg batched column-sum norm lane fill
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_column_sum_vs_numpy/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.240`.
+- Agent: `BlackThrush` / `cod-b`.
+- Subject API: direct Rust `fnp-linalg` `batch_matrix_norm(..., ord="1")`
+  and `ord="-1"`.
+- Reference: NumPy 2.3.5 on `hz2` / `hetzner2` through explicit `ssh hz2`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Decision: keep the existing direct batched column-sum lane-fill path; no
+  source hunk was added in this verification slice.
+
+Lever:
+- The landed path specializes `batch_matrix_norm` for `ord="1"` and
+  `ord="-1"` after one batch shape/data validation.
+- Each lane still calls `matrix_norm_column_sum`, preserving the existing
+  column-addition order, small-strided versus cache-linear selection, NaN
+  propagation, and max/min column-sum semantics.
+- Alien-graveyard mapping: vectorized/morsel-style cache-local stacked matrix
+  work plus constants-kill-you removal of per-lane validation and `Result`
+  plumbing. More radical column prefilter and stack-threshold probes remain
+  rejected by the no-ship entry below.
+
+Commands:
+- `RCH_WORKER=hz2 RCH_REQUIRE_REMOTE=1 RCH_DAEMON_WAIT_RESPONSE_TIMEOUT_SECS=240 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg batch_matrix_norm_column_sum -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+- `ssh hz2 'cd /data/projects/franken_numpy && OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 python3 - <<PY ... PY'`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg batch_matrix_norm_column_sum_direct_lane_fill_matches_per_lane_reference_bits -- --nocapture`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo check -p fnp-linalg --all-targets`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings`
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo build -p fnp-linalg --release`
+
+| Workload | Worker | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---|---:|---:|---:|---|
+| `1_4096x8x8` | `hz2` | 81,679 ns | 903,879 ns | 0.090x, 11.07x faster | Win |
+| `1_1024x32x32` | `hz2` | 101,266 ns | 917,304 ns | 0.110x, 9.06x faster | Win |
+| `-1_4096x8x8` | `hz2` | 78,648 ns | 989,052 ns | 0.080x, 12.58x faster | Win |
+| `-1_1024x32x32` | `hz2` | 95,781 ns | 991,737 ns | 0.097x, 10.35x faster | Win |
+
+Scorecard:
+- Candidate vs NumPy: win/loss/neutral = 4/0/0.
+- Same-worker proof: FrankenNumPy Criterion ran through RCH on `hz2`; NumPy
+  comparator ran directly on `hz2` and reported host `hetzner2`, Python 3.14.4,
+  NumPy 2.3.5.
+- Consistency check: the fresh hz2 Rust rows are consistent with the earlier
+  `tests/artifacts/perf/2026-06-20_linalg_batch_vs_numpy/` proof bundle.
+
+Non-counted probes:
+- An unpinned first `rch` run selected `vmi1153651` and returned noisy Rust
+  rows: 1,151,304 ns, 2,296,887 ns, 1,026,454 ns, and 2,768,589 ns. These are
+  not scored because the intended hz2 selector was not honored and no same-worker
+  NumPy comparator was available for that worker.
+- `rch exec -- python3 - ...` warned that Python is a non-compilation command
+  and ran locally on `thinkstation1`. Cross-host apparent FNP/local-NumPy ratios
+  from the invalid pairing were 1.371x, 2.335x, 1.233x, and 2.611x. They are
+  recorded as routing evidence only, not keep/reject evidence.
+- Raw `ssh root@38.242.134.66` to the selected vmi worker failed with
+  `Permission denied (publickey,password)`; the repo-supported path is the SSH
+  alias used by the cross-engine scripts, for example `ssh hz2`.
+
+Validation notes:
+- Focused bit-preservation test passed.
+- `cargo check -p fnp-linalg --all-targets`, `cargo clippy -p fnp-linalg --all-targets -- -D warnings`,
+  and `cargo build -p fnp-linalg --release` passed through RCH.
+- First `cargo check` attempt on `ovh-b` failed before crate checking because
+  the `zerocopy` build script died with `SIGILL`; the same gate passed on
+  retry through `vmi1149989`, so this is recorded as worker/toolchain
+  infrastructure noise.
+- `cargo fmt --package fnp-linalg -- --check` remains blocked by broad
+  pre-existing rustfmt drift in untouched `fnp-linalg` benches, examples, and
+  source regions.
+- Retry predicate: do not repeat whole-matrix NaN prefilters, 256-column stack
+  threshold changes, or validation-only retunes for this lane. A new attempt
+  needs a different primitive, likely SIMD absolute-value extraction or
+  strip-mined multi-column accumulation that preserves per-column addition order
+  and NaN behavior.
+
 ## 2026-06-20 - BOLD-VERIFY Keep: fnp-linalg batched row-sum norm lane fill
 
 Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_row_sum_vs_numpy/`
