@@ -18097,6 +18097,12 @@ fn logaddexp2(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny
     {
         return Ok(out);
     }
+    if noncontiguous_ndarray(&numpy, x1.bind(py))? || noncontiguous_ndarray(&numpy, x2.bind(py))? {
+        return Ok(numpy
+            .getattr("logaddexp2")?
+            .call1((x1.bind(py), x2.bind(py)))?
+            .unbind());
+    }
     let x1 = extract_numeric_array(py, x1.bind(py), "logaddexp2(x1)")?;
     let x2 = extract_numeric_array(py, x2.bind(py), "logaddexp2(x2)")?;
     let result = ufunc_logaddexp2(&x1, &x2).map_err(map_ufunc_error)?;
@@ -18386,6 +18392,26 @@ fn nan_to_num(
             && x.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
         {
             let kwargs = PyDict::new(py);
+            kwargs.set_item("nan", nan)?;
+            if let Some(p) = posinf {
+                kwargs.set_item("posinf", p)?;
+            }
+            if let Some(n) = neginf {
+                kwargs.set_item("neginf", n)?;
+            }
+            return Ok(numpy
+                .getattr("nan_to_num")?
+                .call((x.bind(py),), Some(&kwargs))?
+                .unbind());
+        }
+    }
+    // Non-contiguous (transposed/strided) ndarrays bail the zero-copy paths into the
+    // cold extract → rebuild (transpose-copy, ~2.5x slower). Delegate to numpy.
+    {
+        let numpy = py.import("numpy")?;
+        if noncontiguous_ndarray(&numpy, x.bind(py))? {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("copy", true)?;
             kwargs.set_item("nan", nan)?;
             if let Some(p) = posinf {
                 kwargs.set_item("posinf", p)?;
