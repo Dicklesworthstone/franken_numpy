@@ -40039,6 +40039,15 @@ fn all(
         }
     };
 
+    // Bool along an AXIS: numpy's SIMD all (byte scan + early-exit) beats the per-lane
+    // scalar fold. Delegate (axis=None bool and f64 stay native).
+    if axis_val.is_some()
+        && a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+        && a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
+    {
+        return fallback();
+    }
+
     // Zero-copy AND-fold for C-contiguous bool / f64 ndarrays (axis=None or a
     // single integer axis); skips the cold extract Vec. Truthiness is
     // order-independent so the short-circuit result is bit-identical.
@@ -40123,6 +40132,15 @@ fn any(
             }
         }
     };
+
+    // Bool along an AXIS: numpy's SIMD any (byte scan + early-exit) beats the per-lane
+    // scalar fold. Delegate (axis=None bool and f64 stay native).
+    if axis_val.is_some()
+        && a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+        && a.bind(py).getattr("dtype")?.getattr("kind")?.extract::<String>()? == "b"
+    {
+        return fallback();
+    }
 
     // Zero-copy OR-fold for C-contiguous bool / f64 ndarrays (axis=None or a
     // single integer axis); skips the cold extract Vec. Truthiness is
