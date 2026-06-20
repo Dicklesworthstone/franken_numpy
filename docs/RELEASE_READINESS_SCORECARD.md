@@ -537,3 +537,32 @@ Score rationale:
 Current release posture:
 - `fnp_einsum_diag_f64_4000` is **measured keep**, not pending.
 - The rch trace residual is **not closed**; future work should only target trace if it removes remaining scalar construction or view/fallback overhead without weakening diagonal writability semantics.
+
+## 2026-06-20 - Linalg Column Norm Strip-Mine Reject Slice
+
+Scope:
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate: `fnp-linalg`.
+- Artifact: `tests/artifacts/perf/2026-06-20_linalg_column_norm_stripmine_cod_a/`.
+- Candidate: 8-column strip-mined cache-linear column accumulation for `matrix_norm_nxn_orders/(one|neg_one)/(256|512|1024)`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Candidate vs current FNP | FAIL | `vmi1149989` showed 5 wins / 1 loss / 0 neutral; `neg_one/256` regressed 1.037x. |
+| Head-to-head performance vs NumPy | FAIL | Direct same-host NumPy capture was blocked by SSH auth; local NumPy was routing-only and mixed, while repeat `hz1` candidate rows lost 1.238x-1.653x against the available `hz1` NumPy context. |
+| Targeted correctness | PASS | `matrix_norm_column_reduction_matches_strided_reference_bits` passed on `hz1`. |
+| Revert discipline | PASS | The production source hunk was removed after measurement. |
+| Evidence durability | PASS | Raw RCH logs, failed NumPy capture attempts, artifact scorecard, and this ledger entry are stored. |
+
+Cluster score: **51 / 100**
+
+Score rationale:
+- +18 correctness: the focused bit-reference guard passed.
+- +12 reproducibility: raw RCH logs capture selected workers, target-dir rewriting, and exact command lines.
+- +15 ledger discipline: wins, losses, blocked NumPy proof, and retry predicate are recorded.
+- +15 revert discipline: no mixed or regressing production hunk remains.
+- -9 performance: the only same-worker Rust delta had a regression and the repeat worker context rejected robustness.
+
+Current release posture:
+- The column-norm residual remains **open**.
+- Do not retry scalar manual strip mining. The next credible route is a real SIMD lane or generated size-specialized column microkernel with same-host NumPy capture and zero target-row regressions.

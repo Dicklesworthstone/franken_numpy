@@ -1,0 +1,13 @@
+  [2m2026-06-20T11:10:36.238633Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mexec called with non-compilation command: python3 -[0m
+    [2;3mat[0m rch/src/hook.rs:749 [2;3mon[0m ThreadId(1)
+
+host thinkstation1
+python 3.13.7
+numpy 2.4.3
+threads {'OMP_NUM_THREADS': None, 'OPENBLAS_NUM_THREADS': None, 'MKL_NUM_THREADS': None, 'NUMEXPR_NUM_THREADS': None}
+matrix_norm_nxn_orders/one/256 median_ns=29345 min_ns=26139 max_ns=36479 result=70.169697796732621
+matrix_norm_nxn_orders/neg_one/256 median_ns=26140 min_ns=25418 max_ns=27162 result=57.882876256453592
+matrix_norm_nxn_orders/one/512 median_ns=96573 min_ns=76715 max_ns=487153 result=138.3675452839507
+matrix_norm_nxn_orders/neg_one/512 median_ns=113425 min_ns=103856 max_ns=133984 result=118.72001772181129
+matrix_norm_nxn_orders/one/1024 median_ns=416639 min_ns=365062 max_ns=522640 result=269.18682025470463
+matrix_norm_nxn_orders/neg_one/1024 median_ns=359040 min_ns=292965 max_ns=499255 result=240.23796667303827

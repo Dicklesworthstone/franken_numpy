@@ -1738,3 +1738,60 @@ Notes:
 - The kept diagonal path still delegates view construction to NumPy's `diagonal()` and explicitly restores writability with `setflags(write=True)` when the operand is writable, preserving NumPy `einsum("ii->i")` view semantics.
 - `cargo check -p fnp-python --lib --bench criterion_python_surface` passed, with pre-existing `fnp-python` warnings. `cargo check -p fnp-python --benches` and `cargo fmt -p fnp-python -- --check` are blocked by unrelated pre-existing lib-test call-site drift and formatting drift; no formatter was run to avoid unrelated rewrites.
 - Retry predicate: do not retry wrapper-level pre-policy diagonal dispatch. The next credible diagonal retry must remove or bypass the remaining `diagonal()+setflags(write=True)` method dispatch while preserving writable-view semantics. Treat the rch trace residual as a separate trace path issue, not a reason to revert the diagonal keep.
+
+## 2026-06-20 - Gauntlet Reject: `fnp-linalg` matrix column norm 8-column strip mine
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_column_norm_stripmine_cod_a/`
+
+Run identity:
+- Parent bead: `franken_numpy-ixs5y`.
+- Agent: `BlackThrush` / `cod-a`.
+- Crate scope: `fnp-linalg` only.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`.
+- Candidate: safe 8-column strip-mined cache-linear column accumulation for `matrix_norm_nxn(..., ord="1" | "-1")`.
+
+Decision:
+- Rejected and reverted. The focused bit-preservation test passed, but the performance proof was mixed and the same-host NumPy comparator could not be refreshed.
+- The candidate had one same-worker Rust regression on `vmi1149989` and a later `hz1` RCH-lane run that lost every row against the available `hz1` NumPy context.
+- Direct Python comparator attempts on `vmi1149989` and `hz1` failed with SSH auth denial. `rch exec -- python3` ran locally on `thinkstation1`, so those NumPy ratios are routing evidence only.
+
+Measured Rust delta on `vmi1149989`:
+
+| Workload | Baseline FNP ns | Candidate FNP ns | Candidate/Baseline | Verdict |
+|---|---:|---:|---:|---|
+| `one/256` | 28388 | 23372 | 0.823x | win |
+| `neg_one/256` | 26724 | 27721 | 1.037x | loss |
+| `one/512` | 113473 | 106512 | 0.939x | win |
+| `neg_one/512` | 111496 | 103362 | 0.927x | win |
+| `one/1024` | 530381 | 409582 | 0.772x | win |
+| `neg_one/1024` | 632365 | 412535 | 0.652x | win |
+
+Routing-only NumPy ratio from local `thinkstation1` NumPy 2.4.3:
+
+| Workload | Candidate FNP ns (`vmi1149989`) | Local NumPy ns | Candidate/NumPy | Counted? |
+|---|---:|---:|---:|---|
+| `one/256` | 23372 | 29345 | 0.796x | no, cross-host |
+| `neg_one/256` | 27721 | 26140 | 1.060x | no, cross-host |
+| `one/512` | 106512 | 96573 | 1.103x | no, cross-host |
+| `neg_one/512` | 103362 | 113425 | 0.911x | no, cross-host |
+| `one/1024` | 409582 | 416639 | 0.983x | no, cross-host |
+| `neg_one/1024` | 412535 | 359040 | 1.149x | no, cross-host |
+
+Repeat RCH-lane routing evidence on `hz1` versus prior direct `hz1` NumPy:
+
+| Workload | Candidate FNP ns (`hz1`) | Prior NumPy ns (`hz1`) | Candidate/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `one/256` | 50646 | 40921 | 1.238x | loss |
+| `neg_one/256` | 50689 | 40940 | 1.238x | loss |
+| `one/512` | 211885 | 147264 | 1.439x | loss |
+| `neg_one/512` | 213556 | 145528 | 1.468x | loss |
+| `one/1024` | 836943 | 506356 | 1.653x | loss |
+| `neg_one/1024` | 830032 | 503971 | 1.647x | loss |
+
+Focused conformance:
+- `rch exec -- cargo test -p fnp-linalg matrix_norm_column_reduction_matches_strided_reference_bits -- --nocapture`: pass, 1 focused test passed on `hz1`.
+- `rch exec -- cargo build -p fnp-linalg --release`: pass on `vmi1293453` after source revert.
+
+Negative retry predicate:
+- Do not retry the scalar 8-column manual strip mine as a standalone lever.
+- A credible retry needs either actual SIMD absolute-value lanes or generated size-specialized column microkernels, same-host NumPy capture, and zero row regressions across `256/512/1024` for both `ord="1"` and `ord="-1"`.
