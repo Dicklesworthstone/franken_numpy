@@ -14991,6 +14991,14 @@ fn count_nonzero(
         }
     }
 
+    // Multi-axis (tuple) reductions bridge bool->f64 in the cold extract (8x blowup,
+    // ~8.5x slower than numpy's optimized multi-axis count). Delegate to numpy.
+    if let Some(axis_obj) = axis.as_ref()
+        && axis_obj.bind(py).cast::<PyTuple>().is_ok()
+    {
+        return fallback();
+    }
+
     // Non-contiguous (transposed/strided) ndarrays bail the zero-copy count into the
     // cold extract → rebuild (transpose-copy, ~340x slower than numpy's strided count).
     // Delegate to numpy.
