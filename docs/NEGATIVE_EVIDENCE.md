@@ -4,6 +4,36 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY REVERTED regression: naive zero-copy short-kernel convolve/correlate
+
+Agent: `BlackThrush` / `cod-b`. Follow-up to the convolve short-kernel loss entry.
+
+Refined diagnostic: `convolve('same', k=5)` per-elem cost is ~1 ns (numpy, flat)
+vs fnp ~3.6 ns at N=10k rising to ~13 ns at N>=500k — so it is the KERNEL (≈3x
+base + a cache tail), not just the wrapper extract.
+
+Attempted lever (REVERTED): a zero-copy short-kernel direct path in the
+fnp-python convolve/correlate wrappers — read both f64 1-D PyBuffers, gather
+`full[n]=Σ_j signal[n-Lk+1+j]·vr[j]` (vr=reverse(v) for convolve / v for
+correlate; signal=longer for convolve, require La>=Lv for correlate), slice per
+mode. CORRECTNESS was perfect: 0 fails / 243 size×mode×(conv+corr) cases vs numpy
+(incl swap + all boundaries). But PERF REGRESSED to 3-39x SLOWER than even the
+existing convolve_mode path (N=1M k=3: 20ms vs old ~6ms vs numpy 0.5ms). Causes:
+(1) `a_cells.iter().map(|c|c.get()).collect()` copies the whole signal; (2) the
+interior dot `&signal[base..base+lk]` + `w[j]*vr[j]` keeps per-iteration slice
+bounds-checks and does NOT autovectorize for the small variable-length inner loop.
+Reverted (git stash; never committed) — do not ship.
+
+Retry predicate: a viable kernel must (a) obtain a real `&[f64]` view of the
+PyBuffer with zero copy (the `from_raw_parts(cells.as_ptr().cast::<f64>(), n)`
+ReadOnlyCell trick used by the cov/reduction fast paths), and (b) emit a tight
+vectorizable interior — e.g. specialize the inner dot per small Lk (const-generic
+or match on Lk in {1..8}) so LLVM unrolls/vectorizes it, mirroring the existing
+fnp-ufunc short-kernel gather. A bounds-checked variable-length inner loop over a
+freshly-collected Vec is strictly slower than numpy's C loop. This remains the
+known-open large-N convolve tail; needs the vectorized zero-copy kernel, not a
+wrapper rewrite alone.
+
 ## 2026-06-20 - BOLD-VERIFY Broad sweep (no new gaps): ~50 ops across 7 families parity/win
 
 Agent: `BlackThrush` / `cod-b`. NumPy 2.4.3 thinkstation1, load ~8-10 (other
