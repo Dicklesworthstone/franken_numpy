@@ -22237,12 +22237,15 @@ fn cov_rowvar_buffer_rows<'a>(
 // into one `centered` array (no stacking copy of the raw inputs) and reuse the
 // shared autovectorized Gram — byte-for-byte the same arithmetic the single-operand
 // path uses, so it inherits its allclose-verified conformance.
-fn try_zerocopy_cov_two_rowvar_f64(
+// Shared two-operand rowvar Gram: returns the (flattened n_vars*n_vars cov, n_vars)
+// computed zero-copy from m's and y's buffers, or None to defer. Used by both
+// cov(m, y) and corrcoef(m, y) so neither has to extract/stack the raw inputs.
+fn cov_gram_two_rowvar_f64(
     py: Python<'_>,
     m: &Bound<'_, PyAny>,
     y: &Bound<'_, PyAny>,
     ddof: usize,
-) -> PyResult<Option<Py<PyAny>>> {
+) -> PyResult<Option<(Vec<f64>, usize)>> {
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     let Some((m_buf, m_rows, n_obs)) = cov_rowvar_buffer_rows(py, m, &ndarray_type)? else {
@@ -22277,6 +22280,19 @@ fn try_zerocopy_cov_two_rowvar_f64(
         center_into(src, &mut centered[dst_row * n_obs..(dst_row + 1) * n_obs]);
     }
     let result = cov_gram_from_centered(&centered, n_vars, n_obs, ddof);
+    Ok(Some((result, n_vars)))
+}
+
+fn try_zerocopy_cov_two_rowvar_f64(
+    py: Python<'_>,
+    m: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+    ddof: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((result, n_vars)) = cov_gram_two_rowvar_f64(py, m, y, ddof)? else {
+        return Ok(None);
+    };
+    let numpy = py.import("numpy")?;
     build_square_f64_matrix(py, &numpy, result, n_vars)
 }
 
@@ -22432,22 +22448,20 @@ fn try_zerocopy_cov_rowvar_f64(
 // numpy.corrcoef normalizes the covariance by the outer product of the diagonal stddevs,
 // then clips to [-1, 1]: `c /= stddev[:,None]; c /= stddev[None,:]; clip`. ddof/bias are
 // ignored by numpy here (the normalization cancels them), so the underlying cov uses ddof=1.
-fn try_zerocopy_corrcoef_rowvar_f64(
-    py: Python<'_>,
-    m: &Bound<'_, PyAny>,
-) -> PyResult<Option<Py<PyAny>>> {
-    let Some((mut cov, n_vars)) = cov_gram_rowvar_f64(py, m, 1)? else {
-        return Ok(None);
-    };
+// Normalize a flattened n_vars*n_vars covariance matrix into a correlation matrix
+// in place: c /= stddev[:,None]; c /= stddev[None,:]; clip to [-1, 1] (numpy's
+// exact two-divide ULP order). Returns None to defer when any variance is
+// non-finite/negative or zero (numpy yields NaN/inf warnings there).
+fn corrcoef_normalize_in_place(cov: &mut [f64], n_vars: usize) -> Option<()> {
     let mut stddev = Vec::with_capacity(n_vars);
     for i in 0..n_vars {
         let var = cov[i * n_vars + i];
         if !var.is_finite() || var < 0.0 {
-            return Ok(None); // numpy warning/NaN surface: defer.
+            return None;
         }
         let sd = var.sqrt();
         if sd == 0.0 {
-            return Ok(None); // zero-variance row: numpy yields NaN/inf — defer.
+            return None;
         }
         stddev.push(sd);
     }
@@ -22455,12 +22469,41 @@ fn try_zerocopy_corrcoef_rowvar_f64(
         let row_scale = stddev[row];
         for (col, &col_scale) in stddev.iter().enumerate().take(n_vars) {
             let idx = row * n_vars + col;
-            // Two sequential divides, matching numpy's `c /= stddev[:,None]` then
-            // `/= stddev[None,:]` ULP order.
             cov[idx] /= row_scale;
             cov[idx] /= col_scale;
             cov[idx] = cov[idx].clamp(-1.0, 1.0);
         }
+    }
+    Some(())
+}
+
+fn try_zerocopy_corrcoef_rowvar_f64(
+    py: Python<'_>,
+    m: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((mut cov, n_vars)) = cov_gram_rowvar_f64(py, m, 1)? else {
+        return Ok(None);
+    };
+    if corrcoef_normalize_in_place(&mut cov, n_vars).is_none() {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    build_square_f64_matrix(py, &numpy, cov, n_vars)
+}
+
+// Two-operand corrcoef(m, y): same zero-copy two-buffer Gram as cov(m, y) (ddof=1,
+// the value numpy.corrcoef always uses internally) then the shared normalize.
+// Closes the 5-12x gap vs numpy on the np.corrcoef(a, b) two-series idiom.
+fn try_zerocopy_corrcoef_two_rowvar_f64(
+    py: Python<'_>,
+    m: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Some((mut cov, n_vars)) = cov_gram_two_rowvar_f64(py, m, y, 1)? else {
+        return Ok(None);
+    };
+    if corrcoef_normalize_in_place(&mut cov, n_vars).is_none() {
+        return Ok(None);
     }
     let numpy = py.import("numpy")?;
     build_square_f64_matrix(py, &numpy, cov, n_vars)
@@ -22758,6 +22801,14 @@ fn corrcoef(
     if rowvar
         && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
         && let Some(out) = try_zerocopy_corrcoef_rowvar_f64(py, x_bound)?
+    {
+        return Ok(out);
+    }
+    // Two-operand rowvar form np.corrcoef(x, y): zero-copy two-buffer Gram + normalize.
+    if rowvar
+        && let Some(y_val) = y_binding
+        && !y_val.is_none()
+        && let Some(out) = try_zerocopy_corrcoef_two_rowvar_f64(py, x_bound, y_val)?
     {
         return Ok(out);
     }

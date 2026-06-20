@@ -4,6 +4,36 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Win: fnp-python corrcoef(m,y) two-operand zero-copy Gram (5-12x loss -> 0.4-0.9x win)
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_python_corrcoef_two_operand_vs_numpy/`
+
+Run identity:
+- Agent: `BlackThrush` / `cod-b`. Under directive `franken_numpy-ixs5y`.
+- Subject: `np.corrcoef(a, b)` two-operand form (`crates/fnp-python/src/lib.rs`).
+- Reference: NumPy 2.4.3 on `thinkstation1`, load ~5-6, OMP/OPENBLAS=1.
+- Decision: SHIP. Direct follow-on to the cov(m,y) two-operand win (same pattern).
+
+LOSE-gap: `np.corrcoef(a, b)` (correlation of two series) was 5-12x slower than
+numpy (100k 11.65x, 1M 5.68x). Identical cause to cov: corrcoef's zero-copy
+fast paths were gated on `y is None`, so the two-operand form fell to the slow
+extract+concat `native_cov_unweighted` + normalize.
+
+Lever: reused the cov two-buffer machinery. Refactored
+`try_zerocopy_cov_two_rowvar_f64` into `cov_gram_two_rowvar_f64` (returns the raw
+(cov Vec, n_vars) from m/y buffers zero-copy) + a thin matrix-building wrapper;
+factored corrcoef's stddev-normalize into `corrcoef_normalize_in_place`; added
+`try_zerocopy_corrcoef_two_rowvar_f64` (= two-buffer Gram ddof=1 -> normalize) and
+wired it into the corrcoef dispatch. Same arithmetic as the single-operand
+corrcoef fast path -> inherits its conformance.
+
+After: 4/0/0 win (10k 0.44x, 100k 0.83x, 1M 0.85x, 4M 0.87x); correctness 0/40
+random (offset means) + corrcoef(M,b)/corrcoef(M,Y)/single-operand all match;
+cov(a,b) regression-checked still correct; conformance_statistics 28 pass (the 1
+fail is the SAME pre-existing 1-ULP "cov y ddof" native-list case, unchanged).
+Edit regions clippy-clean (the 22410 `!Range::contains` warning is pre-existing
+in the untouched SIMD core).
+
 ## 2026-06-20 - BOLD-VERIFY Keep: fnp-python einsum reduce-all scalar builder
 
 Artifact directory:

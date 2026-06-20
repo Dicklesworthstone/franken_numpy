@@ -1,0 +1,2 @@
+test cov_corrcoef_python_container_keyword_outcomes_match_numpy ... FAILED
+test result: FAILED. 28 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.72s
