@@ -1430,6 +1430,25 @@ const SYRK_MID_TRIANGULAR_MIN_TRAIL: usize = 384;
 // trailing panels (and every panel of a small matrix) keep the serial row scan.
 const PAR_TRSM_MIN_TRAIL: usize = 384;
 
+#[inline(always)]
+fn cholesky_dot_add_ordered(lhs: &[f64], rhs: &[f64]) -> f64 {
+    debug_assert_eq!(lhs.len(), rhs.len());
+    let mut sum = 0.0;
+    let mut k = 0;
+    while k + 4 <= lhs.len() {
+        sum += lhs[k] * rhs[k];
+        sum += lhs[k + 1] * rhs[k + 1];
+        sum += lhs[k + 2] * rhs[k + 2];
+        sum += lhs[k + 3] * rhs[k + 3];
+        k += 4;
+    }
+    while k < lhs.len() {
+        sum += lhs[k] * rhs[k];
+        k += 1;
+    }
+    sum
+}
+
 // Right-looking blocked Cholesky (LAPACK dpotrf shape). For each width-nb column
 // panel: factor the nb×nb diagonal block (unblocked), solve the panel below it
 // (L21 = A21·L11^{-T}), then update the trailing block A22 -= L21·L21^T with the
@@ -1665,15 +1684,21 @@ pub fn cholesky_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         return cholesky_blocked(a, n, cholesky_panel_width(n));
     }
 
+    let use_ordered_dot = (16..=32).contains(&n);
     let mut l = vec![0.0; n * n];
     for i in 0..n {
         let row_i = i * n;
         for j in 0..=i {
             let row_j = j * n;
-            let mut sum = 0.0;
-            for k in 0..j {
-                sum += l[row_i + k] * l[row_j + k];
-            }
+            let sum = if use_ordered_dot {
+                cholesky_dot_add_ordered(&l[row_i..row_i + j], &l[row_j..row_j + j])
+            } else {
+                let mut sum = 0.0;
+                for k in 0..j {
+                    sum += l[row_i + k] * l[row_j + k];
+                }
+                sum
+            };
             if i == j {
                 let diag = a[row_i + i] - sum;
                 if diag <= 0.0 {
