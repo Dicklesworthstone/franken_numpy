@@ -936,3 +936,36 @@ Score rationale:
 Current release posture:
 - `batch_cholesky` remains **open**.
 - Do not retry allocation elimination, gate tuning, validation hoist, small const specialization, f64x4 across-lane gather/scatter, or the blocked-path ordered scalar helper as standalone levers. The next credible route is a real blocked/batched panel kernel, generated size-specialized microkernel, or safe SIMD dot primitive with same-host NumPy capture and zero target-row regressions.
+
+## 2026-06-20 - Batch Cholesky Direct-Write n=16/32 Keep Slice
+
+Scope:
+- Parent bead measured: `franken_numpy-ixs5y`; child bead: `franken_numpy-ixs5y.273`.
+- Crate: `fnp-linalg`.
+- Artifact: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_direct_write_cod_b/`.
+- Candidate: route `batch_cholesky` for `n <= 32` through direct output writes, using the ordered scalar dot helper for bit identity with `cholesky_nxn`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Affected-row performance vs current FNP | PASS | Same-worker `vmi1227854`: `2000x16x16` improved to 0.786x baseline; `1000x32x32` improved to 0.716x baseline. Repeat candidate routing rows were 0.841x and 0.751x. |
+| Head-to-head performance vs NumPy | PASS | Same-host `vmi1227854` candidate rows are 0.183x and 0.239x NumPy on the affected sizes; all five measured rows remain faster than NumPy. |
+| Guard-row accounting | WARN | The measured `n>=64` guard rows were slower than the paired baseline, but this patch is gated to `n <= 32`, so those losses are recorded as noisy shared-worker evidence rather than attributed source regressions. |
+| Targeted correctness | PASS | `batch_cholesky_scratch_matches_per_lane_cholesky_nxn_bits` passed remotely after extending the cases through `n=16` and `n=32`. |
+| Crate compile/lint health | PASS | `rch exec -- cargo check -j 1 -p fnp-linalg --all-targets` and `rch exec -- cargo clippy -j 1 -p fnp-linalg --all-targets -- -D warnings` both passed on `vmi1149989`. |
+| Formatting health | WARN | `cargo fmt -p fnp-linalg -- --check` still fails on broad pre-existing `fnp-linalg` rustfmt drift; no formatter was run. `git diff --check` passed. |
+| UBS scan | WARN | `ubs` on the changed files exited nonzero on the existing broad `fnp-linalg/src/lib.rs` inventory; the scan was captured in `ubs_changed_files.txt` and did not isolate a new candidate-specific finding. |
+| Evidence durability | PASS | Baselines, candidates, NumPy comparators, source patch, validation logs, and the artifact scorecard are stored under the artifact directory; ledger row includes every win/loss/neutral ratio. |
+
+Cluster score: **78 / 100**
+
+Score rationale:
+- +24 performance: the two branch-affected rows are clear same-worker wins and both dominate same-host NumPy.
+- +18 correctness: direct-write output remains bit-identical to per-lane `cholesky_nxn` for all tested small sizes including `16/32`.
+- +14 reproducibility: a paired `vmi1227854` baseline/candidate/NumPy table is captured, but worker selection required retries and `vmi1153651` remained too noisy for a paired keep proof.
+- +15 ledger discipline: the guard losses, unpaired baselines, worker-selection issue, and retry predicate are recorded.
+- +12 crate health: focused test, check, and clippy pass remotely.
+- -5 formatting: pre-existing rustfmt drift still blocks a clean format gate.
+
+Current release posture:
+- `batch_cholesky` direct-write small-matrix path is **measured keep** through `n=32`.
+- The Python stacked Cholesky and `n>=64` linalg lanes remain open for separate branch-specific work.

@@ -2417,3 +2417,59 @@ Focused conformance:
 Negative retry predicate:
 - Do not retry the blocked-path ordered 4-wide scalar dot helper as a standalone lever.
 - A credible retry needs a deeper algorithmic or generated-kernel change: for example a real safe SIMD dot primitive that preserves required bit contracts, a size-specialized blocked/batched panel kernel, or a generated microkernel with same-host NumPy capture and no regressions across both medium batch rows.
+
+## 2026-06-20 - BOLD-VERIFY Keep: `fnp-linalg` batch Cholesky direct-write n=16/32
+
+Artifact directory: `tests/artifacts/perf/2026-06-20_linalg_batch_cholesky_direct_write_cod_b/`
+
+Run identity:
+- Parent bead: `franken_numpy-ixs5y`; child bead: `franken_numpy-ixs5y.273`.
+- Agent: `YellowElk` / `cod-b`.
+- Crate scope: `fnp-linalg` only.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Candidate: widen the existing zero-allocation `batch_cholesky` direct-write route to `n <= 32`, and make `cholesky_nxn_into_out` use the same ordered 4-wide scalar dot helper already used by `cholesky_nxn` for `n=16..32`.
+
+Decision:
+- Kept. The changed branch is limited to `n <= 32`; the affected same-worker rows improved materially and beat same-host NumPy.
+- The measured `n >= 64` guard rows are recorded as losses versus the immediately paired baseline even though the candidate branch is not reachable for those sizes. They remain faster than NumPy on the same host, but they are negative evidence about this noisy shared-worker bench lane and should not be used to claim a broad Cholesky win.
+- `RCH_WORKER=vmi1153651` was not honored while that worker was inadmissible; `RCH_WORKER=vmi1227854` was honored and produced the decisive paired baseline.
+
+Primary paired evidence on `vmi1227854`:
+
+| Workload | Baseline FNP ns | Candidate FNP ns | Candidate/Baseline | NumPy median ns | Candidate/NumPy | Verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `batch_cholesky/shape/2000x16x16` | 572680 | 450154 | 0.786x | 2454268 | 0.183x | keep win |
+| `batch_cholesky/shape/1000x32x32` | 1357341 | 971594 | 0.716x | 4061998 | 0.239x | keep win |
+| `batch_cholesky/shape/500x64x64` | 3140923 | 4005072 | 1.275x | 6094522 | 0.657x | guard loss; branch not reached |
+| `batch_cholesky/shape/64x128x128` | 1887548 | 2179264 | 1.155x | 10195537 | 0.214x | guard loss; branch not reached |
+| `batch_cholesky/shape/16x256x256` | 2672825 | 3306358 | 1.237x | 15068349 | 0.219x | guard loss; branch not reached |
+
+Repeat candidate routing evidence on `vmi1227854` before the paired baseline:
+
+| Workload | Candidate FNP ns | Candidate/Baseline | Candidate/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `batch_cholesky/shape/2000x16x16` | 481572 | 0.841x | 0.196x | repeat win |
+| `batch_cholesky/shape/1000x32x32` | 1020036 | 0.751x | 0.251x | repeat win |
+| `batch_cholesky/shape/500x64x64` | 3457920 | 1.101x | 0.567x | guard loss; branch not reached |
+| `batch_cholesky/shape/64x128x128` | 1934582 | 1.025x | 0.190x | guard loss/noise; branch not reached |
+| `batch_cholesky/shape/16x256x256` | 2791921 | 1.045x | 0.185x | guard loss/noise; branch not reached |
+
+Auxiliary `vmi1153651` baseline-only evidence, not used for the keep decision because no candidate run selected that worker:
+
+| Workload | Baseline run 1 / NumPy | Baseline run 2 / NumPy | Baseline run 3 / NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `batch_cholesky/shape/2000x16x16` | 2.652x | 1.302x | 1.741x | residual loss/noisy |
+| `batch_cholesky/shape/1000x32x32` | 1.010x | 2.344x | 3.002x | residual loss/noisy |
+| `batch_cholesky/shape/500x64x64` | 0.905x | 1.790x | 2.337x | mixed/noisy |
+| `batch_cholesky/shape/64x128x128` | 1.007x | 1.817x | 2.340x | residual loss/noisy |
+| `batch_cholesky/shape/16x256x256` | 0.540x | 1.091x | 1.809x | mixed/noisy |
+
+Focused conformance and crate health:
+- `rch exec -- cargo test -j 1 -p fnp-linalg batch_cholesky_scratch_matches_per_lane_cholesky_nxn_bits -- --nocapture`: pass on `vmi1149989`; the focused test passed and the filtered integration shards returned zero-test OK.
+- `rch exec -- cargo check -j 1 -p fnp-linalg --all-targets`: pass on `vmi1149989`.
+- `rch exec -- cargo clippy -j 1 -p fnp-linalg --all-targets -- -D warnings`: pass on `vmi1149989`.
+- `cargo fmt -p fnp-linalg -- --check`: fail due broad pre-existing rustfmt drift in `fnp-linalg` benches/examples and unrelated `src/lib.rs` blocks; formatter was not run to avoid unrelated churn. `git diff --check` passed for the kept patch.
+
+Retry predicate:
+- Do not retry direct-write allocation elimination below `n=16`; that family is now extended through `n=32`.
+- A future Cholesky attempt should either improve the Python stacked boundary directly or target `n >= 64` with a separate branch-specific kernel. It must not use this noisy `n>=64` guard-table drift as proof that the direct-write `n<=32` branch regressed those sizes.

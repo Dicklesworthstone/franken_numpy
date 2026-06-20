@@ -1732,14 +1732,20 @@ fn cholesky_nxn_into_out(a: &[f64], n: usize, out: &mut [f64]) -> Result<(), Lin
             "cholesky requires finite entries",
         ));
     }
+    let use_ordered_dot = (16..=32).contains(&n);
     for i in 0..n {
         let row_i = i * n;
         for j in 0..=i {
             let row_j = j * n;
-            let mut sum = 0.0;
-            for k in 0..j {
-                sum += out[row_i + k] * out[row_j + k];
-            }
+            let sum = if use_ordered_dot {
+                cholesky_dot_add_ordered(&out[row_i..row_i + j], &out[row_j..row_j + j])
+            } else {
+                let mut sum = 0.0;
+                for k in 0..j {
+                    sum += out[row_i + k] * out[row_j + k];
+                }
+                sum
+            };
             if i == j {
                 let diag = a[row_i + i] - sum;
                 if diag <= 0.0 {
@@ -8486,14 +8492,14 @@ pub fn batch_cholesky(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgE
             "batch_cholesky: data length does not match shape",
         ));
     }
-    // Tiny matrices: write each L DIRECTLY into the flat (pre-zeroed) output — no
+    // Small matrices: write each L DIRECTLY into the flat (pre-zeroed) output — no
     // per-lane Vec, no Vec<Vec>, no flatten. cholesky writes L in place with no
     // scratch, so this needs no per-thread buffers at all. Byte-identical to per-lane
     // cholesky_nxn (the unblocked formula reachable for n < CHOL_MID_MIN). Gated to
     // the small-n regime where alloc-elimination wins (per-lane O(n^3) compute
     // overtakes it beyond that — same shape as batch_inv).
-    const CHOL_SCRATCH_MAX_N: usize = 16;
-    if n < CHOL_SCRATCH_MAX_N {
+    const CHOL_DIRECT_WRITE_MAX_N: usize = 32;
+    if n <= CHOL_DIRECT_WRITE_MAX_N {
         let mut result = vec![0.0f64; batch * mat_size];
         if batch_should_parallelize(batch, mat_size) {
             use std::sync::Mutex;
@@ -11495,7 +11501,7 @@ mod tests {
     #[test]
     fn batch_cholesky_scratch_matches_per_lane_cholesky_nxn_bits() {
         // Zero-alloc batch_cholesky must be BYTE-IDENTICAL to per-lane cholesky_nxn.
-        for &n in &[2usize, 3, 5, 8, 15] {
+        for &n in &[2usize, 3, 5, 8, 15, 16, 32] {
             let batch = 2048usize;
             let ms = n * n;
             // Symmetric positive-definite per lane: A = M·Mᵀ + diag boost. Build a
