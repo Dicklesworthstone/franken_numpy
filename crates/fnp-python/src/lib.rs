@@ -19762,6 +19762,18 @@ fn diff(
             return Ok(current);
         }
     }
+    // Non-contiguous (transposed/strided) ndarrays make every zero-copy diff path bail
+    // to the cold extract → native diff (~5.6x slower than numpy's strided diff).
+    // Delegate them to numpy (byte-identical).
+    if a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return fallback();
+    }
     // Bool input reaches here (the zero-copy f64/int/f32 paths above don't take it).
     // numpy's diff(bool) is adjacent XOR with a bool output and is optimal (single
     // pass); the extract path below bridges bool->f64 and runs ~700x slower (85ms vs
@@ -39151,6 +39163,20 @@ fn prod(
     // f32->f64->f32 reassociation risk; delegate instead of the cold extract->f64
     // widen path (~10-52x slower than numpy).
     if numpy_dtype_is_f32(a.bind(py)) {
+        return fallback();
+    }
+
+    // Non-contiguous (transposed/strided) ndarrays bail out of the contiguous-only
+    // fast paths into the cold extract → native fold (~47x slower than numpy's
+    // cache-blocked strided reduction). Delegate them to numpy.
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && !a
+            .bind(py)
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
         return fallback();
     }
 
