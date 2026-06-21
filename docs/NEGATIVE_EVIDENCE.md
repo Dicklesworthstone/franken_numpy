@@ -14,6 +14,10 @@ ALIASES were implemented with a naive extract+build instead of delegating to the
 already-optimized numpy-name twins, so they paid the two-full-copy wrapper tax
 (see the convolve diagnosis) the twin avoids.
 
+0. `rollaxis`: SAME view-materialize bug as matrix_transpose — ~40,000x slower on
+   200x200x100 (numpy ~1us strided view vs ~51ms copy) + shares_memory False.
+   Delegate to numpy.rollaxis -> view parity + correct aliasing. (moveaxis/swapaxes
+   already delegate correctly.) 0 fails across axis×start combos.
 1. `matrix_transpose`: was extract+materialize a C-order COPY -> ~18,000x slower
    on 2000x2000 (numpy ~1us strided VIEW vs ~13ms copy) AND a SEMANTICS bug (result
    no longer aliased the input: shares_memory False vs numpy True). Fix: delegate

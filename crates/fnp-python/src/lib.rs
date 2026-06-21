@@ -20528,20 +20528,17 @@ fn moveaxis(
 #[pyfunction]
 #[pyo3(signature = (a, axis, start=0))]
 fn rollaxis(py: Python<'_>, a: Py<PyAny>, axis: i64, start: i64) -> PyResult<Py<PyAny>> {
+    // numpy.rollaxis returns a strided VIEW (shares memory, writeable). The native
+    // path materialized a C-order copy — ~40000x slower on a 200x200x100 (numpy ~1us
+    // view vs ~51ms copy) AND a semantics divergence (result no longer aliased the
+    // input). An axis roll is never faster materialized than as numpy's view, so
+    // delegate unconditionally (cf. matrix_transpose; moveaxis/swapaxes already
+    // delegate and correctly return views).
     let numpy = py.import("numpy")?;
-    let rollaxis_fn = numpy.getattr("rollaxis")?;
-    let fallback =
-        || -> PyResult<Py<PyAny>> { Ok(rollaxis_fn.call1((a.bind(py), axis, start))?.unbind()) };
-
-    let a = match extract_numeric_array(py, a.bind(py), "rollaxis(a)") {
-        Ok(array) => array,
-        Err(_) => return fallback(),
-    };
-    let result = match a.rollaxis(axis as isize, start as isize) {
-        Ok(result) => result,
-        Err(_) => return fallback(),
-    };
-    build_numpy_array_from_ufunc(py, &result)
+    Ok(numpy
+        .getattr("rollaxis")?
+        .call1((a.bind(py), axis, start))?
+        .unbind())
 }
 
 #[pyfunction]
