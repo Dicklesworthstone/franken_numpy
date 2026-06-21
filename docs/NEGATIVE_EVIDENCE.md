@@ -33,7 +33,13 @@ all shares_memory=True). This (a) validates the guard catches real losses + pass
 clean ops, (b) independently RE-CONFIRMS the eigvalsh/cholesky native-path losses
 the pending delegates fix, (c) baselines the surface as clean except those 2. All
 three guards now validated: correctness 0/27 (ran), perf 2-expected-LOSS (ran),
-on-recovery delegate verifier (syntax). The 2 perf LOSSes flip to parity once the
+on-recovery delegate verifier (syntax). COMPLETE 4-delegate before-baseline (added
+eigh+matrix_power3 to the sweep, re-ran): eigvalsh **4.78x**, eigh **4.74x**,
+cholesky **1.47x** all LOSS in the current native `.so` (the 3 perf delegates —
+will flip to parity post-build); matrix_power(M,3) **0.367x WIN** confirms the
+matrix_power delegate is correctly NARROW (delegates only power<=1 identity/copy;
+keeps the winning native repeated-squaring path for power>=2 → it's a correctness/
+edge delegate, not a perf fix). The 3 perf LOSSes flip to parity once the
 4 delegates build (step 2 of scripts/README on-recovery procedure).
 CORRECTNESS guard added: `scripts/correctness_sweep_vs_numpy.py` (py-syntax-checked)
 encodes the SUBTLE comparators the conformance suite lacked — eig/eigvals POWER-SUM
