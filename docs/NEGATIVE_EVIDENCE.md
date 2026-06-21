@@ -5978,3 +5978,11 @@ Every axis dominated. PATTERN: ~5 catalogued "mild residuals" (diff-prepend/edif
 add-f32f64/bincount-2M) ALL dissolved to wins/parity under min-of-3 re-verify — single-run
 shared-box readings fabricate phantom 1.1-1.3x losses. Only TRUE residuals: frexp 1.11x +
 putmask 1.18x (niche, high-effort, low-ROI). 34 wins; no actionable lever; surface dominant.
+
+### WIN frexp parallelized (82c7f7e4): "mild 1.11x residual" was a SERIAL zero-copy loop
+try_zerocopy_f64_frexp was already zero-copy + bit-exact (frexp_one bit-manip) but ran SERIAL ->
+1.11x vs numpy at large. Parallelizing the per-element loop (disjoint raw-slice chunks, gate
+1<<19) -> 1M 0.15x, 4M 0.24x, 16M 0.11x WIN (numpy single-threaded; fnp wins DRAM bandwidth).
+LESSON: a catalogued "mild residual" (1.11x) hid a clean parallel win — the kernel was fine, just
+serial. RE-EXAMINE even ~1.1x residuals for un-parallelized zero-copy loops before dismissing.
+Now re-checking putmask (the other residual) for the same.
