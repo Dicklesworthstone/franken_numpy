@@ -4,6 +4,20 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: native scalar np.insert fast path (ad3abb3a, 1.09x -> 0.29-0.96x); construction ops swept
+
+`BlackThrush`/`cod-b`. Twin of native delete (2af4e907). insert is a stable 1.09x loss
+(at clean load) — np.insert Python dispatch. Native fast path (single int index + scalar
+value, 1-D f64 C-contig, axis None/0): numpy.empty(n+1) + memcpy 2 runs around the scalar.
+RESULT: N=1000 0.29x (3.4x), 10K 0.39x, 100K 0.77x, 1M 0.96x. Array/list value, slice/array
+obj, 2-D+axis, out-of-range, non-f64 defer. conformance 29/29. 12th passthrough-floor lever.
+CONSTRUCTION SWEEP (negative): vander 1.03x, tri 1.06x(noisy), apply_along_axis 1.00x,
+fliplr 1.00x (VIEW) all parity-or-noise — NO lever. tril_indices 0.13x, trim_zeros 0.15x,
+diag/diagflat/eye all WIN already. The passthrough-floor vein is now NEARLY EXHAUSTED:
+pad+delete+insert landed; remaining Python-wrapper funcs are parity (vander/tri/apply/
+average/select/cov/kron/cross all win-or-parity). Wins are also SHRINKING (pad 4.5x ->
+delete 1.2x -> insert is the same class) -> diminishing returns; the surface is dominated.
+
 ## 2026-06-21 - WIN: native single-int np.delete fast path (2af4e907, 1.1-1.26x -> 0.75-0.93x)
 
 `BlackThrush`/`cod-b`. Continued the passthrough-dispatch-floor lever ([[native pad]]).
