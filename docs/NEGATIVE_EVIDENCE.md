@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - PENDING-BENCH heartbeat: freeze STABLE (disk holding ~40G), awaiting unfreeze
+
+Agent: `BlackThrush` / `cod-b`. Status only (no new lever — all safe code/disk
+actions exhausted across prior frozen turns; details in the entries below).
+- Disk: holding ~40G/1.9T (no longer bleeding toward 0 — the swarm-wide build
+  freeze is effective). Big reclaim still pending human action (cod-b 14G + cod-a
+  7.7G cargo caches + `.probe` 2.7G stale `.so`; I'm dcg/cargo-blocked).
+- Code: 4 native-2-D linalg delegates (eigvalsh/eigh/cholesky/matrix_power) remain
+  build+conformance UNVERIFIED but manually syntax-reviewed CLEAN (prior entry).
+- git: clean + aligned with origin; agent-mail DB still corrupt (`am doctor repair`
+  queued for recovery).
+Next real work resumes the instant cargo is re-enabled — run the on-recovery
+checklist in the SWEEP-COMPLETE entry below. No further safe progress is possible
+under the freeze.
+
 ## 2026-06-21 - Manual syntax review of the 4 unbuilt linalg delegates: CLEAN (de-risks recovery)
 
 Agent: `BlackThrush` / `cod-b`. Build freeze (no cargo). Since the 4 code-only 2-D
