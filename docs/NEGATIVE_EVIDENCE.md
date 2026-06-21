@@ -4,6 +4,38 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - DISK-LOW CODE-ONLY: eigvalsh 2-D delegate (loses 5-6x); eigh/cholesky 2-D losses documented
+
+Agent: `BlackThrush` / `cod-b`. Disk-low pause (54G) — NO new build/bench this
+slice; diagnosed with the EXISTING `.probe/fnp_python.so` (no new artifacts).
+Build + conformance verification PENDING DISK RECOVERY for the code change.
+
+Extending the stale-cliff finding (det/slogdet/inv/solve) to the symmetric/
+decomposition native 2-D paths. Measured (existing .so, OPENBLAS_NUM_THREADS=1):
+- `eigvalsh` 2-D native (sym QR) LOSES 6.36x@200, 5.79x@800.
+- `eigh` 2-D native LOSES 4.18x@200, 4.05x@800.
+- `cholesky` 2-D native LOSES 2.95x@200, 6.28x@800.
+- qr / lstsq / matrix_rank: parity (already delegate) — left alone.
+
+SHIPPED CODE-ONLY (verify on recovery): `eigvalsh` 2-D delegated to numpy — added
+the det-style shape-peek (real 2-D square float ndarray -> fallback before
+extract). Values-only (no eigenvector sign ambiguity) so exact parity; batched
+(>=3-D) batch_eigvalsh unchanged (wins). Change is mechanically identical to the
+verified det/inv/slogdet/solve shape-peek, so high compile confidence.
+
+NOT changed this slice:
+- `eigh` (returns (vals, vecs)): same 4x loss; fix is the same shape-peek ->
+  numpy delegation (delegating yields numpy's eigenvector signs, so vs-numpy
+  conformance is exact). Apply on disk recovery (could not build to verify the
+  tuple-return path here).
+- `cholesky` 2-D: 3-6x loss BUT heavily peer-contended (active commits
+  c1282d90/d1e6f21a on batch cholesky) — leave to that owner; same delegate fix
+  applies (numpy potrf). Note batch_cholesky (>=3-D) is the separate no-ship.
+
+Retry predicate / on-recovery TODO: build + run conformance_linalg* for the
+eigvalsh change; then apply the same shape-peek delegate to eigh (and cholesky if
+uncontended), re-measuring n=200..800 vs numpy first.
+
 ## 2026-06-20 - BOLD-VERIFY WIN x4: STALE getrf/gesv cliff gates (det/slogdet/inv/solve) -> delegate (2-3x loss -> parity)
 
 Agent: `BlackThrush` / `cod-b`. Directive `franken_numpy-ixs5y`. SHIP. Supersedes

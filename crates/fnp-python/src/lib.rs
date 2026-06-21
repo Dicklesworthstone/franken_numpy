@@ -17293,6 +17293,32 @@ fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
             .unbind())
     };
 
+    // STALE-CLIFF class (2026-06-20, same as det/slogdet/inv/solve): the native 2-D
+    // symmetric QR (sym.eigvalsh()) loses to LAPACK syevd on the current NumPy 2.4.3
+    // (measured ~6.4x at n=200, ~5.8x at n=800). Delegate ALL real 2-D square inputs
+    // to numpy before the extract copy (values-only, no eigenvector-sign ambiguity ->
+    // exact parity). The batched (>=3-D) batch_eigvalsh path below is unchanged
+    // (numpy loops serial per lane -> it wins). NOTE: committed code-only during a
+    // disk-low pause; build/conformance verification pending disk recovery.
+    if let Ok(ndarray_type) = numpy.getattr("ndarray")
+        && a.bind(py).is_exact_instance(&ndarray_type)
+        && let Ok(shape) = a
+            .bind(py)
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+        && shape.len() == 2
+        && shape[0] == shape[1]
+        && a
+            .bind(py)
+            .getattr("dtype")
+            .and_then(|d| d.getattr("kind"))
+            .and_then(|k| k.extract::<String>())
+            .map(|k| k == "f")
+            .unwrap_or(false)
+    {
+        return fallback();
+    }
+
     let array = match extract_precise_numeric_array(py, a.bind(py), "eigvalsh(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
