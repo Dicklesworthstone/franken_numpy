@@ -17190,6 +17190,136 @@ fn cholesky(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+fn repeated_f64_square_stack(values: &[f64], batch: usize, n: usize) -> bool {
+    let Some(mat_size) = n.checked_mul(n) else {
+        return false;
+    };
+    let Some(expected_len) = batch.checked_mul(mat_size) else {
+        return false;
+    };
+    if batch <= 1 || values.len() != expected_len {
+        return false;
+    }
+    let first = &values[..mat_size];
+    values[mat_size..].chunks_exact(mat_size).all(|lane| {
+        lane.iter()
+            .zip(first)
+            .all(|(left, right)| left.to_bits() == right.to_bits())
+    })
+}
+
+type RepeatedSolveOutput = (Vec<usize>, Vec<f64>);
+
+fn solve_repeated_f64_square_stack(
+    a_values: &[f64],
+    b_values: &[f64],
+    b_shape: &[usize],
+    batch: usize,
+    n: usize,
+) -> Result<Option<RepeatedSolveOutput>, fnp_linalg::LinAlgError> {
+    let mat_size = match n.checked_mul(n) {
+        Some(value) => value,
+        None => return Ok(None),
+    };
+    if a_values.len() < mat_size {
+        return Ok(None);
+    }
+    let a0 = &a_values[..mat_size];
+
+    if b_shape.len() == 1 {
+        if b_shape[0] != n || b_values.len() != n {
+            return Ok(None);
+        }
+        let solved = fnp_linalg::solve_nxn(a0, b_values, n)?;
+        let Some(out_len) = batch.checked_mul(n) else {
+            return Ok(None);
+        };
+        let mut out = Vec::with_capacity(out_len);
+        for _ in 0..batch {
+            out.extend_from_slice(&solved);
+        }
+        return Ok(Some((vec![batch, n], out)));
+    }
+
+    if b_shape.len() == 2 {
+        if b_shape[0] != n {
+            return Ok(None);
+        }
+        let rhs_cols = b_shape[1];
+        let Some(rhs_width) = n.checked_mul(rhs_cols) else {
+            return Ok(None);
+        };
+        if b_values.len() != rhs_width {
+            return Ok(None);
+        }
+        let solved = fnp_linalg::solve_nxn_multi(a0, b_values, n, rhs_cols)?;
+        let Some(out_len) = batch.checked_mul(rhs_width) else {
+            return Ok(None);
+        };
+        let mut out = Vec::with_capacity(out_len);
+        for _ in 0..batch {
+            out.extend_from_slice(&solved);
+        }
+        return Ok(Some((vec![batch, n, rhs_cols], out)));
+    }
+
+    if b_shape.len() != 3 || b_shape[1] != n {
+        return Ok(None);
+    }
+    let b_batch = b_shape[0];
+    let rhs_cols = b_shape[2];
+    let Some(rhs_width) = n.checked_mul(rhs_cols) else {
+        return Ok(None);
+    };
+
+    if b_batch == 1 {
+        if b_values.len() != rhs_width {
+            return Ok(None);
+        }
+        let solved = fnp_linalg::solve_nxn_multi(a0, b_values, n, rhs_cols)?;
+        let Some(out_len) = batch.checked_mul(rhs_width) else {
+            return Ok(None);
+        };
+        let mut out = Vec::with_capacity(out_len);
+        for _ in 0..batch {
+            out.extend_from_slice(&solved);
+        }
+        return Ok(Some((vec![batch, n, rhs_cols], out)));
+    }
+
+    let Some(out_len) = batch.checked_mul(rhs_width) else {
+        return Ok(None);
+    };
+    if b_batch != batch || b_values.len() != out_len {
+        return Ok(None);
+    }
+    let Some(wide_cols) = batch.checked_mul(rhs_cols) else {
+        return Ok(None);
+    };
+    let Some(wide_len) = n.checked_mul(wide_cols) else {
+        return Ok(None);
+    };
+    let mut wide_rhs = vec![0.0_f64; wide_len];
+    for lane in 0..batch {
+        for row in 0..n {
+            let src = lane * rhs_width + row * rhs_cols;
+            let dst = row * wide_cols + lane * rhs_cols;
+            wide_rhs[dst..dst + rhs_cols].copy_from_slice(&b_values[src..src + rhs_cols]);
+        }
+    }
+
+    let wide_solution = fnp_linalg::solve_nxn_multi(a0, &wide_rhs, n, wide_cols)?;
+    let mut out = vec![0.0_f64; out_len];
+    for lane in 0..batch {
+        for row in 0..n {
+            let src = row * wide_cols + lane * rhs_cols;
+            let dst = lane * rhs_width + row * rhs_cols;
+            out[dst..dst + rhs_cols].copy_from_slice(&wide_solution[src..src + rhs_cols]);
+        }
+    }
+    Ok(Some((vec![batch, n, rhs_cols], out)))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b))]
 fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -17239,6 +17369,33 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
         && !b.has_integer_sidecar()
         && a.values().iter().all(|value| value.is_finite())
         && b.values().iter().all(|value| value.is_finite());
+
+    // Repeated/broadcasted A stacks are a pathological batched-solve case for
+    // NumPy: it factors the same matrix once per lane. Collapse exact repeated
+    // finite-F64 stacks to one vector or wide multi-RHS solve, then restore NumPy's
+    // batched output layout. Unsupported broadcast shapes keep the existing path.
+    if real_f64_finite
+        && a_shape.len() == 3
+        && a_shape[0] > 1
+        && a_shape[1] == a_shape[2]
+        && repeated_f64_square_stack(a.values(), a_shape[0], a_shape[1])
+    {
+        match solve_repeated_f64_square_stack(
+            a.values(),
+            b.values(),
+            b_shape,
+            a_shape[0],
+            a_shape[1],
+        ) {
+            Ok(Some((out_shape, values))) => {
+                if let Ok(result) = UFuncArray::new(out_shape, values, DType::F64) {
+                    return build_numpy_array_from_ufunc(py, &result);
+                }
+            }
+            Ok(None) => {}
+            Err(_) => return fallback(),
+        }
+    }
 
     // Batched (stacked) square inputs: solve every lane natively via the parallel
     // batch_solve instead of passing the whole stack through to numpy (whose batched

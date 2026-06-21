@@ -1610,6 +1610,23 @@ fn bench_linalg_boundary(c: &mut Criterion) {
             .expect("batched matrix rhs")
             .call_method1("__mul__", (0.01_f64,))
             .expect("scaled matrix rhs");
+        let shared_matrix_raw = numpy
+            .call_method1("arange", (n * n,))
+            .expect("shared solve matrix raw values")
+            .call_method1("astype", ("float64",))
+            .expect("shared solve matrix f64 values")
+            .call_method1("reshape", ((n, n),))
+            .expect("shared solve matrix shape")
+            .call_method1("__mul__", (0.001_f64,))
+            .expect("scale shared solve matrix");
+        let shared_matrix = shared_matrix_raw
+            .call_method1("__add__", (&eye,))
+            .expect("well-conditioned shared solve matrix");
+        let repeated_matrices = numpy
+            .call_method1("broadcast_to", (&shared_matrix, (batch, n, n)))
+            .expect("broadcast shared solve matrix")
+            .call_method0("copy")
+            .expect("materialized repeated solve matrix stack");
 
         let fnp_slogdet = module.getattr("slogdet").expect("fnp_python.slogdet");
         let numpy_slogdet = numpy_linalg
@@ -1654,6 +1671,42 @@ fn bench_linalg_boundary(c: &mut Criterion) {
                 let result = numpy_solve
                     .call1((&matrices, &rhs_vec))
                     .expect("numpy solve benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_solve_repeated_a_f64_batch8192_4x4_vec", |bench| {
+            bench.iter(|| {
+                let result = fnp_solve
+                    .call1((&repeated_matrices, &rhs_vec))
+                    .expect("fnp solve repeated-A vector benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_solve_repeated_a_f64_batch8192_4x4_vec", |bench| {
+            bench.iter(|| {
+                let result = numpy_solve
+                    .call1((&repeated_matrices, &rhs_vec))
+                    .expect("numpy solve repeated-A vector benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("fnp_solve_repeated_a_f64_batch8192_4x4_mat2", |bench| {
+            bench.iter(|| {
+                let result = fnp_solve
+                    .call1((&repeated_matrices, &rhs_matrix))
+                    .expect("fnp solve repeated-A matrix benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_solve_repeated_a_f64_batch8192_4x4_mat2", |bench| {
+            bench.iter(|| {
+                let result = numpy_solve
+                    .call1((&repeated_matrices, &rhs_matrix))
+                    .expect("numpy solve repeated-A matrix benchmark call");
                 black_box(result);
             });
         });

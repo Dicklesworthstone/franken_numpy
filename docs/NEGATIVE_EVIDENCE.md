@@ -4,6 +4,48 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - KEEP: repeated-A `solve` factors once, turns neutral stack into 6.27x NumPy win
+
+`YellowElk`/`cod-b`, bead `franken_numpy-ixs5y.279`.
+
+Radical lever from `/alien-graveyard` + `/alien-artifact-coding`: repeated work
+elimination for a numerical kernel. For `np.linalg.solve` at the Python boundary,
+when `A.shape == (batch,n,n)` and every finite F64 lane is bit-identical to lane 0,
+factor the shared matrix once with existing `fnp_linalg::solve_nxn` /
+`solve_nxn_multi`, then restore NumPy's batched output layout. Unsupported shapes
+and solver errors keep the existing NumPy fallback/native paths.
+
+Why this route: the pure `fnp-linalg/src/lib.rs` factor-once candidate was blocked
+by an active `BlackThrush` source lease; Agent Mail refused forced release because
+the reservation itself was recent. I avoided editing through the lease and shipped
+the same algorithmic lever in unconflicted `fnp-python` surface code.
+
+Scorecard: `tests/artifacts/perf/2026-06-21_linalg_broadcast_solve_factor_once_cod_b/scorecard.md`
+
+Baseline before source change, worker `vmi1149989`:
+
+| Row | FNP | NumPy | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| repeated-A vector RHS, batch8192 4x4 | 767.99 us | 2.4480 ms | 0.314x | win |
+| repeated-A matrix RHS mat2, batch8192 4x4 | 3.8335 ms | 3.8887 ms | 0.986x | neutral |
+
+Candidate, worker `hz1` (same-run ratios are the keep signal):
+
+| Row | FNP | NumPy | FNP/NumPy | Speedup vs NumPy | Verdict |
+|---|---:|---:|---:|---:|---|
+| repeated-A vector RHS, batch8192 4x4 | 249.32 us | 3.5669 ms | 0.070x | 14.31x | win |
+| repeated-A matrix RHS mat2, batch8192 4x4 | 641.14 us | 4.0230 ms | 0.159x | 6.27x | win |
+
+Win/loss/neutral after candidate: **2 / 0 / 0**. The prior neutral matrix-RHS
+row becomes a decisive win. No revert.
+
+Validation:
+- `rch exec -- cargo bench -p fnp-python --bench criterion_python_surface repeated_a`: green.
+- `rch exec -- cargo test -p fnp-python --test conformance_linalg_decomp solve_batched -- --nocapture`: green (`solve_batched ... ok`).
+- `rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface`: green with existing `fnp-python` warnings.
+- `rch exec -- cargo clippy -p fnp-python --lib --bench criterion_python_surface -- -D warnings`: still red on broad pre-existing `fnp-python` lint debt; the new helper's local `type_complexity` finding was fixed and no longer appears in the rerun.
+- `cargo test -p fnp-python ... --lib` is not a usable gate today: pre-existing lib-test call-site drift around `spacing`, `sign`, `nextafter`, `hypot`, `logaddexp`, and `logaddexp2` prevents that test target from compiling.
+
 ## 2026-06-21 - LEADS: roll + compress 1.36x real losses (fnp-python, contended); broad sweep else clean
 
 `BlackThrush`/`cod-b`. Broad sweep of less-explored ops vs NumPy (sort/argsort/

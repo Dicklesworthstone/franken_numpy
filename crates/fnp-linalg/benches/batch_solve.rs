@@ -15,17 +15,53 @@ fn old_batch(a: &[f64], b: &[f64], batch: usize, n: usize) -> Vec<f64> {
     out
 }
 
+fn old_batch_broadcast_a(a: &[f64], b: &[f64], batch: usize, n: usize) -> Vec<f64> {
+    let mut out = Vec::with_capacity(batch * n);
+    for k in 0..batch {
+        let x = solve_nxn(a, &b[k * n..(k + 1) * n], n).unwrap();
+        out.extend_from_slice(&x);
+    }
+    out
+}
+
 fn make(batch: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
     let ms = n * n;
     let mut s = 0x2545u64;
-    let mut rnd = || { s ^= s << 13; s ^= s >> 7; s ^= s << 17; (s >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0 };
+    let mut rnd = || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        (s >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+    };
     let mut a = vec![0.0f64; batch * ms];
     // diagonally dominant -> well-conditioned, non-singular
     for k in 0..batch {
         for i in 0..n {
-            for j in 0..n { a[k * ms + i * n + j] = rnd(); }
+            for j in 0..n {
+                a[k * ms + i * n + j] = rnd();
+            }
             a[k * ms + i * n + i] += n as f64 * 2.0;
         }
+    }
+    let b: Vec<f64> = (0..batch * n).map(|_| rnd()).collect();
+    (a, b)
+}
+
+fn make_broadcast_a(batch: usize, n: usize) -> (Vec<f64>, Vec<f64>) {
+    let ms = n * n;
+    let mut s = 0x5eed_f00du64;
+    let mut rnd = || {
+        s ^= s << 13;
+        s ^= s >> 7;
+        s ^= s << 17;
+        (s >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+    };
+    let mut a = vec![0.0f64; ms];
+    for i in 0..n {
+        for j in 0..n {
+            a[i * n + j] = rnd();
+        }
+        a[i * n + i] += n as f64 * 2.0;
     }
     let b: Vec<f64> = (0..batch * n).map(|_| rnd()).collect();
     (a, b)
@@ -42,7 +78,41 @@ fn bench(c: &mut Criterion) {
             bb.iter(|| black_box(old_batch(black_box(&a), black_box(&b), batch, n)))
         });
         g.bench_with_input(BenchmarkId::new("parallel", batch), &batch, |bb, _| {
-            bb.iter(|| black_box(batch_solve(black_box(&a), &a_shape, black_box(&b), &b_shape, true).unwrap()))
+            bb.iter(|| {
+                black_box(
+                    batch_solve(black_box(&a), &a_shape, black_box(&b), &b_shape, true).unwrap(),
+                )
+            })
+        });
+        g.finish();
+    }
+
+    for &(batch, n) in &[(8192usize, 16usize), (2048, 32), (512, 64)] {
+        let (a, b) = make_broadcast_a(batch, n);
+        let a_shape = vec![n, n];
+        let b_shape = vec![batch, n];
+        let mut g = c.benchmark_group(format!("batch_solve_broadcast_a_b{batch}_n{n}"));
+        g.sample_size(10);
+        g.bench_with_input(
+            BenchmarkId::new("refactor_per_lane_serial", batch),
+            &batch,
+            |bb, _| {
+                bb.iter(|| {
+                    black_box(old_batch_broadcast_a(
+                        black_box(&a),
+                        black_box(&b),
+                        batch,
+                        n,
+                    ))
+                })
+            },
+        );
+        g.bench_with_input(BenchmarkId::new("batch_solve", batch), &batch, |bb, _| {
+            bb.iter(|| {
+                black_box(
+                    batch_solve(black_box(&a), &a_shape, black_box(&b), &b_shape, true).unwrap(),
+                )
+            })
         });
         g.finish();
     }
