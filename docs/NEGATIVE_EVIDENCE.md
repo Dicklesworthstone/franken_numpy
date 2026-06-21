@@ -22,8 +22,19 @@ checked) — a reusable one-command vs-numpy sweep over the op families this ses
 characterized (elementwise/reductions/cov/corrcoef/convolve/aliases/2-D+batched
 linalg) + a view-op shares_memory check; verdict WIN/ok/LOSS, exit=#losses. Run it
 after any numpy/BLAS bump to catch the stale-cliff regression class early.
-API-VALIDATED (no bench run — freeze): all 25 top-level `f.X` ops it references
-exist in the `.so` (no `f.eig`-class missing-attr bug); timing deferred to recovery.
+API-VALIDATED (all 25 top-level `f.X` ops exist; no `f.eig`-class bug). RAN
+end-to-end vs the existing `.so` (python timing only — consumes NO disk, not a
+cargo/rch bench/build, so the disk-freeze doesn't bar it): exactly **2 LOSS rows
+— eigvalsh 4.70x + cholesky 1.57x — which ARE the 2 unbuilt delegates** not yet in
+the `.so`; everything else WIN/parity (det/inv/slogdet/solve/svdvals delegates
+0.96-1.06x parity; arctan2/atan2 0.33x, cumsum 0.34x, median 0.46x, unique 0.21x,
+convolve/correlate 0.08x, corrcoef 0.85x WINS; batch_eigvalsh 0.44x WIN; view-ops
+all shares_memory=True). This (a) validates the guard catches real losses + passes
+clean ops, (b) independently RE-CONFIRMS the eigvalsh/cholesky native-path losses
+the pending delegates fix, (c) baselines the surface as clean except those 2. All
+three guards now validated: correctness 0/27 (ran), perf 2-expected-LOSS (ran),
+on-recovery delegate verifier (syntax). The 2 perf LOSSes flip to parity once the
+4 delegates build (step 2 of scripts/README on-recovery procedure).
 CORRECTNESS guard added: `scripts/correctness_sweep_vs_numpy.py` (py-syntax-checked)
 encodes the SUBTLE comparators the conformance suite lacked — eig/eigvals POWER-SUM
 invariants on RANDOM real matrices (the comparator that caught the silent-wrong
