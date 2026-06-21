@@ -186,3 +186,11 @@ complex64 (csingle) ops: abs/conj/angle/sum/mean/add/multiply/exp/cumsum/sort al
 (no f32-style canonicalization bug — the gap pattern does NOT recur in narrow complex) + win/
 parity. real 2.19x = O(1) VIEW (shares_memory=True, time constant across N) = sub-us noise, not
 a loss. Don't chase complex64. Frontier now fully mapped: all crates + text-parse + complex64.
+
+## SHIPPED 2026-06-21: nanmedian double-alloc fix (04bd069e) — WIN
+Landed via git-show isolation past YellowElk's stale fnp-ufunc lock (>1h idle, force_release
+uncallable - no reservation id; their WIP preserved byte-intact, FYI sent). Single-alloc
+filter+select replaces nan_filtered()+median() double-alloc. RESULT: nanmedian flat 131K
+1.31x->0.92x, 1M 0.64x->0.36x, 8M ~0.7x (win, no regression). conformance_percentile_median
+24 / nan_funcs 34 / ufunc nanmedian 3. Of the 3 medium-N fixes: unique (c6b87f00), median-gate
+(a127d3d2), nanmedian (04bd069e) ALL SHIPPED. Only compress-gate candidate remains (speculative).
