@@ -27791,11 +27791,98 @@ fn real_if_close(py: Python<'_>, a: Py<PyAny>, tol: f64) -> PyResult<Py<PyAny>> 
         .unbind())
 }
 
+// Zero-copy parallel np.angle for a complex128 ndarray: angle = arctan2(imag, real)
+// (in degrees when deg). numpy.angle is a single-threaded Python wrapper; arctan2 per
+// element is compute-bound and parallelizes ideally. The complex128 buffer is viewed as
+// interleaved f64 pairs [re0,im0,re1,im1,...] and read directly. Returns None for
+// non-ndarray / non-complex128 / non-contiguous / empty inputs so the general path keeps
+// numpy's scalar-return, real-input, and complex64 conventions exactly.
+fn try_zerocopy_complex_angle(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    z: &Bound<'_, PyAny>,
+    deg: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !z.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = z.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "c"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 16
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = z.getattr("shape")?.extract()?;
+    let n: usize = shape.iter().product();
+    if n == 0 {
+        return Ok(None);
+    }
+    let view = z.call_method1("view", (numpy.getattr("float64")?,))?;
+    let Ok(buffer) = PyBuffer::<f64>::get(&view) else {
+        return Ok(None);
+    };
+    if !buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.len() != 2 * n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), 2 * n) };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias z; written once.
+        let o: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+        let kernel = |i: usize| -> f64 {
+            let a = data[2 * i + 1].atan2(data[2 * i]);
+            if deg {
+                a * (180.0 / std::f64::consts::PI)
+            } else {
+                a
+            }
+        };
+        use rayon::prelude::*;
+        const ANGLE_PARALLEL_MIN: usize = 1 << 15; // arctan2 is compute-bound
+        if n >= ANGLE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            o.par_iter_mut()
+                .enumerate()
+                .for_each(|(i, slot)| *slot = kernel(i));
+        } else {
+            for (i, slot) in o.iter_mut().enumerate() {
+                *slot = kernel(i);
+            }
+        }
+    }
+    if shape.len() == 1 {
+        Ok(Some(flat.unbind()))
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        Ok(Some(flat.call_method1("reshape", (&shape_tuple,))?.unbind()))
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (z, deg=false))]
 fn angle(py: Python<'_>, z: Py<PyAny>, deg: bool) -> PyResult<Py<PyAny>> {
-    // Pass original value to NumPy to preserve scalar return type.
     let numpy = py.import("numpy")?;
+    // Native zero-copy parallel path for complex128 ndarrays (arctan2 stencil); other
+    // dtypes / scalars / 0-d / non-contiguous defer to numpy below.
+    if let Some(out) = try_zerocopy_complex_angle(py, &numpy, z.bind(py), deg)? {
+        return Ok(out);
+    }
+    // Pass original value to NumPy to preserve scalar return type.
     let angle_fn = numpy.getattr("angle")?;
     let kwargs = PyDict::new(py);
     kwargs.set_item("deg", deg)?;
