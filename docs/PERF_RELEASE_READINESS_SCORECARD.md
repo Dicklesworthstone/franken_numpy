@@ -3,6 +3,34 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-a fnp-linalg Spectral Cond No-Ship Recheck
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `cond_nxn/128` target gap | 2/10 | Still 1.115x slower than NumPy after candidate |
+| `eigvalsh_nxn/128` adjacent gap | 2/10 | Still 1.820x slower than NumPy after candidate |
+| Guard rows already winning vs NumPy | 7/10 | `cond_nxn` 64/256/512 stayed wins, but this does not close the target |
+| Revert discipline | 9/10 | Scan/sort elision source was reverted after neutral target result |
+| Focused conformance | 8/10 | `cond_p_spectral_symmetric` focused release test passed |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Counted worker: `hz2`; candidate ran directly in existing warm RCH target
+  `.rch-target-hz2-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8`.
+- Current target baseline: `cond_nxn/128 = 1,242,314 ns`; NumPy `1,110,135 ns`;
+  current FNP/NumPy `1.119x`.
+- Candidate target: `cond_nxn/128 = 1,237,760 ns`; candidate/current `0.996x`;
+  candidate/NumPy `1.115x`.
+- Adjacent `eigvalsh_nxn/128`: candidate `1,359,806 ns` vs NumPy `747,108 ns`,
+  `1.820x`.
+
+Decision:
+- No release-ready improvement from this slice.
+- Keep no source. Route the next spectral attempt to a deeper reduction or
+  eigensolver primitive, not scan elision or eigenvalue postprocessing.
+
+---
+
 ## 2026-06-21 cod-a fnp-random PCG Current Recheck
 
 | Area | Score | Verdict |

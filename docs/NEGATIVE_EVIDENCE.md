@@ -1028,47 +1028,72 @@ class as the pinv/svdvals 2-D delegations already shipped — inv is the one lef
 behind a stale cliff gate. Retry predicate: verify with `OPENBLAS_NUM_THREADS=1`
 inv across n=128..2000 on the tuning box before flipping.
 
-## 2026-06-21 - BOLD-VERIFY CODE-ONLY Pending Bench: exact-symmetric cond duplicate finite-scan elision
+## 2026-06-21 - NO-SHIP: exact-symmetric `cond_nxn` scan/sort elision is neutral at the target
 
 Artifact directory: `tests/artifacts/perf/2026-06-21_linalg_spectral_bold_verify_cod_a/`
 
-Agent: `YellowElk` / `cod-a`. Under directive `franken_numpy-ixs5y`. SOURCE
-COMMITTED, BENCH PENDING.
+Agent: `YellowElk` / `cod-a`. Bead/directive `franken_numpy-ixs5y`. Same-worker
+proof used direct `hz2` execution against the warm RCH target
+`.rch-target-hz2-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8`; no new `.scratch`
+worktree was created.
 
-Disk-low constraint arrived after the same-worker baseline capture: no new
-`cargo bench`, `cargo build`, `cargo check`, or `cargo test` was started after
-that instruction. The source lever is deliberately narrow and must be verified in
-the next turn before being scored as a win/loss.
+Radical lever from `/alien-graveyard`, `/alien-artifact-coding`, and
+`/extreme-software-optimization`: treat exact-symmetric spectral condition
+numbers as a values-only eigenspectrum problem, then remove postprocessing work
+that cannot change the singular-value extrema. The candidate split the internal
+finite `eigvalsh` body so `cond_nxn(..., p=None|"2"|"-2")` could consume
+unsorted eigenvalues, and fused square NaN/Inf/symmetry scans before the fast
+path. Fallbacks for non-symmetric, rectangular, NaN, Inf, and non-spectral orders
+were preserved and focused `cond_p_spectral_symmetric` tests passed.
 
-Candidate:
-- Public `eigvalsh_nxn` keeps the existing shape and finite-input validation.
-- A new internal `eigvalsh_finite_nxn` helper owns the validated reduction + QR +
-  sort body.
-- Exact-symmetric finite `cond_nxn(..., p=None|"2"|"-2")` already rejects NaN
-  and Inf before taking the symmetric branch, so it now calls the internal helper
-  and avoids re-scanning the full matrix for finiteness inside public
-  `eigvalsh_nxn`.
-- Fallback paths for non-symmetric, rectangular, NaN, Inf, and non-2-norm orders
-  are unchanged.
+Decision: **NO-SHIP**. The target `cond_nxn/128` residual loss moved only
+`1,242,314 ns -> 1,237,760 ns` (`0.996x` candidate/current) and remained a
+`1.115x` NumPy loss on the same worker. Production source was reverted; keep only
+this evidence.
 
-Pre-change same-worker `hz1` baseline already captured this session:
+Same-worker `hz2` current baseline and NumPy comparator:
 
-| Row | Current FNP median ns | NumPy median ns | Current FNP/NumPy | Status |
+| Row | Current FNP ns | NumPy ns | Current FNP/NumPy | Verdict |
 |---|---:|---:|---:|---|
-| `eigvalsh_nxn/size/64` | 266,616 | 169,650 | 1.571x | loss; source hunk should not change public row materially |
-| `eigvalsh_nxn/size/128` | 1,932,374 | 929,745 | 2.078x | loss; source hunk should not change public row materially |
-| `eigvalsh_nxn/size/256` | 13,567,576 | 5,707,000 | 2.377x | loss; source hunk should not change public row materially |
-| `cond_nxn/size/64` | 239,040 | 376,481 | 0.635x | current win; guard against regression |
-| `cond_nxn/size/128` | 1,928,424 | 1,370,837 | 1.407x | target residual loss |
-| `cond_nxn/size/256` | 15,869,378 | 15,477,214 | 1.025x | neutral/slight loss |
-| `cond_nxn/size/512` | 84,832,089 | 125,132,325 | 0.678x | current win; guard against regression |
+| `eigvalsh_nxn/size/64` | 212,560 | 136,976 | 1.552x | loss |
+| `eigvalsh_nxn/size/128` | 1,375,833 | 747,108 | 1.842x | loss |
+| `eigvalsh_nxn/size/256` | 9,874,793 | 4,620,415 | 2.137x | loss |
+| `eigvalsh_nxn/size/512` | 54,601,439 | 32,331,704 | 1.689x | loss |
+| `cond_nxn/size/64` | 176,465 | 183,656 | 0.961x | win |
+| `cond_nxn/size/128` | 1,242,314 | 1,110,135 | 1.119x | target loss |
+| `cond_nxn/size/256` | 10,388,605 | 13,487,988 | 0.770x | win |
+| `cond_nxn/size/512` | 49,934,080 | 115,011,342 | 0.434x | win |
 
-Pending next-turn verification:
-- Run per-crate `fnp-linalg` correctness/conformance and formatting gates.
-- Re-run `cond_nxn` and `eigvalsh_nxn` Criterion rows on the same worker if
-  possible; keep only if the `cond_nxn/128` duplicate-scan elision moves the
-  residual loss without regressing the 64/256/512 guard rows.
-- If the row is neutral or regresses, revert this hunk and record the rejection.
+Candidate same-worker `hz2` result:
+
+| Row | Candidate FNP ns | Candidate/current | Candidate/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `eigvalsh_nxn/size/64` | 214,933 | 1.011x | 1.569x | loss |
+| `eigvalsh_nxn/size/128` | 1,359,806 | 0.988x | 1.820x | loss |
+| `eigvalsh_nxn/size/256` | 9,676,603 | 0.980x | 2.094x | loss |
+| `eigvalsh_nxn/size/512` | 47,770,501 | 0.875x | 1.478x | loss/noisy |
+| `cond_nxn/size/64` | 177,597 | 1.006x | 0.967x | win/guard neutral |
+| `cond_nxn/size/128` | 1,237,760 | 0.996x | 1.115x | target loss; neutral |
+| `cond_nxn/size/256` | 9,099,912 | 0.876x | 0.675x | win on already-winning class |
+| `cond_nxn/size/512` | 46,454,544 | 0.930x | 0.404x | win on already-winning class |
+
+Win/loss/neutral score:
+- Candidate vs NumPy across measured rows: **3 / 5 / 0**.
+- Target residual rows (`eigvalsh_nxn/128`, `cond_nxn/128`): **0 / 2 / 0**.
+- Candidate vs current target movement: **0 / 0 / 1** (`cond_nxn/128` was a
+  0.4% neutral change).
+
+Validation:
+- `rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'cond_nxn|eigvalsh_nxn' -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher` captured the current baseline.
+- Same-worker direct `hz2` Python comparator used NumPy `2.3.5`.
+- Same-worker direct `hz2` candidate bench completed in the existing warm target.
+- `rch exec -- cargo test -p fnp-linalg cond_p_spectral_symmetric --release -- --nocapture` passed before and after the candidate.
+
+Retry predicate: do not repeat finiteness-scan elision, public/private
+`eigvalsh` sort splitting, or post-eigenvalue extrema-only reshuffling for this
+loss class. A credible next attempt must attack the actual symmetric
+tridiagonalization/eigensolver cost: dsytrd-class blocked Householder,
+two-stage reduction, or an actually faster convergent tridiagonal eigensolver.
 
 ## 2026-06-20 - BOLD-VERIFY WIN x3: array-API aliases reuse their optimized twins
 
