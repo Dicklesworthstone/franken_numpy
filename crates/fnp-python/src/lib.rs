@@ -16881,6 +16881,16 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
         _ => return fallback(),
     };
 
+    // Boundary-power fast path (2026-06-21, disk-low code-only): NumPy handles
+    // n==0 by allocating identity from shape/dtype and n==1 by returning the
+    // asarray result directly. The native path below extracts and scans the whole
+    // matrix first, which is pure O(n^2) overhead for exact ndarray inputs and
+    // loses NumPy's n==1 alias semantics. Delegate these boundary exponents before
+    // extraction; powers >=2 keep the existing native multiply path.
+    if power <= 1 && is_exact_numpy_ndarray(py, a.bind(py))? {
+        return fallback();
+    }
+
     let array = match extract_precise_numeric_array(py, a.bind(py), "matrix_power(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),

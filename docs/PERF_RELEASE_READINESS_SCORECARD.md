@@ -3,6 +3,33 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 fnp-python matrix_power n=0/1 Boundary Delegate Code-Only Slice
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `matrix_power` exact ndarray `n=0` and `n=1` | 3/10 | Code-only pending bench |
+| `matrix_power` powers `>=2` native path | 8/10 | Left unchanged |
+| Focused conformance | 0/10 | Pending disk recovery |
+| Fresh Criterion ratio-vs-NumPy | 0/10 | Pending disk recovery |
+
+Evidence:
+- Bead: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Code-only lever: delegate exact NumPy ndarray boundary exponents `0` and `1`
+  to `numpy.linalg.matrix_power` before extracting into Rust.
+- Rationale: NumPy's boundary paths need only shape/dtype for `n=0` and return
+  the asarray result for `n=1`; the previous wrapper paid an avoidable full
+  matrix extract plus finite scan first.
+- No new cargo build/bench/test/check was started under the 45G disk-low
+  instruction.
+
+Decision:
+- Keep as a pending-bench code-only commit, not a measured win.
+- Next admissible turn must run focused `fnp-python` Criterion rows and
+  `matrix_power` conformance, then either score the ratio-vs-NumPy or revert on
+  ~0 gain/regression.
+
+---
+
 ## 2026-06-21 fnp-python cholesky 2-D Delegate Code-Only Slice
 
 | Area | Score | Verdict |

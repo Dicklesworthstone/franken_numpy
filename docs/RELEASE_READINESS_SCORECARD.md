@@ -3,6 +3,33 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-21 - fnp-python matrix_power n=0/1 Boundary Delegate Code-Only Slice
+
+Scope:
+- Bead: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-python` / `linalg.matrix_power` exact NumPy ndarray inputs
+  with exponent `0` or `1`.
+- Candidate: delegate boundary exponents to `numpy.linalg.matrix_power` before
+  Rust extraction; leave powers `>=2`, negative exponents, non-ndarray inputs,
+  and error paths on the existing routes.
+- Worker proof: pending. No new cargo build/bench/test/check was started after
+  the 45G disk-low instruction.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Source lever | PASS / CODE-ONLY | Exact ndarray `n=0/1` delegates before extraction, removing avoidable O(n^2) copy/scan and preserving NumPy's `n=1` asarray return behavior. |
+| Fresh head-to-head performance vs NumPy | PENDING | No counted candidate row under the 45G disk-low instruction. |
+| Focused conformance | PENDING | No cargo test/check/build was started after the disk-low instruction. |
+| Evidence durability | PARTIAL | Ledger and scorecard record pending verification and revert predicate. |
+
+Cluster score: **24 / 100**
+
+Current release posture:
+- This is not yet a measured win. It is a narrow boundary-case delegate that must
+  be benched and conformance-checked next turn.
+- Revert if focused `fnp-python` rows show ~0 gain, a new overhead versus NumPy,
+  or any `matrix_power` conformance regression.
+
 ## 2026-06-21 - fnp-python cholesky 2-D Delegate Code-Only Slice
 
 Scope:

@@ -4,6 +4,34 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - DISK-LOW CODE-ONLY Pending Bench: matrix_power n=0/1 ndarray boundary delegate
+
+Agent: `YellowElk` / `cod-a`. Bead: `franken_numpy-ixs5y`. Disk-low pause
+(45G) — no new `cargo bench`, `cargo build`, `cargo check`, or `cargo test`
+started this turn. Agent Mail reservations were granted for the source and
+scorecard files.
+
+Candidate:
+- `fnp_python.linalg.matrix_power` now delegates exact NumPy ndarray inputs with
+  exponent `0` or `1` to `numpy.linalg.matrix_power` before Rust extraction.
+- NumPy handles `n == 0` by allocating identity from shape/dtype and `n == 1`
+  by returning its `asanyarray(a)` result directly. The previous native wrapper
+  extracted and scanned the entire matrix before reaching those boundary cases,
+  an avoidable O(n^2) copy/scan for large exact ndarrays.
+- Powers `>= 2`, non-ndarray inputs, negative exponents, and error paths keep the
+  existing behavior.
+
+Fresh ratio-vs-NumPy: **PENDING**. Expected result: boundary exponents should move
+toward parity for large exact ndarrays and preserve NumPy alias semantics for
+`n == 1`; revert if focused `matrix_power` rows show ~0 gain, new overhead, or
+any linalg conformance regression.
+
+Pending verification:
+- Focused `fnp-python` Criterion rows for `matrix_power` `n=0` and `n=1` on
+  large 2-D exact ndarrays.
+- `cargo test -p fnp-python --test conformance_linalg_advanced matrix_power`
+  after disk recovers.
+
 ## 2026-06-21 - DISK-LOW CODE-ONLY Pending Bench: cholesky 2-D delegate
 
 Agent: `YellowElk` / `cod-a`. Bead: `franken_numpy-ixs5y`. Disk-low pause
