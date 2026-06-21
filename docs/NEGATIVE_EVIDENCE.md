@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: zero-copy parallel flat nanargmax/nanargmin up to 30x (2ea552a7)
+
+`BlackThrush`/`cod-b`. 4th application of the serial-vs-single-threaded-numpy thread. flat
+(axis=None) f64 nanargmax/nanargmin EXTRACTED the buffer into a UFuncArray copy then scanned
+serially. try_zerocopy_f64_nanargextreme: read the borrowed buffer (from_raw_parts, NO copy),
+NaN-SKIPPING argextreme per rayon chunk, combine in index order (replace only on STRICTLY
+better -> first-occurrence among non-NaN); whole-array-NaN defers to numpy (ValueError). Gate
+1<<21. RESULT: 4M/16M 0.03x (30x!); sub-gate native extract path already ~0.63x. conformance
+_nan_funcs 34, argmax 10, matches numpy on NaN-skip+ties+first-occ+all-NaN. NOTE: load was
+14-45 this turn; a 30x win shows clearly through that noise (only marginal gate-boundary
+cases are unreliable at high load, and the gate here is the PROVEN argmax 1<<21 — not tuned).
+THREAD STATUS (5 wins: sqrt/unary-class/binary-nocopy/argextreme/nanargextreme): the
+"copy-to-Vec or serial scan vs single-threaded numpy -> from_raw_parts + parallel reduce"
+lever keeps paying. Remaining grep targets: other extract-then-native reductions (nanmin/
+nanmax flat already parallel 0.49x; check nanprod/nanmean/nanstd flat, and sort/partition).
+
 ## 2026-06-21 - WIN: parallel no-copy flat argmax/argmin 2.5-3x (d8079422); trapezoid already won
 
 `BlackThrush`/`cod-b`. (1) Peer-flagged "trapezoid 1.55-1.78x" was STALE — re-measured: ALL
