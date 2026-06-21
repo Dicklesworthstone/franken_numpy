@@ -138,6 +138,19 @@ def main():
     ok("array_equal(same) == True", f.array_equal(a, a.copy()) == True)
     ok("allclose nan equal_nan", f.allclose(np.array([np.nan, 1.0]), np.array([np.nan, 1.0]), equal_nan=True) == True)
 
+    # 6. value-parity for THIS SESSION'S shipped perf wins (guard against regressing them)
+    sig = rng.standard_normal(50000); ker = rng.standard_normal(16)
+    for mode in ("full", "same", "valid"):
+        ok(f"convolve({mode}) == numpy",
+           np.allclose(np.asarray(f.convolve(sig, ker, mode)), np.convolve(sig, ker, mode), atol=1e-9))
+        ok(f"correlate({mode}) == numpy",
+           np.allclose(np.asarray(f.correlate(sig, ker, mode)), np.correlate(sig, ker, mode), atol=1e-9))
+    p, q = rng.standard_normal(5000), rng.standard_normal(5000)
+    ok("cov(a,b) == numpy", np.allclose(np.asarray(f.cov(p, q)), np.cov(p, q), atol=1e-10))
+    ok("corrcoef(a,b) == numpy", np.allclose(np.asarray(f.corrcoef(p, q)), np.corrcoef(p, q), atol=1e-10))
+    ok("concat(alias) == numpy", np.array_equal(np.asarray(f.concat([p, q])), np.concat([p, q])))
+    ok("atan2(alias) == arctan2", np.allclose(np.asarray(f.atan2(p, q)), np.arctan2(p, q), atol=1e-12))
+
     print(f"\nFAILs: {len(fails)}" + ("" if not fails else "  -> " + ", ".join(fails)))
     sys.exit(min(len(fails), 125))
 

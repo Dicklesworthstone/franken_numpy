@@ -36,6 +36,10 @@ eigvals power-sum invariants on 60 random real matrices -> current build's
 eigenvalues are CORRECT; all error/special-value/view/dtype guards green). Running
 it caught + fixed a bug in the guard itself (eig is `f.linalg.eig`, not `f.eig`) —
 so the committed guard is itself verified working, not just syntax-checked.
+EXTENDED + re-validated: added value-parity checks for this session's shipped wins
+(convolve/correlate full|same|valid, cov(a,b), corrcoef(a,b), concat, atan2) — all
+match numpy in the current `.so` -> 0 fails / 27 checks. The guard now also protects
+the shipped wins from silent regression, not just the bug classes.
 
 ## 2026-06-21 - STATE CHANGE: agent-mail RECOVERED (1 of 2 blockers cleared); only cargo freeze remains
 
