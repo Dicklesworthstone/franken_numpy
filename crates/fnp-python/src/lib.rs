@@ -19727,10 +19727,34 @@ fn try_zerocopy_f64_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
         let (Some(m_out), Some(e_out)) = (m_buf.as_mut_slice(py), e_buf.as_mut_slice(py)) else {
             return Ok(None);
         };
-        for ((m_slot, e_slot), cell) in m_out.iter().zip(e_out.iter()).zip(input.iter()) {
-            let (m, e) = frexp_one(cell.get());
-            m_slot.set(m);
-            e_slot.set(e);
+        // SAFETY: ReadOnlyCell<f64>/Cell<f64>/Cell<i32> are repr(transparent); `input` is
+        // read-only under the GIL and the two output buffers are fresh numpy.empty arrays we
+        // own (no alias). par_chunks_mut splits into disjoint, non-overlapping slices.
+        let data: &[f64] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
+        let m_slice: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(m_out.as_ptr() as *mut f64, n) };
+        let e_slice: &mut [i32] =
+            unsafe { std::slice::from_raw_parts_mut(e_out.as_ptr() as *mut i32, n) };
+        let kernel = |m: &mut [f64], e: &mut [i32], d: &[f64]| {
+            for ((ms, es), &v) in m.iter_mut().zip(e.iter_mut()).zip(d) {
+                let (mm, ee) = frexp_one(v);
+                *ms = mm;
+                *es = ee;
+            }
+        };
+        // frexp reads n f64 + writes n f64 + n i32 (~20n bytes, memory-bound); numpy runs it
+        // single-threaded, so multi-threaded chunks win the DRAM bandwidth at large n.
+        const FREXP_PARALLEL_MIN: usize = 1 << 19;
+        if n >= FREXP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            m_slice
+                .par_chunks_mut(chunk)
+                .zip(e_slice.par_chunks_mut(chunk))
+                .zip(data.par_chunks(chunk))
+                .for_each(|((m, e), d)| kernel(m, e, d));
+        } else {
+            kernel(m_slice, e_slice, data);
         }
     }
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
