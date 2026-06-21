@@ -4,6 +4,36 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - CORRECTION + METHODOLOGY: serial RAYON=1 gives FALSE LOSSES for parallel ops
+
+`BlackThrush`/`cod-b`. Re-measured the prior entry's findings at FULL THREADS (the
+real-world vs-numpy condition). Two corrections + a methodology rule:
+
+WITHDRAW both "leads" — they were FALSE serial-measurement losses:
+- **np.percentile / median / quantile**: serial RAYON=1 read 1.39-1.69x "loss"; at
+  FULL THREADS they are WINS — percentile50 0.61x, median 0.54x, quantile 0.68x,
+  multi 0.21x. (kernel already parallel radix-select; numpy is single-threaded.)
+- **np.cov(rowvar, 100x40000)**: serial "5.66x loss"; full threads 0.93x (OMP=1) /
+  0.86x (numpy BLAS multithread) — a WIN. (serial disabled fnp's parallel Gram while
+  numpy used BLAS.) Also histogram 0.185x, quantile_multi 0.14x at full threads.
+
+CORRECT the interp WIN framing (entry below): it was NOT a "1.9x loss". At FULL
+THREADS the EXTRACT path was already a 2.6x WIN (np 93.7ms -> fnp 35.3ms, non-contig);
+the zero-copy path is 12.5x (np 60.5ms -> fnp 4.9ms). So the interp commit (82c5d03e)
+is a real ~3.4x SELF-improvement (removed extract+build copies) and a big vs-numpy
+win — but the baseline was a win, not a loss. The "1.9x" was the serial artifact.
+
+METHODOLOGY RULE (high value — applies to all BOLD-VERIFY sweeps): **serial
+RAYON_NUM_THREADS=1 is ONLY valid for the vs-numpy verdict when BOTH sides are
+single-threaded** (e.g. batch_inv/solve, where numpy LOOPS LAPACK serially per lane
+— those are REAL full-threads losses). For ops where fnp PARALLELIZES and numpy is
+single-threaded (interp/percentile/median/histogram/nan-reductions/...) OR numpy uses
+BLAS (cov/dot/matmul), serial UNFAIRLY HANDICAPS fnp and reports phantom losses.
+Use serial to ISOLATE a kernel; use FULL THREADS for the win/loss verdict. Re-verify
+any serial-flagged "loss" at full threads before chasing it. The genuine remaining
+losses (full-threads verified) are: batch_inv/solve light-per-lane (kernel) + sqrt
+(forbid-unsafe zero-init). The rest is dominated.
+
 ## 2026-06-21 - WIN: np.interp zero-copy + parallel — ~30x vs numpy (82c5d03e); + 2 new leads
 
 `BlackThrush`/`cod-b`. Binning/statistical sweep (serial RAYON=1, stable) found
