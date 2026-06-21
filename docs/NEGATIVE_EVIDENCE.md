@@ -4,6 +4,59 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - NO-SHIP: SBR stage-1-only eigvalsh route
+
+`YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on the
+native spectral gap after the exact-128 unblocked reducer rejection. The
+alien-graveyard match is communication-avoiding dense linear algebra; the
+artifact-coding numerical-linear-algebra route points at a true two-stage
+symmetric band reduction rather than another sort/post-processing micro-lever.
+I measured the existing SBR dense-to-band stage as the next radical primitive.
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-21_linalg_spectral_sbr_stage1_cod_b_pass4/`
+
+Commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher 'eigvalsh_nxn/size/128|cond_nxn/size/128|sbr_stage1_band_nxn/size/512'`
+- `ssh -i ~/.ssh/je_ovh_ssh_key.pem ubuntu@51.222.245.56 'OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -'`
+- `ssh -i ~/.ssh/je_ovh_ssh_key.pem ubuntu@51.222.245.56 'cd /data/projects/franken_numpy && CARGO_TARGET_DIR=/data/projects/franken_numpy/.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8 cargo bench -p fnp-linalg --bench criterion_linalg -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher "eigvalsh_nxn/size/512"'`
+
+| Probe | Worker | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---|---:|---:|---:|---|
+| Current `eigvalsh_nxn/128` | `ovh-a` | 1,315,452 | 631,765 | 2.082x | current loss |
+| Current `cond_nxn/128` | `ovh-a` | 993,887 | 961,374 | 1.034x | neutral |
+| Current `eigvalsh_nxn/512` | `ovh-a` | 68,791,964 | 27,470,726 | 2.504x | current loss |
+| Existing `sbr_stage1_band_nxn/512` vs NumPy full `eigvalsh/512` | `ovh-a` | 19,948,921 | 27,470,726 | 0.726x | incomplete primitive |
+
+Cross-worker routing-only row:
+- `vmi1227854`: current `eigvalsh_nxn/512 = 42,176,502 ns`; existing
+  `sbr_stage1_band_nxn/1024 = 135,221,960 ns`. Not counted in same-worker
+  NumPy ratios because RCH selected a different worker.
+
+Scorecard:
+- Current API rows vs NumPy: win/loss/neutral = **0/2/1**.
+- SBR stage-1 feasibility row: stage 1 alone is faster than NumPy's full
+  512x512 eigensolve, but it is not an API-equivalent result and is not counted
+  as a production win.
+- Production decision: **no source kept**. Wiring SBR stage 1 into the existing
+  dense tridiagonal reducer would add work without exploiting the band.
+
+Validation and decision:
+- No `crates/fnp-linalg/src/lib.rs` hunk was kept in this pass.
+- Final scoped gates: `cargo test -p fnp-linalg sbr_stage1 --release` passed
+  2 tests with integration shards filtered; `cargo check -p fnp-linalg
+  --all-targets` passed; `cargo clippy -p fnp-linalg --all-targets --
+  -D warnings` passed; `cargo build -p fnp-linalg --release` passed;
+  `git diff --check` passed; `ubs` on the markdown docs/scorecard exited 0
+  with no recognized source-language files.
+- The radical route is now narrower: implement the missing stage-2
+  band-to-tridiagonal reducer or a band-aware eigvalsh pipeline. At `n=512`,
+  SBR stage 1 leaves about `7.52 ms` of the NumPy budget for stage 2 plus
+  tridiagonal eigenvalues if the goal is a same-worker win.
+- Do not ship an SBR stage-1-only dispatch, a dense-band call back into
+  `tridiag_reduce_values`, or another exact-128 threshold/post-sort tweak. Those
+  do not change the dominant dense reducer work.
+
 ## 2026-06-21 - NO-SHIP: eigvalsh/cond 128 values-only unblocked reducer route
 
 `YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on the

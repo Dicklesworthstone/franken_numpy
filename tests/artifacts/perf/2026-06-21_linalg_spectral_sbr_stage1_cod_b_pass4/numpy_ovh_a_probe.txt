@@ -1,0 +1,7 @@
+python=3.13.7
+numpy=2.2.4
+platform=Linux-6.17.0-8-generic-x86_64-with-glibc2.42
+threads=OPENBLAS_NUM_THREADS=1,OMP_NUM_THREADS=1,MKL_NUM_THREADS=1
+numpy_eigvalsh_128: median_ns=631765 min_ns=627017 max_ns=635483 reps=15
+numpy_eigvalsh_512: median_ns=27470726 min_ns=27150260 max_ns=28507847 reps=10
+numpy_cond_128: median_ns=961374 min_ns=937690 max_ns=1310269 reps=15

@@ -3,6 +3,44 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-b fnp-linalg SBR Stage-1 Spectral No-Ship
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Current `eigvalsh_nxn/128` vs NumPy | 2/10 | Same-worker `ovh-a` remains a `2.082x` loss |
+| Current `cond_nxn/128` vs NumPy | 5/10 | Same-worker `ovh-a` is neutral at `1.034x`; not the target gap this pass |
+| Current `eigvalsh_nxn/512` vs NumPy | 2/10 | Same-worker `ovh-a` remains a `2.504x` loss |
+| SBR stage-1 feasibility | 6/10 | Stage 1 alone is `0.726x` of NumPy full `eigvalsh_512`, but not an API result |
+| Source discipline | 10/10 | No linalg source was kept; no stage-1-only dispatch shipped |
+| Retry guidance | 9/10 | Routes to true band-to-tridiagonal / band-aware eigvalsh, away from threshold and post-sort tweaks |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-b`.
+- Artifact directory:
+  `tests/artifacts/perf/2026-06-21_linalg_spectral_sbr_stage1_cod_b_pass4/`.
+- RCH current rows on `ovh-a`: `eigvalsh_nxn/128 = 1,315,452 ns`,
+  `cond_nxn/128 = 993,887 ns`, `sbr_stage1_band_nxn/512 = 19,948,921 ns`.
+- Direct `ovh-a` NumPy rows: `eigvalsh_128 = 631,765 ns`,
+  `eigvalsh_512 = 27,470,726 ns`, `cond_128 = 961,374 ns` with Python
+  `3.13.7`, NumPy `2.2.4`, and BLAS threads pinned to 1.
+- Direct `ovh-a` Rust `eigvalsh_nxn/512` row from the synced RCH workspace:
+  `68,791,964 ns`.
+- Counted current API scorecard vs NumPy: win/loss/neutral = **0/2/1**.
+- Cross-worker routing-only row on `vmi1227854`: `eigvalsh_nxn/512 =
+  42,176,502 ns`, `sbr_stage1_band_nxn/1024 = 135,221,960 ns`.
+- Final scoped gates: `cargo test -p fnp-linalg sbr_stage1 --release`,
+  `cargo check -p fnp-linalg --all-targets`, `cargo clippy -p fnp-linalg
+  --all-targets -- -D warnings`, `cargo build -p fnp-linalg --release`,
+  `git diff --check`, and `ubs` on the markdown docs/scorecard passed.
+
+Decision:
+- No release-ready improvement. Keep no source change.
+- SBR remains the radical route, but the next shippable lever must be a true
+  stage-2 band-to-tridiagonal reducer or band-aware eigvalsh path. A stage-1-only
+  dispatch or dense-band fallback would not attack the dominant work.
+
+---
+
 ## 2026-06-21 cod-b fnp-linalg Eigvalsh/Cond 128 Unblocked Reducer No-Ship
 
 | Area | Score | Verdict |
