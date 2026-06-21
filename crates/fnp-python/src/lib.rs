@@ -9046,31 +9046,31 @@ fn try_zerocopy_f64_roll(
         return Ok(None);
     };
     let n = input.len();
-    let shape: Vec<usize> = in_buffer.shape().to_vec();
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "float64")?;
-    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    let out = numpy
+        .getattr("empty_like")?
+        .call1((a,))?;
     if n > 0 {
         // Normalize the shift into [0, n); result[i] = input[(i - shift) mod n],
         // i.e. result = input[n-s..] ++ input[..n-s].
         let s = (((shift_scalar % n as i64) + n as i64) % n as i64) as usize;
-        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
         };
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
         let split = n - s;
-        for i in 0..s {
-            output[i].set(input[split + i].get());
-        }
-        for i in 0..split {
-            output[s + i].set(input[i].get());
-        }
+        // SAFETY: ReadOnlyCell<f64> and Cell<f64> are repr(transparent) over f64.
+        // `flat` is a freshly allocated numpy.empty output, so it cannot alias the
+        // input buffer. Both contiguous runs are moved verbatim, matching np.roll.
+        let input_f64: &[f64] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
+        let output_f64: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+        output_f64[..s].copy_from_slice(&input_f64[split..]);
+        output_f64[s..].copy_from_slice(&input_f64[..split]);
     }
-    let output_shape = PyTuple::new(py, shape.iter().copied())?;
-    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
-    Ok(Some(output))
+    Ok(Some(out.unbind()))
 }
 
 // Dtype-agnostic flatten roll (axis=None any ndim, or 1-D axis 0/-1) for any
@@ -9150,12 +9150,14 @@ fn try_zerocopy_any_roll(
             return Ok(None);
         };
         // result = input[split..] ++ input[..split], in bytes.
-        for i in 0..s_bytes {
-            output[i].set(input[split_bytes + i].get());
-        }
-        for i in 0..split_bytes {
-            output[s_bytes + i].set(input[i].get());
-        }
+        // SAFETY: ReadOnlyCell<u8> and Cell<u8> are repr(transparent) over u8.
+        // `out_u8` is freshly allocated and unaliased; roll copies raw element bytes.
+        let input_u8: &[u8] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<u8>(), total_bytes) };
+        let output_u8: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut u8, total_bytes) };
+        output_u8[..s_bytes].copy_from_slice(&input_u8[split_bytes..]);
+        output_u8[s_bytes..].copy_from_slice(&input_u8[..split_bytes]);
     }
     let out_typed = out_u8.call_method1("view", (&dtype,))?;
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
