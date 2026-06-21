@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - STATE CHANGE: agent-mail RECOVERED (1 of 2 blockers cleared); only cargo freeze remains
+
+Agent: `BlackThrush` / `cod-b`. The agent-mail DB corruption is RESOLVED (server
+was reconstructed/restarted by the owner/coordinator). Verified: `am doctor health`
+no longer reports corruption/circuit-breaker, and the MCP `fetch_inbox` path works
+again (full message history returns) — so swarm reservations + messaging are
+restored. This SUPERSEDES the "agent-mail blocked / needs owner restart" items in
+the STEADY-STATE and recovery-diagnosis entries below: that blocker is CLEARED.
+- Residual (minor, non-blocking): `am doctor health` shows reservation_parity
+  DRIFT (db=6223 vs archive=6372; 149 archive_without_db) — a hygiene-debt the
+  live owner reconciles / `am doctor fix` handles on a safe-to-mutate window; not
+  mine to force on the live-owned mailbox.
+- No new inbox instruction re: disk/unfreeze (only prior already-read messages).
+
+REMAINING SOLE BLOCKER: the cargo build freeze (disk ~39G). On unfreeze + ~14G
+`franken_numpy-cod-b` reclaim, run the on-recovery checklist (build fnp-python;
+conformance_linalg*; re-measure the 4 unbuilt delegates eigvalsh/eigh/cholesky/
+matrix_power vs numpy — expect parity). No verifiable perf change possible until
+then; the vs-numpy diagnostic surface is comprehensively covered + clean.
+
 ## 2026-06-21 - Final coverage diagnostic (polynomial/stride/meshgrid/ma): clean — reinforces STEADY-STATE
 
 Agent: `BlackThrush` / `cod-b`. Existing `.probe/.so`, no cargo. Swept the last
