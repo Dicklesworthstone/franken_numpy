@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: native datetime64/timedelta64 np.diff via int64 view (041c794c, 1.11x -> 0.41x)
+
+`BlackThrush`/`cod-b`. Swept char/datetime/structured (genuinely untouched). char_upper/
+strip, datetime sort/unique, isnat, str unique/sort all parity (delegated, correct). ONE
+loss: datetime diff 1.11x. diff(datetime64) was correct but the zero-copy diff paths gate
+on kind f/i/u -> datetime64/timedelta64 (kind M/m) missed all -> numpy.diff fallback.
+FIX: these are int64-backed (diff(datetime64[U])->timedelta64[U], diff(timedelta64[U])->
+timedelta64[U]). View buffer as int64, reuse the int zero-copy diff loop (n>1 + axis),
+reinterpret result as timedelta64[U] via the M8->m8 dtype-string swap (maps either input
+kind to the timedelta output, no manual unit parse). Bit-identical (int64 subtraction ==
+numpy). RESULT: 500K 1.11x->0.41x (2.4x), verified units D/s/ms/h/Y + timedelta input +
+n=2 + 2-D axis. conformance 23/23. 13th lever.
+NEW VEIN: DTYPE-GATED zero-copy fast paths that gate on kind f/i/u MISS datetime64/
+timedelta64 (M/m) which are int64-backed -> they fall to numpy delegation (~1.1x). For
+any op where diff/cumsum/sort-family is int64-reducible, viewing M/m as int64 + reinterpret
+hits the fast path. (sort/unique already parity — numpy SIMD; diff was the reusable one.)
+
 ## 2026-06-21 - WIN: native scalar np.insert fast path (ad3abb3a, 1.09x -> 0.29-0.96x); construction ops swept
 
 `BlackThrush`/`cod-b`. Twin of native delete (2af4e907). insert is a stable 1.09x loss
