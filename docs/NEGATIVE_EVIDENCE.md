@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - Fresh diagnostic of 17 previously-untested ops: NO new loss (all parity/win)
+
+Agent: `BlackThrush` / `cod-b`. Build freeze (no cargo); diagnosed via existing
+`.probe/.so` (current for all these ops — none touch the 4 still-unbuilt linalg
+delegates). Swept op families NOT covered by earlier sweeps to find any new
+vs-numpy gap to QUEUE for recovery; result = all parity/win, nothing to queue:
+- np.char: center/ljust/title/swapcase/zfill/split/replace — 0.87-1.09x (parity)
+- np.fft: rfftn, non-pow2 fft, irfft — 0.98-1.02x (parity)
+- piecewise 1.04x, apply_along_axis 1.00x, multi_dot(5) 0.99x, datetime arith /
+  busday(weekmask) ~parity (sub-us)
+- nanvar(ddof=1) 0.14x and nanstd(axis) 0.03x — big WINS
+
+DON'T re-hunt these families — confirmed clean. Combined with prior sweeps
+(ufunc/reductions/linalg/cov/corrcoef/convolve/aliases/view-ops/2-D-axis/
+broadcasting/N-D/random/complex/stats/sorting/indexing), the readily-measurable
+fnp-python vs-numpy surface shows NO outstanding loss. The only deferred items are
+the 4 code-only linalg delegates pending build verification (on-recovery checklist
+in the SWEEP-COMPLETE entry). Pending-bench unchanged.
+
 ## 2026-06-21 - View-semantics robustness sweep: matrix_transpose + rollaxis fixes solid (0 fails/9)
 
 Agent: `BlackThrush` / `cod-b`. Build freeze (no cargo); verified via existing
