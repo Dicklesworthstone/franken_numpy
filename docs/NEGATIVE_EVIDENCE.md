@@ -4,6 +4,36 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - NO-SHIP: np.sqrt 1.5x loss is the forbid(unsafe) zero-init tax (architectural)
+
+`BlackThrush`/`cod-b`. Swept transcendental/cheap unary ufuncs vs NumPy (4M f64,
+min-of-13): nearly all WIN or parity (arctan2 0.33x, sin 0.60x, tan 0.53x, cbrt
+0.27x, expm1/log1p/arcsin/tanh wins; exp/log/log2 parity) — the LONE loss is
+**np.sqrt 1.45-1.64x SLOWER**. Investigated hard (3 builds):
+- Added SIMD `Sqrt => input.sqrt()` (StdFloat, bit-exact: IEEE sqrt is correctly
+  rounded) to `apply_simd_residual_unary_chunk` + vectorized its finite-negative
+  Invalid-flag check. RESULT: 0-gain, still 1.5x. REVERTED.
+- WHY 0-gain: serial (RAYON=1, the scalar `.collect()` path, NO zero-init) is ALSO
+  1.5x, and parallel-SIMD == parallel-scalar == 1.5x -> sqrt is memory/loop-bound,
+  not compute-bound, so SIMD compute can't help.
+- ROOT CAUSE: the parallel SIMD path must `vec![0.0f64; n]` its output (to get
+  `&mut [f64]` slices for par_chunks_mut), a full extra 32MB zeroing pass -> 96MB
+  traffic vs NumPy's `np.empty` 64MB = the ~1.5x. fnp-ufunc is `#![forbid(unsafe_code)]`
+  so an uninitialized Vec (`set_len`) WON'T COMPILE (verified: "usage of an unsafe
+  block" error). Under forbid(unsafe) you can have SIMD+zero-init (96MB) OR
+  scalar+collect (64MB, 1-wide) — BOTH ~1.5x; NumPy gets SIMD+uninit (both). So sqrt
+  is architecturally capped at ~1.5x.
+
+NO-SHIP. Retry predicate: NOT a kernel/SIMD/dispatch tweak (all 0-gain). Needs an
+uninitialized-output mechanism — either lift forbid(unsafe) for a vetted
+np.empty-equivalent helper, OR a rayon `flat_map_iter(...).collect()` that SIMDs each
+chunk into a small reused buffer and lets rayon's (internal-unsafe) collector skip
+the big zeroing. Either is an architecture/human decision; would lift a whole class
+of cheap MEMORY-BOUND unary ops (sqrt; compute-bound exp/log/sin already win because
+the zero-init is negligible vs their compute). Verified head-to-head in Python
+(kernel-in-wrapper; the fnp-ufunc criterion unary bench measures the kernel only,
+not the wrapper's alloc, so it would not surface this). conformance untouched (revert).
+
 ## 2026-06-21 - COD-A REVERIFY: fnp-python linalg boundary vs NumPy, 6W/0L/2N
 
 `YellowElk`/`cod-a`, bead `franken_numpy-ixs5y`. Disk-frugal RCH pass using the
