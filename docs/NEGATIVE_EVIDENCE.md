@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - CONFORMANCE GREEN for the arc's wins + fixed interp/trapz harness bug (a93ae282)
+
+`BlackThrush`/`cod-b`. Verified the multi-turn arc's changes are conformance-clean
+(fnp-python conformance test-binaries compile + run now): conformance_argmax 10/10,
+conformance_argmin 10/10 (covers the argmax gate fixes 3b7692fb/92feb15d + wide-int
+delegate 78e5c686); conformance_reductions pass. conformance_interp_trapz was 14/2-
+FAILED — diagnosed as a PRE-EXISTING HARNESS bug (not my interp 82c5d03e): the
+numpy-oracle generator `outcome_body` (commit 0591ef23) built the comparison script
+with `\n\` continuations whose backslash EATS the source indentation -> flat Python
+-> IndentationError -> both interp + trapz keyword-surface cases failed. Fixed via
+{I4}/{I8} indent placeholders -> 16/16. (Test-only file; transparent fix of a
+committed broken harness.) So all of this arc's perf wins (interp/roll/module-cache/
+cov-gate/argmax-gates/wide-int-delegate) are conformance-GREEN. LESSON: when a
+conformance test fails, check whether the ORACLE (numpy-side) script itself errors
+(harness bug) vs a real impl mismatch — here the "NumPy oracle failed: IndentationError"
+in stderr was the tell.
+
 ## 2026-06-21 - WIN: large wide-int flat argmax/argmin delegate (78e5c686, 2.5x -> ~1.1x)
 
 `BlackThrush`/`cod-b`. Follow-up to the flat-argmax gate fix: int (i32/i64/u32/u64)
