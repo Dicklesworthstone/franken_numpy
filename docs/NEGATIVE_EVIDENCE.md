@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN (RADICAL): zero-copy parallel sinc (be6621ce, up to 50x)
+
+`BlackThrush`/`cod-b`. 4th single-threaded-numpy lever this session (bincount 9x,
+trapezoid 50x, gradient 20x, now sinc 50x). np.sinc is a single-threaded Python wrapper
+(pi*x, sin, divide, where temps); fnp extracted a copy + serial map + built a copy
+(~1.18x). The kernel (sin/element) is COMPUTE-bound -> parallelizes ideally. Zero-copy
+fast path for f64 C-contig: read buffer, write numpy.empty using the SAME branch formula
+as UFuncArray::sinc (x==0->1.0 else sin(pi*x)/(pi*x)) = byte-identical. RESULT: 4M 0.02x
+(50x), 1M 0.04x, 131K 0.12x, 32K 0.39x; serial below 1<<15 gate parity (10K 1.02x, no
+regression). conformance_sinc 5/5. Non-f64/non-contig/0-d defer.
+DISTINCTION vs memory-bound levers: sinc/gradient-interior are COMPUTE-bound (transcendental
+/ arithmetic per element) so they parallelize from a LOW gate (1<<15) and scale near-
+linearly; memory-bound ops (bincount tally, sum) need a HIGHER gate + the work>>overhead
+term. GOTCHA (hit twice this session, gradient+sinc): inserting a helper fn directly above
+a #[pyfunction] target STEALS its #[pyfunction]/#[pyo3] attribute (E0433 wrap_pyfunction /
+"expected argument numpy got f") -> insert helpers ABOVE the attribute, or move the attr.
+LEVER TALLY: bincount 9x + trapezoid 50x + gradient 20x + sinc 50x — the
+serial/passthrough-fnp vs single-threaded-numpy(+temps/+python) vein.
+
 ## 2026-06-21 - WIN (RADICAL): native zero-copy gradient 1-D f64 (a938669b, 3-20x)
 
 `BlackThrush`/`cod-b`. 3rd serial-fnp/native-vs-single-threaded-numpy lever this session
