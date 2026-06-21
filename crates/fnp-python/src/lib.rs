@@ -45204,9 +45204,20 @@ fn try_zerocopy_int_argextreme(
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     // Narrow ints (1/2-byte): numpy's SIMD argmax processes 16-64 lanes per
     // instruction, which the scalar (even parallel) fold can't beat — delegate to
-    // numpy (still bit-identical first-occurrence). Wide ints (4/8-byte): the parallel
-    // single-pass (value, first-index) fold beats numpy's narrower wide-int SIMD.
+    // numpy (still bit-identical first-occurrence).
     if itemsize <= 2 {
+        let op = if take_max { "argmax" } else { "argmin" };
+        return Ok(Some(numpy.getattr(op)?.call1((a,))?.unbind()));
+    }
+    // Wide ints (4/8-byte): the native single-pass fold (argextreme_typed) is SCALAR —
+    // its data-dependent `if v > best` branch doesn't autovectorize, so it measures
+    // ~1.4-2.6x behind numpy's fused SIMD int argmax past a few KiB (the old "beats
+    // numpy" claim was stale). Mirror the f64 flat policy: above the crossover delegate
+    // to numpy (bit-identical — integer order is total, same first-occurrence tie), and
+    // keep the native fold for small inputs where numpy's per-call dispatch isn't worth
+    // it. (Delegation also covers non-contiguous, which argextreme_typed bails on.)
+    const ARGEXTREME_WIDE_INT_NUMPY_MIN_LEN: usize = 4096;
+    if a.getattr("size")?.extract::<usize>()? >= ARGEXTREME_WIDE_INT_NUMPY_MIN_LEN {
         let op = if take_max { "argmax" } else { "argmin" };
         return Ok(Some(numpy.getattr(op)?.call1((a,))?.unbind()));
     }
