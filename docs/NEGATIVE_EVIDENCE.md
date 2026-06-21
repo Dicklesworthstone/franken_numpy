@@ -22,6 +22,13 @@ checked) — a reusable one-command vs-numpy sweep over the op families this ses
 characterized (elementwise/reductions/cov/corrcoef/convolve/aliases/2-D+batched
 linalg) + a view-op shares_memory check; verdict WIN/ok/LOSS, exit=#losses. Run it
 after any numpy/BLAS bump to catch the stale-cliff regression class early.
+CORRECTNESS guard added: `scripts/correctness_sweep_vs_numpy.py` (py-syntax-checked)
+encodes the SUBTLE comparators the conformance suite lacked — eig/eigvals POWER-SUM
+invariants on RANDOM real matrices (the comparator that caught the silent-wrong
+eigvals bug the symmetric-only suite missed), singular->LinAlgError, det(nan),
+cond(singular)->+inf, view shares_memory, and selection-op dtype preservation.
+exit=#fails. Together with the two recovery scripts, the freeze period produced
+durable build-independent guards for the perf + correctness bug classes found.
 
 ## 2026-06-21 - STATE CHANGE: agent-mail RECOVERED (1 of 2 blockers cleared); only cargo freeze remains
 
