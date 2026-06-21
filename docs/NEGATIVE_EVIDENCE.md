@@ -9,9 +9,13 @@ dead ends are not rediscovered as fresh ideas.
 `BlackThrush`/`cod-b`. No state change: inbox re-checked each turn (agent-mail
 working, no new disk/unfreeze instruction), disk ~38-39G, freeze still on. Sole
 blocker = cargo build freeze; 4 unbuilt linalg delegates pending the on-recovery
-build/conformance/re-measure (checklist below). vs-numpy surface comprehensively
-diagnosed + clean — no perf lever available until unfreeze. (This single heartbeat
-is refreshed in place each frozen turn rather than appending duplicates.)
+build/conformance/re-measure. vs-numpy surface comprehensively diagnosed + clean —
+no perf lever available until unfreeze. (This single heartbeat is refreshed in
+place each frozen turn rather than appending duplicates.) ON-RECOVERY automation:
+`scripts/verify_linalg_delegates_on_recovery.sh` (added b-this-turn, bash-syntax-
+checked) runs the whole checklist in one command — builds fnp-python, runs
+conformance_linalg*, fnp-linalg tests, and re-measures eigvalsh/eigh/cholesky/
+matrix_power 2-D vs numpy (expect ~parity) + batched (expect WIN).
 
 ## 2026-06-21 - STATE CHANGE: agent-mail RECOVERED (1 of 2 blockers cleared); only cargo freeze remains
 
