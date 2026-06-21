@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: large wide-int flat argmax/argmin delegate (78e5c686, 2.5x -> ~1.1x)
+
+`BlackThrush`/`cod-b`. Follow-up to the flat-argmax gate fix: int (i32/i64/u32/u64)
+flat argmax/argmin was 1.4-2.6x behind numpy across sizes while FLOAT was parity.
+Root cause: `argextreme_typed` (wide-int path) uses a SCALAR single-pass fold whose
+data-dependent `if v>best` branch won't autovectorize, vs numpy's fused SIMD int
+argmax. (The code comment claimed it "beats numpy" — STALE/wrong; measured 2.5x
+behind.) Fix mirrors the f64 flat policy: in try_zerocopy_int_argextreme, delegate
+size>=4096 wide-ints to numpy (bit-identical: integer order total, first-occurrence
+tie), keep the native fold for small. RESULT: int64 100K 2.6x->1.15x, 1M 2.5x->
+1.1-1.28x, 4M 1.4x->0.93x WIN; uint32 1M 1.04x; correct (ties/neg/uint/i32/small/
+non-contig). Residual ~1.1x = wrapper dispatch overhead (amortized). Completes the
+argextreme delegate policy (narrow ints + float + now wide-int all delegate large;
+SIMD i64 wouldn't beat numpy — the f64 SIMD path delegates large too, copy+scan
+loses to numpy's fused pass). NOTE: stale "beats numpy" perf comments are a hazard
+— re-measure them; the gate/kernel may have changed or been mis-tuned.
+
 ## 2026-06-21 - WIN: flat argmax/argmin gate fix (92feb15d, 4M 1.11x loss -> 0.65x win)
 
 `BlackThrush`/`cod-b`. 3rd mis-tuned parallel gate (cov 6de7eaaa, last-axis argmax
