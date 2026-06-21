@@ -5869,3 +5869,15 @@ sub-us on ops that are not hot-looped (you ravel once, then iterate the result),
 asarray-cost for is_instance-cost. Not pursued. Distinct from the FIXED view-MATERIALIZATION
 bugs (matrix_transpose/rollaxis 18000x, e669aac3) where fnp COPIED — those scaled with N and
 broke shares_memory; these don't.
+
+### API-coverage COMPLETE (BlackThrush 2026-06-21): sorting + niche families also dominated
+Final probe batches (sorting-variants, niche/stride-view, accumulate) confirm domination:
+argpartition 0.89x, searchsorted 0.74x, unique(counts) 0.31x, isin 0.42x, cumsum-2d-ax0 0.12x,
+add.accumulate 0.28x WINS; partition/lexsort/sort(stable|heap)/argsort/sort_complex/packbits/
+nancumsum-2d/gradient2 PARITY. ediff1d apparent 1.20x@2M was LOAD-NOISE (wins 0.95x@500K&8M,
+fast path confirmed hit, bit-exact). With ~10 family batches this stretch all dominated, the
+reachable numpy API surface is COMPREHENSIVELY DOMINATED. Remaining non-wins are exclusively:
+view-op O(1) dispatch-noise, small-array pyo3 wall (tiny ops, fnp wins large), BLAS-Gram floor
+(cov/corrcoef, no-C-BLAS), mild uncommon residuals (frexp/diff-prepend/putmask/busday_count
+1.15-1.25x, no common cause), and the structural walls (SIMD-compaction/no-AVX512, dense-LAPACK,
+forbid-unsafe zero-init). No remaining big actionable lever for a single-agent perf pass.
