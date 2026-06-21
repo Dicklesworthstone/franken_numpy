@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - FULL-THREADS DOMINATION MAP (corrected methodology): surface is dominated
+
+`BlackThrush`/`cod-b`. Authoritative vs-numpy sweep at FULL THREADS (the correct
+verdict condition — see methodology entry below). Replaces the serial-contaminated
+data. fnp WINS or is at PARITY across the measurable single-threaded-numpy surface:
+- elementwise ufunc f64/f32/complex: parity/win (prior sweeps).
+- reductions/sort/set-ops/indexing: win/parity.
+- binning/statistical: percentile50 0.61x, median 0.54x, quantile 0.68x, cov(rowvar)
+  0.86-0.93x, histogram 0.185x — all WIN.
+- gradient/gradient_2d/diff/ediff1d/unwrap/clip/where/pad/repeat/tile/ptp: parity;
+  cumprod 0.30x, nancumsum 0.09x, round 0.46x, nan_to_num 0.18x, cumsum_2d 0.22x WIN.
+- interp 0.08-0.38x WIN (shipped 82c5d03e); roll parity (shipped 84f52074).
+- FFT (1-D c/r/i at 1M/2^20/2^21, rfft2/fft2/fftn/rfftfreq): 0.89-1.18x parity.
+FALSE ALARMS (O(1) dispatch noise, fnp already correct): real_if_close 2.6x
+(0.4us vs 0.9us; shares_memory==True passthrough), flip (prior).
+
+GENUINE remaining losses (full-threads verified): batch_inv/solve light-per-lane
+(kernel, [[batch-cholesky-noship-kernel-wall]], contended) + sqrt forbid-unsafe.
+matmul/dot/inner are BLAS-territory: UNMEASURABLE on the loaded box (numpy-BLAS vs
+fnp-rayon both multithreaded -> 1000x1000 swung 0.47x..2.79x) AND the central perf
+directive franken_numpy-ixs5y (cod-a) — left to that directive / a quiet box.
+CONCLUSION: no genuine, measurable, tractable, uncontended NEW loss remains for me;
+the single-threaded-numpy surface is dominated.
+
 ## 2026-06-21 - CORRECTION + METHODOLOGY: serial RAYON=1 gives FALSE LOSSES for parallel ops
 
 `BlackThrush`/`cod-b`. Re-measured the prior entry's findings at FULL THREADS (the
