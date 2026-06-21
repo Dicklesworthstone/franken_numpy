@@ -5942,3 +5942,17 @@ pursued. LESSON: single 2-4M readings under shared-box load fabricate ~1.1-1.25x
 re-verify with min-of-N-runs (and at 16M) before cataloguing a residual. Net: the surface is even
 MORE dominated than recorded — essentially only frexp/putmask remain as tiny genuine residuals,
 plus the structural walls. No actionable lever.
+
+### bincount large-output: config-dependent parity, numpy-tight-loop+forbid-unsafe floor (BlackThrush 2026-06-21)
+bincount with large output (n_bins > 65536, past the small_range fast path) measures config-
+dependent: 8M-vals/200K-bins 0.83x WIN, 2M/100K 1.29x, 2M/500K 1.05x, weighted-100K 1.00x
+(min-of-3 each). NOT a clean loss (wins at 8M; the 2M mild loss is cache-resident where numpy's
+tight C loop edges out). KEY DIAGNOSIS: weighted (counts[v]+=w, MORE work) is parity 1.0x while
+unweighted (counts[v]+=1) is 1.3x — both share the same serial validate/max-find pre-pass, so
+that pass is NOT the bottleneck. The gap is numpy's super-optimized UNWEIGHTED C count loop vs
+fnp's forbid-unsafe bounds-checked `counts[v as usize]+=1.0` (bounds check can't be elided under
+#![forbid(unsafe_code)] — same class as the np.sqrt zero-init wall). Parallelizing the validate
+max-find pass (a clean rayon reduction, forbid-unsafe-safe) is a possible MODEST enhancement but
+would NOT fix the numpy-tight-loop floor (proven: validate is shared, weighted already parity).
+Not pursued: config-dependent ~parity + forbid-unsafe count floor. Retry predicate: only if
+forbid-unsafe is lifted (unchecked count) OR for huge n_vals where parallel-count amortizes.
