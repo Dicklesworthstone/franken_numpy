@@ -143,3 +143,11 @@ size < MEDIAN_NATIVE_MIN (start ~1<<19=524288, re-measure) → `return fallback(
 - GOTCHA: insert helper fns ABOVE the `#[pyfunction]`/`#[pyo3]` attrs (else E0433).
 - If fnp-python carries peer STALE WIP, stash-PUSH/POP (never DROP); recover a bad pop via
   `git show HEAD:path > path` + git add (dcg blocks reset --hard/restore/checkout--).
+
+## QUEUED CANDIDATE: compress/extract medium-N gate (fnp-ufunc, blocked)
+compress/extract WIN at 8M (0.27x, parallelized) but LOSE medium (131K-2M 1.2-1.8x). Likely
+the parallel gate is too HIGH -> medium runs serial scalar compaction (the wall). When
+fnp-ufunc frees: check if 131K-2M is serial; if so try lowering the compress parallel gate to
+parallelize medium (may win like 8M, OR the privatized-compaction merge overhead negates it
+-> MEASURE the crossover). NO AVX-512 here so unsafe vpcompress is unavailable; parallelism is
+the only lever. SPECULATIVE (not a sure win).
