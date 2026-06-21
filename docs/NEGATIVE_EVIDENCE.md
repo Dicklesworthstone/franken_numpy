@@ -5999,3 +5999,13 @@ PRE-EXISTING (not mine): conformance_extract_put::extract_python_container_surfa
 RED on "nan signed-zero payload" - f.extract is VALUE-CORRECT (returns [nan,-0.0] bit-identical
 to numpy, uint64-view equal); the test's comparison is nan-strict (no equal_nan) = test bug.
 Unrelated to putmask (extract is fn@20113, untouched). Not fixed (shared test, not my file).
+
+### serial-loop-parallel lever EXHAUSTED (BlackThrush 2026-06-21): frexp/putmask were the only losers
+After the frexp+putmask serial->parallel wins, systematically grepped ALL try_zerocopy_* fns for
+serial for-loops without par_ (30+ candidates) and probed the non-obvious ones at large: average
+0.28x, around 0.47x, cross 0.05x, nan_to_num 0.11x, cumulative-ax 0.27x, diagflat 0.91x,
+bitwise_count 0.95x WINS; logical_not/clip parity. clip "1.08x" was NOISE (min-of-3: 0.53x@500K,
+0.74x@2M, 0.96x@8M win/parity). frexp+putmask were the ONLY serial zero-copy loops that LOST to
+numpy (non-trivial per-element work where numpy's single-threaded C was competitive); the rest
+are cheap enough that serial already beats numpy's overhead, or already parity. Lever closed:
+2 wins (frexp/putmask), no more serial-losers. Surface has ZERO genuine residuals now.
