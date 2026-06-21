@@ -48722,6 +48722,34 @@ fn isclose(
     {
         return Ok(out);
     }
+    // isclose(int/bool-array, finite scalar): numpy promotes the array to f64 (asanyarray +
+    // result_type), so isclose(int_arr, sc) == isclose(int_arr.astype(f64), sc) bit-for-bit.
+    // int/bool+scalar otherwise fell to the cold extract (~4-7x). Convert once via a fast C
+    // asarray(f64) and reuse the f64 scalar-broadcast path (zero-copy on the converted array).
+    {
+        let a_bound = a.bind(py);
+        let b_bound = b.bind(py);
+        let ndarray_t = numpy.getattr("ndarray")?;
+        if a_bound.is_exact_instance(&ndarray_t)
+            && !b_bound.is_instance(&ndarray_t)?
+            && !b_bound.hasattr("__len__")?
+            && b_bound.extract::<f64>().is_ok_and(f64::is_finite)
+        {
+            let kind = a_bound
+                .getattr("dtype")?
+                .getattr("kind")?
+                .extract::<String>()?;
+            if kind == "i" || kind == "u" || kind == "b" {
+                let a_f64 =
+                    numpy.call_method1("asarray", (a_bound, numpy.getattr("float64")?))?;
+                if let Some(out) =
+                    try_zerocopy_f64_isclose_array_scalar(py, &a_f64, b_bound, rtol, atol)?
+                {
+                    return Ok(out);
+                }
+            }
+        }
+    }
     // Non-contiguous (transposed/strided) operands bail into the cold extract; delegate.
     if noncontiguous_ndarray(&numpy, a.bind(py))? || noncontiguous_ndarray(&numpy, b.bind(py))? {
         return fallback();
