@@ -42783,14 +42783,53 @@ fn try_zerocopy_f64_argextreme(
     if cells.is_empty() {
         return Ok(None);
     }
-    // numpy's argmin/argmax is a single fused SIMD pass; this path copies the whole
-    // buffer into an owned Vec and THEN scans it (two passes over memory), ~2.5x
-    // behind numpy past a few KiB (measured fnp/numpy 2.48x@16k, 2.63x@1M). Delegate
-    // large arrays to numpy — same first-occurrence tie-break and first-NaN
-    // semantics (the scalar path also defers to numpy on NaN). Tiny arrays keep the
+    // numpy's argmin/argmax is a single fused SIMD pass, single-threaded. Large arrays:
+    // run simd_argextreme_f64 per rayon chunk over the borrowed buffer (NO Vec copy) and
+    // combine — aggregate read bandwidth beats numpy's one thread. Tie-break: chunks are
+    // processed in index order and a chunk only replaces the running best on a STRICTLY
+    // better value, so equal values keep the earliest index (numpy's first-occurrence).
+    // Any chunk seeing a NaN (simd kernel returns None) -> defer the whole array to numpy
+    // for its first-NaN semantics. Memory-bound (compare-only) -> high gate like cheap unary.
+    let n = cells.len();
+    const ARGEXTREME_PARALLEL_MIN: usize = 1 << 21;
+    if n >= ARGEXTREME_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+        let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+        let chunk = n.div_ceil(rayon::current_num_threads());
+        let partials: Vec<Option<(usize, f64)>> = data
+            .par_chunks(chunk)
+            .enumerate()
+            .map(|(ci, c)| simd_argextreme_f64(c, take_max).map(|i| (ci * chunk + i, c[i])))
+            .collect();
+        if partials.iter().any(Option::is_none) {
+            let fname = if take_max { "argmax" } else { "argmin" };
+            return Ok(Some(numpy.getattr(fname)?.call1((a,))?.unbind()));
+        }
+        let mut best: Option<(usize, f64)> = None;
+        for p in partials.into_iter().flatten() {
+            let take = match best {
+                None => true,
+                Some(b) => {
+                    if take_max {
+                        p.1 > b.1
+                    } else {
+                        p.1 < b.1
+                    }
+                }
+            };
+            if take {
+                best = Some(p);
+            }
+        }
+        let idx = best.expect("non-empty buffer has a best").0;
+        return Ok(Some(numpy.getattr("intp")?.call1((idx,))?.unbind()));
+    }
+    // Medium arrays: the old copy-then-scan native path was ~2.5x behind numpy's fused SIMD
+    // pass, so delegate (same first-occurrence + first-NaN semantics). Tiny arrays keep the
     // native scan (numpy's per-call dispatch isn't worth it below the crossover).
     const ARGEXTREME_NUMPY_MIN_LEN: usize = 4096;
-    if cells.len() >= ARGEXTREME_NUMPY_MIN_LEN {
+    if n >= ARGEXTREME_NUMPY_MIN_LEN {
         let fname = if take_max { "argmax" } else { "argmin" };
         return Ok(Some(numpy.getattr(fname)?.call1((a,))?.unbind()));
     }
