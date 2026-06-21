@@ -230,3 +230,13 @@ recompute (bessel_i0(beta) m times) was a clean all-sizes ~2x+ win I almost skip
 hamming/hanning/blackman do NOT have this (their loop-invariants are cheap arithmetic; cost
 is the cos itself; parallel crossover ~256k = very rare; small loss is the bit-exact cos floor)
 -> genuinely low-value, not pursued. bartlett wins already. Windows: kaiser fixed, rest closed.
+
+## SHIPPED 2026-06-21: histogram_bin_edges zero-copy branchless min/max (82e7d7d4) - 4x->win
+Found via the kaiser lens (do-more-work-than-needed): histogram_bin_edges EXTRACTED the whole
+array (UFuncArray copy) + serial-scanned for min/max - 2 O(n) passes + alloc, 3.93-4.07x loss.
+Fix: zero-copy borrowed-buffer single pass with BRANCHLESS f64::min/max + non-finite OR flag
+(no early-return so it autovectorizes -> 1 SIMD pass, beats numpy's 2-pass a.min()/a.max()).
+RESULT: 100K 0.62x, 8M 0.39x WIN, 1M 1.0x parity. Bit-exact; non-f64/non-finite -> numpy.
+LESSON v2: the FIRST attempt (serial scan w/ early-return `if !finite return`) was 1.35-2.6x
+(scalar, branch killed vectorization!) - the branchless bad-flag version vectorized -> win.
+For min/max+validate loops: use branchless f64::min/max + OR-flag, NEVER an early-return branch.
