@@ -5921,3 +5921,14 @@ after the isclose dtype fixes. ALL dominated/parity; only add(f32,f32)/add(f32,s
 isclose(array,scalar) was the lone BIG dtype gap (f32 12-14x, int/bool 4-7x) — now fixed across
 f64/f32/int/bool (+ allclose inherits). The dtype-gap lever (re-audit f32/int/bool after a
 f64-only fast path) is worked: no remaining big dtype-specific loss. Mild residuals only.
+
+### NON-CONTIGUOUS dimension clean (BlackThrush 2026-06-21): coverage now complete on all axes
+Probed transposed(F-contig)/strided/sliced inputs (sum/max/mean/std/sqrt/isclose/sort/argmax/
+cumsum/add/where): ALL dominated/parity (sqrt-strided 0.81x win; rest parity via delegate-to-
+numpy or native strided handling; isclose-strided delegates -> parity, no cold extract). The
+non-contiguous gap class (e669aac3 etc.: c_contiguous-gated fast paths bailing to cold extract)
+remains fixed. COVERAGE COMPLETE across ALL axes this stretch: op-families (~10 batches), sizes
+(medium 100K + large 2-8M), dtypes (f64/f32/int/bool/complex64), contiguity (C/F/strided/sliced).
+Surface COMPREHENSIVELY DOMINATED; remaining non-wins are exclusively documented walls
+(BLAS-floor, view-dispatch O(1), small-array pyo3, mild core-ufunc/uncommon residuals 1.1-1.25x,
+structural: SIMD-compaction/no-AVX512, dense-LAPACK, forbid-unsafe). No remaining actionable lever.
