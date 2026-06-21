@@ -34740,6 +34740,20 @@ fn svdvals(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let svdvals_fn = numpy.getattr("linalg")?.getattr("svdvals")?;
     let fallback = || -> PyResult<Py<PyAny>> { Ok(svdvals_fn.call1((x.bind(py),))?.unbind()) };
 
+    // Single 2-D input: the native pure-Rust SVD (x.svdvals()) loses to LAPACK gesdd
+    // at EVERY size measured (1.2x at 8x8 up to 3.7x rectangular; 3.31x at 800x800) —
+    // same class as the pinv 2-D loss. Delegate straight to numpy BEFORE the extract
+    // copy (-> ~0.97x parity). Only the batched (>=3-D) path below stays native
+    // (numpy loops serial per lane -> it wins, e.g. 500x16x16 0.18x).
+    if let Ok(nd) = x
+        .bind(py)
+        .getattr("ndim")
+        .and_then(|n| n.extract::<usize>())
+        && nd == 2
+    {
+        return fallback();
+    }
+
     let x = match extract_numeric_array(py, x.bind(py), "svdvals(x)") {
         Ok(array) => array,
         Err(_) => return fallback(),

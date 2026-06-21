@@ -36,8 +36,12 @@ REUSABLE: audit array-API alias pyfunctions (atan2/concat/matrix_transpose/...,
 the names added for numpy 2.0 array-API) — they often reimplement instead of
 delegating to the optimized numpy-name function, inheriting the extract+build tax.
 Grep extract_numeric_array + build_numpy_array_from_ufunc with no try_zerocopy.
-STILL OPEN from the same grep: `svdvals` 2-D 3.23x (native pure-Rust SVD, same
-class as the pinv 2-D loss — size-gate/delegate, needs small-n characterization).
+ALSO FIXED (same grep): `svdvals` 2-D was 3.23x (native pure-Rust SVD, same class
+as pinv). Characterized: native 2-D LOSES at every size (1.2x@8x8 .. 3.7x rect,
+3.31x@800), never wins (unlike pinv's tiny-n win) — delegate ALL 2-D to numpy
+gesdd BEFORE the extract (peek ndim==2 -> fallback). 3.31x -> 0.97x parity;
+batched (>=3-D) stays native (500x16x16 0.18x win). conformance_linalg_decomp
+svdvals 3 PASS.
 
 ## 2026-06-20 - BOLD-VERIFY WIN: convolve/correlate zero-copy short-kernel (9-38x loss -> up to 16x WIN)
 
