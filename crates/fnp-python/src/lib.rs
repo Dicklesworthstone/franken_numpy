@@ -8830,6 +8830,149 @@ fn try_zerocopy_int_where(
     Ok(Some(output))
 }
 
+// Zero-copy np.where(cond, x, y) where exactly ONE of x/y is an ndarray and the other is
+// a SCALAR (the extremely common `np.where(c, arr, 0)` idiom). The f64 helper handles
+// f64-array+scalar; this covers ANY numeric dtype (f32/int*/complex/bool) via a byte-level
+// select: the result is just arr[i]'s bytes or the scalar's bytes per element. A
+// result_type(arr, scalar)==arr.dtype guard rejects value-based promotion (e.g.
+// where(int_arr, 0.5) -> float64), which is deferred. Bit-identical (pure byte placement).
+// Returns None for non-bool cond, two-array / two-scalar forms (handled elsewhere),
+// shape mismatch, non-contiguous, or non-numeric / promoting dtypes.
+fn try_zerocopy_where_array_scalar(
+    py: Python<'_>,
+    condition: &Bound<'_, PyAny>,
+    x: &Bound<'_, PyAny>,
+    y: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if condition
+        .getattr("dtype")?
+        .getattr("kind")?
+        .extract::<String>()?
+        != "b"
+    {
+        return Ok(None);
+    }
+    let x_is_arr = x.is_exact_instance(&ndarray_type);
+    let y_is_arr = y.is_exact_instance(&ndarray_type);
+    if x_is_arr == y_is_arr {
+        return Ok(None); // need exactly one array + one scalar
+    }
+    let (arr, scalar_obj, scalar_is_x) = if x_is_arr { (x, y, false) } else { (y, x, true) };
+    // The non-array side must be a TRUE scalar. ndarray SUBCLASSES (e.g. an
+    // __array_function__ override), 0-d arrays, lists, and tuples all expose __len__ and
+    // must defer to numpy (which dispatches subclass overrides and broadcasts sequences);
+    // Python int/float/complex/bool and numpy scalars have no __len__ -> fast path.
+    if scalar_obj.hasattr("__len__")? {
+        return Ok(None);
+    }
+    let dtype = arr.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if !matches!(kind.as_str(), "f" | "i" | "u" | "c" | "b") {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if itemsize == 0 {
+        return Ok(None);
+    }
+    // No value-based promotion: numpy's result must stay arr's dtype.
+    if !numpy
+        .call_method1("result_type", (arr, scalar_obj))?
+        .eq(&dtype)?
+    {
+        return Ok(None);
+    }
+    let cond_shape: Vec<usize> = condition.getattr("shape")?.extract()?;
+    let arr_shape: Vec<usize> = arr.getattr("shape")?.extract()?;
+    if cond_shape != arr_shape {
+        return Ok(None);
+    }
+    if !condition
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+        || !arr
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    // View arr/out/scalar as a same-width UNSIGNED integer and run a TYPED select
+    // (vectorizable cmov/blend) — bit-identical to placing the raw bytes, but unlike a
+    // per-element byte memcpy it vectorizes and beats numpy.where (like the f64 path).
+    // Complex128 (itemsize 16) has no u128 buffer Element -> defer to numpy.
+    let cond_u8 = condition.call_method1("view", (&numpy.getattr("uint8")?,))?;
+    let Ok(cond_buf) = PyBuffer::<u8>::get(&cond_u8) else {
+        return Ok(None);
+    };
+    let Some(cond_cells) = cond_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cond_cells.len();
+    macro_rules! select_unsigned {
+        ($U:ty, $uname:literal) => {{
+            let un = numpy.getattr($uname)?;
+            let arr_u = arr.call_method1("view", (&un,))?;
+            let Ok(arr_buf) = PyBuffer::<$U>::get(&arr_u) else {
+                return Ok(None);
+            };
+            let Some(arr_in) = arr_buf.as_slice(py) else {
+                return Ok(None);
+            };
+            if arr_in.len() != n {
+                return Ok(None);
+            }
+            let sc_kwargs = PyDict::new(py);
+            sc_kwargs.set_item("dtype", &dtype)?;
+            // 1-element array (not 0-d, which can't change itemsize on view) cast to dtype.
+            let sc_arr = numpy.call_method("full", ((1usize,), scalar_obj), Some(&sc_kwargs))?;
+            let sc_u = sc_arr.call_method1("view", (&un,))?;
+            let Ok(sc_buf) = PyBuffer::<$U>::get(&sc_u) else {
+                return Ok(None);
+            };
+            let Some(sc_in) = sc_buf.as_slice(py) else {
+                return Ok(None);
+            };
+            if sc_in.len() != 1 {
+                return Ok(None);
+            }
+            let scalar_u = sc_in[0].get();
+            let out_kwargs = PyDict::new(py);
+            out_kwargs.set_item("dtype", &dtype)?;
+            let shape_tuple = PyTuple::new(py, arr_shape.iter().copied())?;
+            let out = numpy.call_method("empty", (&shape_tuple,), Some(&out_kwargs))?;
+            if n > 0 {
+                let out_u = out.call_method1("view", (&un,))?;
+                let Ok(out_buf) = PyBuffer::<$U>::get(&out_u) else {
+                    return Ok(None);
+                };
+                let Some(out_cells) = out_buf.as_mut_slice(py) else {
+                    return Ok(None);
+                };
+                for ((slot, cc), av) in out_cells
+                    .iter()
+                    .zip(cond_cells.iter())
+                    .zip(arr_in.iter())
+                {
+                    // arr is x when scalar is y; arr is y when scalar is x.
+                    let use_arr = (cc.get() != 0) != scalar_is_x;
+                    slot.set(if use_arr { av.get() } else { scalar_u });
+                }
+            }
+            return Ok(Some(out.unbind()));
+        }};
+    }
+    match itemsize {
+        1 => select_unsigned!(u8, "uint8"),
+        2 => select_unsigned!(u16, "uint16"),
+        4 => select_unsigned!(u32, "uint32"),
+        8 => select_unsigned!(u64, "uint64"),
+        _ => Ok(None),
+    }
+}
+
 // Zero-copy np.select(condlist, choicelist, default) for the common all-float64
 // form: K bool-ndarray conditions and K float64-ndarray choices, all of one
 // identical shape, with a scalar default (numpy's default is 0). For each output
@@ -14199,6 +14342,11 @@ fn where_py(
         // Typed branchless select for int/bool x,y of equal dtype+shape; skips the
         // cold, for-wide-ints lossy extract Vecs. Bit-identical (pure select).
         if let Some(out) = try_zerocopy_int_where(py, condition_bound, &x_arg, &y_arg)? {
+            return Ok(out);
+        }
+        // Array + SCALAR select for any numeric dtype (the common np.where(c, arr, 0)),
+        // byte-level so f32/int*/complex/bool keep the fast path (f64 handled above).
+        if let Some(out) = try_zerocopy_where_array_scalar(py, condition_bound, &x_arg, &y_arg)? {
             return Ok(out);
         }
     }
