@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: np.interp zero-copy + parallel — ~30x vs numpy (82c5d03e); + 2 new leads
+
+`BlackThrush`/`cod-b`. Binning/statistical sweep (serial RAYON=1, stable) found
+3 losses: interp 1.9x, percentile 1.48x, cov(rowvar) 5.66x. SHIPPED interp:
+
+WIN interp (82c5d03e): the wrapper paid extract_numeric_array(x 4M)+build copies
+that MASKED fnp's already-parallel kernel (numpy.interp is single-threaded). Added
+fnp-python `try_zerocopy_f64_interp` (read x/xp/fp as &[f64] PyBuffer, fill into
+numpy.empty) + shared module-level `fnp_ufunc::interp_fill` (binary-search+blend,
+parallel over points); refactored `interp_lr` to call it (10/10 ufunc interp tests,
+bit-identical). MEASURED np.interp(4M, 1000-pt xp): numpy 60.5ms -> fnp 1.96ms
+**~30x**. allclose max-diff 2.2e-16 (lerp-formula ULP, == prior extract path; 2-D/
+interior/out-of-range/left-right/n=1/empty/scalar-defer all match). clippy clean.
+The "1.9x loss" earlier was a SERIAL (RAYON=1) artifact + the extract-copy tax;
+exposing the parallel kernel zero-copy flips it to a 30x win. (4th application of
+the convolve extract+build wrapper-tax playbook: [[convolve-zerocopy-wrapper-win]].)
+
+OPEN LEADS (serial-stable losses, not yet taken):
+- **np.percentile 1.48x** (sort/partition + index) — tractable; check if wrapper
+  extracts or if the partition kernel is the cost.
+- **np.cov(rowvar, n_vars=100, n_obs=40000) 5.66x** — the Gram is a pure-Rust matmul
+  vs numpy BLAS dgemm; HARD under the no-C-BLAS directive (needs a fast SIMD/blocked
+  pure-Rust gemm). Distinct from the n_vars>=128 DRAM-saturated no-ship.
+
 ## 2026-06-21 - FOLLOW-UP: landed flattened `roll` bulk-copy is neutral/noisy on `ovh-a`
 
 `YellowElk`/`cod-b`, bead `franken_numpy-ixs5y.280`.
