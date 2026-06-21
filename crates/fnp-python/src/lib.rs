@@ -8021,23 +8021,39 @@ fn zerocopy_f64_binary_flat<'py>(
                 | BinaryOp::Arctan2
                 | BinaryOp::Logaddexp
                 | BinaryOp::Logaddexp2
+                | BinaryOp::Hypot
         );
-        if parallelizable
-            && n >= FLOAT_POWER_PARALLEL_MIN_LEN
-            && rayon::current_num_threads() >= 2
-        {
+        // Per-op crossover: expensive transcendentals (atan2/pow/logaddexp) amortize the
+        // rayon fan-out from ~16K, but cheap near-memory-bound ops (hypot = sqrt(a^2+b^2))
+        // only win once aggregate bandwidth dominates (~2M, like the cheap unary class) —
+        // a low gate REGRESSES medium N for them.
+        let parallel_min = match op {
+            BinaryOp::Hypot => 1 << 21,
+            _ => FLOAT_POWER_PARALLEL_MIN_LEN,
+        };
+        if parallelizable && n >= parallel_min && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
-
-            let lhs: Vec<f64> = a_in.iter().map(|cell| cell.get()).collect();
-            let rhs: Vec<f64> = b_in.iter().map(|cell| cell.get()).collect();
-            let values: Vec<f64> = lhs
-                .par_iter()
-                .zip(rhs.par_iter())
-                .map(|(&x, &y)| op.apply(x, y))
-                .collect();
-            for (slot, value) in output.iter().zip(values) {
-                slot.set(value);
-            }
+            // No Vec copy: read the borrowed buffers as &[f64] and write op.apply straight
+            // into the numpy.empty output. ReadOnlyCell<f64>/Cell<f64> are repr(transparent)
+            // over f64; inputs are read-only under the GIL and `output` is a fresh buffer we
+            // own (no alias). Bit-identical to the serial op.apply loop. (The old one-time
+            // Vec copy predated this from_raw_parts trick and taxed the cheaper ops.)
+            let lhs: &[f64] =
+                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), n) };
+            let rhs: &[f64] =
+                unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), n) };
+            let out_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(lhs.par_chunks(chunk))
+                .zip(rhs.par_chunks(chunk))
+                .for_each(|((o, l), r)| {
+                    for ((s, &x), &y) in o.iter_mut().zip(l.iter()).zip(r.iter()) {
+                        *s = op.apply(x, y);
+                    }
+                });
         } else {
             for ((slot, a_cell), b_cell) in output.iter().zip(a_in.iter()).zip(b_in.iter()) {
                 slot.set(op.apply(a_cell.get(), b_cell.get()));
