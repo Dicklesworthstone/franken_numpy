@@ -6020,3 +6020,18 @@ bartlett already wins (linear). serial-loop-parallel lever TOTAL: 5 wins (frexp/
 python + hamming/hanning/blackman fnp-ufunc). LESSON: when grepping serial loops, check BOTH
 crates (fnp-python bindings AND fnp-ufunc kernels). User-facing probes cover the rest (every
 op measured win/parity). NOW the lever is genuinely exhausted across both crates.
+
+### NO-SHIP: sort/argsort low-cardinality (dup-heavy) loss (BlackThrush 2026-06-21)
+Fresh value-distribution probe found: sort/argsort on DUP-heavy (low-cardinality) data loses at
+4M+ (worst extreme: ndist=10 @4M sort 1.72x / argsort 1.92x; ndist=100-10K @4M 1.04-1.48x;
+@1M PARITY; sorted/reverse/random all WIN 0.15-0.45x). Cause: numpy's default introsort has a
+highly-tuned 3-way-partition for duplicates (np.sort dup 11ms vs np.sort stable 113ms vs f.sort
+22ms) that fnp's sort lacks. NO-SHIP — two blockers: (1) fnp argsort reproduces numpy's EXACT
+tie-breaking index order on dups (verified array_equal True), so any algorithm change (counting-
+sort / 3-way-partition / delegate) would break that exact-order conformance; (2) matching numpy's
+order AND dup-speed = reimplementing its exact introsort (huge, risky, core-sort). Delegate-on-
+low-cardinality rejected: reliable cheap cardinality detection doesn't exist (range != distinct)
+and an O(n) detection pass taxes the common high-cardinality case (where fnp WINS 0.15-0.45x).
+Distribution+size-specific (only low-cardinality @4M+). Retry predicate: only if conformance is
+relaxed to accept any-valid-argsort (not exact-numpy-order) AND a counting path is added; or if
+fnp adopts numpy's exact introsort. Random/sorted/reverse/high-cardinality all dominate.
