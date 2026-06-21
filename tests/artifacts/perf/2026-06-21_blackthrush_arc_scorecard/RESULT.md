@@ -1,5 +1,23 @@
 # BlackThrush perf arc — scorecard + conformance verification (2026-06-21)
 
+## UPDATE (later 2026-06-21): 24 wins; 3 fixes queued behind fnp-python peer-lock
+
+The parallel-vs-single-threaded-numpy thread (from_raw_parts + rayon) added 8 wins beyond
+the original 16: sqrt 8x, cheap-unary-class ~7x, binary no-copy + hypot 20x, argmax/argmin
+2.5-3x, nanargmax/nanargmin 30x, sort 1.6-2.3x, argsort 2.2-4.3x, unique up to 3.5x. = 24
+total.
+
+GAUNTLET (later, fnp-python locked by YellowElk so read-only only): swept less-covered
+families — fft/rfft ~parity (pocketfft delegate), polyval/roots/vander/gradient2/unwrap/
+ediff1d/real_if_close/tri ~parity, cumprod 0.40x / nancumsum 0.25x / i0 0.30x / sinc 0.04x
+WIN, corrcoef 1.26x = known BLAS-Gram floor (no-ship, no-C-BLAS directive). NO new actionable
+losses. The vs-numpy surface is comprehensively dominated; remaining actionable work = the 3
+QUEUED medium-N delegate fixes (unique/median/nanmedian, see medium_n_delegate_recipe.md),
+all blocked on the fnp-python exclusive lock. Walls unchanged (SIMD-compaction, small-array
+crossing, BLAS, dense LAPACK, sequential).
+
+---
+
 ## FINAL TALLY (16 measured wins this arc, all bit-exact/allclose, conformance-green)
 
 bincount 9x · trapezoid (1-D 50x / N-D 33x / axis0-kernel 1.8x / f32 250x + dtype-bug-fix) ·
