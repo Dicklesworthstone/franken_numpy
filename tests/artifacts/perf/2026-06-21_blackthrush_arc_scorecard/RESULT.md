@@ -1,5 +1,31 @@
 # BlackThrush perf arc — scorecard + conformance verification (2026-06-21)
 
+## FINAL TALLY (16 measured wins this arc, all bit-exact/allclose, conformance-green)
+
+bincount 9x · trapezoid (1-D 50x / N-D 33x / axis0-kernel 1.8x / f32 250x + dtype-bug-fix) ·
+gradient (1-D 20x / N-D 9x / scalar-dx) · sinc 50x · angle(complex128) 25x · pad (1-D-f64
+4.5x / byte-level all-dtype 4.3x) · delete-single-int · insert-scalar 3.4x · datetime/timedelta
+diff 2.4x (gated >=1<<14) · where(cond,arr,scalar) f32/int 20x. Plus earlier-arc: interp
+~12-30x, roll→parity, module-cache, cov/argmax gate fixes, flatnonzero delegate, wide-int
+argmax delegate, histogramdd list-sample bug, the 8-suite oracle-harness IndentationError
+class fix, trapezoid axis=0 cache-kernel.
+
+ARC-WIDE CONFORMANCE (re-verified together, 2026-06-21): 151 tests / 9 changed families /
+0 fail — diff_gradient 23, interp_trapz 16, moveaxis_pad 19, concat_append 29, histogram
+_bincount 32, angle 8, sinc 5, argmax 10, flatnonzero 9. No cross-regressions, no peer
+breakage.
+
+SURFACE STATUS: COMPREHENSIVELY DOMINATED across elementwise / reductions / transforms /
+manipulation / construction / char-datetime-struct / f32-int-complex dtype-gaps / indexing /
+set ops / broadcasting-binary. Remaining losses are all STRUCTURAL WALLS (see ledger):
+SIMD-compaction (compress/extract), small-array pyo3 crossing (clip/passthrough small-N),
+BLAS (matmul/dot/cov-gram = cod-a directive), pure-Rust dense LAPACK (batched inv/solve/
+cholesky), sequential (cumprod/unwrap), forbid(unsafe) zero-init (sqrt). The forbid(unsafe)
++ no-C-BLAS walls need a project-level decision; not unilaterally changeable.
+
+---
+
+
 Agent: BlackThrush / cod-b. Recorded here (own artifact) because the shared ledger
 (`docs/NEGATIVE_EVIDENCE.md`) and `docs/PERF_RELEASE_READINESS_SCORECARD.md` were
 peer-dirty (YellowElk uncommitted) and `crates/fnp-python/src/lib.rs` was held
