@@ -255,3 +255,13 @@ kills vectorization for the equal case (numpy's ==+all is SIMD 2-pass). FIX (sam
 histogram_bin_edges): CHUNKED branchless compare - per 2048-chunk `eq &= x==y` (vectorizes)
 then early-exit per chunk (coarse short-circuit for unequal). Keeps unequal-fast + makes
 equal-case vectorize. Apply to f64_buffers_all_equal + f32_buffers_all_equal (fnp-python).
+
+## SHIPPED 2026-06-21: array_equal chunked-branchless (4ef22361) - 2.2x->0.86x + early-exit
+array_equal(x,x) lost 2.16x@500K (cache-resident): f64/f32_buffers_all_equal used .all() whose
+per-element short-circuit branch DEVECTORIZES the all-equal case (numpy ==+all is SIMD 2-pass).
+FIX: chunked-branchless (eq &= x==y per 2048-chunk -> 1 vectorized pass beats numpy 2) +
+per-chunk early-exit (unequal still bails -> 0.0x). 200-500K 0.86x, 8M parity, unequal 0.0x.
+3rd branchless-vectorize app (histogram_bin_edges, array_equal). git-show EXACT re-apply = NO
+comment cruft (prior cruft was from trimming comments on re-apply; re-apply identical text).
+GOTCHA: `git commit -m "...backticks..."` in DOUBLE quotes -> shell command-substitutes the
+backticks (corrupts msg). Use SINGLE-quoted -m, or no backticks.
