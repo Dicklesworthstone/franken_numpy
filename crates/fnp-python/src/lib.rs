@@ -18532,6 +18532,69 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     build_numpy_array_from_ufunc(py, &result)
 }
 
+fn try_zerocopy_f64_eigvalsh_diagonal(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    uplo: &str,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !matches!(uplo, "L" | "U") {
+        return Ok(None);
+    }
+
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let shape = buffer.shape();
+    if shape.len() != 2 || shape[0] != shape[1] || !buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+
+    let Some(input) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = shape[0];
+    let mut eigenvalues = Vec::with_capacity(n);
+    for i in 0..n {
+        let value = input[i * n + i].get();
+        if !value.is_finite() {
+            return Ok(None);
+        }
+        eigenvalues.push(value);
+    }
+
+    match uplo {
+        "L" => {
+            for row in 1..n {
+                for col in 0..row {
+                    if input[row * n + col].get() != 0.0 {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        "U" => {
+            for row in 0..n {
+                for col in (row + 1)..n {
+                    if input[row * n + col].get() != 0.0 {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    eigenvalues.sort_by(|a, b| a.total_cmp(b));
+    let result = UFuncArray::new(vec![n], eigenvalues, DType::F64).map_err(map_ufunc_error)?;
+    build_numpy_array_from_ufunc(py, &result).map(Some)
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, UPLO="L"))]
 #[allow(non_snake_case)]
@@ -18546,6 +18609,10 @@ fn eigvalsh(py: Python<'_>, a: Py<PyAny>, UPLO: &str) -> PyResult<Py<PyAny>> {
             .call((a_for_fallback.bind(py),), Some(&kwargs))?
             .unbind())
     };
+
+    if let Some(result) = try_zerocopy_f64_eigvalsh_diagonal(py, a.bind(py), UPLO)? {
+        return Ok(result);
+    }
 
     // STALE-CLIFF class (2026-06-20, same as det/slogdet/inv/solve): the native 2-D
     // symmetric QR (sym.eigvalsh()) loses to LAPACK syevd on the current NumPy 2.4.3
@@ -63033,6 +63100,47 @@ mod tests {
                     .call1((&actual_u_mismatch, &expected_u_mismatch))?
                     .extract::<bool>()?,
                 "eigvalsh mismatched upper triangle diverged"
+            );
+
+            // Diagonal selected triangles may have arbitrary ignored-side values.
+            // The fast path must mirror NumPy's UPLO rule rather than require full
+            // matrix diagonal structure.
+            let lower_diagonal_upper_junk = numeric_array(
+                py,
+                vec![
+                    vec![2.0_f64, 50.0_f64, 60.0_f64],
+                    vec![0.0_f64, 3.0_f64, 70.0_f64],
+                    vec![0.0_f64, 0.0_f64, 6.0_f64],
+                ],
+                "float64",
+            );
+            let actual_lower_diag = eigvalsh_fn.call1((lower_diagonal_upper_junk.clone(),))?;
+            let expected_lower_diag = numpy_eigvalsh.call1((lower_diagonal_upper_junk.clone(),))?;
+            assert!(
+                allclose
+                    .call1((&actual_lower_diag, &expected_lower_diag))?
+                    .extract::<bool>()?,
+                "eigvalsh lower-diagonal selected triangle diverged"
+            );
+
+            let upper_diagonal_lower_junk = numeric_array(
+                py,
+                vec![
+                    vec![2.0_f64, 0.0_f64, 0.0_f64],
+                    vec![50.0_f64, 3.0_f64, 0.0_f64],
+                    vec![60.0_f64, 70.0_f64, 6.0_f64],
+                ],
+                "float64",
+            );
+            let actual_upper_diag =
+                eigvalsh_fn.call((upper_diagonal_lower_junk.clone(),), Some(&kwargs_u))?;
+            let expected_upper_diag =
+                numpy_eigvalsh.call((upper_diagonal_lower_junk.clone(),), Some(&kwargs_u_n))?;
+            assert!(
+                allclose
+                    .call1((&actual_upper_diag, &expected_upper_diag))?
+                    .extract::<bool>()?,
+                "eigvalsh upper-diagonal selected triangle diverged"
             );
 
             // Identity → eigenvalues all 1.

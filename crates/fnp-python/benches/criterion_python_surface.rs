@@ -1794,6 +1794,22 @@ fn bench_linalg_boundary(c: &mut Criterion) {
             raw.call_method1("__add__", (&eye,))
                 .expect("well-conditioned dense 2-D matrix")
         };
+        let make_diagonal_2d = |dim: usize| {
+            let values = numpy
+                .call_method1("arange", (dim,))
+                .expect("diagonal raw values")
+                .call_method1("astype", ("float64",))
+                .expect("diagonal f64 values")
+                .call_method1("__add__", (0.25_f64,))
+                .expect("shifted diagonal values")
+                .call_method1("__mul__", (-1.0_f64,))
+                .expect("descending diagonal values");
+            numpy
+                .getattr("diag")
+                .expect("numpy.diag")
+                .call1((values,))
+                .expect("diagonal 2-D matrix")
+        };
 
         let fnp_slogdet = module.getattr("slogdet").expect("fnp_python.slogdet");
         let numpy_slogdet = numpy_linalg
@@ -1998,6 +2014,29 @@ fn bench_linalg_boundary(c: &mut Criterion) {
                     let result = numpy_cholesky
                         .call1((&input,))
                         .expect("numpy cholesky benchmark call");
+                    black_box(result);
+                });
+            });
+        }
+
+        for (label, input) in [
+            ("n200", make_diagonal_2d(200)),
+            ("n800", make_diagonal_2d(800)),
+        ] {
+            group.bench_function(format!("fnp_eigvalsh_diagonal_f64_2d_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_eigvalsh
+                        .call1((&input,))
+                        .expect("fnp eigvalsh diagonal benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_eigvalsh_diagonal_f64_2d_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_eigvalsh
+                        .call1((&input,))
+                        .expect("numpy eigvalsh diagonal benchmark call");
                     black_box(result);
                 });
             });

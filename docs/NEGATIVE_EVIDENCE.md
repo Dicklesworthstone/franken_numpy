@@ -4,6 +4,49 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - KEEP: Python-surface diagonal eigvalsh selected-triangle fast path
+
+`YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Disk-frugal BOLD-VERIFY pass
+on the Python `eigvalsh` surface, using the existing warm
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b` root and no
+new `.scratch` worktree. The graveyard/optimization lever is a narrow incumbent
+replacement: for exact `float64` 2-D square ndarrays whose selected `UPLO`
+triangle has zero off-diagonal entries, bypass the broad dense-matrix delegate
+and return the sorted diagonal values directly.
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-21_fnp_python_eigvalsh_diagonal_cod_b/`
+
+Commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-python eigvalsh_matches_numpy_across_uplo_batched_and_complex -- --nocapture`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-python --bench criterion_python_surface eigvalsh_diagonal_f64_2d -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+
+Same-process RCH head-to-head on `hz2`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `python_linalg_boundary/fnp_eigvalsh_diagonal_f64_2d_n200` | 17,559 | 1,655,615 | 0.0106x | WIN |
+| `python_linalg_boundary/fnp_eigvalsh_diagonal_f64_2d_n800` | 203,248 | 87,648,968 | 0.0023x | WIN |
+
+Scorecard:
+- Candidate vs NumPy: win/loss/neutral = **2/0/0**.
+- Previous 2-D float `eigvalsh` wrapper behavior delegated this class to NumPy;
+  the NumPy rows are therefore the old-path baseline for this exact diagonal
+  class, apart from wrapper call overhead.
+- The `n800` NumPy row emitted Criterion's "Unable to complete 10 samples in
+  3.0s" warning, but the gap is ~431x and the row still completed with exit 0.
+
+Validation and decision:
+- **Keep** `try_zerocopy_f64_eigvalsh_diagonal`. It is restricted to exact
+  `float64`, exact `ndarray`, C-contiguous, finite, 2-D square inputs, and only
+  when the selected `UPLO` triangle is diagonal.
+- Focused conformance passed: `eigvalsh_matches_numpy_across_uplo_batched_and_complex`.
+  The test now locks both selected-triangle diagonal fast paths, including junk
+  values on the ignored triangle.
+- Dense SPD `eigvalsh_nxn` remains the real spectral gap; do not widen this
+  exact-structure fast path to dense or approximate-band inputs without fresh
+  parity and same-process NumPy proof.
+
 ## 2026-06-21 - KEEP: batch_cholesky n=64 direct-write lane fill
 
 `YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on

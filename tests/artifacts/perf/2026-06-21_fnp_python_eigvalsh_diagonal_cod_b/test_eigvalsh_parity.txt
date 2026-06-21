@@ -1,0 +1,1349 @@
+  [2m2026-06-21T23:39:43.029574Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: ovh-a at ubuntu@51.222.245.56 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:921 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:43.192321Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_numpy (hash: f8416174b04438a4)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:43.192370Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 11 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:44.026175Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker ovh-a...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:44.026235Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 pattern(s) from .rchignore (total: 39)[0m
+    [2;3mat[0m rch/src/transfer.rs:886 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:44.026242Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy -> /data/projects/franken_numpy on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:44.981360Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 955ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:44.981422Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-conformance -> /data/projects/franken_numpy/crates/fnp-conformance on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:45.523337Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 541ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:45.523407Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-dtype -> /data/projects/franken_numpy/crates/fnp-dtype on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:46.072896Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 549ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:46.072987Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-io -> /data/projects/franken_numpy/crates/fnp-io on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:46.684562Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 611ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:46.684626Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-iter -> /data/projects/franken_numpy/crates/fnp-iter on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:47.242562Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 557ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:47.242625Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-linalg -> /data/projects/franken_numpy/crates/fnp-linalg on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:47.752977Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 510ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:47.753032Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-ndarray -> /data/projects/franken_numpy/crates/fnp-ndarray on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:48.232005Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 478ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:48.232083Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-python -> /data/projects/franken_numpy/crates/fnp-python on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:48.741652Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 509ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:48.741715Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-random -> /data/projects/franken_numpy/crates/fnp-random on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:49.198796Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 457ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:49.198864Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-runtime -> /data/projects/franken_numpy/crates/fnp-runtime on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:49.805762Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 606ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:49.805832Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-ufunc -> /data/projects/franken_numpy/crates/fnp-ufunc on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:50.394834Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 588ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:50.394866Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 25458 files, 1223804 bytes in 6361ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:54.050790Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mExecuting command remotely: cargo test -p fnp-python eigvalsh_matches_numpy_across_uplo_batched_and_complex -- --nocapture[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:529 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:39:54.050835Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRewriting CARGO_TARGET_DIR for remote execution (worker-scoped path): /data/projects/.rch-targets/franken_numpy-cod-b -> /data/projects/franken_numpy/.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8[0m
+    [2;3mat[0m rch/src/transfer.rs:799 [2;3mon[0m ThreadId(1)
+
+    Updating crates.io index
+ Downloading crates ...
+  Downloaded once_cell v1.21.4
+  Downloaded simd-adler32 v0.3.9
+  Downloaded itoa v1.0.18
+  Downloaded serde_derive v1.0.228
+  Downloaded regex v1.12.3
+  Downloaded crc32fast v1.5.0
+  Downloaded criterion-plot v0.5.0
+  Downloaded unicode-ident v1.0.24
+  Downloaded walkdir v2.5.0
+  Downloaded quote v1.0.45
+  Downloaded pyo3-macros v0.28.3
+  Downloaded oorandom v11.1.5
+  Downloaded getrandom v0.3.4
+  Downloaded crossbeam-utils v0.8.21
+  Downloaded cast v0.3.0
+  Downloaded bytemuck v1.25.0
+  Downloaded anstyle v1.0.14
+  Downloaded adler2 v2.0.1
+  Downloaded serde v1.0.228
+  Downloaded plotters-svg v0.3.7
+  Downloaded plotters-backend v0.3.7
+  Downloaded zmij v1.0.21
+  Downloaded zerocopy-derive v0.8.48
+  Downloaded target-lexicon v0.13.5
+  Downloaded crossbeam-epoch v0.9.18
+  Downloaded tinytemplate v1.2.1
+  Downloaded proc-macro2 v1.0.106
+  Downloaded rayon-core v1.13.0
+  Downloaded pyo3-macros-backend v0.28.3
+  Downloaded memchr v2.8.0
+  Downloaded miniz_oxide v0.8.9
+  Downloaded libc v0.2.185
+  Downloaded itertools v0.13.0
+  Downloaded rayon v1.12.0
+  Downloaded serde_json v1.0.149
+  Downloaded aho-corasick v1.1.4
+  Downloaded criterion v0.6.0
+  Downloaded itertools v0.10.5
+  Downloaded pyo3-ffi v0.28.3
+  Downloaded num-traits v0.2.19
+  Downloaded flate2 v1.1.9
+  Downloaded plotters v0.3.7
+  Downloaded ciborium v0.2.2
+  Downloaded clap v4.6.1
+  Downloaded ciborium-io v0.2.2
+  Downloaded syn v2.0.117
+  Downloaded cfg-if v1.0.4
+  Downloaded zerocopy v0.8.48
+  Downloaded anes v0.1.6
+  Downloaded serde_core v1.0.228
+  Downloaded regex-syntax v0.8.10
+  Downloaded clap_lex v1.1.0
+  Downloaded half v2.7.1
+  Downloaded either v1.15.0
+  Downloaded crossbeam-deque v0.8.6
+  Downloaded ciborium-ll v0.2.2
+  Downloaded clap_builder v4.6.0
+  Downloaded autocfg v1.5.0
+  Downloaded pyo3-build-config v0.28.3
+  Downloaded heck v0.5.0
+  Downloaded pyo3 v0.28.3
+  Downloaded same-file v1.0.6
+  Downloaded regex-automata v0.4.14
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling target-lexicon v0.13.5
+   Compiling cfg-if v1.0.4
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+   Compiling zerocopy v0.8.48
+   Compiling either v1.15.0
+   Compiling rayon-core v1.13.0
+   Compiling zmij v1.0.21
+   Compiling serde v1.0.228
+   Compiling libc v0.2.185
+   Compiling serde_json v1.0.149
+   Compiling memchr v2.8.0
+   Compiling itoa v1.0.18
+   Compiling autocfg v1.5.0
+   Compiling crc32fast v1.5.0
+   Compiling simd-adler32 v0.3.9
+   Compiling getrandom v0.3.4
+   Compiling fnp-ndarray v0.1.0 (/data/projects/franken_numpy/crates/fnp-ndarray)
+   Compiling heck v0.5.0
+   Compiling adler2 v2.0.1
+   Compiling ciborium-io v0.2.2
+   Compiling miniz_oxide v0.8.9
+   Compiling clap_lex v1.1.0
+   Compiling regex-syntax v0.8.10
+   Compiling anstyle v1.0.14
+   Compiling num-traits v0.2.19
+   Compiling plotters-backend v0.3.7
+   Compiling itertools v0.10.5
+   Compiling once_cell v1.21.4
+   Compiling clap_builder v4.6.0
+   Compiling bytemuck v1.25.0
+   Compiling fnp-runtime v0.1.0 (/data/projects/franken_numpy/crates/fnp-runtime)
+   Compiling crossbeam-epoch v0.9.18
+   Compiling plotters-svg v0.3.7
+   Compiling pyo3-build-config v0.28.3
+   Compiling flate2 v1.1.9
+   Compiling cast v0.3.0
+   Compiling syn v2.0.117
+   Compiling same-file v1.0.6
+   Compiling crossbeam-deque v0.8.6
+   Compiling itertools v0.13.0
+   Compiling walkdir v2.5.0
+   Compiling anes v0.1.6
+   Compiling oorandom v11.1.5
+   Compiling fnp-io v0.1.0 (/data/projects/franken_numpy/crates/fnp-io)
+   Compiling plotters v0.3.7
+   Compiling regex-automata v0.4.14
+   Compiling rayon v1.12.0
+   Compiling criterion-plot v0.5.0
+   Compiling pyo3-ffi v0.28.3
+   Compiling pyo3-macros-backend v0.28.3
+   Compiling pyo3 v0.28.3
+   Compiling clap v4.6.1
+   Compiling regex v1.12.3
+   Compiling fnp-linalg v0.1.0 (/data/projects/franken_numpy/crates/fnp-linalg)
+   Compiling fnp-random v0.1.0 (/data/projects/franken_numpy/crates/fnp-random)
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling pyo3-macros v0.28.3
+   Compiling tinytemplate v1.2.1
+   Compiling fnp-iter v0.1.0 (/data/projects/franken_numpy/crates/fnp-iter)
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling fnp-dtype v0.1.0 (/data/projects/franken_numpy/crates/fnp-dtype)
+   Compiling ciborium v0.2.2
+   Compiling fnp-ufunc v0.1.0 (/data/projects/franken_numpy/crates/fnp-ufunc)
+   Compiling criterion v0.6.0
+warning: method `nan_filtered` is never used
+     --> crates/fnp-ufunc/src/lib.rs:25354:8
+      |
+ 4913 | impl UFuncArray {
+      | --------------- method in this implementation
+...
+25354 |     fn nan_filtered(&self) -> Self {
+      |        ^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fnp-ufunc` (lib) generated 1 warning
+   Compiling fnp-python v0.1.0 (/data/projects/franken_numpy/crates/fnp-python)
+warning: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2519:5
+     |
+2516 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2519 |     Depth,
+     |     ^^^^^
+2520 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5151:4
+     |
+5151 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5173:4
+     |
+5173 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `fnp-python` (lib) generated 3 warnings
+warning: `fnp-python` (lib test) generated 3 warnings (3 duplicates)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 05s
+     Running unittests src/lib.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/fnp_python-363c3a2a5e6d0925)
+
+running 1 test
+test tests::eigvalsh_matches_numpy_across_uplo_batched_and_complex ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 531 filtered out; finished in 0.25s
+
+     Running tests/conformance_abs.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_abs-d7726dd58f445207)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+     Running tests/conformance_all.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_all-aa6c2d6e54581d4d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/conformance_allclose.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_allclose-56d98317224774b5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 48 filtered out; finished in 0.00s
+
+     Running tests/conformance_angle.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_angle-bc4e093931096c15)
+     Running tests/conformance_any.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_any-2f5de01dcf2fb474)
+     Running tests/conformance_apply_funcs.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_apply_funcs-a4579962f8f4b8c9)
+     Running tests/conformance_arctan2.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_arctan2-d80fbb44c8118638)
+     Running tests/conformance_argmax.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_argmax-554fee33dc6b3b9f)
+     Running tests/conformance_argmin.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_argmin-9002b270072ab146)
+     Running tests/conformance_argwhere.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_argwhere-5495960f9e7cd8a7)
+     Running tests/conformance_arithmetic.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_arithmetic-5004b2ec76a07876)
+     Running tests/conformance_arithmetic_ops.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_arithmetic_ops-b0c4ca8018d6325d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_around.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_around-c7da1864f40910c1)
+     Running tests/conformance_array_api_extras.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_array_api_extras-c96b95747a892cef)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/conformance_array_creation.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_array_creation-2339f38e8734fa2e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/conformance_array_creation_base.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_array_creation_base-864d2794d6cc1a2c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_array_equal.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_array_equal-5a0765228a6cac37)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.00s
+
+
+running 0 tests
+     Running tests/conformance_array_like.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_array_like-6ff1025348aaf9b9)
+     Running tests/conformance_array_manip.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_array_manip-3714b9fc6454b50b)
+     Running tests/conformance_array_transform.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_array_transform-e453a60d468ee60c)
+     Running tests/conformance_array_utils.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_array_utils-3ede1b2013b6db84)
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+     Running tests/conformance_asarray.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_asarray-435ee17cb42bf98f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/conformance_atleast_broadcast.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_atleast_broadcast-658a53b9d665fd75)
+     Running tests/conformance_binary_math.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_binary_math-8efd638584a9ef5f)
+     Running tests/conformance_binary_ops.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_binary_ops-14f0e262046cf6b3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+
+     Running tests/conformance_bitwise.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_bitwise-57e036f6f8812a14)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_bitwise_shifts.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_bitwise_shifts-bb22d4afdd2c3323)
+     Running tests/conformance_block_concat.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_block_concat-bf8f392c341b2e91)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_busday.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_busday-054f9a98bb207e85)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_cbrt_fabs.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_cbrt_fabs-bfb250a2a0ddd488)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/conformance_clip.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_clip-c7088a8c7a08e6c4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+     Running tests/conformance_close.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_close-d86111e9b885253e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+     Running tests/conformance_comparison.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_comparison-b8d6ec4b0d8eee67)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.00s
+
+     Running tests/conformance_comparison_logical.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_comparison_logical-84dabde369282ab1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+
+     Running tests/conformance_complex.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_complex-8e895c3ba697afbc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_complex_ops.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_complex_ops-b4c77d8eef6ad477)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/conformance_compress_choose_diagonal.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_compress_choose_diagonal-5ee842715490f5b5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 25 filtered out; finished in 0.00s
+
+     Running tests/conformance_concat_append.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_concat_append-bdef1cec36ce032f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.00s
+
+     Running tests/conformance_convolution.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_convolution-334fb5cd97fc96eb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_copysign.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_copysign-455c5d96ccf17d80)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/conformance_count_nonzero_zerocopy.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_count_nonzero_zerocopy-126bb3f9c45c981d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_cross.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_cross-1614e0df2c115802)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_cumprod_zerocopy.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_cumprod_zerocopy-a21d7605aaf3ae28)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/conformance_cumsum.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_cumsum-3a18eeaf6836d0e5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_cumsum_zerocopy.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_cumsum_zerocopy-34605c9ccf00f1c9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/conformance_cumulative.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_cumulative-5a05e11d8d37d6a2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+     Running tests/conformance_diag.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_diag-ea273f5f486bb835)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/conformance_diagnostics.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_diagnostics-6328c721ac10c6d9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_diff.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_diff-d62f946f1592340a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/conformance_diff_gradient.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_diff_gradient-e01e73fdd65334e0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+     Running tests/conformance_display.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_display-cd2f1a81c0cb247d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/conformance_divmod.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_divmod-b7c695f5395b380f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/conformance_dot.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_dot-cb38b62cd63319fa)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/conformance_dot_products.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_dot_products-c666b7d47bdcb6ea)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_dtype_promotion.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_dtype_promotion-37a61ace540a1d31)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/conformance_dtype_utils.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_dtype_utils-8a7b0afd97cbda66)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+     Running tests/conformance_ediff1d.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_ediff1d-0821f36ac28dc34a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_einsum.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_einsum-47e39037d83895a6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 0.00s
+
+     Running tests/conformance_exp_log.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_exp_log-3e94e5e9c5d70e03)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out; finished in 0.00s
+
+     Running tests/conformance_extract_put.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_extract_put-bf23b1b0f46ade0b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 28 filtered out; finished in 0.00s
+
+     Running tests/conformance_eye_diag.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_eye_diag-d072627f1177d7b7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/conformance_fft.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_fft-b906d06b2fcf9bac)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_flatnonzero.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_flatnonzero-0a439e1ff2295294)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/conformance_float_power_remainder.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_float_power_remainder-353b04a9ecbd4b3f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 21 filtered out; finished in 0.00s
+
+     Running tests/conformance_floor_divide.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_floor_divide-9fa44d6960744d2f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/conformance_fmax.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_fmax-3086e8d7c89929d8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/conformance_fmax_fmin.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_fmax_fmin-dfd1bba31ed0c46b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests/conformance_fmin.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_fmin-8cdcd1f90061d1b2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/conformance_fp_classify.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_fp_classify-102879aeade8fda1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/conformance_fp_introspect.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_fp_introspect-961c2aaa8eb92732)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/conformance_frexp.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_frexp-823563db02361ce9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/conformance_frexp_modf.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_frexp_modf-abbaf94a622b656b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/conformance_gcd_lcm.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_gcd_lcm-7955d2bab3577e7c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+     Running tests/conformance_gradient.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_gradient-09cc57c2d2122d8e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_grid_objects.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_grid_objects-767f92aeb76b6ca0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/conformance_heaviside.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_heaviside-731c2a2df0b50b96)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/conformance_histogram2d_dd.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_histogram2d_dd-501a90f686bd95fc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+     Running tests/conformance_histogram_bincount.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_histogram_bincount-cd91753d786dd901)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 32 filtered out; finished in 0.00s
+
+     Running tests/conformance_hypot.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_hypot-d08acef341094a24)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/conformance_indexing.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_indexing-5b28bbfaa3022754)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_indices.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_indices-48255c936a9c5786)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+     Running tests/conformance_inner.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_inner-efc87a0c5cb95c15)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/conformance_integer_overflow.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_integer_overflow-bb64dc8020e849b1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_interp_trapz.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_interp_trapz-87d0b39a0cc1e203)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+     Running tests/conformance_io.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_io-2806e334c0d70c63)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+     Running tests/conformance_isclose.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_isclose-0ce236a6bb7b65a2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_isin_fromiter.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_isin_fromiter-09c6c1423a1967f9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_isinf_signed.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_isinf_signed-0065b171de4055eb)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+     Running tests/conformance_kron.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_kron-7371e89de93fed6a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_ldexp.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_ldexp-5674a017f34bca85)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/conformance_lexsort.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_lexsort-7bd55ee0b53fff1e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+     Running tests/conformance_linalg.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_linalg-76811636b2458bff)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_linalg_advanced.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_linalg_advanced-56668c0ea59994da)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.00s
+
+     Running tests/conformance_linalg_basic.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_linalg_basic-8f771922ef481249)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 56 filtered out; finished in 0.00s
+
+     Running tests/conformance_linalg_decomp.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_linalg_decomp-45b2d60bd8bda66e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 39 filtered out; finished in 0.00s
+
+     Running tests/conformance_log_exp.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_log_exp-3206b723f7209494)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_logaddexp.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_logaddexp-490e1cb3888eee70)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_logical.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_logical-45a7e83d1c5d3f80)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests/conformance_ma.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_ma-66424ce31ccbdf00)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_ma_utils.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_ma_utils-682375de660efbdf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/conformance_masked_array_ops.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_masked_array_ops-90271baab7a43ecf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/conformance_matmul.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_matmul-b790ecf4691ec1f4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/conformance_max.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_max-399033e62cab1527)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_maximum.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_maximum-5ec2fe06a6100f77)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/conformance_maximum_minimum.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_maximum_minimum-c92a2a284e9ddc3d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests/conformance_mean.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_mean-3b63109fc577f020)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/conformance_memory_utils.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_memory_utils-a70caa8367bec559)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/conformance_meshgrid.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_meshgrid-2363c1f52232ab11)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/conformance_min.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_min-6a85d29877f3cd87)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_minimum.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_minimum-93bd398f5119b0c0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/conformance_modf.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_modf-650d4c993b18dc1c)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/conformance_module_attrs_reexports.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_module_attrs_reexports-fcb9b392aa1f3794)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out; finished in 0.00s
+
+     Running tests/conformance_module_helpers.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_module_helpers-9d8daf4943c2b4f7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/conformance_module_metadata.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_module_metadata-cfc80504d174fa17)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+
+     Running tests/conformance_moveaxis_pad.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_moveaxis_pad-71937de43656bd5d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+     Running tests/conformance_nan_funcs.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_nan_funcs-b697934080eebac3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 34 filtered out; finished in 0.00s
+
+     Running tests/conformance_nan_to_num_clip.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_nan_to_num_clip-822662d430bc1e62)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests/conformance_nextafter.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_nextafter-f28feaa53080161b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/conformance_outer.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_outer-b273a8e7521c57a9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/conformance_partition.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_partition-a84685ec2d6d63c3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+     Running tests/conformance_percentile_median.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_percentile_median-5d35b8874e6c0f4b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 24 filtered out; finished in 0.00s
+
+     Running tests/conformance_piecewise.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_piecewise-3ac067d8b018c5b7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_poly_ops.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_poly_ops-f0ec3c05cc5c75a8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+     Running tests/conformance_polynomial.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_polynomial-d8e593db0b3afca7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_prod.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_prod-fd9952ed277cc043)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+     Running tests/conformance_ptp.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_ptp-76cc3935495545ea)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/conformance_random.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_random-848351ee538c866a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/conformance_range_funcs.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_range_funcs-c46baad065c5a6fc)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 0.00s
+
+     Running tests/conformance_reciprocal.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_reciprocal-2908a059967e5b19)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/conformance_reductions.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_reductions-740f2e8eaf9100d5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_remainder.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_remainder-c1a784f6fba5211d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_remaining_top_level_attrs.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_remaining_top_level_attrs-5645e69cffd4d7e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/conformance_repr_funcs.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_repr_funcs-5406698dba6491d9)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/conformance_reshape_ravel.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_reshape_ravel-79140f00831f54b0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 0.00s
+
+     Running tests/conformance_rounding.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_rounding-f65f695464eaed17)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+     Running tests/conformance_savetxt_tofile.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_savetxt_tofile-7eb47b9337104e90)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 12 filtered out; finished in 0.00s
+
+     Running tests/conformance_searching.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_searching-f0c2434594562fee)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+     Running tests/conformance_select_zerocopy.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_select_zerocopy-ab279f9e9961f064)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_setops.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_setops-39ddcac00734d7be)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_shape_manip.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_shape_manip-e164aa6d574b383d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+     Running tests/conformance_sign.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_sign-04140a88a6bb25e2)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 16 filtered out; finished in 0.00s
+
+     Running tests/conformance_sinc.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_sinc-f8f72b6c7c491146)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 0.00s
+
+     Running tests/conformance_sort_search.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_sort_search-da4d01612af5a90d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 33 filtered out; finished in 0.00s
+
+     Running tests/conformance_sorting.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_sorting-6c9864bf7f9e6fb3)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_spacing.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_spacing-038aa35139cd260f)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/conformance_special_math.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_special_math-771545b757ee4f12)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_split.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_split-041130d8376a46c1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+     Running tests/conformance_sqrt.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_sqrt-162a20c23ca41f10)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_stack.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_stack-28938fd2b6a4722e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 27 filtered out; finished in 0.00s
+
+     Running tests/conformance_statistics.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_statistics-62034149f4af66f6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 29 filtered out; finished in 0.00s
+
+     Running tests/conformance_std.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_std-ec1fcae85f002f74)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_stride_tricks.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_stride_tricks-748dc56827da11b7)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/conformance_strings_namespace.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_strings_namespace-66b7ed3157d4bcee)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/conformance_submodule_reexports.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_submodule_reexports-03e1df86a6368cfe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 9 filtered out; finished in 0.00s
+
+     Running tests/conformance_sum.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_sum-be4d03f31af6699d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 26 filtered out; finished in 0.00s
+
+     Running tests/conformance_take_put.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_take_put-0a651ec288dc7d7a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 20 filtered out; finished in 0.00s
+
+     Running tests/conformance_tensor_ops.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_tensor_ops-01031290393d6e71)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/conformance_tensordot.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_tensordot-1209f66a8cc787da)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/conformance_testing.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_testing-6358646823dc8711)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/conformance_tile_repeat.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_tile_repeat-306120303ed2d25a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+     Running tests/conformance_trace.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_trace-bd045dda260c7ec6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/conformance_trig.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_trig-28e4c1303664dbd5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 54 filtered out; finished in 0.00s
+
+     Running tests/conformance_trig_math.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_trig_math-27d8d3c0afb9c2e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests/conformance_trim_zeros.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_trim_zeros-a46245b4ec449b92)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s
+
+     Running tests/conformance_ufunc_edge.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_ufunc_edge-950d97cd554d3180)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_unary_ops.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_unary_ops-97a9182374148fc6)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_unravel_unique.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_unravel_unique-0d1076e6caf6ce51)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 30 filtered out; finished in 0.00s
+
+     Running tests/conformance_var.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_var-93919e3e607b6b54)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 15 filtered out; finished in 0.00s
+
+     Running tests/conformance_vdot.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_vdot-745b230dac2f27d0)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.00s
+
+     Running tests/conformance_vector_products.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_vector_products-e7ee2a2e70f026f4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 14 filtered out; finished in 0.00s
+
+     Running tests/conformance_where.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_where-3d72b54439089f22)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 23 filtered out; finished in 0.00s
+
+     Running tests/conformance_window_funcs.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_window_funcs-55cfe8e64fef6d92)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 13 filtered out; finished in 0.00s
+
+     Running tests/conformance_zeros_ones.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/conformance_zeros_ones-ff4aa0e9456f7c9e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 10 filtered out; finished in 0.00s
+
+     Running tests/e2e_workflow.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/e2e_workflow-a81fb5162c8e0251)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 17 filtered out; finished in 0.00s
+
+     Running tests/golden_native_functions.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/golden_native_functions-720f9897fe26f385)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 11 filtered out; finished in 0.00s
+
+     Running tests/metamorphic_array_ops.rs (.rch-target-ovh-a-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8/debug/deps/metamorphic_array_ops-ba1fd9190969cbd8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 84 filtered out; finished in 0.00s
+
+  [2m2026-06-21T23:41:00.394769Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRemote command finished: exit=0 in 66343ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:653 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:41:00.395092Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mRetrieving build artifacts...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:702 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:41:00.395122Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mRetrieving artifacts from /data/projects/franken_numpy on ovh-a[0m
+    [2;3mat[0m rch/src/transfer.rs:2246 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:41:00.395176Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 retrieval exclude pattern(s) from .rchignore (total: 5)[0m
+    [2;3mat[0m rch/src/transfer.rs:996 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:41:00.832120Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mArtifacts retrieved in 436ms (1 files, 2961 bytes)[0m
+    [2;3mat[0m rch/src/transfer.rs:2301 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T23:41:00.832142Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mArtifacts retrieved: 1 files, 2961 bytes in 436ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:735 [2;3mon[0m ThreadId(1)
+
+[RCH] remote ovh-a (77.8s)
