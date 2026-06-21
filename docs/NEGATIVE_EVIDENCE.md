@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - Edge-case correctness sweep of BUILT linalg delegates: 0 fails / 19 (release-confidence)
+
+Agent: `BlackThrush` / `cod-b`. Build freeze (no cargo) — verified via the EXISTING
+`.probe/fnp_python.so` (already has the built det/inv/slogdet/solve/svdvals
+delegates; eigvalsh/eigh/cholesky/matrix_power are NOT in this .so — still unbuilt).
+Beyond the conformance suite, swept special/edge cases vs numpy (allclose, equal_nan;
+LinAlgError parity by exception type):
+- det: 1x1, singular, NaN-entry, Inf-entry, integer input, large(300) — PASS
+- inv: 1x1, singular(->LinAlgError), integer, large(256) — PASS
+- slogdet: negative-det, singular, large(300) — PASS
+- solve: multi-RHS, 1-D RHS, singular(->LinAlgError) — PASS
+- svdvals: rectangular(300x200), 1x1, large(400) — PASS
+TOTAL: **0 fails / 19**. The delegations preserve numpy's special-value handling
+(NaN/Inf det), integer promotion, singular->LinAlgError, and shape edges exactly
+(expected, since they delegate to numpy). Adds release-confidence that the shipped
+2-D linalg delegates are robust, not just fast-path-parity. (Script reproducible:
+det/inv/slogdet/solve/svdvals on the listed inputs, np.allclose vs numpy.)
+
 ## 2026-06-21 - PENDING-BENCH heartbeat: freeze STABLE (disk holding ~40G), awaiting unfreeze
 
 Agent: `BlackThrush` / `cod-b`. Status only (no new lever — all safe code/disk
