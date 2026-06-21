@@ -6939,6 +6939,31 @@ fn numpy_array_from_slice<'py, T: pyo3::buffer::Element + Copy>(
     Ok(array)
 }
 
+fn numpy_complex128_array_from_interleaved_f64<'py>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    values: &[f64],
+) -> PyResult<Bound<'py, PyAny>> {
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "complex128")?;
+    let array = numpy.call_method("empty", (values.len() / 2,), Some(&kwargs))?;
+    if !values.is_empty() {
+        let view = array.call_method1("view", ("float64",))?;
+        let buffer = PyBuffer::<f64>::get(&view)?;
+        buffer.copy_from_slice(py, values)?;
+    }
+    Ok(array)
+}
+
+fn sort_complex_real_cmp(left: &f64, right: &f64) -> std::cmp::Ordering {
+    match (left.is_nan(), right.is_nan()) {
+        (true, true) => std::cmp::Ordering::Equal,
+        (true, false) => std::cmp::Ordering::Greater,
+        (false, true) => std::cmp::Ordering::Less,
+        (false, false) => left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal),
+    }
+}
+
 fn direct_f64_unary_output_supported(array: &UFuncArray, op: UnaryOp) -> bool {
     if array.dtype() != DType::F64 || array.has_integer_sidecar() {
         return false;
@@ -37211,6 +37236,75 @@ fn argsort(
     core_numpy_passthrough(py, "argsort", args, kwargs)
 }
 
+fn try_zerocopy_f64_sort_complex_flat(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    if a.getattr("ndim")?.extract::<usize>()? != 1
+        || !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let n = a.len()?;
+    const SORT_COMPLEX_PARALLEL_MIN: usize = 1 << 19;
+    const SORT_COMPLEX_PARALLEL_THREADS_MIN: usize = 8;
+    if n < SORT_COMPLEX_PARALLEL_MIN
+        || rayon::current_num_threads() < SORT_COMPLEX_PARALLEL_THREADS_MIN
+    {
+        return Ok(Some(numpy.getattr("sort_complex")?.call1((a,))?.unbind()));
+    }
+
+    let Ok(in_buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(in_cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if in_cells.len() != n {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let input: &[f64] = unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<f64>(), n) };
+
+    use rayon::prelude::*;
+    if input.par_iter().any(|value| value.is_nan()) {
+        return Ok(Some(numpy.getattr("sort_complex")?.call1((a,))?.unbind()));
+    }
+
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "complex128")?;
+    let out = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n == 0 {
+        return Ok(Some(out.unbind()));
+    }
+    let view = out.call_method1("view", ("float64",))?;
+    let out_buffer = PyBuffer::<f64>::get(&view)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    if out_cells.len() != n * 2 {
+        return Ok(None);
+    }
+
+    // SAFETY: both buffer cell types are transparent over f64; the output is freshly
+    // allocated complex128 storage viewed as float64, so it cannot alias the input.
+    let output: &mut [f64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n * 2) };
+    output[..n].copy_from_slice(input);
+    output[..n].par_sort_by(sort_complex_real_cmp);
+
+    for index in (0..n).rev() {
+        output[index * 2] = output[index];
+        output[index * 2 + 1] = 0.0;
+    }
+
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 fn sort_complex(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
@@ -37226,6 +37320,9 @@ fn sort_complex(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // inputs still defer to numpy — our export bridge doesn't round-trip
     // complex via reshape.
     let a_bound = a.bind(py);
+    if let Some(out) = try_zerocopy_f64_sort_complex_flat(py, &numpy, a_bound)? {
+        return Ok(out);
+    }
     let native = match extract_precise_numeric_array(py, a_bound, "sort_complex(a)") {
         Ok(value) => value,
         Err(_) => return fallback(py),
@@ -37252,18 +37349,8 @@ fn sort_complex(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // sorted has shape [n, 2] with interleaved (re, im) f64 values.
     let pairs = sorted.values();
     let n = sorted.shape()[0];
-    let builtins = py.import("builtins")?;
-    let complex_ctor = builtins.getattr("complex")?;
-    let mut py_values: Vec<Py<PyAny>> = Vec::with_capacity(n);
-    for i in 0..n {
-        let re = pairs[i * 2];
-        let im = pairs[i * 2 + 1];
-        py_values.push(complex_ctor.call1((re, im))?.unbind());
-    }
-    let list = PyList::new(py, py_values.iter())?;
-    let kwargs = PyDict::new(py);
-    kwargs.set_item("dtype", "complex128")?;
-    Ok(numpy.call_method("array", (list,), Some(&kwargs))?.unbind())
+    debug_assert_eq!(pairs.len(), n * 2);
+    Ok(numpy_complex128_array_from_interleaved_f64(py, &numpy, pairs)?.unbind())
 }
 
 #[pyfunction]
@@ -90219,6 +90306,32 @@ mod tests {
             let ours_nan = sort_complex_fn.call1((complex_nan_input.clone(),))?;
             let theirs_nan = numpy_sort_complex.call1((complex_nan_input.clone(),))?;
             assert_array_matches_numpy(&ours_nan, &theirs_nan)?;
+
+            // Exact real float64 arrays must preserve NumPy's observable signed-zero bits
+            // whether they take the large-array fast path or delegate below the crossover.
+            let signbit = numpy.getattr("signbit")?;
+            let real_signed_zero = array_fn.call1((vec![-3.0_f64, 0.0, -0.0, 2.0],))?;
+            let ours_real_signed_zero = sort_complex_fn.call1((real_signed_zero.clone(),))?;
+            let theirs_real_signed_zero = numpy_sort_complex.call1((real_signed_zero.clone(),))?;
+            assert_array_matches_numpy(&ours_real_signed_zero, &theirs_real_signed_zero)?;
+            assert_eq!(
+                repr_string(&signbit.call1((ours_real_signed_zero.getattr("real")?,))?),
+                repr_string(&signbit.call1((theirs_real_signed_zero.getattr("real")?,))?),
+                "real float64 sort_complex must preserve signed-zero ordering"
+            );
+
+            // NumPy's NaN sort surface can perturb equal-zero signs depending on
+            // input order, so the fast path delegates NaN-bearing real arrays.
+            let real_nan_signed_zero =
+                array_fn.call1((vec![0.0_f64, -0.0, f64::NAN, 2.0, -3.0],))?;
+            let ours_real_nan = sort_complex_fn.call1((real_nan_signed_zero.clone(),))?;
+            let theirs_real_nan = numpy_sort_complex.call1((real_nan_signed_zero.clone(),))?;
+            assert_array_matches_numpy(&ours_real_nan, &theirs_real_nan)?;
+            assert_eq!(
+                repr_string(&signbit.call1((ours_real_nan.getattr("real")?,))?),
+                repr_string(&signbit.call1((theirs_real_nan.getattr("real")?,))?),
+                "real float64 sort_complex NaN fallback must match signed-zero bits"
+            );
 
             // Matrix input parity: shape/result surface and copy-vs-alias behavior.
             let matrix = array_fn.call1((vec![vec![3_i64, 1], vec![2_i64, 4]],))?;

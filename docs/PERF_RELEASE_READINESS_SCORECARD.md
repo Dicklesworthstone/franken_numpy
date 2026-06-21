@@ -82,11 +82,11 @@ Decision:
 
 | Area | Score | Verdict |
 |---|---:|---|
-| High-thread `sort_complex` vs NumPy | 8/10 | 1M real-f64 row wins at `0.767x`; 200k row is neutral at `1.001x` |
-| Low-thread guard | 8/10 | Forced 4-thread rows are neutral: `1.004x` and `1.000x` |
+| High-thread `sort_complex` vs NumPy | 9/10 | Fresh current rerun wins both rows: `0.975x` at 200k and `0.150x` at 1M |
+| Low-thread guard | 8/10 | Forced 4-thread rerun stays neutral: `1.024x` and `1.017x` |
 | Revert discipline | 9/10 | Rejected direct-output-only, combined scan/copy, and sub-8-thread native sort variants |
-| Focused conformance | 9/10 | `sort_complex` unit row and `conformance_sort_search` filtered rows passed |
-| Release build readiness | 7/10 | Per-crate release build still required after docs; prior bench builds passed with known warnings |
+| Focused conformance | 9/10 | `conformance_sort_search` filtered rows passed; signed-zero/NaN unit guards added for broader lib-unit runs |
+| Release build readiness | 8/10 | `cargo build -p fnp-python --release` passed through RCH with known warnings |
 | Retry guidance | 8/10 | Ledger routes away from Python complex list construction and ungated parallel sort |
 
 Evidence:
@@ -110,6 +110,15 @@ Evidence:
 - Final forced fallback with `RAYON_NUM_THREADS=4` on `ovh-a`: 200k
   `1,457,144 ns` vs NumPy `1,451,943 ns` (`1.004x` neutral); 1M
   `8,476,034 ns` vs NumPy `8,475,550 ns` (`1.000x` neutral).
+- Fresh current rerun high-thread on `hz2`: 200k `8,681,463 ns` vs NumPy
+  `8,900,824 ns` (`0.975x` win); 1M `8,101,862 ns` vs NumPy
+  `53,997,830 ns` (`0.150x` win).
+- Fresh current rerun forced fallback with `RAYON_NUM_THREADS=4` on `hz1`:
+  200k `2,215,800 ns` vs NumPy `2,164,453 ns` (`1.024x` neutral); 1M
+  `12,702,714 ns` vs NumPy `12,486,455 ns` (`1.017x` neutral).
+- Release build:
+  `AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo build -p fnp-python --release`
+  passed on `hz1` with the existing three `fnp-python` warnings.
 - `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`; no new
   `.scratch` worktree.
 

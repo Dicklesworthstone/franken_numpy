@@ -52,6 +52,75 @@ Validation and decision:
   regression. The measured current path is already a NumPy win at the suspected
   medium sizes; future work should target a fresh loss instead.
 
+## 2026-06-21 - WIN/NEUTRAL: gated real-f64 sort_complex direct complex128 path
+
+`YellowElk`/`cod-a`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on the
+Python-boundary `sort_complex` residual. The radical lever replaces the old
+native path's per-element Python `complex(re, im)` list construction with a
+direct `complex128` ndarray allocation viewed as `float64`, then uses a borrowed
+real-f64 input slice plus stable Rayon sorting for large 1-D exact ndarray rows.
+The path deliberately delegates below the size/thread crossover and on NaNs:
+signed-zero order is observable, NumPy's NaN/zero interaction is subtle, and
+4-thread workers need no native-sort tax.
+
+Commands:
+- `AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --bench criterion_python_surface -- python_sort_complex_boundary --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- `AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- env RAYON_NUM_THREADS=4 cargo bench -p fnp-python --bench criterion_python_surface -- python_sort_complex_boundary --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- `AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --test conformance_sort_search sort_complex -- --nocapture`
+- `AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo build -p fnp-python --release`
+
+| Probe | Worker/env | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---|---:|---:|---:|---|
+| Baseline old native export, 200k | `hz1` | 53,011,981 | 2,177,501 | 24.345x loss | current loss |
+| Baseline old native export, 1M | `hz1` | 294,361,340 | 12,954,676 | 22.722x loss | current loss |
+| Direct complex128 output only, 200k | `hz1` | 18,647,774 | 2,311,394 | 8.068x loss | rejected |
+| Direct complex128 output only, 1M | `hz1` | 83,373,074 | 12,494,221 | 6.673x loss | rejected |
+| Combined scan/copy experiment, 200k | `hz1` | 3,544,474 | 2,177,484 | 1.628x loss | rejected |
+| Combined scan/copy experiment, 1M | `hz1` | 16,353,970 | 12,546,074 | 1.304x loss | rejected |
+| Pre-thread-gate direct path, 200k | `hz1` | 2,194,713 | 2,193,066 | 1.001x neutral | partial |
+| Pre-thread-gate direct path, 1M | `hz1` | 17,210,239 | 12,538,696 | 1.373x loss | rejected gate |
+| Final high-thread path, 200k | `ovh-a` | 1,457,650 | 1,456,064 | 1.001x neutral | keep |
+| Final high-thread path, 1M | `ovh-a` | 6,538,178 | 8,520,745 | 0.767x win | keep |
+| Final forced 4-thread fallback, 200k | `ovh-a`, `RAYON_NUM_THREADS=4` | 1,457,144 | 1,451,943 | 1.004x neutral | keep gate |
+| Final forced 4-thread fallback, 1M | `ovh-a`, `RAYON_NUM_THREADS=4` | 8,476,034 | 8,475,550 | 1.000x neutral | keep gate |
+| Current rerun high-thread path, 200k | `hz2` | 8,681,463 | 8,900,824 | 0.975x win | keep |
+| Current rerun high-thread path, 1M | `hz2` | 8,101,862 | 53,997,830 | 0.150x win | keep |
+| Current rerun forced 4-thread fallback, 200k | `hz1`, `RAYON_NUM_THREADS=4` | 2,215,800 | 2,164,453 | 1.024x neutral | keep gate |
+| Current rerun forced 4-thread fallback, 1M | `hz1`, `RAYON_NUM_THREADS=4` | 12,702,714 | 12,486,455 | 1.017x neutral | keep gate |
+
+Scorecard:
+- Old native export vs NumPy: win/loss/neutral = **0/2/0**.
+- Direct-output-only candidate vs NumPy: win/loss/neutral = **0/2/0**.
+- Combined scan/copy candidate vs NumPy: win/loss/neutral = **0/2/0**.
+- Pre-thread-gate candidate vs NumPy: win/loss/neutral = **0/1/1**.
+- Final high-thread candidate vs NumPy: win/loss/neutral = **1/0/1**.
+- Final forced 4-thread fallback vs NumPy: win/loss/neutral = **0/0/2**.
+- Current rerun high-thread candidate vs NumPy: win/loss/neutral = **2/0/0**.
+- Current rerun forced 4-thread fallback vs NumPy: win/loss/neutral = **0/0/2**.
+
+Validation and decision:
+- Focused conformance after the final gate passed:
+  `conformance_sort_search` passed its three filtered
+  `sort_complex`/`argsort_complex` rows. The source also adds signed-zero and
+  NaN-fallback unit coverage for the broader lib-unit shard.
+- Per-crate release build passed through RCH on `hz1` with the existing three
+  `fnp-python` warnings. `git diff --check` passed.
+- Fresh current-tree rerun on `hz2` converted both high-thread rows to wins
+  (`0.975x`, `0.150x`). The forced-4-thread rerun on `hz1` stayed neutral
+  (`1.024x`, `1.017x`), preserving the low-thread guard.
+- `cargo fmt --check -p fnp-python` still reports broad pre-existing formatting
+  drift across `fnp-python`; it was not normalized in this perf commit. `ubs` on
+  the touched files completed with broad pre-existing `fnp-python/src/lib.rs`
+  findings while its shadow fmt/clippy/build subchecks were clean.
+- The kept source gates the native path to exact 1-D C-contiguous `float64`
+  ndarrays with no NaNs, `n >= 1 << 19`, and at least 8 Rayon threads. It
+  delegates the low-thread and NaN cases before taking a `PyBuffer`, which avoids
+  the rejected fallback tax.
+- Do not retry Python `complex(...)` list construction, direct-output-only, or
+  combined scan/copy variants. A credible next attempt should expand the direct
+  buffer path to another dtype/shape only with signed-zero/NaN parity tests and a
+  fresh crossover sweep.
+
 ## 2026-06-21 - NO-SHIP: eigvalsh(128) Sturm bisection eigensolver
 
 `YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on the
