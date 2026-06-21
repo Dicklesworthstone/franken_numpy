@@ -20569,6 +20569,7 @@ fn try_zerocopy_f64_gradient_1d(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     f: &Bound<'_, PyAny>,
+    dx: f64,
     edge_order: usize,
 ) -> PyResult<Option<Py<PyAny>>> {
     if edge_order != 1 {
@@ -20612,18 +20613,19 @@ fn try_zerocopy_f64_gradient_1d(
         // repr(transparent) over f64; every element is written exactly once.
         let o: &mut [f64] =
             unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
-        o[0] = data[1] - data[0];
-        o[n - 1] = data[n - 1] - data[n - 2];
+        // edge_order=1 boundaries: forward/backward difference divided by spacing.
+        o[0] = (data[1] - data[0]) / dx;
+        o[n - 1] = (data[n - 1] - data[n - 2]) / dx;
         use rayon::prelude::*;
         const GRADIENT_PARALLEL_MIN: usize = 1 << 18; // serial native already crushes numpy below this; parallel only wins past ~256K (fan-out floor)
         if n >= GRADIENT_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             o[1..n - 1].par_iter_mut().enumerate().for_each(|(j, slot)| {
                 let i = j + 1;
-                *slot = (data[i + 1] - data[i - 1]) / 2.0;
+                *slot = (data[i + 1] - data[i - 1]) / (2.0 * dx);
             });
         } else {
             for i in 1..n - 1 {
-                o[i] = (data[i + 1] - data[i - 1]) / 2.0;
+                o[i] = (data[i + 1] - data[i - 1]) / (2.0 * dx);
             }
         }
     }
@@ -20640,12 +20642,18 @@ fn gradient(
     edge_order: usize,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
-    // Native zero-copy parallel fast path for 1-D f64 with default unit spacing and
-    // default axis; everything else (spacing varargs, explicit axis, edge_order=2,
-    // N-D, non-f64) defers to numpy so all of its conventions match exactly.
-    if varargs.len() == 0
-        && axis.is_none()
-        && let Some(out) = try_zerocopy_f64_gradient_1d(py, &numpy, f.bind(py), edge_order)?
+    // Native zero-copy parallel fast path for 1-D f64 with UNIFORM spacing (no spacing
+    // arg => dx=1, or a single scalar spacing arg => that dx) and default axis. A
+    // coordinate-array spacing arg, explicit axis, edge_order=2, N-D, or non-f64 all
+    // defer to numpy so every convention matches exactly.
+    let uniform_dx: Option<f64> = match varargs.len() {
+        0 => Some(1.0),
+        1 => varargs.get_item(0)?.extract::<f64>().ok(), // None if it's a coordinate array
+        _ => None,
+    };
+    if axis.is_none()
+        && let Some(dx) = uniform_dx
+        && let Some(out) = try_zerocopy_f64_gradient_1d(py, &numpy, f.bind(py), dx, edge_order)?
     {
         return Ok(out);
     }
