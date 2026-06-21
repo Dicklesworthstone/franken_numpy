@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN (RADICAL): native gradient along last axis for N-D (87bd6403, 8-9x)
+
+`BlackThrush`/`cod-b`. 6th single-threaded-numpy lever this session. Generalized the 1-D
+native gradient path to the LAST (contiguous) axis for N-D: each contiguous row of length
+L is an independent central-difference stencil; 1-D = single-row (interior-parallel), N-D
+parallelizes over rows (par_chunks(L)). numpy.gradient(axis=-1) is single-threaded + temp-
+allocating + Python-setup-heavy. RESULT: gradient(2000x2000, axis=1/-1) 1.08x->0.11-0.12x
+(~9x), dx=2.5 same; 1-D unchanged (0.13x, no regression). Bit-exact (validated 2-D/3-D/
+(4,1e6), dx=1/2.5, array_equal). Native only when target axis is last/contiguous (axis=None
+=> ndim==1; axis=k => normalize==ndim-1); axis=0/non-last, coord-array spacing, edge_order=2,
+no-axis-N-D (list return), non-f64, non-contig defer. conformance_diff_gradient 23/23.
+COORDINATION: landed while YellowElk's uncommitted compress WIP sat in the shared lib.rs.
+Used `git stash push -- lib.rs` (save their WIP) -> apply+commit MY gradient -> `git stash
+pop` (restore their WIP exactly). Non-destructive, non-overlapping (compress ~L9461 vs
+gradient ~L20585) -> their work preserved bit-for-bit, my win shipped. REUSABLE: to land
+a non-overlapping change in a file with a peer's stale uncommitted WIP, stash-POP (never
+stash-DROP) is safe; verify the peer diff is byte-identical after pop.
+
 ## 2026-06-21 - BOLD-VERIFY Recheck: 2-D linalg delegate Criterion rows added; dense losses closed, one micro-loss exposed
 
 `YellowElk`/`cod-a`, parent directive `franken_numpy-ixs5y`. Applied the
