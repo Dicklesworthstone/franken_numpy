@@ -18558,6 +18558,77 @@ fn radians(
     }
 }
 
+// Zero-copy parallel sinc for an f64 C-contiguous ndarray. numpy.sinc is a
+// single-threaded Python wrapper (pi*x, sin, divide, where temporaries); the kernel
+// (sin per element) is compute-bound and parallelizes ideally. Read the buffer directly
+// and write numpy.empty using the SAME branch formula as UFuncArray::sinc, so the result
+// is byte-identical to the extract path (conformance preserved). Avoids the extract+build
+// copies. Returns None for non-ndarray / non-contiguous / empty / 0-d (defer to general).
+fn try_zerocopy_f64_sinc(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    x: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !x.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(None);
+    };
+    if !buffer.is_c_contiguous() || buffer.shape().is_empty() {
+        return Ok(None);
+    }
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n == 0 {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let shape: Vec<usize> = buffer.shape().to_vec();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias x; written once.
+        let o: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+        let kernel = |xv: f64| -> f64 {
+            if xv == 0.0 {
+                1.0
+            } else {
+                let px = std::f64::consts::PI * xv;
+                px.sin() / px
+            }
+        };
+        use rayon::prelude::*;
+        const SINC_PARALLEL_MIN: usize = 1 << 15; // sin is compute-bound -> parallelizes early
+        if n >= SINC_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            o.par_iter_mut()
+                .zip(data.par_iter())
+                .for_each(|(slot, &xv)| *slot = kernel(xv));
+        } else {
+            for (slot, &xv) in o.iter_mut().zip(data.iter()) {
+                *slot = kernel(xv);
+            }
+        }
+    }
+    if shape.len() == 1 {
+        Ok(Some(flat.unbind()))
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        Ok(Some(flat.call_method1("reshape", (&shape_tuple,))?.unbind()))
+    }
+}
+
 #[pyfunction]
 fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // extract_numeric_array canonicalizes narrow widths to f64, so the native sinc
@@ -18569,6 +18640,10 @@ fn sinc(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .getattr("sinc")?
             .call1((x.bind(py),))?
             .unbind());
+    }
+    let numpy = py.import("numpy")?;
+    if let Some(out) = try_zerocopy_f64_sinc(py, &numpy, x.bind(py))? {
+        return Ok(out);
     }
     let x = extract_numeric_array(py, x.bind(py), "sinc(x)")?;
     build_numpy_scalar_or_array(py, &x.sinc())
