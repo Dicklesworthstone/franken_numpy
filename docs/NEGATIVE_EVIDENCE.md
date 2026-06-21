@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: cache-friendly trapezoid kernel loop order in fnp-ufunc (7874baec, axis=0 1.23x->0.57x)
+
+`BlackThrush`/`cod-b`. A NON-fnp-python lever (fnp-python was peer-locked by YellowElk).
+`UFuncArray::trapezoid` reduced a non-last axis with column-OUTER/row-INNER loops -> the
+inner k-loop strode by `inner` (column-major on row-major data), thrashing cache:
+trapezoid(M, axis=0) 1.23x SLOWER than numpy. FIX: swap to axis(k) OUTER, contiguous(i)
+INNER, accumulating into out_values -> inner read+write stride-1 (cache-friendly +
+vectorizable). Per-output k-order unchanged => BIT-IDENTICAL (fnp-ufunc trapezoid tests
+13/13, allclose vs numpy). GOTCHA: inner==1 (last axis) regressed 0.60x->1.78x under the
+swap (scalar-register sum became per-k memory write) -> branch keeps the original scalar
+sum for inner==1. RESULT: axis=0 1.23x->0.53-0.60x (~1.8x) across (2000,2000)/(4000,1000)/
+(500,8000); axis=1 stays 0.53-0.80x (no regression). conformance_interp_trapz 16/16.
+LESSON: cache-hostile loop nesting (column-major on C-contiguous) is a real lever for
+non-last-axis reductions — swap to contiguous-inner; and a loop swap that helps inner>1
+can REGRESS inner==1 (register vs memory accumulation) -> branch on inner. Measurement
+GOTCHA: needs strong warmup — (2000,2000) read 1.19x cold but 0.57x warm. Committed
+fnp-ufunc ONLY (built fnp-python with peer's WIP just to measure; never staged it).
+
 ## 2026-06-21 - WIN: `np.linalg.matrix_power(A, 1)` exact-ndarray alias shortcut (cod-a, 2.4x)
 
 `YellowElk`/`cod-a`, parent directive `franken_numpy-ixs5y`. Targeted the
