@@ -5891,3 +5891,14 @@ diff2/average/nanmin/nanmax PARITY. The gate fixes (cov 1<<22, argmax 1<<20, med
 small n_vars (native 55-cell dot vs BLAS syrk; parallel/SIMD-across-obs breaks cov bit-exact
 repr => documented no-ship, needs C-BLAS or a bit-exactness human decision). Size-coverage now
 COMPLETE: large (2-8M) AND medium (100K) both comprehensively dominated.
+
+### WIN isclose(f32-array, finite-scalar) 12-14x->0.02x (5ef2b313) + DTYPE-GAP lesson
+The f64 isclose-scalar fix (4a503652) was F64-ONLY, so isclose(f32, 0.0) was even WORSE (~12-14x)
+- missed the f64 path, fell to the f32->f64 extract. Added try_zerocopy_f32_isclose_array_scalar
+(numpy promotes scalar via asanyarray+result_type => |a-b| in f64; read f32 buffer, cast each to
+f64, bit-exact). 100K 0.16x, 4M 0.02x. LESSON (dtype-gap lever, 5th finder): a NEW f64-only
+zero-copy fast path can leave the f32 (or bool/int) form EVEN SLOWER than before (it now misses
+BOTH the array-array path AND the f64-scalar path -> coldest extract). After adding an f64
+scalar/special-case path, CHECK f32. Audited my other f64-only recent fixes: array_equal already
+covers f32 (f32_buffers_all_equal, 0.79x win); histogram_bin_edges f32 is only mild 1.20x (min/
+max extract, low-ROI, not the full-predicate blowup isclose had). isclose was the big f32 gap.
