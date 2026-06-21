@@ -220,3 +220,13 @@ both encumbered). And MARGINAL: for most bridge ops the COMPUTE dominates, not t
 (that's why my targeted zero-copy wins - convolve/sinc - were for COPY-dominated ops where
 the kernel was cheap). The remaining bridge ops (windows etc.) are compute-bound, so a
 zero-copy bridge saves little. NOT a clean lever. Every radical avenue now explored.
+
+## SHIPPED 2026-06-21: kaiser loop-invariant hoist + parallel (7d3b9201) - up to 12x WIN
+UFuncArray::kaiser recomputed bessel_i0(beta) (denominator) AND alpha PER POINT inside the map
+(m redundant Bessel evals). Hoisted both + parallelized (gate 1<<14, bessel compute-bound).
+RESULT: kaiser 1024 1.28x->0.22x, 10k 0.69x, 100k 1.46x->0.10x, 1M 1.22x->0.10x. Bit-allclose.
+LESSON: re-read the kernel before dismissing as "niche/low-ROI" — a loop-invariant EXPENSIVE
+recompute (bessel_i0(beta) m times) was a clean all-sizes ~2x+ win I almost skipped.
+hamming/hanning/blackman do NOT have this (their loop-invariants are cheap arithmetic; cost
+is the cos itself; parallel crossover ~256k = very rare; small loss is the bit-exact cos floor)
+-> genuinely low-value, not pursued. bartlett wins already. Windows: kaiser fixed, rest closed.
