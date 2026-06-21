@@ -10552,9 +10552,36 @@ fn try_zerocopy_f64_putmask(
     let Some(a_out) = a_buffer.as_mut_slice(py) else {
         return Ok(false);
     };
-    for (i, slot) in a_out.iter().enumerate() {
-        if mask_in[i].get() != 0 {
-            slot.set(val_in[i % v].get());
+    let n = a_out.len();
+    // numpy.putmask cycles `values` by FLAT position (`values[i % v]`), NOT by masked-count, so
+    // every output slot is independent — embarrassingly parallel. Scatter into a's own buffer
+    // over disjoint raw-slice chunks (in-place, no copy-back); numpy runs this single-threaded.
+    // SAFETY: ReadOnlyCell<u8/f64>/Cell<f64> are repr(transparent); read-only mask/values under
+    // the GIL, a's buffer written only at disjoint, non-overlapping chunk positions.
+    let a_slice: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(a_out.as_ptr() as *mut f64, n) };
+    let m: &[u8] = unsafe { std::slice::from_raw_parts(mask_in.as_ptr().cast::<u8>(), n) };
+    let vals: &[f64] = unsafe { std::slice::from_raw_parts(val_in.as_ptr().cast::<f64>(), v) };
+    const PUTMASK_PARALLEL_MIN: usize = 1 << 19;
+    if n >= PUTMASK_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        let chunk = n.div_ceil(rayon::current_num_threads());
+        a_slice
+            .par_chunks_mut(chunk)
+            .enumerate()
+            .for_each(|(ci, ac)| {
+                let base = ci * chunk;
+                for (j, slot) in ac.iter_mut().enumerate() {
+                    let i = base + j;
+                    if m[i] != 0 {
+                        *slot = vals[i % v];
+                    }
+                }
+            });
+    } else {
+        for (i, slot) in a_slice.iter_mut().enumerate() {
+            if m[i] != 0 {
+                *slot = vals[i % v];
+            }
         }
     }
     Ok(true)
