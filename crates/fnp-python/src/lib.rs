@@ -45042,6 +45042,62 @@ fn einsum_native(
     }
 }
 
+// Parallel flat f64 np.unique(ar): numpy flattens then returns SORTED DISTINCT values — a
+// deterministic output, so a parallel sort + dedup is unconditionally bit-identical (unlike
+// argsort, no tie ambiguity). numpy.unique is single-threaded sort+dedup; the native path
+// here extracted a UFuncArray copy then sorted serially. Read the borrowed buffer (any
+// C-contiguous shape -> flat, matching numpy's flatten), rayon par_sort, Vec::dedup, copy
+// the distinct values into a right-sized numpy.empty. Defers (Ok(None)) for: not exact
+// C-contiguous f64, below the crossover, or ANY NaN (numpy collapses multiple NaN to one at
+// the end — a special case — and partial_cmp has no total order with NaN).
+fn try_zerocopy_f64_unique_flat(
+    py: Python<'_>,
+    item: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !item.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, item) {
+        return Ok(None);
+    }
+    if !item.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(item) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    const UNIQUE_PARALLEL_MIN: usize = 1 << 20;
+    if n < UNIQUE_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    if data.par_iter().any(|v| v.is_nan()) {
+        return Ok(None);
+    }
+    let mut sorted: Vec<f64> = data.to_vec();
+    sorted.par_sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
+    sorted.dedup(); // sorted -> equal values are consecutive; == collapses them (incl -0.0/0.0)
+    let m = sorted.len();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", (m,), Some(&kwargs))?;
+    if m > 0 {
+        let out_buffer = PyBuffer::<f64>::get(&out)?;
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: fresh numpy.empty buffer we own (no alias).
+        let dst: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, m) };
+        dst.copy_from_slice(&sorted);
+    }
+    Ok(Some(out.unbind()))
+}
+
 // Set / shortcut helpers
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
@@ -45056,6 +45112,10 @@ fn unique(
         // Counting-sort dedup for small-range integers — O(n+range) beats the sort
         // path (and numpy) for narrow widths and tight value ranges.
         if let Some(out) = try_zerocopy_int_unique(py, &item)? {
+            return Ok(out);
+        }
+        // Parallel sort+dedup for large flat f64 (deterministic output -> bit-exact).
+        if let Some(out) = try_zerocopy_f64_unique_flat(py, &item)? {
             return Ok(out);
         }
         // NumPy's unique preserves the input dtype exactly; our native kernel
