@@ -34359,6 +34359,83 @@ fn ma_argmin(
     build_numpy_scalar_or_array(py, &result)
 }
 
+// Native fast path for the common case: np.pad(x, pad_width, mode="constant") with
+// default constant_values=0 on a 1-D f64 C-contiguous ndarray. np.pad is a Python
+// function whose mode dispatch + pad_width normalization cost ~9us even for a trivial
+// pad; this allocates numpy.empty, zeros the two edges, and memcpys the input interior
+// — bit-identical to numpy (placement + zeros, no arithmetic). Returns None (defer to
+// np.pad) for any non-constant mode, any kwargs (e.g. explicit constant_values),
+// non-f64 / non-1-D / non-contiguous input, or an unrecognized pad_width form.
+fn try_zerocopy_f64_pad_1d_constant(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    array: &Bound<'_, PyAny>,
+    pad_width: &Bound<'_, PyAny>,
+    mode: &str,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if mode != "constant" {
+        return Ok(None);
+    }
+    if kwargs.is_some_and(|k| !k.is_empty()) {
+        return Ok(None); // only the default constant_values=0
+    }
+    if !array.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = array.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(array) else {
+        return Ok(None);
+    };
+    if buffer.shape().len() != 1 || !buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    // pad_width: int -> (k,k); (before,after); or [(before,after)] (single-axis).
+    let (before, after) = if let Ok(k) = pad_width.extract::<usize>() {
+        (k, k)
+    } else if let Ok(ba) = pad_width.extract::<(usize, usize)>() {
+        ba
+    } else if let Ok(v) = pad_width.extract::<Vec<(usize, usize)>>() {
+        if v.len() != 1 {
+            return Ok(None);
+        }
+        v[0]
+    } else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let total = before + n + after;
+    let out_kwargs = PyDict::new(py);
+    out_kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", (total,), Some(&out_kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias array; every
+        // element is written exactly once (edges zeroed, interior copied).
+        let o: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
+        o[..before].fill(0.0);
+        o[before + n..].fill(0.0);
+        o[before..before + n].copy_from_slice(data);
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (array, pad_width, mode="constant", **kwargs))]
 fn pad(
@@ -34375,6 +34452,12 @@ fn pad(
     // reflect_type). Extra kwargs forward through verbatim so the full
     // numpy surface is exposed.
     let numpy = py.import("numpy")?;
+    // Native 1-D constant-mode fast path (bypasses np.pad's ~9us Python dispatch).
+    if let Some(out) =
+        try_zerocopy_f64_pad_1d_constant(py, &numpy, array.bind(py), pad_width.bind(py), mode, kwargs)?
+    {
+        return Ok(out);
+    }
     let call_kwargs = PyDict::new(py);
     call_kwargs.set_item("mode", mode)?;
     if let Some(extras) = kwargs {
