@@ -835,3 +835,39 @@ Decision:
 - The target remains open for a deeper symmetric spectral primitive: shared-work
   tridiagonal eigensolver, true band-to-tridiagonal stage, or generated
   128-specific reducer with paired proof.
+
+---
+
+## 2026-06-21 cod-a fnp-linalg Terminal-2x2 QR No-Ship
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Current six-row linalg slice vs NumPy | 1/10 | Same-worker `vmi1227854` remains **0/6/0** vs NumPy |
+| Terminal-2x2 QR candidate vs current | 0/10 | Same-worker candidate regressed all six measured rows |
+| Revert discipline | 10/10 | Candidate source hunk was removed; final linalg source is unchanged |
+| Disk discipline | 10/10 | Used existing `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`; no new `.scratch` |
+| Retry guidance | 8/10 | Routes away from QR tail cleanup and toward reducer/eigensolver replacement |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- RCH same-worker baseline on `vmi1227854`: `eigvalsh_nxn/64 = 204,702 ns`,
+  `eigvalsh_nxn/128 = 1,313,136 ns`, `eigvalsh_nxn/256 = 8,099,070 ns`,
+  `cond_nxn/64 = 156,445 ns`, `cond_nxn/128 = 1,162,411 ns`,
+  `cond_nxn/256 = 7,369,744 ns`.
+- Same-host NumPy on `vmi1227854`, Python `3.13.7`, NumPy `2.4.6`, BLAS
+  threads pinned to 1: `eigvalsh` 64/128/256 = `161,342 / 465,138 /
+  1,987,180 ns`; `cond` 64/128/256 = `131,617 / 764,155 / 4,544,545 ns`.
+- Current ratio-vs-NumPy: `eigvalsh` 64/128/256 = `1.269x / 2.823x /
+  4.076x`; `cond` 64/128/256 = `1.189x / 1.521x / 1.622x`.
+- Candidate terminal-2x2 QR rows on the same worker: `211,842 / 1,376,577 /
+  9,645,038 ns` for `eigvalsh`; `175,060 / 1,208,742 / 8,700,746 ns` for
+  `cond`.
+- Candidate/current: `1.035x / 1.048x / 1.191x` for `eigvalsh`; `1.119x /
+  1.040x / 1.181x` for `cond`.
+
+Decision:
+- No release-ready improvement. Keep no source change.
+- Do not retry terminal 2x2 QR deflation, QR tail cleanup, sorting-only changes,
+  or shallow active-window gates as standalone levers. The next credible path is
+  a real reducer/eigensolver replacement: band-to-tridiagonal stage 2,
+  band-aware eigvalsh, or generated fixed-size reducer with paired NumPy proof.

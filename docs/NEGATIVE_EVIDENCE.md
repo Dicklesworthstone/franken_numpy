@@ -5639,3 +5639,61 @@ Validation and decision:
   standalone work. A credible next attempt needs a shared-work tridiagonal
   eigensolver, true band-to-tridiagonal stage, or generated 128-specific reducer
   with paired same-worker proof.
+
+## 2026-06-21 - NO-SHIP: terminal 2x2 eigvalsh QR deflation regresses
+
+`YellowElk`/`cod-a`, parent `franken_numpy-ixs5y`. Disk-frugal BOLD-VERIFY pass
+on native `fnp-linalg` spectral losses, using the existing warm
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a` target root
+and no new `.scratch` worktree. The radical lever was a terminal 2x2 analytic
+deflation in the values-only tridiagonal QR loop: when the active unreduced
+block shrinks to exactly two rows, solve that 2x2 directly and continue instead
+of taking another Wilkinson QR step.
+
+Decision: **NO-SHIP**. Same-worker old/new RCH proof on `vmi1227854` regressed
+all measured eigvalsh and cond guard rows. The source hunk was reverted; final
+production source is unchanged.
+
+Commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'cond_nxn/size/(64|128|256)|eigvalsh_nxn/size/(64|128|256)' -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- `ssh vmi1227854 'OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 python3 -'`
+- Routing-only QR micro-report already confirmed the QR scaled-hypot loop is not
+  the dominant frontier: `tridiag_eigvals_qr_perf_report` passed with about
+  `1.21x-1.25x` QR-only speedup on larger synthetic tridiagonal rows, while the
+  public API remains dominated by reducer/eigensolver work.
+
+Same-worker current final tree vs NumPy (`vmi1227854`, Python `3.13.7`,
+NumPy `2.4.6`, single-thread BLAS):
+
+| Row | Current FNP ns | NumPy ns | Current FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `eigvalsh_nxn/size/64` | 204,702 | 161,342 | 1.269x | loss |
+| `eigvalsh_nxn/size/128` | 1,313,136 | 465,138 | 2.823x | loss |
+| `eigvalsh_nxn/size/256` | 8,099,070 | 1,987,180 | 4.076x | loss |
+| `cond_nxn/size/64` | 156,445 | 131,617 | 1.189x | loss |
+| `cond_nxn/size/128` | 1,162,411 | 764,155 | 1.521x | loss |
+| `cond_nxn/size/256` | 7,369,744 | 4,544,545 | 1.622x | loss |
+
+Same-worker terminal-2x2 candidate result:
+
+| Row | Candidate FNP ns | Candidate/current | Candidate/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `eigvalsh_nxn/size/64` | 211,842 | 1.035x | 1.313x | regression |
+| `eigvalsh_nxn/size/128` | 1,376,577 | 1.048x | 2.960x | regression |
+| `eigvalsh_nxn/size/256` | 9,645,038 | 1.191x | 4.854x | regression |
+| `cond_nxn/size/64` | 175,060 | 1.119x | 1.330x | regression |
+| `cond_nxn/size/128` | 1,208,742 | 1.040x | 1.582x | regression |
+| `cond_nxn/size/256` | 8,700,746 | 1.181x | 1.915x | regression |
+
+Win/loss/neutral score:
+- Current final tree vs NumPy across measured API rows: **0 / 6 / 0**.
+- Candidate vs current final tree: **0 / 6 / 0**.
+- Candidate vs NumPy: **0 / 6 / 0**.
+
+Retry predicate:
+- Do not retry terminal 2x2 analytic QR deflation as a standalone lever; it
+  makes the public eigvalsh/cond paths slower on same-worker proof.
+- Do not spend more passes on QR tail cleanup, post-sort tweaks, or shallow
+  active-window gates. A credible next attempt must remove dominant reducer work:
+  true band-to-tridiagonal stage 2, a band-aware eigvalsh path, or a generated
+  fixed-size reducer/eigensolver with same-worker proof against NumPy.
