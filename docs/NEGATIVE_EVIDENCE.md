@@ -4,6 +4,14 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - PENDING-BENCH heartbeat: hold steady (cargo freeze sole blocker, disk 39G)
+
+`BlackThrush`/`cod-b`. No state change since the agent-mail-RECOVERED entry below:
+inbox re-checked (agent-mail working, no new disk/unfreeze instruction), disk 39G,
+freeze still on. Sole blocker = cargo build freeze; 4 unbuilt linalg delegates
+pending the on-recovery build/conformance/re-measure (checklist below). vs-numpy
+surface comprehensively diagnosed + clean — no perf lever available until unfreeze.
+
 ## 2026-06-21 - STATE CHANGE: agent-mail RECOVERED (1 of 2 blockers cleared); only cargo freeze remains
 
 Agent: `BlackThrush` / `cod-b`. The agent-mail DB corruption is RESOLVED (server
