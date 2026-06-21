@@ -4,6 +4,59 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - BOLD-VERIFY Recheck: `fnp-linalg` matrix norm 1/-1 rows are current wins; no source change
+
+Artifact directory: `tests/artifacts/perf/2026-06-21_linalg_cod_b_matrix_norm_strip8/`
+
+Run identity:
+- Bead: `franken_numpy-ixs5y.281`; parent directive `franken_numpy-ixs5y`.
+- Agent: `YellowElk` / `cod-b`.
+- Subject API: direct Rust `fnp-linalg::matrix_norm_nxn(..., ord="1"|"-1")`.
+- Current code already contains the SIMD cache-linear column-sum path. The
+  immediately prior scalar 8-column strip-mine family is already recorded as a
+  no-ship, so no new source hunk was attempted.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+
+Commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'matrix_norm_nxn_orders/(one|neg_one)/(256|512|1024)' -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg matrix_norm_column_reduction_matches_strided_reference_bits -- --nocapture`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo build -p fnp-linalg --release`
+
+Triage scorecard:
+- Current remote Rust row versus prior direct `hz2` NumPy comparator:
+  win/loss/neutral = **6/0/0**. This marks the old matrix-norm column
+  reduction gap as stale at current head.
+- Current remote Rust row versus local `thinkstation1` NumPy 2.4.3 comparator:
+  win/loss/neutral = **6/0/0**, but this is cross-host routing evidence only.
+- Same-host fresh NumPy comparator was blocked: SSH to `vmi1152480` failed with
+  `Permission denied`, and `rch exec -- python3` warned that it is a
+  non-compilation command and ran locally on `thinkstation1`.
+
+| Workload | Current FNP ns (`vmi1152480`) | Prior direct NumPy ns (`hz2`) | FNP/Prior NumPy | Local NumPy ns (`thinkstation1`) | FNP/Local NumPy | Verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `one/256` | 7,743 | 27,712 | 0.279x | 40,817 | 0.190x | current win |
+| `neg_one/256` | 5,207 | 28,312 | 0.184x | 30,277 | 0.172x | current win |
+| `one/512` | 26,211 | 103,667 | 0.253x | 79,090 | 0.331x | current win |
+| `neg_one/512` | 25,737 | 102,987 | 0.250x | 79,020 | 0.326x | current win |
+| `one/1024` | 99,936 | 397,192 | 0.252x | 357,727 | 0.279x | current win |
+| `neg_one/1024` | 98,382 | 393,621 | 0.250x | 328,452 | 0.300x | current win |
+
+Focused conformance/build:
+- `matrix_norm_column_reduction_matches_strided_reference_bits`: pass, 1 focused
+  test passed on `vmi1153651`; the filtered integration shards reported zero
+  matching tests and no failures.
+- `cargo build -p fnp-linalg --release`: pass on `vmi1152480`.
+
+Decision:
+- Keep no source change. The radical lever from the graveyard mapping here is
+  already present in current head: cache-linear column accumulation with SIMD
+  absolute-value lanes, not the rejected scalar strip-mine.
+- Route away from `matrix_norm_nxn_orders/(one|neg_one)` until a fresh same-host
+  NumPy run shows a loss again. Do not retry scalar strip-mining; the next
+  credible attempt would need a generated size-specialized column microkernel
+  or another data-movement reduction that improves same-host ratios without
+  changing per-column addition order.
+
 ## 2026-06-21 - WIN (RADICAL): zero-copy parallel angle complex128 (d84296c4, up to 25x)
 
 `BlackThrush`/`cod-b`. 5th single-threaded-numpy lever this session (bincount 9x,

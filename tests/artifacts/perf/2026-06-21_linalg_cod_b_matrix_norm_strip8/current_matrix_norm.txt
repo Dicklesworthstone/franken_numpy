@@ -1,0 +1,16 @@
+command:
+AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'matrix_norm_nxn_orders/(one|neg_one)/(256|512|1024)' -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher
+
+remote worker:
+vmi1152480
+
+result:
+test matrix_norm_nxn_orders/one/256 ... bench:       7,743 ns/iter (+/- 1,357)
+test matrix_norm_nxn_orders/neg_one/256 ... bench:       5,207 ns/iter (+/- 410)
+test matrix_norm_nxn_orders/one/512 ... bench:      26,211 ns/iter (+/- 874)
+test matrix_norm_nxn_orders/neg_one/512 ... bench:      25,737 ns/iter (+/- 765)
+test matrix_norm_nxn_orders/one/1024 ... bench:      99,936 ns/iter (+/- 10,512)
+test matrix_norm_nxn_orders/neg_one/1024 ... bench:      98,382 ns/iter (+/- 6,209)
+
+remote command:
+exit=0

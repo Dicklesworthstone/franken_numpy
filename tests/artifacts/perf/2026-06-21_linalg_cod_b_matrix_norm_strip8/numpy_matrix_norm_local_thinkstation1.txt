@@ -1,0 +1,7 @@
+host=thinkstation1 numpy=2.4.3
+matrix_norm_nxn_orders/one/256: median_ns=40817 min_ns=33323 max_ns=54834 value=np.float64(70.16969779673262)
+matrix_norm_nxn_orders/neg_one/256: median_ns=30277 min_ns=29356 max_ns=54624 value=np.float64(57.88287625645359)
+matrix_norm_nxn_orders/one/512: median_ns=79090 min_ns=78088 max_ns=111852 value=np.float64(138.3675452839507)
+matrix_norm_nxn_orders/neg_one/512: median_ns=79020 min_ns=78439 max_ns=102444 value=np.float64(118.72001772181129)
+matrix_norm_nxn_orders/one/1024: median_ns=357727 min_ns=309356 max_ns=516979 value=np.float64(269.1868202547046)
+matrix_norm_nxn_orders/neg_one/1024: median_ns=328452 min_ns=293496 max_ns=369480 value=np.float64(240.23796667303827)

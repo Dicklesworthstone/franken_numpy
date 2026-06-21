@@ -1,0 +1,8 @@
+invalid comparator attempt:
+ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new root@109.205.181.92 'cd /data/projects/franken_numpy && python3 ...'
+
+result:
+root@109.205.181.92: Permission denied (publickey,password).
+
+decision:
+Do not count this file as NumPy timing evidence. The counted ledger table uses prior direct hz2 NumPy rows plus local thinkstation1 routing evidence, both explicitly labeled.

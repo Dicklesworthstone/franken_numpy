@@ -3,6 +3,37 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-b fnp-linalg Matrix Norm Current Recheck
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Current `matrix_norm_nxn_orders` 1/-1 rows | 8/10 | Current head wins all six checked rows versus prior direct NumPy and local routing comparator |
+| Revert discipline | 9/10 | No source hunk attempted; avoided the already-rejected scalar strip-mine family |
+| Focused conformance/build | 8/10 | Focused column-reduction bit test and `fnp-linalg` release build passed through `rch` |
+| Same-host NumPy comparator freshness | 4/10 | Fresh same-host Python was blocked by SSH auth; local comparator is routing-only |
+
+Evidence:
+- Bead: `franken_numpy-ixs5y.281`; agent `YellowElk` / `cod-b`.
+- Current Rust bench worker: `vmi1152480`; command:
+  `rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg
+  'matrix_norm_nxn_orders/(one|neg_one)/(256|512|1024)'`.
+- Current FNP medians: `one/256` 7,743 ns, `neg_one/256` 5,207 ns,
+  `one/512` 26,211 ns, `neg_one/512` 25,737 ns, `one/1024` 99,936 ns,
+  `neg_one/1024` 98,382 ns.
+- Against the prior direct `hz2` NumPy rows, current FNP/NumPy ratios are
+  `0.279x`, `0.184x`, `0.253x`, `0.250x`, `0.252x`, and `0.250x`.
+- SSH to the selected worker was denied, and `rch exec -- python3` runs locally
+  for non-compilation commands, so the fresh `thinkstation1` NumPy 2.4.3 ratios
+  are recorded only as cross-host routing evidence.
+
+Decision:
+- Keep no source change. Mark the previous matrix-norm 1/-1 column-reduction
+  gap as stale at current head.
+- Route future work to a fresh measured loss, not another scalar strip-mine or
+  allocation-only matrix-norm retune.
+
+---
+
 ## 2026-06-21 cod-a fnp-linalg Spectral Cond No-Ship Recheck
 
 | Area | Score | Verdict |
