@@ -4,6 +4,34 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - MAP: batched-linalg kernel frontier (serial A/B) — why eigvalsh wins but inv/solve lose
+
+`BlackThrush`/`cod-b`. Used the reliable SERIAL A/B (RAYON_NUM_THREADS=1; numpy's
+batched gufunc loop is single-threaded, so this isolates the per-lane KERNEL from
+parallel noise) to map the whole batched-linalg frontier at B=128 n=32 (fnp/numpy):
+- KERNEL-BOUND (native per-lane > LAPACK): eigvalsh 2.54, batch_inv 1.89,
+  batch_solve 1.81, batch_svd 1.60.
+- KERNEL-OK (native per-lane competitive): batch_det 0.79, cholesky 0.95, qr 1.05,
+  pinv 1.28, lstsq 1.01.
+
+KEY INSIGHT (resolves why some kernel-bound ops still WIN parallel): a batched op
+wins iff `numpy_serial_per_lane * batch` > `fnp_serial_per_lane * batch / threads +
+overhead`. So it's HEAVY vs LIGHT per-lane work, not just the kernel ratio:
+- HEAVY per-lane (eigvalsh syevd, svd gesdd, det, cholesky): numpy's serial loop is
+  expensive, so fnp parallel WINS even when its kernel is 2.5x slower serially
+  (eigvalsh parallel 0.45x WIN despite 2.54 serial; batch_svd wins parallel too).
+- LIGHT per-lane (inv getri, solve gesv at moderate n): numpy's serial loop is cheap
+  and fnp's parallel overhead can't be amortized -> fnp LOSES parallel. batch_inv
+  1.4-1.9x (entry below) AND batch_solve (serial 1.24-2.03 across n=16/64, same
+  class) are the two LIGHT-per-lane moderate-batch LOSSES.
+
+NO-SHIP both inv+solve (kernel-bound, light per-lane). Retry = SIMD/blocked per-lane
+kernel (bit-exact risk) OR delegate moderate-batch to numpy via a batch×n gate —
+the gate needs a QUIET box to find the parallel crossover (native wins at large
+batch / tiny n; this box's parallel A/B swings 2x, unusable). cholesky now reads
+serial 0.95 here (vs my 2026-06-20 6x no-ship at d=16-64) — possibly a peer kernel
+change or conditioning; re-measure cholesky parallel on a quiet box before trusting.
+
 ## 2026-06-21 - NO-SHIP: batch_inv moderate-batch 1.4-1.9x loss is KERNEL-bound (alloc-elim disproven)
 
 `BlackThrush`/`cod-b`. With warm builds re-enabled, investigated the one real loss
