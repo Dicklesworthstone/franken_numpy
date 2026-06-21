@@ -102,3 +102,13 @@ Full-crate sweep complete (elementwise/reductions/sort-select/char/indexing/set/
 linalg) — surface comprehensively dominated. Remaining: nanmedian double-alloc + compress-gate
 (paste-ready, handed off, behind YellowElk's live fnp-ufunc lock); structural walls (small-array
 crossing, BLAS, SIMD-compaction[no-AVX512]). No new actionable lever available.
+
+## BLAS GAP QUANTIFIED (2026-06-21 ~16:18 UTC) — cod-a's no-C-BLAS area, not mine
+matmul vs numpy(OpenBLAS): 128x128 1.0x parity, 512x512 ~0.5-1.2x, 1024x1024 1.16-2.24x
+(moderate, noisy). dot(vec 4M) 0.75-1.07x parity, matvec 2000 0.67-0.99x win/parity. The
+pure-Rust GEMM is reasonable (within ~2x of OpenBLAS at 1024, NOT catastrophic). The residual
+large-matmul gap is the no-C-BLAS directive (cod-a/YellowElk territory) — matching OpenBLAS
+needs a tuned Rust GEMM (huge undertaking, contended). Not an actionable lever for me.
+ARC COMPLETE: 28 wins, all 3 medium-N fixes shipped, compress-gate closed (wall), matmul
+quantified (BLAS directive). No remaining clean lever; further gains need project-level
+decisions (lift forbid-unsafe / no-C-BLAS) or AVX-512 hardware.
