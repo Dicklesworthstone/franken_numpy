@@ -3,6 +3,39 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-a fnp-python Linalg Boundary Reverify
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Python linalg boundary ratio-vs-NumPy | 9/10 | 6 wins, 0 losses, 2 neutral rows |
+| Delegate behavior boundary | 9/10 | Exact 2-D LAPACK-shaped ndarray calls delegated; batched/native winning paths preserved |
+| Focused conformance | 8/10 | `conformance_linalg` 1/1 and `conformance_linalg_decomp` 39/39 pass; advanced shard 28/29 with only missing SciPy |
+| Current dirty-worktree independence | 6/10 | Later filtered rerun blocked by unowned `fnp-ufunc` unsafe edit, not by linalg delegate behavior |
+
+Evidence:
+- Bead: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- RCH worker for counted bench: `vmi1149989`; command:
+  `rch exec -- cargo bench -p fnp-python --bench criterion_python_surface --
+  python_linalg_boundary --sample-size 10 --measurement-time 2 --warm-up-time 1
+  --output-format bencher`.
+- Ratio table: `slogdet` 0.331x, `solve` vec 0.367x, `solve` mat2 0.469x,
+  `cholesky` 4x4 1.010x, 8x8 0.870x, 16x16 0.853x, 32x32 0.919x,
+  64x64 0.989x.
+- Counted conformance: `conformance_linalg` 1/1 PASS; `conformance_linalg_decomp`
+  39/39 PASS. `conformance_linalg_advanced` passed 28/29 and stopped only because
+  `solve_triangular_complex` imports `scipy`, which was not installed on the
+  worker.
+
+Decision:
+- Mark the previous code-only 2-D dense-linalg delegate rows as superseded by
+  measured evidence for this focused boundary slice.
+- No source change and no revert in this cod-a pass.
+- Remaining target gaps are not this wrapper cliff; route future work to the
+  measured kernel/batching losses (`batch_inv`, `batch_solve`, and native
+  `eigvalsh_nxn/128`) with a different primitive.
+
+---
+
 ## 2026-06-21 fnp-python matrix_power n=0/1 Boundary Delegate Code-Only Slice
 
 | Area | Score | Verdict |

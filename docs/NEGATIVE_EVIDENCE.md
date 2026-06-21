@@ -4,6 +4,61 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - COD-A REVERIFY: fnp-python linalg boundary vs NumPy, 6W/0L/2N
+
+`YellowElk`/`cod-a`, bead `franken_numpy-ixs5y`. Disk-frugal RCH pass using the
+existing warm target root (`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`),
+per-crate only. The radical lever under test is the already-shipped Python-boundary
+LAPACK delegate strategy for stale native 2-D dense-linalg cliffs: use cheap
+shape/dtype metadata to route exact NumPy ndarray 2-D LAPACK-shaped calls to
+NumPy before Rust extraction, while preserving winning native batched / non-2-D
+paths.
+
+Command counted for performance:
+`RCH_REQUIRE_REMOTE` was not needed for the bench; `rch exec -- cargo bench -p
+fnp-python --bench criterion_python_surface -- python_linalg_boundary
+--sample-size 10 --measurement-time 2 --warm-up-time 1 --output-format bencher`
+ran on `vmi1149989`. Note: this pinned Cargo rejected `cargo bench --release`,
+and Criterion rejected an extra `--` before its flags; those attempts are command
+syntax negative evidence, not project performance evidence.
+
+| Row | FNP ns/iter | NumPy ns/iter | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `slogdet` batch8192 4x4 | 861,862 | 2,602,743 | 0.331x | WIN |
+| `solve` batch8192 4x4 vec | 998,382 | 2,724,262 | 0.367x | WIN |
+| `solve` batch8192 4x4 mat2 | 1,182,773 | 2,521,797 | 0.469x | WIN |
+| `cholesky` batch10000 4x4 | 2,664,341 | 2,637,971 | 1.010x | NEUTRAL |
+| `cholesky` batch4000 8x8 | 2,357,179 | 2,710,934 | 0.870x | WIN |
+| `cholesky` batch2000 16x16 | 4,086,493 | 4,788,786 | 0.853x | WIN |
+| `cholesky` batch1000 32x32 | 8,227,823 | 8,950,952 | 0.919x | WIN |
+| `cholesky` batch500 64x64 | 15,302,846 | 15,465,535 | 0.989x | NEUTRAL |
+
+Score: **6 WIN / 0 LOSS / 2 NEUTRAL** in the focused Python linalg boundary
+matrix. No regression to revert.
+
+Conformance:
+- `conformance_linalg`: 1/1 PASS on the targeted RCH run.
+- `conformance_linalg_decomp`: 39/39 PASS on `hz2`.
+- `conformance_linalg_advanced`: 28/29 PASS before stopping only on
+  `solve_triangular_complex` because that worker lacks `scipy`; this is an
+  environment miss, not a NumPy mismatch. The `matrix_power` tests are included
+  in the passing set.
+- A later filtered `matrix_power` rerun on `hz2` did not reach tests because the
+  shared worktree now contains an unowned `crates/fnp-ufunc/src/lib.rs` edit with
+  an `unsafe` block at line 7985 under `#![forbid(unsafe_code)]`. Not counted
+  against the linalg delegate proof and not staged by `cod-a`.
+
+Decision:
+- KEEP the current delegate strategy and score the Python linalg boundary as
+  release-ready for this focused slice.
+- Do not spend more cod-a time on native 2-D dense-linalg wrapper cliffs already
+  closed by delegation. The remaining measured loss classes are deeper kernel or
+  batching problems: moderate-batch `batch_inv` / `batch_solve` light-per-lane
+  losses and native `eigvalsh_nxn/128`. Retry only with a genuinely different
+  primitive such as factor-once broadcast-A solve reuse, SIMD/blocked per-lane
+  kernels with bit-contract proof, or a measured NumPy delegate gate; do not
+  repeat no-ship small-threshold, reducer, sort, or allocation-threshold tweaks.
+
 ## 2026-06-21 - MAP: batched-linalg kernel frontier (serial A/B) — why eigvalsh wins but inv/solve lose
 
 `BlackThrush`/`cod-b`. Used the reliable SERIAL A/B (RAYON_NUM_THREADS=1; numpy's

@@ -3,6 +3,33 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-21 - cod-a fnp-python Linalg Boundary Reverify
+
+Scope:
+- Bead: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-python` linalg boundary Criterion rows versus live NumPy.
+- Candidate under verification: existing exact-2-D ndarray LAPACK delegate
+  strategy, with batched/native winning paths preserved.
+- Worker proof: RCH `vmi1149989` for the counted bench; `hz2` for the decomp
+  conformance shard.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Fresh head-to-head performance vs NumPy | PASS | Focused boundary matrix scored 6 wins, 0 losses, 2 neutral rows; worst counted ratio was neutral `cholesky` 4x4 at 1.010x. |
+| Focused linalg conformance | PASS | `conformance_linalg` passed 1/1; `conformance_linalg_decomp` passed 39/39. |
+| Advanced conformance scope | PARTIAL / ENV | `conformance_linalg_advanced` passed 28/29 and failed only because worker Python lacked SciPy for `solve_triangular_complex`. |
+| Dirty-worktree isolation | PASS WITH CAVEAT | A later filtered rerun was blocked before tests by an unowned `fnp-ufunc` unsafe edit; no cod-a source from this pass was involved. |
+| Evidence durability | PASS | Ratio table and retry/routing decision are recorded in `docs/NEGATIVE_EVIDENCE.md`. |
+
+Cluster score: **88 / 100**
+
+Current release posture:
+- The focused Python linalg boundary slice is measured release-ready.
+- The prior code-only pending rows below are superseded for this slice, not
+  deleted, so the ledger remains auditable.
+- Future performance work should target measured remaining kernel/batching
+  losses, not repeat the now-closed 2-D wrapper cliff.
+
 ## 2026-06-21 - fnp-python matrix_power n=0/1 Boundary Delegate Code-Only Slice
 
 Scope:
