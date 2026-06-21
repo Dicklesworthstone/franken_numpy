@@ -80,19 +80,21 @@ fn parse_nested_int_list(s: &str) -> Vec<Vec<i64>> {
 fn argwhere_outcome_body(function_expr: &str, input_expr: &str) -> String {
     format!(
         "def outcome(fn):\n\
-             try:\n\
-                 value = fn({input_expr})\n\
-                 arr = np.asarray(value)\n\
-                 print('ok')\n\
-                 print(type(value).__name__)\n\
-                 print(str(arr.dtype))\n\
-                 print(tuple(arr.shape))\n\
-                 print(arr.tolist())\n\
-             except Exception as exc:\n\
-                 print('err')\n\
-                 print(type(exc).__name__)\n\
-                 print(str(exc))\n\
-         outcome({function_expr})"
+         {I4}try:\n\
+         {I8}value = fn({input_expr})\n\
+         {I8}arr = np.asarray(value)\n\
+         {I8}print('ok')\n\
+         {I8}print(type(value).__name__)\n\
+         {I8}print(str(arr.dtype))\n\
+         {I8}print(tuple(arr.shape))\n\
+         {I8}print(arr.tolist())\n\
+         {I4}except Exception as exc:\n\
+         {I8}print('err')\n\
+         {I8}print(type(exc).__name__)\n\
+         {I8}print(str(exc))\n\
+         outcome({function_expr})",
+        I4 = "    ",
+        I8 = "        ",
     )
 }
 

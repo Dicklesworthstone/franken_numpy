@@ -72,16 +72,18 @@ fn parse_float_list(s: &str) -> Vec<f64> {
 fn trim_zeros_outcome_body(function_expr: &str, input_expr: &str, trim_arg: &str) -> String {
     format!(
         "def outcome(fn):\n\
-             try:\n\
-                 value = fn({input_expr}{trim_arg})\n\
-                 print('ok')\n\
-                 print(type(value).__name__)\n\
-                 print(repr(value))\n\
-             except Exception as exc:\n\
-                 print('err')\n\
-                 print(type(exc).__name__)\n\
-                 print(str(exc))\n\
-         outcome({function_expr})"
+         {I4}try:\n\
+         {I8}value = fn({input_expr}{trim_arg})\n\
+         {I8}print('ok')\n\
+         {I8}print(type(value).__name__)\n\
+         {I8}print(repr(value))\n\
+         {I4}except Exception as exc:\n\
+         {I8}print('err')\n\
+         {I8}print(type(exc).__name__)\n\
+         {I8}print(str(exc))\n\
+         outcome({function_expr})",
+        I4 = "    ",
+        I8 = "        ",
     )
 }
 

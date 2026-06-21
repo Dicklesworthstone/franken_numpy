@@ -41,18 +41,20 @@ fn outcome_body(setup: &str, call_expr: &str) -> String {
     format!(
         "{setup}\n\
          def normalize(value):\n\
-             if isinstance(value, tuple):\n\
-                 return ('tuple', [normalize(item) for item in value])\n\
-             if isinstance(value, list):\n\
-                 return ('list', [normalize(item) for item in value])\n\
-             arr = np.asarray(value)\n\
-             return ('array', str(arr.dtype), tuple(arr.shape), repr(arr.tolist()))\n\
+         {I4}if isinstance(value, tuple):\n\
+         {I8}return ('tuple', [normalize(item) for item in value])\n\
+         {I4}if isinstance(value, list):\n\
+         {I8}return ('list', [normalize(item) for item in value])\n\
+         {I4}arr = np.asarray(value)\n\
+         {I4}return ('array', str(arr.dtype), tuple(arr.shape), repr(arr.tolist()))\n\
          def outcome(op):\n\
-             try:\n\
-                 print(('ok', normalize({call_expr})))\n\
-             except Exception as exc:\n\
-                 print(('err', type(exc).__name__))\n\
-         outcome(op)"
+         {I4}try:\n\
+         {I8}print(('ok', normalize({call_expr})))\n\
+         {I4}except Exception as exc:\n\
+         {I8}print(('err', type(exc).__name__))\n\
+         outcome(op)",
+        I4 = "    ",
+        I8 = "        ",
     )
 }
 

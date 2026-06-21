@@ -41,18 +41,20 @@ fn outcome_body(setup: &str, call_expr: &str) -> String {
     format!(
         "{setup}\n\
          def outcome(op):\n\
-             try:\n\
-                 value = {call_expr}\n\
-                 arr = np.asarray(value)\n\
-                 print('ok')\n\
-                 print(type(value).__name__)\n\
-                 print(str(arr.dtype))\n\
-                 print(tuple(arr.shape))\n\
-                 print(repr(arr.tolist()))\n\
-             except Exception as exc:\n\
-                 print('err')\n\
-                 print(type(exc).__name__)\n\
-         outcome(op)"
+         {I4}try:\n\
+         {I8}value = {call_expr}\n\
+         {I8}arr = np.asarray(value)\n\
+         {I8}print('ok')\n\
+         {I8}print(type(value).__name__)\n\
+         {I8}print(str(arr.dtype))\n\
+         {I8}print(tuple(arr.shape))\n\
+         {I8}print(repr(arr.tolist()))\n\
+         {I4}except Exception as exc:\n\
+         {I8}print('err')\n\
+         {I8}print(type(exc).__name__)\n\
+         outcome(op)",
+        I4 = "    ",
+        I8 = "        ",
     )
 }
 
