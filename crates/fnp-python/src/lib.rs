@@ -20485,6 +20485,76 @@ fn try_zerocopy_histogram(
     }
 }
 
+// Native zero-copy parallel np.gradient for the common 1-D f64 case (unit spacing,
+// default axis, edge_order=1). numpy.gradient runs single-threaded and allocates
+// temporaries; the central-difference stencil is fully data-parallel (each output
+// element is independent) and bit-identical to numpy (same formula and order):
+// interior out[i] = (f[i+1]-f[i-1])/2, edges out[0]=f[1]-f[0], out[-1]=f[-1]-f[-2].
+fn try_zerocopy_f64_gradient_1d(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    f: &Bound<'_, PyAny>,
+    edge_order: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if edge_order != 1 {
+        return Ok(None);
+    }
+    if !f.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = f.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(f) else {
+        return Ok(None);
+    };
+    if buffer.shape().len() != 1 || !buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n < 2 {
+        return Ok(None); // numpy requires >=2 samples for edge_order=1 -> let it raise
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias f; Cell<f64> is
+        // repr(transparent) over f64; every element is written exactly once.
+        let o: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+        o[0] = data[1] - data[0];
+        o[n - 1] = data[n - 1] - data[n - 2];
+        use rayon::prelude::*;
+        const GRADIENT_PARALLEL_MIN: usize = 1 << 18; // serial native already crushes numpy below this; parallel only wins past ~256K (fan-out floor)
+        if n >= GRADIENT_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            o[1..n - 1].par_iter_mut().enumerate().for_each(|(j, slot)| {
+                let i = j + 1;
+                *slot = (data[i + 1] - data[i - 1]) / 2.0;
+            });
+        } else {
+            for i in 1..n - 1 {
+                o[i] = (data[i + 1] - data[i - 1]) / 2.0;
+            }
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (f, *varargs, axis=None, edge_order=1))]
 fn gradient(
@@ -20494,10 +20564,19 @@ fn gradient(
     axis: Option<Py<PyAny>>,
     edge_order: usize,
 ) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    // Native zero-copy parallel fast path for 1-D f64 with default unit spacing and
+    // default axis; everything else (spacing varargs, explicit axis, edge_order=2,
+    // N-D, non-f64) defers to numpy so all of its conventions match exactly.
+    if varargs.len() == 0
+        && axis.is_none()
+        && let Some(out) = try_zerocopy_f64_gradient_1d(py, &numpy, f.bind(py), edge_order)?
+    {
+        return Ok(out);
+    }
     // Passthrough to np.gradient so spacing-argument handling, axis
     // selection, return-shape conventions, and boundary schemes match
     // NumPy exactly.
-    let numpy = py.import("numpy")?;
     let gradient_fn = numpy.getattr("gradient")?;
     let mut positional: Vec<Py<PyAny>> = Vec::with_capacity(varargs.len() + 1);
     positional.push(f);
