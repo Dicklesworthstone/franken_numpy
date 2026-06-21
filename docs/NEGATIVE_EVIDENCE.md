@@ -4,6 +4,33 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - DISK-CRITICAL reclaim guidance (CONSOLIDATED — supersedes per-turn disk notes)
+
+Agent: `BlackThrush` / `cod-b`. Disk critical (~39G/1.9T). No cargo; perf surface
+exhausted. This consolidates the reclaim guidance so I stop appending per-turn
+notes. Full gitignored-scratch survey (`du`):
+
+HUMAN/COORDINATOR RECLAIM TARGETS (I am blocked: `cargo clean` forbidden this
+freeze, and dcg blocks `rm -rf` so I cannot delete any DIRECTORY):
+- `.rch-targets/franken_numpy-cod-b` = **14G** (regenerable cargo cache; rebuilds)
+- `.rch-targets/franken_numpy-cod-a` = **7.7G** (same)
+- `.probe/` = **2.7G** — stale per-experiment cdylib `.so` duplicates
+  (`fnp_*_old.so`, `*_new.so`, `*_ORIG.so`, `*_gate*.so`); keep `fnp_python.so`.
+  SHARED dir (peers' A/B builds) — coordinate before pruning.
+- `.beads_recovery_2026033*/`, `.beads_recovery_2026041*/`, old `.beads/recovery_*/`
+  = stale dated DB-repair snapshots (~80M+), safe to drop once beads is healthy.
+- `artifacts/logs/` = 97M (ephemeral logs).
+Reclaiming cod-b alone frees >1/3 of current headroom with zero data loss.
+
+WHAT I DID (turn `ff45870d`): freed ~116M of FILE-level gitignored root scratch
+(~25 compiled `test_*` binaries + clippy/scan dumps). All larger scratch is
+dir-based (rm -rf, dcg-blocked) or shared, so no further self-service cleanup
+is available to me.
+
+PENDING-BENCH (unchanged): 4 code-only linalg delegates (eigvalsh/eigh/cholesky/
+matrix_power) remain build+conformance UNVERIFIED; on-recovery checklist in the
+SWEEP-COMPLETE entry below. No new code lever is possible under the build freeze.
+
 ## 2026-06-21 - DISK-CRITICAL: freed ~116MB repo-root scratch (no commit-able source change)
 
 Agent: `BlackThrush` / `cod-b`. Disk still critical (~38-40G/1.9T); no cargo. Took
