@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - NEGATIVE: indexing/set ops dominated; compress/extract = SIMD-compaction wall
+
+`BlackThrush`/`cod-b`. Swept indexing + set ops (genuinely less-checked). WINS: take_along
+_axis 0.93x, put 0.77x, choose 0.74x, isin 0.39x, setdiff1d 0.08x, union1d 0.05x, setxor1d
+0.05x, take_1d ~parity. NO clean lever. The two mild "losses" are walls: (1) compress 1.2-
+1.8x + extract 1.1-1.7x across ALL sizes — both are boolean COMPACTION, and numpy uses a
+SIMD compaction (AVX-512 vpcompress) that fnp's safe-Rust scalar branchless mask can't match;
+extract is a passthrough to numpy.extract and routing it to fnp's native compress path is NO
+better (also the wall). compress already documented no-ship [[roll-compress-zerocopy-cell-loop
+-leads]]; extract is the same wall. NOT fixable without unsafe SIMD compaction. (2)
+sliding_window_view 1.19-1.24x is an O(1) VIEW -> sub-us dispatch noise, not a loss.
+STATUS: the vs-numpy surface (elementwise / reductions / transforms / manipulation /
+construction / char-datetime-struct / f32-int-complex dtype-gaps / indexing / set ops) is
+now COMPREHENSIVELY DOMINATED. Remaining losses are all structural walls: SIMD-compaction
+(compress/extract), small-array pyo3 crossing (clip/passthrough small-N), BLAS (matmul/dot/
+cov-gram — cod-a's no-C-BLAS directive), pure-Rust dense LAPACK (batched inv/solve/cholesky),
+sequential (cumprod/unwrap), and forbid(unsafe) zero-init (sqrt). Don't re-sweep these.
+
 ## 2026-06-21 - FIX + NEGATIVE: datetime-diff small-N regression gated; clip/complex are walls
 
 `BlackThrush`/`cod-b`. REGRESSION FIX (84acc931): a routine regression spot-check of my
