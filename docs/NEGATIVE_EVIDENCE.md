@@ -5857,3 +5857,15 @@ dispatch) and small-array pyo3 wall (inner 2.4x@800 but 0.49x@8M). MILD genuine 
 (low-ROI 1.15-1.25x, uncommon, no common class, not pursued): frexp 1.20x, diff(prepend) 1.17x,
 putmask 1.15x, busday_count 1.2x. No remaining BIG actionable lever; rest = structural walls
 (SIMD-compaction/no-AVX512, BLAS/no-C-BLAS, small-array crossing, forbid-unsafe zero-init).
+
+### View-op dispatch ~2x is sub-us noise; class-fix LOW-ROI (BlackThrush 2026-06-21, do not chase)
+ravel/swapaxes/squeeze/broadcast_to/expand_dims/moveaxis/diagonal/matrix_transpose measure
+1.2-2.3x vs numpy BUT are O(1) views: fnp shares_memory=True (correct view semantics) and the
+ratio is CONSTANT across N (ravel 2.06x@500K == 2.18x@8M — does NOT scale => no data movement,
+pure dispatch). Cause: per-call `py.import("numpy")` + `asarray` + method (3 pyo3 crossings vs
+numpy's 1). A class-fix (cached ndarray-type via PyOnceLock like NUMPY_MODULE@41235, then call
+the method directly on the ndarray skipping asarray) is feasible but LOW-ROI: the saving is
+sub-us on ops that are not hot-looped (you ravel once, then iterate the result), and it trades
+asarray-cost for is_instance-cost. Not pursued. Distinct from the FIXED view-MATERIALIZATION
+bugs (matrix_transpose/rollaxis 18000x, e669aac3) where fnp COPIED — those scaled with N and
+broke shares_memory; these don't.
