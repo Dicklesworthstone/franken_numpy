@@ -4,6 +4,18 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: native single-int np.delete fast path (2af4e907, 1.1-1.26x -> 0.75-0.93x)
+
+`BlackThrush`/`cod-b`. Continued the passthrough-dispatch-floor lever ([[native pad]]).
+Swept Python-wrapper funcs at small/medium N: insert/delete/select/average/cov/vander/
+diagflat/kron/cross/geomspace/ediff1d. Most win/parity; insert NOISY-parity (0.97-1.15x,
+not stable). delete = consistent loss (1.10-1.26x across N=1k-100k, numpy.delete's obj-
+normalization + boolean-mask + take Python overhead). FIX: native fast path for a SINGLE
+integer index on a 1-D f64 C-contig array (axis None/0) -> numpy.empty(n-1) + memcpy the
+two surviving runs. bit-identical. RESULT: 1000 0.75x, 10K 0.82x, 100K 0.93x, 1M 0.76x.
+Slice/array/bool obj, 2-D+axis, flatten, out-of-range, non-f64 all defer. conformance
+concat_append 29/29. 11th passthrough-floor lever this session.
+
 ## 2026-06-21 - WIN: native 1-D constant np.pad fast path (4ec7599f, up to 4.5x)
 
 `BlackThrush`/`cod-b`. Swept array-manipulation ops (pad/insert/delete/tile/flip/rot90/
