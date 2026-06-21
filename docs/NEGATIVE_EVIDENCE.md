@@ -22,6 +22,8 @@ checked) — a reusable one-command vs-numpy sweep over the op families this ses
 characterized (elementwise/reductions/cov/corrcoef/convolve/aliases/2-D+batched
 linalg) + a view-op shares_memory check; verdict WIN/ok/LOSS, exit=#losses. Run it
 after any numpy/BLAS bump to catch the stale-cliff regression class early.
+API-VALIDATED (no bench run — freeze): all 25 top-level `f.X` ops it references
+exist in the `.so` (no `f.eig`-class missing-attr bug); timing deferred to recovery.
 CORRECTNESS guard added: `scripts/correctness_sweep_vs_numpy.py` (py-syntax-checked)
 encodes the SUBTLE comparators the conformance suite lacked — eig/eigvals POWER-SUM
 invariants on RANDOM real matrices (the comparator that caught the silent-wrong
