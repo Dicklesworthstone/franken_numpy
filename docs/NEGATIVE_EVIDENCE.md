@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: cov/corrcoef small-shape Gram parallel-gate fix (6de7eaaa, 3.3x->2.1x)
+
+`BlackThrush`/`cod-b`. Found via full-threads sweep: corrcoef(50,1000) STABLE 3.29x
+loss (corrcoef(200,5000) wins 0.92x). Diagnosed: cov_gram_from_centered parallelized
+at work>=1<<18 (262K), but the measured crossover is ~5M — small Grams pay rayon
+fan-out + triangular per-row load imbalance (row i does i+1 cells) that dwarf the
+tiny computation. parallel-vs-serial: 50x1000 (2.5M) serial wins (359<488us);
+80x1000 (6.4M) parallel wins (596<716us); 100x1000 (10M) parallel wins (633<1111us).
+FIX: raised gate to 1<<22 (4.2M) — bit-identical (cell-independent dot8, serial==
+parallel). RESULT: corrcoef 50x1000 3.29x->2.11x, cov similar; 80x1000/200x5000
+preserved; allclose correct. Residual ~2.1x is the BLAS-Gram floor (numpy dgemm vs
+fnp scalar dot8; hard under no-C-BLAS) — the fix removes the parallel-OVERHEAD
+regression, not that floor. METHOD: this is the kind of mis-tuned size-gate full-
+threads measurement catches (serial RAYON=1 would've hidden the parallel penalty).
+
 ## 2026-06-21 - SMALL-ARRAY dispatch: cached numpy module in passthrough (616c64a1, fnp -20% overhead)
 
 `BlackThrush`/`cod-b`. Found a real loss class: SMALL arrays (N=100-1000). fnp
