@@ -17,6 +17,21 @@ Confirmed the medium-N losses are NOT the kernel: UFuncArray::unique f64 already
 fix is in fnp-python (delegate medium-N to numpy, or a zero-copy binding) — there is no
 fnp-ufunc lever. Don't re-chase the kernel.
 
+## GATE SWEEP COMPLETE (2026-06-21) — frontier clean after the par-select family.
+
+Finished the medium-N (16K-262K) gate sweep. NO more mistuned-gate losses:
+- axis median/percentile/nanmedian (1<<14 per-lane gates): all WIN at medium (0.1-0.85x) —
+  many lanes give good parallelism, gates well-tuned.
+- aggregates at medium: histogram 0.4-0.8x, cumsum 0.26x, cumprod 0.2-0.28x, digitize 0.9x,
+  searchsorted 0.83-0.94x — all win/parity. sort-axis passthrough, vander parity.
+- bincount medium 1.1-1.24x: NOT a gate (BINCOUNT_PARALLEL_MIN already 1<<19, correct; below
+  it serial bincount just trails numpy's C impl ~1.2x; lowering the gate would fan-out WORSE).
+- nanmedian flat medium 1.1-1.3x: serial NaN-filter+select+binding (not a gate), mild, U-shaped.
+CONCLUSION: the mistuned-gate lever is EXHAUSTED — its wins were the 3 global par-select gates
+(median a127d3d2 + single/multi-q percentile ab5e0c68), 2-9.6x catastrophes at 131K -> wins.
+Residual medium-N losses (bincount, nanmedian) are serial-vs-numpy floors, not gates; mild;
+nanmedian would need a fiddly fnp-python middle-band delegate. Low priority.
+
 ## SYSTEMATIC MISTUNED-GATE SWEEP (2026-06-21) — median was not alone
 
 After the median gate fix, swept fnp-ufunc parallel gates at MEDIUM N (16K-131K, where
