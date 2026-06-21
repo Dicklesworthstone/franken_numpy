@@ -46699,6 +46699,121 @@ fn numpy_dtype_is_subplatform_integer(py: Python<'_>, value: &Bound<'_, PyAny>) 
 }
 
 // Arithmetic: divmod + mod/remainder (3).
+// Zero-copy np.divmod for two same-shape f64 ndarrays. The general path extracts BOTH operands
+// into UFuncArray copies, scans for zero, computes, and builds TWO output arrays — the cold
+// extract+build traffic scales with n (2.7x@1M -> 3.75x@16M). Here we read both buffers, defer
+// (return None) when any special value is present (zero divisor / non-finite — numpy's exact
+// edge handling lives in the cold path), and otherwise compute quotient+remainder straight into
+// two numpy.empty buffers in parallel. Finite-nonzero formula is bit-identical to divmod_arrays.
+fn try_zerocopy_f64_divmod(
+    py: Python<'_>,
+    x1: &Bound<'_, PyAny>,
+    x2: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_t = numpy.getattr("ndarray")?;
+    if !x1.is_exact_instance(&ndarray_t)
+        || !x2.is_exact_instance(&ndarray_t)
+        || !numpy_dtype_is_f64(py, x1)
+        || !numpy_dtype_is_f64(py, x2)
+    {
+        return Ok(None);
+    }
+    let c_contig = |a: &Bound<'_, PyAny>| -> PyResult<bool> {
+        a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()
+    };
+    if !c_contig(x1)? || !c_contig(x2)? {
+        return Ok(None);
+    }
+    let (Ok(b1), Ok(b2)) = (PyBuffer::<f64>::get(x1), PyBuffer::<f64>::get(x2)) else {
+        return Ok(None);
+    };
+    if b1.shape() != b2.shape() {
+        return Ok(None); // no broadcasting: defer to numpy
+    }
+    let (Some(c1), Some(c2)) = (b1.as_slice(py), b2.as_slice(py)) else {
+        return Ok(None);
+    };
+    let n = c1.len();
+    let shape: Vec<usize> = b1.shape().to_vec();
+    // SAFETY: ReadOnlyCell<f64> repr(transparent); read-only under the GIL.
+    let a: &[f64] = unsafe { std::slice::from_raw_parts(c1.as_ptr().cast::<f64>(), n) };
+    let b: &[f64] = unsafe { std::slice::from_raw_parts(c2.as_ptr().cast::<f64>(), n) };
+    // Defer any special case (zero divisor / non-finite) to numpy's exact edge handling.
+    let clean = {
+        use rayon::prelude::*;
+        if n >= (1 << 16) && rayon::current_num_threads() >= 2 {
+            a.par_iter()
+                .zip(b.par_iter())
+                .all(|(&av, &bv)| av.is_finite() && bv.is_finite() && bv != 0.0)
+        } else {
+            a.iter()
+                .zip(b.iter())
+                .all(|(&av, &bv)| av.is_finite() && bv.is_finite() && bv != 0.0)
+        }
+    };
+    if !clean {
+        return Ok(None);
+    }
+    let mk = |nm: &str| -> PyResult<Bound<'_, PyAny>> {
+        let kw = PyDict::new(py);
+        kw.set_item("dtype", nm)?;
+        numpy.call_method("empty", (n,), Some(&kw))
+    };
+    let quotient = mk("float64")?;
+    let remainder = mk("float64")?;
+    if n > 0 {
+        let (Ok(qb), Ok(rb)) = (
+            PyBuffer::<f64>::get(&quotient),
+            PyBuffer::<f64>::get(&remainder),
+        ) else {
+            return Ok(None);
+        };
+        let (Some(qc), Some(rc)) = (qb.as_mut_slice(py), rb.as_mut_slice(py)) else {
+            return Ok(None);
+        };
+        // SAFETY: fresh numpy.empty buffers we own; disjoint chunks under par_chunks_mut.
+        let q: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(qc.as_ptr() as *mut f64, n) };
+        let r: &mut [f64] = unsafe { std::slice::from_raw_parts_mut(rc.as_ptr() as *mut f64, n) };
+        let kernel = |q: &mut [f64], r: &mut [f64], a: &[f64], b: &[f64]| {
+            for (((qs, rs), &av), &bv) in q.iter_mut().zip(r.iter_mut()).zip(a).zip(b) {
+                *qs = (av / bv).floor();
+                let rem = av % bv;
+                *rs = if rem != 0.0 && (rem > 0.0) != (bv > 0.0) {
+                    rem + bv
+                } else if rem == 0.0 {
+                    0.0_f64.copysign(bv)
+                } else {
+                    rem
+                };
+            }
+        };
+        const DIVMOD_PARALLEL_MIN: usize = 1 << 18;
+        if n >= DIVMOD_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            q.par_chunks_mut(chunk)
+                .zip(r.par_chunks_mut(chunk))
+                .zip(a.par_chunks(chunk))
+                .zip(b.par_chunks(chunk))
+                .for_each(|(((qq, rr), aa), bb)| kernel(qq, rr, aa, bb));
+        } else {
+            kernel(q, r, a, b);
+        }
+    }
+    let shape_t = PyTuple::new(py, shape.iter().copied())?;
+    let quotient = quotient.call_method1("reshape", (&shape_t,))?;
+    let remainder = remainder.call_method1("reshape", (&shape_t,))?;
+    if shape.is_empty() {
+        let qs = quotient.get_item(())?;
+        let rs = remainder.get_item(())?;
+        return Ok(Some(PyTuple::new(py, [&qs, &rs])?.into_any().unbind()));
+    }
+    Ok(Some(
+        PyTuple::new(py, [&quotient, &remainder])?.into_any().unbind(),
+    ))
+}
+
 #[pyfunction]
 #[pyo3(signature = (x1, x2))]
 fn divmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
@@ -46717,6 +46832,12 @@ fn divmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // exactly; defer everything else to numpy.divmod.
     if !numpy_dtype_is_f64(py, x1.bind(py)) || !numpy_dtype_is_f64(py, x2.bind(py)) {
         return fallback();
+    }
+
+    // Zero-copy same-shape f64 fast path (avoids 2 extract copies + 2 builds; the cold path's
+    // traffic scales with n, 2.7-3.75x). Defers broadcasting / special values to the cold path.
+    if let Some(out) = try_zerocopy_f64_divmod(py, x1.bind(py), x2.bind(py))? {
+        return Ok(out);
     }
 
     let x1a = match extract_numeric_array(py, x1.bind(py), "divmod(x1)") {
