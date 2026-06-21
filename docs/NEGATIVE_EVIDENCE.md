@@ -5932,3 +5932,13 @@ remains fixed. COVERAGE COMPLETE across ALL axes this stretch: op-families (~10 
 Surface COMPREHENSIVELY DOMINATED; remaining non-wins are exclusively documented walls
 (BLAS-floor, view-dispatch O(1), small-array pyo3, mild core-ufunc/uncommon residuals 1.1-1.25x,
 structural: SIMD-compaction/no-AVX512, dense-LAPACK, forbid-unsafe). No remaining actionable lever.
+
+### Mild-residual list CORRECTED (BlackThrush 2026-06-21): 3 of 5 were single-run NOISE
+Careful re-verify (min of 3x8-iter runs) of the catalogued mild residuals: diff(prepend) 0.98x
+PARITY (was "1.17x" — noise), ediff1d 0.95x PARITY (was "1.20x@2M" — noise), add/mul(f32) 1.0x
+PARITY@16M (was "1.1x" — noise). Only GENUINE mild residuals: frexp 1.11x (two-output) + putmask
+1.18x (in-place masked assign) — both UNCOMMON + moderate-effort fixes for ~1.1x => low-ROI, not
+pursued. LESSON: single 2-4M readings under shared-box load fabricate ~1.1-1.25x phantom losses;
+re-verify with min-of-N-runs (and at 16M) before cataloguing a residual. Net: the surface is even
+MORE dominated than recorded — essentially only frexp/putmask remain as tiny genuine residuals,
+plus the structural walls. No actionable lever.
