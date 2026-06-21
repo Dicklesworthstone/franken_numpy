@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: parallel no-copy flat argmax/argmin 2.5-3x (d8079422); trapezoid already won
+
+`BlackThrush`/`cod-b`. (1) Peer-flagged "trapezoid 1.55-1.78x" was STALE — re-measured: ALL
+trapezoid cases now WIN (1-D/last-axis 0.02-0.03x, axis=0 0.48-0.67x). No work needed; my
+queued last-axis recipe already landed. (2) Applied the parallel lever to flat argmax/argmin:
+they DELEGATED to numpy for len>=4096 (the old native copied the buffer to a Vec then serial-
+scanned, ~2.5x behind numpy's fused SIMD). Since numpy argextreme is SINGLE-THREADED, a
+parallel no-copy reduction wins: simd_argextreme_f64 per rayon chunk over from_raw_parts
+(no Vec copy), combine with an index-ORDERED reduce that replaces only on STRICTLY-better
+value (preserves numpy's first-occurrence tie-break); any NaN chunk defers to numpy. Gate
+1<<21 (compare-only memory-bound, like cheap-unary/hypot). RESULT: 2M argmax 0.31x/argmin
+0.39x, 8M 0.32-0.40x, 32M 0.38-0.41x; conformance_argmax 10/10, matches numpy on ties+NaN.
+RUNNING THREAD (3 wins now): the "copy buffer to Vec before scanning/parallel" antipattern
+(unary, binary Vec-copy, argextreme) loses to a from_raw_parts(&[f64]) read + parallel. Grep
+`.map(|c| c.get()).collect()` and `iter().map(|cell|cell.get())` for more (cov 23763 NEEDs
+its Vec=UFuncArray storage; matmul 38594 Vec is a deliberate alignment copy — both skip).
+
 ## 2026-06-21 - WIN: no-copy parallel binary path + hypot (fa71f8d2)
 
 `BlackThrush`/`cod-b`. Extended the parallel-vs-single-threaded-numpy lever to native binary
