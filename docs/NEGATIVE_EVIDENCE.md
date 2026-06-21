@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN (RADICAL): zero-copy parallel angle complex128 (d84296c4, up to 25x)
+
+`BlackThrush`/`cod-b`. 5th single-threaded-numpy lever this session (bincount 9x,
+trapezoid 50x, gradient 20x, sinc 50x, angle 25x). np.angle was a pure PASSTHROUGH to
+single-threaded numpy.angle (Python wrapper: extract imag/real, arctan2, optional
+*180/pi). arctan2/element is COMPUTE-bound -> parallelizes. Native path for complex128:
+view the buffer as interleaved f64 pairs [re,im], arctan2(im,re) (*180/pi if deg) into
+numpy.empty in parallel. RESULT: 4M 0.04x, 1M 0.05x, 131K 0.13x, 32K 0.31x; serial below
+1<<15 parity (no regression). complex128 bit-exact incl deg/2-D; real/complex64/scalar/
+0-d/non-contig defer to numpy unchanged. conformance_angle 8/8.
+TECHNIQUE: complex128 zero-copy = z.view(float64) -> interleaved [re0,im0,re1,im1,...]
+&[f64], element i is (data[2i], data[2i+1]). Reusable for any complex elementwise op.
+TEST GOTCHA (recurring): np.op(rng.standard_normal(N)) vs f.op(rng.standard_normal(N))
+uses DIFFERENT data (rng advances) -> spurious mismatch; bind the array once.
+LEVER TALLY: bincount 9x + trapezoid 50x + gradient 20x + sinc 50x + angle 25x.
+
 ## 2026-06-21 - WIN (RADICAL): zero-copy parallel sinc (be6621ce, up to 50x)
 
 `BlackThrush`/`cod-b`. 4th single-threaded-numpy lever this session (bincount 9x,
