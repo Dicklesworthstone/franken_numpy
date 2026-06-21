@@ -5881,3 +5881,13 @@ view-op O(1) dispatch-noise, small-array pyo3 wall (tiny ops, fnp wins large), B
 (cov/corrcoef, no-C-BLAS), mild uncommon residuals (frexp/diff-prepend/putmask/busday_count
 1.15-1.25x, no common cause), and the structural walls (SIMD-compaction/no-AVX512, dense-LAPACK,
 forbid-unsafe zero-init). No remaining big actionable lever for a single-agent perf pass.
+
+### MEDIUM-size (100K) gate-crossover sweep clean (BlackThrush 2026-06-21): gates well-tuned
+Swept reductions/transforms at 100K (the zone where mistuned parallel gates caused the
+median/percentile/kaiser losses). All win/parity: nanstd/nanvar 0.18x, nansum 0.24x, nanmean
+0.21x, cumprod 0.26x, gradient 0.10x, nanprod 0.51x, nanargmin 0.70x WINS; std/var/prod/ptp/
+diff2/average/nanmin/nanmax PARITY. The gate fixes (cov 1<<22, argmax 1<<20, median/percentile
+1<<19) hold — no remaining mistuned gate. Only cov(10,10000) 1.31x = known BLAS-Gram floor at
+small n_vars (native 55-cell dot vs BLAS syrk; parallel/SIMD-across-obs breaks cov bit-exact
+repr => documented no-ship, needs C-BLAS or a bit-exactness human decision). Size-coverage now
+COMPLETE: large (2-8M) AND medium (100K) both comprehensively dominated.
