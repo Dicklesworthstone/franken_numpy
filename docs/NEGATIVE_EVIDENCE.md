@@ -4,6 +4,53 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - NO-SHIP: eigvalsh(128) Sturm bisection eigensolver
+
+`YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on the
+native `fnp-linalg::eigvalsh_nxn/size/128` residual. The radical lever tested a
+values-only symmetric-tridiagonal Sturm-count bisection eigensolver for exactly
+`n == 128`, replacing only the final implicit-QR eigenvalue phase after the
+existing blocked Householder reduction. This is a legitimate deeper eigensolver
+primitive, not a retry of the already-rejected threshold, sort, cond-extrema,
+panel-width, active-window deflation, tail-local row-dot, or sub-1024 Rayon
+matvec families.
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-21_linalg_eigvalsh128_cod_b_pass2/`
+
+Commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg eigvalsh_nxn/size/128 -- --sample-size 12 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- `ssh hz2 'OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -'`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg eigvalsh_128_bisection_matches_qr_reference --release -- --nocapture`
+
+| Probe | Worker | FNP ns | NumPy ns | FNP/NumPy | Candidate/Baseline | Verdict |
+|---|---|---:|---:|---:|---:|---|
+| Current QR path | `hz2` | 1,545,094 | 750,348 | 2.059x loss | n/a | current loss |
+| Candidate Sturm bisection | `hz2` | 5,133,686 | 750,348 | 6.842x loss | 3.322x regression | no-ship |
+
+Scorecard:
+- Current vs NumPy: win/loss/neutral = **0/1/0**.
+- Candidate vs NumPy: win/loss/neutral = **0/1/0**.
+- Candidate vs current: win/loss/neutral = **0/1/0**.
+
+Validation and decision:
+- Candidate focused correctness passed: the temporary `n=128` bisection output
+  matched the established QR reference within `1e-9`.
+- Performance failed hard: doing independent Sturm bisection for every
+  eigenvalue was much slower than the implicit QR chase on the measured dense
+  SPD row.
+- Source was reverted. No `crates/fnp-linalg/src/lib.rs` hunk is kept.
+- Final focused gates after revert: `cargo test -p fnp-linalg tridiag --release`
+  passed 7/7 with 4 ignored timing reports; `cargo build -p fnp-linalg --release`
+  passed; `git diff --check` passed. `cargo fmt --check -p fnp-linalg` still
+  reports broad pre-existing linalg formatting drift and was not normalized in
+  this evidence-only commit.
+- Do not retry full-spectrum per-eigenvalue Sturm bisection for this class. A
+  credible next attempt needs a shared-work tridiagonal eigensolver
+  (dqds/MRRR/divide-and-conquer style), true two-stage band-to-tridiagonal work,
+  or a generated 128-specific reducer that reduces the Householder phase without
+  revisiting the rejected microfamilies above.
+
 ## 2026-06-21 - WIN: matrix_power(A, 1) lazy fallback removes residual wrapper loss
 
 `YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. The prior exact-ndarray `n==1`

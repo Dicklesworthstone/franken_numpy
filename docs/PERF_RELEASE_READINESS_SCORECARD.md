@@ -3,6 +3,44 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-b fnp-linalg Eigvalsh 128 Sturm Bisection No-Ship
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Current `eigvalsh_nxn/128` vs NumPy | 2/10 | Fresh `hz2` row is still a 2.059x NumPy loss |
+| Sturm bisection candidate | 0/10 | Regressed to 3.322x slower than current and 6.842x slower than NumPy |
+| Correctness guard | 8/10 | Candidate matched QR reference within `1e-9` before revert |
+| Revert discipline | 9/10 | Production `fnp-linalg` source returned to baseline; evidence only |
+| Retry guidance | 8/10 | Routes away from per-eigenvalue bisection and rejected microfamilies |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-b`.
+- Artifact directory:
+  `tests/artifacts/perf/2026-06-21_linalg_eigvalsh128_cod_b_pass2/`.
+- Current baseline on `hz2`: `eigvalsh_nxn/size/128 = 1,545,094 ns`.
+- Direct NumPy comparator via `ssh hz2`: NumPy `2.3.5`, median `750,348 ns`.
+- Current FNP/NumPy ratio: `2.059x` loss.
+- Candidate: exact-`n==128` Sturm-count bisection for all tridiagonal
+  eigenvalues after the existing blocked reduction.
+- Candidate result on `hz2`: `5,133,686 ns`; candidate/current `3.322x`
+  regression; candidate/NumPy `6.842x` loss.
+- Candidate focused test passed, then the source hunk and temporary test were
+  removed.
+- Final focused gates after revert: `cargo test -p fnp-linalg tridiag --release`
+  passed 7/7 with 4 ignored timing reports; `cargo build -p fnp-linalg --release`
+  passed; `git diff --check` passed. `cargo fmt --check -p fnp-linalg` still
+  reports broad pre-existing linalg formatting drift and was not normalized.
+
+Decision:
+- No release-ready improvement. Keep no source.
+- Do not retry full-spectrum per-eigenvalue bisection for this residual.
+- Next credible `eigvalsh_nxn/128` attempt needs shared-work tridiagonal
+  eigensolver work, true two-stage band-to-tridiagonal work, or a generated
+  128-specific reducer that avoids the already rejected threshold/sort/deflation
+  and row-dot families.
+
+---
+
 ## 2026-06-21 cod-b fnp-python Matrix Power Lazy Fallback Keep
 
 | Area | Score | Verdict |
