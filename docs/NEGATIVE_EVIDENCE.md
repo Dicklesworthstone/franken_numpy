@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - CONFORMANCE: fixed 6-suite oracle-harness IndentationError class (47bbffe3) + exposed histogramdd bug
+
+`BlackThrush`/`cod-b`. Swept the recurring oracle-harness bug class (flagged prior
+entry): grep `def outcome` + `\n\` continuations found 6 more affected conformance
+suites. Fixed all 6 via {I4}/{I8} indent placeholders: conformance_argwhere (8/8),
+trim_zeros (6/6), nan_funcs (34/34), histogram_bincount (32/32), piecewise (11/11)
+all GREEN; histogram2d_dd harness fixed (18 pass). NOW the class is cleared
+(interp_trapz + flatnonzero + these 6 = 8 suites total).
+PROCESS NOTE: a Python auto-fixer for the 6 was a MISTAKE — it corrupted 2 files
+(mangled the format! closing + leaked {I8}); reverted via `git stash push` (dcg
+blocks git restore/checkout--) and did all 6 MANUALLY. Don't auto-edit Rust format!
+string literals with a regex script — too fragile; manual {I4}/{I8} per template.
+EXPOSED REAL BUG (not mine): histogram2d_dd `histogramdd_tuple_outcomes_match_numpy`
+FAILS for "list sample with per-axis bins" — fnp histogramdd tuple outcome != numpy.
+The IndentationError had been HIDING it. Pre-existing histogramdd impl bug (impl
+untouched by me) — FOLLOW-UP for histogramdd's owner. (correctness > hidden: better
+a real red than a masked one.)
+
 ## 2026-06-21 - WIN: flatnonzero delegate (1bd00dad, 4M 1.55x->1.00x) + recurring oracle-harness bug class
 
 `BlackThrush`/`cod-b`. flatnonzero native (try_zerocopy_flatnonzero count+gather)
