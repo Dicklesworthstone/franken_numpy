@@ -70,6 +70,48 @@ class as the pinv/svdvals 2-D delegations already shipped — inv is the one lef
 behind a stale cliff gate. Retry predicate: verify with `OPENBLAS_NUM_THREADS=1`
 inv across n=128..2000 on the tuning box before flipping.
 
+## 2026-06-21 - BOLD-VERIFY CODE-ONLY Pending Bench: exact-symmetric cond duplicate finite-scan elision
+
+Artifact directory: `tests/artifacts/perf/2026-06-21_linalg_spectral_bold_verify_cod_a/`
+
+Agent: `YellowElk` / `cod-a`. Under directive `franken_numpy-ixs5y`. SOURCE
+COMMITTED, BENCH PENDING.
+
+Disk-low constraint arrived after the same-worker baseline capture: no new
+`cargo bench`, `cargo build`, `cargo check`, or `cargo test` was started after
+that instruction. The source lever is deliberately narrow and must be verified in
+the next turn before being scored as a win/loss.
+
+Candidate:
+- Public `eigvalsh_nxn` keeps the existing shape and finite-input validation.
+- A new internal `eigvalsh_finite_nxn` helper owns the validated reduction + QR +
+  sort body.
+- Exact-symmetric finite `cond_nxn(..., p=None|"2"|"-2")` already rejects NaN
+  and Inf before taking the symmetric branch, so it now calls the internal helper
+  and avoids re-scanning the full matrix for finiteness inside public
+  `eigvalsh_nxn`.
+- Fallback paths for non-symmetric, rectangular, NaN, Inf, and non-2-norm orders
+  are unchanged.
+
+Pre-change same-worker `hz1` baseline already captured this session:
+
+| Row | Current FNP median ns | NumPy median ns | Current FNP/NumPy | Status |
+|---|---:|---:|---:|---|
+| `eigvalsh_nxn/size/64` | 266,616 | 169,650 | 1.571x | loss; source hunk should not change public row materially |
+| `eigvalsh_nxn/size/128` | 1,932,374 | 929,745 | 2.078x | loss; source hunk should not change public row materially |
+| `eigvalsh_nxn/size/256` | 13,567,576 | 5,707,000 | 2.377x | loss; source hunk should not change public row materially |
+| `cond_nxn/size/64` | 239,040 | 376,481 | 0.635x | current win; guard against regression |
+| `cond_nxn/size/128` | 1,928,424 | 1,370,837 | 1.407x | target residual loss |
+| `cond_nxn/size/256` | 15,869,378 | 15,477,214 | 1.025x | neutral/slight loss |
+| `cond_nxn/size/512` | 84,832,089 | 125,132,325 | 0.678x | current win; guard against regression |
+
+Pending next-turn verification:
+- Run per-crate `fnp-linalg` correctness/conformance and formatting gates.
+- Re-run `cond_nxn` and `eigvalsh_nxn` Criterion rows on the same worker if
+  possible; keep only if the `cond_nxn/128` duplicate-scan elision moves the
+  residual loss without regressing the 64/256/512 guard rows.
+- If the row is neutral or regresses, revert this hunk and record the rejection.
+
 ## 2026-06-20 - BOLD-VERIFY WIN x3: array-API aliases reuse their optimized twins
 
 Artifact: inline (this entry). Agent: `BlackThrush` / `cod-b`. Directive `franken_numpy-ixs5y`. SHIP.

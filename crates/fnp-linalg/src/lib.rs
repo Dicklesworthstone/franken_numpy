@@ -5496,11 +5496,19 @@ pub fn eigvalsh_nxn(a: &[f64], n: usize) -> Result<Vec<f64>, LinAlgError> {
         return Err(LinAlgError::SpectralConvergenceFailed);
     }
 
+    Ok(eigvalsh_finite_nxn(a, n))
+}
+
+fn eigvalsh_finite_nxn(a: &[f64], n: usize) -> Vec<f64> {
+    debug_assert_eq!(Some(a.len()), n.checked_mul(n));
+    debug_assert!(n > 0);
+    debug_assert!(a.iter().all(|v| v.is_finite()));
+
     let (mut d, mut e) = tridiag_reduce_values(a, n);
     tridiag_eigvals_qr(&mut d, &mut e, n);
 
     d.sort_by(|a, b| a.total_cmp(b));
-    Ok(d)
+    d
 }
 
 /// Compute eigenvalues and eigenvectors of a symmetric NxN matrix via QR iteration.
@@ -6037,12 +6045,8 @@ fn is_exact_symmetric_nxn(a: &[f64], n: usize) -> bool {
     true
 }
 
-fn symmetric_cond_from_eigvalsh(
-    a: &[f64],
-    n: usize,
-    reciprocal: bool,
-) -> Result<f64, LinAlgError> {
-    let eigvals = eigvalsh_nxn(a, n)?;
+fn symmetric_cond_from_eigvalsh(a: &[f64], n: usize, reciprocal: bool) -> f64 {
+    let eigvals = eigvalsh_finite_nxn(a, n);
     let mut sigma_min = f64::INFINITY;
     let mut sigma_max = 0.0f64;
     for eig in eigvals {
@@ -6053,14 +6057,14 @@ fn symmetric_cond_from_eigvalsh(
 
     if reciprocal {
         if sigma_max == 0.0 {
-            Ok(f64::INFINITY)
+            f64::INFINITY
         } else {
-            Ok(sigma_min / sigma_max)
+            sigma_min / sigma_max
         }
     } else if sigma_min == 0.0 {
-        Ok(f64::INFINITY)
+        f64::INFINITY
     } else {
-        Ok(sigma_max / sigma_min)
+        sigma_max / sigma_min
     }
 }
 
@@ -6156,7 +6160,7 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
                 return Ok(f64::INFINITY);
             }
             if !has_nan && is_exact_symmetric_nxn(a, n) {
-                return symmetric_cond_from_eigvalsh(a, n, false);
+                return Ok(symmetric_cond_from_eigvalsh(a, n, false));
             }
             let sigmas = svd_nxn(a, n)?;
             let sigma_max = sigmas.first().copied().unwrap_or(0.0);
@@ -6171,7 +6175,7 @@ pub fn cond_p_nxn(a: &[f64], n: usize, p: Option<&str>) -> Result<f64, LinAlgErr
                 return Ok(f64::INFINITY);
             }
             if !has_nan && is_exact_symmetric_nxn(a, n) {
-                return symmetric_cond_from_eigvalsh(a, n, true);
+                return Ok(symmetric_cond_from_eigvalsh(a, n, true));
             }
             let sigmas = svd_nxn(a, n)?;
             let sigma_max = sigmas.first().copied().unwrap_or(0.0);

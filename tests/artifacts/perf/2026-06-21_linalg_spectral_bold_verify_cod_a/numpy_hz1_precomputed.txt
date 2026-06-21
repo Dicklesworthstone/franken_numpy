@@ -1,0 +1,11 @@
+host_hz1
+python 3.14.4
+numpy 2.3.5
+mode precomputed_inputs
+numpy_eigvalsh_precomputed_64: min=167477 median=169650 p95=193956 max=208573 ns runs=25
+numpy_eigvalsh_precomputed_128: min=910538 median=929745 p95=952097 max=968066 ns runs=25
+numpy_eigvalsh_precomputed_256: min=5623812 median=5707000 p95=5906745 max=6775524 ns runs=25
+numpy_cond_precomputed_64: min=361572 median=376481 p95=406196 max=411397 ns runs=25
+numpy_cond_precomputed_128: min=1352843 median=1370837 p95=1394512 max=1412354 ns runs=25
+numpy_cond_precomputed_256: min=15381844 median=15477214 p95=15642336 max=16379356 ns runs=25
+numpy_cond_precomputed_512: min=123469738 median=125132325 p95=129971365 max=131651164 ns runs=25

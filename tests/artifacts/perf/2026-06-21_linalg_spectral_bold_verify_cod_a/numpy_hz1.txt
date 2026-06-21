@@ -1,0 +1,10 @@
+host_hz1
+python 3.14.4
+numpy 2.3.5
+numpy_eigvalsh_64: min=959712 median=964520 p95=974790 max=1018763 ns runs=15
+numpy_eigvalsh_128: min=4008614 median=4045164 p95=4066944 max=4084718 ns runs=15
+numpy_eigvalsh_256: min=18669728 median=21124429 p95=27194323 max=30763849 ns runs=15
+numpy_cond_64: min=367344 median=388693 p95=422917 max=436704 ns runs=15
+numpy_cond_128: min=1389873 median=1484952 p95=1891458 max=2081969 ns runs=15
+numpy_cond_256: min=15603712 median=16257477 p95=17882122 max=19751469 ns runs=15
+numpy_cond_512: min=122326089 median=123316528 p95=126441295 max=130414953 ns runs=15
