@@ -8065,12 +8065,16 @@ pub fn batch_inv(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgError>
             "batch_inv: data length does not match shape",
         ));
     }
-    // Tiny matrices: write each inverse DIRECTLY into the flat output through
-    // per-thread reusable (lu, perm) scratch — no per-lane lu/perm/eye/result alloc,
-    // no Vec<Vec>, no flatten. inv is n*n (m=n RHS columns), so like matrix-RHS solve
-    // its per-lane O(n^3) compute overtakes the alloc savings beyond small n; gate to
-    // the regime where the win is clear. Byte-identical to per-lane inv_nxn.
-    const INV_SCRATCH_MAX_N: usize = 16;
+    // Write each inverse DIRECTLY into the flat output through per-thread reusable
+    // (lu, perm) scratch — no per-lane lu/perm/eye/result alloc, no Vec<Vec>, no
+    // flatten. The previous gate (n<16) routed n=16..64 through batch_map_lanes +
+    // per-lane inv_nxn (Vec alloc/lane) + a full flatten copy, which measured 1.4-1.9x
+    // SLOWER than np.linalg.inv at moderate batch (B=256 n=16 1.87x, n=32 1.80x,
+    // n=64 1.48x) — the loss shrank with n, the signature of fixed per-lane
+    // alloc/flatten overhead (not the per-lane O(n^3) kernel). Direct-write through
+    // n<128 eliminates that overhead; byte-identical to per-lane inv_nxn. n>=128 was
+    // already ~parity, so it keeps the batch_map_lanes path.
+    const INV_SCRATCH_MAX_N: usize = 128;
     if n < INV_SCRATCH_MAX_N {
         let mut result = vec![0.0f64; batch * mat_size];
         if batch_should_parallelize(batch, mat_size) {
