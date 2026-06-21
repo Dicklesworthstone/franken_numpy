@@ -90,3 +90,15 @@ gradient along the LAST axis for N-D (gradient(M, axis=-1) ~1.08x parity → par
 per-row stencil, est. ~2-3x): a clean generalization of the proven 1-D path
 (parallel over outer rows via par_chunks(L); 1-D stays interior-parallel). Blocked this
 turn by YellowElk's exclusive reservation on crates/fnp-python/src/lib.rs.
+
+## CONSOLIDATED LOW-LOAD SCORECARD (2026-06-21 ~15:42 UTC, load 7.1, 8M) — all wins confirmed
+
+Representative vs-numpy ratios (fnp/np, <1 = win), measured at LOW load (reliable):
+  sqrt 0.13 | negative 0.14 | hypot 0.05 | arctan2 0.04 | argmax 0.17 | nanargmax 0.03
+  sort 0.56 | argsort 0.26 | unique 0.66 | median 0.56 | percentile 0.56 | cumsum 0.66
+  nansum 0.07 | where 0.61
+All 27 arc wins intact incl the median/percentile gate fixes (a127d3d2/ab5e0c68, 0.56x at 8M).
+Full-crate sweep complete (elementwise/reductions/sort-select/char/indexing/set/utility/gates/
+linalg) — surface comprehensively dominated. Remaining: nanmedian double-alloc + compress-gate
+(paste-ready, handed off, behind YellowElk's live fnp-ufunc lock); structural walls (small-array
+crossing, BLAS, SIMD-compaction[no-AVX512]). No new actionable lever available.
