@@ -45155,7 +45155,15 @@ where
         }
     };
     use rayon::prelude::*;
-    const ARGEXTREME_PARALLEL_MIN: usize = 1 << 16;
+    // Flat argmax/argmin is a single memory-bound scan, so rayon (per-chunk arg +
+    // reduce) adds combine overhead without speeding the bandwidth-saturated read.
+    // Measured: SERIAL beats parallel for all N<~8M (even 4M: serial 1.28ms <
+    // parallel 1.60ms, and serial BEATS numpy 0.81x while parallel loses 1.11x);
+    // parallel only edges ahead by ~16M. Old gate 1<<16 (65K) forced parallel on the
+    // common 100K-4M range -> turned a serial win into a loss. Gate at 1<<23 (8M).
+    // Chunk args are position-offset + combined deterministically -> serial/parallel
+    // pick the same index (bit-identical).
+    const ARGEXTREME_PARALLEL_MIN: usize = 1 << 23;
     const CHUNK: usize = 1 << 14;
     let idx = if n >= ARGEXTREME_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         data.par_chunks(CHUNK)
