@@ -3,6 +3,44 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-a fnp-python 2-D Linalg Delegate Criterion Recheck
+
+| Area | Score | Verdict |
+|---|---:|---|
+| 2-D `eigvalsh`/`eigh`/`cholesky` delegate rows | 8/10 | 2 wins, 0 losses, 4 neutral; old dense Python-surface loss remains closed |
+| `matrix_power` boundary rows | 5/10 | `n=0` parity; `n=1` exposes a 2.407x micro-dispatch loss |
+| Guard linalg boundary rows | 9/10 | Batch `slogdet`/`inv`/`solve` still dominate NumPy; batched Cholesky stays parity/win |
+| Revert discipline | 9/10 | Kept benchmark rows only; no production edit while `fnp-python/src/lib.rs` is peer-dirty |
+| Focused conformance | 9/10 | `conformance_linalg*` release shards passed 69/69 |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Added exact 2-D delegate rows to
+  `crates/fnp-python/benches/criterion_python_surface.rs`.
+- Counted bench worker: `ovh-a`; command:
+  `rch exec -- cargo bench -p fnp-python --bench criterion_python_surface --
+  python_linalg_boundary --output-format bencher`.
+- New delegate ratios: `eigvalsh` n=200 `1.002x`, `eigvalsh` n=800 `1.011x`,
+  `eigh` n=200 `0.886x`, `eigh` n=800 `0.996x`, `cholesky` n=200 `0.906x`,
+  `cholesky` n=800 `0.997x`.
+- `matrix_power(A, 0)` n=800 is `1.015x`; `matrix_power(A, 1)` n=800 is
+  `2.407x`, but only `1,401 ns` versus NumPy `582 ns`.
+- Same run guard score across all linalg boundary pairs:
+  **11 wins / 1 loss / 9 neutral**.
+- Focused conformance used `rch` with no admissible worker and fell back locally,
+  still using `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`:
+  `conformance_linalg` 1/1, `conformance_linalg_advanced` 29/29,
+  `conformance_linalg_decomp` 39/39.
+
+Decision:
+- Treat dense 2-D `eigvalsh`/`eigh`/`cholesky` as release-ready for the Python
+  surface; do not reopen native-kernel work for those exact ndarray rows.
+- Keep no production source change from this pass. The remaining measured loss
+  is a narrow `matrix_power(A, 1)` wrapper dispatch floor and should wait until
+  `crates/fnp-python/src/lib.rs` is free from peer-owned compress work.
+
+---
+
 ## 2026-06-21 cod-a fnp-python Batch Inv/Solve Current Recheck
 
 | Area | Score | Verdict |

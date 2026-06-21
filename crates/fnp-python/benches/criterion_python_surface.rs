@@ -1701,6 +1701,50 @@ fn bench_linalg_boundary(c: &mut Criterion) {
         };
         let inv_stack_128 = make_spd_stack(64, 128);
         let inv_stack_256 = make_spd_stack(16, 256);
+        let make_spd_2d = |dim: usize| {
+            let rng = numpy
+                .getattr("random")
+                .expect("numpy.random")
+                .call_method1("default_rng", (0xD361_u64 + dim as u64,))
+                .expect("2-D linalg rng");
+            let raw = rng
+                .call_method1("standard_normal", ((dim, dim),))
+                .expect("2-D normal matrix")
+                .call_method1("astype", ("float64",))
+                .expect("2-D f64 matrix");
+            let transposed = raw.getattr("T").expect("2-D transpose view");
+            let gram = numpy
+                .getattr("matmul")
+                .expect("numpy.matmul")
+                .call1((&raw, &transposed))
+                .expect("2-D gram matrix");
+            let eye = numpy
+                .call_method1("eye", (dim,))
+                .expect("2-D identity")
+                .call_method1("__mul__", (dim as f64 + 1.0_f64,))
+                .expect("scaled 2-D identity");
+            gram.call_method1("__add__", (&eye,))
+                .expect("2-D SPD matrix")
+        };
+        let make_dense_2d = |dim: usize| {
+            let total = dim * dim;
+            let raw = numpy
+                .call_method1("arange", (total,))
+                .expect("dense 2-D raw values")
+                .call_method1("astype", ("float64",))
+                .expect("dense 2-D f64 values")
+                .call_method1("reshape", ((dim, dim),))
+                .expect("dense 2-D shape")
+                .call_method1("__mul__", (0.0001_f64,))
+                .expect("scaled dense 2-D matrix");
+            let eye = numpy
+                .call_method1("eye", (dim,))
+                .expect("dense 2-D identity")
+                .call_method1("__mul__", (2.0_f64,))
+                .expect("scaled dense 2-D identity");
+            raw.call_method1("__add__", (&eye,))
+                .expect("well-conditioned dense 2-D matrix")
+        };
 
         let fnp_slogdet = module.getattr("slogdet").expect("fnp_python.slogdet");
         let numpy_slogdet = numpy_linalg
@@ -1710,10 +1754,22 @@ fn bench_linalg_boundary(c: &mut Criterion) {
         let numpy_inv = numpy_linalg.getattr("inv").expect("numpy.linalg.inv");
         let fnp_solve = module.getattr("solve").expect("fnp_python.solve");
         let numpy_solve = numpy_linalg.getattr("solve").expect("numpy.linalg.solve");
+        let fnp_eigvalsh = module.getattr("eigvalsh").expect("fnp_python.eigvalsh");
+        let numpy_eigvalsh = numpy_linalg
+            .getattr("eigvalsh")
+            .expect("numpy.linalg.eigvalsh");
+        let fnp_eigh = module.getattr("eigh").expect("fnp_python.eigh");
+        let numpy_eigh = numpy_linalg.getattr("eigh").expect("numpy.linalg.eigh");
         let fnp_cholesky = module.getattr("cholesky").expect("fnp_python.cholesky");
         let numpy_cholesky = numpy_linalg
             .getattr("cholesky")
             .expect("numpy.linalg.cholesky");
+        let fnp_matrix_power = module
+            .getattr("matrix_power")
+            .expect("fnp_python.matrix_power");
+        let numpy_matrix_power = numpy_linalg
+            .getattr("matrix_power")
+            .expect("numpy.linalg.matrix_power");
 
         group.bench_function("fnp_slogdet_f64_batch8192_4x4", |bench| {
             bench.iter(|| {
@@ -1841,6 +1897,89 @@ fn bench_linalg_boundary(c: &mut Criterion) {
                 black_box(result);
             });
         });
+
+        for (label, input) in [("n200", make_spd_2d(200)), ("n800", make_spd_2d(800))] {
+            group.bench_function(format!("fnp_eigvalsh_delegate_f64_2d_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_eigvalsh
+                        .call1((&input,))
+                        .expect("fnp eigvalsh delegate benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_eigvalsh_delegate_f64_2d_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_eigvalsh
+                        .call1((&input,))
+                        .expect("numpy eigvalsh benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("fnp_eigh_delegate_f64_2d_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_eigh
+                        .call1((&input,))
+                        .expect("fnp eigh delegate benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_eigh_delegate_f64_2d_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_eigh
+                        .call1((&input,))
+                        .expect("numpy eigh benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("fnp_cholesky_delegate_f64_2d_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_cholesky
+                        .call1((&input,))
+                        .expect("fnp cholesky delegate benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_cholesky_delegate_f64_2d_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_cholesky
+                        .call1((&input,))
+                        .expect("numpy cholesky benchmark call");
+                    black_box(result);
+                });
+            });
+        }
+
+        let matrix_power_800 = make_dense_2d(800);
+        for (label, power) in [("n0", 0_i64), ("n1", 1_i64)] {
+            group.bench_function(
+                format!("fnp_matrix_power_delegate_f64_2d_800_{label}"),
+                |bench| {
+                    bench.iter(|| {
+                        let result = fnp_matrix_power
+                            .call1((&matrix_power_800, power))
+                            .expect("fnp matrix_power delegate benchmark call");
+                        black_box(result);
+                    });
+                },
+            );
+
+            group.bench_function(
+                format!("numpy_matrix_power_delegate_f64_2d_800_{label}"),
+                |bench| {
+                    bench.iter(|| {
+                        let result = numpy_matrix_power
+                            .call1((&matrix_power_800, power))
+                            .expect("numpy matrix_power benchmark call");
+                        black_box(result);
+                    });
+                },
+            );
+        }
 
         for (label, input) in [
             ("batch10000_4x4", make_spd_stack(10_000, 4)),

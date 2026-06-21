@@ -4,6 +4,77 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - BOLD-VERIFY Recheck: 2-D linalg delegate Criterion rows added; dense losses closed, one micro-loss exposed
+
+`YellowElk`/`cod-a`, parent directive `franken_numpy-ixs5y`. Applied the
+graveyard/alien-artifact/optimization loop to the native dense-2D linalg cliff
+after the warm-build delegate closeout. The radical source lever had already
+shipped: exact real 2-D ndarray `eigvalsh`/`eigh`/`cholesky` delegate to NumPy's
+LAPACK path before Rust extraction, while batched native paths stay in Rust. This
+slice keeps no production source change; it adds reproducible Criterion rows to
+`python_linalg_boundary` so the closed loss class is measurable via the standard
+per-crate bench.
+
+Disk-frugal commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --bench criterion_python_surface -- python_linalg_boundary --output-format bencher`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --release --test conformance_linalg --test conformance_linalg_advanced --test conformance_linalg_decomp`
+
+Counted worker for the bench: `ovh-a`. Focused conformance used `rch` but fell
+back locally because no worker slots were admissible; it still used the cod-a
+target dir and only the `fnp-python` linalg shards.
+
+New same-process Python-boundary rows:
+
+| Row | FNP ns/iter | NumPy ns/iter | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `eigvalsh` 2-D n=200 | 1,986,165 | 1,981,935 | 1.002x | neutral/parity |
+| `eigh` 2-D n=200 | 6,069,369 | 6,848,490 | 0.886x | WIN |
+| `cholesky` 2-D n=200 | 365,134 | 402,864 | 0.906x | WIN |
+| `eigvalsh` 2-D n=800 | 94,116,656 | 93,137,025 | 1.011x | neutral/parity |
+| `eigh` 2-D n=800 | 343,687,445 | 345,151,105 | 0.996x | neutral/parity |
+| `cholesky` 2-D n=800 | 19,617,546 | 19,674,716 | 0.997x | neutral/parity |
+| `matrix_power(A, 0)` 2-D n=800 | 139,448 | 137,403 | 1.015x | neutral/parity |
+| `matrix_power(A, 1)` 2-D n=800 | 1,401 | 582 | 2.407x | LOSS, micro-dispatch floor |
+
+Same run guard rows:
+
+| Row | FNP ns/iter | NumPy ns/iter | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `slogdet` batch8192 4x4 | 441,199 | 1,745,891 | 0.253x | WIN |
+| `inv` batch8192 4x4 | 544,096 | 2,775,588 | 0.196x | WIN |
+| `inv` batch64 128x128 | 6,215,681 | 55,570,868 | 0.112x | WIN |
+| `inv` batch16 256x256 | 14,849,310 | 101,187,050 | 0.147x | WIN |
+| `solve` batch8192 4x4 vector RHS | 439,634 | 2,277,074 | 0.193x | WIN |
+| `solve` repeated-A batch8192 4x4 vector RHS | 151,448 | 2,258,209 | 0.067x | WIN |
+| `solve` repeated-A batch8192 4x4 matrix RHS | 402,088 | 2,437,732 | 0.165x | WIN |
+| `solve` batch8192 4x4 matrix RHS | 492,789 | 2,436,274 | 0.202x | WIN |
+| `cholesky` batch10000 4x4 | 2,066,933 | 2,068,781 | 0.999x | neutral/parity |
+| `cholesky` batch4000 8x8 | 1,973,573 | 3,995,034 | 0.494x | WIN |
+| `cholesky` batch2000 16x16 | 2,689,416 | 2,698,673 | 0.997x | neutral/parity |
+| `cholesky` batch1000 32x32 | 4,795,511 | 4,722,852 | 1.015x | neutral/parity |
+| `cholesky` batch500 64x64 | 10,944,302 | 10,922,565 | 1.002x | neutral/parity |
+
+Score:
+- New delegate rows: **2 wins / 1 loss / 5 neutral**. The loss is
+  `matrix_power(A, 1)` at an absolute 819 ns delta and needs a narrow wrapper
+  fast path, but `crates/fnp-python/src/lib.rs` is currently peer-dirty with
+  active compress work, so no production edit was attempted in this slice.
+- Full linalg boundary run: **11 wins / 1 loss / 9 neutral**. The dense
+  `eigvalsh`/`eigh`/`cholesky` user-facing loss class remains closed.
+
+Verification:
+- `rustfmt --edition 2024 --check crates/fnp-python/benches/criterion_python_surface.rs`: PASS.
+- `conformance_linalg`: PASS, 1/1.
+- `conformance_linalg_advanced`: PASS, 29/29.
+- `conformance_linalg_decomp`: PASS, 39/39.
+
+Retry predicate:
+- Do not reopen 2-D dense `eigvalsh`/`eigh`/`cholesky` kernel work for the Python
+  surface; the delegate rows are now reproducible parity/wins.
+- The next non-contended wrapper target is `matrix_power(A, 1)` dispatch-floor
+  overhead: exact ndarray, exponent one, return/asarray semantics. Recheck only
+  after `crates/fnp-python/src/lib.rs` is no longer peer-owned.
+
 ## 2026-06-21 - BOLD-VERIFY Recheck: batch `inv`/`solve` already dominate NumPy; benchmark rows added
 
 `YellowElk`/`cod-a`, parent directive `franken_numpy-ixs5y`. Applied the
