@@ -175,3 +175,8 @@ None => {
 Helpers exist: select_median(&mut [f64])->f64 (29132), par_select_median(&[f64])->f64 (29255).
 all-NaN -> NaN (matches current nan_filtered+median(empty)). Verify conformance_percentile
 _median + nanmedian flat bit-exact + measure (expect medium 1.3x->~0.8x, large 0.64x->~0.4x).
+
+## NEGATIVE 2026-06-21: text parsing is NOT a lever
+loadtxt 100kx5 = 1.05x parity (numpy has a FAST C parser since 1.23 — not the old slow-Python
+assumption; a native fnp parser wouldn't beat numpy's C loadtxt). fromstring already WINS 0.45x.
+genfromtxt present. Don't chase "native CSV parser" — numpy's C path is the floor here.
