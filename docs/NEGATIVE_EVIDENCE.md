@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - SMALL-ARRAY dispatch: cached numpy module in passthrough (616c64a1, fnp -20% overhead)
+
+`BlackThrush`/`cod-b`. Found a real loss class: SMALL arrays (N=100-1000). fnp
+passthrough ufuncs (add/sub/mul/sqrt/...) are 2.1-2.7x slower than numpy at N=100
+because the per-call binding overhead dominates the trivial kernel. Micro-breakdown
+(add N=100): numpy 461ns; py.import("numpy")+getattr ~341ns; pyo3 *args double-
+crossing ~790ns; fnp total ~1593ns. core_numpy_passthrough (185 ops) re-imported
+numpy every call.
+
+SHIPPED 616c64a1: cache the numpy module via PyOnceLock<Py<PyModule>> -> f.add(N=100)
+1593->1282ns (~300ns/call, ~20% less fnp dispatch overhead) across all 185 passthrough
+ops; add(4M) parity 1.02x (no regression); 12 binary ops + reduce + kwargs verified
+correct. HONEST: this does NOT close the vs-numpy small-array gap (still ~2.6x) —
+the residual ~790ns pyo3 *args double-crossing is IRREDUCIBLE (fnp.add must cross
+Python->Rust->Python; passthrough ops ARE numpy + that overhead, can't beat numpy
+on small arrays). So: real fnp SELF-speedup (helps tight small-array loops), vs-numpy
+NEUTRAL. RETRY for more: a per-name function cache saves another ~140ns (getattr) but
+needs a thread-safe map keyed by 'static name; the *args double-crossing is the wall.
+
 ## 2026-06-21 - matmul kernel gap precisely measured: 2-2.7x at d>=512 (single-thread, BLAS-microkernel gap)
 
 `BlackThrush`/`cod-b`. Pinned BOTH sides single-threaded (OMP/OPENBLAS/MKL=1 numpy-BLAS
