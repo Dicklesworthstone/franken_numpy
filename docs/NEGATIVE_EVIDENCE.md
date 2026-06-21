@@ -5986,3 +5986,16 @@ try_zerocopy_f64_frexp was already zero-copy + bit-exact (frexp_one bit-manip) b
 LESSON: a catalogued "mild residual" (1.11x) hid a clean parallel win — the kernel was fine, just
 serial. RE-EXAMINE even ~1.1x residuals for un-parallelized zero-copy loops before dismissing.
 Now re-checking putmask (the other residual) for the same.
+
+### WIN putmask parallelized (c8eba276): 2nd "residual" was also a serial loop -> 0.35x
+putmask cycles values by FLAT position (values[i % v]), NOT masked-count, so it's embarrassingly
+parallel (looked sequential but isn't). Parallelized the in-place zero-copy scatter (gate 1<<19)
+-> 2M 0.35x, 8M 0.69x (was 1.18x); bit-exact incl cyclic len-3/len-10. BOTH catalogued "genuine
+residuals" (frexp 82c7f7e4 + putmask c8eba276) were serial zero-copy loops with clean parallel
+wins -> surface now has ZERO genuine residuals. LESSON: a ~1.1x "mild residual" on a zero-copy op
+is a PARALLELIZATION SIGNAL (numpy single-threaded; fnp serial ties/loses, fnp parallel wins) -
+NOT a wall. Re-examine all ~1.1x residuals for un-parallelized loops.
+PRE-EXISTING (not mine): conformance_extract_put::extract_python_container_surfaces_match_numpy
+RED on "nan signed-zero payload" - f.extract is VALUE-CORRECT (returns [nan,-0.0] bit-identical
+to numpy, uint64-view equal); the test's comparison is nan-strict (no equal_nan) = test bug.
+Unrelated to putmask (extract is fn@20113, untouched). Not fixed (shared test, not my file).
