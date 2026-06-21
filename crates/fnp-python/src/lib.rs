@@ -13897,6 +13897,87 @@ fn try_zerocopy_f64_trapezoid_flat(
     Ok(Some(numpy.getattr("float64")?.call1((result,))?.unbind()))
 }
 
+// Zero-copy parallel trapezoid along the LAST axis for an N-D (ndim>=2) f64 C-contiguous
+// ndarray with uniform dx. Each contiguous row of length L -> dx*(rowsum - (r[0]+r[-1])/2),
+// parallel over rows; result has shape[:-1]. numpy.trapezoid(axis=last) is single-threaded
+// + allocates an (...,L) temporary; this reads the buffer directly. allclose to numpy
+// (per-term pairwise vs the sum shortcut differ ~1e-16). 1-D is handled by the flat path
+// (scalar return). Non-last axis / non-f64 / non-contiguous / L<2 defer.
+fn try_zerocopy_f64_trapezoid_lastaxis(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    y: &Bound<'_, PyAny>,
+    dx: f64,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !y.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = y.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(y) else {
+        return Ok(None);
+    };
+    if !buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = buffer.shape().to_vec();
+    let ndim = shape.len();
+    if ndim < 2 {
+        return Ok(None); // 1-D handled by the flat (scalar) path
+    }
+    let norm = if axis < 0 { axis + ndim as isize } else { axis };
+    if norm != ndim as isize - 1 {
+        return Ok(None); // native only for the last (contiguous) axis
+    }
+    let l = shape[ndim - 1];
+    if l < 2 {
+        return Ok(None);
+    }
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let total = cells.len();
+    let outer = total / l;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (outer,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias y; written once.
+        let o: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, outer) };
+        let rowtrap = |r: &[f64]| -> f64 {
+            let s: f64 = r.iter().sum();
+            dx * (s - (r[0] + r[r.len() - 1]) / 2.0)
+        };
+        use rayon::prelude::*;
+        const TRAPEZOID_PARALLEL_MIN: usize = 1 << 16;
+        if total >= TRAPEZOID_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            o.par_iter_mut()
+                .zip(data.par_chunks(l))
+                .for_each(|(s, r)| *s = rowtrap(r));
+        } else {
+            for (s, r) in o.iter_mut().zip(data.chunks(l)) {
+                *s = rowtrap(r);
+            }
+        }
+    }
+    let shape_tuple = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
+    Ok(Some(flat.call_method1("reshape", (&shape_tuple,))?.unbind()))
+}
+
 fn trapezoid_impl(
     py: Python<'_>,
     name: &str,
@@ -13928,6 +14009,13 @@ fn trapezoid_impl(
     // copy that ~doubled memory traffic for the reduction.
     if x.is_none()
         && let Some(out) = try_zerocopy_f64_trapezoid_flat(py, &numpy, y.bind(py), dx, axis)?
+    {
+        return Ok(out);
+    }
+    // Zero-copy N-D trapezoid along the LAST (contiguous) axis: per-row sum shortcut,
+    // parallel over rows. Avoids the extract copy + numpy's single-threaded temp-alloc.
+    if x.is_none()
+        && let Some(out) = try_zerocopy_f64_trapezoid_lastaxis(py, &numpy, y.bind(py), dx, axis)?
     {
         return Ok(out);
     }
