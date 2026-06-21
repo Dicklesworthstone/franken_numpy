@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: no-copy parallel binary path + hypot (fa71f8d2)
+
+`BlackThrush`/`cod-b`. Extended the parallel-vs-single-threaded-numpy lever to native binary
+ops (zerocopy_f64_binary_flat). TWO findings: (1) the existing parallel set (arctan2/
+logaddexp/logaddexp2/floatpower) COPIED both input buffers into Vecs before the rayon map
+(comment claimed "PyBuffer cells are !Sync" — DISPROVEN by the unary from_raw_parts trick).
+Those 2 full copies were a large tax: removing them (read a,b as &[f64], write op.apply into
+the numpy.empty output) took arctan2 0.57x->0.04-0.20x, logaddexp 0.61x->0.04-0.21x (5-14x
+more). (2) Added Hypot to the set. KEY: hypot=sqrt(a^2+b^2) is NEAR-MEMORY-BOUND, so with
+the expensive-op gate (16384) it REGRESSED 2-3x at 16K-1M (measured) — gave it a HIGH gate
+(1<<21) like the cheap-unary class -> parity->0.05x at 2M+ (20x). Confirms the gate rule:
+compute-bound ops parallelize from ~16K, memory-bound from ~2M. conformance arithmetic 48 /
+trig 54 / exp_log 46, bit-exact. LESSON: "cells !Sync -> Vec copy" was a stale workaround;
+from_raw_parts(&[f64]) is Sync under the GIL and eliminates the copy for ALL parallel paths.
+
 ## 2026-06-21 - WIN (CLASS): parallel f64 unary-map -> ~7x on cheap unary ops at large N (b88b1995)
 
 `BlackThrush`/`cod-b`. Generalized the sqrt insight (b40ff37b): numpy's unary ufuncs are
