@@ -6009,3 +6009,14 @@ bitwise_count 0.95x WINS; logical_not/clip parity. clip "1.08x" was NOISE (min-o
 numpy (non-trivial per-element work where numpy's single-threaded C was competitive); the rest
 are cheap enough that serial already beats numpy's overhead, or already parity. Lever closed:
 2 wins (frexp/putmask), no more serial-losers. Surface has ZERO genuine residuals now.
+
+### CORRECTION: serial-loop lever extended to fnp-ufunc window kernels (99c281bc) - 3 more wins
+The prior "lever exhausted" note only checked fnp-PYTHON serial loops. The fnp-UFUNC window
+kernels (hamming/hanning/blackman) were ALSO serial cos-maps losing at cache-resident sizes
+(hamming/hanning 1.06-1.15x@100K-1M; win at 4M). Parallelized like kaiser (gated par_iter cos
+map) -> hamming 0.27-0.46x, hanning 0.21-0.46x, blackman 0.12-0.24x. allclose vs numpy (1-ULP
+Rust-cos vs C-cos, pre-existing; parallel collect byte-identical to serial). conformance 13+2.
+bartlett already wins (linear). serial-loop-parallel lever TOTAL: 5 wins (frexp/putmask fnp-
+python + hamming/hanning/blackman fnp-ufunc). LESSON: when grepping serial loops, check BOTH
+crates (fnp-python bindings AND fnp-ufunc kernels). User-facing probes cover the rest (every
+op measured win/parity). NOW the lever is genuinely exhausted across both crates.
