@@ -47055,7 +47055,17 @@ fn histogramdd_native(
         bins_obj = Some(args.get_item(1)?);
     }
 
-    let sample = match extract_precise_numeric_array(py, &args.get_item(0)?, "histogramdd") {
+    // numpy treats a LIST/array_like sample as a SEQUENCE OF D arrays (D = len of the
+    // sequence, via atleast_2d(sample).T), but an ndarray sample as (N, D) via .shape.
+    // The native path below uses the (N, D) interpretation, which matches numpy ONLY for
+    // ndarray inputs. For non-ndarray samples delegate to numpy so its sequence-of-D-
+    // arrays convention is reproduced exactly (e.g. a [[..],[..]] list with mismatched
+    // bins must raise ValueError, not silently histogram as (N, D)).
+    let sample_arg = args.get_item(0)?;
+    if !sample_arg.is_exact_instance(&py.import("numpy")?.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let sample = match extract_precise_numeric_array(py, &sample_arg, "histogramdd") {
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
