@@ -4,6 +4,59 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - NO-SHIP: eigvalsh/cond 128 values-only unblocked reducer route
+
+`YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on the
+residual native spectral 128-size gap. The alien-graveyard mapping pointed to
+communication-avoiding dense linear algebra, and the numerical-linear-algebra
+artifact router called for a different decomposition/reducer primitive rather
+than post-processing. I tested the narrowest plausible reducer route: for
+values-only `n == 128`, dispatch tridiagonalization to the existing unblocked
+Householder reducer while leaving `eigh`/Q accumulation and all other sizes on
+the current blocked reducer.
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-21_linalg_eigvalsh_cond128_cod_b_pass3/`
+
+Commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'eigvalsh_nxn/size/128|cond_nxn/size/128' -- --sample-size 12 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- `ssh -i ~/.ssh/je_ovh_ssh_key.pem ubuntu@51.222.245.56 'OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -'`
+- `ssh -i ~/.ssh/contabo_vps_ed25519 root@38.242.134.66 'OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -'`
+
+| Probe | Worker | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---|---:|---:|---:|---|
+| Current `eigvalsh_nxn/128` | `hz1` | 1,906,955 | 911,490 | 2.092x | current loss |
+| Current `cond_nxn/128` | `hz1` | 1,787,593 | 1,372,420 | 1.303x | current loss |
+| Current rerun `eigvalsh_nxn/128` | `ovh-a` | 1,318,349 | 669,516 | 1.969x | current loss |
+| Current rerun `cond_nxn/128` | `ovh-a` | 1,226,881 | 1,009,183 | 1.216x | current loss |
+| Candidate unblocked-128 `eigvalsh_nxn/128` | `vmi1153651` | 4,243,947 | 803,699 | 5.280x | no-ship |
+| Candidate unblocked-128 `cond_nxn/128` | `vmi1153651` | 3,856,139 | 1,541,118 | 2.502x | no-ship |
+
+Scorecard:
+- Current vs NumPy: win/loss/neutral = **0/4/0** across the counted `hz1` and
+  `ovh-a` rows.
+- Candidate vs NumPy: win/loss/neutral = **0/2/0**.
+- Production decision: **reverted/no-source**. No
+  `crates/fnp-linalg/src/lib.rs` hunk is kept.
+
+Validation and decision:
+- The candidate was rejected before conformance expansion because it worsened the
+  target ratios, including a `5.280x` NumPy loss for `eigvalsh_nxn/128`.
+- The one-line dispatch hunk was reverted immediately; `git diff -- crates/fnp-linalg/src/lib.rs`
+  is empty after revert.
+- Final scoped gates: `cargo test -p fnp-linalg tridiag --release` passed 7
+  tests with 4 ignored probes; `cargo check -p fnp-linalg --all-targets`
+  passed; `cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed;
+  `cargo build -p fnp-linalg --release` passed; `git diff --check` passed.
+- `cargo fmt -p fnp-linalg --check` still reports broad pre-existing rustfmt
+  drift in linalg benches/examples/tests and unrelated source regions. It was
+  not normalized in this evidence-only commit.
+- Do not retry the values-only exact-128 unblocked reducer route, `TRIDIAG_BLOCK_MIN`
+  threshold moves, direct extrema, sort-only changes, or tail-local row-dot
+  variants for this residual. A credible next attempt still needs a shared-work
+  tridiagonal eigensolver, true two-stage band-to-tridiagonal reducer, or a
+  genuinely generated 128-specialized Householder reducer with paired proof.
+
 ## 2026-06-21 - WIN/NO-SOURCE: percentile_method axis=None medium-N gate verified
 
 `YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on the

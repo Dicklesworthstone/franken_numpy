@@ -1,0 +1,6 @@
+host=hz1
+python=Python 3.14.4
+numpy=2.3.5
+threads openblas=1 omp=1 mkl=1
+numpy_eigvalsh_128 median_ns=911490 min_ns=890972 p95_ns=954130 runs=31
+numpy_cond_128 median_ns=1372420 min_ns=1348865 p95_ns=1443032 runs=31

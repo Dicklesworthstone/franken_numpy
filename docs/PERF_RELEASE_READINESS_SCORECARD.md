@@ -3,6 +3,50 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-b fnp-linalg Eigvalsh/Cond 128 Unblocked Reducer No-Ship
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Current `eigvalsh_nxn/128` vs NumPy | 2/10 | Confirmed current losses on `hz1` (`2.092x`) and `ovh-a` (`1.969x`) |
+| Current `cond_nxn/128` vs NumPy | 3/10 | Confirmed current losses on `hz1` (`1.303x`) and `ovh-a` (`1.216x`) |
+| Exact-128 unblocked values-only reducer | 0/10 | Candidate lost to NumPy by `5.280x` and `2.502x` on `vmi1153651` |
+| Revert discipline | 10/10 | `crates/fnp-linalg/src/lib.rs` returned to zero diff; evidence only |
+| Final per-crate gates | 8/10 | `test tridiag --release`, `check`, `clippy -D warnings`, release build, and `git diff --check` passed |
+| Retry guidance | 8/10 | Routes away from unblocked exact-128, threshold, sort, direct-extrema, and row-dot families |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-b`.
+- Artifact directory:
+  `tests/artifacts/perf/2026-06-21_linalg_eigvalsh_cond128_cod_b_pass3/`.
+- Current `hz1` rows: `eigvalsh_nxn/128 = 1,906,955 ns` vs NumPy
+  `911,490 ns` (`2.092x` loss); `cond_nxn/128 = 1,787,593 ns` vs NumPy
+  `1,372,420 ns` (`1.303x` loss).
+- Current `ovh-a` rerun: `eigvalsh_nxn/128 = 1,318,349 ns` vs NumPy
+  `669,516 ns` (`1.969x` loss); `cond_nxn/128 = 1,226,881 ns` vs NumPy
+  `1,009,183 ns` (`1.216x` loss).
+- Candidate source trial: exact values-only `n == 128` tridiagonalization routed
+  to the existing unblocked Householder reducer while eigenvector paths and all
+  other sizes stayed blocked.
+- Candidate `vmi1153651` rows: `eigvalsh_nxn/128 = 4,243,947 ns` vs NumPy
+  `803,699 ns` (`5.280x` loss); `cond_nxn/128 = 3,856,139 ns` vs NumPy
+  `1,541,118 ns` (`2.502x` loss).
+- Final scoped gates: `cargo test -p fnp-linalg tridiag --release` passed 7
+  tests with 4 ignored probes; `cargo check -p fnp-linalg --all-targets`
+  passed; `cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed;
+  `cargo build -p fnp-linalg --release` passed; `git diff --check` passed.
+- `cargo fmt -p fnp-linalg --check` remains blocked by broad pre-existing
+  formatting drift outside this evidence slice.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`; no new
+  `.scratch` worktree.
+
+Decision:
+- No release-ready improvement. Keep no linalg source.
+- The target gap remains open, but this route is rejected. A future attempt needs
+  a shared-work tridiagonal eigensolver, true two-stage band reduction, or a
+  genuinely generated 128-specialized reducer with paired proof.
+
+---
+
 ## 2026-06-21 cod-b fnp-ufunc percentile_method medium gate check
 
 | Area | Score | Verdict |
