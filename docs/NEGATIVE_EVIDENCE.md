@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN (RADICAL): parallel privatized bincount (8bd0aaa9, up to 9x)
+
+`BlackThrush`/`cod-b`. np.bincount is SINGLE-THREADED; fnp's plain path was a serial
+two-pass (max-find + count) at ~parity (0.84-1.04x). Parallelized BOTH passes over the
+i64 buffer (read &[i64] via from_raw_parts): parallel max/neg reduce + privatized tally
+(each chunk -> thread-local count array, locals summed element-wise). Integer counts are
+ORDER-INDEPENDENT => bit-identical to serial (WEIGHTED bincount stays serial — float
+adds are order-dependent, must preserve numpy's forward-pass accumulation). RESULT:
+4M K=1000 0.84x->0.11x (~8x), 1M 0.43x, 8M 0.21x, K=65536@4M 0.62x.
+GATE TUNING (measured crossover, the key): parallel LOSES BADLY below ~512K (32K K=1000
+= 8.9x SLOWER — fan-out + per-task K-Vec alloc dwarfs tiny work) and for large-K-medium-N
+(1M K=65536 the length*nthreads merge > the count). Final gate = n>=1<<19 (fan-out floor)
+AND length<=1<<16 (privatized memory) AND n>=length*32 (merge a fraction of count; large
+K needs proportionally larger n: K=65536 wins from ~4M, K=1000 from ~512K). Small-N +
+large-K-medium-N stay serial (no regression; 262K 1.15x + 1M-K=65536 1.53x are pre-
+existing serial floors, parallel measured worse there). conformance 32/32, correct
+incl weighted/minlength. EXTENDS the parallel-privatized-reduction pattern
+([[parallel-privatized-buffer-reductions]], histogram) to bincount. LESSON: a serial
+fnp path at ~parity vs a SINGLE-THREADED numpy op is a parallelization lever — but the
+gate needs BOTH an N floor (fan-out) AND an N>=K*c term (privatized merge cost).
+
 ## 2026-06-21 - FIX: histogramdd list-sample convention bug (c26629f2) -> histogram2d_dd 19/19 GREEN
 
 `BlackThrush`/`cod-b`. Fixed the real impl bug EXPOSED (not introduced) by harness fix
