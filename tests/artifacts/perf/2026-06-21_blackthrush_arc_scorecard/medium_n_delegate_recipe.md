@@ -17,7 +17,23 @@ Confirmed the medium-N losses are NOT the kernel: UFuncArray::unique f64 already
 fix is in fnp-python (delegate medium-N to numpy, or a zero-copy binding) — there is no
 fnp-ufunc lever. Don't re-chase the kernel.
 
-## STATUS 2026-06-21: #1 unique SHIPPED (c6b87f00). #2/#3 median/nanmedian NEED MORE WORK.
+## STATUS 2026-06-21: #1 unique SHIPPED (c6b87f00), #2 median SHIPPED (a127d3d2). #3 nanmedian deferred.
+
+#2 median DONE — it was a MISTUNED KERNEL GATE, not binding: MEDIAN_GLOBAL_PARALLEL_MIN was
+1<<17=131072 but par_select_median only wins from ~400K; at 131K-256K it ran 1.4-9.6x slower
+(worst 5.95-9.6x right at 131072). Raised to 1<<19 -> 131K 5.95x->0.78x WIN, 262K ->1.18x,
+large unchanged, bit-exact, conformance_percentile_median 24/24. (Residual: serial select
+still mildly loses ~1.2x at some medium sizes e.g. 65K/262K — minor, optional binding delegate.)
+
+#3 nanmedian DEFERRED — its medium loss (50K-512K 1.1-1.3x) is NOT a kernel gate: flat
+nanmedian (outer_count=1) is serial (the NANMEDIAN_PARALLEL_MIN_ELEMS gate is the AXIS/lane
+path). The flat loss is the NaN-filter Vec-alloc + serial select_percentile + extract/build
+binding. It WINS small (10K 0.66x) and large (1M 0.64x), loses the medium band. Fix options:
+(a) a flat-parallel nanmedian kernel path (par NaN-filter + par_select, HIGH gate ~1<<19) for
+the large end — but large already wins; (b) a middle-band binding delegate in fnp-python
+(lo<=N<hi -> numpy) — fiddly + mild. Low priority; revisit if a clean approach appears.
+
+## STATUS (earlier): #1 unique SHIPPED (c6b87f00). #2/#3 median/nanmedian NEED MORE WORK.
 
 #1 DONE: delegate exact-float64 unique that misses the parallel path -> numpy. Medium-N
 0.98-1.01x parity (was 1.1-2.4x), large still 0.82x, int unchanged, conformance_setops pass.
