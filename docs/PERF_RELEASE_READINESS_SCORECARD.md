@@ -918,38 +918,39 @@ Decision:
 
 ---
 
-## 2026-06-21 cod-a fnp-linalg Exact Tridiagonal Eigvalsh Keep
+## 2026-06-21 cod-b fnp-linalg Exact Tridiagonal Eigvalsh Keep
 
 | Area | Score | Verdict |
 |---|---:|---|
-| Exact tridiagonal final vs old FNP | 9/10 | Same-worker final is `0.287x / 0.126x / 0.124x` old FNP time |
-| Exact tridiagonal final vs NumPy | 9/10 | Same-worker final beats NumPy on all measured rows: `0.628x / 0.476x / 0.303x` |
+| Exact tridiagonal old FNP vs NumPy | 2/10 | Same-worker old path lost all rows: `2.066x / 2.532x / 2.274x` NumPy time |
+| Exact tridiagonal final vs old FNP | 10/10 | Same-worker final is `0.283x / 0.185x / 0.127x` old FNP time |
+| Exact tridiagonal final vs NumPy | 10/10 | Same-worker final beats NumPy on all measured rows: `0.584x / 0.468x / 0.288x` |
 | Dense spectral frontier | 4/10 | Dense SPD `eigvalsh_nxn` loss remains open; this keep covers exact tridiagonal inputs |
-| Conformance/check/clippy | 9/10 | Focused eigvalsh tests, fast-path tests, check, and clippy passed through RCH |
-| Disk discipline | 10/10 | Used existing `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`; no new `.scratch` |
+| Conformance/check/clippy/build | 9/10 | Focused eigvalsh tests, fast-path tests, check, clippy, and release build passed through RCH |
+| Disk discipline | 10/10 | Used existing `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`; no new `.scratch` |
 | Validation caveats | 7/10 | Workspace fmt and UBS remain blocked by unrelated pre-existing drift/noise |
 
 Evidence:
-- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-b`.
 - Source lever: exact symmetric tridiagonal inputs to `eigvalsh_nxn` now extract
   diagonal/off-diagonal arrays and enter the existing tridiagonal QR eigensolver
   directly, skipping dense Householder tridiagonalization.
-- Same-worker `vmi1149989` old FNP rows: `128 = 1,458,389 ns`, `256 =
-  12,761,124 ns`, `512 = 50,970,521 ns`.
-- Same-worker `vmi1149989` final FNP rows: `128 = 417,801 ns`, `256 =
-  1,609,408 ns`, `512 = 6,327,679 ns`.
+- Same-worker `vmi1149989` old FNP rows: `128 = 1,477,437 ns`, `256 =
+  9,305,490 ns`, `512 = 49,845,148 ns`.
+- Same-worker `vmi1149989` final FNP rows: `128 = 417,718 ns`, `256 =
+  1,721,791 ns`, `512 = 6,320,658 ns`.
 - Same-worker direct NumPy rows with NumPy `2.2.4` and BLAS threads pinned to 1:
-  `128 = 665,628 ns`, `256 = 3,380,215 ns`, `512 = 20,895,970 ns`.
+  `128 = 715,137 ns`, `256 = 3,675,686 ns`, `512 = 21,924,302 ns`.
 - Counted scorecard: old FNP vs NumPy **0/3/0**, final FNP vs old FNP
   **3/0/0**, final FNP vs NumPy **3/0/0**.
-- RCH `hz2` candidate sanity rows: `444,840 / 1,642,900 / 6,637,038 ns`.
+- RCH `hz1` candidate sanity rows: `535,984 / 1,941,455 / 8,016,470 ns`.
 - Rejected micro-variant: a two-pass delayed-allocation helper regressed the
   `128` row to `635,968 ns` on `vmi1149989`; reverted before final.
 - Final scoped gates: `cargo test -p fnp-linalg eigvalsh --release`,
-  `cargo test -p fnp-linalg exact_symmetric_tridiagonal_values_accepts_only_exact_band --release`,
-  `cargo test -p fnp-linalg eigvalsh_exact_tridiagonal_matches_dense_reduction_fallback --release`,
+  `cargo test -p fnp-linalg exact_tridiagonal -- --nocapture`,
   `cargo check -p fnp-linalg --all-targets`, and `cargo clippy -p fnp-linalg
-  --all-targets -- -D warnings` passed through RCH/per-crate workflow.
+  --all-targets -- -D warnings`, and `cargo build -p fnp-linalg --release`
+  passed through RCH/per-crate workflow.
 
 Decision:
 - Release-ready keep for exact symmetric tridiagonal inputs.
