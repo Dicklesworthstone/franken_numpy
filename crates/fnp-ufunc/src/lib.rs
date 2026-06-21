@@ -17334,7 +17334,12 @@ impl UFuncArray {
                 // NumPy propagates NaN in median. For large inputs the parallel
                 // radix-select beats the serial introselect (numpy's algorithm) by
                 // using every core for the count passes; parallelise the NaN scan too.
-                const MEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 17;
+                // Gate was 1<<17 but the parallel radix-select's fan-out only pays off from
+                // ~400K — at 1<<17..~256K it was 1.4-9.6x SLOWER than numpy (worst right at
+                // 131072). Raised to 1<<19 so medium N keeps the serial select; the parallel
+                // path engages only where it robustly wins (>=512K measured ~0.5x). Result is
+                // bit-identical either way (median is the same order statistic).
+                const MEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
                 let parallel = n >= MEDIAN_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
                 let has_nan = if parallel {
                     self.values.par_iter().any(|v| v.is_nan())
