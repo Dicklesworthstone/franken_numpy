@@ -4,6 +4,28 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: flatnonzero delegate (1bd00dad, 4M 1.55x->1.00x) + recurring oracle-harness bug class
+
+`BlackThrush`/`cod-b`. flatnonzero native (try_zerocopy_flatnonzero count+gather)
+is ~1.9-2.2x behind numpy at EVERY size (256:1.88x .. 4M:1.55x; kernel-bound,
+serial==parallel) — the zero-copy native never wins. Delegate size>=256 to numpy
+(cc... bit-identical, all dtypes): 4M 1.55x->1.00x, 16K 1.08x (large=common mask
+case=parity), 256-1K 1.88x->1.4x (residual=wrapper dispatch tax), <256 native; no
+regression, correct. NOTE: nanargmax broad-sweep "1.87x" was LOAD NOISE — focused
+re-measure 0.64x WIN (single-measurement-under-load false-loss again; re-verify
+focused).
+
+RECURRING HARNESS-BUG CLASS (cc5f3bac + a93ae282): the `*_python_container[_keyword]
+_surfaces` conformance tests (added by deadlock-audit-*-surfaces beads) build their
+numpy-oracle script with `\n\` line-continuations whose backslash EATS the source
+indentation -> flat Python -> "NumPy oracle failed: IndentationError" -> the case
+FAILS (harness bug, NOT the impl). Fixed interp_trapz (16/16) + flatnonzero (9/9)
+via {I4}/{I8} indent placeholders. LIKELY ALSO BROKEN (same template): argwhere,
+nonzero, count_nonzero, searchsorted, trim_zeros *_python_container_* tests — grep
+`def outcome` + `\n\` in crates/fnp-python/tests/. LESSON: a conformance FAIL whose
+stderr says "NumPy oracle failed: IndentationError" is a harness bug, not an impl
+mismatch — fix the oracle generator.
+
 ## 2026-06-21 - CONFORMANCE GREEN for the arc's wins + fixed interp/trapz harness bug (a93ae282)
 
 `BlackThrush`/`cod-b`. Verified the multi-turn arc's changes are conformance-clean
