@@ -4,6 +4,20 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - QUEUED (fnp-python peer-locked): 3 medium-N delegate fixes found + recipe
+
+`BlackThrush`/`cod-b`. Found 3 medium-N native losses but `crates/fnp-python/src/lib.rs` is
+exclusively locked by YellowElk (fresh, no commits) — DID NOT touch it; wrote a validated
+ready-recipe (tests/artifacts/perf/2026-06-21_blackthrush_arc_scorecard/medium_n_delegate
+_recipe.md) + messaged YellowElk. Findings (fnp/np, <1 win): (1) unique f64 native extract+
+serial LOSES the whole medium range 50K-512K (1.1-2.4x) — delegate sub-1<<20 f64 to numpy
+(my parallel path 742fa7ac wins >=1<<20); SOLID. (2) median loses small-medium (~256K 2-3x,
+noisy) wins >=512K (0.38-0.61x). (3) nanmedian loses 256K-512K (3.2x->1.3x) wins >=786K
+(0.63x). All same pattern: native wins large / loses medium -> delegate-below-crossover gate
+(cf datetime-diff 84acc931). RE-VERIFY crossovers under low load before finalizing (load was
+18-20). LESSON: when the only perf-surface file (fnp-python) is peer-locked, the productive
+move is measure read-only + queue a validated recipe + coordinate — not touch the lock.
+
 ## 2026-06-21 - WIN: parallel sort+dedup flat f64 np.unique up to 3.5x (742fa7ac)
 
 `BlackThrush`/`cod-b`. 8th from_raw_parts+parallel win. np.unique(ar) flattens then returns
