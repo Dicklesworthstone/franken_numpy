@@ -4,6 +4,19 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - FIX: histogramdd list-sample convention bug (c26629f2) -> histogram2d_dd 19/19 GREEN
+
+`BlackThrush`/`cod-b`. Fixed the real impl bug EXPOSED (not introduced) by harness fix
+47bbffe3. numpy reads a LIST/array_like histogramdd sample as a SEQUENCE OF D arrays
+(D = len, via atleast_2d(sample).T), an ndarray sample as (N,D) via .shape.
+histogramdd_native extracted ANY array_like + used (N,D), so a list [[0,0],[1,1],
+[2,4],[3,9]] with bins=[2,3] silently histogrammed as (4,2) instead of raising numpy's
+ValueError (atleast_2d.T -> D=4 != 2 bins). FIX: gate native to exact-ndarray samples;
+delegate non-ndarray to numpy. ndarray native unchanged (3-D bit-exact). suite 18/1
+-> 19/19. Harness-bug arc now CLOSED: 8 suites green. LESSON: native fast paths that
+extract array_like BEFORE an ndarray check can adopt the WRONG numpy input convention
+for list/tuple inputs — gate native to exact-ndarray, delegate array_like to numpy.
+
 ## 2026-06-21 - CONFORMANCE: fixed 6-suite oracle-harness IndentationError class (47bbffe3) + exposed histogramdd bug
 
 `BlackThrush`/`cod-b`. Swept the recurring oracle-harness bug class (flagged prior
