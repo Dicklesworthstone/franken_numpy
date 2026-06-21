@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: argmax/argmin last-axis parallel-gate fix (3b7692fb, small-2D 6.1x->2.2x)
+
+`BlackThrush`/`cod-b`. SECOND mis-tuned parallel gate (after cov 6de7eaaa) — this is
+a systematic class. argmax/argmin along the last axis parallelized at outer*lane>=
+1<<16 (65K), but the per-lane argextreme scan is tiny so rayon fan-out dominates much
+higher. Measured (parallel-vs-serial-vs-numpy): argmax(256x256=65K) 6.13x slower than
+numpy parallel, ~2.2x serial; 524K serial 121<136us parallel; crossover ~1M (1024x1024
+parallel 113<173us serial, beats numpy; 4M ~8x win). Raised float + int last-axis
+gates 1<<16 -> 1<<20. RESULT: argmax(axis=1) 256x256 6.13x->2.20x, 512x256 3.17->1.60,
+1024x256 2.45->1.58; 1024x1024 0.75x + 2000x2000 0.13x wins PRESERVED; bit-identical
+(independent lane scans) + array_equal correct. Removes the parallel-OVERHEAD
+regression; residual ~2.2x at smallest = kernel floor (numpy's tight small-argmax C
+loop). Note: sum/max axis had only MILD small-size penalty (1.05-1.19x) — their 1<<16
+element gate is roughly OK, not worth changing.
+
+SYSTEMATIC LEVER (2 wins so far): grep parallel gates (`current_num_threads()>=2` +
+a `>= THRESHOLD`), test the op at sizes JUST ABOVE the gate parallel-vs-serial; if
+serial wins, the gate is too low -> raise to the measured crossover (bit-identical for
+order-independent kernels). Remaining argextreme gates to check: flat argmax
+(ARGEXTREME_PARALLEL_MIN 1<<16, L45149), ptp/nanextreme/nanvar axis constants.
+
 ## 2026-06-21 - WIN: cov/corrcoef small-shape Gram parallel-gate fix (6de7eaaa, 3.3x->2.1x)
 
 `BlackThrush`/`cod-b`. Found via full-threads sweep: corrcoef(50,1000) STABLE 3.29x
