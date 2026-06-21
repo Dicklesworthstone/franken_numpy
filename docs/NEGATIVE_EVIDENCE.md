@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN (CLASS): parallel f64 unary-map -> ~7x on cheap unary ops at large N (b88b1995)
+
+`BlackThrush`/`cod-b`. Generalized the sqrt insight (b40ff37b): numpy's unary ufuncs are
+SINGLE-THREADED, so the serial unary_map_f64 (backs negative/abs/square/reciprocal/rint/
+floor/ceil/trunc/sign/degrees/radians) left a parallel win on the table at large N (it read
+~parity 0.97x serial, hiding it). Parallelized it (raw-slice par_chunks over the numpy.empty
+output, bit-exact). RESULT @8M: ALL ~0.14x (7x); 4M ~0.5x. conformance_arithmetic 48/48.
+KEY GATE LESSON: cheap PURE-MEMORY unary ops have a HIGH parallel crossover (~2M) — at
+131K-1M parallel LOSES (2.4x->1.0x: rayon fan-out + from_raw_parts overhead dwarf the trivial
+memory work); only at 2M+ does aggregate bandwidth win. CONTRAST: sqrt (COMPUTE-bound) wins
+from ~131K. So memory-bound maps need a HIGH gate (1<<21), compute-bound a LOW gate (1<<17).
+I nearly shipped a 1<<17 gate that would have REGRESSED 131K-1M (2.4x) — caught by sweeping
+the crossover, not just the 8M point. ALWAYS map the full crossover before setting a parallel
+gate; the 8M win does not imply a 131K win for memory-bound ops.
+
 ## 2026-06-21 - WIN (RADICAL, OVERTURNS A NO-SHIP): fused-parallel f64 sqrt up to 8x (b40ff37b)
 
 `BlackThrush`/`cod-b`. Re-examined the documented "np.sqrt 1.5x = forbid(unsafe) zero-init
