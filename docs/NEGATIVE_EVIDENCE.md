@@ -5902,3 +5902,13 @@ BOTH the array-array path AND the f64-scalar path -> coldest extract). After add
 scalar/special-case path, CHECK f32. Audited my other f64-only recent fixes: array_equal already
 covers f32 (f32_buffers_all_equal, 0.79x win); histogram_bin_edges f32 is only mild 1.20x (min/
 max extract, low-ROI, not the full-predicate blowup isclose had). isclose was the big f32 gap.
+
+### isclose dtype coverage COMPLETE (BlackThrush 2026-06-21): int/bool scalar 4-7x->0.5x (8bb3033d)
+After f64 (4a503652) + f32 (5ef2b313), isclose(int64/int32/bool array, finite scalar) still fell
+to the cold extract (4-7x). numpy promotes the array to f64, so isclose(int_arr,sc) ==
+isclose(int_arr.astype(f64),sc) bit-for-bit; convert once via fast C asarray(f64) and reuse the
+f64 zero-copy scalar path. int64 0.51x, int32 0.60x, bool 0.50x. isclose(array,scalar) now wins
+across ALL of f64(0.02x)/f32(0.02x)/int/bool. DTYPE-GAP LEVER summary: one f64-only scalar fast
+path silently left f32 (12-14x, COMMON) + int/bool (4-7x) on the coldest extract. Other scalar-
+operand paths checked: where already covers f32/int; the f32-scalar surface (clip/maximum/cmp/
+add/mul) is dominated/mild. allclose inherits isclose, so it's fixed across all dtypes too.
