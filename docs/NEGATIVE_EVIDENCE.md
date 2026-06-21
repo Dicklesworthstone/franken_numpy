@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN (RADICAL, OVERTURNS A NO-SHIP): fused-parallel f64 sqrt up to 8x (b40ff37b)
+
+`BlackThrush`/`cod-b`. Re-examined the documented "np.sqrt 1.5x = forbid(unsafe) zero-init
+tax, architectural no-ship" [[forbid-unsafe-zeroinit-tax-unary-ops]] with fresh eyes — and
+it was a MISDIAGNOSIS. zerocopy_f64_unary_flat already uses numpy.empty (NO zero-init). The
+real cause: sqrt did a SEPARATE O(n) input.iter().any(finite-negative) PRE-SCAN (to mirror
+numpy's invalid-value warning) BEFORE the serial compute -> an extra full read pass that no
+other unary op has (hence sqrt was the lone ~1.10x loss, all others parity). FIX: fuse the
+finite-negative detection INTO the sqrt compute (single read+write pass) + parallelize
+(numpy.sqrt is single-threaded). Defer (None->numpy fallback) only if a finite-negative is
+present (preserves the warning; sqrt(neg)=nan is bit-correct). RESULT: 8M 1.10x->0.12x (8x),
+1M 0.19x, 131K 0.68x, 10K 0.71x. conformance_sqrt 15/15, bit-exact incl 2-D/inf/nan/-0 +
+neg-defer. The prior "SIMD 0-gain" retry was SIMD-IN-FNP-UFUNC WITH zero-init; this
+fnp-python fused-parallel path (numpy.empty, no zero-init, no pre-scan, parallel) is a
+DIFFERENT angle that the no-ship note never tried.
+META-LESSON: documented "architectural no-ship / wall" notes can be MISDIAGNOSED — re-derive
+the cause from the actual code, don't trust the label. The fnp-python layer (unsafe allowed)
+can do numpy.empty + from_raw_parts_mut + parallel, bypassing fnp-ufunc forbid(unsafe) walls.
+
 ## 2026-06-21 - NEGATIVE: indexing/set ops dominated; compress/extract = SIMD-compaction wall
 
 `BlackThrush`/`cod-b`. Swept indexing + set ops (genuinely less-checked). WINS: take_along
