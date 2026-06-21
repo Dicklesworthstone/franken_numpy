@@ -4,6 +4,82 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - LEADS: roll + compress 1.36x real losses (fnp-python, contended); broad sweep else clean
+
+`BlackThrush`/`cod-b`. Broad sweep of less-explored ops vs NumPy (sort/argsort/
+partition/set-ops/2-D axis reductions/indexing/flip/roll/repeat/tile/clip/diff/
+gradient/bincount/digitize). Nearly all WIN/parity (unique 0.01x, intersect1d 0.02x,
+argmax_ax1 0.19x, cumsum_ax1 0.28x wins; sort/partition/take/clip/diff/gradient
+parity). REAL losses (confirmed via SERIAL RAYON=1 A/B, stable under the load~37 box —
+parallel timings are noise right now):
+- **np.roll 1.36-1.43x** (serial, stable). fnp-python `roll` HAS zero-copy fast paths
+  (try_zerocopy_f64_roll / _any_roll / _2d_multi) — so the loss is the fast path being
+  ~1.36x slower than numpy's 2-slice-concatenate, not a cold extract. Lead: profile
+  the rotate (likely a single rotate vs numpy's two contiguous memcpy split at the
+  shift boundary into numpy.empty).
+- **np.compress 1.36x** (serial, stable). fnp-python `compress` has a zero-copy
+  bool-mask path; ~1.36x off numpy's mask-select. Lead: vectorize the gather/count.
+BOTH are in `crates/fnp-python/src/lib.rs`, held EXCLUSIVELY by YellowElk this window
+(+ the prioritized perf child .279 broadcast-A batch_solve is YellowElk's too) — so
+NOT editable by me now; messaged YellowElk to coordinate / hand off.
+FALSE ALARM: np.flip "3.46x" is an O(1) view op — fnp `flip` already delegates to
+numpy (shares_memory==True, values match); the ratio is sub-microsecond dispatch
+noise, NOT a loss. Don't chase.
+Net: no shippable win this turn (real losses are contended; rest dominated). Retry:
+take roll/compress when fnp-python frees, serial-A/B the rotate/gather fast paths.
+
+## 2026-06-21 - BOLD-VERIFY Recheck: fnp-random PCG vs NumPy is 10/0/0 current wins
+
+Run identity:
+- Bead: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Scope: current `origin/main`-based `fnp-random` PCG head-to-head rows after the
+  `.265` direct final-buffer/append bytes keep.
+- Worker: `vmi1152480` via `rch exec`.
+- Target dir: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`
+  (RCH rewrote to its worker-scoped warm target path).
+
+Command:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-random --bench random_vs_numpy -- --sample-size 10 --measurement-time 2 --warm-up-time 1 --output-format bencher`
+
+Alien-graveyard / artifact-coding mapping:
+- The live code is the kept final-buffer vectorized execution lever for fixed
+  consumption PCG streams: jump-ahead raw `u64` fill, direct byte final-buffer
+  fill/append, and distribution-specific batch fills. The proof obligation is
+  RNG stream-state isomorphism, not statistical approximation.
+
+Current scorecard:
+
+| Workload | FrankenNumPy | NumPy | FNP/NumPy ratio | Verdict |
+|---|---:|---:|---:|---|
+| `pcg64_random_raw` 100k | 182,261 ns | 466,914 ns | 0.390x | win |
+| `pcg64_random_raw` 1M | 1,428,658 ns | 3,105,939 ns | 0.460x | win |
+| `Generator::bytes` 100k | 52,577 ns | 100,640 ns | 0.522x | win |
+| `Generator::bytes` 1M | 265,415 ns | 990,310 ns | 0.268x | win |
+| `gumbel` 100k | 520,357 ns | 1,740,591 ns | 0.299x | win |
+| `gumbel` 1M | 3,240,989 ns | 18,824,465 ns | 0.172x | win |
+| `laplace` 100k | 540,783 ns | 1,720,907 ns | 0.314x | win |
+| `laplace` 1M | 2,681,920 ns | 19,252,209 ns | 0.139x | win |
+| `uint8` full range 100k | 102,032 ns | 109,423 ns | 0.932x | win |
+| `uint8` full range 1M | 307,167 ns | 1,047,950 ns | 0.293x | win |
+
+Scorecard:
+- Current head-to-head vs NumPy: **10 wins / 0 losses / 0 neutral**.
+- The old `.257` intermediate word-vector bytes path remains rejected and
+  reverted.
+- The previously documented "current serial `Generator::bytes` gap" is stale:
+  `.265` changed the current code to direct final-Vec append/fill, and this fresh
+  worker sweep reconfirms both byte rows as wins.
+
+Validation status:
+- Bench command completed successfully through RCH.
+- Conformance/build gates were rerun in the follow-up validation commands for
+  this docs update; keep this section as evidence refresh only, not a new source
+  lever.
+- Retry predicate: do not reopen the PCG bytes family unless a future fresh
+  current-main sweep shows a real same-worker NumPy loss. Target active losses in
+  deeper linalg/ufunc kernels instead of repeating rejected word-transcode or
+  already-kept final-buffer PCG levers.
+
 ## 2026-06-21 - NO-SHIP: np.sqrt 1.5x loss is the forbid(unsafe) zero-init tax (architectural)
 
 `BlackThrush`/`cod-b`. Swept transcendental/cheap unary ufuncs vs NumPy (4M f64,
