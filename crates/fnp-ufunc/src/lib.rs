@@ -17471,7 +17471,9 @@ impl UFuncArray {
                 }
                 // NumPy propagates NaN in percentile. Large inputs use the parallel
                 // radix-select (same primitive as median); the NaN scan parallelises too.
-                const PERCENTILE_GLOBAL_PARALLEL_MIN: usize = 1 << 17;
+                // Gate raised 1<<17->1<<19 (same fix as median): the parallel radix-select
+                // fan-out only pays off from ~400K; at 131K it was 6.8-9.1x slower than numpy.
+                const PERCENTILE_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
                 let parallel =
                     n >= PERCENTILE_GLOBAL_PARALLEL_MIN && rayon::current_num_threads() >= 2;
                 let has_nan = if parallel {
@@ -17617,7 +17619,9 @@ impl UFuncArray {
                 integer_sidecar: None,
             });
         }
-        const PERCENTILE_MULTI_Q_GLOBAL_PARALLEL_MIN: usize = 1 << 17;
+        // Raised 1<<17->1<<19 (same fan-out fix as single-q/median): the parallel radix-
+        // select loses at 131K (~2.1x) and only wins from ~512K; medium N keeps serial.
+        const PERCENTILE_MULTI_Q_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
         let parallel = n >= PERCENTILE_MULTI_Q_GLOBAL_PARALLEL_MIN
             && qs.len() >= 2
             && rayon::current_num_threads() >= 2;
