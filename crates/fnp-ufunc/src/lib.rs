@@ -25803,8 +25803,25 @@ impl UFuncArray {
     pub fn nanmedian(&self, axis: Option<isize>) -> Result<Self, UFuncError> {
         match axis {
             None => {
-                let filtered = self.nan_filtered();
-                filtered.median(None)
+                // Filter NaN into one owned Vec and run median's gated select on it directly
+                // (no nan_filtered() UFuncArray + no median(None) re-clone -> single alloc
+                // instead of two). Mirrors median(None): serial select_median for medium N,
+                // par_select_median >=1<<19. all-NaN -> NaN (matches median of an empty array).
+                let filtered: Vec<f64> =
+                    self.values.iter().copied().filter(|v| !v.is_nan()).collect();
+                if filtered.is_empty() {
+                    return Ok(Self::scalar(f64::NAN, DType::F64));
+                }
+                const NANMEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
+                let med = if filtered.len() >= NANMEDIAN_GLOBAL_PARALLEL_MIN
+                    && rayon::current_num_threads() >= 2
+                {
+                    par_select_median(&filtered)
+                } else {
+                    let mut data = filtered;
+                    select_median(&mut data)
+                };
+                Ok(Self::scalar(med, DType::F64))
             }
             Some(ax) => {
                 let ax = normalize_axis(ax, self.shape.len())?;
