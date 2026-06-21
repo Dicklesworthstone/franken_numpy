@@ -7943,6 +7943,86 @@ fn try_zerocopy_f32_isclose(
     Ok(Some(output))
 }
 
+// Zero-copy isclose(f64-array, FINITE scalar): np.isclose(a,b) = |a-b| <= atol + rtol*|b|. For
+// a finite scalar b the threshold is CONSTANT, so read a's buffer once and write the bool
+// predicate into a fresh uint8(->bool) output — no extract copy of a. The array-array fast
+// path requires BOTH operands be ndarrays, so the very common isclose(x, 0.0) fell to a full
+// extract (~5x). inf/nan in a naturally yield false (NaN/Inf compare false); equal_nan is
+// irrelevant for finite b (b is not NaN). Returns None for non-f64/non-contiguous a, or a
+// non-scalar / non-finite b.
+fn try_zerocopy_f64_isclose_array_scalar(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+    rtol: f64,
+    atol: f64,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_t = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_t) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    if b.is_instance(&ndarray_t)? || b.hasattr("__len__")? {
+        return Ok(None);
+    }
+    let Ok(bv) = b.extract::<f64>() else {
+        return Ok(None);
+    };
+    if !bv.is_finite() {
+        return Ok(None);
+    }
+    if !a
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let Ok(buf) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    let shape: Vec<usize> = buf.shape().to_vec();
+    let thresh = atol + rtol * bv.abs();
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "uint8")?;
+    let bytes = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buf) = PyBuffer::<u8>::get(&bytes) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: ReadOnlyCell<f64>/Cell<u8> are repr(transparent); a is read-only under the
+        // GIL and `bytes` is a fresh numpy.empty buffer we own (no alias).
+        let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+        let out: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
+        let kernel = |o: &mut [u8], d: &[f64]| {
+            for (s, &v) in o.iter_mut().zip(d) {
+                *s = u8::from((v - bv).abs() <= thresh);
+            }
+        };
+        const ISCLOSE_PARALLEL_MIN: usize = 1 << 21;
+        if n >= ISCLOSE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out.par_chunks_mut(chunk)
+                .zip(data.par_chunks(chunk))
+                .for_each(|(o, d)| kernel(o, d));
+        } else {
+            kernel(out, data);
+        }
+    }
+    let as_bool = bytes.call_method1("view", (numpy.getattr("bool_")?,))?;
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    Ok(Some(as_bool.call_method1("reshape", (&output_shape,))?.unbind()))
+}
+
 // Wrap zerocopy_f64_isclose_flat with the shared reshape / 0-d scalar handling.
 fn try_zerocopy_f64_isclose(
     py: Python<'_>,
@@ -48431,6 +48511,13 @@ fn isclose(
         return Ok(out);
     }
     if let Some(out) = try_zerocopy_f32_isclose(py, a.bind(py), b.bind(py), rtol, atol, equal_nan)?
+    {
+        return Ok(out);
+    }
+    // isclose(f64-array, finite scalar): the array-array path above needs both ndarrays, so the
+    // very common isclose(x, 0.0) fell to a full extract (~5x). Zero-copy scalar-broadcast path.
+    if let Some(out) =
+        try_zerocopy_f64_isclose_array_scalar(py, a.bind(py), b.bind(py), rtol, atol)?
     {
         return Ok(out);
     }
