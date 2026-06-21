@@ -22480,11 +22480,16 @@ fn cov_gram_from_centered(centered: &[f64], n_vars: usize, n_obs: usize, ddof: u
         }
     };
     let mut result = vec![0.0f64; n_vars * n_vars];
-    // Below ~1<<18 multiply-adds the rayon dispatch dwarfs the work, and below 32 rows
-    // there are too few row tasks to amortize fan-out. Above both gates fan out over
-    // rows. Each cell is its own dot8, so serial and parallel agree.
+    // Fan out over rows only above the measured crossover. The old gate (1<<18 work)
+    // was far too low: measured on this host, work=2.5M (e.g. corrcoef 50x1000) is
+    // 36% SLOWER parallel (rayon fan-out + the triangular per-row load imbalance —
+    // row i does i+1 cells — dwarf the tiny Gram), while work>=10M (100x1000) is ~43%
+    // FASTER parallel. The crossover sits ~5M, so gate at 1<<22 (4.2M): below it run
+    // serial (fixes the small-shape 3.3x->2.1x regression), above it fan out (keeps
+    // the large-shape wins). <32 rows: too few tasks. Each cell is its own dot8, so
+    // serial and parallel are bit-identical for any gate.
     let work = (n_vars as u64) * (n_vars as u64) * (n_obs as u64);
-    if n_vars >= 32 && work >= (1 << 18) && rayon::current_num_threads() >= 2 {
+    if n_vars >= 32 && work >= (1 << 22) && rayon::current_num_threads() >= 2 {
         result
             .par_chunks_mut(n_vars)
             .enumerate()
