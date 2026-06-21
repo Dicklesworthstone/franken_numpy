@@ -4,6 +4,29 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - RESOLVED: 4 linalg delegates BUILD+CONFORMANCE+PERF verified (warm build)
+
+`BlackThrush`/`cod-b`. Mandate relaxed to allow small WARM per-crate builds — used
+it to do the long-pending on-recovery verification of the 4 code-only delegates
+(eigvalsh 29ab9297, eigh 76712a2b, cholesky 4d79608a, matrix_power 8efc05dd). Target
+was warm (deps + fnp-python fingerprints from Jun20), so this was an INCREMENTAL
+per-crate build, not a cold full rebuild. Forced LOCAL (RCH_MIN_LOCAL_TIME_MS, no
+rch -> matches local libpython ABI). Disk 39G throughout.
+
+- BUILD: `cargo build -p fnp-python --release --lib` clean in 1m33s (only 3
+  pre-existing dead-code warnings, unrelated). The 4 delegates COMPILE. Deployed
+  fresh 14M `.so` -> `.probe/`.
+- CONFORMANCE: conformance_linalg 1 + _advanced 29 + _decomp 39 = **69/69 PASS**.
+  Correctness guard (scripts/) 0 fails on the fresh `.so`.
+- PERF (after vs the before-baseline above): eigvalsh **4.78x->0.97x**, eigh
+  **4.74x->0.95x**, cholesky **1.47x->1.01x** — all flipped LOSS->parity exactly as
+  predicted. matrix_power(M,3) 0.23x WIN (native power>=2 kept), batch_eigvalsh
+  0.82x WIN (batched native kept) — narrow delegates preserved the winning paths.
+
+The native-2-D dense-linalg loss class is now CLOSED **and fully verified**. The
+"4 unbuilt delegates pending" item in every prior heartbeat is RESOLVED. agent-mail
+also recovered earlier. No blockers remain on this work.
+
 ## 2026-06-21 - NOISE ruled out: full-scale (N=4M) std "1.52x LOSS" is load-noise, not real
 
 `BlackThrush`/`cod-b`. Ran perf_gap_sweep `--full` (N=4M, python timing only — no
