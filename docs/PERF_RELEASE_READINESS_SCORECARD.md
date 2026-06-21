@@ -3,6 +3,44 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-b fnp-ufunc percentile_method medium gate check
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Current `percentile_method(None, linear)` vs NumPy | 9/10 | Same-host OVH rows are 3 wins, 0 losses, 0 neutral |
+| Candidate cutoff change | 2/10 | Not kept; RCH moved candidate to another worker before paired proof |
+| Probe coverage | 8/10 | Added ignored medium-N timing probe for 131K/262K/524K rows |
+| Revert discipline | 9/10 | `PERCENTILE_M_GLOBAL_PARALLEL_MIN` restored to `1 << 17`; production path unchanged |
+| Final per-crate gates | 8/10 | `check`, `clippy -D warnings`, percentile release filter, and trapezoid release filter passed |
+| Retry guidance | 8/10 | Do not raise this gate unless a paired same-worker regression appears |
+
+Evidence:
+- Agent/bead: `YellowElk` / `cod-b`, parent `franken_numpy-ixs5y`.
+- Artifact directory:
+  `tests/artifacts/perf/2026-06-21_ufunc_percentile_method_gate_cod_b/`.
+- Rust probe:
+  `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-ufunc percentile_method_medium_gate_report --release -- --ignored --nocapture`
+  on RCH worker `ovh-a`.
+- NumPy comparator: `ssh fmd` on the same OVH host, Python `3.13.7`,
+  NumPy `2.2.4`, single-thread env.
+- Ratios: n=131072 `0.560x`, n=262144 `0.223x`, n=524288 `0.171x`.
+- Final `fnp-ufunc` gates: `cargo check -p fnp-ufunc --all-targets` passed;
+  `cargo clippy -p fnp-ufunc --all-targets -- -D warnings` passed after a
+  behavior-preserving iterator rewrite in the current-tree `trapezoid` last-axis
+  loop; `cargo test -p fnp-ufunc percentile --release` passed 33 tests with 5
+  ignored perf probes; `cargo test -p fnp-ufunc trapezoid --release` passed 13
+  tests.
+- `cargo fmt --check -p fnp-ufunc` remains blocked by broad pre-existing
+  formatting drift outside this evidence slice.
+
+Decision:
+- Current `percentile_method(axis=None, method=linear)` is release-ready for
+  the checked medium rows.
+- Keep the cutoff unchanged. The next BOLD-VERIFY target should be a measured
+  current loss, not this already-winning method path.
+
+---
+
 ## 2026-06-21 cod-b fnp-linalg Matrix Norm Column Current Win
 
 | Area | Score | Verdict |

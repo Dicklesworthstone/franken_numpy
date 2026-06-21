@@ -1,0 +1,7 @@
+host=fixmydocuments
+python=3.13.7
+numpy=2.2.4
+threads openblas=1 omp=1 mkl=1
+NUMPY_PERCENTILE_METHOD n=131072 median_ms=0.883377 min_ms=0.820098 p95_ms=0.939453 iters=21 bits=40e75e48a3d70a3d
+NUMPY_PERCENTILE_METHOD n=262144 median_ms=1.707563 min_ms=1.658561 p95_ms=1.777385 iters=17 bits=40e75e3f2d593bfa
+NUMPY_PERCENTILE_METHOD n=524288 median_ms=3.923541 min_ms=3.861735 p95_ms=3.933731 iters=9 bits=40e75e464efe8982

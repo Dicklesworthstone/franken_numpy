@@ -26384,13 +26384,13 @@ impl UFuncArray {
         if inner == 1 {
             // Last (contiguous) axis: scalar accumulation per row — register-resident
             // sum over sequential reads, optimal. (Matches the original loop exactly.)
-            for o in 0..outer {
+            for (o, out) in out_values.iter_mut().enumerate() {
                 let obase = o * axis_len;
                 let mut sum = 0.0f64;
                 for k in 0..axis_len - 1 {
                     sum += (self.values[obase + k] + self.values[obase + k + 1]) / 2.0 * dx;
                 }
-                out_values[o] = sum;
+                *out = sum;
             }
         } else {
             // Non-last reduction axis (axis=0 / middle): k OUTER, contiguous i INNER,
@@ -67045,6 +67045,47 @@ print(json.dumps(payload))
             "PERCENTILE_NONE new={new_ms:.3}ms old_sort={old_ms:.3}ms speedup={:.2}x",
             old_ms / new_ms
         );
+    }
+
+    #[test]
+    #[ignore = "perf timing: percentile_method(None) medium-N gate; run --release -- --ignored --nocapture"]
+    fn percentile_method_medium_gate_report() {
+        use std::time::Instant;
+
+        fn median(mut xs: Vec<f64>) -> f64 {
+            xs.sort_by(f64::total_cmp);
+            xs[xs.len() / 2]
+        }
+
+        for &(n, iters) in &[(131_072usize, 21usize), (262_144, 17), (524_288, 9)] {
+            let data: Vec<f64> = (0..n)
+                .map(|i| {
+                    let x = ((i as u64).wrapping_mul(2_654_435_761) % 1_000_003) as f64;
+                    x.mul_add(1.0 / 7.0, -5000.0)
+                })
+                .collect();
+            let arr = UFuncArray::new(vec![n], data, DType::F64).unwrap();
+            std::hint::black_box(
+                arr.percentile_method(37.0, None, QuantileInterp::Linear)
+                    .unwrap(),
+            );
+
+            let mut times = Vec::with_capacity(iters);
+            let mut bits = 0u64;
+            for _ in 0..iters {
+                let t0 = Instant::now();
+                let out = arr
+                    .percentile_method(37.0, None, QuantileInterp::Linear)
+                    .unwrap();
+                times.push(t0.elapsed().as_secs_f64() * 1e3);
+                bits = out.values()[0].to_bits();
+                std::hint::black_box(bits);
+            }
+            println!(
+                "PERCENTILE_METHOD_GATE n={n} median_ms={:.6} iters={iters} bits={bits:016x}",
+                median(times)
+            );
+        }
     }
 
     #[test]

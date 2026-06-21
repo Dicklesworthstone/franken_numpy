@@ -4,6 +4,54 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN/NO-SOURCE: percentile_method axis=None medium-N gate verified
+
+`YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on the
+remaining `fnp-ufunc::UFuncArray::percentile_method(q, axis=None, method=...)`
+parallel cutoff after the scalar percentile/quantile gates were raised in
+`ab5e0c68`. The suspected lever was raising
+`PERCENTILE_M_GLOBAL_PARALLEL_MIN` from `1 << 17` to `1 << 19` as well. The
+measured current path already beats NumPy on the same OVH host, so no production
+cutoff change shipped.
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-21_ufunc_percentile_method_gate_cod_b/`
+
+Commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-ufunc percentile_method_medium_gate_report --release -- --ignored --nocapture`
+- `ssh fmd 'OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -'`
+
+| Row | Current FNP median ms | NumPy median ms | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `percentile_method(None, linear)` n=131072 | 0.494989 | 0.883377 | 0.560x | current win |
+| `percentile_method(None, linear)` n=262144 | 0.380504 | 1.707563 | 0.223x | current win |
+| `percentile_method(None, linear)` n=524288 | 0.672502 | 3.923541 | 0.171x | current win |
+
+Scorecard:
+- Current vs NumPy: win/loss/neutral = **3/0/0**.
+- Production cutoff candidate: **no-ship/no-source**. The one-line `1 << 19`
+  trial could not be counted because RCH moved the candidate run to `hz1`, so
+  paired same-worker proof was not available; the source was restored to the
+  current `1 << 17` cutoff.
+
+Validation and decision:
+- Added an ignored crate-local perf probe,
+  `percentile_method_medium_gate_report`, to make the medium-N method path
+  re-measurable without adding a new bench file or `.scratch` worktree.
+- Current output bits matched NumPy on all three rows.
+- Final per-crate gates: `cargo check -p fnp-ufunc --all-targets` passed,
+  `cargo clippy -p fnp-ufunc --all-targets -- -D warnings` passed after a
+  behavior-preserving iterator rewrite of the current-tree `trapezoid` last-axis
+  accumulation loop, `cargo test -p fnp-ufunc percentile --release` passed
+  33/0/5 ignored, and `cargo test -p fnp-ufunc trapezoid --release` passed
+  13/0/0.
+- `cargo fmt --check -p fnp-ufunc` still reports broad pre-existing formatting
+  drift in the bench and unrelated source/test regions; it was not normalized in
+  this perf evidence commit.
+- Do not raise `PERCENTILE_M_GLOBAL_PARALLEL_MIN` without a paired same-worker
+  regression. The measured current path is already a NumPy win at the suspected
+  medium sizes; future work should target a fresh loss instead.
+
 ## 2026-06-21 - NO-SHIP: eigvalsh(128) Sturm bisection eigensolver
 
 `YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on the
