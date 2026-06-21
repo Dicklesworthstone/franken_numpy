@@ -39483,7 +39483,15 @@ fn core_numpy_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
+    // Cache the numpy module once instead of re-importing it on every call. This
+    // passthrough backs 185 ops; on SMALL arrays the per-call `py.import("numpy")`
+    // (~200ns, measured) dominates the trivial kernel, so caching it cuts the
+    // dispatch overhead for every passthrough ufunc with zero behaviour change
+    // (same module, same getattr+call). Large-array ops are unaffected (amortized).
+    static NUMPY_MODULE: PyOnceLock<Py<PyModule>> = PyOnceLock::new();
+    let numpy = NUMPY_MODULE
+        .get_or_try_init(py, || -> PyResult<Py<PyModule>> { Ok(py.import("numpy")?.unbind()) })?
+        .bind(py);
     Ok(numpy.getattr(name)?.call(args, kwargs)?.unbind())
 }
 
