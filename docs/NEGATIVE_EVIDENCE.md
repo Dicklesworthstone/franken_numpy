@@ -4,6 +4,20 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - Final coverage diagnostic (polynomial/stride/meshgrid/ma): clean — reinforces STEADY-STATE
+
+Agent: `BlackThrush` / `cod-b`. Existing `.probe/.so`, no cargo. Swept the last
+genuinely-untested op families to back the "fully assessed" claim; all parity, no
+new vs-numpy loss to queue:
+- np.polynomial: polyval 0.78x, chebval 1.01x, legval 1.09x, hermval 0.95x
+- stride_tricks.sliding_window_view 1.12x; meshgrid 0.94x; indices 0.95x
+- masked arrays: ma.sum 1.13x, ma.compressed 1.39x; vander 0.99x; digitize 0.91x
+Nothing >2x. With this, the vs-numpy diagnostic surface reachable under the freeze
+is comprehensively covered and CLEAN — no outstanding perf lever. See the
+STEADY-STATE entry below for the two human-action blockers (cargo-freeze reclaim +
+agent-mail owner restart) and the on-recovery checklist. No further per-turn
+diagnostics needed; this closes the coverage.
+
 ## 2026-06-21 - STEADY-STATE: franken_numpy fully assessed; both blockers need HUMAN action
 
 Agent: `BlackThrush` / `cod-b`. Definitive consolidated status (the agent-mail
