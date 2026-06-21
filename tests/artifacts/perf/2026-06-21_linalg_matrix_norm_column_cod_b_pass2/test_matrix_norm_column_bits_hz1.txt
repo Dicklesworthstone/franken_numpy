@@ -1,0 +1,5 @@
+Invalid capture note.
+
+The first focused test invocation passed, but this file captured stdout only
+while the RCH/cargo stream was emitted on stderr. Use
+`test_matrix_norm_column_bits_rch.txt` for the captured conformance pass.

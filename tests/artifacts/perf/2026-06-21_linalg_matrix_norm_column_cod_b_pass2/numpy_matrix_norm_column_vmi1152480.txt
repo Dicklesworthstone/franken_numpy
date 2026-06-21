@@ -1,0 +1,12 @@
+worker=vmi1152480
+python=3.13.7
+numpy=2.4.6
+threads=OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+matrix_norm_nxn_orders/one/128 median_ns=9615 min_ns=7942 max_ns=22564 p95_ns=12258
+matrix_norm_nxn_orders/neg_one/128 median_ns=9583 min_ns=8022 max_ns=16194 p95_ns=10976
+matrix_norm_nxn_orders/one/256 median_ns=22594 min_ns=22033 max_ns=99047 p95_ns=32748
+matrix_norm_nxn_orders/neg_one/256 median_ns=27742 min_ns=22793 max_ns=76084 p95_ns=31667
+matrix_norm_nxn_orders/one/512 median_ns=97495 min_ns=89644 max_ns=122503 p95_ns=111997
+matrix_norm_nxn_orders/neg_one/512 median_ns=93719 min_ns=85497 max_ns=115903 p95_ns=106458
+matrix_norm_nxn_orders/one/1024 median_ns=478653 min_ns=414939 max_ns=536160 p95_ns=513496
+matrix_norm_nxn_orders/neg_one/1024 median_ns=461018 min_ns=369662 max_ns=568779 p95_ns=526725

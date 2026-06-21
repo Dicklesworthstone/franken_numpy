@@ -1,0 +1,7 @@
+Invalid capture note.
+
+This first Rust bench invocation wrote the Criterion/RCH stream to stderr while
+`tee` captured stdout only, so the file is intentionally not used as proof.
+The valid captured Rust comparator is `current_matrix_norm_column_hz1_rerun.txt`;
+that command requested `hz1`, RCH selected `vmi1152480`, and the same worker was
+used for `numpy_matrix_norm_column_vmi1152480.txt`.

@@ -5335,3 +5335,50 @@ Focused conformance and crate health:
 Retry predicate:
 - Do not retry ungated full row-dot matvec. It helps the 256-class dense reducer but loses at 64/128 and 512.
 - A credible next eigvalsh attempt needs a deeper values-only tridiagonal reducer, true band-stage primitive, or generated 128-specific reducer that improves `eigvalsh_nxn/128` / `cond_nxn/128` without reopening rejected panel-width, active-window deflation, or sub-1024 Rayon matvec families.
+
+## 2026-06-21 - RELEASE-READY RECHECK: `matrix_norm` column sums now beat NumPy
+
+`YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY current-code
+recheck of `fnp-linalg::matrix_norm_nxn_orders/(one|neg_one)` after the earlier
+matrix-norm column-sum ledger rows recorded 256-1024 losses and warned against
+allocation-only stack-threshold or NaN-prefilter retries. The radical mapping was
+cache/data-movement plus vectorized absolute-value accumulation. No source was
+changed in this pass because current `main` already contains the safe `std::simd`
+cache-linear column accumulation path.
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-21_linalg_matrix_norm_column_cod_b_pass2/`
+
+Commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'matrix_norm_nxn_orders/(one|neg_one)' -- --sample-size 12 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- Direct NumPy comparator on RCH-selected worker `vmi1152480`, with single-thread BLAS env and NumPy `2.4.6`.
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg matrix_norm_column_reduction_matches_strided_reference_bits --release -- --nocapture`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo build -p fnp-linalg --release`
+
+Authoritative same-worker evidence on `vmi1152480`:
+
+| Workload | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `one/128` | 7,684 | 9,615 | 0.799x | win |
+| `neg_one/128` | 7,773 | 9,583 | 0.811x | win |
+| `one/256` | 4,983 | 22,594 | 0.221x | win |
+| `neg_one/256` | 5,129 | 27,742 | 0.185x | win |
+| `one/512` | 25,621 | 97,495 | 0.263x | win |
+| `neg_one/512` | 25,818 | 93,719 | 0.275x | win |
+| `one/1024` | 129,460 | 478,653 | 0.270x | win |
+| `neg_one/1024` | 122,906 | 461,018 | 0.267x | win |
+
+Scorecard:
+- Current vs NumPy: win/loss/neutral = **8/0/0**.
+- Source changes: **0**.
+
+Validation and decision:
+- Focused release-mode bit-preservation test passed on RCH-selected
+  `vmi1153651`.
+- `cargo build -p fnp-linalg --release` passed on RCH-selected `vmi1152480`.
+- The older matrix-norm column residual is stale on current `main`; no source
+  hunk was needed or kept.
+- Do not retry allocation-only stack-threshold or NaN-prefilter families for
+  this lane. Reopen only if a same-worker rerun shows a current FNP/NumPy loss
+  or if the column-sum kernel changes its scalar addition order, NaN behavior,
+  or stride contract.

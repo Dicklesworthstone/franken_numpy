@@ -1,0 +1,12 @@
+worker=hz1
+python=3.14.4
+numpy=2.3.5
+threads=OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1
+matrix_norm_nxn_orders/one/128 median_ns=13036 min_ns=12524 max_ns=48603 p95_ns=19236
+matrix_norm_nxn_orders/neg_one/128 median_ns=13395 min_ns=12934 max_ns=23825 p95_ns=22122
+matrix_norm_nxn_orders/one/256 median_ns=42702 min_ns=42009 max_ns=54812 p95_ns=47229
+matrix_norm_nxn_orders/neg_one/256 median_ns=42770 min_ns=42149 max_ns=57068 p95_ns=52518
+matrix_norm_nxn_orders/one/512 median_ns=140293 min_ns=115889 max_ns=183648 p95_ns=161606
+matrix_norm_nxn_orders/neg_one/512 median_ns=119816 min_ns=114586 max_ns=133581 p95_ns=131738
+matrix_norm_nxn_orders/one/1024 median_ns=478762 min_ns=429391 max_ns=585064 p95_ns=552302
+matrix_norm_nxn_orders/neg_one/1024 median_ns=462253 min_ns=431313 max_ns=604089 p95_ns=591597

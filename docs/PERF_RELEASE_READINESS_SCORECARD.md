@@ -3,6 +3,88 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-b fnp-linalg Matrix Norm Column Current Win
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Current `matrix_norm_nxn_orders/(one|neg_one)` vs NumPy | 10/10 | Same-worker `vmi1152480` row is 8 wins, 0 losses, 0 neutral |
+| Largest remaining row | 9/10 | Worst current ratio is still a win: `neg_one/128 = 0.811x` |
+| Deep-size column rows | 10/10 | 256-1024 rows are `0.185x` to `0.275x` FNP/NumPy |
+| Source discipline | 10/10 | No source change was needed or kept |
+| Focused conformance | 9/10 | Column reduction bit-preservation test passed in release mode |
+| Release build | 9/10 | `cargo build -p fnp-linalg --release` passed through RCH |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-b`.
+- Artifact directory:
+  `tests/artifacts/perf/2026-06-21_linalg_matrix_norm_column_cod_b_pass2/`.
+- Current Rust bench:
+  `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'matrix_norm_nxn_orders/(one|neg_one)' -- --sample-size 12 --warm-up-time 1 --measurement-time 2 --output-format bencher`.
+- RCH selected `vmi1152480`; direct NumPy comparator ran on the same worker with
+  Python `3.13.7` and NumPy `2.4.6`.
+- Ratios: `one/128 0.799x`, `neg_one/128 0.811x`, `one/256 0.221x`,
+  `neg_one/256 0.185x`, `one/512 0.263x`, `neg_one/512 0.275x`,
+  `one/1024 0.270x`, `neg_one/1024 0.267x`.
+- Scorecard vs NumPy: win/loss/neutral = **8/0/0**.
+- Focused conformance:
+  `cargo test -p fnp-linalg matrix_norm_column_reduction_matches_strided_reference_bits --release -- --nocapture`
+  passed on RCH-selected `vmi1153651`.
+- Release build:
+  `cargo build -p fnp-linalg --release` passed on RCH-selected `vmi1152480`.
+
+Decision:
+- Release-ready current-code proof. The older column-sum residual is stale on
+  current `main`.
+- No source hunk is kept. Do not reopen the allocation-only stack-threshold or
+  NaN-prefilter families for this lane.
+
+---
+
+## 2026-06-21 cod-a fnp-python Sort Complex Real-f64 Gate Keep
+
+| Area | Score | Verdict |
+|---|---:|---|
+| High-thread `sort_complex` vs NumPy | 8/10 | 1M real-f64 row wins at `0.767x`; 200k row is neutral at `1.001x` |
+| Low-thread guard | 8/10 | Forced 4-thread rows are neutral: `1.004x` and `1.000x` |
+| Revert discipline | 9/10 | Rejected direct-output-only, combined scan/copy, and sub-8-thread native sort variants |
+| Focused conformance | 9/10 | `sort_complex` unit row and `conformance_sort_search` filtered rows passed |
+| Release build readiness | 7/10 | Per-crate release build still required after docs; prior bench builds passed with known warnings |
+| Retry guidance | 8/10 | Ledger routes away from Python complex list construction and ungated parallel sort |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Source: `crates/fnp-python/src/lib.rs`, exact 1-D C-contiguous `float64`
+  `sort_complex` path builds `complex128` output directly and sorts real values
+  with stable Rayon sorting only at the high-thread crossover.
+- Bench rows added in
+  `crates/fnp-python/benches/criterion_python_surface.rs` under
+  `python_sort_complex_boundary`.
+- Baseline old native export on `hz1`: 200k `53,011,981 ns` vs NumPy
+  `2,177,501 ns` (`24.345x` loss); 1M `294,361,340 ns` vs NumPy
+  `12,954,676 ns` (`22.722x` loss).
+- Rejected direct-output-only candidate: 200k `8.068x` loss, 1M `6.673x`
+  loss.
+- Rejected combined scan/copy candidate: 200k `1.628x` loss, 1M `1.304x`
+  loss.
+- Final high-thread keep on `ovh-a`: 200k `1,457,650 ns` vs NumPy
+  `1,456,064 ns` (`1.001x` neutral); 1M `6,538,178 ns` vs NumPy
+  `8,520,745 ns` (`0.767x` win).
+- Final forced fallback with `RAYON_NUM_THREADS=4` on `ovh-a`: 200k
+  `1,457,144 ns` vs NumPy `1,451,943 ns` (`1.004x` neutral); 1M
+  `8,476,034 ns` vs NumPy `8,475,550 ns` (`1.000x` neutral).
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`; no new
+  `.scratch` worktree.
+
+Decision:
+- Release-ready for exact 1-D C-contiguous real-f64 `sort_complex` at the
+  measured high-thread crossover.
+- Keep low-thread and NaN-bearing rows delegated to NumPy; signed-zero/NaN
+  behavior stays guarded by focused conformance.
+- Next work should target remaining measured losses rather than broadening this
+  path without a dtype/shape-specific crossover sweep.
+
+---
+
 ## 2026-06-21 cod-b fnp-linalg Eigvalsh 128 Sturm Bisection No-Ship
 
 | Area | Score | Verdict |
