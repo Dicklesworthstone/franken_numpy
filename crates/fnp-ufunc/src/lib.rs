@@ -26344,15 +26344,34 @@ impl UFuncArray {
         let out_total = outer * inner;
         let mut out_values = vec![0.0f64; out_total];
 
-        for o in 0..outer {
-            for i in 0..inner {
+        if inner == 1 {
+            // Last (contiguous) axis: scalar accumulation per row — register-resident
+            // sum over sequential reads, optimal. (Matches the original loop exactly.)
+            for o in 0..outer {
+                let obase = o * axis_len;
                 let mut sum = 0.0f64;
                 for k in 0..axis_len - 1 {
-                    let idx0 = o * axis_len * inner + k * inner + i;
-                    let idx1 = o * axis_len * inner + (k + 1) * inner + i;
-                    sum += (self.values[idx0] + self.values[idx1]) / 2.0 * dx;
+                    sum += (self.values[obase + k] + self.values[obase + k + 1]) / 2.0 * dx;
                 }
-                out_values[o * inner + i] = sum;
+                out_values[o] = sum;
+            }
+        } else {
+            // Non-last reduction axis (axis=0 / middle): k OUTER, contiguous i INNER,
+            // accumulating into out_values. This makes the inner read+write stride-1
+            // (cache-friendly + vectorizable) instead of the old column-major
+            // (stride=inner) access that thrashed cache. The per-output accumulation
+            // order over k is unchanged (k = 0,1,..), so the result is bit-identical.
+            for o in 0..outer {
+                let obase = o * axis_len * inner;
+                let osum = o * inner;
+                for k in 0..axis_len - 1 {
+                    let r0 = obase + k * inner;
+                    let r1 = obase + (k + 1) * inner;
+                    for i in 0..inner {
+                        out_values[osum + i] +=
+                            (self.values[r0 + i] + self.values[r1 + i]) / 2.0 * dx;
+                    }
+                }
             }
         }
 
