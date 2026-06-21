@@ -4,6 +4,55 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: `np.compress(axis=None)` 16-lane mask count/compaction (cod-b, 2.0-2.8x)
+
+`YellowElk`/`cod-b`, parent directive `franken_numpy-ixs5y`. Applied the
+graveyard/alien-artifact/optimization loop to the current `compress_f64_axis_none`
+loss instead of reopening stale linalg lanes. Lever: replace the flat f64
+zero-copy fast path's branchy boolean true-count with a 16-lane mask/count helper
+and widen the generic typed mask compactor from 8 to 16 lanes. This keeps the
+NumPy contract unchanged: inspect only the first `len(condition)` flattened
+elements, preserve selected element order, return a fresh 1-D ndarray, and defer
+NumPy's longer-condition error path when the mask exceeds the array.
+
+Evidence directory:
+`tests/artifacts/perf/2026-06-21_fnp_python_compress_cod_b/`
+
+Disk-frugal commands used `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`
+and did not create a new `.scratch` worktree:
+- `rch exec -- cargo bench -p fnp-python --bench criterion_python_surface compress_f64_axis_none -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- `rch exec -- cargo test -p fnp-python --test conformance_compress_choose_diagonal compress -- --nocapture`
+- `rch exec -- cargo build -p fnp-python --release`
+
+Head-to-head ratios:
+
+| Row | Baseline FNP/NumPy | Candidate FNP ns | Candidate NumPy ns | Candidate FNP/NumPy | Verdict |
+|---|---:|---:|---:|---:|---|
+| `compress_f64_axis_none_100000` | 1.123x loss (`hz1`) | 62,745 | 172,737 | 0.363x | WIN |
+| `compress_f64_axis_none_1000000` | 1.077x loss (`hz1`) | 883,588 | 1,773,287 | 0.498x | WIN |
+
+Decision:
+- Keep the source hunk. Candidate-vs-baseline deltas are cross-worker routing
+  evidence only (`hz1` baseline, `vmi1149989` candidate); the keep proof is the
+  same-process candidate FNP/NumPy ratio.
+- First 16-lane attempt panicked because the widened loop still advanced by 8;
+  fixed to `base += 16`. The failed artifact is retained and not counted.
+- Filtered compress conformance passed 13/13. The full
+  `conformance_compress_choose_diagonal` shard had 24/25 pass with the one
+  failure in unrelated `choose_python_container_surfaces_match_numpy`; every
+  `compress_*` test in that shard passed.
+- `cargo build -p fnp-python --release` passed through `rch`. `cargo fmt
+  --check -p fnp-python` is not clean at the shared checkout because of broader
+  pre-existing/unowned formatting drift; no broad auto-format was applied.
+- UBS on `crates/fnp-python/src/lib.rs` returned the existing broad inventory
+  of panic/unwrap/security heuristics in this large binding file; no isolated
+  finding was introduced by the compress hunk.
+
+Retry predicate:
+- Reopen only if a same-process rerun of these exact rows shows FNP/NumPy
+  `>= 1.0x` again, or if the flat `compress` dtype/view contract changes.
+  Do not retry the already-rejected 8-lane mask variant.
+
 ## 2026-06-21 - WIN (RADICAL): native gradient along last axis for N-D (87bd6403, 8-9x)
 
 `BlackThrush`/`cod-b`. 6th single-threaded-numpy lever this session. Generalized the 1-D

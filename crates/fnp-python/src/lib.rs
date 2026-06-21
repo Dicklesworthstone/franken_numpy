@@ -9461,7 +9461,7 @@ fn try_zerocopy_f64_compress(
     if m > arr_in.len() {
         return Ok(None);
     }
-    let count = cond_in.iter().filter(|cell| cell.get() != 0).count();
+    let count = count_true_u8_prefix(cond_in, m);
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
     let flat = numpy.call_method("empty", (count,), Some(&kwargs))?;
@@ -9614,15 +9614,15 @@ fn compact_typed<'py, T: pyo3::buffer::Element + Copy>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        // Build an 8-bit mask per condition chunk, then gather only selected
+        // Build a mask per condition chunk, then gather only selected
         // lanes with trailing-zero iteration. This avoids both per-element branch
         // mispredicts and speculative stores for unkept lanes.
         let mut w = 0usize;
         let mut base = 0usize;
-        while base + 8 <= m {
-            let mut mask = 0u8;
-            for lane in 0..8 {
-                mask |= ((cond_in[base + lane].get() != 0) as u8) << lane;
+        while base + 16 <= m {
+            let mut mask = 0u16;
+            for lane in 0..16 {
+                mask |= ((cond_in[base + lane].get() != 0) as u16) << lane;
             }
             while mask != 0 {
                 let lane = mask.trailing_zeros() as usize;
@@ -9630,7 +9630,7 @@ fn compact_typed<'py, T: pyo3::buffer::Element + Copy>(
                 w += 1;
                 mask &= mask - 1;
             }
-            base += 8;
+            base += 16;
         }
         for i in base..m {
             if cond_in[i].get() != 0 {
@@ -9640,6 +9640,23 @@ fn compact_typed<'py, T: pyo3::buffer::Element + Copy>(
         }
     }
     Ok(Some(flat.unbind()))
+}
+
+fn count_true_u8_prefix(cond: &[pyo3::buffer::ReadOnlyCell<u8>], len: usize) -> usize {
+    let mut count = 0usize;
+    let mut base = 0usize;
+    while base + 16 <= len {
+        let mut mask = 0u16;
+        for lane in 0..16 {
+            mask |= ((cond[base + lane].get() != 0) as u16) << lane;
+        }
+        count += mask.count_ones() as usize;
+        base += 16;
+    }
+    for cell in cond.iter().take(len).skip(base) {
+        count += (cell.get() != 0) as usize;
+    }
+    count
 }
 
 // Dispatch a branchless compaction for every fixed-width numeric dtype (all 8

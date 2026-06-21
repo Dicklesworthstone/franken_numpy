@@ -1,0 +1,207 @@
+  [2m2026-06-21T09:04:32.178626Z[0m [32m INFO[0m [1;32mrch::hook[0m[32m: [32mSelected worker: vmi1227854 at root@109.123.245.77 (0 slots remaining after reservation, speed 50.0)[0m
+    [2;3mat[0m rch/src/hook.rs:921 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:32.390555Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mStarting remote compilation pipeline for franken_numpy (hash: f8416174b04438a4)[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:241 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:32.390616Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mPrepared dependency sync manifest for 11 roots[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:263 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:34.125807Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSyncing project to worker vmi1227854...[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:323 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:34.125870Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mLoaded 1 pattern(s) from .rchignore (total: 39)[0m
+    [2;3mat[0m rch/src/transfer.rs:886 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:34.125879Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy -> /data/projects/franken_numpy on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:38.908756Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 4782ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:38.908829Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-conformance -> /data/projects/franken_numpy/crates/fnp-conformance on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:40.728068Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1819ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:40.728136Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-dtype -> /data/projects/franken_numpy/crates/fnp-dtype on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:42.810002Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2081ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:42.810072Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-io -> /data/projects/franken_numpy/crates/fnp-io on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:45.119997Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2309ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:45.120067Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-iter -> /data/projects/franken_numpy/crates/fnp-iter on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:47.027970Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1907ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:47.028038Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-linalg -> /data/projects/franken_numpy/crates/fnp-linalg on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:49.006905Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1978ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:49.006985Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-ndarray -> /data/projects/franken_numpy/crates/fnp-ndarray on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:51.194595Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2187ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:51.194669Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-python -> /data/projects/franken_numpy/crates/fnp-python on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:53.007051Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1812ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:53.007118Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-random -> /data/projects/franken_numpy/crates/fnp-random on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:54.876977Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1869ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:54.877049Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-runtime -> /data/projects/franken_numpy/crates/fnp-runtime on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:56.649456Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 1772ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:56.649528Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSyncing /data/projects/franken_numpy/crates/fnp-ufunc -> /data/projects/franken_numpy/crates/fnp-ufunc on vmi1227854[0m
+    [2;3mat[0m rch/src/transfer.rs:1528 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:58.867421Z[0m [32m INFO[0m [1;32mrch::transfer[0m[32m: [32mSync completed in 2217ms[0m
+    [2;3mat[0m rch/src/transfer.rs:1592 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:04:58.867456Z[0m [32m INFO[0m [1;32mrch::hook::transfer_orchestration[0m[32m: [32mSync complete: 25458 files, 3478449 bytes in 24733ms[0m
+    [2;3mat[0m rch/src/hook/transfer_orchestration.rs:486 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:05:00.417333Z[0m [33m WARN[0m [1;33mrch::hook::dependency_closure[0m[33m: [33mRemote dependency preflight blocked remote execution on vmi1227854 [RCH-E412] remediation='Dependency verification could not determine remote state; inspect sync/SSH logs and retry.' evidence='unknown manifest /data/projects/franken_numpy/Cargo.toml: dependency probe unavailable for manifest under /data/projects/franken_numpy; sample required_path=/data/projects/franken_numpy/Cargo.toml; additional unreported paths for this root/kind share this failure; probe exited with status Some(255); stdout=''; stderr='kex_exchange_identification: read: Connection reset by peer
+Connection reset by 109.123.245.77 port 22''[0m
+    [2;3mat[0m rch/src/hook/dependency_closure.rs:999 [2;3mon[0m ThreadId(1)
+
+  [2m2026-06-21T09:05:00.468796Z[0m [33m WARN[0m [1;33mrch::hook[0m[33m: [33mDependency preflight blocked remote execution [RCH-E412]: Dependency verification could not determine remote state; inspect sync/SSH logs and retry.; evidence='unknown manifest /data/projects/franken_numpy/Cargo.toml: dependency probe unavailable for manifest under /data/projects/franken_numpy; sample required_path=/data/projects/franken_numpy/Cargo.toml; additional unreported paths for this root/kind share this failure; probe exited with status Some(255); stdout=''; stderr='kex_exchange_identification: read: Connection reset by peer
+Connection reset by 109.123.245.77 port 22''[0m
+    [2;3mat[0m rch/src/hook.rs:1031 [2;3mon[0m ThreadId(1)
+
+[RCH] local (dependency preflight RCH-E412: Dependency verification could not determine remote state; inspect sync/SSH logs and retry.; evidence: unknown manifest /data/projects/franken_numpy/Cargo.toml: dependency probe unavailable for manifest under /data/projects/franken_numpy; sample required_path=/data/projects/franken_numpy/Cargo.toml; additional unreported paths for this root/kind share this failure; probe exited with status Some(255); stdout=''; stderr='kex_exchange_identification: read: Connection reset by peer
+Connection reset by 109.123.245.77 port 22')
+   Compiling simd-adler32 v0.3.9
+   Compiling adler2 v2.0.1
+   Compiling once_cell v1.21.4
+   Compiling bytemuck v1.25.0
+   Compiling crc32fast v1.5.0
+   Compiling getrandom v0.3.4
+   Compiling pyo3-build-config v0.28.3
+   Compiling zerocopy v0.8.48
+   Compiling serde v1.0.228
+   Compiling fnp-linalg v0.1.0 (/data/projects/franken_numpy/crates/fnp-linalg)
+   Compiling miniz_oxide v0.8.9
+   Compiling fnp-random v0.1.0 (/data/projects/franken_numpy/crates/fnp-random)
+   Compiling flate2 v1.1.9
+   Compiling tinytemplate v1.2.1
+   Compiling fnp-iter v0.1.0 (/data/projects/franken_numpy/crates/fnp-iter)
+   Compiling pyo3-ffi v0.28.3
+   Compiling pyo3-macros-backend v0.28.3
+   Compiling pyo3 v0.28.3
+   Compiling fnp-io v0.1.0 (/data/projects/franken_numpy/crates/fnp-io)
+   Compiling pyo3-macros v0.28.3
+   Compiling half v2.7.1
+   Compiling fnp-dtype v0.1.0 (/data/projects/franken_numpy/crates/fnp-dtype)
+   Compiling ciborium-ll v0.2.2
+   Compiling ciborium v0.2.2
+   Compiling fnp-ufunc v0.1.0 (/data/projects/franken_numpy/crates/fnp-ufunc)
+   Compiling criterion v0.6.0
+   Compiling fnp-python v0.1.0 (/data/projects/franken_numpy/crates/fnp-python)
+warning: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2519:5
+     |
+2516 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2519 |     Depth,
+     |     ^^^^^
+2520 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5151:4
+     |
+5151 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5173:4
+     |
+5173 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `fnp-python` (lib) generated 3 warnings
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 32.20s
+     Running tests/conformance_compress_choose_diagonal.rs (/data/projects/.rch-targets/franken_numpy-cod-b/debug/deps/conformance_compress_choose_diagonal-f3c5b9d3ef7685c4)
+
+running 25 tests
+
+thread 'choose_python_container_surfaces_match_numpy' (3404944) panicked at crates/fnp-python/tests/conformance_compress_choose_diagonal.rs:312:5:
+assertion `left == right` failed: choose Python-container surfaces should match numpy: scalar index scalar choices
+('ok', 'ndarray', 'int64', (), 20)
+('ok', 'int64', 'int64', (), 20)
+bool indices two choices
+('err', 'TypeError', 'choose(a): expected an integer index array, got dtype bool')
+('ok', 'ndarray', 'int64', (3,), [1, 9, 1])
+string choices
+('err', 'TypeError', 'choose(choices)[0]: expected a bool/int/uint/float array, got dtype <U1')
+('ok', 'ndarray', '<U1', (3,), ['a', 'b', 'a'])
+invalid mode error
+('err', 'ValueError', "choose: unsupported mode 'bad'; expected 'raise', 'wrap', or 'clip'")
+('err', 'ValueError', "clipmode must be one of 'clip', 'raise', or 'wrap' (got 'bad')")
+raise mode error
+('err', 'ValueError', 'choose: index 3 out of range for 2 choices')
+('err', 'ValueError', 'invalid entry in choice array')
+False
+  left: "scalar index scalar choices\n('ok', 'ndarray', 'int64', (), 20)\n('ok', 'int64', 'int64', (), 20)\nbool indices two choices\n('err', 'TypeError', 'choose(a): expected an integer index array, got dtype bool')\n('ok', 'ndarray', 'int64', (3,), [1, 9, 1])\nstring choices\n('err', 'TypeError', 'choose(choices)[0]: expected a bool/int/uint/float array, got dtype <U1')\n('ok', 'ndarray', '<U1', (3,), ['a', 'b', 'a'])\ninvalid mode error\n('err', 'ValueError', \"choose: unsupported mode 'bad'; expected 'raise', 'wrap', or 'clip'\")\n('err', 'ValueError', \"clipmode must be one of 'clip', 'raise', or 'wrap' (got 'bad')\")\nraise mode error\n('err', 'ValueError', 'choose: index 3 out of range for 2 choices')\n('err', 'ValueError', 'invalid entry in choice array')\nFalse"
+ right: "True"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test choose_python_container_surfaces_match_numpy ... FAILED
+test choose_2d ... ok
+test diagonal_3d_default_axes ... ok
+test compress_1d_basic ... ok
+test diagonal_offset_positive ... ok
+test compress_2d_axis0 ... ok
+test diagonal_3d_custom_axes ... ok
+test choose_float_arrays ... ok
+test choose_complex ... ok
+test diagonal_non_square ... ok
+test diagonal_python_container_surfaces_match_numpy ... ok
+test diagonal_offset_negative ... ok
+test choose_basic ... ok
+test compress_2d_no_axis ... ok
+test compress_string_payload_matches_numpy ... ok
+test compress_all_false ... ok
+test compress_complex ... ok
+test compress_2d_axis1 ... ok
+test compress_string_condition_truthiness_matches_numpy ... ok
+test compress_python_container_surfaces_match_numpy ... ok
+test compress_extract_equivalence ... ok
+test diagonal_2d_basic ... ok
+test compress_object_condition_truthiness_matches_numpy ... ok
+test compress_f64_axis_matches_numpy_bytes_and_golden ... ok
+test compress_zerocopy_f64_bit_exact_matches_numpy ... ok
+
+failures:
+
+failures:
+    choose_python_container_surfaces_match_numpy
+
+test result: FAILED. 24 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s
+
+error: test failed, to rerun pass `-p fnp-python --test conformance_compress_choose_diagonal`

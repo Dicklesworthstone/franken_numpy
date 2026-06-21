@@ -3,6 +3,39 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-b fnp-python Compress Mask Count/Compaction Keep
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `compress_f64_axis_none` vs NumPy | 9/10 | 2 wins, 0 losses; candidate ratios 0.363x and 0.498x |
+| Revert discipline | 8/10 | Failed first 16-lane attempt was fixed before keep; no regression hunk retained |
+| Focused conformance | 8/10 | Filtered `compress` shard passed 13/13; full shard's lone failure is unrelated `choose` parity |
+| Release build | 8/10 | `cargo build -p fnp-python --release` passed through `rch` |
+| Hygiene gates | 6/10 | UBS/fmt report broad pre-existing `fnp-python` debt; no broad cleanup mixed into this perf commit |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-b`.
+- Source: `crates/fnp-python/src/lib.rs`, flat f64 `compress` fast path and
+  generic typed mask compactor.
+- Artifact directory:
+  `tests/artifacts/perf/2026-06-21_fnp_python_compress_cod_b/`.
+- Baseline (`hz1`): `compress_f64_axis_none_100000` FNP/NumPy `1.123x`;
+  `compress_f64_axis_none_1000000` FNP/NumPy `1.077x`.
+- Candidate (`vmi1149989`, same process FNP vs NumPy): 100K row
+  `62,745 ns` vs `172,737 ns` (`0.363x`); 1M row `883,588 ns` vs
+  `1,773,287 ns` (`0.498x`).
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`; no new
+  `.scratch` worktree.
+
+Decision:
+- Release-ready for this exact flat f64 `compress(axis=None)` row.
+- Cross-worker candidate-vs-baseline movement is not used as proof; the proof is
+  the candidate head-to-head ratio against NumPy in the same Criterion process.
+- Next target should be a current measured loss, not another pass over the
+  already-fixed 8-lane branch.
+
+---
+
 ## 2026-06-21 cod-a fnp-python 2-D Linalg Delegate Criterion Recheck
 
 | Area | Score | Verdict |
