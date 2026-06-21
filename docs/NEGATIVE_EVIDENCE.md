@@ -5966,3 +5966,15 @@ dominated. The only genuine non-wins: 2 tiny uncommon residuals (frexp 1.11x, pu
 documented structural walls (BLAS-Gram floor, view-op O(1) dispatch, small-array pyo3, forbid-
 unsafe bounds-check [sqrt/bincount-unweighted], numpy-tight-loop, dense-LAPACK). No actionable
 single-agent lever remains; 34 measured wins shipped this arc.
+
+### mixed-dtype binary + complex128 dominated (BlackThrush 2026-06-21)
+Probed mixed-dtype binary (f32+f64/int+f64/f64+f32) + complex128. ALL dominated: add(f32,f64)
+0.89x, multiply 0.99x, subtract 0.92x (careful min-of-3; the single-run "1.1-1.26x" was NOISE —
+dtype f64 correct, bit-exact), int+f64 parity, hypot(f32,f64) parity; complex128 abs/conj/mul/
+add/isclose parity, angle(c128) 0.03x WIN. fnp's mixed-dtype promotion path beats numpy (no temp
+promotion copy). DIMENSION COVERAGE truly exhaustive now: families x sizes x dtypes(f64/f32/int/
+bool/c64/c128) x mixed-dtype x contiguity x out= x ufunc-methods x reduction-axis(last+strided0).
+Every axis dominated. PATTERN: ~5 catalogued "mild residuals" (diff-prepend/ediff1d/f32-add/
+add-f32f64/bincount-2M) ALL dissolved to wins/parity under min-of-3 re-verify — single-run
+shared-box readings fabricate phantom 1.1-1.3x losses. Only TRUE residuals: frexp 1.11x +
+putmask 1.18x (niche, high-effort, low-ROI). 34 wins; no actionable lever; surface dominant.
