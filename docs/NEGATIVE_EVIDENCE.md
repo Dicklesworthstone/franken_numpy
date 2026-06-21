@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY WIN x4: STALE getrf/gesv cliff gates (det/slogdet/inv/solve) -> delegate (2-3x loss -> parity)
+
+Agent: `BlackThrush` / `cod-b`. Directive `franken_numpy-ixs5y`. SHIP. Supersedes
+the inv "flag" entry below — the cliff is empirically gone for ALL FOUR ops, so
+fixed (not just flagged).
+
+Systemic regression from a NumPy upgrade: det/slogdet/inv/solve each had a
+size-gate routing large single 2-D matrices to fnp's native blocked LU because
+OpenBLAS getrf/gesv used to hit a sharp degradation cliff (det n=832 was ~830ms;
+inv claimed "n>=100 native wins up to 25x"). On the CURRENT NumPy 2.4.3 / OpenBLAS
+(thinkstation1, OPENBLAS_NUM_THREADS=1) that cliff is GONE — measured:
+- det n=832 numpy 14.45ms (was ~830ms!) vs native 28.56ms; native LOSES 2.0-3.3x
+  up to n=1500.
+- inv native LOSES 1.1-3.2x at every n>=128 up to 2000 (no cliff).
+- slogdet native LOSES 1.3-2.5x (n=400..1500).
+- solve native LOSES 1.4-2.8x (n=400..1500).
+With no cliff there is NO native-win regime for a single 2-D factorization, so the
+gates now force a pure 2-3x loss.
+
+FIX: delegate ALL real 2-D square inputs to numpy in each gate (det/slogdet:
+remove the `< NATIVE_MIN_DIM` upper bound from the shape-peek so all float 2-D
+delegate; inv/solve: remove the `< 100`/`< 104` bound so all 2-D square delegate).
+Batched (>=3-D) native paths (batch_det/slogdet/inv/solve) UNCHANGED — they still
+win (numpy loops serial per lane). After: all four 0.98-1.08x parity. Correctness:
+det/slogdet/inv/solve match numpy + singular->LinAlgError preserved (delegating is
+correctness-SAFER) + batched still correct; conformance_linalg 1 +
+conformance_linalg_advanced 29 + conformance_linalg_decomp 39 all PASS.
+
+REUSABLE / WARNING: perf SIZE-GATES tuned against a dependency's perf cliff go
+STALE when the dependency is upgraded and silently flip into losses. After any
+NumPy/BLAS bump, RE-MEASURE every native-vs-numpy size-gate (grep NATIVE_MIN_DIM /
+shape[0] < N gates in linalg). Retry predicate: re-enable a native 2-D
+factorization ONLY if a future NumPy/BLAS reintroduces the getrf/gesv cliff
+(verify n=832..1500 single-matrix vs numpy with OPENBLAS_NUM_THREADS=1 first).
+
 ## 2026-06-20 - BOLD-VERIFY Win + flag: mask_indices delegate; inv native-path loss (contended gate)
 
 Agent: `BlackThrush` / `cod-b`.

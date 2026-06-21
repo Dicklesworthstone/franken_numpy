@@ -16911,10 +16911,12 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     let fallback =
         || -> PyResult<Py<PyAny>> { Ok(slogdet_fn.call1((a_for_fallback.bind(py),))?.unbind()) };
 
-    // Same OpenBLAS getrf cliff as det(): the native LU loses ~2.2-2.6x to numpy for
-    // a single matrix below n~800 but wins 25x+ above the cliff (see det). Peek the
-    // shape/dtype and delegate medium/small real-float 2-D square matrices straight
-    // to numpy, skipping the wasted extract. (Batched path below is unchanged.)
+    // STALE-CLIFF UPDATE (2026-06-20): the old gate routed n>=832 single-matrix
+    // slogdet to the native LU on the same now-gone OpenBLAS getrf cliff as det().
+    // Measured on NumPy 2.4.3 the native LU LOSES at every size (n=400 1.3x, 900
+    // 2.5x, 1500 2.3x; no cliff), so delegate ALL real-float 2-D square to numpy.
+    // Batched (>=3-D) path unchanged (still wins). Re-enable native 2-D only if a
+    // future NumPy/BLAS reintroduces the cliff (verify n=832..1500 vs numpy first).
     const SLOGDET_NATIVE_MIN_DIM: usize = 832;
     if let Ok(ndarray_type) = numpy.getattr("ndarray")
         && a.bind(py).is_exact_instance(&ndarray_type)
@@ -16924,7 +16926,6 @@ fn slogdet(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .and_then(|s| s.extract::<Vec<usize>>())
         && shape.len() == 2
         && shape[0] == shape[1]
-        && shape[0] < SLOGDET_NATIVE_MIN_DIM
         && a
             .bind(py)
             .getattr("dtype")
@@ -17164,11 +17165,13 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .unbind())
     };
 
-    // Shape-peek BEFORE extracting: numpy's gesv beats the native LU for small 2-D
-    // square systems (n<104), and copying both operands into UFuncArrays first would
-    // dominate that tiny solve (n=16 was 2.7x slow even when the post-extract gate
-    // delegated). Delegate without extracting. Larger / non-2-D / non-ndarray inputs
-    // fall through to the native path (whose own size-gate backstops list inputs).
+    // STALE-CLIFF UPDATE (2026-06-20): the old gate delegated only n<104 single 2-D
+    // solves and ran the native LU for larger ones, on the assumption numpy's gesv
+    // cliffed at large n (same OpenBLAS lineage as det/inv). That cliff is GONE on
+    // NumPy 2.4.3 — native solve LOSES at every large size (n=400 2.8x, 900 1.6x,
+    // 1500 1.4x; no cliff). Delegate ALL 2-D square `a` to numpy (exact-parity,
+    // faster); the batched (>=3-D) batch_solve below still wins. Re-enable native 2-D
+    // only if a future NumPy/BLAS reintroduces the gesv cliff.
     if let Ok(ndarray_type) = numpy.getattr("ndarray")
         && a.bind(py).is_exact_instance(&ndarray_type)
         && let Ok(shape) = a
@@ -17177,7 +17180,6 @@ fn solve(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .and_then(|s| s.extract::<Vec<usize>>())
         && shape.len() == 2
         && shape[0] == shape[1]
-        && shape[0] < 104
     {
         return fallback();
     }
@@ -17365,15 +17367,17 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // semantics are preserved exactly.
     let bound = a.bind(py);
     let numpy = py.import("numpy")?;
-    // numpy's LAPACK getrf (OpenBLAS) is the better-optimized LU below n~800, so the
-    // native det_nxn loses ~1.2-2.4x there; but OpenBLAS getrf hits a sharp
-    // degradation cliff above ~832 (n=768 ~12ms vs n=832 ~830ms here) where fnp's
-    // parallel blocked LU wins 25x+. Route the single-matrix native path only for
-    // large dims and delegate smaller ones to numpy (exact-parity, faster).
+    // STALE-CLIFF UPDATE (2026-06-20): the old size-gate routed n>=832 single-matrix
+    // det to the native blocked LU because OpenBLAS getrf used to hit a sharp cliff
+    // above ~832 (n=832 was ~830ms). That cliff is GONE on the current NumPy 2.4.3 /
+    // OpenBLAS — measured n=832 numpy 14.45ms vs native 28.56ms, and native LOSES at
+    // every size up to 1500 (1.98-3.29x). With no cliff there is no native-win regime
+    // for a single 2-D det, so delegate ALL 2-D square real-float to numpy
+    // (exact-parity, faster). The native det_nxn / DET_NATIVE_MIN_DIM path is kept
+    // only for the rare non-ndarray/int 2-D below; the batched (>=3-D) path still
+    // wins (numpy loops serial per lane). Re-enable native 2-D only if a future
+    // NumPy/BLAS reintroduces the getrf cliff (verify n=832..1500 vs numpy first).
     const DET_NATIVE_MIN_DIM: usize = 832;
-    // Fast pre-check: a small/medium 2-D square real-float ndarray is delegated to
-    // numpy below the cliff anyway, so peek its shape/dtype and pass it straight
-    // through — skipping the wasted extract→UFuncArray copy (true parity vs numpy).
     if let Ok(ndarray_type) = numpy.getattr("ndarray")
         && bound.is_exact_instance(&ndarray_type)
         && let Ok(shape) = bound
@@ -17381,7 +17385,6 @@ fn det(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .and_then(|s| s.extract::<Vec<usize>>())
         && shape.len() == 2
         && shape[0] == shape[1]
-        && shape[0] < DET_NATIVE_MIN_DIM
         && bound
             .getattr("dtype")
             .and_then(|d| d.getattr("kind"))
@@ -17433,15 +17436,17 @@ fn inv(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
             .call1((bound,))?
             .unbind())
     };
-    // numpy's getrf+getri beats the native inv_nxn for small 2-D systems but cliffs
-    // sharply at n~100 (n<=96 ~1.7x faster; n>=100 native wins up to 25x). Shape-peek
-    // before the extract — which would otherwise dominate a tiny inv — and delegate
-    // small systems to numpy. Mirrors the solve gesv-cliff size-gate.
+    // STALE-CLIFF UPDATE (2026-06-20): the old gate routed n>=100 single-matrix inv
+    // to native inv_nxn, claiming numpy getri "cliffs at n~100 (native wins up to
+    // 25x)". That cliff is GONE on NumPy 2.4.3 / OpenBLAS — native inv LOSES at every
+    // size measured (n=128 1.5x .. 400 3.2x .. 2000 1.2x; no cliff anywhere). Delegate
+    // ALL real 2-D square ndarrays to numpy (exact-parity, faster); the batched
+    // (>=3-D) batch_inv below still wins (numpy loops serial per lane). Re-enable
+    // native 2-D only if a future NumPy/BLAS reintroduces the getri cliff.
     if bound.is_exact_instance(&numpy.getattr("ndarray")?)
         && let Ok(shape) = bound.getattr("shape").and_then(|s| s.extract::<Vec<usize>>())
         && shape.len() == 2
         && shape[0] == shape[1]
-        && shape[0] < 100
     {
         return fallback();
     }
