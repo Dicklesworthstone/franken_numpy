@@ -13978,6 +13978,98 @@ fn try_zerocopy_f64_trapezoid_lastaxis(
     Ok(Some(flat.call_method1("reshape", (&shape_tuple,))?.unbind()))
 }
 
+// Zero-copy trapezoid along the LAST axis for an f32 C-contiguous ndarray (1-D -> f32
+// scalar; N-D -> f32 array of shape[:-1]). The f64-only paths miss f32 -> it falls to
+// extract (canonicalizes f32->f64: returns the WRONG f64 dtype, and ~8-11x slow vs numpy).
+// numpy.trapezoid(f32) returns f32. Accumulate in f64 (exactly the values the f64 extract
+// path produced) and cast the result to f32 -> correct dtype, conformance-safe, parallel.
+fn try_zerocopy_f32_trapezoid(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    y: &Bound<'_, PyAny>,
+    dx: f64,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !y.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = y.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 4
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f32>::get(y) else {
+        return Ok(None);
+    };
+    if !buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = buffer.shape().to_vec();
+    let ndim = shape.len();
+    if ndim == 0 {
+        return Ok(None);
+    }
+    let norm = if axis < 0 { axis + ndim as isize } else { axis };
+    if norm != ndim as isize - 1 {
+        return Ok(None);
+    }
+    let l = shape[ndim - 1];
+    if l < 2 {
+        return Ok(None);
+    }
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let total = cells.len();
+    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
+    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), total) };
+    use rayon::prelude::*;
+    const TRAPEZOID_F32_PARALLEL_MIN: usize = 1 << 16;
+    let row_f32 = |r: &[f32]| -> f32 {
+        let s: f64 = r.iter().map(|&v| v as f64).sum();
+        (dx * (s - (r[0] as f64 + r[r.len() - 1] as f64) / 2.0)) as f32
+    };
+    if ndim == 1 {
+        let s: f64 = if total >= TRAPEZOID_F32_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            let chunk = total.div_ceil(rayon::current_num_threads());
+            data.par_chunks(chunk)
+                .map(|c| c.iter().map(|&v| v as f64).sum::<f64>())
+                .sum()
+        } else {
+            data.iter().map(|&v| v as f64).sum()
+        };
+        let result = (dx * (s - (data[0] as f64 + data[total - 1] as f64) / 2.0)) as f32;
+        return Ok(Some(numpy.getattr("float32")?.call1((result,))?.unbind()));
+    }
+    let outer = total / l;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float32")?;
+    let flat = numpy.call_method("empty", (outer,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f32>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias y; written once.
+        let o: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f32, outer) };
+        if total >= TRAPEZOID_F32_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            o.par_iter_mut()
+                .zip(data.par_chunks(l))
+                .for_each(|(s, r)| *s = row_f32(r));
+        } else {
+            for (s, r) in o.iter_mut().zip(data.chunks(l)) {
+                *s = row_f32(r);
+            }
+        }
+    }
+    let shape_tuple = PyTuple::new(py, shape[..ndim - 1].iter().copied())?;
+    Ok(Some(flat.call_method1("reshape", (&shape_tuple,))?.unbind()))
+}
+
 fn trapezoid_impl(
     py: Python<'_>,
     name: &str,
@@ -14016,6 +14108,15 @@ fn trapezoid_impl(
     // parallel over rows. Avoids the extract copy + numpy's single-threaded temp-alloc.
     if x.is_none()
         && let Some(out) = try_zerocopy_f64_trapezoid_lastaxis(py, &numpy, y.bind(py), dx, axis)?
+    {
+        return Ok(out);
+    }
+    // f32 last-axis: the f64-only paths above miss f32, sending it to extract (canonicalizes
+    // f32->f64 -> WRONG f64 dtype AND ~8-11x slow). Native f32 path accumulates in f64 and
+    // casts the result to f32 (numpy.trapezoid(f32) returns f32) — same values as the f64
+    // extract path produced, now with the correct dtype and zero-copy/parallel.
+    if x.is_none()
+        && let Some(out) = try_zerocopy_f32_trapezoid(py, &numpy, y.bind(py), dx, axis)?
     {
         return Ok(out);
     }
