@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN (RADICAL): zero-copy parallel trapezoid (f091be6b, up to 50x)
+
+`BlackThrush`/`cod-b`. 2nd application this session of the serial-fnp-vs-single-threaded-
+numpy lever (after bincount). np.trapezoid is single-threaded AND allocates temporaries
+((y[1:]+y[:-1])*dx/2 then .sum()); fnp's path extracted a FULL COPY of y then ran a
+serial naive sum -> 1.2-1.78x behind at ~1M (extract copy ~doubled traffic; numpy's
+SIMD sum beat fnp's scalar iter().sum()). KEY INSIGHT: fnp's trapezoid kernel is a naive
+serial sum, NOT numpy's pairwise -> it already differs ~7e-14 (allclose, NOT bit-exact)
+-> free to reassociate/parallelize. Added zero-copy 1-D f64 contiguous dx fast path:
+read buffer directly, compute dx*(sum(y) - (y[0]+y[-1])/2) [algebraically == numpy] via
+a parallel chunked sum. RESULT: 1M 0.07x (14x), 4M 0.03x (33x), 8M 0.02x (50x), 65K
+0.73x; small-N serial zero-copy win/parity (8K 0.92x). Gate 1<<16 (measured: parallel
+LOSES 1.67-1.81x at 16K-32K to fan-out, wins from 65K). Correct <1e-9 incl dx/adversarial;
+conformance_interp_trapz 16/16. x-arg/2-D-axis/non-contig defer unchanged.
+LESSON: check if an fnp reduction kernel is naive-serial (NOT numpy-pairwise) -> if it's
+already allclose-not-bit-exact, you can parallelize freely (a tree-sum is MORE accurate,
+closer to numpy). The extract-copy + serial-scalar-sum combo is a double tax on reductions
+vs temp-allocating single-threaded numpy.
+
 ## 2026-06-21 - WIN (RADICAL): parallel privatized bincount (8bd0aaa9, up to 9x)
 
 `BlackThrush`/`cod-b`. np.bincount is SINGLE-THREADED; fnp's plain path was a serial
