@@ -194,3 +194,12 @@ filter+select replaces nan_filtered()+median() double-alloc. RESULT: nanmedian f
 1.31x->0.92x, 1M 0.64x->0.36x, 8M ~0.7x (win, no regression). conformance_percentile_median
 24 / nan_funcs 34 / ufunc nanmedian 3. Of the 3 medium-N fixes: unique (c6b87f00), median-gate
 (a127d3d2), nanmedian (04bd069e) ALL SHIPPED. Only compress-gate candidate remains (speculative).
+
+## CLOSED 2026-06-21: compress/extract medium-N is a WALL, not a gate (don't pursue)
+compact_typed (fnp-python:9833) is SERIAL (sequential write cursor, branchless 16-lane mask
++ trailing-zero gather — no parallel path). compress 8M wins 0.27x (cache-thrash favors fnp's
+sequential access) but medium 131K-2M loses 1.2-1.8x = numpy's SIMD compaction beats fnp's
+serial scalar at cache-resident medium N. NOT fixable: no AVX-512 here (no vpcompress), and
+parallel compaction needs a prefix-sum+scatter whose overhead won't beat numpy at medium.
+The compress-gate candidate is CLOSED. All 3 medium-N fixes (unique/median/nanmedian) SHIPPED;
+no remaining clean lever — surface fully dominated.
