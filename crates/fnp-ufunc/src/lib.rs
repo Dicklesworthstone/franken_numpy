@@ -21489,9 +21489,19 @@ impl UFuncArray {
                 integer_sidecar: None,
             };
         }
-        let values: Vec<f64> = (0..m)
-            .map(|i| 0.54 - 0.46 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos())
-            .collect();
+        // Parallelize the per-point cos map: numpy runs hamming single-threaded, so its
+        // vectorized cos edges out our serial cos at cache-resident sizes (1.1x@100K) while we
+        // already win at 4M; multi-threaded chunks win across the board. Bit-identical (same
+        // per-point formula; collect from a parallel map preserves index order).
+        let point =
+            |i: usize| 0.54 - 0.46 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos();
+        const HAMMING_PARALLEL_MIN: usize = 1 << 16;
+        let values: Vec<f64> = if m >= HAMMING_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            (0..m).into_par_iter().map(point).collect()
+        } else {
+            (0..m).map(point).collect()
+        };
         Self {
             shape: vec![m],
             values,
@@ -21510,9 +21520,17 @@ impl UFuncArray {
                 integer_sidecar: None,
             };
         }
-        let values: Vec<f64> = (0..m)
-            .map(|i| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos())
-            .collect();
+        // Parallelize the per-point cos map (see hamming): bit-identical, wins cache-resident
+        // sizes where numpy's single-threaded vectorized cos otherwise edged out our serial one.
+        let point =
+            |i: usize| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos();
+        const HANNING_PARALLEL_MIN: usize = 1 << 16;
+        let values: Vec<f64> = if m >= HANNING_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            (0..m).into_par_iter().map(point).collect()
+        } else {
+            (0..m).map(point).collect()
+        };
         Self {
             shape: vec![m],
             values,
@@ -21531,12 +21549,18 @@ impl UFuncArray {
                 integer_sidecar: None,
             };
         }
-        let values: Vec<f64> = (0..m)
-            .map(|i| {
-                let x = 2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0);
-                0.42 - 0.5 * x.cos() + 0.08 * (2.0 * x).cos()
-            })
-            .collect();
+        // Parallelize the per-point cos map (see hamming): bit-identical.
+        let point = |i: usize| {
+            let x = 2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0);
+            0.42 - 0.5 * x.cos() + 0.08 * (2.0 * x).cos()
+        };
+        const BLACKMAN_PARALLEL_MIN: usize = 1 << 16;
+        let values: Vec<f64> = if m >= BLACKMAN_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            (0..m).into_par_iter().map(point).collect()
+        } else {
+            (0..m).map(point).collect()
+        };
         Self {
             shape: vec![m],
             values,
