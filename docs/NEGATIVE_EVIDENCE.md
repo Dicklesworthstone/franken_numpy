@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: native where(cond, arr, scalar) f32/int (6d4e9d0c, 1.1-1.3x -> 0.04-0.31x)
+
+`BlackThrush`/`cod-b`. Swept int64/f32 versions of f64-gated ops (roll/interp/clip/cumsum/
+where/searchsorted): all dtype-correct + win/parity EXCEPT where(cond, arr, scalar). The
+f64 where handles scalar-y (0.27x win) but try_zerocopy_int_where requires BOTH operands be
+ndarrays -> np.where(c, arr, 0) (the common idiom) missed -> f32 1.14x, int64 1.30x. FIX:
+native array+scalar select viewing arr/out/scalar as same-width unsigned (u8/u16/u32/u64 by
+itemsize) + TYPED select. RESULT: f32 0.04x (20x!), int64 0.31x, int32 0.13x; f64 unchanged.
+TWO KEY LESSONS: (1) a per-element BYTE memcpy select does NOT vectorize -> it was 1.55-1.64x
+(WORSE than the delegate!); the typed-unsigned select (view as uN, slot.set(cond?a:s))
+vectorizes -> 0.04x. ALWAYS use a typed select, never byte-by-byte, for element-wise picks.
+(2) is_exact_instance(ndarray) is FALSE for ndarray SUBCLASSES, so "not exact ndarray" !=
+"scalar" -> a subclass with __array_function__ override got mis-classified as scalar
+(numpy.full broadcast error + bypassed the override). Guard: the scalar side must lack
+__len__ (ndarrays/subclasses/0-d/lists/tuples all have it; Python+numpy scalars don't).
+result_type==arr.dtype guard defers value-based promotion. complex128 (itemsize 16) defers.
+NOTE pre-existing: conformance_where where_python_container_surfaces fails on HEAD too (a
+kwargs error-MESSAGE diff: fnp.where (condition,/,*args) vs numpy positional-only) — not
+this change; left (fixing the signature risks the 1/3-arg arity handling for a niche msg).
+
 ## 2026-06-21 - WIN: byte-level np.pad for all numeric dtypes (caa7b536, up to 4.3x)
 
 `BlackThrush`/`cod-b`. Continued F32-DTYPE-GAP. Swept f32 versions of all my wins:
