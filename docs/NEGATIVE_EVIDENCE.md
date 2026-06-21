@@ -5912,3 +5912,12 @@ across ALL of f64(0.02x)/f32(0.02x)/int/bool. DTYPE-GAP LEVER summary: one f64-o
 path silently left f32 (12-14x, COMMON) + int/bool (4-7x) on the coldest extract. Other scalar-
 operand paths checked: where already covers f32/int; the f32-scalar surface (clip/maximum/cmp/
 add/mul) is dominated/mild. allclose inherits isclose, so it's fixed across all dtypes too.
+
+### DTYPE-GAP lever EXHAUSTED (BlackThrush 2026-06-21): isclose was the only big gap
+Swept f32-f32/int-int ARRAY-ARRAY binary (hypot/arctan2/maximum/logaddexp/power/copysign/add/
+floor_divide/remainder/gcd/left_shift) + f32/int/bool + scalar (clip/maximum/cmp/where/add/mul)
+after the isclose dtype fixes. ALL dominated/parity; only add(f32,f32)/add(f32,scalar)/mul mild
+1.08-1.19x (core ufuncs, near-parity, low-ROI). complex64 (abs/angle/conj/isclose) parity.
+isclose(array,scalar) was the lone BIG dtype gap (f32 12-14x, int/bool 4-7x) — now fixed across
+f64/f32/int/bool (+ allclose inherits). The dtype-gap lever (re-audit f32/int/bool after a
+f64-only fast path) is worked: no remaining big dtype-specific loss. Mild residuals only.
