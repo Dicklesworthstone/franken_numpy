@@ -4,6 +4,22 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: parallel flat f64 argsort 2.2-4.3x for distinct values (e1ec7416)
+
+`BlackThrush`/`cod-b`. 7th from_raw_parts+parallel win. np.argsort was a passthrough. numpy's
+default argsort is single-threaded UNSTABLE quicksort -> tie order is algorithm-specific and
+CANNOT be reproduced. KEY INSIGHT: when all values are DISTINCT the sorting permutation is
+UNIQUE, so any correct parallel sort = exactly numpy's result. try_zerocopy_f64_argsort_flat:
+fill an intp index buffer, rayon par_sort_unstable_by value, then VERIFY no ties (no adjacent
+-equal values in sorted order); ANY tie or NaN -> defer to the passthrough. Gate 1<<20.
+RESULT: 1M 0.28x, 4M 0.23x, 16M 0.26x (bigger than sort's ~0.5x — numpy argsort's indirect
+compares are slower). distinct bit-exact; ties+NaN defer-and-match; dtype intp. conformance
+_sorting pass. REUSABLE: for UNSTABLE numpy ops (argsort/argpartition), the result is only
+reproducible when inputs are distinct -> parallelize + verify-distinct + defer-on-tie is a
+clean safe pattern (don't try to match numpy's unstable tie order). partition/unique remain:
+partition's intra-partition order is unspecified (defer-heavy); unique's output IS
+deterministic (sorted distinct) so a parallel sort+dedup would be bit-exact (next candidate).
+
 ## 2026-06-21 - WIN: parallel flat f64 sort 1.6-2.3x (bc19f333); nan-reductions confirmed won
 
 `BlackThrush`/`cod-b`. Swept nan-reductions + sort family. nan-reductions ALL already win
