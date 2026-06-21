@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: parallel flat f64 sort 1.6-2.3x (bc19f333); nan-reductions confirmed won
+
+`BlackThrush`/`cod-b`. Swept nan-reductions + sort family. nan-reductions ALL already win
+(nanprod 0.12x, nanmean 0.06x, nanstd/nanvar 0.09x, nanmedian 0.76x, nanmin 0.39x, median
+0.46x). The PARITY passthroughs were sort/argsort/partition/unique (1.00x). Took np.sort:
+it was a pure passthrough ("Rust->NumPy export slower" — true for a SERIAL native sort, but
+numpy.sort is single-threaded introsort). try_zerocopy_f64_sort_flat: 1-D C-contiguous f64,
+default kind, axis in {-1,0,None} -> from_raw_parts read, copy to numpy.empty, rayon
+par_sort_unstable_by partial_cmp. Bit-identical no-NaN (ascending values; ties equal).
+ANY NaN -> defer (numpy's NaN-at-end mixed-payload order is algorithm-specific); 2-D/axis/
+kind/order/non-f64 -> passthrough. GATE 1<<20 (HIGHER than reductions: parallel MERGE sort
+has more per-elem overhead — 256K noisy break-even/can-regress, 1M+ clean). RESULT: 1M
+0.61-0.80x, 4M 0.43x, 16M 0.54x. conformance_sorting + bit-exact/NaN-defer/2-D verified.
+6th win on the from_raw_parts+parallel thread. NEXT: argsort (passthrough, parity) — same
+idea but must produce the PERMUTATION (par_sort indices by value, first-occurrence ties =
+numpy's stable-for-argsort? numpy argsort default is quicksort=UNstable, so tie order is
+algorithm-specific -> may need kind='stable' match or defer on ties; investigate carefully).
+
 ## 2026-06-21 - WIN: zero-copy parallel flat nanargmax/nanargmin up to 30x (2ea552a7)
 
 `BlackThrush`/`cod-b`. 4th application of the serial-vs-single-threaded-numpy thread. flat
