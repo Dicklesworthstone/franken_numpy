@@ -265,3 +265,17 @@ per-chunk early-exit (unequal still bails -> 0.0x). 200-500K 0.86x, 8M parity, u
 comment cruft (prior cruft was from trimming comments on re-apply; re-apply identical text).
 GOTCHA: `git commit -m "...backticks..."` in DOUBLE quotes -> shell command-substitutes the
 backticks (corrupts msg). Use SINGLE-quoted -m, or no backticks.
+
+## COMPREHENSIVE less-common probe 2026-06-21 (post-5-wins): big losses EXHAUSTED
+Probed float-manip, string/datetime, manip/index, less-common-linalg, indexing — ALL dominated.
+WINS confirmed: char.upper/lower 0.04x, logaddexp2 0.05x, spacing 0.20x, degrees 0.20x,
+count_nonzero-ax 0.23x, reciprocal 0.33x, rint/fix/trunc 0.4-0.5x, ldexp 0.51x, put/choose
+0.73x, multi_dot 0.42x, matrix_power3 0.36x, lstsq 0.80x. APPARENT losses are DOCUMENTED WALLS:
+ - VIEW-noise (O(1), shares_memory=True, fnp delegates): diagonal 1.5x, matrix_transpose 1.9x
+   (constant ratio across N=800/4000 => sub-us dispatch noise, NOT algorithmic).
+ - SMALL-ARRAY pyo3 wall: inner 2.4x@800 but 0.49x@8M (WIN large), ix_/trace@800 mild.
+MILD residuals (genuine, low-ROI 1.15-1.25x, uncommon, no common class -> not pursued):
+ frexp 1.20x (2-output), diff(prepend) 1.17x (kwarg bypasses zerocopy diff path), putmask
+ 1.15x, busday_count 1.2x. CONCLUSION: less-common surface comprehensively dominated after the
+ 5 wins this stretch (nanmedian, kaiser 12x, histogram_bin_edges 4x, isclose-scalar 30x,
+ array_equal 2.2x). No more BIG actionable lever; remaining = mild residuals + structural walls.
