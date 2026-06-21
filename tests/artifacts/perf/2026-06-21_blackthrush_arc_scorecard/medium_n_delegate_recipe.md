@@ -17,6 +17,23 @@ Confirmed the medium-N losses are NOT the kernel: UFuncArray::unique f64 already
 fix is in fnp-python (delegate medium-N to numpy, or a zero-copy binding) — there is no
 fnp-ufunc lever. Don't re-chase the kernel.
 
+## QUEUED: nanmedian flat DOUBLE-ALLOC fix (fnp-ufunc, blocked by YellowElk lock)
+
+DIAGNOSED the nanmedian flat medium loss (1.1-1.3x): `UFuncArray::nanmedian(None)` does
+`self.nan_filtered().median(None)` — nan_filtered() builds a new Vec (alloc #1), then
+median(None) does `self.values.clone()` (alloc #2) + select. median(None) alone is ONE clone
+(wins 0.78x at 131K after the gate fix); nanmedian pays TWO allocs -> the ~1.3x. FIX (clean,
+in fnp-ufunc ~25803): give the filtered Vec straight to a select helper instead of re-cloning.
+Either (a) extract median's select+interpolate body into `fn median_of_owned_values(mut v:
+Vec<f64>, parallel_gate) -> f64` and call it from BOTH median (clone->call) and nanmedian
+(filter->call), or (b) inline the select on the filtered Vec in nanmedian(None). Preserves the
+1<<19 gate + even/odd interpolation. Expect nanmedian medium 1.3x->~0.8x (like median) AND
+large 0.64x->~0.4x. BLOCKED: crates/fnp-ufunc/src/lib.rs reserved by YellowElk (til ~16:48).
+Apply when free; bit-identical (same order statistic), verify conformance_percentile_median.
+
+## np.char swept (2026-06-21): DOMINATED — upper/lower 0.03x (native), strip 0.8x, add/
+## multiply/find/replace/str_len/startswith win/parity. No lever.
+
 ## GATE SWEEP COMPLETE (2026-06-21) — frontier clean after the par-select family.
 
 Finished the medium-N (16K-262K) gate sweep. NO more mistuned-gate losses:
