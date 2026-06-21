@@ -3,6 +3,41 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-a fnp-python Batch Inv/Solve Current Recheck
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Python `inv` batch rows vs NumPy | 9/10 | 3 wins, 0 losses, 0 neutral |
+| Python `solve` guard rows vs NumPy | 9/10 | 2 wins, 0 losses, 0 neutral |
+| Revert discipline | 9/10 | Rejected source-kernel edit; kept only benchmark rows |
+| Focused conformance | 8/10 | `conformance_linalg` 1/1 passed on `ovh-a` |
+| Same-process comparator freshness | 8/10 | FNP and NumPy ran inside the same Criterion bench process |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Added `fnp_inv`/`numpy_inv` rows to
+  `crates/fnp-python/benches/criterion_python_surface.rs`.
+- Counted `inv` worker: `ovh-a`; command:
+  `rch exec -- cargo bench -p fnp-python --bench criterion_python_surface --
+  inv_f64 --output-format bencher`.
+- `inv` FNP/NumPy ratios: batch8192 4x4 `0.155x`, batch64 128x128
+  `0.067x`, batch16 256x256 `0.134x`.
+- Counted `solve` guard worker: `vmi1149989`; command:
+  `rch exec -- cargo bench -p fnp-python --bench criterion_python_surface --
+  solve_f64_batch8192_4x4 --output-format bencher`.
+- `solve` FNP/NumPy ratios: vector RHS `0.231x`, matrix RHS `0.252x`.
+
+Decision:
+- Mark the previous batch `inv` / `solve` light-lane loss routing as stale for
+  the Python-boundary API rows measured here.
+- No source kernel edit. A generated direct small-N inverse/solve path would be
+  premature without a fresh same-process NumPy loss.
+- Route future BOLD-VERIFY work to a current measured residual outside this
+  closed slice (`eigvalsh_nxn/128`, architectural `sqrt` zero-init, or
+  peer-owned Python wrapper lanes).
+
+---
+
 ## 2026-06-21 cod-b fnp-linalg Matrix Norm Current Recheck
 
 | Area | Score | Verdict |

@@ -2,7 +2,7 @@
 //!
 //! These target Python-boundary costs that the Rust engine benches do not see.
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use fnp_python::fnp_python;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
 use pyo3::{PyResult, Python};
@@ -1672,11 +1672,42 @@ fn bench_linalg_boundary(c: &mut Criterion) {
             .expect("broadcast shared solve matrix")
             .call_method0("copy")
             .expect("materialized repeated solve matrix stack");
+        let make_spd_stack = |batch: usize, dim: usize| {
+            let rng = numpy
+                .getattr("random")
+                .expect("numpy.random")
+                .call_method1("default_rng", (0xC401_u64 + dim as u64,))
+                .expect("cholesky rng");
+            let raw = rng
+                .call_method1("standard_normal", ((batch, dim, dim),))
+                .expect("stacked normal matrix")
+                .call_method1("astype", ("float64",))
+                .expect("stacked f64 matrix");
+            let transposed = raw
+                .call_method1("swapaxes", (-1_i64, -2_i64))
+                .expect("stacked transpose");
+            let gram = numpy
+                .getattr("matmul")
+                .expect("numpy.matmul")
+                .call1((&raw, &transposed))
+                .expect("stacked gram matrix");
+            let eye = numpy
+                .call_method1("eye", (dim,))
+                .expect("cholesky identity")
+                .call_method1("__mul__", (dim as f64 + 1.0_f64,))
+                .expect("scaled cholesky identity");
+            gram.call_method1("__add__", (&eye,))
+                .expect("stacked SPD matrix")
+        };
+        let inv_stack_128 = make_spd_stack(64, 128);
+        let inv_stack_256 = make_spd_stack(16, 256);
 
         let fnp_slogdet = module.getattr("slogdet").expect("fnp_python.slogdet");
         let numpy_slogdet = numpy_linalg
             .getattr("slogdet")
             .expect("numpy.linalg.slogdet");
+        let fnp_inv = module.getattr("inv").expect("fnp_python.inv");
+        let numpy_inv = numpy_linalg.getattr("inv").expect("numpy.linalg.inv");
         let fnp_solve = module.getattr("solve").expect("fnp_python.solve");
         let numpy_solve = numpy_linalg.getattr("solve").expect("numpy.linalg.solve");
         let fnp_cholesky = module.getattr("cholesky").expect("fnp_python.cholesky");
@@ -1701,6 +1732,43 @@ fn bench_linalg_boundary(c: &mut Criterion) {
                 black_box(result);
             });
         });
+
+        group.bench_function("fnp_inv_f64_batch8192_4x4", |bench| {
+            bench.iter(|| {
+                let result = fnp_inv.call1((&matrices,)).expect("fnp inv benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_inv_f64_batch8192_4x4", |bench| {
+            bench.iter(|| {
+                let result = numpy_inv
+                    .call1((&matrices,))
+                    .expect("numpy inv benchmark call");
+                black_box(result);
+            });
+        });
+
+        for (label, input) in [
+            ("batch64_128x128", inv_stack_128),
+            ("batch16_256x256", inv_stack_256),
+        ] {
+            group.bench_function(format!("fnp_inv_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_inv.call1((&input,)).expect("fnp inv benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_inv_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_inv
+                        .call1((&input,))
+                        .expect("numpy inv benchmark call");
+                    black_box(result);
+                });
+            });
+        }
 
         group.bench_function("fnp_solve_f64_batch8192_4x4_vec", |bench| {
             bench.iter(|| {
@@ -1774,40 +1842,12 @@ fn bench_linalg_boundary(c: &mut Criterion) {
             });
         });
 
-        let make_cholesky_stack = |batch: usize, dim: usize| {
-            let rng = numpy
-                .getattr("random")
-                .expect("numpy.random")
-                .call_method1("default_rng", (0xC401_u64 + dim as u64,))
-                .expect("cholesky rng");
-            let raw = rng
-                .call_method1("standard_normal", ((batch, dim, dim),))
-                .expect("stacked normal matrix")
-                .call_method1("astype", ("float64",))
-                .expect("stacked f64 matrix");
-            let transposed = raw
-                .call_method1("swapaxes", (-1_i64, -2_i64))
-                .expect("stacked transpose");
-            let gram = numpy
-                .getattr("matmul")
-                .expect("numpy.matmul")
-                .call1((&raw, &transposed))
-                .expect("stacked gram matrix");
-            let eye = numpy
-                .call_method1("eye", (dim,))
-                .expect("cholesky identity")
-                .call_method1("__mul__", (dim as f64 + 1.0_f64,))
-                .expect("scaled cholesky identity");
-            gram.call_method1("__add__", (&eye,))
-                .expect("stacked SPD matrix")
-        };
-
         for (label, input) in [
-            ("batch10000_4x4", make_cholesky_stack(10_000, 4)),
-            ("batch4000_8x8", make_cholesky_stack(4_000, 8)),
-            ("batch2000_16x16", make_cholesky_stack(2_000, 16)),
-            ("batch1000_32x32", make_cholesky_stack(1_000, 32)),
-            ("batch500_64x64", make_cholesky_stack(500, 64)),
+            ("batch10000_4x4", make_spd_stack(10_000, 4)),
+            ("batch4000_8x8", make_spd_stack(4_000, 8)),
+            ("batch2000_16x16", make_spd_stack(2_000, 16)),
+            ("batch1000_32x32", make_spd_stack(1_000, 32)),
+            ("batch500_64x64", make_spd_stack(500, 64)),
         ] {
             group.bench_function(format!("fnp_cholesky_f64_{label}"), |bench| {
                 bench.iter(|| {

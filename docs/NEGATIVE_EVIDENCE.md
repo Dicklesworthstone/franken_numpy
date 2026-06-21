@@ -4,6 +4,62 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - BOLD-VERIFY Recheck: batch `inv`/`solve` already dominate NumPy; benchmark rows added
+
+`YellowElk`/`cod-a`, parent directive `franken_numpy-ixs5y`. Applied the
+graveyard/optimization loop to the live "batch_inv/batch_solve light-per-lane"
+loss note before changing source. The radical candidate would have been a
+generated small-N direct solve/inverse kernel, but the current Python-boundary
+head-to-head shows the visible `np.linalg.inv` and `np.linalg.solve` batch rows
+already CRUSH NumPy. No source algorithm change is justified; the kept hunk is a
+benchmark-harness extension that makes the `inv` proof reproducible inside
+`cargo bench -p fnp-python`.
+
+Disk-frugal commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-linalg --bench batch_solve -- --output-format bencher`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --bench criterion_python_surface -- solve_f64_batch8192_4x4 --output-format bencher`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg -- batch_inv --output-format bencher`
+- Added `fnp_inv`/`numpy_inv` rows to `python_linalg_boundary`, then ran:
+  `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --bench criterion_python_surface -- inv_f64 --output-format bencher`
+
+Same-process Python-boundary head-to-head (`ovh-a`, counted `inv` rows):
+
+| Row | FNP ns/iter | NumPy ns/iter | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `inv` batch8192 4x4 | 427,950 | 2,766,243 | 0.155x | WIN |
+| `inv` batch64 128x128 | 6,103,881 | 90,583,863 | 0.067x | WIN |
+| `inv` batch16 256x256 | 13,601,847 | 101,694,445 | 0.134x | WIN |
+
+Same-process Python-boundary head-to-head (`vmi1149989`, guard `solve` rows):
+
+| Row | FNP ns/iter | NumPy ns/iter | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `solve` batch8192 4x4 vector RHS | 633,115 | 2,745,673 | 0.231x | WIN |
+| `solve` batch8192 4x4 matrix RHS | 791,166 | 3,145,066 | 0.252x | WIN |
+
+Current native routing evidence:
+- `batch_solve` current parallel vs serial reference on `vmi1149989`: independent
+  n=4 `0.928x` self-win, n=8 `0.384x` self-win, n=16 `1.195x` self-loss;
+  broadcast-A n=16/32/64 wins `0.274x`, `0.159x`, and `0.182x`.
+- `batch_inv` current native Rust rows on `vmi1149989`: 64x128x128
+  `7,606,703 ns`; 16x256x256 `11,509,666 ns`. These are routing-only rows
+  because `rch exec -- python3` warns and runs locally for non-compilation
+  commands; the valid same-worker NumPy ratios are the new Python Criterion rows
+  above.
+
+Score:
+- New Python-boundary `inv` rows versus NumPy: **3 wins / 0 losses / 0 neutral**.
+- Fresh `solve` guard rows versus NumPy: **2 wins / 0 losses / 0 neutral**.
+- Source-lever decision: **no-ship/no-op**. Do not edit batch solve/inv merely
+  for "light lane" unless a fresh Criterion Python-boundary row shows an actual
+  same-worker NumPy loss. The current real residuals are elsewhere
+  (`eigvalsh_nxn/128`, architectural `sqrt` zero-init, or peer-owned Python
+  wrapper work).
+
+Verification:
+- `rustfmt --edition 2024 --check crates/fnp-python/benches/criterion_python_surface.rs`: PASS.
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --test conformance_linalg`: PASS, 1/1.
+
 ## 2026-06-21 - WIN: extend native gradient to scalar spacing gradient(y,dx) (22528cde, 3-11x)
 
 `BlackThrush`/`cod-b`. Extended the native 1-D gradient path (a938669b) to UNIFORM scalar
