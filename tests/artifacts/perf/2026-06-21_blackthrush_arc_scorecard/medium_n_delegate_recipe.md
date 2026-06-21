@@ -180,3 +180,9 @@ _median + nanmedian flat bit-exact + measure (expect medium 1.3x->~0.8x, large 0
 loadtxt 100kx5 = 1.05x parity (numpy has a FAST C parser since 1.23 — not the old slow-Python
 assumption; a native fnp parser wouldn't beat numpy's C loadtxt). fromstring already WINS 0.45x.
 genfromtxt present. Don't chase "native CSV parser" — numpy's C path is the floor here.
+
+## NEGATIVE 2026-06-21: complex64 dtype DOMINATED (last dtype corner)
+complex64 (csingle) ops: abs/conj/angle/sum/mean/add/multiply/exp/cumsum/sort all dtype-CORRECT
+(no f32-style canonicalization bug — the gap pattern does NOT recur in narrow complex) + win/
+parity. real 2.19x = O(1) VIEW (shares_memory=True, time constant across N) = sub-us noise, not
+a loss. Don't chase complex64. Frontier now fully mapped: all crates + text-parse + complex64.
