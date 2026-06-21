@@ -12,8 +12,9 @@ blocker = cargo build freeze; 4 unbuilt linalg delegates pending the on-recovery
 build/conformance/re-measure. vs-numpy surface comprehensively diagnosed + clean —
 no perf lever available until unfreeze. (This single heartbeat is refreshed in
 place each frozen turn rather than appending duplicates.) ON-RECOVERY automation:
-`scripts/verify_linalg_delegates_on_recovery.sh` (added b-this-turn, bash-syntax-
-checked) runs the whole checklist in one command — builds fnp-python, runs
+`scripts/on_recovery_check_linalg_delegates.sh` (bash-syntax-checked; named to
+avoid the `verify_*.sh` gitignore rule) runs the whole checklist in one command —
+builds fnp-python, runs
 conformance_linalg*, fnp-linalg tests, and re-measures eigvalsh/eigh/cholesky/
 matrix_power 2-D vs numpy (expect ~parity) + batched (expect WIN).
 
