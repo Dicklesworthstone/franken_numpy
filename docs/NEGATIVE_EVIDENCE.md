@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - FIX + NEGATIVE: datetime-diff small-N regression gated; clip/complex are walls
+
+`BlackThrush`/`cod-b`. REGRESSION FIX (84acc931): a routine regression spot-check of my
+recent wins caught datetime diff (041c794c) at 1.59x for SMALL N. Measured: my int64-view
+path wins large (200K 0.39x) but LOSES small (1K 2.10x) — its view+reinterpret setup exceeds
+numpy.diff at small N. I'd regressed small datetime diff (prior numpy.diff delegate was the
+~1.5x crossing-wall floor; mine made it 2.1x). Gated native to size>=1<<14, delegate below
+(restores 1K to 1.52x = pre-change, keeps 16K+ wins). LESSON: every native-vs-delegate path
+needs a small-N floor — the int64-view trick (and any zero-copy path) has setup overhead
+that loses below the crossover; spot-check recent wins at SMALL N too, not just large.
+NEGATIVE (no clean lever this sweep): (1) clip small-N loses (f32 1.63x@1K, int 1.27x@1K)
+but WINS large (100K+) — this is the SMALL-ARRAY CROSSING WALL: numpy.clip is a fast C
+UFUNC (not a Python wrapper like pad/delete), so fnp's path overhead can't beat it small;
+delegating only shaves to ~1.25x (the irreducible pyo3 crossing). Per [[small-array-dispatch
+-passthrough-cache]] small-array ops can't win -> don't chase. (2) complex128 reductions
+(sum/mean/cumsum/var/conj/cumsum-ax0) all parity; c_prod (small+rare+SEQUENTIAL) + c_dot
+(BLAS zdotu, both-MT noisy) not levers. (3) where scalar-X confirmed WIN (int 0.28x, f32
+0.05x) — both sides covered by 6d4e9d0c. DTYPE-GAP VEIN now largely exhausted.
+
 ## 2026-06-21 - WIN: native where(cond, arr, scalar) f32/int (6d4e9d0c, 1.1-1.3x -> 0.04-0.31x)
 
 `BlackThrush`/`cod-b`. Swept int64/f32 versions of f64-gated ops (roll/interp/clip/cumsum/
