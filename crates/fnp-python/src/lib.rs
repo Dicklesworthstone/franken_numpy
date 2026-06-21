@@ -30685,14 +30685,31 @@ fn f64_buffers_all_equal(
         return Some(false);
     }
     let (s1, s2) = (b1.as_slice(py)?, b2.as_slice(py)?);
-    Some(if equal_nan {
-        s1.iter().zip(s2.iter()).all(|(x, y)| {
-            let (x, y) = (x.get(), y.get());
-            x == y || (x.is_nan() && y.is_nan())
-        })
-    } else {
-        s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get())
-    })
+    let n = s1.len();
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let d1: &[f64] = unsafe { std::slice::from_raw_parts(s1.as_ptr().cast::<f64>(), n) };
+    let d2: &[f64] = unsafe { std::slice::from_raw_parts(s2.as_ptr().cast::<f64>(), n) };
+    // Chunked-branchless: each chunk reduces with bit-AND (`eq &= ...`, no per-element
+    // short-circuit branch — that branch devectorizes the all-equal case, where numpy's
+    // ==+all is a SIMD 2-pass, so the old `.all()` lost ~2.2x at cache-resident sizes).
+    // A single vectorized pass beats numpy's two; per-chunk early-exit keeps unequal bail fast.
+    const CHUNK: usize = 2048;
+    for (c1, c2) in d1.chunks(CHUNK).zip(d2.chunks(CHUNK)) {
+        let mut eq = true;
+        if equal_nan {
+            for (&x, &y) in c1.iter().zip(c2) {
+                eq &= (x == y) | (x.is_nan() & y.is_nan());
+            }
+        } else {
+            for (&x, &y) in c1.iter().zip(c2) {
+                eq &= x == y;
+            }
+        }
+        if !eq {
+            return Some(false);
+        }
+    }
+    Some(true)
 }
 
 // Early-exit `all(x == y)` over two same-shape f32 buffers, with equal_nan.
@@ -30706,14 +30723,28 @@ fn f32_buffers_all_equal(
         return Some(false);
     }
     let (s1, s2) = (b1.as_slice(py)?, b2.as_slice(py)?);
-    Some(if equal_nan {
-        s1.iter().zip(s2.iter()).all(|(x, y)| {
-            let (x, y) = (x.get(), y.get());
-            x == y || (x.is_nan() && y.is_nan())
-        })
-    } else {
-        s1.iter().zip(s2.iter()).all(|(x, y)| x.get() == y.get())
-    })
+    let n = s1.len();
+    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
+    let d1: &[f32] = unsafe { std::slice::from_raw_parts(s1.as_ptr().cast::<f32>(), n) };
+    let d2: &[f32] = unsafe { std::slice::from_raw_parts(s2.as_ptr().cast::<f32>(), n) };
+    // Chunked-branchless (see f64_buffers_all_equal): vectorizes the all-equal case.
+    const CHUNK: usize = 2048;
+    for (c1, c2) in d1.chunks(CHUNK).zip(d2.chunks(CHUNK)) {
+        let mut eq = true;
+        if equal_nan {
+            for (&x, &y) in c1.iter().zip(c2) {
+                eq &= (x == y) | (x.is_nan() & y.is_nan());
+            }
+        } else {
+            for (&x, &y) in c1.iter().zip(c2) {
+                eq &= x == y;
+            }
+        }
+        if !eq {
+            return Some(false);
+        }
+    }
+    Some(true)
 }
 
 // Early-exit byte equality of two same-shape ndarrays viewed as uint8. For
