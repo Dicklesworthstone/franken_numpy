@@ -5499,3 +5499,37 @@ Validation and decision:
   this lane. Reopen only if a same-worker rerun shows a current FNP/NumPy loss
   or if the column-sum kernel changes its scalar addition order, NaN behavior,
   or stride contract.
+
+## 2026-06-21 - COD-A REVERIFY: eigvalsh(128) current blocked path remains a NumPy loss
+
+`YellowElk`/`cod-a`, parent `franken_numpy-ixs5y`. Disk-frugal BOLD-VERIFY
+recheck of native `fnp-linalg::eigvalsh_nxn/size/128`, using the existing warm
+target root and no new `.scratch` worktree. The radical candidate from the
+graveyard/optimization pass was the exact-128 blocked-tridiagonalization route,
+but current `main` already has that route: `tridiag_reduce_impl` dispatches to
+the blocked reducer for `n >= TRIDIAG_BLOCK_MIN`. No source hunk was kept.
+
+Commands:
+- `AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg eigvalsh_nxn/size/128 -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- `ssh fmd 'OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -'`
+- `AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-linalg eigvalsh --release -- --nocapture`
+- `AGENT_NAME=cod-a CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo build -p fnp-linalg --release`
+
+| Probe | Worker | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---|---:|---:|---:|---|
+| Current `eigvalsh_nxn/size/128` | `ovh-a` / `fmd` | 1,908,101 | 655,420 | 2.912x | current loss |
+
+Scorecard:
+- Current vs NumPy: win/loss/neutral = **0/1/0**.
+- Production source: **no-source/no-ship**. Exact-128 blocked routing is
+  already present; the remaining loss is deeper than the dispatch gate.
+
+Validation and decision:
+- Filtered release `eigvalsh` tests passed: 7 unit rows and 3 golden rows on
+  RCH-selected `vmi1227854`.
+- `cargo build -p fnp-linalg --release` passed on RCH-selected `vmi1293453`.
+- Do not retry exact-128 blocked routing, threshold moves, sorting-only changes,
+  private cond extrema scans, row-dot gating, or sub-1024 Rayon matvec as
+  standalone work. A credible next attempt needs a shared-work tridiagonal
+  eigensolver, true band-to-tridiagonal stage, or generated 128-specific reducer
+  with paired same-worker proof.

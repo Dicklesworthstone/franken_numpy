@@ -718,3 +718,38 @@ Reject `.257`: pre-revert bytes word-fill was slower than NumPy by 1.64x at 100k
 Keep `.250`: final-code PCG64 gumbel is faster than NumPy by 6.01x at 100k f64 and 7.15x at 1M f64 on `ovh-a`.
 
 Keep `.253`: final-code PCG64 laplace is faster than NumPy by 6.76x at 100k f64 and 8.67x at 1M f64 on `ovh-a`.
+
+---
+
+## 2026-06-21 cod-a fnp-linalg Eigvalsh 128 Current-Loss Reverify
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Current `eigvalsh_nxn/128` vs NumPy | 2/10 | Same-host `ovh-a`/`fmd` row is `2.912x` slower than NumPy |
+| Exact-128 blocked route | 5/10 | Already present on `main`; no source hunk to keep |
+| Revert discipline | 10/10 | No `fnp-linalg` source diff kept |
+| Focused conformance | 9/10 | Filtered release `eigvalsh` tests passed: 7 unit rows plus 3 golden rows |
+| Release build | 9/10 | `cargo build -p fnp-linalg --release` passed through RCH |
+| Retry guidance | 8/10 | Routes future work to a deeper tridiagonal eigensolver/reducer, not shallow gates |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Current Rust row on RCH-selected `ovh-a`: `eigvalsh_nxn/size/128 =
+  1,908,101 ns`.
+- Same-host NumPy comparator through `ssh fmd`, Python `3.13.7`, NumPy `2.2.4`,
+  single-thread BLAS env: median `655,420 ns`.
+- Ratio-vs-NumPy: `2.912x` loss; win/loss/neutral = **0/1/0**.
+- Focused tests:
+  `cargo test -p fnp-linalg eigvalsh --release -- --nocapture` passed on
+  RCH-selected `vmi1227854`.
+- Release build:
+  `cargo build -p fnp-linalg --release` passed on RCH-selected `vmi1293453`.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`; no new
+  `.scratch` worktree.
+
+Decision:
+- No release-ready improvement was available from the exact-128 blocked route
+  because that route is already current. Keep no source.
+- The target remains open for a deeper symmetric spectral primitive: shared-work
+  tridiagonal eigensolver, true band-to-tridiagonal stage, or generated
+  128-specific reducer with paired proof.
