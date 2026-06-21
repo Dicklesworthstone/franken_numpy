@@ -6047,3 +6047,14 @@ small-array pyo3 wall: tiny work, fixed dispatch overhead. REVERTED (block-skip 
 complexity for a marginal/noise gain on an overhead-bound op; bit-exact but wrong fix). Not
 fixable without cutting the per-call numpy-object overhead (irreducible: needs numpy module/type
 caching for compress's dispatch, ~same wall as small-array passthrough). Dense compress wins.
+
+### WIN zero-copy two-output divmod(f64) (f8c26343): up to 12x (was 2.7-3.75x, scaled with n)
+Two-output-ufunc angle (frexp precedent): divmod(f64) had NO zero-copy path -> cold extract+build
+of 2 inputs + 2 outputs, traffic scaling with n (2.72x@1M->3.75x@16M = work-bound, not overhead).
+try_zerocopy_f64_divmod: read both buffers, defer special values (zero/inf/nan -> numpy exact
+edge handling), else parallel compute quotient+remainder into 2 numpy.empty (gate 1<<18). 1M
+0.13x, 4M 0.12x, 16M 0.08x. Bit-exact (finite-nonzero formula == divmod_arrays); edge defer
+matches numpy. Two-output ufuncs now all good: frexp (82c7f7e4), divmod (f8c26343), modf (was
+already a win). LESSON: multi-output ufuncs without a zero-copy path fall to cold extract+build
+(2 in + N out copies) that SCALES with n -> add a zero-copy N-output parallel path (frexp-class).
+GOTCHA: place helper BELOW the pyfunction's #[pyfunction]/#[pyo3] attrs (else E0433 detaches them).
