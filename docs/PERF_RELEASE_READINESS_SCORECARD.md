@@ -56,6 +56,39 @@ Decision:
 
 ---
 
+## 2026-06-21 fnp-python 2-D Eigh Delegate Code-Only Candidate
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Existing 2-D `eigh` native path | 2/10 | Not release-ready; prior Python-surface native path loses 4.18x@200 and 4.05x@800 vs NumPy |
+| Delegate candidate source | 5/10 | Code-only candidate is already on `main` via `76712a2b`; exact real 2-D square float `ndarray` routes to NumPy before extraction |
+| Batched `batch_eigh` preservation | 6/10 | Source path untouched; guard benchmark still pending |
+| Validation status | 1/10 | No direct cargo build/bench run and no focused conformance; targeted UBS failed on broad pre-existing inventory |
+
+Evidence:
+- Bead: `franken_numpy-ixs5y.278`.
+- Existing measured native ratios: `np.linalg.eigh` real 2-D square float
+  ndarray loses `4.18x` at n=200 and `4.05x` at n=800.
+- Source change: remote `main` already applied the same metadata-only
+  shape/dtype peek used by `eigvalsh` in `76712a2b`; matching 2-D inputs call
+  `numpy.linalg.eigh(..., UPLO=UPLO)` before Rust extraction. The duplicate
+  local hunk from bead `.278` was skipped during rebase.
+- No after-ratio is recorded yet. Build, focused conformance, and head-to-head
+  bench are pending the next disk-safe turn.
+- Targeted UBS on the changed file set exited nonzero from existing
+  `fnp-python` findings; it did not identify the new `eigh` hunk as the cause.
+- Agent Mail reservation could not be recorded because the database corruption
+  circuit breaker refused writes; coordination is via `docs/NEGATIVE_EVIDENCE.md`.
+
+Decision:
+- Keep the upstream code-only delegate candidate for the next validation slice.
+- Do not mark the row release-ready until 2-D `eigh` after-ratios are measured
+  and the batched native guard still routes correctly.
+- If validation fails, revert the single wrapper hunk and keep the ledger entry
+  as negative evidence.
+
+---
+
 ## 2026-06-21 Linalg Eigvalsh 128 Values-Only Reducer Probe
 
 | Area | Score | Verdict |

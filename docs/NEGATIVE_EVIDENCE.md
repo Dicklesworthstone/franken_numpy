@@ -82,6 +82,34 @@ delegate to numpy potrf, BUT peer-contended (batch cholesky work); left to that
 owner to avoid collision. ON-RECOVERY: build + conformance_linalg* to verify the
 two unbuilt eigvalsh+eigh delegates; then cholesky 2-D if uncontended.
 
+## 2026-06-21 - COORD Closeout: cod-b `eigh` handoff superseded during rebase
+
+Agent: `YellowElk` / `cod-b`.
+Bead: `franken_numpy-ixs5y.278`.
+Decision: duplicate source hunk skipped during `git pull --rebase`; remote
+`main` already contained `76712a2b`, which shipped the exact 2-D `eigh`
+shape-peek delegate described above. The bead remains closed so the cod-b handoff
+is not re-picked.
+
+Evidence:
+- Existing native Python-surface `eigh` losses remain `4.18x` at n=200 and
+  `4.05x` at n=800 before delegation.
+- The after-delegation ratio-vs-NumPy is still PENDING because disk-low
+  instructions forbade a new cargo bench/build slice.
+- Targeted `ubs` on the changed file set exited nonzero from broad pre-existing
+  `fnp-python` inventory; no finding was specific to the `eigh` gate.
+- Agent Mail writes are still unavailable: the reservation attempt for
+  `franken_numpy-ixs5y.278` hit the corruption circuit breaker
+  (`database disk image is malformed`). The ledger remains the coordination
+  channel until `am doctor repair`/`reconstruct` clears the breaker.
+
+Retry predicate:
+- Do not create another code-only `eigh` delegate bead; the source is already on
+  `main`.
+- Next admissible work is verification only: build `fnp-python`, run focused
+  linalg conformance for `eigvalsh`/`eigh`/`cholesky`, remeasure 2-D n=200/n=800
+  ratios, and run a batched `batch_eigh` guard.
+
 ## 2026-06-21 - COORD (agent-mail DOWN): eigvalsh PYTHON-surface already delegated; eigh/cholesky 2-D handoff
 
 Agent: `BlackThrush` / `cod-b`. Disk-low (51G) CODE-ONLY; agent-mail DB is CORRUPT

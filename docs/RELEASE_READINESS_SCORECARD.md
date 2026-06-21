@@ -58,6 +58,51 @@ Current release posture:
 - Revert if focused `fnp-python` rows show ~0 gain, a new overhead versus NumPy,
   or any cholesky conformance regression.
 
+## 2026-06-21 - fnp-python 2-D Eigh Delegate Code-Only Pending Bench Slice
+
+Scope:
+- Bead: `franken_numpy-ixs5y.278`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-python` / `np.linalg.eigh` wrapper.
+- Constraint: disk-low pause; no direct cargo bench/build run in this slice by
+  user instruction.
+- Source status: upstream `76712a2b` already applied the exact 2-D `eigh`
+  delegate during rebase; the duplicate local source hunk was skipped.
+- Decision: verification remains pending and this is not a measured
+  release-ready win yet.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Existing target performance vs NumPy | FAIL / ROUTING INPUT | Prior measured 2-D native `eigh` loses `4.18x` at n=200 and `4.05x` at n=800. |
+| Code-only specialization | PRESENT / PENDING | Real 2-D square float exact `ndarray` inputs delegate to `numpy.linalg.eigh` before extraction via upstream `76712a2b`; `UPLO` is preserved. |
+| Batched native guard | PENDING | Existing `batch_eigh` path is untouched and must be rechecked next bench slice. |
+| Focused conformance | PENDING | No focused linalg conformance shard was run because of the disk-low no-build instruction. |
+| Build | PENDING | `fnp-python` extension build deferred until disk recovery. |
+| UBS | KNOWN GAP | Targeted UBS on changed files exited nonzero from broad pre-existing `fnp-python` inventory; no finding was specific to the `eigh` hunk. |
+| Agent Mail coordination | DEGRADED | Reservation write failed due Agent Mail DB corruption circuit breaker; ledger is the coordination channel. |
+| Source discipline | PASS | Duplicate source hunk skipped during rebase; scorecard and bead export record the cod-b closeout. |
+
+Cluster score: **50 / 100**
+
+Score rationale:
+- +16 target selection: the lever targets an existing measured 4x Python-surface
+  loss.
+- +12 behavior boundary: only exact real 2-D square float `ndarray` inputs
+  change; batched native `batch_eigh` remains intact.
+- +10 parity safety: delegated 2-D results use NumPy's own eigenvalues and
+  eigenvector signs.
+- +6 source discipline: duplicate local source was not reintroduced over
+  upstream.
+- +6 ledger discipline: pending validation and retry predicate are recorded.
+- -50 verification: build, conformance, and after-ratio benchmark evidence are
+  deferred by the disk-low instruction.
+
+Current release posture:
+- `np.linalg.eigh` 2-D should remain marked pending until the next cargo-safe
+  turn proves the wrapper builds, conformance passes, and the after-ratio moves
+  to NumPy parity.
+- Do not claim this as a perf win from the scorecard closeout alone.
+
 ## 2026-06-21 - Linalg Eigvalsh 128 Tail-Local Reducer No-Ship Slice
 
 Scope:
