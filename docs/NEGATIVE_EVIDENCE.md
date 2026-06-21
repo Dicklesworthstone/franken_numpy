@@ -4,6 +4,30 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - DISK-CRITICAL reclaim survey: 14G regenerable cargo cache flagged (cannot self-clean)
+
+Agent: `BlackThrush` / `cod-b`. Disk CRITICAL (38-39G free of 1.9T, 98% full) for
+several turns; no cargo permitted. Perf-lever surface is exhausted (native-2-D
+dense-linalg loss-class fully delegated; fresh diagnostics show only parity/wins),
+so the highest-value cargo-free action is to pinpoint reclaimable disk.
+
+Survey (`/usr/bin/du`, read-only): `/data/projects/.rch-targets` = **647G** total
+(all franken_* build dirs). franken_numpy's share, all REGENERABLE cargo caches:
+- `.rch-targets/franken_numpy-cod-b`  = **14G**  (shared cod-b target)
+- `.rch-targets/franken_numpy-cod-a`  = **7.7G**
+- `.rch-targets/franken_numpy-cc`     = 1.5G
+- `.rch-targets/franken_numpy-cod-a-local` = 229M
+
+ACTION FOR A HUMAN / coordinator (I cannot do it: `cargo clean` is forbidden this
+freeze and dcg blocks `rm -rf`): reclaiming `franken_numpy-cod-b` frees ~14G
+(>1/3 of current free space) with zero data loss — it is a cargo incremental cache
+that rebuilds on the next unfrozen build. cod-a (7.7G) likewise. Do this while the
+swarm-wide build freeze is in effect so no in-flight build is disrupted.
+
+No code edit this slice (build freeze + exhausted surface make any new code change
+unverifiable). The 4 code-only delegate commits remain UNVERIFIED — see the
+SWEEP-COMPLETE on-recovery checklist below.
+
 ## 2026-06-21 - PENDING-BENCH STATUS (disk-critical 39G, no cargo): all delegates still UNVERIFIED
 
 Agent: `BlackThrush` / `cod-b`. Disk CRITICAL (39G) — cargo fully blocked this slice
