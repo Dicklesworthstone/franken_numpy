@@ -211,3 +211,12 @@ build bridge. The loss is the scalar bessel_i0-vs-numpy floor. Parallelizing the
 only help LARGE windows (100k+); but real windows are small (64-8192 pts) where parallel can't
 help and the scalar-i0 floor remains. LOW-ROI (niche + small-typical + encumbered). Not pursued.
 Frontier now fully mapped incl window fns; only residuals are niche-small-loss or walls.
+
+## RADICAL IDEA RULED OUT 2026-06-21: zero-copy build bridge (marginal + huge refactor)
+build_numpy_array_from_ufunc(py, &UFuncArray) COPIES (numpy_array_from_slice) because it
+borrows. A zero-copy version (move Vec via into_pyarray) needs: by-value signature + migrate
+ALL callers + UFuncArray::into_values - a big cross-crate refactor (fnp-python + fnp-ufunc,
+both encumbered). And MARGINAL: for most bridge ops the COMPUTE dominates, not the O(n) copy
+(that's why my targeted zero-copy wins - convolve/sinc - were for COPY-dominated ops where
+the kernel was cheap). The remaining bridge ops (windows etc.) are compute-bound, so a
+zero-copy bridge saves little. NOT a clean lever. Every radical avenue now explored.
