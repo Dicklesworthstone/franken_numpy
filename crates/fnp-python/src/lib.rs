@@ -16161,6 +16161,77 @@ fn insert(
         .unbind())
 }
 
+// Native fast path for np.delete(arr, idx) with a SINGLE integer index on a 1-D f64
+// C-contiguous array (axis None or 0). np.delete is a Python function (obj normalization,
+// boolean-mask build, take) costing ~us even for a trivial single-element delete (measured
+// ~1.1-1.26x across N); this allocates numpy.empty(n-1) and memcpys the two surviving runs
+// — bit-identical. Returns None (defer to np.delete) for non-scalar obj (slice/array/bool),
+// an out-of-range index (numpy raises IndexError), non-1-D / non-f64 / non-contiguous
+// input, or a non-trivial axis.
+fn try_zerocopy_f64_delete_scalar(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    arr: &Bound<'_, PyAny>,
+    obj: &Bound<'_, PyAny>,
+    axis: Option<&Bound<'_, PyAny>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if let Some(ax) = axis {
+        match ax.extract::<isize>() {
+            Ok(a) if a == 0 || a == -1 => {}
+            _ => return Ok(None),
+        }
+    }
+    if obj.is_instance_of::<pyo3::types::PyBool>() {
+        return Ok(None);
+    }
+    let Ok(idx_raw) = obj.extract::<i64>() else {
+        return Ok(None); // slice / array / float obj -> defer
+    };
+    if !arr.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = arr.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(arr) else {
+        return Ok(None);
+    };
+    if buffer.shape().len() != 1 || !buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    let idx = if idx_raw < 0 { idx_raw + n as i64 } else { idx_raw };
+    if idx < 0 || idx >= n as i64 {
+        return Ok(None); // numpy raises IndexError -> defer
+    }
+    let idx = idx as usize;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let out_kwargs = PyDict::new(py);
+    out_kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", (n - 1,), Some(&out_kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias arr; written once.
+        let o: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n - 1) };
+        o[..idx].copy_from_slice(&data[..idx]);
+        o[idx..].copy_from_slice(&data[idx + 1..]);
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (arr, obj, axis=None))]
 fn delete(
@@ -16173,6 +16244,13 @@ fn delete(
     // flattened defaults, axis-aware removals, and bounds errors all
     // stay exact.
     let numpy = py.import("numpy")?;
+    // Native single-int-index 1-D f64 fast path (bypasses np.delete's ~us Python dispatch).
+    let axis_bound = axis.as_ref().map(|a| a.bind(py));
+    if let Some(out) =
+        try_zerocopy_f64_delete_scalar(py, &numpy, arr.bind(py), obj.bind(py), axis_bound)?
+    {
+        return Ok(out);
+    }
     let delete_fn = numpy.getattr("delete")?;
     let kwargs = PyDict::new(py);
     if let Some(axis) = axis {
