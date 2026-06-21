@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: byte-level np.pad for all numeric dtypes (caa7b536, up to 4.3x)
+
+`BlackThrush`/`cod-b`. Continued F32-DTYPE-GAP. Swept f32 versions of all my wins:
+median/percentile/mean/std/var/sum/cumsum/diff/ediff1d/ptp/average/convolve/gradient ALL
+dtype-correct (f32) + win/parity -> f32 trapezoid was the lone dtype bug (fixed c8418664).
+Remaining: pad. The native constant-pad fast path was f64-only -> f32/int*/complex/bool fell
+to np.pad dispatch (f32 1.19x, int64 1.52x, int32 1.23x, complex 1.18x @N=1000). INSIGHT:
+constant_values=0 -> the fill is all-zero BYTES for ANY numeric dtype, so pad is byte-level
+dtype-agnostic. FIX: view buffer as uint8, numpy.empty(total, same dtype), zero edge
+byte-runs + memcpy interior bytes (bit-identical). RESULT @N=1000: f32 0.44x, int64 0.35x
+(4.3x), int32 0.37x, complex128 0.35x; f64 unchanged 0.22x (kept its direct path -> no
+regression: a uint8 view adds ~2 method calls that erode the small-N win, so f64 stays
+direct, non-f64 goes byte-level). conformance moveaxis_pad 19/19. 15th lever.
+REUSABLE: constant-0 fill / placement-only ops (pad, and likely concatenate/tile/repeat
+edges) are BYTE-LEVEL dtype-agnostic -> one uint8-view path covers f/i/u/c/b; keep the
+hot dtype (f64) on a direct typed buffer to avoid the view overhead at small N.
+
 ## 2026-06-21 - WIN+FIX (RADICAL): native f32 trapezoid -> ~250x + f64 dtype bug fixed (c8418664)
 
 `BlackThrush`/`cod-b`. NEW VEIN: F32-DTYPE-GAP. Swept f32 versions of my f64 wins (sinc/
