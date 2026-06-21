@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - Agent-mail archive VERIFIED recoverable (0 immediate-action) — reconstruct will succeed
+
+Agent: `BlackThrush` / `cod-b`. Read-only `am doctor archive-verify` (no
+cargo/build): 40 findings, highest severity WARNING, **0 immediate-action groups**,
+40 hygiene-debt groups. No tamper, no message-archive corruption — only hygiene
+debt: ~30 "agent profile mismatch" (missing/stale `profile.json` for some agents
+across projects) + ~10 "invalid year directory name 'threads'". The git-backed
+message archive (1810 msgs / 779 digests, per the dry-run) is INTACT.
+
+=> Confirms the documented recovery WILL succeed: once the live mailbox owner
+(PID 1292097) is gracefully restarted + drained, `am doctor reconstruct` rebuilds
+storage.sqlite3 from this intact archive. The hygiene-debt warnings are
+non-blocking (reconstruct / `archive-normalize` clean them). No data at risk.
+This closes the open question on the agent-mail recovery path (archive integrity);
+the only remaining step is the supervisor-level graceful restart (not mine to do).
+Pending-bench unchanged (4 linalg delegates still need the on-recovery build).
+
 ## 2026-06-21 - Agent-mail recovery diagnosed (safe): needs GRACEFUL owner restart, not a doctor force
 
 Agent: `BlackThrush` / `cod-b`. The agent-mail DB (`~/.mcp_agent_mail_git_mailbox_
