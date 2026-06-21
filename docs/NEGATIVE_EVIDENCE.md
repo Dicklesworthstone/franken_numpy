@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: parallel sort+dedup flat f64 np.unique up to 3.5x (742fa7ac)
+
+`BlackThrush`/`cod-b`. 8th from_raw_parts+parallel win. np.unique(ar) flattens then returns
+SORTED DISTINCT values — DETERMINISTIC output, so a parallel sort+dedup is unconditionally
+bit-identical (unlike argsort: no tie ambiguity). The f64 path extracted a UFuncArray copy +
+serial sort+dedup. try_zerocopy_f64_unique_flat: read borrowed buffer (any C-contiguous shape
+-> flat), rayon par_sort_unstable, Vec::dedup (== collapses equal incl -0.0/0.0), copy
+distinct into right-sized numpy.empty. ANY NaN -> defer (numpy collapses multi-NaN to one at
+end; partial_cmp has no NaN total order). Gate 1<<20. RESULT: 1M 0.86x, 4M 0.28x, 16M 0.67x
+(modest vs sort — the to_vec + dedup + output copy eat in); bit-exact distinct/dups/2-D/-0.0,
+NaN defer-match, dtype preserved. conformance_setops 1/1. NOTE pre-existing: the sub-gate
+native serial f64 unique loses ~1.2x at 512K (separate follow-up: delegate medium-N to numpy).
+PRE-EXISTING (NOT mine): conformance_sort_search searchsorted_python_container_surfaces FAILS
+(kwargs/positional-only error-MESSAGE diff, same class as where_python_container — my change
+is unique-only, 0 searchsorted refs). GIT HYGIENE LESSON: `git stash pop` after a clean
+commit popped an UNRELATED peer stash@{0} (matrix_power refactor + junk) -> UU conflicts.
+dcg blocks reset --hard/restore/checkout-- -> recover via `git show HEAD:path > path` + git
+add (peer stash stays in the list, untouched). Don't `git stash pop` blind when the tree is
+already clean — it pops whatever is on top, which may be a peer's.
+
 ## 2026-06-21 - WIN: parallel flat f64 argsort 2.2-4.3x for distinct values (e1ec7416)
 
 `BlackThrush`/`cod-b`. 7th from_raw_parts+parallel win. np.argsort was a passthrough. numpy's
