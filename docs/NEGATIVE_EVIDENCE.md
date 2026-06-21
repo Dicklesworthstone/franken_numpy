@@ -6035,3 +6035,15 @@ and an O(n) detection pass taxes the common high-cardinality case (where fnp WIN
 Distribution+size-specific (only low-cardinality @4M+). Retry predicate: only if conformance is
 relaxed to accept any-valid-argsort (not exact-numpy-order) AND a counting path is added; or if
 fnp adopts numpy's exact introsort. Random/sorted/reverse/high-cardinality all dominate.
+
+### DISPROVEN: sparse compress/extract block-skip (overhead-bound, not scan-bound)
+Fresh probe found compress/extract on SPARSE masks lose 2.15-2.74x (worst at 0.1% True, vanishes
+at >=10% True -> 0.95x). Hypothesized scan-bound (per-element mask scan) and added block-skip
+(skip all-False u128/u64 mask words) to count_true_u8_prefix + the f64 compaction loop. Result:
+barely moved (0.1% 2.74->2.54x, 1% 2.17x unchanged) -> DISPROVEN. The bottleneck is NOT the scan
+but the FIXED per-call overhead (import numpy + getattr + view-to-uint8 + 2x PyBuffer::get +
+numpy.empty) which dominates when the output is tiny (sparse -> few elements). Same class as the
+small-array pyo3 wall: tiny work, fixed dispatch overhead. REVERTED (block-skip added unsafe
+complexity for a marginal/noise gain on an overhead-bound op; bit-exact but wrong fix). Not
+fixable without cutting the per-call numpy-object overhead (irreducible: needs numpy module/type
+caching for compress's dispatch, ~same wall as small-array passthrough). Dense compress wins.
