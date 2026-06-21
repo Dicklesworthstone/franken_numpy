@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: extend native gradient to scalar spacing gradient(y,dx) (22528cde, 3-11x)
+
+`BlackThrush`/`cod-b`. Extended the native 1-D gradient path (a938669b) to UNIFORM scalar
+spacing: gradient(y)=>dx=1, gradient(y,dx_scalar)=>that dx (interior /(2*dx), edges /dx).
+Previously ANY spacing vararg fell back to the single-threaded numpy.gradient passthrough.
+dx=1.0 keeps the unit case bit-identical (/(2*1)=/2, /1=identity). gradient(y,2.0) 4M
+0.09x (11x), 10K 0.30x; bit-exact dx=1/2/0.5/3.7. Coordinate-ARRAY spacing (non-scalar
+vararg, detected via .extract::<f64>().ok()==None), explicit axis, edge_order=2, N-D,
+non-f64 still defer. conformance 23/23. NOTE: complex elementwise vein now EXHAUSTED —
+abs/absolute/conjugate/square/exp on complex128 are fast numpy ufuncs (parity, NOT Python
+wrappers); real/imag are correct view passthroughs (shares_memory True) whose "2.28x" is
+sub-us pyo3 dispatch noise on a 0.3us O(1) op (the small-array wall), not a loss.
+LEVER TALLY (session): bincount 9x, trapezoid 50x, gradient 20x (+scalar-dx 11x), sinc
+50x, angle 25x.
+
 ## 2026-06-21 - BOLD-VERIFY Recheck: `fnp-linalg` matrix norm 1/-1 rows are current wins; no source change
 
 Artifact directory: `tests/artifacts/perf/2026-06-21_linalg_cod_b_matrix_norm_strip8/`
