@@ -4,6 +4,19 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - NOISE ruled out: full-scale (N=4M) std "1.52x LOSS" is load-noise, not real
+
+`BlackThrush`/`cod-b`. Ran perf_gap_sweep `--full` (N=4M, python timing only — no
+disk/cargo) as a large-N diagnostic. It flagged `std` 1.52x LOSS (was 0.879x WIN at
+N=1M) — a plausible size-dependent gap. CONFIRMED FALSE POSITIVE by re-measuring
+std/var/mean at N=1/2/4/8M with n=15: all hover ~parity with NON-MONOTONIC variance
+(std 1.09/0.90/0.99/1.04; var 1.17/0.97/1.30/1.00; mean 1.01/1.53/1.51/0.99) — the
+signature of a LOADED box (disk-low period), not a real regression. No new loss;
+the only true losses remain the 3 delegates (eigvalsh/eigh/cholesky, baselined
+below). METHODOLOGY NOTE for the perf guard: under load, confirm any single flagged
+LOSS with n>=15 across multiple sizes before queuing it — a lone 1.5x can be noise.
+(Disciplined: ruled out the phantom rather than queue a false lever.)
+
 ## 2026-06-21 - PENDING-BENCH heartbeat: FREEZE-PERIOD WORK COMPLETE — awaiting unfreeze
 
 `BlackThrush`/`cod-b`. FREEZE-PERIOD INFRASTRUCTURE COMPLETE + VALIDATED — every
