@@ -17,7 +17,27 @@ Confirmed the medium-N losses are NOT the kernel: UFuncArray::unique f64 already
 fix is in fnp-python (delegate medium-N to numpy, or a zero-copy binding) — there is no
 fnp-ufunc lever. Don't re-chase the kernel.
 
-## 1. unique f64 medium-N  [SOLID — native loses the WHOLE medium range]
+## STATUS 2026-06-21: #1 unique SHIPPED (c6b87f00). #2/#3 median/nanmedian NEED MORE WORK.
+
+#1 DONE: delegate exact-float64 unique that misses the parallel path -> numpy. Medium-N
+0.98-1.01x parity (was 1.1-2.4x), large still 0.82x, int unchanged, conformance_setops pass.
+
+#2/#3 REVISED — median/nanmedian are U-SHAPED, not "delegate below X":
+  median:    10K 0.70x WIN, 50K 0.85x win, 131K 4.24x LOSS, 262K 1.1-1.3x loss, 524K 0.50x WIN, 1M 0.35x WIN
+  nanmedian: 10K 0.66x WIN, 50K 1.12x loss, 131K 1.31x loss, 262K 1.15x loss, 524K 0.87x WIN, 1M 0.64x WIN
+They WIN small (native beats numpy's Python median wrapper dispatch) AND large (par_select_
+median kernel), but LOSE a MIDDLE band (~50K-512K). The median 131K 4.24x is extreme ->
+SUSPECT the par_select_median kernel gate (MEDIAN_GLOBAL_PARALLEL_MIN in fnp-ufunc) is too
+LOW, so 131K pays parallel fan-out on too-little work (cf the cheap-unary high-crossover
+lesson). TWO candidate fixes to investigate (low load):
+  (a) KERNEL (fnp-ufunc, cleaner if true): RAISE MEDIAN_GLOBAL_PARALLEL_MIN so medium N uses
+      serial select — would fix BOTH median+nanmedian + benefit all callers. Verify 131K.
+  (b) BINDING (fnp-python): delegate the MIDDLE band only (lo<=N<hi) to numpy — fiddlier,
+      needs precise lo/hi under low load.
+Prefer (a) if the 4.24x is fan-out. Re-measure under low load first (131K 4.24x may be partly
+load noise at load~15). DON'T ship a simple below-threshold gate (would regress small-N wins).
+
+## 1. unique f64 medium-N  [SHIPPED c6b87f00]
 
 Native f64 `np.unique` (extract UFuncArray + serial sort+dedup) loses across all medium N:
 50K 1.6-2.1x, 131K 2.0-2.4x, 262K 1.3-1.4x, 524K 1.1-1.3x. My parallel path (742fa7ac)
