@@ -17788,9 +17788,19 @@ fn matrix_rank(
 #[pyfunction]
 #[pyo3(signature = (a, n))]
 fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    let matrix_power_fn = numpy.getattr("linalg")?.getattr("matrix_power")?;
+    let a_for_fallback = a.clone_ref(py);
+    let n_for_fallback = n.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        Ok(matrix_power_fn
+            .call1((a_for_fallback.bind(py), n_for_fallback.bind(py)))?
+            .unbind())
+    };
+
     let power = match n.bind(py).extract::<i64>() {
         Ok(power) if power >= 0 => power,
-        _ => return numpy_linalg_matrix_power(py, a.bind(py), n.bind(py)),
+        _ => return fallback(),
     };
 
     // Boundary-power fast path (2026-06-21): NumPy handles n==1 by returning
@@ -17799,12 +17809,6 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
     if power == 1 && matrix_power_one_exact_ndarray_can_return_input(py, a.bind(py))? {
         return Ok(a);
     }
-
-    let a_for_fallback = a.clone_ref(py);
-    let n_for_fallback = n.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        numpy_linalg_matrix_power(py, a_for_fallback.bind(py), n_for_fallback.bind(py))
-    };
 
     // n==0 still delegates to NumPy's identity allocation. Powers >=2 keep the
     // existing native multiply path.
@@ -17831,15 +17835,6 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
         Err(_) => return fallback(),
     };
     build_numpy_array_from_ufunc(py, &result)
-}
-
-fn numpy_linalg_matrix_power(
-    py: Python<'_>,
-    a: &Bound<'_, PyAny>,
-    n: &Bound<'_, PyAny>,
-) -> PyResult<Py<PyAny>> {
-    let matrix_power_fn = py.import("numpy")?.getattr("linalg")?.getattr("matrix_power")?;
-    Ok(matrix_power_fn.call1((a, n))?.unbind())
 }
 
 fn matrix_power_one_exact_ndarray_can_return_input(
@@ -21803,9 +21798,8 @@ fn histogram_bin_edges(
             // histogram_bin_edges only needs min/max of the data. The old path extracted the
             // WHOLE array into a UFuncArray copy and THEN scanned it — two O(n) passes plus an
             // allocation, ~4x behind numpy. NumPy itself does a 2-pass a.min()/a.max(); reading
-            // the borrowed f64 buffer once (branchless f64::min/max + a non-finite OR flag, no
-            // early return so LLVM autovectorizes -> 1 SIMD pass) beats it (0.39-0.62x at 100K/
-            // 8M, parity at cache-resident 1M). Non-f64 / non-contiguous / non-finite -> numpy.
+            // the borrowed f64 buffer once (min+max+finite in a SINGLE pass, no copy) beats it.
+            // Non-f64 / non-contiguous / non-finite fall back to numpy.
             let ndarray_t = numpy.getattr("ndarray")?;
             if !a_bound.is_exact_instance(&ndarray_t) || !numpy_dtype_is_f64(py, a_bound) {
                 return fallback(py);
@@ -21830,6 +21824,11 @@ fn histogram_bin_edges(
                 // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under GIL.
                 let data: &[f64] =
                     unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+                // Branchless single pass: f64::min/max (vectorizable, NaN-ignoring) + a
+                // non-finite OR-reduce flag (no early return, so LLVM autovectorizes the
+                // whole loop -> 1 SIMD pass, beating numpy's 2-pass a.min()/a.max()). Any
+                // non-finite -> fall back to numpy (NaN-propagation parity). lo/hi are only
+                // consumed when !bad (all finite), so NaN/inf can't leak into the result.
                 let mut lo = f64::INFINITY;
                 let mut hi = f64::NEG_INFINITY;
                 let mut bad = false;
@@ -21839,7 +21838,6 @@ fn histogram_bin_edges(
                     hi = hi.max(v);
                 }
                 if bad {
-                    // Non-finite input: numpy raises ("autodetected range not finite") — defer.
                     return fallback(py);
                 }
                 if lo == hi {
@@ -65913,7 +65911,7 @@ mod tests {
             }
 
             let values = numeric_array(py, vec![1.0, 0.0, -1.0, 2.0], "float64");
-            let actual = spacing(py, values.clone().unbind())?;
+            let actual = spacing(py, &PyTuple::new(py, [&values])?, None)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("spacing", (values,))?;
 
@@ -65938,7 +65936,7 @@ mod tests {
             // float64 (float32 -> float64, int8 -> float64, ...).
             for dt in ["float64", "float32", "int8", "int16", "uint8", "int32"] {
                 let values = numeric_array(py, vec![1.0, 2.0, 3.0], dt);
-                let ours = spacing(py, values.clone().unbind())?;
+                let ours = spacing(py, &PyTuple::new(py, [&values])?, None)?;
                 let theirs = numpy.call_method1("spacing", (values,))?;
                 let ours_dtype = ours.bind(py).getattr("dtype")?.str()?.to_string();
                 let theirs_dtype = theirs.getattr("dtype")?.str()?.to_string();
@@ -65968,7 +65966,7 @@ mod tests {
                 vec![f64::NAN, f64::NEG_INFINITY, f64::INFINITY, -0.0],
                 "float64",
             );
-            let actual = spacing(py, values.clone().unbind())?;
+            let actual = spacing(py, &PyTuple::new(py, [&values])?, None)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("spacing", (values,))?;
 
@@ -66000,7 +65998,7 @@ mod tests {
                 ],
                 "float64",
             );
-            let actual = sign(py, values.clone().unbind())?;
+            let actual = sign(py, &PyTuple::new(py, [&values])?, None)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("sign", (values,))?;
 
@@ -66024,7 +66022,7 @@ mod tests {
                 vec![vec![-2_i64, 0_i64, 5_i64], vec![7_i64, -11_i64, 0_i64]],
                 "int64",
             );
-            let actual = sign(py, values.clone().unbind())?;
+            let actual = sign(py, &PyTuple::new(py, [&values])?, None)?;
             let numpy = py.import("numpy")?;
             let expected = numpy.call_method1("sign", (values,))?;
 
@@ -66546,7 +66544,7 @@ mod tests {
 
             let x1 = numeric_array(py, vec![1.0, 0.0, -1.0], "float64");
             let x2 = numeric_array(py, vec![2.0, -1.0, 0.0], "float64");
-            let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = nextafter(py, &PyTuple::new(py, [&x1, &x2])?, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("nextafter")?.call1((x1, x2))?;
@@ -66571,7 +66569,7 @@ mod tests {
 
             let x1 = numeric_array(py, vec![vec![0.0, -0.0], vec![1.0, -1.0]], "float64");
             let x2 = numeric_array(py, vec![-0.0, 0.0], "float64");
-            let actual = nextafter(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = nextafter(py, &PyTuple::new(py, [&x1, &x2])?, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("nextafter")?.call1((x1, x2))?;
@@ -66597,7 +66595,7 @@ mod tests {
 
             let x1 = numeric_array(py, vec![3.0, 5.0, 8.0], "float64");
             let x2 = numeric_array(py, vec![4.0, 12.0, 15.0], "float64");
-            let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = hypot(py, &PyTuple::new(py, [&x1, &x2])?, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("hypot")?.call1((x1, x2))?;
@@ -66622,7 +66620,7 @@ mod tests {
 
             let x1 = numeric_array(py, vec![vec![3.0, 6.0], vec![8.0, 0.0]], "float64");
             let x2 = numeric_array(py, vec![4.0, 8.0], "float64");
-            let actual = hypot(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = hypot(py, &PyTuple::new(py, [&x1, &x2])?, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("hypot")?.call1((x1, x2))?;
@@ -66724,7 +66722,7 @@ mod tests {
 
             let x1 = numeric_array(py, vec![0.0, 1.0, -2.0], "float64");
             let x2 = numeric_array(py, vec![0.0, 3.0, -4.0], "float64");
-            let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = logaddexp(py, &PyTuple::new(py, [&x1, &x2])?, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("logaddexp")?.call1((x1, x2))?;
@@ -66758,7 +66756,7 @@ mod tests {
                 "float64",
             );
             let x2 = numeric_array(py, vec![f64::NEG_INFINITY, f64::INFINITY], "float64");
-            let actual = logaddexp(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = logaddexp(py, &PyTuple::new(py, [&x1, &x2])?, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("logaddexp")?.call1((x1, x2))?;
@@ -66784,7 +66782,7 @@ mod tests {
 
             let x1 = numeric_array(py, vec![0.0, 1.0, -2.0], "float64");
             let x2 = numeric_array(py, vec![0.0, 3.0, -4.0], "float64");
-            let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = logaddexp2(py, &PyTuple::new(py, [&x1, &x2])?, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("logaddexp2")?.call1((x1, x2))?;
@@ -66818,7 +66816,7 @@ mod tests {
                 "float64",
             );
             let x2 = numeric_array(py, vec![f64::NEG_INFINITY, f64::INFINITY], "float64");
-            let actual = logaddexp2(py, x1.clone().unbind(), x2.clone().unbind())?;
+            let actual = logaddexp2(py, &PyTuple::new(py, [&x1, &x2])?, None)?;
 
             let numpy = py.import("numpy")?;
             let expected = numpy.getattr("logaddexp2")?.call1((x1, x2))?;
@@ -69766,7 +69764,7 @@ mod tests {
                 kwargs.set_item("dtype", "timedelta64[D]")?;
                 numpy.call_method("array", (vec![1_i64, -2_i64, 0_i64],), Some(&kwargs))?
             };
-            let got = sign(py, td.clone().unbind())?;
+            let got = sign(py, &PyTuple::new(py, [&td])?, None)?;
             same(got.bind(py), &numpy.call_method1("sign", (td,))?)?;
 
             Ok(())
