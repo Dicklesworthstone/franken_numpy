@@ -41562,7 +41562,10 @@ fn lastaxis_argextreme_int<T: pyo3::buffer::Element + Copy + PartialOrd + Partia
         best_i as i64
     };
     use rayon::prelude::*;
-    const ARGEXTREME_INT_LASTAXIS_PARALLEL_MIN: usize = 1 << 16;
+    // Same tiny-per-lane-scan crossover as the float last-axis argextreme above:
+    // total<~1M is faster serial (rayon fan-out dwarfs the scan), >=1<<20 wins
+    // parallel. Raised from 1<<16. Lane scans independent -> serial/parallel identical.
+    const ARGEXTREME_INT_LASTAXIS_PARALLEL_MIN: usize = 1 << 20;
     let out: Vec<i64> = if outer * lane >= ARGEXTREME_INT_LASTAXIS_PARALLEL_MIN
         && rayon::current_num_threads() >= 2
     {
@@ -41636,7 +41639,13 @@ fn try_zerocopy_lastaxis_argextreme(
         let data: &[f64] =
             unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
         use rayon::prelude::*;
-        const ARGEXTREME_LASTAXIS_PARALLEL_MIN: usize = 1 << 16;
+        // Per-lane argextreme is a tiny scan, so rayon fan-out only pays off well above
+        // the old 1<<16 gate: measured, total<~1M is FASTER serial (argmax 256x256
+        // (65K) was 6.1x SLOWER parallel than numpy, ~1x serial; 524K serial 121<136us
+        // parallel), while >=1<<20 (1M, e.g. 1024x1024) parallel wins (113<173us serial,
+        // beats numpy) and 4M is ~8x. Gate at 1<<20. Lane scans are independent ->
+        // serial/parallel bit-identical.
+        const ARGEXTREME_LASTAXIS_PARALLEL_MIN: usize = 1 << 20;
         let parallel = outer * lane >= ARGEXTREME_LASTAXIS_PARALLEL_MIN
             && rayon::current_num_threads() >= 2;
         let per: Vec<Option<usize>> = if parallel {
