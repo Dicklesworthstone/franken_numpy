@@ -5755,3 +5755,70 @@ Retry predicate:
   active-window gates. A credible next attempt must remove dominant reducer work:
   true band-to-tridiagonal stage 2, a band-aware eigvalsh path, or a generated
   fixed-size reducer/eigensolver with same-worker proof against NumPy.
+
+## 2026-06-21 - KEEP: exact tridiagonal eigvalsh skips dense reduction
+
+`YellowElk`/`cod-a`, parent `franken_numpy-ixs5y`. Disk-frugal BOLD-VERIFY pass
+on the native `fnp-linalg` spectral frontier, using the existing warm
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a` root and no
+new `.scratch` worktree. The radical lever is a band-structure gate: when a
+finite dense input to `eigvalsh_nxn` is exactly symmetric tridiagonal, extract
+the diagonal/off-diagonal arrays and run the existing tridiagonal QR eigensolver
+directly instead of first doing dense Householder tridiagonalization.
+
+Decision: **KEEP** for exact tridiagonal matrices. This does not claim closure
+of the dense SPD `eigvalsh_nxn/128` loss; it removes an avoidable dense-reducer
+tax for already-tridiagonal inputs and beats same-worker NumPy on the measured
+rows.
+
+Commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'eigvalsh_tridiagonal_nxn/size/(128|256|512)' -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- `ssh vmi1149989 'cd /data/projects/franken_numpy && CARGO_TARGET_DIR=/data/projects/franken_numpy/.rch-target-vmi1149989-pool-f4ecbc5a8032ed7eb8c61438ab6b2cc8 cargo bench -p fnp-linalg --bench criterion_linalg ...'`
+- `ssh vmi1149989 'OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -'`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-linalg eigvalsh --release -- --nocapture`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-linalg exact_symmetric_tridiagonal_values_accepts_only_exact_band --release -- --nocapture`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-linalg eigvalsh_exact_tridiagonal_matches_dense_reduction_fallback --release -- --nocapture`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo check -p fnp-linalg --all-targets`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings`
+
+Same-worker current old/FNP candidate/NumPy proof (`vmi1149989`, NumPy `2.2.4`,
+single-thread BLAS for NumPy):
+
+| Row | Old FNP ns | Final FNP ns | NumPy ns | Final/Old | Final/NumPy | Verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `eigvalsh_tridiagonal_nxn/size/128` | 1,458,389 | 417,801 | 665,628 | 0.287x | 0.628x | keep, beats NumPy |
+| `eigvalsh_tridiagonal_nxn/size/256` | 12,761,124 | 1,609,408 | 3,380,215 | 0.126x | 0.476x | keep, beats NumPy |
+| `eigvalsh_tridiagonal_nxn/size/512` | 50,970,521 | 6,327,679 | 20,895,970 | 0.124x | 0.303x | keep, beats NumPy |
+
+Win/loss/neutral score:
+- Old FNP vs NumPy: **0 / 3 / 0**.
+- Final FNP vs old FNP: **3 / 0 / 0**.
+- Final FNP vs NumPy: **3 / 0 / 0**.
+
+Additional RCH candidate sanity (`hz2`) measured final FNP at `444,840 /
+1,642,900 / 6,637,038 ns` for 128/256/512. A two-pass helper variant that
+delayed diagonal allocation was rejected and reverted: it degraded the 128 row
+to `635,968 ns` on `vmi1149989`, so the kept implementation is the one-pass
+extract/check path.
+
+Validation notes:
+- Focused eigvalsh release tests passed: 7 unit rows plus 3 golden rows.
+- Focused fast-path tests passed: exact-band gate and forced-dense fallback
+  parity.
+- `cargo check -p fnp-linalg --all-targets` passed on RCH-selected `hz1`.
+- `cargo clippy -p fnp-linalg --all-targets -- -D warnings` passed on
+  RCH-selected `hz1`.
+- `cargo fmt --check` remains blocked by broad pre-existing formatting drift,
+  including peer-owned `crates/fnp-python/src/lib.rs`; no workspace format sweep
+  was run.
+- `ubs crates/fnp-linalg/src/lib.rs crates/fnp-linalg/benches/criterion_linalg.rs`
+  exited nonzero due existing broad heuristics in `fnp-linalg` (panic/indexing/
+  equality/secret-comparison false positives), while its shadow cargo fmt,
+  clippy, check, test-build, audit, and deny substeps were clean.
+
+Retry predicate:
+- Do not generalize this gate to approximate bands or asymmetric inputs without
+  new parity proof. The kept gate is exact: only zero outside the first
+  off-diagonal and exact symmetric off-diagonal equality skip dense reduction.
+- Dense SPD `eigvalsh_nxn` remains a loss; the next dense attempt still needs a
+  true reducer/eigensolver replacement, not QR-tail or sort work.

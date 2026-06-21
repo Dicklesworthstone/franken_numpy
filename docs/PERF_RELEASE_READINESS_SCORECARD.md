@@ -915,3 +915,44 @@ Decision:
   or shallow active-window gates as standalone levers. The next credible path is
   a real reducer/eigensolver replacement: band-to-tridiagonal stage 2,
   band-aware eigvalsh, or generated fixed-size reducer with paired NumPy proof.
+
+---
+
+## 2026-06-21 cod-a fnp-linalg Exact Tridiagonal Eigvalsh Keep
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Exact tridiagonal final vs old FNP | 9/10 | Same-worker final is `0.287x / 0.126x / 0.124x` old FNP time |
+| Exact tridiagonal final vs NumPy | 9/10 | Same-worker final beats NumPy on all measured rows: `0.628x / 0.476x / 0.303x` |
+| Dense spectral frontier | 4/10 | Dense SPD `eigvalsh_nxn` loss remains open; this keep covers exact tridiagonal inputs |
+| Conformance/check/clippy | 9/10 | Focused eigvalsh tests, fast-path tests, check, and clippy passed through RCH |
+| Disk discipline | 10/10 | Used existing `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`; no new `.scratch` |
+| Validation caveats | 7/10 | Workspace fmt and UBS remain blocked by unrelated pre-existing drift/noise |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Source lever: exact symmetric tridiagonal inputs to `eigvalsh_nxn` now extract
+  diagonal/off-diagonal arrays and enter the existing tridiagonal QR eigensolver
+  directly, skipping dense Householder tridiagonalization.
+- Same-worker `vmi1149989` old FNP rows: `128 = 1,458,389 ns`, `256 =
+  12,761,124 ns`, `512 = 50,970,521 ns`.
+- Same-worker `vmi1149989` final FNP rows: `128 = 417,801 ns`, `256 =
+  1,609,408 ns`, `512 = 6,327,679 ns`.
+- Same-worker direct NumPy rows with NumPy `2.2.4` and BLAS threads pinned to 1:
+  `128 = 665,628 ns`, `256 = 3,380,215 ns`, `512 = 20,895,970 ns`.
+- Counted scorecard: old FNP vs NumPy **0/3/0**, final FNP vs old FNP
+  **3/0/0**, final FNP vs NumPy **3/0/0**.
+- RCH `hz2` candidate sanity rows: `444,840 / 1,642,900 / 6,637,038 ns`.
+- Rejected micro-variant: a two-pass delayed-allocation helper regressed the
+  `128` row to `635,968 ns` on `vmi1149989`; reverted before final.
+- Final scoped gates: `cargo test -p fnp-linalg eigvalsh --release`,
+  `cargo test -p fnp-linalg exact_symmetric_tridiagonal_values_accepts_only_exact_band --release`,
+  `cargo test -p fnp-linalg eigvalsh_exact_tridiagonal_matches_dense_reduction_fallback --release`,
+  `cargo check -p fnp-linalg --all-targets`, and `cargo clippy -p fnp-linalg
+  --all-targets -- -D warnings` passed through RCH/per-crate workflow.
+
+Decision:
+- Release-ready keep for exact symmetric tridiagonal inputs.
+- Do not extend this to approximate bands, asymmetric inputs, or dense SPD cases
+  without fresh parity and same-worker NumPy proof. Dense `eigvalsh_nxn` still
+  needs a deeper reducer/eigensolver replacement.

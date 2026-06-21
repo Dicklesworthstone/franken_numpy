@@ -5504,11 +5504,33 @@ fn eigvalsh_finite_nxn(a: &[f64], n: usize) -> Vec<f64> {
     debug_assert!(n > 0);
     debug_assert!(a.iter().all(|v| v.is_finite()));
 
-    let (mut d, mut e) = tridiag_reduce_values(a, n);
+    let (mut d, mut e) = exact_symmetric_tridiagonal_values(a, n)
+        .unwrap_or_else(|| tridiag_reduce_values(a, n));
     tridiag_eigvals_qr(&mut d, &mut e, n);
 
     d.sort_by(|a, b| a.total_cmp(b));
     d
+}
+
+fn exact_symmetric_tridiagonal_values(a: &[f64], n: usize) -> Option<(Vec<f64>, Vec<f64>)> {
+    let mut d = vec![0.0f64; n];
+    let mut e = vec![0.0f64; n.saturating_sub(1)];
+    for row in 0..n {
+        d[row] = a[row * n + row];
+        if row + 1 < n {
+            let upper = a[row * n + row + 1];
+            if upper != a[(row + 1) * n + row] {
+                return None;
+            }
+            e[row] = upper;
+        }
+        for col in (row + 2)..n {
+            if a[row * n + col] != 0.0 || a[col * n + row] != 0.0 {
+                return None;
+            }
+        }
+    }
+    Some((d, e))
 }
 
 /// Compute eigenvalues and eigenvectors of a symmetric NxN matrix via QR iteration.
@@ -12305,6 +12327,53 @@ mod tests {
         assert!((eigvals[0] - 1.0).abs() < 1e-6, "eig0={}", eigvals[0]);
         assert!((eigvals[1] - 2.0).abs() < 1e-6, "eig1={}", eigvals[1]);
         assert!((eigvals[2] - 4.0).abs() < 1e-6, "eig2={}", eigvals[2]);
+    }
+
+    #[test]
+    fn exact_symmetric_tridiagonal_values_accepts_only_exact_band() {
+        let tri = [
+            2.0, -1.0, 0.0, 0.0, -1.0, 2.0, -1.0, 0.0, 0.0, -1.0, 2.0, -1.0, 0.0,
+            0.0, -1.0, 2.0,
+        ];
+        let (d, e) = super::exact_symmetric_tridiagonal_values(&tri, 4).expect("tridiagonal");
+        assert_eq!(d, vec![2.0, 2.0, 2.0, 2.0]);
+        assert_eq!(e, vec![-1.0, -1.0, -1.0]);
+
+        let mut dense = tri;
+        dense[2] = f64::MIN_POSITIVE;
+        assert!(super::exact_symmetric_tridiagonal_values(&dense, 4).is_none());
+
+        let mut asymmetric = tri;
+        asymmetric[4] = -0.5;
+        assert!(super::exact_symmetric_tridiagonal_values(&asymmetric, 4).is_none());
+    }
+
+    #[test]
+    fn eigvalsh_exact_tridiagonal_matches_dense_reduction_fallback() {
+        for &n in &[8usize, 32] {
+            let mut tri = vec![0.0; n * n];
+            for i in 0..n {
+                tri[i * n + i] = 2.0;
+                if i + 1 < n {
+                    tri[i * n + i + 1] = -1.0;
+                    tri[(i + 1) * n + i] = -1.0;
+                }
+            }
+
+            let fast = eigvalsh_nxn(&tri, n).expect("fast tridiagonal eigvalsh");
+
+            let mut forced_dense = tri.clone();
+            forced_dense[2] = f64::MIN_POSITIVE;
+            forced_dense[2 * n] = f64::MIN_POSITIVE;
+            let dense = eigvalsh_nxn(&forced_dense, n).expect("dense fallback eigvalsh");
+
+            for (idx, (a, b)) in fast.iter().zip(dense.iter()).enumerate() {
+                assert!(
+                    (a - b).abs() <= 1.0e-10,
+                    "n={n} idx={idx} fast={a} dense={b}"
+                );
+            }
+        }
     }
 
     #[test]
