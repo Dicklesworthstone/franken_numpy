@@ -13986,6 +13986,16 @@ fn try_zerocopy_flatnonzero(py: Python<'_>, a: &Bound<'_, PyAny>) -> PyResult<Op
     if !a.is_exact_instance(&ndarray_type) {
         return Ok(None);
     }
+    // The native count+gather scan below is ~1.9-2.2x behind numpy's tight C
+    // flatnonzero at EVERY size measured (256: 1.88x .. 4M: 1.55x; kernel-bound,
+    // serial==parallel) — the zero-copy native never wins. Delegate to numpy
+    // (bit-identical indices, all dtypes/shapes); keep the native path only for tiny
+    // inputs (<256) where numpy's ravel+nonzero+[0] per-call dispatch would dominate
+    // the sub-microsecond scan. Mirrors the argextreme delegate policy.
+    const FLATNONZERO_NUMPY_MIN_LEN: usize = 1 << 8;
+    if a.getattr("size")?.extract::<usize>()? >= FLATNONZERO_NUMPY_MIN_LEN {
+        return Ok(Some(numpy.getattr("flatnonzero")?.call1((a,))?.unbind()));
+    }
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
