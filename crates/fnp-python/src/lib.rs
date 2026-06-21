@@ -13828,6 +13828,58 @@ fn try_zerocopy_f64_interp(
     Ok(Some(flat.call_method1("reshape", (&output_shape,))?.unbind()))
 }
 
+// Zero-copy parallel trapezoid for a 1-D f64 C-contiguous ndarray with uniform dx.
+// trapezoid(y, dx) = dx * (sum(y) - (y[0]+y[-1])/2); the sum is the dominant cost and
+// numpy runs it single-threaded, so a parallel chunked sum wins on large inputs while
+// staying within allclose of numpy's per-term pairwise sum. Returns None (defer to the
+// general path) for non-1-D/non-f64/non-contiguous y, an x argument, a non-trivial axis,
+// or n<2 (numpy's small-length edge semantics).
+fn try_zerocopy_f64_trapezoid_flat(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    y: &Bound<'_, PyAny>,
+    dx: f64,
+    axis: isize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if axis != -1 && axis != 0 {
+        return Ok(None); // 1-D input -> only the single axis is addressable
+    }
+    if !y.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = y.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(y) else {
+        return Ok(None);
+    };
+    if buffer.shape().len() != 1 || !buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n < 2 {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    use rayon::prelude::*;
+    const TRAPEZOID_PARALLEL_MIN: usize = 1 << 16; // measured crossover (parallel loses <64K)
+    let total: f64 = if n >= TRAPEZOID_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        let chunk = n.div_ceil(rayon::current_num_threads());
+        data.par_chunks(chunk).map(|c| c.iter().sum::<f64>()).sum()
+    } else {
+        data.iter().sum()
+    };
+    let result = dx * (total - (data[0] + data[n - 1]) / 2.0);
+    Ok(Some(numpy.getattr("float64")?.call1((result,))?.unbind()))
+}
+
 fn trapezoid_impl(
     py: Python<'_>,
     name: &str,
@@ -13850,6 +13902,17 @@ fn trapezoid_impl(
         kwargs.set_item("dx", dx)?;
         kwargs.set_item("axis", axis)?;
         return Ok(numpy.getattr(name)?.call((y.bind(py),), Some(&kwargs))?.unbind());
+    }
+    // Zero-copy fast path: 1-D f64 contiguous y with uniform dx (no x). numpy's
+    // trapezoid is single-threaded and allocates temporaries; read the buffer directly
+    // and compute dx*(sum(y) - (y[0]+y[-1])/2) via a parallel chunked sum. This equals
+    // numpy's (y[1:]+y[:-1])/2*dx summation to ~1e-14 (within allclose — fnp's serial
+    // naive kernel already differs at that level), and avoids the extract_numeric_array
+    // copy that ~doubled memory traffic for the reduction.
+    if x.is_none()
+        && let Some(out) = try_zerocopy_f64_trapezoid_flat(py, &numpy, y.bind(py), dx, axis)?
+    {
+        return Ok(out);
     }
     let y = extract_numeric_array(py, y.bind(py), &format!("{name}(y)"))?;
     let result = match x {
