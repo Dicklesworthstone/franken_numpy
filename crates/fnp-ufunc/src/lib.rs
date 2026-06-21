@@ -21578,14 +21578,25 @@ impl UFuncArray {
                 integer_sidecar: None,
             };
         }
-        let values: Vec<f64> = (0..m)
-            .map(|i| {
-                let alpha = (m as f64 - 1.0) / 2.0;
-                let r = (i as f64 - alpha) / alpha;
-                let arg = beta * (1.0 - r * r).max(0.0).sqrt();
-                bessel_i0(arg) / bessel_i0(beta)
-            })
-            .collect();
+        // Hoist the two loop-invariants out of the per-point map: `alpha` and especially
+        // `bessel_i0(beta)` (the normalizing denominator) were recomputed for EVERY point —
+        // m redundant Bessel evals. Computing the denominator once roughly halves the Bessel
+        // work (numerator-only per point) at all sizes; parallelize the per-point Bessel map
+        // (compute-bound) for large windows. Bit-identical (same formula, denom value same).
+        let alpha = (m as f64 - 1.0) / 2.0;
+        let denom = bessel_i0(beta);
+        let point = |i: usize| -> f64 {
+            let r = (i as f64 - alpha) / alpha;
+            let arg = beta * (1.0 - r * r).max(0.0).sqrt();
+            bessel_i0(arg) / denom
+        };
+        const KAISER_PARALLEL_MIN: usize = 1 << 14;
+        let values: Vec<f64> = if m >= KAISER_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            (0..m).into_par_iter().map(point).collect()
+        } else {
+            (0..m).map(point).collect()
+        };
         Self {
             shape: vec![m],
             values,
