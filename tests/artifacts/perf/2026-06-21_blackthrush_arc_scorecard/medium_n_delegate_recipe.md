@@ -279,3 +279,14 @@ MILD residuals (genuine, low-ROI 1.15-1.25x, uncommon, no common class -> not pu
  1.15x, busday_count 1.2x. CONCLUSION: less-common surface comprehensively dominated after the
  5 wins this stretch (nanmedian, kaiser 12x, histogram_bin_edges 4x, isclose-scalar 30x,
  array_equal 2.2x). No more BIG actionable lever; remaining = mild residuals + structural walls.
+
+## QUEUED 2026-06-21: np.mod alias misses remainder twin (3.49x) - blocked on YellowElk fnp-python lock
+np.mod IS np.remainder (alias) but f.mod (py_mod) loses 2.99-3.49x@1M-8M while f.remainder is
+parity 1.0x. f.mod == f.remainder bit-exact (verified signed). f.mod has its own COLD extract+
+build path missing remainder's fast path (alias-misses-twin: cf atan2->arctan2, concat->concatenate).
+FIX (fnp-python, when free): (1) route py_mod array path -> remainder impl (3.49x->1.0x parity,
+bit-exact instant). (2) BETTER: remainder/mod only PARITY but divmod's r-output won 0.12x via
+zero-copy parallel -> add zero-copy parallel single-output remainder path (r=a%b; if r!=0 &&
+(r>0)!=(b>0){r+=b} elif r==0 {0.copysign(b)}; defer zero/inf/nan; gate 1<<18), mod routes to it.
+Est -> ~0.1-0.2x WIN. BLOCKED: fnp-python + docs/NEGATIVE_EVIDENCE.md both exclusive-reserved by
+YellowElk (fresh, ~01:35). Recorded here (own artifact) since canonical ledger is peer-locked.
