@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: native 1-D constant np.pad fast path (4ec7599f, up to 4.5x)
+
+`BlackThrush`/`cod-b`. Swept array-manipulation ops (pad/insert/delete/tile/flip/rot90/
+tril/triu/meshgrid/stack/concat). Most win/parity; flip+rot90 are VIEWS (shares_memory
+True -> their 1.16-2.5x is sub-us view-dispatch noise, NOT losses — confirmed); insert
+noisy-parity (med 1.08x). Real lever: np.pad is a pure passthrough, and np.pad's Python
+mode-dispatch + pad_width normalization cost ~9us EVEN for a trivial pad -> 1-D small/medium
+lost 1.10-1.23x (2-D + large parity/copy-bound). FIX: native fast path for mode='constant'
++ default constant_values=0 + 1-D f64 C-contig -> numpy.empty + zero 2 edges + memcpy
+interior (bit-identical). pad_width int/(b,a)/[(b,a)]. RESULT: N=1000 1.11x->0.22x (4.5x),
+10K 0.30x, 100K 0.60x, 1M 0.91x (copy-bound). conformance_moveaxis_pad 19/19. Non-constant
+modes / any kwargs / 2-D / non-f64 defer. 10th passthrough/serial-vs-numpy lever.
+GENERALIZABLE: numpy functions implemented in PYTHON (pad, gradient, angle, sinc, ...) have
+a ~us dispatch floor even on trivial inputs -> a tight native Rust fast path for the common
+case beats them at small/medium N regardless of the kernel being memcpy-simple. NOTE: flip/
+rot90/real/imag are O(1) views -> never a real loss (verify shares_memory before chasing).
+
 ## 2026-06-21 - NEGATIVE: axis=0 / 3-D middle-axis / int axis reductions all parity-or-win (no lever)
 
 `BlackThrush`/`cod-b`. Followed the trapezoid cache-hostile-kernel lever (7874baec) into a
