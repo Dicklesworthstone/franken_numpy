@@ -45123,6 +45123,13 @@ fn unique(
         if let Some(out) = try_zerocopy_f64_unique_flat(py, &item)? {
             return Ok(out);
         }
+        // f64 that didn't take the parallel path (sub-1<<20, NaN, or non-contiguous):
+        // numpy's sort+dedup beats our native extract+serial across the whole medium range
+        // (measured 1.1-2.4x at 50K-512K), so delegate. int/other dtypes fall through to the
+        // native path unchanged below.
+        if is_exact_numpy_ndarray(py, &item)? && numpy_dtype_is_f64(py, &item) {
+            return core_numpy_passthrough(py, "unique", args, kwargs);
+        }
         // NumPy's unique preserves the input dtype exactly; our native kernel
         // canonicalizes narrow ints/floats (int32 -> int64, float32 -> float64),
         // so defer any non-canonical width to NumPy.
