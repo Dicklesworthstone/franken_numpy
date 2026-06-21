@@ -3,6 +3,50 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-b fnp-linalg batch_cholesky n=64 direct-write keep
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Current `500x64x64` vs NumPy | 8/10 | Already a same-worker win at `0.331x` NumPy time |
+| Candidate `500x64x64` vs current | 9/10 | Direct-write widened path improves current by `0.685x` |
+| Candidate `500x64x64` vs NumPy | 10/10 | Same-worker candidate is `0.227x` NumPy time |
+| `1000x32x32` guard | 8/10 | Existing branch remains a win: `0.921x` vs current, `0.154x` vs NumPy |
+| `64x128x128` guard | 7/10 | Still beats NumPy, but branch is not reached and the baseline row was noisy |
+| Conformance/build gates | 9/10 | Focused bit-identity test, check, clippy, release build, and diff check passed |
+| Tool hygiene | 7/10 | Scoped fmt/UBS remain blocked by pre-existing linalg-wide drift/noise outside this hunk |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-b`.
+- Artifact directory:
+  `tests/artifacts/perf/2026-06-21_linalg_batch_cholesky64_direct_write_cod_b/`.
+- Source lever: `CHOL_DIRECT_WRITE_MAX_N` widened from `32` to `64`; the
+  byte-identity regression test now includes `n = 64`.
+- Same-worker `ovh-a` current rows: `1000x32x32 = 806,310 ns`,
+  `500x64x64 = 3,587,449 ns`, `64x128x128 = 3,460,608 ns`.
+- Same-worker `ovh-a` candidate rows: `1000x32x32 = 742,740 ns`,
+  `500x64x64 = 2,457,592 ns`, `64x128x128 = 1,757,799 ns`.
+- Direct `ovh-a` NumPy rows with Python `3.13.7`, NumPy `2.2.4`, and BLAS
+  threads pinned to 1: `1000x32x32 = 4,827,292 ns`, `500x64x64 =
+  10,837,794 ns`, `64x128x128 = 8,874,177 ns`.
+- Counted ratios: candidate vs NumPy = `0.154x`, `0.227x`, `0.198x`; candidate
+  vs current = `0.921x`, `0.685x`, `0.508x`.
+- Counted scorecard: current vs NumPy **3/0/0**, candidate vs NumPy **3/0/0**,
+  candidate vs current **3/0/0**.
+- Final scoped gates: `cargo test -p fnp-linalg
+  batch_cholesky_scratch_matches_per_lane_cholesky_nxn_bits -- --nocapture`,
+  `cargo check -p fnp-linalg --all-targets`, `cargo clippy -p fnp-linalg
+  --all-targets -- -D warnings`, `cargo build -p fnp-linalg --release`, and
+  `git diff --check` passed via RCH/per-crate workflow.
+
+Decision:
+- Release-ready keep. This is a small, behavior-preserving allocation-elision
+  lever on a measured batch Cholesky row that already dominates NumPy and now
+  widens the lead.
+- Do not infer that `n >= 128` should use the same threshold. That boundary is
+  a blocked-Cholesky algorithm decision and needs separate proof.
+
+---
+
 ## 2026-06-21 cod-b fnp-linalg SBR Stage-1 Spectral No-Ship
 
 | Area | Score | Verdict |

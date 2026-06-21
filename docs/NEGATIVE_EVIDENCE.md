@@ -4,6 +4,64 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - KEEP: batch_cholesky n=64 direct-write lane fill
+
+`YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on
+`fnp-linalg::batch_cholesky` after the spectral/SBR no-ships. The
+alien-graveyard match is size-class specialization plus allocation elimination:
+extend the existing direct-write batch Cholesky lane from `n <= 32` to `n <= 64`
+so the still-unblocked `cholesky_nxn` formula writes directly into the output
+buffer instead of allocating one `Vec` per lane and flattening. This stays below
+`CHOL_MID_MIN` where blocked Cholesky takes over.
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-21_linalg_batch_cholesky64_direct_write_cod_b/`
+
+Commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher 'batch_cholesky/shape/(1000x32x32|500x64x64|64x128x128)'`
+- `ssh -i ~/.ssh/je_ovh_ssh_key.pem ubuntu@51.222.245.56 'OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -'`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-linalg batch_cholesky_scratch_matches_per_lane_cholesky_nxn_bits -- --nocapture`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo check -p fnp-linalg --all-targets`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo clippy -p fnp-linalg --all-targets -- -D warnings`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo build -p fnp-linalg --release`
+
+| Probe | Baseline FNP ns | Candidate FNP ns | NumPy ns | Baseline/NumPy | Candidate/Baseline | Candidate/NumPy | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `batch_cholesky/shape/1000x32x32` | 806,310 | 742,740 | 4,827,292 | 0.167x | 0.921x | 0.154x | guard win |
+| `batch_cholesky/shape/500x64x64` | 3,587,449 | 2,457,592 | 10,837,794 | 0.331x | 0.685x | 0.227x | target win |
+| `batch_cholesky/shape/64x128x128` | 3,460,608 | 1,757,799 | 8,874,177 | 0.390x | 0.508x | 0.198x | guard win, noisy |
+
+Scorecard:
+- Current baseline vs NumPy: win/loss/neutral = **3/0/0**.
+- Candidate vs NumPy: win/loss/neutral = **3/0/0**.
+- Candidate vs current baseline: win/loss/neutral = **3/0/0**.
+- The `128x128` row does not exercise the widened direct-write branch; keep it
+  as a no-regression guard only because that baseline row was noisy.
+
+Invalid/routing-only rows:
+- `baseline_batch_cholesky_hz1.txt`: RCH selected `hz2` despite the requested
+  label; not counted against the direct `ovh-a` NumPy comparator.
+- `numpy_batch_cholesky_hz2.txt`: direct SSH to `hz2` was denied; not counted.
+
+Validation and decision:
+- **Keep** `CHOL_DIRECT_WRITE_MAX_N = 64` and the `n = 64` byte-identity test
+  row. The direct-write helper remains byte-identical to per-lane
+  `cholesky_nxn` below `CHOL_MID_MIN`.
+- `cargo test -p fnp-linalg
+  batch_cholesky_scratch_matches_per_lane_cholesky_nxn_bits -- --nocapture`
+  passed on `ovh-a` and now covers `n = 64`.
+- `cargo check -p fnp-linalg --all-targets`, `cargo clippy -p fnp-linalg
+  --all-targets -- -D warnings`, `cargo build -p fnp-linalg --release`, and
+  `git diff --check` passed.
+- `cargo fmt --check -p fnp-linalg` remains blocked by broad pre-existing
+  rustfmt drift in linalg benches/examples and unrelated source regions; it was
+  not normalized in this perf commit.
+- `ubs crates/fnp-linalg/src/lib.rs` exits nonzero on the file's existing broad
+  inventory of panic/direct-indexing heuristics while its internal fmt/clippy/
+  build subchecks pass. No UBS finding maps to this small threshold/test hunk.
+- Do not extend this direct-write threshold to `n >= 128` without fresh proof:
+  blocked Cholesky starts there, so that would be a different algorithmic lane.
+
 ## 2026-06-21 - NO-SHIP: SBR stage-1-only eigvalsh route
 
 `YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Fresh BOLD-VERIFY pass on the

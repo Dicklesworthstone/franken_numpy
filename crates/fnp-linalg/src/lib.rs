@@ -8567,9 +8567,9 @@ pub fn batch_cholesky(data: &[f64], shape: &[usize]) -> Result<Vec<f64>, LinAlgE
     // per-lane Vec, no Vec<Vec>, no flatten. cholesky writes L in place with no
     // scratch, so this needs no per-thread buffers at all. Byte-identical to per-lane
     // cholesky_nxn (the unblocked formula reachable for n < CHOL_MID_MIN). Gated to
-    // the small-n regime where alloc-elimination wins (per-lane O(n^3) compute
-    // overtakes it beyond that — same shape as batch_inv).
-    const CHOL_DIRECT_WRITE_MAX_N: usize = 32;
+    // the small/mid-n regime where alloc-elimination still wins before blocked
+    // Cholesky takes over at CHOL_MID_MIN.
+    const CHOL_DIRECT_WRITE_MAX_N: usize = 64;
     if n <= CHOL_DIRECT_WRITE_MAX_N {
         let mut result = vec![0.0f64; batch * mat_size];
         if batch_should_parallelize(batch, mat_size) {
@@ -11572,8 +11572,8 @@ mod tests {
     #[test]
     fn batch_cholesky_scratch_matches_per_lane_cholesky_nxn_bits() {
         // Zero-alloc batch_cholesky must be BYTE-IDENTICAL to per-lane cholesky_nxn.
-        for &n in &[2usize, 3, 5, 8, 15, 16, 32] {
-            let batch = 2048usize;
+        for &n in &[2usize, 3, 5, 8, 15, 16, 32, 64] {
+            let batch = if n >= 64 { 128usize } else { 2048usize };
             let ms = n * n;
             // Symmetric positive-definite per lane: A = M·Mᵀ + diag boost. Build a
             // diagonally-dominant symmetric matrix directly.
