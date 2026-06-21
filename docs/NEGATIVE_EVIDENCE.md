@@ -4,11 +4,15 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
-## 2026-06-21 - PENDING-BENCH heartbeat: hold steady (cargo freeze sole blocker)
+## 2026-06-21 - PENDING-BENCH heartbeat: FREEZE-PERIOD WORK COMPLETE — awaiting unfreeze
 
-`BlackThrush`/`cod-b`. No state change: inbox re-checked each turn (agent-mail
-working, no new disk/unfreeze instruction), disk ~38-39G, freeze still on. Sole
-blocker = cargo build freeze; 4 unbuilt linalg delegates pending the on-recovery
+`BlackThrush`/`cod-b`. FREEZE-PERIOD INFRASTRUCTURE COMPLETE + VALIDATED — every
+build-independent lever is done (3 guards built+run-validated, README, complete
+4-delegate before-baseline, full perf+correctness surface characterized clean).
+No further verifiable franken_numpy work exists until the cargo freeze lifts.
+No state change: inbox re-checked each turn (agent-mail working, no new disk/
+unfreeze instruction), disk ~38-39G/98%, freeze still on. Sole blocker = cargo
+build freeze; 4 unbuilt linalg delegates pending the on-recovery
 build/conformance/re-measure. vs-numpy surface comprehensively diagnosed + clean —
 no perf lever available until unfreeze. (This single heartbeat is refreshed in
 place each frozen turn rather than appending duplicates.) ON-RECOVERY automation:
