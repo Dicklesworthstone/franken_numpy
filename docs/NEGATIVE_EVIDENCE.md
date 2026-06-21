@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - PENDING-BENCH STATUS (disk-critical 39G, no cargo): all delegates still UNVERIFIED
+
+Agent: `BlackThrush` / `cod-b`. Disk CRITICAL (39G) — cargo fully blocked this slice
+(no build, no compile-check, no bench). No new code edit made: the native-2-D-dense
+-linalg loss-class is fully closed (see the SWEEP-COMPLETE entry below — det/slogdet
+/inv/solve/svdvals BUILT; eigvalsh 29ab9297 / eigh 76712a2b / cholesky 4d79608a /
+matrix_power 8efc05dd code-only UNBUILT), and a fresh existing-`.probe/.so`
+diagnostic of un-swept ops (gradient/interp/histogram-density/trace+diagonal offset/
+vector norms/outer/kron/ediff1d/trapezoid/cumsum-2D/ptp) found only parity/wins —
+no substantive loss remains to delegate. Did NOT force an unverifiable code change
+under the build freeze (no cargo to catch a typo), nor trivial churn, nor risky
+deletion of committed evidence / shared `.probe` artifacts.
+
+STATE: the 4 code-only delegate commits remain BUILD- and CONFORMANCE-UNVERIFIED.
+The ON-RECOVERY VERIFY CHECKLIST in the SWEEP-COMPLETE entry below is the gating
+action for the next non-frozen turn (build fnp-python; conformance_linalg*;
+re-measure eigvalsh/eigh/cholesky 2-D vs numpy; `am doctor repair` the corrupt
+agent-mail DB). Until disk frees, no further fnp-* perf work is verifiable.
+
 ## 2026-06-21 - SWEEP COMPLETE + ON-RECOVERY VERIFY CHECKLIST: native 2-D dense linalg loss-class closed
 
 Agent: `BlackThrush` / `cod-b`. Disk-low (40G), CODE-ONLY, agent-mail DB corrupt.
