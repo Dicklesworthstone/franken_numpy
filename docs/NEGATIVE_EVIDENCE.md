@@ -5823,3 +5823,37 @@ Retry predicate:
   off-diagonal and exact symmetric off-diagonal equality skip dense reduction.
 - Dense SPD `eigvalsh_nxn` remains a loss; the next dense attempt still needs a
   true reducer/eigensolver replacement, not QR-tail or sort work.
+
+---
+
+## BlackThrush less-common-op stretch (2026-06-21): 5 wins + comprehensive-probe negative evidence
+
+vs-NumPy ratios (fnp/np, <1 = win), full-threads, conformance-green, bit-exact/correct:
+
+| op | before | after | commit |
+|----|--------|-------|--------|
+| kaiser (window) | 1.22-1.46x loss | 0.10-0.69x (up to 12x) | 7d3b9201 |
+| histogram_bin_edges | 3.93-4.07x loss | 0.39-1.0x | 82e7d7d4 |
+| isclose(array, finite-scalar) | 4.8-5.4x loss | 0.03-0.16x (up to 30x) | 4a503652 |
+| array_equal(equal case) | 2.16x loss | 0.86x + unequal early-exit 0.0x | 4ef22361 |
+| nanmedian (single-alloc + gate) | 1.31x/0.64x | 0.92x/0.36x | 04bd069e |
+
+REUSABLE LENSES (each found >=1 win above):
+1. SCALAR-OPERAND GAP: a zero-copy fast path gated on BOTH operands being ndarrays leaves the
+   array+scalar form on the cold extract (isclose-scalar; cf where-scalar, cov-two-operand).
+2. BRANCHLESS-BEATS-EARLY-RETURN: a per-element `if ... return` / `.all()` short-circuit in a
+   scan DEVECTORIZES; a branchless reduce (`acc &= ...` / min/max + flag) autovectorizes into 1
+   SIMD pass that beats numpy's 2-pass (histogram_bin_edges min/max, array_equal). Chunk it to
+   keep a coarse early-exit.
+3. LOOP-INVARIANT EXPENSIVE RECOMPUTE: an expensive call with loop-constant args inside a map
+   (kaiser recomputed bessel_i0(beta) per point) -> hoist (+ parallelize).
+4. EXTRACT-COPY WHEN ONLY A REDUCTION IS NEEDED: histogram_bin_edges copied the whole array
+   for just min/max -> read the borrowed buffer.
+
+COMPREHENSIVE PROBE (post-5-wins) — big less-common losses EXHAUSTED. Families float-manip /
+string-datetime / manip-index / less-common-linalg / indexing ALL dominated. Apparent losses
+are DOCUMENTED WALLS: view-noise (diagonal/matrix_transpose O(1), shares_memory=True, sub-us
+dispatch) and small-array pyo3 wall (inner 2.4x@800 but 0.49x@8M). MILD genuine residuals
+(low-ROI 1.15-1.25x, uncommon, no common class, not pursued): frexp 1.20x, diff(prepend) 1.17x,
+putmask 1.15x, busday_count 1.2x. No remaining BIG actionable lever; rest = structural walls
+(SIMD-compaction/no-AVX512, BLAS/no-C-BLAS, small-array crossing, forbid-unsafe zero-init).
