@@ -240,3 +240,18 @@ RESULT: 100K 0.62x, 8M 0.39x WIN, 1M 1.0x parity. Bit-exact; non-f64/non-finite 
 LESSON v2: the FIRST attempt (serial scan w/ early-return `if !finite return`) was 1.35-2.6x
 (scalar, branch killed vectorization!) - the branchless bad-flag version vectorized -> win.
 For min/max+validate loops: use branchless f64::min/max + OR-flag, NEVER an early-return branch.
+
+## SHIPPED 2026-06-21: isclose(array, finite-scalar) zero-copy (4a503652) - up to 30x
+isclose(x, 0.0)/(x, scalar) - VERY common - missed the both-ndarray zero-copy path -> full
+extract copy (~5x). try_zerocopy_f64_isclose_array_scalar: finite scalar b -> constant
+threshold atol+rtol*|b|, read x buffer once, write |x_i-b|<=thresh into bool out (parallel
+>=1<<21). inf/nan -> false naturally; equal_nan irrelevant (b not NaN). 100K 0.16x, 2M 0.08x,
+8M 0.03x (was 4.8-5.4x). bit-exact +nan/inf/2-D. The where-scalar pattern (3rd app: where/cov/
+isclose). conformance_isclose 15/allclose 15.
+
+## QUEUED: array_equal(equal case) 2.2x - chunked-branchless (next)
+array_equal(x,x) 2.18-2.56x: f64_buffers_all_equal uses `.all(|x==y|)` whose short-circuit
+kills vectorization for the equal case (numpy's ==+all is SIMD 2-pass). FIX (same lesson as
+histogram_bin_edges): CHUNKED branchless compare - per 2048-chunk `eq &= x==y` (vectorizes)
+then early-exit per chunk (coarse short-circuit for unequal). Keeps unequal-fast + makes
+equal-case vectorize. Apply to f64_buffers_all_equal + f32_buffers_all_equal (fnp-python).
