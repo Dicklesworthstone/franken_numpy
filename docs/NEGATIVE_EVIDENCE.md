@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - Manual syntax review of the 4 unbuilt linalg delegates: CLEAN (de-risks recovery)
+
+Agent: `BlackThrush` / `cod-b`. Build freeze (no cargo). Since the 4 code-only 2-D
+linalg delegates sit build-UNVERIFIED, I manually reviewed each block's syntax/types
+against the already-verified det/inv shape-peek (which compiled) to catch any
+compile breakage before the freeze lifts:
+- `eigvalsh` (29ab9297) and `eigh` (76712a2b): identical let-chain — `let numpy`
+  in scope, `if let Ok(ndarray_type) = numpy.getattr("ndarray") && a.bind(py)
+  .is_exact_instance(&ndarray_type) && let Ok(shape)=... && shape.len()==2 &&
+  shape[0]==shape[1] && <dtype kind=='f'> { return fallback(); }`. Types check
+  (`a.bind(py)` -> `&Bound`); matches the verified det pattern. CLEAN.
+- `cholesky` (4d79608a, peer) and `matrix_power` (8efc05dd, peer): use the
+  `is_exact_numpy_ndarray(py, a.bind(py))?` helper + `shape.is_some_and(..)` /
+  `power<=1` guards -> `fallback()`. Idiomatic, well-formed. CLEAN.
+
+No compile issues found -> high confidence all 4 build on recovery. Implication for
+the on-recovery checklist: expect a clean `cargo build`; prioritize conformance +
+re-measurement over debugging. (Still pending-bench — not a substitute for the
+actual build/conformance run.)
+
 ## 2026-06-21 - DISK-CRITICAL reclaim guidance (CONSOLIDATED — supersedes per-turn disk notes)
 
 Agent: `BlackThrush` / `cod-b`. Disk critical (~39G/1.9T). No cargo; perf surface
