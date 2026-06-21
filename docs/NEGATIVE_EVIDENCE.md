@@ -4,6 +4,34 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - NO-SHIP: batch_inv moderate-batch 1.4-1.9x loss is KERNEL-bound (alloc-elim disproven)
+
+`BlackThrush`/`cod-b`. With warm builds re-enabled, investigated the one real loss
+the perf guard surfaced: `np.linalg.inv` on stacked (..,n,n) loses 1.4-1.9x at
+moderate batch (B=256 n=16 1.87x, B=128 n=32 1.80x, B=64 n=64 1.48x; parity at
+n<=8 and n>=128), while batch_det/slogdet/eigvalsh all WIN. Cause looked like the
+n>=16 path (`batch_map_lanes` + per-lane `inv_nxn` Vec alloc + flatten copy) vs the
+n<16 parallel direct-write scratch path.
+
+TRIED: raise `INV_SCRATCH_MAX_N` 16->128 so n=16..64 use direct-write scratch
+(byte-identical; fnp-linalg batch_inv tests 5/5 + conformance + correctness guard
+0/27 all PASS). PARALLEL A/B was UNUSABLE — the loaded box swung the same shape
+2x between runs (B=256 n=16 read 0.82x then 1.74x; B=2048 n=16 0.49x then 1.19x);
+cf the std N=4M noise false-positive. DECISIVE serial A/B (RAYON_NUM_THREADS=1;
+numpy's batched loop is single-threaded anyway) is STABLE at **2.3-2.5x** across
+n=16/32/64 (3 trials each) -> the native `inv_nxn` per-lane kernel is ~2.3x slower
+than LAPACK getri. So the loss is the KERNEL, not alloc/flatten; the gate-raise
+doesn't fix it (serial unchanged). REVERTED to gate=16 (kept an in-code no-ship
+comment). Same class as [[batch-cholesky-noship-kernel-wall]] + the 2-D stale-cliff.
+
+RETRY PREDICATE: NOT alloc/gate/threshold (disproven). Real fix = a SIMD/blocked
+inv kernel (reassociation breaks bit-exact golden = human decision) OR delegate
+moderate-batch inv to numpy with a batch×n gate (numpy serial-LAPACK loop is what
+we lose to; native parallel only clearly wins at large batch / very small n — but
+that gate needs a QUIET box to tune, this one is too noisy). METHOD LESSON (3rd
+time): on a loaded box, parallel perf A/B is worthless — use RAYON=1 serial A/B to
+read the kernel; confirm losses with serial before building a fix.
+
 ## 2026-06-21 - RESOLVED: 4 linalg delegates BUILD+CONFORMANCE+PERF verified (warm build)
 
 `BlackThrush`/`cod-b`. Mandate relaxed to allow small WARM per-crate builds — used
