@@ -21064,6 +21064,47 @@ fn diff(
     let Ok(n) = usize::try_from(n) else {
         return fallback();
     };
+    // datetime64 / timedelta64 are int64-backed: diff(datetime64[U]) -> timedelta64[U]
+    // and diff(timedelta64[U]) -> timedelta64[U]. numpy.diff handles these via Python
+    // dispatch (~1.11x). View the buffer as int64, reuse the contiguous int zero-copy
+    // diff (kind 'M'/'m' otherwise misses every fast path), then reinterpret the result
+    // as timedelta64[U] (the M8->m8 dtype-string swap maps either input kind to the
+    // timedelta output). Bit-identical (int64 subtraction is exactly numpy's). Any miss
+    // (non-contiguous, empty axis) falls to the numpy.diff fallback.
+    if n >= 1 {
+        let a_bound = a.bind(py);
+        if a_bound.is_exact_instance(&numpy.getattr("ndarray")?) {
+            let dtype = a_bound.getattr("dtype")?;
+            let kind = dtype.getattr("kind")?.extract::<String>()?;
+            if (kind == "M" || kind == "m")
+                && a_bound
+                    .getattr("flags")?
+                    .getattr("c_contiguous")?
+                    .extract::<bool>()?
+            {
+                let dtype_str = dtype.getattr("str")?.extract::<String>()?; // e.g. "<M8[D]"
+                let td_str = dtype_str.replace("M8", "m8"); // timedelta64[U]
+                let int_view = a_bound.call_method1("view", ("int64",))?;
+                let mut current: Py<PyAny> = int_view.unbind();
+                let mut all_ok = true;
+                for _ in 0..n {
+                    let cur = current.bind(py);
+                    match try_zerocopy_int_diff(py, cur, 1, axis)? {
+                        Some(out) => current = out,
+                        None => {
+                            all_ok = false;
+                            break;
+                        }
+                    }
+                }
+                if all_ok {
+                    let td_dtype = numpy.call_method1("dtype", (td_str,))?;
+                    return Ok(current.bind(py).call_method1("view", (&td_dtype,))?.unbind());
+                }
+                return fallback();
+            }
+        }
+    }
     // Zero-copy diff via repeated first differences. numpy defines the n-th
     // difference as the first difference applied n times, so each step reuses the
     // n==1 zero-copy paths (1-D f64, per-axis f64, integer all-widths) on the
