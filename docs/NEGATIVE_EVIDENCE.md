@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - NEGATIVE: axis=0 / 3-D middle-axis / int axis reductions all parity-or-win (no lever)
+
+`BlackThrush`/`cod-b`. Followed the trapezoid cache-hostile-kernel lever (7874baec) into a
+systematic audit: are OTHER non-last-axis reductions cache-hostile + losing? SWEPT (2-D
+axis=0 on C-contig 2000x2000; 3-D middle axis=1 on 200^3; int64 axis=0): sum, prod, mean,
+std, var, min, max, argmin, ptp, cumsum, median, nanmean. ALL parity-or-WIN under focused
+measurement (strong warmup, 3-5 trials): medians 0.08-1.05x. The apparent "losses" (max_ax0
+1.23, ptp_ax0 1.24, int_max_ax0 1.28) were LOAD NOISE — focused medians 0.95-1.03x (range
+0.77-1.28 = pure variance). NO stable loss found. WHY no lever: f64 min/max axis already
+DELEGATE to numpy's SIMD for size>=4096 (try_zerocopy_f64_minmax: scalar fold can't
+vectorize NaN/signed-zero reduction in safe Rust — bead 8vdtg, the SIMD wall); sum/mean/var
+/cumsum/median axis are zero-copy-optimized already; numpy's own axis-0 reductions are
+SIMD+fast so parity is the ceiling. trapezoid axis=0 was special (a genuinely cache-hostile
+EXTRACT-path kernel, now fixed). CONCLUSION: the vs-numpy reduction surface is comprehensively
+dominated — don't re-sweep these families chasing the noise. RULE: re-measure any near-1.0
+axis reduction with strong warmup + medians before treating it as a lever; load noise on this
+box routinely spikes parity ops to 1.2-1.3x.
+
 ## 2026-06-21 - WIN: zero-copy trapezoid along last axis N-D (2bd6a25c, 3-33x)
 
 `BlackThrush`/`cod-b`. fnp-python freed (YellowElk committed matrix_power) -> landed the
