@@ -20587,21 +20587,29 @@ fn try_zerocopy_f64_gradient_1d(
     let Ok(buffer) = PyBuffer::<f64>::get(f) else {
         return Ok(None);
     };
-    if buffer.shape().len() != 1 || !buffer.is_c_contiguous() {
+    if !buffer.is_c_contiguous() {
         return Ok(None);
+    }
+    // Handles the LAST (contiguous) axis for 1-D AND N-D: each contiguous row of length
+    // L is an independent central-difference stencil. 1-D is the single-row case.
+    let shape: Vec<usize> = buffer.shape().to_vec();
+    let ndim = shape.len();
+    if ndim == 0 {
+        return Ok(None);
+    }
+    let l = shape[ndim - 1];
+    if l < 2 {
+        return Ok(None); // numpy requires >=2 samples along the axis for edge_order=1
     }
     let Some(cells) = buffer.as_slice(py) else {
         return Ok(None);
     };
-    let n = cells.len();
-    if n < 2 {
-        return Ok(None); // numpy requires >=2 samples for edge_order=1 -> let it raise
-    }
+    let total = cells.len();
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
-    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
-    let out = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    let out = numpy.call_method("empty", (total,), Some(&kwargs))?;
     {
         let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
             return Ok(None);
@@ -20612,24 +20620,45 @@ fn try_zerocopy_f64_gradient_1d(
         // SAFETY: freshly allocated numpy.empty output, cannot alias f; Cell<f64> is
         // repr(transparent) over f64; every element is written exactly once.
         let o: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
-        // edge_order=1 boundaries: forward/backward difference divided by spacing.
-        o[0] = (data[1] - data[0]) / dx;
-        o[n - 1] = (data[n - 1] - data[n - 2]) / dx;
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
         use rayon::prelude::*;
-        const GRADIENT_PARALLEL_MIN: usize = 1 << 18; // serial native already crushes numpy below this; parallel only wins past ~256K (fan-out floor)
-        if n >= GRADIENT_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-            o[1..n - 1].par_iter_mut().enumerate().for_each(|(j, slot)| {
+        const GRADIENT_PARALLEL_MIN: usize = 1 << 18; // serial native already crushes numpy below this
+        // Per contiguous row: edge_order=1 boundaries (forward/backward diff / dx) +
+        // central interior (/(2*dx)). Bit-identical to numpy.gradient along the last axis.
+        let stencil = |orow: &mut [f64], r: &[f64]| {
+            let l = r.len();
+            orow[0] = (r[1] - r[0]) / dx;
+            orow[l - 1] = (r[l - 1] - r[l - 2]) / dx;
+            for j in 1..l - 1 {
+                orow[j] = (r[j + 1] - r[j - 1]) / (2.0 * dx);
+            }
+        };
+        let parallel = total >= GRADIENT_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        if parallel && total == l {
+            // 1-D: a single row gives no row-level parallelism -> parallelize the interior.
+            o[0] = (data[1] - data[0]) / dx;
+            o[l - 1] = (data[l - 1] - data[l - 2]) / dx;
+            o[1..l - 1].par_iter_mut().enumerate().for_each(|(j, slot)| {
                 let i = j + 1;
                 *slot = (data[i + 1] - data[i - 1]) / (2.0 * dx);
             });
+        } else if parallel {
+            // N-D last axis: each contiguous row is independent -> parallelize over rows.
+            o.par_chunks_mut(l)
+                .zip(data.par_chunks(l))
+                .for_each(|(orow, r)| stencil(orow, r));
         } else {
-            for i in 1..n - 1 {
-                o[i] = (data[i + 1] - data[i - 1]) / (2.0 * dx);
+            for (orow, r) in o.chunks_mut(l).zip(data.chunks(l)) {
+                stencil(orow, r);
             }
         }
     }
-    Ok(Some(out.unbind()))
+    if ndim == 1 {
+        Ok(Some(out.unbind()))
+    } else {
+        let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+        Ok(Some(out.call_method1("reshape", (&shape_tuple,))?.unbind()))
+    }
 }
 
 #[pyfunction]
@@ -20651,7 +20680,24 @@ fn gradient(
         1 => varargs.get_item(0)?.extract::<f64>().ok(), // None if it's a coordinate array
         _ => None,
     };
-    if axis.is_none()
+    // The native path computes the gradient along the LAST (contiguous) axis and returns a
+    // single array. numpy returns a single array only when an axis is given (or for 1-D);
+    // with no axis on N-D it returns a list. So take native only when the target axis is
+    // the last one: axis=None requires ndim==1; axis=k requires k to normalize to ndim-1.
+    let axis_is_last = uniform_dx.is_some()
+        && match f.bind(py).getattr("ndim").and_then(|n| n.extract::<usize>()) {
+            Ok(ndim) if ndim >= 1 => match axis.as_ref() {
+                None => ndim == 1,
+                Some(a) => a
+                    .bind(py)
+                    .extract::<isize>()
+                    .ok()
+                    .map(|ax| if ax < 0 { ax + ndim as isize } else { ax })
+                    .is_some_and(|norm| norm == ndim as isize - 1),
+            },
+            _ => false,
+        };
+    if axis_is_last
         && let Some(dx) = uniform_dx
         && let Some(out) = try_zerocopy_f64_gradient_1d(py, &numpy, f.bind(py), dx, edge_order)?
     {
