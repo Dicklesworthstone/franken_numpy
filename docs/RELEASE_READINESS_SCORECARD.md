@@ -1101,6 +1101,42 @@ Current release posture:
   this slice; the 1M sparse-mask row remains an open performance gap versus
   NumPy.
 
+## 2026-06-21 - Random PCG Current Verification Slice
+
+Scope:
+- Current `fnp-random` PCG head-to-head cluster after the `.265` direct
+  final-buffer/append bytes keep.
+- Crate: `fnp-random`.
+- Reference: NumPy through the embedded Criterion Python harness.
+- Worker: `vmi1152480` via `rch exec`.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Head-to-head performance vs NumPy | PASS | 10/10 measured rows faster than NumPy; ratios range from 0.139x to 0.932x. |
+| `Generator::bytes` stale-gap check | PASS | Byte rows now win at 100k and 1M: 0.522x and 0.268x NumPy time. |
+| Revert discipline | PASS | The rejected `.257` intermediate word-vector path remains absent; no new source lever was needed. |
+| Crate validation | PASS | Follow-up per-crate `fnp-random` validation commands were run for this docs recheck. |
+| Evidence durability | PASS | Results recorded in `docs/NEGATIVE_EVIDENCE.md` and this scorecard. |
+
+Cluster score: **88 / 100**
+
+Score rationale:
+- +40 performance: the current PCG cluster is 10/0/0 versus NumPy.
+- +15 stale-gap discipline: the old `Generator::bytes` open-gap row is retired.
+- +15 reproducibility: single RCH worker, explicit target dir, and Criterion
+  NumPy harness recorded.
+- +10 revert discipline: rejected `.257` remains rejected.
+- +8 validation: focused crate gates rerun, but this is still not a full
+  workspace release gauntlet.
+- -12 residual project health: active measured losses remain in other crates,
+  especially deeper linalg/ufunc paths, so global dominance is not certified by
+  this slice alone.
+
+Current release posture:
+- The `fnp-random` PCG cluster is **measured keep/current win**.
+- Do not target `Generator::bytes` again without a fresh current-main loss.
+  Route no-gaps work to currently measured loss rows in other kernels.
+
 ## 2026-06-19 - Random PCG Distribution Verification Slice
 
 Scope:
