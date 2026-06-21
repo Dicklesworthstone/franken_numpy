@@ -17115,13 +17115,16 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
         _ => return fallback(),
     };
 
-    // Boundary-power fast path (2026-06-21, disk-low code-only): NumPy handles
-    // n==0 by allocating identity from shape/dtype and n==1 by returning the
-    // asarray result directly. The native path below extracts and scans the whole
-    // matrix first, which is pure O(n^2) overhead for exact ndarray inputs and
-    // loses NumPy's n==1 alias semantics. Delegate these boundary exponents before
-    // extraction; powers >=2 keep the existing native multiply path.
-    if power <= 1 && is_exact_numpy_ndarray(py, a.bind(py))? {
+    // Boundary-power fast path (2026-06-21): NumPy handles n==1 by returning
+    // asarray(a) after the stacked-square validation. For exact ndarrays, that is
+    // the same object, so avoid the extra NumPy call and preserve alias semantics.
+    if power == 1 && matrix_power_one_exact_ndarray_can_return_input(py, a.bind(py))? {
+        return Ok(a);
+    }
+
+    // n==0 still delegates to NumPy's identity allocation. Powers >=2 keep the
+    // existing native multiply path.
+    if power == 0 && is_exact_numpy_ndarray(py, a.bind(py))? {
         return fallback();
     }
 
@@ -17144,6 +17147,35 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
         Err(_) => return fallback(),
     };
     build_numpy_array_from_ufunc(py, &result)
+}
+
+fn matrix_power_one_exact_ndarray_can_return_input(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    if !is_exact_numpy_ndarray(py, a)? {
+        return Ok(false);
+    }
+    let Ok(shape_obj) = a.getattr("shape") else {
+        return Ok(false);
+    };
+    let Ok(shape) = shape_obj.cast::<PyTuple>() else {
+        return Ok(false);
+    };
+    let ndim = shape.len();
+    if ndim < 2 {
+        return Ok(false);
+    }
+    let rows = shape.get_item(ndim - 2)?.extract::<usize>()?;
+    let cols = shape.get_item(ndim - 1)?.extract::<usize>()?;
+    if rows != cols {
+        return Ok(false);
+    }
+    if ndim == 2 {
+        return Ok(true);
+    }
+    let dtype_kind = a.getattr("dtype")?.getattr("kind")?;
+    Ok(!dtype_kind.eq("O")?)
 }
 
 #[pyfunction]

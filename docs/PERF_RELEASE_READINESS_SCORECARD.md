@@ -3,6 +3,44 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-a fnp-python Matrix Power n==1 Alias Keep
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `matrix_power(A, 1)` vs NumPy | 9/10 | Same-worker `hz1` row improved from `2.779x` loss to `0.409x` win |
+| Sibling boundary row | 8/10 | `matrix_power(A, 0)` stayed neutral/win: `0.963x` before, `0.931x` candidate |
+| Focused conformance | 9/10 | `conformance_linalg_advanced matrix_power` passed 5/5 |
+| Release build | 8/10 | `cargo build -p fnp-python --release` passed through `rch` |
+| Revert discipline | 9/10 | One source hunk only; invalid/subclass/object-stack paths still defer to NumPy |
+| Hygiene gates | 6/10 | Whole-file `rustfmt --check`, UBS, and unit-test filter remain blocked by pre-existing `fnp-python` drift/debt |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Source: `crates/fnp-python/src/lib.rs`, `matrix_power` exact-ndarray `n == 1`
+  short-cut before the extraction/native multiply path.
+- Counted bench worker: `hz1`; command:
+  `rch exec -- cargo bench -p fnp-python --bench criterion_python_surface -- matrix_power_delegate --output-format bencher`.
+- Before row (`hz1`, same turn before source hunk): `n0` `297,768 ns` vs
+  `309,071 ns` (`0.963x`); `n1` `1,834 ns` vs `660 ns` (`2.779x` loss).
+- Candidate row (`hz1`): `n0` `279,617 ns` vs `300,364 ns` (`0.931x`);
+  `n1` `277 ns` vs `677 ns` (`0.409x`).
+- Conformance:
+  `rch exec -- cargo test -p fnp-python --test conformance_linalg_advanced matrix_power -- --nocapture`
+  passed 5/5.
+- Release build:
+  `rch exec -- cargo build -p fnp-python --release` passed.
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`; no new
+  `.scratch` worktree.
+
+Decision:
+- Release-ready for exact NumPy ndarray `matrix_power(A, 1)`.
+- This closes the micro-dispatch loss exposed by the earlier 2-D linalg delegate
+  scorecard without reopening native GEMM/LAPACK lanes.
+- Keep monitoring broader `fnp-python` hygiene separately; do not mix unrelated
+  formatting or stale unit-test signature repairs into this perf commit.
+
+---
+
 ## 2026-06-21 cod-b fnp-python Compress Mask Count/Compaction Keep
 
 | Area | Score | Verdict |

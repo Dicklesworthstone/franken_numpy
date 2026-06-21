@@ -4,6 +4,50 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: `np.linalg.matrix_power(A, 1)` exact-ndarray alias shortcut (cod-a, 2.4x)
+
+`YellowElk`/`cod-a`, parent directive `franken_numpy-ixs5y`. Targeted the
+remaining measured Python-boundary loss from the 2-D linalg delegate scorecard:
+`matrix_power(A, 1)` on an exact `float64` ndarray. NumPy validates stacked
+square shape and then returns the original array object for `n == 1`; the prior
+FrankenNumPy branch delegated back into NumPy after wrapper/import/getattr
+setup. Lever: mirror the NumPy short-cut directly for exact ndarrays whose last
+two dimensions are square, excluding stacked object arrays so NumPy still owns
+its `NotImplementedError` surface. All invalid, subclass, negative, `n == 0`,
+and native `n >= 2` paths keep the previous fallback/native behavior.
+
+Disk-frugal commands used
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a` and did not
+create a new `.scratch` worktree:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --bench criterion_python_surface -- matrix_power_delegate --output-format bencher`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --test conformance_linalg_advanced matrix_power -- --nocapture`
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo build -p fnp-python --release`
+
+Same-worker `hz1` head-to-head ratios:
+
+| Row | Before FNP ns | Before NumPy ns | Before FNP/NumPy | Candidate FNP ns | Candidate NumPy ns | Candidate FNP/NumPy | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `matrix_power_f64_2d_800_n0` | 297,768 | 309,071 | 0.963x | 279,617 | 300,364 | 0.931x | neutral/win |
+| `matrix_power_f64_2d_800_n1` | 1,834 | 660 | 2.779x loss | 277 | 677 | 0.409x | WIN |
+
+Decision:
+- Keep. The target row is now faster than NumPy in the same Criterion process,
+  and the sibling `n == 0` row did not regress.
+- Focused conformance passed: `conformance_linalg_advanced matrix_power` 5/5.
+- Release build passed: `cargo build -p fnp-python --release`.
+- `cargo test -p fnp-python matrix_power` is not usable as a gate on this
+  checkout because unrelated test-module calls to `spacing`, `sign`,
+  `nextafter`, `hypot`, and `logaddexp*` currently do not compile after those
+  wrappers moved to tuple/kwargs signatures. That failure is not from this hunk.
+- `rustfmt --check crates/fnp-python/src/lib.rs` and UBS are not clean at the
+  whole-file level because of broad pre-existing `fnp-python` drift/debt; no
+  isolated finding was introduced by the matrix-power hunk.
+
+Retry predicate:
+- Reopen only if the exact ndarray `n == 1` alias contract changes upstream, or
+  if a same-process rerun of `fnp_matrix_power_delegate_f64_2d_800_n1` reports
+  FNP/NumPy `>= 1.0x`.
+
 ## 2026-06-21 - WIN: `np.compress(axis=None)` 16-lane mask count/compaction (cod-b, 2.0-2.8x)
 
 `YellowElk`/`cod-b`, parent directive `franken_numpy-ixs5y`. Applied the
