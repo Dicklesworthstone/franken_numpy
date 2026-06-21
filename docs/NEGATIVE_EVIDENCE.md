@@ -4,6 +4,26 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - DISK-CRITICAL: freed ~116MB repo-root scratch (no commit-able source change)
+
+Agent: `BlackThrush` / `cod-b`. Disk still critical (~38-40G/1.9T); no cargo. Took
+the one safe disk action available to me: `rm` of ~116MB of GITIGNORED repo-root
+local scratch — ~25 throwaway compiled `test_*` ELF binaries + `a.out` + the
+clippy/bug-scan analysis dumps (clippy_pedantic*/clippy_indexing*/clippy_cast*/
+clippy_json/deep_clippy/rust-bug-scan .txt). All regenerable, none are crate source
+or build inputs (the workspace builds from `crates/*`), so removal is build-safe.
+These were already `.gitignore`d, so there is NO trackable source change to commit
+from the cleanup — this entry is the audit record.
+
+STILL THE BIG UNBLOCK (needs human/coordinator — I can't: dcg blocks `rm -rf`,
+`cargo clean` forbidden): reclaim `.rch-targets/franken_numpy-cod-b` (~14G, see the
+reclaim-survey entry below) — 120x more than the root scratch and the real fix.
+
+No code lever this slice (build freeze + exhausted perf surface; root junk was
+already gitignored so no git-rm cleanup exists either). The 4 code-only linalg
+delegates (eigvalsh/eigh/cholesky/matrix_power) remain build+conformance UNVERIFIED
+— on-recovery checklist in the SWEEP-COMPLETE entry below.
+
 ## 2026-06-21 - DISK-CRITICAL reclaim survey: 14G regenerable cargo cache flagged (cannot self-clean)
 
 Agent: `BlackThrush` / `cod-b`. Disk CRITICAL (38-39G free of 1.9T, 98% full) for
