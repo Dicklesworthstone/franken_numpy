@@ -4,6 +4,20 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: zero-copy trapezoid along last axis N-D (2bd6a25c, 3-33x)
+
+`BlackThrush`/`cod-b`. fnp-python freed (YellowElk committed matrix_power) -> landed the
+queued lever. Extended the 1-D trapezoid zero-copy (f091be6b) to the LAST contiguous axis
+for N-D, like gradient N-D (87bd6403): per contiguous row L -> dx*(rowsum-(r[0]+r[-1])/2),
+parallel over rows, result shape[:-1]. numpy.trapezoid(axis=last) single-threaded +
+allocates (...,L) temp; this reads the buffer directly. RESULT: trapezoid(M,axis=-1)
+2000x2000 0.53x->0.04x (25x), (4000,1000)/(500,8000) 0.03x (33x), (50,200,30) 0.37x.
+allclose vs numpy (~1e-16). conformance_interp_trapz 16/16. TRAPEZOID NOW FULLY DOMINATED:
+1-D 50x (f091be6b), last-axis N-D 3-33x (this), axis=0 1.8x cache kernel (7874baec).
+axis=0 zero-copy (privatized column-sum, est ~0.3x) still possible but axis=0 already a
+win via the kernel fix -> low priority. SESSION LEVER TALLY: bincount 9x, trapezoid
+(1-D 50x + N-D 33x + axis0 kernel 1.8x), gradient (1-D 20x + N-D 9x), sinc 50x, angle 25x.
+
 ## 2026-06-21 - WIN: cache-friendly trapezoid kernel loop order in fnp-ufunc (7874baec, axis=0 1.23x->0.57x)
 
 `BlackThrush`/`cod-b`. A NON-fnp-python lever (fnp-python was peer-locked by YellowElk).
