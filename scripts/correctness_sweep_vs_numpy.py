@@ -37,6 +37,10 @@ except Exception as e:  # pragma: no cover
     print(f"cannot import fnp_python (set PYTHONPATH to the built .so dir): {e}")
     sys.exit(2)
 
+# fnp exposes linalg fns both top-level and under f.linalg; eig is linalg-only.
+_eig = getattr(f, "eig", None) or f.linalg.eig
+_eigvals = getattr(f, "eigvals", None) or f.linalg.eigvals
+
 fails = []
 
 
@@ -61,14 +65,14 @@ def main():
         A = rng.standard_normal((n, n))
         traces = [np.trace(np.linalg.matrix_power(A, k)) for k in (1, 2, 3)]
         try:
-            w = f.eigvals(A)
+            w = _eigvals(A)
             if not all(abs(power_sums(w, k) - traces[k - 1]) <= 1e-6 * (1 + abs(traces[k - 1]))
                        for k in (1, 2, 3)):
                 bad_eigvals += 1
         except Exception:
             bad_eigvals += 1
         try:
-            w2 = f.eig(A)[0]
+            w2 = _eig(A)[0]
             if not all(abs(power_sums(w2, k) - traces[k - 1]) <= 1e-6 * (1 + abs(traces[k - 1]))
                        for k in (1, 2, 3)):
                 bad_eig += 1

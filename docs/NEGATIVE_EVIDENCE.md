@@ -29,6 +29,11 @@ eigvals bug the symmetric-only suite missed), singular->LinAlgError, det(nan),
 cond(singular)->+inf, view shares_memory, and selection-op dtype preservation.
 exit=#fails. Together with the two recovery scripts, the freeze period produced
 durable build-independent guards for the perf + correctness bug classes found.
+VALIDATED against the existing `.probe/.so`: 0 fails / 17 checks (incl. eig +
+eigvals power-sum invariants on 60 random real matrices -> current build's
+eigenvalues are CORRECT; all error/special-value/view/dtype guards green). Running
+it caught + fixed a bug in the guard itself (eig is `f.linalg.eig`, not `f.eig`) —
+so the committed guard is itself verified working, not just syntax-checked.
 
 ## 2026-06-21 - STATE CHANGE: agent-mail RECOVERED (1 of 2 blockers cleared); only cargo freeze remains
 
