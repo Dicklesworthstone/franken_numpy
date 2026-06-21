@@ -151,3 +151,27 @@ fnp-ufunc frees: check if 131K-2M is serial; if so try lowering the compress par
 parallelize medium (may win like 8M, OR the privatized-compaction merge overhead negates it
 -> MEASURE the crossover). NO AVX-512 here so unsafe vpcompress is unavailable; parallelism is
 the only lever. SPECULATIVE (not a sure win).
+
+## PASTE-READY nanmedian fix (verified design 2026-06-21; apply when fnp-ufunc frees)
+Build compiles with peer WIP; my edit region (nanmedian ~25803) does NOT overlap YellowElk's
+fnp-ufunc WIP (26356, 67019). Replace `nanmedian(None) => self.nan_filtered().median(None)`
+with (single alloc, mirrors median(None)'s gate+select, no nan_filtered UFuncArray + no
+re-clone):
+```rust
+None => {
+    let filtered: Vec<f64> = self.values.iter().copied().filter(|v| !v.is_nan()).collect();
+    if filtered.is_empty() { return Ok(Self::scalar(f64::NAN, DType::F64)); }
+    const NANMEDIAN_GLOBAL_PARALLEL_MIN: usize = 1 << 19;
+    let med = if filtered.len() >= NANMEDIAN_GLOBAL_PARALLEL_MIN
+        && rayon::current_num_threads() >= 2 {
+        par_select_median(&filtered)
+    } else {
+        let mut data = filtered;
+        select_median(&mut data)
+    };
+    Ok(Self::scalar(med, DType::F64))
+}
+```
+Helpers exist: select_median(&mut [f64])->f64 (29132), par_select_median(&[f64])->f64 (29255).
+all-NaN -> NaN (matches current nan_filtered+median(empty)). Verify conformance_percentile
+_median + nanmedian flat bit-exact + measure (expect medium 1.3x->~0.8x, large 0.64x->~0.4x).
