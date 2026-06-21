@@ -5956,3 +5956,13 @@ max-find pass (a clean rayon reduction, forbid-unsafe-safe) is a possible MODEST
 would NOT fix the numpy-tight-loop floor (proven: validate is shared, weighted already parity).
 Not pursued: config-dependent ~parity + forbid-unsafe count floor. Retry predicate: only if
 forbid-unsafe is lifted (unchecked count) OR for huge n_vals where parallel-count amortizes.
+
+### out= parameter dimension clean (BlackThrush 2026-06-21)
+Probed in-place output (add/multiply/sqrt/negative/exp/abs/subtract/sin/floor with out=, incl
+out=a aliased): ALL parity/win (0.90-1.12x ~1.0x). fnp writes out= directly (no alloc+copy gap).
+DIMENSION COVERAGE now exhaustive: op-families x sizes(medium+large) x dtypes(f64/f32/int/bool/
+complex) x contiguity(C/F/strided/sliced) x out= x ufunc-reduce-where — ALL comprehensively
+dominated. The only genuine non-wins: 2 tiny uncommon residuals (frexp 1.11x, putmask 1.18x) +
+documented structural walls (BLAS-Gram floor, view-op O(1) dispatch, small-array pyo3, forbid-
+unsafe bounds-check [sqrt/bincount-unweighted], numpy-tight-loop, dense-LAPACK). No actionable
+single-agent lever remains; 34 measured wins shipped this arc.
