@@ -4,6 +4,56 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - FOLLOW-UP: landed flattened `roll` bulk-copy is neutral/noisy on `ovh-a`
+
+`YellowElk`/`cod-b`, bead `franken_numpy-ixs5y.280`.
+
+Current-main correction: `origin/main` advanced while this bead was open and
+already landed the roll memcpy implementation in `84f52074`, with artifact
+closeout `24b3d258`. This closeout keeps no additional production source. It
+adds the reusable Criterion roll row and records a follow-up head-to-head warning
+that the landed lever is worker/noise-sensitive rather than a fresh dominant win
+on every run.
+
+Radical lever under audit from `/alien-graveyard`, `/alien-artifact-coding`, and
+`/extreme-software-optimization`: replace flattened `np.roll` fast-path
+element-by-element `Cell` rotation loops with contiguous bulk moves, mapping
+vectorized execution/cache-locality onto the exact two-copy roll contract. Proof
+obligation: preserve verbatim element relocation for flattened `axis=None` rolls,
+then score against NumPy in the same Criterion group.
+
+Scorecard: `tests/artifacts/perf/2026-06-21_roll_bulk_copy_no_ship_cod_b/scorecard.md`
+
+Baseline before source trial, worker `ovh-a`:
+
+| Row | FNP | NumPy | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `roll` 4M f64 axis=None shift1000 | 2,067,710 ns | 1,419,763 ns | 1.456x | loss |
+
+Follow-up measurements, worker `ovh-a`:
+
+| Candidate | FNP | NumPy | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| bulk `copy_from_slice` flattened f64/byte paths | 1,409,862 ns | 1,388,494 ns | 1.015x | neutral |
+| current `84f52074` landing: f64 `empty_like` plus byte bulk-copy | 1,516,753 ns | 1,417,947 ns | 1.070x | loss |
+
+Win/loss/neutral after candidate trials: **0 / 1 / 1**. Candidate 1 removes most
+of FrankenNumPy's own gap but is still not a measured NumPy win on this run. The
+current landing recheck is a small loss on `ovh-a`, despite the landed commit's
+separate `.probe` parity evidence. Do **not** revert `84f52074` from this single
+follow-up. Keep the bench row and evidence; require repeated same-worker proof
+before changing the landed roll path again.
+
+Validation and caveats:
+- `rch exec -- cargo bench -p fnp-python --bench criterion_python_surface roll_f64_axis_none ...` completed for baseline and both candidates.
+- `rch exec -- cargo build -p fnp-python --bench criterion_python_surface --release`: green on `hz2` with the pre-existing three `fnp-python` warnings.
+- `rch exec -- cargo test -p fnp-python --test conformance_array_transform roll -- --nocapture`: green on `hz2`, 10 passed / 0 failed.
+- The early `vmi1264463` candidate run was interrupted after a long silent wait and is not counted.
+- Retry predicate: do not repeat Cell-loop-to-memcpy or `empty_like` shape-direct
+  variants as standalone roll levers. The next roll attempt must either prove
+  the landed code across repeated same-worker runs or remove a deeper
+  Python/NumPy allocation or ownership cost that beats NumPy head-to-head.
+
 ## 2026-06-21 - KEEP: repeated-A `solve` factors once, turns neutral stack into 6.27x NumPy win
 
 `YellowElk`/`cod-b`, bead `franken_numpy-ixs5y.279`.

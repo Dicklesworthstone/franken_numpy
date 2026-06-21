@@ -2,7 +2,7 @@
 //!
 //! These target Python-boundary costs that the Rust engine benches do not see.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, Criterion};
 use fnp_python::fnp_python;
 use pyo3::types::{PyAnyMethods, PyDict, PyModule, PyTuple};
 use pyo3::{PyResult, Python};
@@ -1434,6 +1434,51 @@ fn bench_compress_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_roll_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_roll_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_roll = module.getattr("roll").expect("fnp_python.roll");
+        let numpy_roll = numpy.getattr("roll").expect("numpy.roll");
+
+        let size = 4_000_000_i64;
+        let shift = 1000_i64;
+        let input = numpy
+            .call_method1("arange", (size,))
+            .expect("roll index")
+            .call_method1("astype", ("float64",))
+            .expect("roll f64 input");
+
+        group.bench_function("fnp_roll_f64_axis_none_4m_shift1000", |bench| {
+            bench.iter(|| {
+                let result = fnp_roll
+                    .call1((&input, shift))
+                    .expect("fnp roll benchmark call");
+                black_box(result);
+            });
+        });
+
+        group.bench_function("numpy_roll_f64_axis_none_4m_shift1000", |bench| {
+            bench.iter(|| {
+                let result = numpy_roll
+                    .call1((&input, shift))
+                    .expect("numpy roll benchmark call");
+                black_box(result);
+            });
+        });
+    });
+
+    group.finish();
+}
+
 fn bench_einsum_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_einsum_boundary");
     group.sample_size(10);
@@ -1811,6 +1856,7 @@ criterion_group!(
     bench_setops_boundary,
     bench_statistics_boundary,
     bench_compress_boundary,
+    bench_roll_boundary,
     bench_einsum_boundary,
     bench_linalg_boundary
 );
