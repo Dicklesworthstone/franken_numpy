@@ -34745,6 +34745,101 @@ fn try_zerocopy_f64_pad_1d_constant(
     Ok(Some(out.unbind()))
 }
 
+// Byte-level native fast path for np.pad(x, pad_width, mode="constant") with default
+// constant_values=0 on a 1-D C-contiguous ndarray of ANY numeric kind (f/i/u/c/b). For
+// these kinds the fill value 0 is all-zero bytes, so the pad is dtype-agnostic: view the
+// buffer as uint8, allocate numpy.empty(total, same dtype), zero the two edge byte-runs,
+// memcpy the interior bytes — bit-identical to numpy. This covers f32/int*/complex/bool
+// (the f64 path above handles f64 with the slightly-faster direct buffer). numpy.pad's
+// ~us Python dispatch otherwise costs ~1.1-1.5x. Datetime/timedelta (M/m, 0 bytes != the
+// cast fill), strings/void (S/U/V), and any kwargs/non-constant mode defer.
+fn try_zerocopy_pad_bytes_1d_constant(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    array: &Bound<'_, PyAny>,
+    pad_width: &Bound<'_, PyAny>,
+    mode: &str,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if mode != "constant" {
+        return Ok(None);
+    }
+    if kwargs.is_some_and(|k| !k.is_empty()) {
+        return Ok(None);
+    }
+    if !array.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = array.getattr("dtype")?;
+    let kind = dtype.getattr("kind")?.extract::<String>()?;
+    if !matches!(kind.as_str(), "f" | "i" | "u" | "c" | "b") {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if itemsize == 0 {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = array.getattr("shape")?.extract()?;
+    if shape.len() != 1
+        || !array
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let n = shape[0];
+    let (before, after) = if let Ok(k) = pad_width.extract::<usize>() {
+        (k, k)
+    } else if let Ok(ba) = pad_width.extract::<(usize, usize)>() {
+        ba
+    } else if let Ok(v) = pad_width.extract::<Vec<(usize, usize)>>() {
+        if v.len() != 1 {
+            return Ok(None);
+        }
+        v[0]
+    } else {
+        return Ok(None);
+    };
+    let uint8 = numpy.getattr("uint8")?;
+    let in_u8 = array.call_method1("view", (&uint8,))?;
+    let Ok(in_buf) = PyBuffer::<u8>::get(&in_u8) else {
+        return Ok(None);
+    };
+    let Some(in_cells) = in_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let nbytes = n * itemsize;
+    if in_cells.len() != nbytes {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
+    let in_data: &[u8] = unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<u8>(), nbytes) };
+    let total = before + n + after;
+    let out_kwargs = PyDict::new(py);
+    out_kwargs.set_item("dtype", &dtype)?;
+    let out = numpy.call_method("empty", (total,), Some(&out_kwargs))?;
+    {
+        let out_u8 = out.call_method1("view", (&uint8,))?;
+        let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let total_bytes = total * itemsize;
+        // SAFETY: freshly allocated numpy.empty output viewed as uint8, cannot alias
+        // array; every byte is written exactly once (edges zeroed, interior copied).
+        let o: &mut [u8] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, total_bytes) };
+        let lead = before * itemsize;
+        o[..lead].fill(0);
+        o[lead + nbytes..].fill(0);
+        o[lead..lead + nbytes].copy_from_slice(in_data);
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (array, pad_width, mode="constant", **kwargs))]
 fn pad(
@@ -34764,6 +34859,12 @@ fn pad(
     // Native 1-D constant-mode fast path (bypasses np.pad's ~9us Python dispatch).
     if let Some(out) =
         try_zerocopy_f64_pad_1d_constant(py, &numpy, array.bind(py), pad_width.bind(py), mode, kwargs)?
+    {
+        return Ok(out);
+    }
+    // Same fast path for non-f64 numeric dtypes (f32/int*/complex/bool) via a byte copy.
+    if let Some(out) =
+        try_zerocopy_pad_bytes_1d_constant(py, &numpy, array.bind(py), pad_width.bind(py), mode, kwargs)?
     {
         return Ok(out);
     }
