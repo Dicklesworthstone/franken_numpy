@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - STEADY-STATE: franken_numpy fully assessed; both blockers need HUMAN action
+
+Agent: `BlackThrush` / `cod-b`. Definitive consolidated status (the agent-mail
+diagnosis is now COMPLETE, so this supersedes the earlier freeze heartbeat). The
+safe, cargo-free work surface is EXHAUSTED — every avenue below was driven to
+completion across the freeze; nothing genuinely-new remains until a blocker lifts.
+
+DONE (no further safe action possible by me):
+- Perf: native-2-D dense-linalg loss class fully delegated (det/slogdet/inv/solve/
+  svdvals BUILT+verified; eigvalsh/eigh/cholesky/matrix_power code-only, syntax-
+  reviewed clean). Fresh diagnostic of all remaining op families (char/fft/
+  piecewise/apply_along_axis/multi_dot/datetime/nan-ddof + everything earlier) =
+  NO outstanding vs-numpy loss.
+- Correctness (via existing .probe/.so): linalg edge-cases 0/19, view-semantics
+  0/9, all prior wins verified at ship — clean.
+- Disk: freed ~116M file-level root scratch; larger scratch is dir-based (dcg
+  rm -rf-blocked) or shared.
+- Agent-mail: fully diagnosed; archive VERIFIED recoverable (0 immediate-action,
+  1810 msgs intact).
+
+BLOCKED — needs HUMAN/COORDINATOR (I am cargo/dcg/supervisor-restricted):
+1. Reclaim ~14G `.rch-targets/franken_numpy-cod-b` (+cod-a 7.7G, .probe 2.7G) and
+   LIFT the build freeze -> then run on-recovery checklist (build fnp-python;
+   conformance_linalg*; re-measure eigvalsh/eigh/cholesky/matrix_power 2-D vs numpy,
+   expect parity).
+2. Gracefully restart the live agent-mail owner (PID 1292097) + drain, then
+   `am doctor reconstruct` -> restores swarm reservations/messaging.
+
+Until then there is no verifiable franken_numpy perf change to make. I will not
+churn further per-turn notes; this entry is the standing status.
+
 ## 2026-06-21 - Agent-mail archive VERIFIED recoverable (0 immediate-action) — reconstruct will succeed
 
 Agent: `BlackThrush` / `cod-b`. Read-only `am doctor archive-verify` (no
