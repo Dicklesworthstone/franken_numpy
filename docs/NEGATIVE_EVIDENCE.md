@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN (RADICAL): native zero-copy gradient 1-D f64 (a938669b, 3-20x)
+
+`BlackThrush`/`cod-b`. 3rd serial-fnp/native-vs-single-threaded-numpy lever this session
+(after bincount 9x, trapezoid 50x). np.gradient was a PURE PASSTHROUGH to numpy -> fnp
+could only match it (~parity) and inherited numpy's single-threaded stencil + temp-array
+allocs + heavy Python-level setup (axis/spacing handling). Added a NATIVE zero-copy path
+for the common case (1-D f64 C-contiguous, unit spacing, default axis, edge_order=1):
+read buffer directly, write numpy.empty, central diff out[i]=(f[i+1]-f[i-1])/2 + edge_order
+=1 boundaries — bit-identical to numpy. RESULT: serial native CRUSHES numpy at small/med N
+(numpy's Python gradient overhead: 10K 0.22x, 131K 0.07x=14x); parallel adds bandwidth at
+large N (1M 0.06x, 8M 0.05x=20x). ALL wins (3-20x), bit-exact, conformance 23/23. Gate
+1<<18: parallel LOSES to fan-out at 65K-131K (2.6-4.2x) where serial already wins ~0.03-
+0.07x, only wins past ~256K. KEY: a PASSTHROUGH op is a lever too — numpy's own Python-
+level wrapper overhead (np.gradient does slicing/axis setup in Python) means a tight
+native Rust path wins HUGE even serial at small N, before any parallelism. Spacing/axis/
+edge_order=2/N-D/non-f64 defer unchanged.
+LEVER TALLY this session: bincount 9x + trapezoid 50x + gradient 20x — all the same
+"fnp serial/passthrough vs single-threaded numpy (+temps/+python-overhead)" vein.
+
 ## 2026-06-21 - WIN (RADICAL): zero-copy parallel trapezoid (f091be6b, up to 50x)
 
 `BlackThrush`/`cod-b`. 2nd application this session of the serial-fnp-vs-single-threaded-
