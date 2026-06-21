@@ -19569,59 +19569,12 @@ impl UFuncArray {
                 "interp: xp and fp must have same length".to_string(),
             ));
         }
-        let n = xp.shape[0];
-        if n == 0 {
-            return Err(UFuncError::Msg("interp: xp must not be empty".to_string()));
-        }
-        let left_val = left.unwrap_or(fp.values[0]);
-        let right_val = right.unwrap_or(fp.values[n - 1]);
-
-        // Each query point xi runs an independent binary search over the (shared,
-        // read-only) xp/fp plus a fixed-order linear blend, with no cross-point
-        // state, so an indexed parallel map over the query points is bit-for-bit
-        // identical to the serial map for any thread count. Compute-bound at
-        // O(points * log n).
-        let xpv = &xp.values;
-        let fpv = &fp.values;
-        let interp_at = |&xi: &f64| -> f64 {
-            if n == 1 {
-                if xi < xpv[0] {
-                    return left_val;
-                }
-                if xi > xpv[0] {
-                    return right_val;
-                }
-                return fpv[0];
-            }
-            if xi < xpv[0] {
-                return left_val;
-            }
-            if xi > xpv[n - 1] {
-                return right_val;
-            }
-            // Binary search for interval
-            let mut lo = 0;
-            let mut hi = n - 1;
-            while lo < hi - 1 {
-                let mid = (lo + hi) / 2;
-                if xpv[mid] <= xi {
-                    lo = mid;
-                } else {
-                    hi = mid;
-                }
-            }
-            let t = (xi - xpv[lo]) / (xpv[hi] - xpv[lo]);
-            fpv[lo] * (1.0 - t) + fpv[hi] * t
-        };
-        const INTERP_PARALLEL_MIN_ELEMS: usize = 1 << 12;
-        let values: Vec<f64> = if x.values.len() >= INTERP_PARALLEL_MIN_ELEMS
-            && n >= 2
-            && rayon::current_num_threads() >= 2
-        {
-            x.values.par_iter().map(interp_at).collect()
-        } else {
-            x.values.iter().map(interp_at).collect()
-        };
+        // Bit-identical to the prior inline binary-search + linear-blend map; the
+        // shared module-level `interp_fill` is now the single source of truth (also
+        // used by the fnp-python zero-copy interp wrapper). Validation of xp/fp
+        // length and emptiness lives there.
+        let mut values = vec![0.0f64; x.values.len()];
+        interp_fill(&x.values, &xp.values, &fp.values, left, right, &mut values)?;
 
         let shape = x.shape.clone();
         Ok(Self {
@@ -34046,6 +33999,80 @@ fn fft_pow2_butterflies<const FINITE: bool>(
         }
         len = len4;
     }
+}
+
+/// Fill `out[i] = np.interp(x[i], xp, fp)` for the whole query slice `x`, writing
+/// directly into a caller-provided output buffer. `xp` must be ascending (numpy's
+/// contract); `left`/`right` default to `fp[0]`/`fp[n-1]` for out-of-range queries.
+/// Each query point is an independent binary-search + linear blend, so the parallel
+/// and serial fills are bit-identical for any thread count. Shared by `interp_lr`
+/// (which allocates + returns a UFuncArray) and the fnp-python zero-copy interp
+/// wrapper, which writes straight into the NumPy output buffer — skipping the
+/// extract-x and build-result copies the UFuncArray path otherwise pays.
+pub fn interp_fill(
+    x: &[f64],
+    xp: &[f64],
+    fp: &[f64],
+    left: Option<f64>,
+    right: Option<f64>,
+    out: &mut [f64],
+) -> Result<(), UFuncError> {
+    if xp.len() != fp.len() {
+        return Err(UFuncError::Msg(
+            "interp: xp and fp must have same length".to_string(),
+        ));
+    }
+    let n = xp.len();
+    if n == 0 {
+        return Err(UFuncError::Msg("interp: xp must not be empty".to_string()));
+    }
+    if out.len() != x.len() {
+        return Err(UFuncError::Msg(
+            "interp: out length must match x length".to_string(),
+        ));
+    }
+    let left_val = left.unwrap_or(fp[0]);
+    let right_val = right.unwrap_or(fp[n - 1]);
+    let interp_at = |&xi: &f64| -> f64 {
+        if n == 1 {
+            if xi < xp[0] {
+                return left_val;
+            }
+            if xi > xp[0] {
+                return right_val;
+            }
+            return fp[0];
+        }
+        if xi < xp[0] {
+            return left_val;
+        }
+        if xi > xp[n - 1] {
+            return right_val;
+        }
+        let mut lo = 0;
+        let mut hi = n - 1;
+        while lo < hi - 1 {
+            let mid = (lo + hi) / 2;
+            if xp[mid] <= xi {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let t = (xi - xp[lo]) / (xp[hi] - xp[lo]);
+        fp[lo] * (1.0 - t) + fp[hi] * t
+    };
+    const INTERP_PARALLEL_MIN_ELEMS: usize = 1 << 12;
+    if x.len() >= INTERP_PARALLEL_MIN_ELEMS && n >= 2 && rayon::current_num_threads() >= 2 {
+        out.par_iter_mut()
+            .zip(x.par_iter())
+            .for_each(|(o, xi)| *o = interp_at(xi));
+    } else {
+        for (o, xi) in out.iter_mut().zip(x.iter()) {
+            *o = interp_at(xi);
+        }
+    }
+    Ok(())
 }
 
 /// Fill the output band `[lo, lo + out.len())` of the full convolution

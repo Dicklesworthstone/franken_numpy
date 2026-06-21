@@ -13675,6 +13675,16 @@ fn interp(
     let (Some(left), Some(right)) = (extract_bound(&left), extract_bound(&right)) else {
         return fallback();
     };
+    // Zero-copy fast path: x/xp/fp are C-contiguous f64 ndarrays. Reads the borrowed
+    // buffers and writes np.interp straight into a numpy.empty output via the shared
+    // fnp_ufunc::interp_fill — skipping the extract_numeric_array(x) + build copies
+    // (two ~8B/elem passes) that cost ~1.9x vs numpy on large x. Defers (None) for
+    // non-f64 / non-contiguous / non-ndarray, where the extract path below runs.
+    if let Some(out) =
+        try_zerocopy_f64_interp(py, x.bind(py), xp.bind(py), fp.bind(py), left, right)?
+    {
+        return Ok(out);
+    }
     let (Ok(x), Ok(xp), Ok(fp)) = (
         extract_numeric_array(py, x.bind(py), "interp(x)"),
         extract_numeric_array(py, xp.bind(py), "interp(xp)"),
@@ -13684,6 +13694,77 @@ fn interp(
     };
     let result = UFuncArray::interp_lr(&x, &xp, &fp, left, right).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
+}
+
+// Zero-copy np.interp(x, xp, fp[, left, right]) for C-contiguous float64 ndarrays.
+// Reads x/xp/fp as borrowed &[f64] (no extract Vec), allocates numpy.empty(x.size),
+// and fills it via fnp_ufunc::interp_fill (binary-search + linear blend, parallel
+// over query points, bit-identical to the UFuncArray path), then reshapes to x's
+// shape. Returns Ok(None) — caller falls through to the extract path — for any
+// non-f64, non-C-contiguous, or non-ndarray operand, or non-1-D xp/fp.
+fn try_zerocopy_f64_interp(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    xp: &Bound<'_, PyAny>,
+    fp: &Bound<'_, PyAny>,
+    left: Option<f64>,
+    right: Option<f64>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !x.is_exact_instance(&ndarray_type)
+        || !xp.is_exact_instance(&ndarray_type)
+        || !fp.is_exact_instance(&ndarray_type)
+    {
+        return Ok(None);
+    }
+    // PyBuffer::<f64>::get succeeds only for C-contiguous float64 buffers, enforcing
+    // the dtype + contiguity gate for all three operands at once.
+    let (Ok(x_buf), Ok(xp_buf), Ok(fp_buf)) = (
+        PyBuffer::<f64>::get(x),
+        PyBuffer::<f64>::get(xp),
+        PyBuffer::<f64>::get(fp),
+    ) else {
+        return Ok(None);
+    };
+    if xp_buf.shape().len() != 1 || fp_buf.shape().len() != 1 {
+        return Ok(None);
+    }
+    let (Some(x_cells), Some(xp_cells), Some(fp_cells)) = (
+        x_buf.as_slice(py),
+        xp_buf.as_slice(py),
+        fp_buf.as_slice(py),
+    ) else {
+        return Ok(None);
+    };
+    let nx = x_cells.len();
+    let x_in: &[f64] = unsafe { std::slice::from_raw_parts(x_cells.as_ptr().cast::<f64>(), nx) };
+    let xp_in: &[f64] =
+        unsafe { std::slice::from_raw_parts(xp_cells.as_ptr().cast::<f64>(), xp_cells.len()) };
+    let fp_in: &[f64] =
+        unsafe { std::slice::from_raw_parts(fp_cells.as_ptr().cast::<f64>(), fp_cells.len()) };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let flat = numpy.call_method("empty", (nx,), Some(&kwargs))?;
+    if nx > 0 {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: `flat` is a freshly allocated numpy.empty output that cannot alias
+        // x/xp/fp; Cell<f64> is repr(transparent) over f64. interp_fill writes every
+        // element exactly once.
+        let out: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, nx) };
+        if fnp_ufunc::interp_fill(x_in, xp_in, fp_in, left, right, out).is_err() {
+            return Ok(None);
+        }
+    }
+    let shape: Vec<usize> = x_buf.shape().to_vec();
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    Ok(Some(flat.call_method1("reshape", (&output_shape,))?.unbind()))
 }
 
 fn trapezoid_impl(
