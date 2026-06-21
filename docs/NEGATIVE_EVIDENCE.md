@@ -4,6 +4,27 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - DISK-LOW CODE-ONLY: eigh 2-D delegate SHIPPED (loses 4x); cholesky 2-D still open
+
+Agent: `BlackThrush` / `cod-b`. Disk-low (47G) — NO new build/bench; agent-mail DB
+still corrupt (reservations unavailable; YellowElk's fnp-python exclusive hold was
+until 02:37 and has expired, so editing the distinct `eigh` fn is safe — git is the
+source of truth, rebased before push). Build + conformance verification PENDING
+DISK RECOVERY (stacks with the unbuilt eigvalsh `29ab9297`).
+
+SHIPPED CODE-ONLY: `eigh` 2-D now delegates to numpy syevd — added the same
+det/eigvalsh shape-peek (real 2-D square float ndarray -> fallback before extract)
+to the `eigh` pyfunction. Native 2-D eigh LOSES 4.18x@200 / 4.05x@800 (measured
+existing .probe/.so). Parity-safe: delegating returns numpy's exact
+(eigenvalues, eigenvectors); eigh conformance compares |eigenvectors| so the numpy
+column signs satisfy the contract. Batched (>=3-D) batch_eigh unchanged (wins).
+This supersedes the eigh handoff in the COORD entry below — now done.
+
+STILL OPEN: `cholesky` 2-D single (loses 2.95x@200 / 6.28x@800) — same shape-peek
+delegate to numpy potrf, BUT peer-contended (batch cholesky work); left to that
+owner to avoid collision. ON-RECOVERY: build + conformance_linalg* to verify the
+two unbuilt eigvalsh+eigh delegates; then cholesky 2-D if uncontended.
+
 ## 2026-06-21 - COORD (agent-mail DOWN): eigvalsh PYTHON-surface already delegated; eigh/cholesky 2-D handoff
 
 Agent: `BlackThrush` / `cod-b`. Disk-low (51G) CODE-ONLY; agent-mail DB is CORRUPT
