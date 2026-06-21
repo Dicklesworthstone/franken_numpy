@@ -4,6 +4,23 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: flat argmax/argmin gate fix (92feb15d, 4M 1.11x loss -> 0.65x win)
+
+`BlackThrush`/`cod-b`. 3rd mis-tuned parallel gate (cov 6de7eaaa, last-axis argmax
+3b7692fb, now flat argmax). Flat argmax/argmin is a single MEMORY-BOUND scan; rayon
+(per-chunk arg + reduce) adds combine overhead without speeding the bandwidth-
+saturated read, so SERIAL beats parallel for all N<~8M. Measured 4M: serial 1.28ms
+< parallel 1.60ms, and serial BEATS numpy (0.81x) while parallel LOSES (1.11x);
+parallel only edges ahead ~16M. Old gate 1<<16 (65K) forced parallel on the common
+100K-4M range. Raised ARGEXTREME_PARALLEL_MIN 1<<16 -> 1<<23. RESULT: flat argmax 4M
+1.11x->0.65x WIN, 1M->1.03x parity, 16M 0.97x, all correct, bit-identical. No size
+regresses (serial<=parallel for this memory-bound op). The other gates checked are
+WELL-TUNED: nanextreme flat+axis (1<<20), ptp axis (1<<21), nanvar axis (1<<16 but
+WINS 0.30x — per-lane variance is expensive enough to amortize); sum/max axis 1<<16
+only mild (1.05-1.19x).
+OPEN: int flat argmin small ~2.5x is a SEPARATE pre-existing KERNEL gap (serial<=old
+parallel, so not the gate) — int argextreme kernel slower than numpy small; follow-up.
+
 ## 2026-06-21 - WIN: argmax/argmin last-axis parallel-gate fix (3b7692fb, small-2D 6.1x->2.2x)
 
 `BlackThrush`/`cod-b`. SECOND mis-tuned parallel gate (after cov 6de7eaaa) — this is
