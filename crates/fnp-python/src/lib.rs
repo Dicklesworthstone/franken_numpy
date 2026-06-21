@@ -7070,16 +7070,11 @@ fn zerocopy_f64_unary_flat<'py>(
     let Some(input) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    // sqrt of a finite-negative must record the NumPy invalid event on the
-    // UFuncArray path; defer those identically to the direct output path.
-    if matches!(op, UnaryOp::Sqrt)
-        && input.iter().any(|cell| {
-            let value = cell.get();
-            value.is_finite() && value < 0.0
-        })
-    {
-        return Ok(None);
-    }
+    // sqrt of a finite-negative must record the NumPy invalid event on the UFuncArray
+    // path; defer those identically. Rather than a separate O(n) any()-scan BEFORE the
+    // compute (an extra full read pass that made sqrt ~1.1x vs numpy while every other
+    // unary op is parity), the finite-negative detection is FUSED into the sqrt compute
+    // loop below (and parallelized), so the common all-nonnegative case is a single pass.
     let shape: Vec<usize> = in_buffer.shape().to_vec();
     let n = input.len();
     let kwargs = PyDict::new(py);
@@ -7092,30 +7087,70 @@ fn zerocopy_f64_unary_flat<'py>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        // Dispatch on `op` ONCE, then run a monomorphic (autovectorizable) loop.
-        // Each arm calls `UnaryOp::<lit>.apply`, whose `self` is a compile-time
-        // constant, so the inner match folds away to the single concrete f64 op
-        // — provably identical to the old `op.apply(..)` body, only vectorized.
-        match op {
-            UnaryOp::Abs => unary_map_f64(input, output, |x| UnaryOp::Abs.apply(x)),
-            UnaryOp::Fabs => unary_map_f64(input, output, |x| UnaryOp::Fabs.apply(x)),
-            UnaryOp::Negative => unary_map_f64(input, output, |x| UnaryOp::Negative.apply(x)),
-            UnaryOp::Positive => unary_map_f64(input, output, |x| UnaryOp::Positive.apply(x)),
-            UnaryOp::Rint => unary_map_f64(input, output, |x| UnaryOp::Rint.apply(x)),
-            UnaryOp::Sqrt => unary_map_f64(input, output, |x| UnaryOp::Sqrt.apply(x)),
-            UnaryOp::Floor => unary_map_f64(input, output, |x| UnaryOp::Floor.apply(x)),
-            UnaryOp::Ceil => unary_map_f64(input, output, |x| UnaryOp::Ceil.apply(x)),
-            UnaryOp::Trunc => unary_map_f64(input, output, |x| UnaryOp::Trunc.apply(x)),
-            UnaryOp::Sign => unary_map_f64(input, output, |x| UnaryOp::Sign.apply(x)),
-            UnaryOp::Square => unary_map_f64(input, output, |x| UnaryOp::Square.apply(x)),
-            UnaryOp::Reciprocal => unary_map_f64(input, output, |x| UnaryOp::Reciprocal.apply(x)),
-            UnaryOp::Degrees => unary_map_f64(input, output, |x| UnaryOp::Degrees.apply(x)),
-            UnaryOp::Radians => unary_map_f64(input, output, |x| UnaryOp::Radians.apply(x)),
-            // The guard at the top of this fn restricts `op` to the arms above;
-            // anything else would have returned None, but keep a correct default.
-            other => {
-                for (slot, cell) in output.iter().zip(input.iter()) {
-                    slot.set(other.apply(cell.get()));
+        if matches!(op, UnaryOp::Sqrt) {
+            // Fused single-pass sqrt + finite-negative detection, parallel for large n.
+            // numpy.sqrt is single-threaded; a parallel sqrt over the buffer wins, and
+            // fusing the neg-check (vs the old separate any()-scan) removes the extra read
+            // pass that made sqrt the lone unary loss. If any finite-negative is present we
+            // defer (Ok(None)) so the numpy fallback records the invalid-value warning;
+            // the value sqrt(neg)=nan is itself correct, so the discarded `flat` is fine.
+            use rayon::prelude::*;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
+            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+            let in_data: &[f64] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
+            let out_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+            let saw_neg = AtomicBool::new(false);
+            let run = |o: &mut [f64], i: &[f64]| {
+                let mut neg = false;
+                for (s, &v) in o.iter_mut().zip(i.iter()) {
+                    neg |= v.is_finite() && v < 0.0;
+                    *s = v.sqrt();
+                }
+                if neg {
+                    saw_neg.store(true, Ordering::Relaxed);
+                }
+            };
+            const SQRT_PARALLEL_MIN: usize = 1 << 17;
+            if n >= SQRT_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+                let chunk = n.div_ceil(rayon::current_num_threads());
+                out_data
+                    .par_chunks_mut(chunk)
+                    .zip(in_data.par_chunks(chunk))
+                    .for_each(|(o, i)| run(o, i));
+            } else {
+                run(out_data, in_data);
+            }
+            if saw_neg.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+        } else {
+            // Dispatch on `op` ONCE, then run a monomorphic (autovectorizable) loop.
+            // Each arm calls `UnaryOp::<lit>.apply`, whose `self` is a compile-time
+            // constant, so the inner match folds away to the single concrete f64 op
+            // — provably identical to the old `op.apply(..)` body, only vectorized.
+            match op {
+                UnaryOp::Abs => unary_map_f64(input, output, |x| UnaryOp::Abs.apply(x)),
+                UnaryOp::Fabs => unary_map_f64(input, output, |x| UnaryOp::Fabs.apply(x)),
+                UnaryOp::Negative => unary_map_f64(input, output, |x| UnaryOp::Negative.apply(x)),
+                UnaryOp::Positive => unary_map_f64(input, output, |x| UnaryOp::Positive.apply(x)),
+                UnaryOp::Rint => unary_map_f64(input, output, |x| UnaryOp::Rint.apply(x)),
+                UnaryOp::Floor => unary_map_f64(input, output, |x| UnaryOp::Floor.apply(x)),
+                UnaryOp::Ceil => unary_map_f64(input, output, |x| UnaryOp::Ceil.apply(x)),
+                UnaryOp::Trunc => unary_map_f64(input, output, |x| UnaryOp::Trunc.apply(x)),
+                UnaryOp::Sign => unary_map_f64(input, output, |x| UnaryOp::Sign.apply(x)),
+                UnaryOp::Square => unary_map_f64(input, output, |x| UnaryOp::Square.apply(x)),
+                UnaryOp::Reciprocal => unary_map_f64(input, output, |x| UnaryOp::Reciprocal.apply(x)),
+                UnaryOp::Degrees => unary_map_f64(input, output, |x| UnaryOp::Degrees.apply(x)),
+                UnaryOp::Radians => unary_map_f64(input, output, |x| UnaryOp::Radians.apply(x)),
+                // The guard at the top of this fn restricts `op` to the arms above;
+                // anything else would have returned None, but keep a correct default.
+                other => {
+                    for (slot, cell) in output.iter().zip(input.iter()) {
+                        slot.set(other.apply(cell.get()));
+                    }
                 }
             }
         }
