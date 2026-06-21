@@ -957,3 +957,33 @@ Decision:
 - Do not extend this to approximate bands, asymmetric inputs, or dense SPD cases
   without fresh parity and same-worker NumPy proof. Dense `eigvalsh_nxn` still
   needs a deeper reducer/eigensolver replacement.
+
+---
+
+## 2026-06-21 cod-a fnp-linalg Diagonal Eigvalsh QR-Skip No-Ship
+
+| Area | Score | Verdict |
+|---|---:|---|
+| Current diagonal `eigvalsh` vs NumPy | 10/10 | Same-worker current is `0.030x / 0.019x / 0.014x` NumPy time |
+| Candidate QR-skip vs current | 0/10 | Candidate regressed all rows: `1.324x / 1.252x / 1.212x` current time |
+| Revert discipline | 10/10 | Candidate source hunk was removed; final linalg source is unchanged |
+| Benchmark coverage | 8/10 | Added focused `eigvalsh_diagonal_nxn` Criterion rows for 128/256/512 |
+| Disk discipline | 10/10 | Used existing `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`; no new `.scratch` |
+| Retry guidance | 8/10 | Routes away from diagonal flag cleanup and back to dense spectral primitives |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Current RCH rows on same worker `ovh-a`: `12,132 / 51,756 / 281,984 ns`
+  for 128/256/512 descending diagonal matrices.
+- Candidate QR-skip rows on same worker `ovh-a`: `16,057 / 64,813 /
+  341,859 ns`.
+- Direct same-host NumPy rows on `fmd`, NumPy `2.2.4`, BLAS threads pinned to
+  1: `405,480 / 2,707,520 / 19,579,503 ns`.
+- Counted scorecard: current FNP vs NumPy **3/0/0**, candidate vs current FNP
+  **0/3/0**, candidate vs NumPy **3/0/0**.
+
+Decision:
+- No release-ready source improvement. Keep the focused benchmark and evidence;
+  keep no linalg source hunk.
+- Do not retry diagonal QR-skip unless future profiles show zero-offdiagonal QR
+  deflation became expensive. Dense `eigvalsh_nxn` remains the real open gap.

@@ -5824,6 +5824,50 @@ Retry predicate:
 - Dense SPD `eigvalsh_nxn` remains a loss; the next dense attempt still needs a
   true reducer/eigensolver replacement, not QR-tail or sort work.
 
+## 2026-06-21 - NO-SHIP: diagonal eigvalsh QR-skip regresses current; current already dominates NumPy
+
+`YellowElk`/`cod-a`, parent `franken_numpy-ixs5y`. Disk-frugal BOLD-VERIFY pass
+on a structured spectral row, using the existing warm
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a` root and no
+new `.scratch` worktree. The graveyard/optimization hypothesis was a
+band-structure specialization: once the exact tridiagonal scan proves every
+off-diagonal is zero, skip `tridiag_eigvals_qr` and return the sorted diagonal.
+
+Decision: **NO-SHIP** for the QR-skip source hunk. The current exact
+tridiagonal path is already far faster than NumPy on diagonal inputs, and the
+candidate regressed all same-worker current rows. Source returned to zero diff.
+The diagonal Criterion rows are retained as a focused benchmark/proof surface.
+
+Commands:
+- `AGENT_NAME=YellowElk CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-linalg --bench criterion_linalg 'eigvalsh_diagonal_nxn/size/(128|256|512)' -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+- `ssh fmd 'OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python3 -'`
+
+Same-worker current/candidate/NumPy proof (`ovh-a`/`fmd`, NumPy `2.2.4`,
+single-thread BLAS for NumPy):
+
+| Row | Current FNP ns | Candidate ns | NumPy ns | Current/NumPy | Candidate/Current | Verdict |
+|---|---:|---:|---:|---:|---:|---|
+| `eigvalsh_diagonal_nxn/size/128` | 12,132 | 16,057 | 405,480 | 0.030x | 1.324x | current dominates; candidate regresses |
+| `eigvalsh_diagonal_nxn/size/256` | 51,756 | 64,813 | 2,707,520 | 0.019x | 1.252x | current dominates; candidate regresses |
+| `eigvalsh_diagonal_nxn/size/512` | 281,984 | 341,859 | 19,579,503 | 0.014x | 1.212x | current dominates; candidate regresses |
+
+Win/loss/neutral score:
+- Current FNP vs NumPy: **3 / 0 / 0**.
+- Candidate vs current FNP: **0 / 3 / 0**.
+- Candidate vs NumPy: **3 / 0 / 0**, but rejected because it loses to current.
+
+Why rejected:
+- The exact-tridiagonal QR path deflates zero off-diagonals cheaply enough that
+  the extra diagonal flag/branch did not pay for itself.
+- This is a constants-kill-you case from the graveyard risk taxonomy: the
+  asymptotic-looking shortcut loses on the actual hot rows after measurement.
+
+Retry predicate:
+- Do not retry diagonal QR-skip or diagonal flag threading unless a future
+  tridiagonal QR rewrite makes the zero-offdiagonal case measurably expensive.
+- Dense SPD `eigvalsh_nxn` remains the real spectral gap; route there to a
+  reducer/eigensolver replacement rather than another exact-structure cleanup.
+
 ---
 
 ## BlackThrush less-common-op stretch (2026-06-21): 5 wins + comprehensive-probe negative evidence

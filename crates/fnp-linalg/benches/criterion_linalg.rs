@@ -48,6 +48,14 @@ fn generate_spd_tridiagonal_matrix(n: usize) -> Vec<f64> {
     a
 }
 
+fn generate_descending_diagonal_matrix(n: usize) -> Vec<f64> {
+    let mut a = vec![0.0; n * n];
+    for i in 0..n {
+        a[i * n + i] = (n - i) as f64 + 0.25;
+    }
+    a
+}
+
 fn generate_random_matrix(n: usize, seed: u64) -> Vec<f64> {
     let mut state = seed;
     (0..n * n)
@@ -208,6 +216,23 @@ fn bench_eigvalsh(c: &mut Criterion) {
         group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, _| {
             bench.iter(|| {
                 let result = eigvalsh_nxn(black_box(&a), n);
+                black_box(result)
+            });
+        });
+    }
+
+    group.finish();
+}
+
+fn bench_eigvalsh_diagonal(c: &mut Criterion) {
+    let mut group = c.benchmark_group("eigvalsh_diagonal_nxn");
+
+    for n in [128usize, 256, 512] {
+        let a = generate_descending_diagonal_matrix(n);
+
+        group.bench_with_input(BenchmarkId::new("size", n), &n, |bench, &n| {
+            bench.iter(|| {
+                let result = eigvalsh_nxn(black_box(&a), black_box(n));
                 black_box(result)
             });
         });
@@ -655,6 +680,7 @@ criterion_group!(
     bench_svd,
     bench_svd_full,
     bench_eigvalsh,
+    bench_eigvalsh_diagonal,
     bench_eigvalsh_tridiagonal,
     bench_sbr_stage1,
     bench_norm_frobenius,
