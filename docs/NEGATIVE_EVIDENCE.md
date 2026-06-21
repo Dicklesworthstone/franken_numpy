@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-20 - BOLD-VERIFY Win + flag: mask_indices delegate; inv native-path loss (contended gate)
+
+Agent: `BlackThrush` / `cod-b`.
+
+WIN (shipped): `mask_indices` was ~2.56x slower at n=2000 — the native path built
+the n*n bool array, round-tripped it OUT to the Python mask_func, then extracted
+the result BACK into a UFuncArray before where_nonzero (two extra full n*n copies
+numpy never makes). numpy.mask_indices is `mask_func(ones((n,n)),k).nonzero()`
+entirely in numpy; the op is copy-dominated, no native advantage -> delegate ->
+parity.
+
+FLAG for the fnp-linalg owner (NOT changed — contended, config-dependent):
+`np.linalg.inv` of a real 2-D matrix routes to native `fnp_linalg::inv_nxn` for
+n>=100 (gate `shape[0] < 100 -> numpy`). The gate comment claims "n>=100 native
+wins up to 25x" (a numpy getri cliff, mirroring the det/slogdet getrf cliff). But
+MEASURED on this box (NumPy 2.4.3, OPENBLAS_NUM_THREADS=1, 64-core, load ~10),
+native inv LOSES at every size n>=100: n=128 1.53x, 200 2.80x, 400 3.17x, 512
+1.62x, 900 1.45x, 1024 1.13x, 1500 1.24x, 2000 1.17x — NO numpy cliff anywhere up
+to 2000. So the cliff premise does not hold for inv on this NumPy/OpenBLAS; the
+native 2-D inv path is a pure 1.1-3.2x loss here.
+
+Did NOT flip the gate: it is contended core linalg and the premise is
+config-dependent (the det getrf cliff IS real on the original tuning box per the
+parallel-privatized-buffer-reductions ledger; inv's getri may cliff on a
+single-threaded reference-BLAS build but not here). Owner should re-measure inv
+on the tuning config; if native inv also loses there, lower the gate to delegate
+all 2-D inv to numpy (keep the batched >=3-D native path, which wins ~0.46x). Same
+class as the pinv/svdvals 2-D delegations already shipped — inv is the one left
+behind a stale cliff gate. Retry predicate: verify with `OPENBLAS_NUM_THREADS=1`
+inv across n=128..2000 on the tuning box before flipping.
+
 ## 2026-06-20 - BOLD-VERIFY WIN x3: array-API aliases reuse their optimized twins
 
 Artifact: inline (this entry). Agent: `BlackThrush` / `cod-b`. Directive `franken_numpy-ixs5y`. SHIP.
