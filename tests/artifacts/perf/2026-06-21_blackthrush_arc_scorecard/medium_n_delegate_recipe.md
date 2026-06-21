@@ -17,6 +17,23 @@ Confirmed the medium-N losses are NOT the kernel: UFuncArray::unique f64 already
 fix is in fnp-python (delegate medium-N to numpy, or a zero-copy binding) — there is no
 fnp-ufunc lever. Don't re-chase the kernel.
 
+## SYSTEMATIC MISTUNED-GATE SWEEP (2026-06-21) — median was not alone
+
+After the median gate fix, swept fnp-ufunc parallel gates at MEDIUM N (16K-131K, where
+fan-out losses hide — the large-N gauntlet misses them). Found the SAME catastrophe in
+percentile/quantile: PERCENTILE_GLOBAL_PARALLEL_MIN (single-q) + PERCENTILE_MULTI_Q_GLOBAL
+_PARALLEL_MIN both 1<<17 -> 131K single-q 6.8-9.1x / multi-q 2.1x SLOWER. Raised both to
+1<<19 (ab5e0c68): single-q 131K 0.79x, multi-q 0.82x, large unchanged. The par radix-select
+(median/percentile/quantile share it) only wins from ~512K -> ALL its gates belong at 1<<19.
+FALSE POSITIVES checked: cross 'loss' was a non-contiguous .T test artifact (contiguous cross
+WINS 0.05-0.34x); count_nonzero 32K 3.6x is serial small-array overhead (gate already 1<<19).
+
+GIT HAZARD (cost me a bad commit bd84e754, force-fixed to ab5e0c68): in a shared tree with
+peer WIP, `git add myfile` then commit can sweep in PRE-STAGED peer changes. ALWAYS run
+`git diff --cached --stat` and confirm it's ONLY your file BEFORE every commit. Recover a
+contaminated pushed commit via reset --soft HEAD~1 + `git reset HEAD -- <peer files>` +
+recommit + `git push --force-with-lease` (back up peer files to /tmp first).
+
 ## STATUS 2026-06-21: #1 unique SHIPPED (c6b87f00), #2 median SHIPPED (a127d3d2). #3 nanmedian deferred.
 
 #2 median DONE — it was a MISTUNED KERNEL GATE, not binding: MEDIAN_GLOBAL_PARALLEL_MIN was
