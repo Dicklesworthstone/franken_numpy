@@ -16,7 +16,12 @@ place each frozen turn rather than appending duplicates.) ON-RECOVERY automation
 avoid the `verify_*.sh` gitignore rule) runs the whole checklist in one command —
 builds fnp-python, runs
 conformance_linalg*, fnp-linalg tests, and re-measures eigvalsh/eigh/cholesky/
-matrix_power 2-D vs numpy (expect ~parity) + batched (expect WIN).
+matrix_power 2-D vs numpy (expect ~parity) + batched (expect WIN). Companion
+regression tool added this turn: `scripts/perf_gap_sweep_vs_numpy.py` (py-syntax-
+checked) — a reusable one-command vs-numpy sweep over the op families this session
+characterized (elementwise/reductions/cov/corrcoef/convolve/aliases/2-D+batched
+linalg) + a view-op shares_memory check; verdict WIN/ok/LOSS, exit=#losses. Run it
+after any numpy/BLAS bump to catch the stale-cliff regression class early.
 
 ## 2026-06-21 - STATE CHANGE: agent-mail RECOVERED (1 of 2 blockers cleared); only cargo freeze remains
 
