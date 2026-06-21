@@ -203,3 +203,11 @@ serial scalar at cache-resident medium N. NOT fixable: no AVX-512 here (no vpcom
 parallel compaction needs a prefix-sum+scatter whose overhead won't beat numpy at medium.
 The compress-gate candidate is CLOSED. All 3 medium-N fixes (unique/median/nanmedian) SHIPPED;
 no remaining clean lever — surface fully dominated.
+
+## NEGATIVE 2026-06-21: window fns (kaiser/hamming/hanning) mild loss, LOW-ROI
+kaiser 1.2-1.5x, hamming/hanning 1.10x (bartlett/blackman/select WIN, polyfit/piecewise parity).
+UFuncArray::kaiser (fnp-ufunc:21572) = serial per-point bessel_i0(arg)/bessel_i0(beta) map +
+build bridge. The loss is the scalar bessel_i0-vs-numpy floor. Parallelizing the kernel would
+only help LARGE windows (100k+); but real windows are small (64-8192 pts) where parallel can't
+help and the scalar-i0 floor remains. LOW-ROI (niche + small-typical + encumbered). Not pursued.
+Frontier now fully mapped incl window fns; only residuals are niche-small-loss or walls.
