@@ -4,6 +4,21 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - View-semantics robustness sweep: matrix_transpose + rollaxis fixes solid (0 fails/9)
+
+Agent: `BlackThrush` / `cod-b`. Build freeze (no cargo); verified via existing
+`.probe/.so` (both view-op delegates are built in). The matrix_transpose (18000x)
+and rollaxis (40000x) fixes were the VIEW-MATERIALIZATION bug class (native
+materialized a copy where numpy returns a strided VIEW — both slow AND a
+shares_memory/writeable semantics divergence). Confirmed the delegations restore
+true view semantics across input variety (each case checks value-equality AND
+`shares_memory(result, input)==True` AND matching `writeable` flag vs numpy):
+- matrix_transpose: 2-D square, 2-D rect, 3-D, Fortran-order, strided slice — PASS
+- rollaxis: 3-D (axis 2->0, 0->3), 4-D (3->1), Fortran-order — PASS
+TOTAL **0 fails / 9**. The view contract (aliases input memory, writeable parity)
+holds for non-contiguous, F-order, and >2-D inputs — not just the basic ship-time
+spot-check. Release-confidence that the view-op bug-class fixes are robust.
+
 ## 2026-06-21 - Edge-case correctness sweep of BUILT linalg delegates: 0 fails / 19 (release-confidence)
 
 Agent: `BlackThrush` / `cod-b`. Build freeze (no cargo) — verified via the EXISTING
