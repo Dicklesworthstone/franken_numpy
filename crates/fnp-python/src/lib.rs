@@ -36912,6 +36912,62 @@ fn copy(py: Python<'_>, a: Py<PyAny>, order: &str, subok: bool) -> PyResult<Py<P
     fallback(py)
 }
 
+// Parallel flat f64 sort. numpy.sort is single-threaded introsort; for a 1-D C-contiguous
+// f64 array (default kind) a rayon par_sort_unstable over a fresh numpy.empty copy beats it
+// once n amortizes the fan-out + export (the passthrough comment about "export overhead" was
+// for a SERIAL native sort — parallel offsets it). Bit-identical for no-NaN input: np.sort
+// returns ascending values, and ties are equal values so unstable order is irrelevant.
+// Defers (Ok(None) -> passthrough) for: not exact 1-D C-contiguous f64, below the crossover,
+// or ANY NaN (numpy's NaN-at-end ordering of mixed payloads is algorithm-specific).
+fn try_zerocopy_f64_sort_flat(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    if a.getattr("ndim")?.extract::<usize>()? != 1
+        || !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    // Parallel merge sort has more per-element overhead than a pure reduction, so the
+    // crossover is higher: at 256K it's noisy break-even (can regress), at 1M+ it cleanly
+    // wins ~1.6-1.85x. Gate at 1<<20; below it the numpy passthrough is parity.
+    const SORT_PARALLEL_MIN: usize = 1 << 20;
+    if n < SORT_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    if src.par_iter().any(|v| v.is_nan()) {
+        return Ok(None);
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", (n,), Some(&kwargs))?;
+    let out_buffer = PyBuffer::<f64>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src).
+    let dst: &mut [f64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+    dst.copy_from_slice(src);
+    // No NaN -> partial_cmp is a total order; unstable parallel sort matches numpy's values.
+    dst.par_sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn sort(
@@ -36919,6 +36975,24 @@ fn sort(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    // Fast path: np.sort(a) / np.sort(a, axis in {-1,0,None}) on a 1-D f64 array, default
+    // kind. Any kind/order kwarg or other axis -> passthrough (handles every other surface).
+    if args.len() == 1 {
+        let axis_ok = match kwargs {
+            None => true,
+            Some(kw) => kw.iter().all(|(k, v)| {
+                k.extract::<String>().ok().as_deref() == Some("axis")
+                    && (v.is_none()
+                        || v.extract::<isize>().map(|x| x == -1 || x == 0).unwrap_or(false))
+            }),
+        };
+        if axis_ok {
+            let numpy = py.import("numpy")?;
+            if let Some(out) = try_zerocopy_f64_sort_flat(py, &numpy, &args.get_item(0)?)? {
+                return Ok(out);
+            }
+        }
+    }
     core_numpy_passthrough(py, "sort", args, kwargs)
 }
 
