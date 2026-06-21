@@ -26276,6 +26276,79 @@ fn nanvar(
     Ok(output)
 }
 
+// Zero-copy parallel flat nanargmax/nanargmin (axis=None) for C-contiguous f64 ndarrays.
+// numpy's nanarg* is single-threaded; the native path used to extract the whole buffer into
+// a UFuncArray copy and scan serially. Read the borrowed buffer (from_raw_parts, NO copy)
+// and run a NaN-skipping argextreme per rayon chunk, then combine in index order (replace
+// only on a STRICTLY better value -> numpy's first-occurrence among non-NaN). Returns
+// Ok(None) to defer: not an exact f64 C-contiguous ndarray, below the parallel crossover, or
+// the array is entirely NaN (numpy raises ValueError "All-NaN slice encountered").
+fn try_zerocopy_f64_nanargextreme(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    if !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    const NANARG_PARALLEL_MIN: usize = 1 << 21;
+    if n < NANARG_PARALLEL_MIN || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let chunk = n.div_ceil(rayon::current_num_threads());
+    let combine = |best: &mut Option<(usize, f64)>, idx: usize, v: f64| {
+        let take = match *best {
+            None => true,
+            Some(b) => {
+                if take_max {
+                    v > b.1
+                } else {
+                    v < b.1
+                }
+            }
+        };
+        if take {
+            *best = Some((idx, v));
+        }
+    };
+    let partials: Vec<Option<(usize, f64)>> = data
+        .par_chunks(chunk)
+        .enumerate()
+        .map(|(ci, c)| {
+            let base = ci * chunk;
+            let mut best: Option<(usize, f64)> = None;
+            for (i, &v) in c.iter().enumerate() {
+                if !v.is_nan() {
+                    combine(&mut best, base + i, v);
+                }
+            }
+            best
+        })
+        .collect();
+    let mut best: Option<(usize, f64)> = None;
+    for p in partials.into_iter().flatten() {
+        combine(&mut best, p.0, p.1);
+    }
+    match best {
+        Some((idx, _)) => Ok(Some(numpy.getattr("intp")?.call1((idx,))?.unbind())),
+        None => Ok(None), // all-NaN -> defer to numpy (ValueError)
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
 fn nanargmax(
@@ -26310,6 +26383,11 @@ fn nanargmax(
     // numpy's fast reduction (via fallback) instead of the slow native f64 path.
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
+    }
+    if axis.is_none()
+        && let Some(result) = try_zerocopy_f64_nanargextreme(py, &numpy, a.bind(py), true)?
+    {
+        return Ok(result);
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanargmax(a)") {
         Ok(array) => array,
@@ -26366,6 +26444,11 @@ fn nanargmin(
     // numpy's fast reduction (via fallback) instead of the slow native f64 path.
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
+    }
+    if axis.is_none()
+        && let Some(result) = try_zerocopy_f64_nanargextreme(py, &numpy, a.bind(py), false)?
+    {
+        return Ok(result);
     }
     let a = match extract_numeric_array(py, a.bind(py), "nanargmin(a)") {
         Ok(array) => array,
