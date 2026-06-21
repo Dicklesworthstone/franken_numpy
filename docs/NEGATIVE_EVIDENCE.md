@@ -4,6 +4,29 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN: matrix_power(A, 1) lazy fallback removes residual wrapper loss
+
+`YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. The prior exact-ndarray `n==1`
+direct-return idea was semantically right, but the wrapper still imported NumPy and looked up
+`numpy.linalg.matrix_power` before reaching the identity fast path. Fresh head-to-head bench
+showed that residual setup could still lose badly on a small boundary row: current HEAD
+`matrix_power_delegate_f64_2d_800_n1` was `1,413 ns` vs NumPy `582 ns` (`2.428x` loss),
+while `n0` stayed neutral (`143,942 ns` vs `143,410 ns`, `1.004x`). Kept lever: parse `n`
+first, return exact ndarray `n==1` before fallback construction, and use a small helper for
+the real NumPy fallback after the fast path. Final patched-source rerun on `vmi1153651`:
+`n1` `503 ns` vs NumPy `1,422 ns` (`0.354x`, 2.83x faster); delegated `n0` was noisy but
+near-neutral at `1,301,266 ns` vs `1,195,201 ns` (`1.089x`). Independent patched-source
+repeat on `hz1`: `n1` `263 ns` vs NumPy `676 ns` (`0.389x`), `n0` `1.022x`.
+Rejected/no-ship evidence: direct-return with Vec shape was still `2.044x` loss; tuple-shape
+plus a broader cached fallback won (`0.365x`) but was not kept because it mixed in a wider
+refactor; tuple-shape with eager fallback still lost (`2.167x`), proving the import/getattr
+setup was the lever. Conformance: `rch exec -- cargo test -p fnp-python --test
+conformance_linalg_advanced matrix_power -- --nocapture` passed 5/5. Build:
+`rch exec -- cargo build -p fnp-python --release` passed with the known 3 `fnp-python`
+warnings. Artifact dir: `tests/artifacts/perf/2026-06-21_fnp_python_matrix_power_cod_b/`.
+Retry only if exact ndarray `n==1` rises above NumPy again or object-stack/non-square error
+parity changes.
+
 ## 2026-06-21 - QUEUED (fnp-python peer-locked): 3 medium-N delegate fixes found + recipe
 
 `BlackThrush`/`cod-b`. Found 3 medium-N native losses but `crates/fnp-python/src/lib.rs` is

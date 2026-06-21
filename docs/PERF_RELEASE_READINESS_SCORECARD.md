@@ -3,6 +3,43 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 cod-b fnp-python Matrix Power Lazy Fallback Keep
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `matrix_power(A, 1)` vs NumPy | 9/10 | Current residual `2.428x` loss became `0.354x` win on patched-source rerun |
+| Sibling boundary row | 7/10 | `matrix_power(A, 0)` remained delegated; final row was noisy `1.089x`, repeat was `1.022x` |
+| Revert discipline | 9/10 | Kept only lazy fallback construction; rejected broader cached fallback and eager-fallback variants |
+| Focused conformance | 9/10 | `conformance_linalg_advanced matrix_power` passed 5/5 |
+| Release build | 8/10 | `cargo build -p fnp-python --release` passed through `rch` with existing warnings |
+| Hygiene gates | 6/10 | `cargo fmt --check -p fnp-python` still blocked by broad pre-existing formatting drift |
+
+Evidence:
+- Bead/directive: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-b`.
+- Source: `crates/fnp-python/src/lib.rs`, `matrix_power` fallback construction moved
+  after the exact-ndarray `n == 1` identity return.
+- Artifact directory:
+  `tests/artifacts/perf/2026-06-21_fnp_python_matrix_power_cod_b/`.
+- Current baseline (`ovh-a`, before lazy fallback): `n0` `143,942 ns` vs
+  `143,410 ns` (`1.004x`); `n1` `1,413 ns` vs `582 ns` (`2.428x` loss).
+- Final patched-source rerun (`vmi1153651`): `n0` `1,301,266 ns` vs
+  `1,195,201 ns` (`1.089x`); `n1` `503 ns` vs `1,422 ns` (`0.354x`).
+- Independent patched-source repeat (`hz1`): `n0` `300,795 ns` vs `294,294 ns`
+  (`1.022x`); `n1` `263 ns` vs `676 ns` (`0.389x`).
+- Rejected candidates: Vec-shape direct return (`2.044x` loss), broader cached
+  fallback (`0.365x` but too wide), tuple-shape eager fallback (`2.167x` loss).
+- `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`; no new
+  `.scratch` worktree.
+
+Decision:
+- Release-ready for the exact NumPy ndarray `matrix_power(A, 1)` boundary.
+- Keep `n==0` delegated to NumPy; do not reopen native identity allocation in this
+  commit.
+- Future work should target a fresh measured loss rather than broadening the
+  fallback helper into a general NumPy call cache.
+
+---
+
 ## 2026-06-21 cod-a fnp-python Matrix Power n==1 Alias Keep
 
 | Area | Score | Verdict |

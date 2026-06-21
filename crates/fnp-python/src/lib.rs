@@ -17683,19 +17683,9 @@ fn matrix_rank(
 #[pyfunction]
 #[pyo3(signature = (a, n))]
 fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    let numpy = py.import("numpy")?;
-    let matrix_power_fn = numpy.getattr("linalg")?.getattr("matrix_power")?;
-    let a_for_fallback = a.clone_ref(py);
-    let n_for_fallback = n.clone_ref(py);
-    let fallback = || -> PyResult<Py<PyAny>> {
-        Ok(matrix_power_fn
-            .call1((a_for_fallback.bind(py), n_for_fallback.bind(py)))?
-            .unbind())
-    };
-
     let power = match n.bind(py).extract::<i64>() {
         Ok(power) if power >= 0 => power,
-        _ => return fallback(),
+        _ => return numpy_linalg_matrix_power(py, a.bind(py), n.bind(py)),
     };
 
     // Boundary-power fast path (2026-06-21): NumPy handles n==1 by returning
@@ -17704,6 +17694,12 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
     if power == 1 && matrix_power_one_exact_ndarray_can_return_input(py, a.bind(py))? {
         return Ok(a);
     }
+
+    let a_for_fallback = a.clone_ref(py);
+    let n_for_fallback = n.clone_ref(py);
+    let fallback = || -> PyResult<Py<PyAny>> {
+        numpy_linalg_matrix_power(py, a_for_fallback.bind(py), n_for_fallback.bind(py))
+    };
 
     // n==0 still delegates to NumPy's identity allocation. Powers >=2 keep the
     // existing native multiply path.
@@ -17730,6 +17726,15 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
         Err(_) => return fallback(),
     };
     build_numpy_array_from_ufunc(py, &result)
+}
+
+fn numpy_linalg_matrix_power(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    n: &Bound<'_, PyAny>,
+) -> PyResult<Py<PyAny>> {
+    let matrix_power_fn = py.import("numpy")?.getattr("linalg")?.getattr("matrix_power")?;
+    Ok(matrix_power_fn.call1((a, n))?.unbind())
 }
 
 fn matrix_power_one_exact_ndarray_can_return_input(
