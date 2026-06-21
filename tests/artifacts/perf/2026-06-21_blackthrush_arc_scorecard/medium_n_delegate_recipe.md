@@ -8,6 +8,15 @@ to numpy (cf. the datetime-diff small-N gate fix 84acc931).
 MEASURED vs numpy (fnp/np ratio; <1 = win). Load was 18–20 during measurement → RE-VERIFY
 crossovers under low load before finalizing each gate.
 
+## KERNEL PATH RULED OUT (2026-06-21, fnp-ufunc inspected)
+
+Confirmed the medium-N losses are NOT the kernel: UFuncArray::unique f64 already
+`par_sort_unstable_by` (fnp-ufunc:~24481) and median already `par_select_median`
+(fnp-ufunc:~17348). The loss is purely the fnp-python BINDING — extract_numeric_array (numpy
+-> UFuncArray copy) + build_numpy_array_from_ufunc (UFuncArray -> numpy copy). So the ONLY
+fix is in fnp-python (delegate medium-N to numpy, or a zero-copy binding) — there is no
+fnp-ufunc lever. Don't re-chase the kernel.
+
 ## 1. unique f64 medium-N  [SOLID — native loses the WHOLE medium range]
 
 Native f64 `np.unique` (extract UFuncArray + serial sort+dedup) loses across all medium N:
