@@ -13451,32 +13451,93 @@ fn try_zerocopy_bincount(
     let Some(input) = buffer.as_slice(py) else {
         return Ok(None);
     };
-    // Single pass to validate non-negativity and find the max (an out-of-range
-    // negative value is deferred to the general path so numpy raises its ValueError).
-    let mut max_val: i64 = -1;
-    for cell in input.iter() {
-        let value = cell.get();
-        if value < 0 {
-            return Ok(None);
+    use rayon::prelude::*;
+    // ReadOnlyCell<i64> is repr(transparent) over i64; read-only under the GIL -> &[i64]
+    // (Sync). numpy's bincount is single-threaded, so a privatized parallel tally over
+    // many cores wins on large inputs (the op is memory-bound; parallel reads aggregate
+    // bandwidth). Integer counts are order-independent => the merged result is
+    // bit-identical to the serial forward pass.
+    let n = input.len();
+    let data: &[i64] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<i64>(), n) };
+    const BINCOUNT_PARALLEL_MIN: usize = 1 << 19; // fan-out floor (measured crossover ~512K)
+    const BINCOUNT_PARALLEL_K_MAX: usize = 1 << 16; // bound privatized-array memory + merge
+    let parallel_scan = n >= BINCOUNT_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+
+    // Pass 1: max value + non-negativity (a negative value defers so numpy raises).
+    let (max_val, any_neg) = if parallel_scan {
+        data.par_iter()
+            .fold(
+                || (-1i64, false),
+                |(mx, neg), &v| (mx.max(v), neg || v < 0),
+            )
+            .reduce(|| (-1i64, false), |a, b| (a.0.max(b.0), a.1 || b.1))
+    } else {
+        let mut mx = -1i64;
+        let mut neg = false;
+        for &v in data {
+            if v < 0 {
+                neg = true;
+                break;
+            }
+            if v > mx {
+                mx = v;
+            }
         }
-        if value > max_val {
-            max_val = value;
-        }
+        (mx, neg)
+    };
+    if any_neg {
+        return Ok(None);
     }
     let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "int64")?;
     let out = numpy.call_method("zeros", (length,), Some(&kwargs))?;
-    if length > 0 && !input.is_empty() {
+    if length > 0 && n > 0 {
         let Ok(out_buffer) = PyBuffer::<i64>::get(&out) else {
             return Ok(None);
         };
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for cell in input.iter() {
-            let slot = &output[cell.get() as usize];
-            slot.set(slot.get() + 1);
+        // Parallel only when the tally work (~n) dominates the per-thread overhead:
+        // the K_MAX cap bounds privatized-array memory, and n >= length*32 ensures the
+        // length*nthreads merge/alloc is a small fraction of the count (large-K needs a
+        // proportionally larger n — e.g. K=65536 wins from ~4M, K=1000 from ~512K).
+        let parallel_count = parallel_scan
+            && length <= BINCOUNT_PARALLEL_K_MAX
+            && n >= length.saturating_mul(32);
+        if parallel_count {
+            // Privatized parallel tally: each chunk counts into a thread-local array,
+            // then the locals are summed element-wise (bit-identical to serial counts).
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            let merged = data
+                .par_chunks(chunk)
+                .fold(
+                    || vec![0i64; length],
+                    |mut acc, c| {
+                        for &v in c {
+                            acc[v as usize] += 1;
+                        }
+                        acc
+                    },
+                )
+                .reduce(
+                    || vec![0i64; length],
+                    |mut a, b| {
+                        for (slot, add) in a.iter_mut().zip(b.iter()) {
+                            *slot += add;
+                        }
+                        a
+                    },
+                );
+            for (slot, &count) in output.iter().zip(merged.iter()) {
+                slot.set(count);
+            }
+        } else {
+            for &v in data {
+                let slot = &output[v as usize];
+                slot.set(slot.get() + 1);
+            }
         }
     }
     Ok(Some(out.unbind()))
