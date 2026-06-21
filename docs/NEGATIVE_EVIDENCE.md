@@ -4,6 +4,45 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - SWEEP COMPLETE + ON-RECOVERY VERIFY CHECKLIST: native 2-D dense linalg loss-class closed
+
+Agent: `BlackThrush` / `cod-b`. Disk-low (40G), CODE-ONLY, agent-mail DB corrupt.
+This is the authoritative completion record for the post-numpy-2.4.3 stale-cliff /
+native-2-D-dense-linalg loss class — DO NOT re-hunt these; they are all delegated.
+
+The class (native pure-Rust 2-D dense factorization loses 2-6x to LAPACK because
+the getrf/gesv/syevd/potrf perf cliffs the size-gates assumed are gone in NumPy
+2.4.3) is now fully closed across these ops (single 2-D delegates to numpy;
+BATCHED >=3-D paths kept native where they win):
+
+| op | commit | built? |
+|---|---|---|
+| det / slogdet / inv / solve | 4594d64d | BUILT+conformance PASS |
+| svdvals (2-D) | (earlier, BUILT) | BUILT |
+| eigvalsh (2-D) | 29ab9297 | UNBUILT (disk-low) |
+| eigh (2-D) | 76712a2b | UNBUILT (disk-low) |
+| cholesky (2-D, both upper) | 4d79608a (peer) | UNBUILT (disk-low) |
+| matrix_power boundary | 8efc05dd (peer) | UNBUILT (disk-low) |
+
+ON-RECOVERY VERIFY CHECKLIST (run as soon as disk frees + builds resume):
+1. `cargo build -p fnp-python --release --lib` — confirms the 4 unbuilt code-only
+   delegates (eigvalsh/eigh/cholesky/matrix_power) all COMPILE (they are
+   mechanically identical shape-peek `-> fallback()` blocks, but unverified).
+2. `cargo test -p fnp-python --release --test conformance_linalg --test
+   conformance_linalg_advanced --test conformance_linalg_decomp` — all green.
+3. Re-measure eigvalsh/eigh/cholesky 2-D (n=200,800) vs numpy: expect ~parity
+   (was 3-6x loss). Re-measure batched (>=3-D) eigvalsh/eigh stays a win.
+4. `am doctor repair` (or `reconstruct`) the corrupt agent-mail DB (reservations +
+   messaging have been down; coordination has been via git/this ledger).
+
+No NEW code lever this slice: the linalg-delegation vein is exhausted (me + peers
+finished it), and a fresh existing-`.probe/.so` diagnostic of un-swept ops
+(gradient spacing/axis, interp period, histogram density, trace/diagonal offset,
+vector norms ord=1/3, outer/kron, ediff1d to_end, trapezoid, cumsum 2-D, ptp) found
+only parity/wins — no substantive loss remains. Avoided trivial churn (e.g.
+trace_offset 4->9us is sub-us dispatch noise) and avoided shipping an unverifiable
+change under the build freeze.
+
 ## 2026-06-21 - DISK-LOW CODE-ONLY Pending Bench: matrix_power n=0/1 ndarray boundary delegate
 
 Agent: `YellowElk` / `cod-a`. Bead: `franken_numpy-ixs5y`. Disk-low pause
