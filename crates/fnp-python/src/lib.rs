@@ -21331,6 +21331,13 @@ fn diff(
                     .getattr("c_contiguous")?
                     .extract::<bool>()?
             {
+                // Small inputs: the int64-view + reinterpret setup loses to numpy.diff
+                // (the small-array crossing wall, measured ~2.1x @1K, ~parity @10K);
+                // delegate. The native path wins from ~16K (0.45x @100K, 0.39x @200K).
+                const DATETIME_DIFF_NATIVE_MIN: usize = 1 << 14;
+                if a_bound.getattr("size")?.extract::<usize>()? < DATETIME_DIFF_NATIVE_MIN {
+                    return fallback();
+                }
                 let dtype_str = dtype.getattr("str")?.extract::<String>()?; // e.g. "<M8[D]"
                 let td_str = dtype_str.replace("M8", "m8"); // timedelta64[U]
                 let int_view = a_bound.call_method1("view", ("int64",))?;
