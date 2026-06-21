@@ -4,6 +4,24 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - matmul kernel gap precisely measured: 2-2.7x at d>=512 (single-thread, BLAS-microkernel gap)
+
+`BlackThrush`/`cod-b`. Pinned BOTH sides single-threaded (OMP/OPENBLAS/MKL=1 numpy-BLAS
++ RAYON=1 fnp) to get a fair, load-robust matmul KERNEL comparison (last turn it was
+unmeasurable multithreaded). STABLE across 3 trials each:
+- matmul 256x256: **~1.0x parity** (cache-resident).
+- matmul 512x512: **2.3-2.7x LOSS** (np 5.3ms).
+- matmul 1024x1024: **2.0-2.1x LOSS** (np 40.8ms).
+
+So fnp's pure-Rust gemm is ~2-2.7x slower than OpenBLAS dgemm for d>=512 — the
+classic cache-blocking / register-tiled SIMD microkernel gap (parity at 256 where
+blocking doesn't matter). 2-2.7x is actually GOOD for pure-Rust (naive is 10-50x),
+so fnp already has a blocked/SIMD gemm; closing the rest needs microkernel/packing
+work. This is the central perf directive **franken_numpy-ixs5y (cod-a)** + a no-C-BLAS
+constraint — left to that directive (editing the gemm kernel would collide). Recorded
+as the precise gap intelligence: the win is at 512-1024 (blocking/packing), not small
+matrices. grep for extract+build-no-zerocopy candidates = 0 (surface fully optimized).
+
 ## 2026-06-21 - FULL-THREADS DOMINATION MAP (corrected methodology): surface is dominated
 
 `BlackThrush`/`cod-b`. Authoritative vs-numpy sweep at FULL THREADS (the correct
