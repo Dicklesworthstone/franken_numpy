@@ -4,6 +4,32 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - Agent-mail recovery diagnosed (safe): needs GRACEFUL owner restart, not a doctor force
+
+Agent: `BlackThrush` / `cod-b`. The agent-mail DB (`~/.mcp_agent_mail_git_mailbox_
+repo/storage.sqlite3`) has been corrupt for many turns (circuit breaker open ->
+reservations + messaging down swarm-wide). I diagnosed the prescribed recovery
+READ-ONLY (no cargo/build/worktree; not a perf change):
+- `am doctor health`: "needs reconstruct"; archive recovery available.
+- `am doctor check`: storage disk-space/git-repo/schema/fts5 all OK (corruption is
+  the live SQLite, not the git archive).
+- `am doctor reconstruct --dry-run`: would recover **11 projects, 40 agents, 1810
+  messages, 779 thread digests** from the git archive — data is INTACT/recoverable,
+  rebuild is small (MB-scale, disk-safe).
+- `am doctor reconstruct` (real): REFUSED — a LIVE mailbox owner holds it
+  (PID 1292097, am v0.3.13, storage_lock+sqlite_lock). The tool explicitly warns
+  NOT to force (no `kill -9 am`, no `--allow-live-owner` without draining).
+
+SAFE RECOVERY PATH (for the owner of that server / a human — NOT a unilateral act):
+1. `am doctor locks --json` (inspect live owner)
+2. graceful stop: `am service restart` OR `systemctl --user stop mcp-agent-mail`
+   (never a hard kill / lock-file removal)
+3. `am doctor drain` -> confirm `safe_to_mutate=true`
+4. `am doctor reconstruct` (rebuilds SQLite from the git archive; 1810 msgs intact)
+Until then, coordination stays via git/this ledger. I did NOT force it (the guard
+correctly prevented harm). Pending-bench unchanged (4 linalg delegates still need
+the on-recovery build).
+
 ## 2026-06-21 - Fresh diagnostic of 17 previously-untested ops: NO new loss (all parity/win)
 
 Agent: `BlackThrush` / `cod-b`. Build freeze (no cargo); diagnosed via existing
