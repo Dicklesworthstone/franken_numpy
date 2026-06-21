@@ -1,0 +1,61 @@
+Warning: Permanently added '212.90.121.76' (ED25519) to the list of known hosts.
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling crossbeam-utils v0.8.21
+   Compiling serde_core v1.0.228
+   Compiling zerocopy v0.8.48
+   Compiling either v1.15.0
+   Compiling typenum v1.20.0
+   Compiling autocfg v1.5.0
+   Compiling zmij v1.0.21
+   Compiling cfg-if v1.0.4
+   Compiling serde v1.0.228
+   Compiling rayon-core v1.13.0
+   Compiling serde_json v1.0.149
+   Compiling itoa v1.0.18
+   Compiling ciborium-io v0.2.2
+   Compiling regex-syntax v0.8.10
+   Compiling num-traits v0.2.19
+   Compiling clap_lex v1.1.0
+   Compiling plotters-backend v0.3.7
+   Compiling anstyle v1.0.14
+   Compiling memchr v2.8.0
+   Compiling crossbeam-epoch v0.9.18
+   Compiling hybrid-array v0.4.10
+   Compiling clap_builder v4.6.0
+   Compiling plotters-svg v0.3.7
+   Compiling syn v2.0.117
+   Compiling itertools v0.10.5
+   Compiling crossbeam-deque v0.8.6
+   Compiling same-file v1.0.6
+   Compiling crypto-common v0.2.1
+   Compiling block-buffer v0.12.0
+   Compiling cast v0.3.0
+   Compiling const-oid v0.10.2
+   Compiling plotters v0.3.7
+   Compiling walkdir v2.5.0
+   Compiling regex-automata v0.4.14
+   Compiling rayon v1.12.0
+   Compiling criterion-plot v0.5.0
+   Compiling digest v0.11.2
+   Compiling itertools v0.13.0
+   Compiling clap v4.6.1
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling fnp-ndarray v0.1.0 (/data/projects/.scratch/franken_numpy-cod-b-boldverify-20260621-0030/crates/fnp-ndarray)
+   Compiling cpufeatures v0.3.0
+   Compiling sha2 v0.11.0
+   Compiling regex v1.12.3
+   Compiling zerocopy-derive v0.8.48
+   Compiling serde_derive v1.0.228
+   Compiling fnp-linalg v0.1.0 (/data/projects/.scratch/franken_numpy-cod-b-boldverify-20260621-0030/crates/fnp-linalg)
+   Compiling tinytemplate v1.2.1
+   Compiling half v2.7.1
+   Compiling ciborium-ll v0.2.2
+   Compiling ciborium v0.2.2
+   Compiling criterion v0.6.0
+    Finished `bench` profile [optimized + debuginfo] target(s) in 29.46s
+     Running benches/criterion_linalg.rs (/data/projects/.rch-targets/franken_numpy-cod-b/release/deps/criterion_linalg-ddbfbb6482365a23)
+Gnuplot not found, using plotters backend
+test eigvalsh_nxn/size/128 ... bench:   1,295,452 ns/iter (+/- 69,743)

@@ -3,6 +3,49 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-21 - Linalg Eigvalsh 128 Tail-Local Reducer No-Ship Slice
+
+Scope:
+- Bead: `franken_numpy-ixs5y.277`.
+- Parent bead measured: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg::eigvalsh_nxn`.
+- Worker proof: Rust baseline, direct NumPy comparator, and paired direct A/B on
+  `vmi1149989`.
+- Artifact:
+  `tests/artifacts/perf/2026-06-21_linalg_eigvalsh128_values_reducer_cod_b/`.
+- Decision: no production source kept. The tail-local small-n reducer matvec
+  candidate passed tridiagonal correctness gates but regressed paired timing.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Current head-to-head performance vs NumPy | FAIL | `eigvalsh_nxn/128` baseline `1,372,654 ns` vs NumPy `708,451 ns`, a `1.937x` loss on `vmi1149989`. |
+| Candidate first-run signal | MIXED | Candidate `1,295,452 ns`, `0.944x` of the RCH baseline but with overlapping error bars and still `1.829x` NumPy. |
+| Paired same-worker A/B | FAIL | Direct repeat baseline `1,295,211 ns`, candidate `1,380,393 ns`, a `1.066x` regression and `1.949x` NumPy. |
+| Focused tridiagonal correctness | PASS | `cargo test -p fnp-linalg tridiag --release` passed, including row-dot bit equivalence and rank2k/eigvalsh golden. |
+| QR profile | PASS / NOT TARGET | Values-only QR remains 1.23x-1.24x faster than the old libm-hypot path; this rejection does not reopen cheap QR-tail work. |
+| Revert discipline | PASS | No `crates/fnp-linalg/src/lib.rs` production diff survived. |
+| Evidence durability | PASS | Baseline, NumPy comparator, candidate, paired repeat, profile, and validation logs are retained in the artifact directory. |
+
+Cluster score: **58 / 100**
+
+Score rationale:
+- +18 evidence discipline: same-worker NumPy and paired Rust A/B were captured
+  despite RCH pinning drift.
+- +14 correctness: tridiagonal focused gates stayed green.
+- +12 source discipline: the regressing source hunk was reverted.
+- +8 profiling clarity: the QR profile keeps the target on reducer/eigensolver
+  work rather than post-processing.
+- +6 routing clarity: the retry predicate excludes this small-n slice-indexing
+  family.
+- -42 performance: the actual current row remains a `1.937x` NumPy loss, and the
+  candidate regressed the paired A/B.
+
+Current release posture:
+- `eigvalsh_nxn/128` is still a release blocker.
+- Do not retry this tail-local matvec rewrite, SBR/full-band materialization,
+  threshold, sort, cond-extrema, ungated row-dot, or sub-1024 Rayon matvec
+  levers. The next attempt must be a different reducer/eigensolver primitive.
+
 ## 2026-06-20 - fnp-python Einsum Reduce-All Scalar Builder Keep Slice
 
 Scope:

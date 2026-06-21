@@ -1,0 +1,6 @@
+Warning: Permanently added '212.90.121.76' (ED25519) to the list of known hosts.
+   Compiling fnp-linalg v0.1.0 (/data/projects/.scratch/franken_numpy-cod-b-boldverify-20260621-0030/crates/fnp-linalg)
+    Finished `bench` profile [optimized + debuginfo] target(s) in 17.86s
+     Running benches/criterion_linalg.rs (/data/projects/.rch-targets/franken_numpy-cod-b/release/deps/criterion_linalg-ddbfbb6482365a23)
+Gnuplot not found, using plotters backend
+test eigvalsh_nxn/size/128 ... bench:   1,380,393 ns/iter (+/- 72,064)

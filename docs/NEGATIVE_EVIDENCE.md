@@ -4,6 +4,63 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - BOLD-VERIFY No-Ship: eigvalsh 128 tail-local reducer matvec
+
+Artifact directory:
+`tests/artifacts/perf/2026-06-21_linalg_eigvalsh128_values_reducer_cod_b/`
+
+Run identity:
+- Agent: `YellowElk` / `cod-b`.
+- Bead: `franken_numpy-ixs5y.277`.
+- Parent bead: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-linalg::eigvalsh_nxn`.
+- Target dir requested: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`.
+- Counted worker: `vmi1149989`.
+- Decision: NO-SHIP. The small-n tail-local symmetric matvec candidate passed
+  tridiagonal correctness tests but regressed the paired same-worker direct A/B.
+  The source hunk was reverted; no `crates/fnp-linalg/src/lib.rs` diff remains.
+
+Current measured loss:
+
+| Row | FNP baseline ns | NumPy median ns | FNP/NumPy | Outcome |
+|---|---:|---:|---:|---|
+| `eigvalsh_nxn/size/128` | 1,372,654 | 708,451 | 1.937x | current loss |
+
+Candidate evidence:
+
+| Probe | Worker/mode | Baseline ns | Candidate ns | Candidate/Baseline | Candidate/NumPy | Verdict |
+|---|---|---:|---:|---:|---:|---|
+| Tail-local small-n half-symmetric matvec, first run | `vmi1149989` direct candidate vs RCH baseline | 1,372,654 | 1,295,452 | 0.944x | 1.829x | inconclusive; error bars overlap |
+| Tail-local small-n half-symmetric matvec, paired repeat | `vmi1149989` direct baseline/candidate | 1,295,211 | 1,380,393 | 1.066x | 1.949x | no-ship regression |
+
+Measurement notes:
+- The candidate kept the existing row-dot path for `192 <= n < 384` and the
+  large-matrix path unchanged, but rewrote the `n < 192` half-symmetric panel
+  matvec to operate on tail-local `u`/`v` slices.
+- The tridiagonal gate passed, including
+  `tridiag_symmetric_matvec_serial_matches_full_row_dot_bits`,
+  `tridiag_rank2k_fused_update_preserves_spectra_and_golden_sha256`, and
+  `tridiag_eigvals_qr_matches_eig_qr_to_allclose`.
+- `tridiag_eigvals_qr_perf_report` on `vmi1149989` again showed the values-only
+  QR scaled-hypot path is already faster than the old libm-hypot path by
+  1.23x-1.24x at n=256/512/768, so this rejection does not reopen cheap QR-tail
+  work.
+- RCH selected `vmi1149989` for the counted Rust baseline, but worker pinning
+  was not honored consistently for follow-up commands. The decisive A/B was run
+  through the `vmi1149989` SSH alias after copying only the candidate source file
+  into the remote scratch checkout.
+
+Retry predicate:
+- Do not retry tail-local slice indexing for the small blocked reducer. It is a
+  noise-sized first-run signal and a paired same-worker regression.
+- Do not reopen SBR/full-band, threshold, public sort, private cond-extrema,
+  ungated row-dot, or sub-1024 Rayon matvec families for `eigvalsh_nxn/128`;
+  they already have negative evidence.
+- The remaining credible route is a genuinely different values-only
+  tridiagonal reducer/eigensolver, such as a generated 128-specific reducer with
+  a stronger proof obligation or a real compact-band stage-2 primitive that does
+  not materialize dense Givens work.
+
 ## 2026-06-20 - DISK-LOW CODE-ONLY: eigvalsh 2-D delegate (loses 5-6x); eigh/cholesky 2-D losses documented
 
 Agent: `BlackThrush` / `cod-b`. Disk-low pause (54G) — NO new build/bench this

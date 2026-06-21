@@ -3,6 +3,33 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 Linalg Eigvalsh 128 Values-Only Reducer Probe
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `eigvalsh_nxn/128` current row | 2/10 | Not release-ready; 1.937x slower than NumPy on `vmi1149989` |
+| Tail-local small-n reducer matvec | 0/10 | Rejected; paired direct A/B regressed 1.066x |
+| Tridiagonal correctness gates | 9/10 | Focused release tests passed |
+| Source/revert discipline | 9/10 | No production linalg diff kept |
+
+Evidence:
+- Artifact: `tests/artifacts/perf/2026-06-21_linalg_eigvalsh128_values_reducer_cod_b/`.
+- Current baseline: `eigvalsh_nxn/size/128 = 1,372,654 ns`; same-worker NumPy
+  median `708,451 ns`; FNP/NumPy `1.937x`.
+- Candidate first run: `1,295,452 ns`, still `1.829x` NumPy and within baseline
+  noise.
+- Paired direct repeat on `vmi1149989`: baseline `1,295,211 ns`, candidate
+  `1,380,393 ns`; candidate/baseline `1.066x` regression.
+- `cargo test -p fnp-linalg tridiag --release` passed; QR profile stayed on the
+  already-optimized scaled-hypot path.
+
+Decision:
+- Keep no source from this probe.
+- Keep the negative evidence and route `eigvalsh_nxn/128` to a different
+  reducer/eigensolver primitive.
+
+---
+
 ## 2026-06-20 fnp-python Einsum Reduce-All Scalar Builder
 
 | Area | Score | Verdict |
