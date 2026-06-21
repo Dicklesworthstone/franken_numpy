@@ -17109,6 +17109,34 @@ fn cholesky(
         }
     };
 
+    // STALE-CLIFF class (2026-06-21, same as det/slogdet/inv/solve/eigvalsh/eigh):
+    // native 2-D Cholesky loses to NumPy potrf on the current surface (existing
+    // disk-low probe: 2.95x at n=200, 6.28x at n=800). Delegate real 2-D square
+    // ndarrays before the extract copy. Stacked and non-ndarray inputs keep the
+    // existing paths below. NOTE: committed code-only during a disk-low pause;
+    // build/conformance and fresh Criterion verification are pending disk recovery.
+    if is_exact_numpy_ndarray(py, a.bind(py))? {
+        let shape = a
+            .bind(py)
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+            .ok();
+        let real_float = a
+            .bind(py)
+            .getattr("dtype")
+            .and_then(|d| d.getattr("kind"))
+            .and_then(|k| k.extract::<String>())
+            .map(|k| k == "f")
+            .unwrap_or(false);
+        if shape
+            .as_ref()
+            .is_some_and(|shape| shape.len() == 2 && shape[0] == shape[1])
+            && real_float
+        {
+            return fallback();
+        }
+    }
+
     // For stacked NumPy arrays, LAPACK's batched frontend plus avoiding the
     // Rust extraction copy beats the native per-lane path from n=4 upward.
     if !upper && should_delegate_stacked_cholesky_to_numpy(py, a.bind(py))? {

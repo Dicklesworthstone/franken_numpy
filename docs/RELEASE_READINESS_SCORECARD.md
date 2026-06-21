@@ -3,6 +3,34 @@
 This is a rolling gauntlet scorecard. It summarizes measured evidence for the
 current verification slice and does not certify the whole project for release.
 
+## 2026-06-21 - fnp-python cholesky 2-D Delegate Code-Only Slice
+
+Scope:
+- Bead: `franken_numpy-ixs5y`.
+- Crate/API: `fnp-python` / `linalg.cholesky` exact NumPy ndarray real 2-D
+  square inputs.
+- Candidate: delegate to `numpy.linalg.cholesky` before Rust extraction,
+  preserving existing `upper` passthrough semantics and leaving stacked /
+  non-ndarray paths unchanged.
+- Worker proof: pending. No new cargo build/bench/test/check was started after
+  the 48G disk-low instruction.
+
+| Gate | Result | Evidence |
+|---|---|---|
+| Existing target gap vs NumPy | FAIL / ROUTING EVIDENCE | Prior disk-low probe found native 2-D `cholesky` loses `2.95x` at 200x200 and `6.28x` at 800x800. |
+| Source lever | PASS / CODE-ONLY | Exact ndarray real 2-D square inputs delegate to NumPy before extraction; stacked and non-ndarray paths unchanged. |
+| Fresh head-to-head performance vs NumPy | PENDING | No counted candidate row under the 48G disk-low instruction. |
+| Focused conformance | PENDING | No cargo test/check/build was started after the disk-low instruction. |
+| Evidence durability | PARTIAL | Ledger and scorecard record pending verification and revert predicate. |
+
+Cluster score: **24 / 100**
+
+Current release posture:
+- This is not yet a measured win. It is a high-confidence source-only stale-cliff
+  gate that must be benched and conformance-checked next turn.
+- Revert if focused `fnp-python` rows show ~0 gain, a new overhead versus NumPy,
+  or any cholesky conformance regression.
+
 ## 2026-06-21 - Linalg Eigvalsh 128 Tail-Local Reducer No-Ship Slice
 
 Scope:

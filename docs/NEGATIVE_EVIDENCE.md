@@ -4,6 +4,35 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - DISK-LOW CODE-ONLY Pending Bench: cholesky 2-D delegate
+
+Agent: `YellowElk` / `cod-a`. Bead: `franken_numpy-ixs5y`. Disk-low pause
+(48G) — no new `cargo bench`, `cargo build`, `cargo check`, or `cargo test`
+started after the instruction. Agent Mail writes are blocked by the corrupt DB
+circuit breaker, so this ledger is the coordination record.
+
+Context: remote `main` already shipped the same 2-D `eigh` delegate while this
+slice was rebasing, so the duplicate `eigh` patch was skipped. The remaining
+documented Python-surface stale-cliff row was 2-D `cholesky`: native loses to
+NumPy potrf by `2.95x` at 200x200 and `6.28x` at 800x800 in the existing
+`.probe/fnp_python.so` disk-low sweep.
+
+SHIPPED CODE-ONLY (verify next bench turn): `fnp_python.linalg.cholesky` now
+delegates exact NumPy ndarray real 2-D square inputs to `numpy.linalg.cholesky`
+before the Rust extraction copy, preserving the existing `upper` keyword
+fallback. Stacked and non-ndarray inputs keep the existing paths. Fresh
+candidate ratio-vs-NumPy: **PENDING**. Expected ratio-vs-NumPy is parity
+(`~1.0x`) because the candidate directly calls NumPy; revert if focused
+Criterion shows ~0 gain, new overhead, or any conformance regression.
+
+Pending verification:
+- Focused `fnp-python` Criterion rows for 2-D `cholesky`, with `n=200` and
+  `n=800` matching the probe if disk allows.
+- `cargo test -p fnp-python --test conformance_linalg_decomp cholesky` or the
+  focused cholesky conformance shard after disk recovers.
+- Build/check status for the stacked unbuilt `eigvalsh`/`eigh`/`cholesky`
+  delegate group before scoring the slice as release-ready.
+
 ## 2026-06-21 - DISK-LOW CODE-ONLY: eigh 2-D delegate SHIPPED (loses 4x); cholesky 2-D still open
 
 Agent: `BlackThrush` / `cod-b`. Disk-low (47G) — NO new build/bench; agent-mail DB

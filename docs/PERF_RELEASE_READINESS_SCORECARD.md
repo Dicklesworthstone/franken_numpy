@@ -3,6 +3,32 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-21 fnp-python cholesky 2-D Delegate Code-Only Slice
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `fnp_python.linalg.cholesky` exact ndarray real 2-D square inputs | 3/10 | Code-only pending bench |
+| Stacked / non-ndarray cholesky paths | 8/10 | Left unchanged |
+| Focused conformance | 0/10 | Pending disk recovery |
+| Fresh Criterion ratio-vs-NumPy | 0/10 | Pending disk recovery |
+
+Evidence:
+- Bead: `franken_numpy-ixs5y`; agent `YellowElk` / `cod-a`.
+- Existing disk-low probe recorded the native 2-D `cholesky` path losing to
+  NumPy by `2.95x` at 200x200 and `6.28x` at 800x800.
+- Code-only lever: delegate exact NumPy ndarray real 2-D square inputs to
+  `numpy.linalg.cholesky` before extracting into Rust; preserve `upper` fallback
+  semantics and keep stacked / non-ndarray paths unchanged.
+- No new cargo build/bench/test/check was started after the 48G disk-low
+  instruction. Agent Mail writes are blocked by the corrupt DB circuit breaker.
+
+Decision:
+- Keep as a pending-bench code-only commit, not a measured win.
+- Next admissible turn must run focused `fnp-python` Criterion rows and cholesky
+  conformance, then either score the ratio-vs-NumPy or revert on ~0 gain.
+
+---
+
 ## 2026-06-21 Linalg Eigvalsh 128 Values-Only Reducer Probe
 
 | Area | Score | Verdict |
