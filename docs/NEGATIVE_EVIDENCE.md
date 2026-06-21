@@ -4,6 +4,25 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-21 - WIN+FIX (RADICAL): native f32 trapezoid -> ~250x + f64 dtype bug fixed (c8418664)
+
+`BlackThrush`/`cod-b`. NEW VEIN: F32-DTYPE-GAP. Swept f32 versions of my f64 wins (sinc/
+gradient/trapezoid/angle/pad/interp). sinc/gradient PARITY (f32 OK); interp 0.25x win;
+pad 1.18x mild. BIG: f32 trapezoid 11.56x (1-D) / 8.60x (N-D axis) — AND a latent DTYPE
+BUG: the trapezoid zero-copy paths gate on f64, so f32 fell to extract (canonicalizes
+f32->f64) -> returned float64 (numpy.trapezoid(f32) returns float32) AND ~11x slow. FIX:
+native f32 last-axis path — read f32, accumulate the sum in f64 (= exactly the values the
+f64-extract path produced, conformance-safe), cast result to f32. RESULT: 11.56x->0.04x
+(~250x), dtype now float32. 1-D allclose exact; N-D maxabsdiff ~1.5e-5 (f64 accumulation is
+MORE accurate than numpy's f32 pairwise -> near-zero rows fail strict allclose by f32 noise,
+but that's the SAME as the prior f64-return path which conformance already accepts).
+conformance_interp_trapz 16/16. 14th lever.
+KEY INSIGHTS: (1) f64-only zero-copy gates make f32 fall to extract which CANONICALIZES
+f32->f64 = wrong dtype + slow (a dtype bug hiding behind allclose). Grep itemsize==8 gates.
+(2) To match numpy's f32 result conformance-safely without replicating its f32 pairwise
+order, accumulate in f64 + cast (= what the extract path already did) -> correct dtype,
+faster, same values. FOLLOW-UP: f32 pad 1.18x (extend the constant-pad fast path to f32).
+
 ## 2026-06-21 - WIN: native datetime64/timedelta64 np.diff via int64 view (041c794c, 1.11x -> 0.41x)
 
 `BlackThrush`/`cod-b`. Swept char/datetime/structured (genuinely untouched). char_upper/
