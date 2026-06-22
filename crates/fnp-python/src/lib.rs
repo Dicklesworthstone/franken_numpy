@@ -25038,6 +25038,10 @@ fn cov(
             let (nv, no) = (shape[0], shape[1]);
             (48..256).contains(&nv)
                 || (nv < 48 && (nv as u64) * (nv as u64) * (no as u64) >= 200_000)
+                // large n_vars + SHORT obs: many output cells, short dots -> dsyrk
+                // dominates the per-cell dot8 (256x50=4.68x, 300x50=2.67x). Native
+                // reclaims the win at n_obs>=~500 or n_vars>=512, so bound the box.
+                || ((256..512).contains(&nv) && no < 256)
         }
     {
         return fallback(py);
@@ -25168,6 +25172,9 @@ fn corrcoef(
             let (nv, no) = (shape[0], shape[1]);
             (48..256).contains(&nv)
                 || (nv < 48 && (nv as u64) * (nv as u64) * (no as u64) >= 400_000)
+                // large n_vars + SHORT obs strip (same as cov): 256x50=1.96x, 400x50
+                // =2.38x; native reclaims at n_obs>=~500 / n_vars>=512.
+                || ((256..512).contains(&nv) && no < 256)
         }
     {
         return fallback(py);
