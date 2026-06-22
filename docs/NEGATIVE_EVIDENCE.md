@@ -6540,3 +6540,28 @@ LEVER: a `extract_numeric_array -> kernel -> build` native path on a SIMPLE elem
 is a cold-copy vein (3 copies); zero-copy in/out (read buffer, write bool in place) kills it. And
 ALWAYS re-tune the parallel gate by measuring the L3->DRAM crossover (serial wins cache-resident,
 parallel wins DRAM-bound); a too-low gate turns the win into a mid-size loss band.
+
+---
+
+## BlackThrush WIN: isnan/isinf/isfinite/isposinf/isneginf on INTEGER/BOOL input (2026-06-22, 16-628x loss removed)
+
+CLASS find (sibling of the isposinf/isneginf zero-copy win): all five float-predicates ran the COLD
+extract_numeric_array path for INTEGER/UNSIGNED/BOOL input — widening the whole array to an f64
+UFuncArray (the f64/f32 zero-copy fast paths only match floats) -> kernel -> build = 16-628x slower
+than numpy. But integers/bools CANNOT be nan/inf: isnan/isinf/isposinf/isneginf are identically
+False, isfinite identically True. Added try_const_bool_integral: an integral/bool ndarray returns
+np.zeros/np.ones(shape, bool) directly (memset, no widening). BIT-IDENTICAL (array_equal).
+
+| input | before | after |
+|-------|--------|-------|
+| isnan/isinf/isfinite(int/bool) 1M | 65-628x LOSS (21ms) | 1.2x@1M -> 1.0x@10M (fixed pyo3 floor; catastrophe gone) |
+| isposinf/isneginf(int) | 16-24x LOSS | 0.04x (16-26x WIN; numpy computes isinf&signbit even for int) |
+
+CORRECTNESS 38/38 differential (5 preds x i8/i32/i64/u16/bool/f64/f32 + 0-d/2-D/empty int edges)
+array_equal + 101 `is*` lib conformance PASS. The isnan/isinf/isfinite residual is the fixed pyo3
+dispatch floor (~3us of getattrs vs numpy's single ufunc dispatch), shrinks to parity by 10M —
+justified because it removes a 65-628x CATASTROPHE (per this session's rule: ship a residual only to
+kill a catastrophe). LEVER: a float-only zero-copy fast path leaves INTEGER/BOOL on the cold f64-
+widen extract; for predicates whose answer is a dtype-CONSTANT on integral input (isnan/isinf/
+isfinite family), short-circuit to zeros/ones — no widen, no kernel. Grep float-gated fast paths for
+the integer/bool fall-through.

@@ -19192,6 +19192,34 @@ fn solve_triangular(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+// numpy's isnan/isinf/isposinf/isneginf are identically False on any integer /
+// unsigned / bool array (those dtypes cannot represent nan/inf), and isfinite is
+// identically True. numpy returns a constant bool array in ~memset time; our
+// native path widened the integers to an f64 UFuncArray (cold extract -> kernel ->
+// build) = 16-628x slower. Fast-path an integral/bool ndarray to
+// np.full(shape, value, dtype=bool). Float / complex / non-ndarray -> Ok(None)
+// (those must actually evaluate the predicate per element).
+fn try_const_bool_integral(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    value: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !x.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let kind = x.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if !matches!(kind.as_str(), "i" | "u" | "b") {
+        return Ok(None);
+    }
+    let shape = x.getattr("shape")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "bool")?;
+    // np.zeros (calloc) / np.ones beat np.full(value) for the constant bool fill.
+    let ctor = if value { "ones" } else { "zeros" };
+    Ok(Some(numpy.call_method(ctor, (shape,), Some(&kwargs))?.unbind()))
+}
+
 // Zero-copy np.isposinf / np.isneginf for a float (f32/f64) c-contiguous ndarray.
 // The old native path extracted the whole array to a widened-f64 UFuncArray, ran
 // the kernel, then built a fresh bool UFuncArray across the export bridge (three
@@ -19303,6 +19331,9 @@ fn isposinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
     if let Some(out) = try_zerocopy_isinf_signed(py, x, true)? {
         return Ok(out);
     }
+    if let Some(out) = try_const_bool_integral(py, x, false)? {
+        return Ok(out); // integer/bool can't be +inf -> all False
+    }
     let x = extract_numeric_array(py, x, "isposinf(x)")?;
     let result = ufunc_isposinf(&x).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
@@ -19327,6 +19358,9 @@ fn isposinf(
 fn isneginf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_isinf_signed(py, x, false)? {
         return Ok(out);
+    }
+    if let Some(out) = try_const_bool_integral(py, x, false)? {
+        return Ok(out); // integer/bool can't be -inf -> all False
     }
     let x = extract_numeric_array(py, x, "isneginf(x)")?;
     let result = ufunc_isneginf(&x).map_err(map_ufunc_error)?;
@@ -19399,6 +19433,9 @@ fn isnan_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f32_predicate(py, x, f32::is_nan)? {
         return Ok(out);
     }
+    if let Some(out) = try_const_bool_integral(py, x, false)? {
+        return Ok(out); // integer/bool can't be NaN -> all False
+    }
     // Complex: numpy applies the predicate per-component (isnan(z)=isnan(re)|isnan(im)).
     // extract_numeric_array can't push a complex array through the real-valued Isnan
     // kernel and raises TypeError, so delegate complex inputs to numpy (the oracle).
@@ -19444,6 +19481,9 @@ fn isinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f32_predicate(py, x, f32::is_infinite)? {
         return Ok(out);
     }
+    if let Some(out) = try_const_bool_integral(py, x, false)? {
+        return Ok(out); // integer/bool can't be inf -> all False
+    }
     // Complex: numpy applies the predicate per-component (isinf(z)=isinf(re)|isinf(im)).
     // The real-valued kernel raises TypeError on complex, so delegate to numpy.
     let numpy = py.import("numpy")?;
@@ -19485,6 +19525,9 @@ fn isfinite_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> 
     }
     if let Some(out) = try_zerocopy_f32_predicate(py, x, f32::is_finite)? {
         return Ok(out);
+    }
+    if let Some(out) = try_const_bool_integral(py, x, true)? {
+        return Ok(out); // integer/bool is always finite -> all True
     }
     // Complex: numpy ANDs the components (isfinite(z)=isfinite(re)&isfinite(im)).
     // The real-valued kernel raises TypeError on complex, so delegate to numpy.
