@@ -304,3 +304,14 @@ won big because TWO-output (cold builds 2 arrays); remainder is ONE-output so it
 already parity (1 build), and the defer-scan pass eats the parallel gain. RULE: zero-copy-parallel
 wins big only when the cold path is expensive (multi-output build OR extract-dominated); for cheap
 one-output ops already at parity, scan+compute == numpy single pass == parity.
+
+## RE-CORRECTION 2026-06-21: mod loss IS REAL (~2x on HEAD); my "stale-.so phantom" was the error
+DEFINITIVE HEAD-clean build (git-show HEAD:lib.rs, WITHOUT YellowElk's uncommitted mod-WIP):
+mod 2.0-2.2x LOSS, remainder 0.98-1.0x parity. So mod IS a real ~2x loss on HEAD (cold py_mod
+extract+build path). My prior "stale-.so phantom" note (fe9acf3a) was WRONG — the fresh rebuild
+that showed mod=parity had YellowElk's alias-WIP IN THE TREE, which is the FIX (mod registered
+as the remainder PyUFunc object -> uses remainder's parity path). My ORIGINAL FYI (mod loses)
+was correct. YellowElk's alias-unify is a GENUINE ~2x perf fix (not just object-identity). Left
+their WIP to land. LESSON (the real one): to test whether a loss is real vs a peer's in-tree fix,
+build HEAD-clean (git-show HEAD:file) EXCLUDING uncommitted peer WIP — don't measure on a tree
+that already contains someone's fix. (The divmod-.so 3.49x was also real, just an older build.)
