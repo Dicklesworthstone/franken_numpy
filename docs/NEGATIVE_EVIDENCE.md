@@ -6176,3 +6176,37 @@ RULE: zero-copy-parallel wins BIG only when cold path is expensive (multi-output
 extract); one-output ops already at parity gain nothing. METHOD: min-of-3 + HEAD-clean rebuild
 (EXCLUDING peer in-tree WIP) before trusting any single-op anomaly — caught the mod stale-.so
 flip-flop and ~5 phantom "residuals" that dissolved to parity under re-verify.
+
+---
+
+## BlackThrush char/string + arg/dtype/axis arc consolidation (2026-06-22)
+
+WINS shipped this arc (fnp/np ratio, <1=win; bit-exact, conformance-green):
+| op | before | after | commit | lever |
+|----|--------|-------|--------|-------|
+| bincount(narrow/uint int) | ~3x | 0.02-0.20x | fb253d2e | narrow-buffer direct-read (u8 image-hist 50x) |
+| argmax/argmin(bool) flat | ~36000x (40ms) | ~us (4-8x resid) | a9f367fd | u64-word short-circuit (find-first-True catastrophe) |
+| nanargmax/nanargmin(f32) flat | 6-8x | 0.03-0.94x | 6f515301 | f32 direct-read nanargextreme (dtype-gap) |
+| argmax/argmin(bool) last-axis | ~2500x | 4-8x | dabd5f21 | u8 int-path via uint8 view (catastrophe removed) |
+| argmax/argmin(bool) non-last-axis | ~10x | 0.67-0.74x | 6b1bd8ef | u8 int-path view (down-axis, full WIN) |
+| nanargmax/nanargmin(f32) last-axis | 7.2x | 0.03-0.04x | ef76155f | zero-copy f32 nan-axis (30x; astype disproven first) |
+| char/strings.swapcase | 1.0x(delegate) | 0.12x | 9082f7c3 | ASCII codepoint fast path (numpy str-method slow) |
+| char/strings.capitalize+title | 1.0x | 0.13-0.14x | 054c4a64 | ASCII per-slot fast path |
+
+NO-SHIPS / DISPROVEN (reverted, with retry predicate):
+- max/min(bool) flat u8-short-circuit: overhead-bound (numpy short-circuit/SIMD; pyo3 ~2us floor);
+  mild-loss not catastrophe -> not worth residual. WALL.
+- bool argmax last-axis per-row short-circuit: no better than u8-int-reuse (overhead/output-build
+  bound; numpy tight C loop wins); "4.44x" earlier = load-noise (same binary 7.4x). WALL.
+- nanargmax-f32-axis astype-f64-reuse: COPY-BOUND (f32->f64 widen dominates, astype OR extract);
+  only a no-widen DIRECT-READ wins (-> ef76155f). Rule: widen-reuse = copy-bound parity-at-best.
+- char str_len fast path: NO win (numpy 2.x str_len is a C ufunc, ~fast). REFINED RULE: a parity-
+  delegate is a win-vein ONLY if numpy is ALSO slow there (Python str methods). MUST verify numpy
+  absolute ns/el before chasing a delegator.
+
+REFINED LEVERS: (1) catastrophe-removal justifies a residual; a mild loss does NOT (ship residual
+only when removing a catastrophe). (2) direct-read WINS, astype/widen-reuse is copy-bound. (3)
+delegate=win-vein ONLY if numpy is also slow (string ops: case/strip/add/multiply/ljust slow=vein;
+find/count/zfill/str_len = numpy C-fast = no-vein). (4) re-measure SAME binary to reject load-noise
+phantoms. QUEUED (disk-critical, build-free scoped): char strip/add/multiply/ljust/rjust/center
+win-veins -> tests/artifacts/perf/2026-06-21_blackthrush_arc_scorecard/char_strip_queued_recipe.md
