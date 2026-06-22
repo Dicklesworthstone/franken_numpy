@@ -7178,3 +7178,14 @@ PRESERVED; 0 mismatches. LESSON (reinforces matrix_power/windows): the narrow co
 pattern tail keeps yielding REAL wins (now 3: matrix_power, windows, einsum-diag) even after broad
 surfaces converged — single-operand einsum special-forms (reduce, diag) need explicit fast-path-or-
 delegate; the generic kernel is 40-1300x off numpy on them. Sweep special index patterns, not just shapes.
+
+## BlackThrush: einsum special-form space verified — catastrophes fixed, residuals = binding floor (2026-06-22)
+Full single-operand einsum sweep after the diagonal delegate (5a965da7): mixed reduce+diag / multi-
+diag (iij->i 1.35, iijj->ij 1.94, iji->ij 1.94, iii->i 1.93) now DELEGATED (was 43-65x) -> residual
+1.3-1.9x = irreducible pyo3 *args double-crossing on small-output diagonal ops (numpy fast in us,
+crossing ~790ns dominates). Full reductions par (ij-> 1.01, ijk->ij 1.02, delegated, output amortizes).
+Transposes (ij->ji 1.38, ijk->kji 1.59) = O(1)-view binding floor (cf ravel/matrix_transpose/permute_
+dims). The 43-1339x catastrophe is GONE; ALL einsum special-form residuals are now the binding floor
+(small-output/view, irreducible crossing) -> not fixable. einsum special-form vein MINED OUT (diag
+delegate was the win). core_numpy_passthrough already caches numpy module (616c64a1, -20%); the *args
+crossing is the floor.
