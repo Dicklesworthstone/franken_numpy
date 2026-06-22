@@ -7189,3 +7189,13 @@ dims). The 43-1339x catastrophe is GONE; ALL einsum special-form residuals are n
 (small-output/view, irreducible crossing) -> not fixable. einsum special-form vein MINED OUT (diag
 delegate was the win). core_numpy_passthrough already caches numpy module (616c64a1, -20%); the *args
 crossing is the floor.
+
+## BlackThrush: trace/diagonal/scatter-gather corner — binding floor, no gap (2026-06-22)
+trace 1.3-1.64x (small-med; 5000=0.92 win) + diagonal 1.6x: VERIFIED binding-floor, not bugs.
+diagonal correctly returns a VIEW (shares_memory=True, writeable=False, matches numpy) -> the 1.6x is
+O(1)-view pyo3 overhead (cf ravel/matrix_transpose/permute_dims), NOT the diag-materialization bug.
+trace "ok=False" = 1-ULP summation-order diff (3.5e-14, allclose True), not a defect; small-n loss
+is binding overhead (gather-diagonal+sum vs numpy strided sum). tensordot axes=1/2 par, np.add.at par,
+take_along_axis 2D 0.66 WIN, put_along_axis/fill_diagonal par. No fixable gap. The special-pattern
+tail (matrix_power/windows/einsum-diag = 3 wins) is now exhausted; remaining index/view-op residuals
+are all the irreducible binding floor. Hit rate on further narrow sweeps = ~0.
