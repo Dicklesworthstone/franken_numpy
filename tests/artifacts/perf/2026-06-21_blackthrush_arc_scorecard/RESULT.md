@@ -143,3 +143,12 @@ floor (view+buffer+intp ~4us vs numpy ~1us at first-hit) + u64-scan vs wider-SIM
 angle (same class as narrow-bincount). NOTE: all/any bool 1.17-1.44x mild (short-circuit, minor
 follow-up). LESSON: a "find-first" idiom op on bool with no fast path = pathological cold extract
 (40ms) — catastrophe-class, not just a ratio loss; the bool/narrow-dtype angle keeps surfacing these.
+
+## 2026-06-22: nanargmax/nanargmin f32 dtype-gap fixed (6f515301) - 6-8x -> 0.03-0.94x (30x@8M)
+nanarg(max/min)(f32) missed the f64-only try_zerocopy_f64_nanargextreme -> cold f32->f64 widen
+extract (~6-8x). Added try_zerocopy_f32_nanargextreme (read f32 directly, compare in f32, all
+sizes since f32 cold path WIDENS). 1M 0.94x, 8M 0.03x. Bit-exact (ties/2-D); f64 path unchanged.
+dtype-gap lever (cf isclose-f32). conformance nan_funcs 34. NOTE: nan-REDUCTIONS on f32 (nansum/
+nanmean/nanmax/nanstd/nanvar/nanmedian/nanprod/nancumsum) are all WIN/parity (0.68-1.06x) - NO gap
+(reductions promote to f64 both sides; the gap was specific to ARG variants returning an index via
+the f64-only fast path). dtype-gap angle mined: isclose-f32 + nanargmax-f32 the finds; rest dominated.
