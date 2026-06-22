@@ -47032,8 +47032,11 @@ fn numpy_dtype_is_complex(value: &Bound<'_, PyAny>) -> bool {
 fn try_zerocopy_unicode_ascii_case(
     py: Python<'_>,
     input: &Bound<'_, PyAny>,
-    uppercase: bool,
+    method: &str,
 ) -> PyResult<Option<Py<PyAny>>> {
+    if !matches!(method, "upper" | "lower" | "swapcase") {
+        return Ok(None); // unknown op -> delegate to numpy
+    }
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     if !input.is_exact_instance(&ndarray_type) {
@@ -47072,16 +47075,14 @@ fn try_zerocopy_unicode_ascii_case(
     };
     for (src, dst) in codepoints_in.iter().zip(output.iter()) {
         let codepoint = src.get();
-        let mapped = if uppercase {
-            if (u32::from(b'a')..=u32::from(b'z')).contains(&codepoint) {
-                codepoint - 32
-            } else {
-                codepoint
-            }
-        } else if (u32::from(b'A')..=u32::from(b'Z')).contains(&codepoint) {
-            codepoint + 32
-        } else {
-            codepoint
+        let is_lower = (u32::from(b'a')..=u32::from(b'z')).contains(&codepoint);
+        let is_upper = (u32::from(b'A')..=u32::from(b'Z')).contains(&codepoint);
+        let mapped = match method {
+            "upper" if is_lower => codepoint - 32,
+            "lower" if is_upper => codepoint + 32,
+            "swapcase" if is_lower => codepoint - 32,
+            "swapcase" if is_upper => codepoint + 32,
+            _ => codepoint,
         };
         dst.set(mapped);
     }
@@ -47096,9 +47097,8 @@ fn unicode_ascii_case_or_numpy(
     input: Py<PyAny>,
     namespace: &str,
     method: &str,
-    uppercase: bool,
 ) -> PyResult<Py<PyAny>> {
-    if let Some(result) = try_zerocopy_unicode_ascii_case(py, input.bind(py), uppercase)? {
+    if let Some(result) = try_zerocopy_unicode_ascii_case(py, input.bind(py), method)? {
         return Ok(result);
     }
     Ok(py
@@ -47111,22 +47111,32 @@ fn unicode_ascii_case_or_numpy(
 
 #[pyfunction(name = "upper", signature = (a))]
 fn char_upper_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    unicode_ascii_case_or_numpy(py, a, "char", "upper", true)
+    unicode_ascii_case_or_numpy(py, a, "char", "upper")
 }
 
 #[pyfunction(name = "lower", signature = (a))]
 fn char_lower_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    unicode_ascii_case_or_numpy(py, a, "char", "lower", false)
+    unicode_ascii_case_or_numpy(py, a, "char", "lower")
+}
+
+#[pyfunction(name = "swapcase", signature = (a))]
+fn char_swapcase_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_case_or_numpy(py, a, "char", "swapcase")
 }
 
 #[pyfunction(name = "upper", signature = (a))]
 fn strings_upper_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    unicode_ascii_case_or_numpy(py, a, "strings", "upper", true)
+    unicode_ascii_case_or_numpy(py, a, "strings", "upper")
 }
 
 #[pyfunction(name = "lower", signature = (a))]
 fn strings_lower_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    unicode_ascii_case_or_numpy(py, a, "strings", "lower", false)
+    unicode_ascii_case_or_numpy(py, a, "strings", "lower")
+}
+
+#[pyfunction(name = "swapcase", signature = (a))]
+fn strings_swapcase_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_case_or_numpy(py, a, "strings", "swapcase")
 }
 
 fn copy_numpy_module_attrs(from: &Bound<'_, PyAny>, to: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -51456,6 +51466,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             copy_numpy_module_attrs(&strings_upstream, &strings)?;
             strings.add_function(wrap_pyfunction!(strings_upper_ascii, &strings)?)?;
             strings.add_function(wrap_pyfunction!(strings_lower_ascii, &strings)?)?;
+            strings.add_function(wrap_pyfunction!(strings_swapcase_ascii, &strings)?)?;
             m.add_submodule(&strings)?;
             m.add("strings", strings)?;
         }
@@ -51464,6 +51475,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             copy_numpy_module_attrs(&char_upstream, &char_mod)?;
             char_mod.add_function(wrap_pyfunction!(char_upper_ascii, &char_mod)?)?;
             char_mod.add_function(wrap_pyfunction!(char_lower_ascii, &char_mod)?)?;
+            char_mod.add_function(wrap_pyfunction!(char_swapcase_ascii, &char_mod)?)?;
             m.add_submodule(&char_mod)?;
             m.add("char", char_mod)?;
         }
