@@ -6457,3 +6457,31 @@ REFINED RULE (hardened): a parity-delegate is a win-vein ONLY if numpy is ALSO s
 prior ns/el note or a small-array probe (overhead inflates 18ns->33ns, flipping a loss into a phantom
 "vein"). The entire char strip/pad/concat queued recipe is CLOSED as no-ship. encode/replace remain
 the only unclaimed slow string ops and both have output-shape complications (defer).
+
+---
+
+## BlackThrush WIN: np.unwrap native single-pass (2026-06-22) — structural multi-pass vein
+
+np.unwrap was a pure passthrough; numpy's unwrap runs MANY full-array passes (diff, mod, two
+copyto masks, cumsum, slice-assign) = ~25-44ms for 1M f64 (32-44 ns/el) while the math is
+per-element O(1) along the axis. Added try_native_unwrap_f64_default: one fused sequential pass
+per last-axis row (cumulative phase correction), default discont(pi)/period(2pi)/last-axis/f64/
+c-contiguous only; non-default discont/period, non-last axis, non-f64/non-contig -> delegate.
+
+| size | before | after | ratio |
+|------|--------|-------|-------|
+| 1M (1-D) | 1.0x (40ms passthrough) | 13ms | 0.32x (3.1x WIN) |
+| 100K | 1.0x | 1.0ms | 0.45x |
+| 10K | 1.0x | 0.09ms | 0.41x |
+| 2-D 200x5000 (last axis) | 1.0x | 12.9ms | 0.31x |
+
+CORRECTNESS: 21/21 differential (smooth/jumpy/wrapped/exact-pi-jumps/nan/inf/all_nan/neg/big-jumps/
+2-D/3-D last-axis/neg-axis + delegated axis0/period/discont/f32/non-contiguous) allclose; inline
+conformance unwrap_matches_numpy_across_default_axis_discont_and_period PASS. NaN GOTCHA: numpy
+zeroes ph_correct only where `abs(dd) < discont` -> the complement (|dd|>=pi OR dd is NaN) takes the
+correction, so the short-circuit MUST be `dd.is_nan() || dd.abs() >= pi` (a bare `>= pi` skips NaN
+and drops numpy's NaN propagation -> caught by the with_nan case). rem_euclid(2pi) matches numpy's
+float mod. LEVER (reusable): a PASSTHROUGH op where numpy itself is structurally slow (many temp-
+array passes for an O(1)-per-element recurrence: unwrap/gradient-class) is a native-single-pass vein
+even when "inherently sequential" (cumsum) — sequential Rust still beats numpy's 5+ vectorized
+passes. TODO: parallelize N-D last-axis rows (independent) for a further win on stacked inputs.
