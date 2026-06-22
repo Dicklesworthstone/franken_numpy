@@ -38591,6 +38591,12 @@ fn try_zerocopy_ma_compressed_f64(
         return Ok(None);
     }
     let kept = mask.iter().filter(|m| m.get() == 0).count();
+    // fnp's direct gather beats numpy's boolean-index only when MOST elements are kept (sparse
+    // mask -> ~0.13x; the common masked case). At moderate density numpy's C compaction wins
+    // (kept~50% -> ~3.6x). Bail to numpy unless >=90% kept (the count pass above is cheap u8).
+    if kept * 10 < total * 9 {
+        return Ok(None);
+    }
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
     let flat = numpy.call_method("empty", (kept,), Some(&kwargs))?;
@@ -38631,11 +38637,9 @@ fn compressed(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
         return Ok(out);
     }
 
-    let Some(masked) = extract_numeric_masked_array(py, x.bind(py), "compressed")? else {
-        return fallback();
-    };
-    let result = masked.compressed();
-    build_numpy_array_from_ufunc(py, &result)
+    // Non-f64 (int/complex/...) and moderate-density f64 reach here: the native extract->compress->
+    // rebuild path was ~17x for int (dtype-gap); numpy.ma.compressed (C boolean-index) is faster.
+    fallback()
 }
 
 #[pyfunction]
