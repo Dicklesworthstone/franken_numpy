@@ -334,3 +334,13 @@ f64-accum-then-cast (maxdiff 9.5e-7). So the f64 kernel (convolve_gather_fill, f
 bit-match numpy f32; a win would need a SEPARATE f32-accumulating kernel matching numpy's exact f32
 order (reassociation = bit-exactness RISK). Not worth it (current mild parity + high risk). WALL:
 convolve/correlate f32 = f32-accumulation-precision blocked; do not chase. int conv similar (int-accum).
+
+## 2026-06-22 (disk-critical, build-free scout): QUEUE outer-f32 45x + kron-f32 20x dtype-gaps
+Build-free win-vein scout found 2 big dtype-gap LOSSES (fix when disk recovers):
+- outer f32: 44.77-45.73x LOSS. outer f64 is ~parity (memory: "can't beat numpy build-copy floor").
+  f32 path is pathological (cold extract+widen+build+cast). FIX: delegate f32 (+ other non-f64) outer
+  -> numpy (parity, removes 45x; f64 already only parity so no win lost). Simple delegate (cf median).
+- kron f32: 19.36-20.15x LOSS. kron f64 WINS (memory: "kron identity win"). f32 cold. FIX: check kron
+  f64 fast path - extend to f32 (typed, WIN like f64) if mechanical, else delegate f32 (parity).
+OTHER (fine): histogram/bincount weighted f64/f32 parity, histogram2d 0.15x WIN, digitize-f32 0.76x,
+searchsorted-f32 0.57x WIN, unique-f32 parity. RE-VERIFY min-of-3 before fixing (these are min-of-2).
