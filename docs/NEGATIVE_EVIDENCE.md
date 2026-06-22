@@ -7146,3 +7146,16 @@ dedicated machine. Raising their gate would REGRESS real performance to optimize
 env. NOT FIXED (correct call). LESSON: a contended-box "parallel landmine" is only a real defect when
 serial already wins AND the op is one-time/cheap-per-element (windows); for hot compute-bound maps it
 is a measurement artifact — keep the parallel gate. Don't optimize for the swarm-contention artifact.
+
+## BlackThrush: memory-bound op gate audit — no landmine (confirms compute-vs-memory criterion) (2026-06-22)
+Audited memory-bound ops (add/multiply/astype/where/select) at the gate band (70K-300K) in BOTH
+parallel and serial. add/multiply/astype/where = par (1.0-1.10) in BOTH modes -> NO contention
+landmine (unlike the compute-bound windows). This CONFIRMS the refined criterion: memory-bound ops
+parallelize weakly (bandwidth-limited) so their gates add little benefit AND little contention risk
+-> they sit at par either way, nothing to fix. select = consistent 1.22-1.29x in BOTH modes (serial
+==parallel -> NOT gate/contention) = binding/SETUP overhead (try_zerocopy_f64_select iterates
+condlist/choicelist, per-cond dtype.kind String extract + view + PyBuffer::get); the zero-copy
+compute kernel is fine, the 1.25x is pyo3 setup on an uncommon op -> binding-floor, marginal, not
+worth a build. NET: the only fixable contention-landmine class is COMPUTE-BOUND one-time/cheap SETUP
+ops (windows, shipped); memory-bound ops are par, compute-bound hot transforms (sinc/angle) keep
+parallel (artifact), select is binding-floor. Gate audit essentially complete.
