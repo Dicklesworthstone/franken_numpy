@@ -7089,3 +7089,13 @@ LESSON: composite linalg ops (matrix_power, and CHECK tensorinv/tensorsolve/matr
 through slow native matmul/decomp paths even when the standalone op (f.matmul=1.01x) is at parity —
 sweep the COMPOSITE/less-common ops, not just primitives. 8th win this session; convergence claim
 was over-stated for the straggler tail.
+
+## BlackThrush: composite linalg straggler sweep — clean except matrix_power (2026-06-22)
+After the matrix_power win, swept the rest of the composite tail (matrix_rank/tensorinv/tensorsolve/
+norm-2/norm-nuc/cond/slogdet/kron/einsum-chain). All par-or-win. matrix_rank tall (2000,100) flagged
+18.23x then 1.77x but RE-MEASURE shows median ~1.02 with 0.03<->1.39 swings = SVD LOAD NOISE on the
+contended box; its gate (MATRIX_RANK_NATIVE_MAX_DIM=16, max(M,N)>16 -> numpy fallback) already works
+-> delegates at parity. einsum 3-chain 0.02 WIN, norm-2/slogdet/kron par. So matrix_power was the
+ONLY real composite miss (now fixed e43467c7); the composite tail is otherwise dominated/par. NOTE:
+SVD/GEMM-based composite ops are EXTREMELY load-noisy (0.03<->18x swings) — re-measure 3-4x before
+trusting any single ratio. Verified-not-fixed > chasing a noise spike.
