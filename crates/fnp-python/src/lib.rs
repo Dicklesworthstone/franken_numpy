@@ -47174,6 +47174,101 @@ fn try_zerocopy_unicode_ascii_cap_title(
     Ok(Some(codepoints_out.call_method1("view", (&dtype,))?.unbind()))
 }
 
+// numpy.char.translate delegates to slow per-element str.translate (~448ns/el, Python). Fast-path the
+// common case: table is a dict of ASCII ordinal->ordinal (1:1 remap, SAME width), no None/str values,
+// no null key (0), deletechars=None, ASCII input. Build a 128-entry lookup and map per codepoint.
+// str-table form / None|str values / null key / deletechars / non-ASCII -> Ok(None) (delegate).
+fn try_zerocopy_unicode_ascii_translate(
+    py: Python<'_>,
+    input: &Bound<'_, PyAny>,
+    table: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Ok(tdict) = table.downcast::<PyDict>() else {
+        return Ok(None);
+    };
+    let mut lookup: [u32; 128] = std::array::from_fn(|i| i as u32);
+    for (k, v) in tdict.iter() {
+        let Ok(ki) = k.extract::<i64>() else {
+            return Ok(None);
+        };
+        if ki <= 0 || ki > 127 {
+            return Ok(None); // null-key or non-ASCII key -> delegate
+        }
+        let Ok(vi) = v.extract::<i64>() else {
+            return Ok(None); // None / str value (delete/expand) -> delegate
+        };
+        if !(0..=127).contains(&vi) {
+            return Ok(None); // non-ASCII value -> delegate
+        }
+        lookup[ki as usize] = vi as u32;
+    }
+    let numpy = py.import("numpy")?;
+    if !input.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = input.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "U" {
+        return Ok(None);
+    }
+    if !input
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if itemsize == 0 || itemsize % 4 != 0 {
+        return Ok(None);
+    }
+    let uint32_dtype = numpy.getattr("uint32")?;
+    let codepoints = input.call_method1("view", (&uint32_dtype,))?;
+    let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
+        return Ok(None);
+    };
+    let Some(codepoints_in) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if codepoints_in.iter().any(|c| c.get() > 0x7f) {
+        return Ok(None);
+    }
+    let codepoints_out = numpy.call_method1("empty_like", (&codepoints,))?;
+    let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
+        return Ok(None);
+    };
+    let Some(output) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // lookup[0] == 0 (null key gated out) -> NUL padding maps to itself; ASCII gate -> index < 128.
+    for (s, d) in codepoints_in.iter().zip(output.iter()) {
+        d.set(lookup[s.get() as usize]);
+    }
+    Ok(Some(codepoints_out.call_method1("view", (&dtype,))?.unbind()))
+}
+
+fn unicode_ascii_translate_or_numpy(
+    py: Python<'_>,
+    input: Py<PyAny>,
+    table: Py<PyAny>,
+    deletechars: Option<Py<PyAny>>,
+    namespace: &str,
+) -> PyResult<Py<PyAny>> {
+    let del_given = deletechars.as_ref().is_some_and(|d| !d.bind(py).is_none());
+    if !del_given
+        && let Some(result) =
+            try_zerocopy_unicode_ascii_translate(py, input.bind(py), table.bind(py))?
+    {
+        return Ok(result);
+    }
+    let func = py.import("numpy")?.getattr(namespace)?.getattr("translate")?;
+    match deletechars {
+        Some(d) => Ok(func
+            .call1((input.bind(py), table.bind(py), d.bind(py)))?
+            .unbind()),
+        None => Ok(func.call1((input.bind(py), table.bind(py)))?.unbind()),
+    }
+}
+
 fn unicode_ascii_cap_title_or_numpy(
     py: Python<'_>,
     input: Py<PyAny>,
@@ -47232,6 +47327,16 @@ fn char_capitalize_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction(name = "title", signature = (a))]
 fn char_title_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     unicode_ascii_cap_title_or_numpy(py, a, "char", "title", true)
+}
+
+#[pyfunction(name = "translate", signature = (a, table, deletechars=None))]
+fn char_translate_native(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    table: Py<PyAny>,
+    deletechars: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    unicode_ascii_translate_or_numpy(py, a, table, deletechars, "char")
 }
 
 #[pyfunction(name = "upper", signature = (a))]
@@ -51600,6 +51705,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             char_mod.add_function(wrap_pyfunction!(char_swapcase_ascii, &char_mod)?)?;
             char_mod.add_function(wrap_pyfunction!(char_capitalize_ascii, &char_mod)?)?;
             char_mod.add_function(wrap_pyfunction!(char_title_ascii, &char_mod)?)?;
+            char_mod.add_function(wrap_pyfunction!(char_translate_native, &char_mod)?)?;
             m.add_submodule(&char_mod)?;
             m.add("char", char_mod)?;
         }
