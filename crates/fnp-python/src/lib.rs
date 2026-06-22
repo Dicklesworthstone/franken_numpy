@@ -41083,10 +41083,11 @@ fn ravel_multi_index(
 // ndarray coordinate arrays of equal shape, C order, default "raise" mode. Each
 // output flat index is the multiply-add flat = Σ coord[d]·stride[d] (C strides,
 // no division), read straight from the coordinate buffers into one int64 output.
-// Integer arithmetic is exact ⇒ bit-identical to numpy. Returns None (caller
-// defers) for non-int64/scalar/ragged coords, F order, clip/wrap modes, a
-// coord-count mismatch, non-contiguous input, or any out-of-range coordinate so
-// numpy's exact ValueError and scalar-return semantics are preserved.
+// Integer arithmetic is exact ⇒ bit-identical to numpy. Handles raise (default),
+// clip (clamp), and wrap (rem_euclid) scalar modes. Returns None (caller defers)
+// for non-int64/scalar/ragged coords, F order, a per-axis mode SEQUENCE, a
+// coord-count mismatch, non-contiguous input, or (raise mode) any out-of-range
+// coordinate so numpy's exact ValueError and scalar-return semantics are preserved.
 fn try_zerocopy_ravel_c(
     py: Python<'_>,
     multi_index: &Bound<'_, PyAny>,
@@ -41097,14 +41098,18 @@ fn try_zerocopy_ravel_c(
     if order != "C" {
         return Ok(None);
     }
-    if let Some(m) = mode
-        && !m.is_none()
-    {
-        match m.extract::<String>() {
-            Ok(s) if s == "raise" => {}
-            _ => return Ok(None), // clip/wrap/sequence modes defer
-        }
-    }
+    // mode: 0=raise (default, OOB defers for numpy's ValueError), 1=clip (clamp each coord to
+    // [0,dim-1]), 2=wrap (coord.rem_euclid(dim)). A sequence of modes / anything else defers.
+    let mode_kind: u8 = match mode {
+        None => 0,
+        Some(m) if m.is_none() => 0,
+        Some(m) => match m.extract::<String>() {
+            Ok(s) if s == "raise" => 0,
+            Ok(s) if s == "clip" => 1,
+            Ok(s) if s == "wrap" => 2,
+            _ => return Ok(None),
+        },
+    };
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
     // dims may be an int or a sequence of ints.
@@ -41194,9 +41199,15 @@ fn try_zerocopy_ravel_c(
         for i in 0..n {
             let mut flat_idx: i64 = 0;
             for dd in 0..d {
-                let coord = inputs[dd][i].get();
-                if coord < 0 || coord >= dims[dd] {
-                    return Ok(None); // raise mode OOB → defer for numpy's ValueError
+                let mut coord = inputs[dd][i].get();
+                match mode_kind {
+                    0 => {
+                        if coord < 0 || coord >= dims[dd] {
+                            return Ok(None); // raise mode OOB → defer for numpy's ValueError
+                        }
+                    }
+                    1 => coord = coord.clamp(0, dims[dd] - 1), // clip
+                    _ => coord = coord.rem_euclid(dims[dd]),   // wrap
                 }
                 flat_idx += coord * strides[dd];
             }
