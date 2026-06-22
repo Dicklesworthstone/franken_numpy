@@ -232,3 +232,13 @@ _namespace 9. upper/lower unchanged. FOUND via np.char family probe (numpy's cha
 ASCII-codepoint Rust path wins). QUEUED FOLLOW-UPS: capitalize (first cp upper rest lower per fixed-
 width slot = itemsize/4) + title (per-word-boundary) -> same ASCII-fast + numpy-fallback pattern, win
 opportunity; strip (whitespace trim per slot). All niche but real + safe (ASCII fast / numpy fallback).
+
+## 2026-06-21: char/strings.capitalize+title ASCII fast path WIN (054c4a64) - parity -> 0.13-0.14x (7x)
+Completed the char case family. try_zerocopy_unicode_ascii_cap_title: per fixed-width slot
+(itemsize/4 codepoints), capitalize=first cp upper+rest lower; title=first letter of each word
+(cased char after uncased) upper+rest lower (matches str.capitalize/str.title for ASCII). All-ASCII
+fast, non-ASCII/non-U/non-contig delegates. 1.0x->0.13-0.14x (7x) char+strings. Bit-exact incl
+apostrophes/digit-before-letter (title), empty, U1, non-ASCII-delegate. conformance strings 9.
+CHAR CASE FAMILY COMPLETE: upper/lower (pre-existing) + swapcase (9082f7c3) + capitalize/title
+(054c4a64), all ASCII-fast/numpy-fallback. DEFERRED: strip (changes string length -> needs slot
+re-pack, fiddlier). char family was the live win-vein after many dominated families.
