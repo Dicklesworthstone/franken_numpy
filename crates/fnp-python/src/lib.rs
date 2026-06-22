@@ -16065,6 +16065,17 @@ fn count_nonzero(
                 try_zerocopy_count_nonzero(py, a.bind(py), axis_simple, keepdims)?
             {
                 return Ok(out);
+            } else if keepdims
+                && let Some(ax) = axis_simple
+                && let Some(out) = try_zerocopy_count_nonzero(py, a.bind(py), Some(ax), false)?
+            {
+                // keepdims-on-axis: the no-keepdims fast path wins (~0.4x), but the keepdims
+                // path is gated out of try_zerocopy (returns None) and fell to a ~5x cold
+                // extract. Run the fast count then re-insert the reduced axis via expand_dims
+                // (keepdims-on-axis class, cf nan-family keepdims_expand_axis; BlackThrush 2026-06-22).
+                let numpy = py.import("numpy")?;
+                let ndim = a.bind(py).getattr("ndim")?.extract::<usize>()?;
+                return keepdims_expand_axis(py, &numpy, out, ax as i64, ndim);
             }
         }
     }
