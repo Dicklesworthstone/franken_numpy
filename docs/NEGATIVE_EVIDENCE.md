@@ -7216,3 +7216,14 @@ No loss. INPUT-SPACE COVERAGE COMPLETE across every dimension: shape x dtype x o
 index-pattern x dispatch-kwarg x multi-axis x LAYOUT. Three consecutive zero-hit sweeps (multi-axis,
 trace/diagonal, non-contig) confirm the reachable bit-exact surface is EXHAUSTED. 10 wins shipped;
 sole remaining lever = human C-BLAS/accept decision (bead cblas-large-gram-lever-8lnzn).
+
+## BlackThrush: broadcasting + matmul-dispatch sweep — all par (2026-06-22, 4th zero-hit)
+Broadcasting (scalar / (n,1) col / (n,) row / (n,1)+(1,m) outer / 0-d) all par (1.01-1.04); matmul
+dispatch variants (matvec/vecmat 1.07, stacked/bcast par, dot-1d 0.75 WIN) par-or-win. No gap. This
+is the 4TH consecutive zero-hit sweep (multi-axis / trace-diagonal / non-contig / broadcast-matmul)
+covering every remaining input+dispatch dimension. The reachable bit-exact surface is DEFINITIVELY
+exhausted: 10 wins shipped this session, both candidate pure-Rust kernel levers implemented-and-
+disproved (batched-SIMD cholesky slower, int-SIMD ~0-gain), every op-family/dtype/shape/pattern/
+kwarg/layout swept. Sole remaining un-dominated workload = the C-BLAS kernel floor (cov large-Gram
+3-8x, batched LU) — a HUMAN A(link C-BLAS)/C(accept) decision (bead cblas-large-gram-lever-8lnzn).
+Further "find a gap" sweeps now have ~0 hit rate; the productive lever is the bead decision.
