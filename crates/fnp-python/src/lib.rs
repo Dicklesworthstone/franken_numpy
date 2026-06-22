@@ -47183,7 +47183,7 @@ fn try_zerocopy_unicode_ascii_translate(
     input: &Bound<'_, PyAny>,
     table: &Bound<'_, PyAny>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    let Ok(tdict) = table.downcast::<PyDict>() else {
+    let Ok(tdict) = table.cast::<PyDict>() else {
         return Ok(None);
     };
     let mut lookup: [u32; 128] = std::array::from_fn(|i| i as u32);
@@ -47362,6 +47362,16 @@ fn strings_capitalize_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>>
 #[pyfunction(name = "title", signature = (a))]
 fn strings_title_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     unicode_ascii_cap_title_or_numpy(py, a, "strings", "title", true)
+}
+
+#[pyfunction(name = "translate", signature = (a, table, deletechars=None))]
+fn strings_translate_native(
+    py: Python<'_>,
+    a: Py<PyAny>,
+    table: Py<PyAny>,
+    deletechars: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    unicode_ascii_translate_or_numpy(py, a, table, deletechars, "strings")
 }
 
 fn copy_numpy_module_attrs(from: &Bound<'_, PyAny>, to: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -51694,6 +51704,7 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             strings.add_function(wrap_pyfunction!(strings_swapcase_ascii, &strings)?)?;
             strings.add_function(wrap_pyfunction!(strings_capitalize_ascii, &strings)?)?;
             strings.add_function(wrap_pyfunction!(strings_title_ascii, &strings)?)?;
+            strings.add_function(wrap_pyfunction!(strings_translate_native, &strings)?)?;
             m.add_submodule(&strings)?;
             m.add("strings", strings)?;
         }
