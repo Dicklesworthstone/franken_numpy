@@ -199,3 +199,16 @@ read f32 directly, per-lane first-non-NaN arg in f32 (order-preserving bit-exact
 conformance nan_funcs 34. VALIDATES the direct-read-vs-astype rule AGAIN: astype-widen is copy-bound
 (parity-at-best, here it FAILED), only a no-widen direct-read WINS (cf bincount-narrow 50x). nanargmax-
 f32 dtype-gap now complete (flat 6f515301 + last-axis ef76155f); ax0 1.08x near-parity left as-is.
+
+## 2026-06-21: set-ops DOMINATED; bool last-axis short-circuit DISPROVEN (overhead wall)
+- set-operations family probed: intersect1d/union1d/setdiff1d/setxor1d-int 0.02-0.04x, unique-int
+  0.01x, isin-int/f64 0.12-0.21x (huge WINS), intersect1d-f64 0.97x parity, ediff1d-f64 1.0-1.2x
+  parity. DOMINATED, no loss. Completeness note: np.in1d MISSING in fnp (NOATTR; numpy's deprecated
+  isin alias) — minor, deprecated, not perf.
+- bool last-axis argmax/argmin (shipped u8-int-reuse dabd5f21, ~4-8x load-noisy): tried per-lane
+  u64 SHORT-CIRCUIT scan -> DISPROVEN (50%T argmax 6.19x, NOT better than u8-int-reuse; the
+  "4.44x" at dabd5f21 was load-noise, re-measured 7.4x same binary). bool last-axis is OVERHEAD-
+  BOUND: numpy's tight per-row short-circuit C loop + fnp's 4000-elt intp output-build overhead;
+  fnp can't beat it whether full-scan or short-circuit. REVERTED + rebuilt clean. WALL: bool last-
+  axis argmax residual 4-8x = output-build + numpy-tight-loop, not the scan. Catastrophe (2500x)
+  already removed by u8-int-reuse; residual not winnable. Do not re-try short-circuit.
