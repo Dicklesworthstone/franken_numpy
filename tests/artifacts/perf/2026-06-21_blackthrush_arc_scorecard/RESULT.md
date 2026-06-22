@@ -152,3 +152,15 @@ dtype-gap lever (cf isclose-f32). conformance nan_funcs 34. NOTE: nan-REDUCTIONS
 nanmean/nanmax/nanstd/nanvar/nanmedian/nanprod/nancumsum) are all WIN/parity (0.68-1.06x) - NO gap
 (reductions promote to f64 both sides; the gap was specific to ARG variants returning an index via
 the f64-only fast path). dtype-gap angle mined: isclose-f32 + nanargmax-f32 the finds; rest dominated.
+
+## 2026-06-22: bool last-axis argmax/argmin catastrophe fixed (dabd5f21) - 2500x -> 4-8x
+argmax/argmin(bool, axis=-1) (np.argmax(cond,axis=1) first-True-per-row) missed lastaxis_arg-
+extreme dtype branches -> cold bool->f64 widen ~2500x(ax1). Added kind=="b" branch reusing the
+u8 int path via uint8 view (argmax-u8 first-0x01 = numpy bool semantics). 2500x->4.44x/7.68x,
+bit-exact (rand/all-F/all-T/3-D). conformance 10/10. Catastrophe removed; residual 4-8x = full-
+lane u8 scan vs numpy per-row short-circuit.
+QUEUED FOLLOW-UPS (arg-family axis dtype-gaps, milder): (1) bool NON-last-axis argmax/argmin
+~10x (ax0) - try int_argextreme_axis::<u8> on uint8 view (if it supports narrow widths, same
+u8-reuse trick); (2) nanargmax/nanargmin(f32) along axis ~7.3x (my f32 nanarg fix was flat
+axis=None only) - need f32 nan-axis path; (3) per-row short-circuit for bool-axis -> parity
+(vs current 4-8x). FOUND via arg-family x dtype x axis cross-probe.
