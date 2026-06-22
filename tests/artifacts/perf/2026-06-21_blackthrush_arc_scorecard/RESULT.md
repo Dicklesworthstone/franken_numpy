@@ -325,3 +325,12 @@ axis verified. conformance_statistics 28/29 (1 fail = pre-existing cov-y-ddof 1-
 STATS-FAMILY dtype-gap sweep DONE: corrcoef-f32 (a8fd0bea), median/pct/quant-int (1a82738a), average
 int/bool (f73dad86) all -> parity; std/var/mean/sum/cumsum/ptp/nanmean/nanstd-int win/parity. The
 "delegate non-f64 when native widens + never beats numpy" lever applied across stats. f64 wins kept.
+
+## 2026-06-22: convolve/correlate f32/int + dot probe - NO actionable; convolve-f32 win BLOCKED
+convolve/correlate f32 1.1x, int 1.2x (mild parity, NOT a real loss); dot/vdot/inner f32 parity (BLAS).
+convolve-f64 wins 0.02x (50x, zero-copy try_zerocopy_conv_corr_f64). convolve-f32 looks like a missed
+50x win BUT it's BLOCKED: numpy convolve f32 ACCUMULATES IN f32 (not f64) - verified f32-result !=
+f64-accum-then-cast (maxdiff 9.5e-7). So the f64 kernel (convolve_gather_fill, f64 accum) CANNOT
+bit-match numpy f32; a win would need a SEPARATE f32-accumulating kernel matching numpy's exact f32
+order (reassociation = bit-exactness RISK). Not worth it (current mild parity + high risk). WALL:
+convolve/correlate f32 = f32-accumulation-precision blocked; do not chase. int conv similar (int-accum).
