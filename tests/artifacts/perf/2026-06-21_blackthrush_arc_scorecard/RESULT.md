@@ -383,3 +383,15 @@ noise", getmaskarray). Verify shares_memory + min-of-3 before treating as losses
 FINE: concatenate/stack/roll/tile/repeat f32 parity/win.
 QUEUE PRIORITY (disk recovery): outer-f32 + kron-f32 (1-line each, WIN) > cross-f32 (6x) > trace
 (dtype-gap+base) > [verify flip/diag noise]. trace-f32 from earlier folds into the trace item.
+
+## 2026-06-22 (build-free): flip/diag CONFIRMED view-noise (drop); cross-f32 scoped
+- flip f32 + diag f32: CONFIRMED O(1) VIEW-NOISE -> NOT losses, DROPPED from queue. fnp returns a
+  VIEW (np.shares_memory(fnp_result, input)==True, same as numpy); the 2.3-2.5x ratio is pyo3
+  dispatch overhead on an instant view op (cf getmaskarray, flip-3.46x memory note). Do not chase.
+- cross f32 (6x): only try_zerocopy_f64_cross_n3 exists (f64-only); no cross_typed helper. FIX =
+  mirror f64_cross_n3 to f32 (read f32 a,b; compute the fixed 3-component formula c=a1*b2-a2*b1 etc.
+  in f32; output f32). BIT-EXACT (fixed per-component formula, no accumulation/reassociation -> safe
+  like outer). WIN like f64. Moderate (~50-line mirror, NOT 1-line - no generic cross helper).
+CLEAN QUEUE (disk recovery, re-verify min-of-3): (1) outer-f32 + kron-f32 = 1-LINE each (WIN, bit-
+exact, ready-to-paste) (2) cross-f32 6x (mirror f64->f32, bit-exact) (3) trace int/f32 dtype-gap +
+f64-base 1.5x (read impl to scope). flip/diag = noise (dropped).
