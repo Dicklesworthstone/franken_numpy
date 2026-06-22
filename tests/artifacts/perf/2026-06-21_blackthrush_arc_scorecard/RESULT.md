@@ -255,3 +255,15 @@ numpy is ALSO slow there (Python-level); if numpy has a C ufunc (str_len), fast-
 MUST verify numpy-is-slow before assuming a char win. The other predicates (isalpha/isdigit/etc.)
 are LIKELY numpy C ufuncs too (numpy 2.x np.strings) -> probably no-win; do NOT chase without
 confirming numpy slowness. char case family (slow in numpy) remains the only confirmed char win-vein.
+
+## 2026-06-22: char.translate ASCII 1:1-dict WIN (b5f3e683) - parity -> 0.05x (20x)
+The lone real remaining char vein (448ns Python str.translate, genuinely slow). Fast-path: table is
+dict of ASCII ord->ord (1:1 same-width), no None/str values, no null key, deletechars=None, ASCII
+input -> 128-entry lookup, per-codepoint map. 1.0x->0.05x (20x). bit-exact 1:1; None-delete/maketrans-
+del/str-table/non-ASCII/deletechars all correctly DELEGATE. conformance strings 9. VALIDATES the
+corrected win-rule from the strip miss: translate 448ns Python = WON; strip 33ns C-ufunc = lost.
+CHAR WIN-VEIN FULLY RESOLVED: WON = swapcase/capitalize/title (Python-slow case ops) + translate
+(Python-slow). NO-WIN (numpy C-ufunc) = str_len/strip/lstrip/rstrip/add/ljust/rjust/center/find/
+count/isX/zfill. Output-complex skip = split/join/encode/partition. char family = DONE.
+NOTE: build emitted 4 warnings (was 3) - likely a minor rustc style warning in new translate code;
+check on next clippy pass (build green, conformance green, win verified - not blocking).
