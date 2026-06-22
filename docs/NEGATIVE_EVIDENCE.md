@@ -6776,3 +6776,18 @@ zerocopy_f64_unary_flat path already WIN big (reciprocal 0.52x, sign 0.44-0.55x,
 fnp beats numpy when compute/element is high; only the cheapest bandwidth-bound maps lose, and the
 gate (2M) is correct (parallel only helps >2M for these). Reverted; no kernel lever here. Broader
 unary/binary sweep: sort/argsort par, clip 0.69x win, unique 0.17x win, maximum/minimum/where par.
+
+## BlackThrush NO-SHIP: diff f64 1D raw-slice rewrite is a REGRESSION (2026-06-22, reverted)
+
+A discovery sweep flagged `np.diff` f64 1D at 1.35x vs numpy — but that was SWARM-LOAD NOISE. A
+controlled A/B (env-toggle FNP_CELL_LOOP, one build, min+median of 400) showed the EXISTING
+Cell-indexed loop `slot.set(input[i+1].get() - input[i].get())` is already good: N=1M r=1.09
+(near par), N=4M r=0.87 (WIN). Rewriting it to raw &mut [f64] iterators
+(`out_raw.iter_mut().zip(in_raw.iter()).zip(in_raw[1..].iter())`) to "enable SIMD" REGRESSED it:
+N=100K 1.00->1.18, N=1M 1.09->1.24, N=4M 0.87->1.04. So the Cell `.get()` indexed loop vectorizes
+FINE here, and the overlapping zip-of-zip raw form generates WORSE code. REVERTED. LESSON
+(corrects the [[mistuned-parallel-gates-systematic-lever]] unary hypothesis): Cell `.get()`/`.set()`
+loops do NOT reliably block autovectorization — LLVM handles simple indexed Cell loads well; a
+raw-slice rewrite can be neutral OR a regression. Do NOT rewrite Cell loops to raw slices on a
+vectorization hunch — A/B with an env-toggle FIRST (and use min+median, the box is load-noisy:
+single-run sweeps overstate losses by 20-35%). diff is NOT an un-dominated gap.
