@@ -287,3 +287,13 @@ f64/int/nomask; conformance_ma_utils 24. Rest of np.ma (filled 0.2x/getdata/coun
 invalid/masked_where/nonzero) win/parity. LESSON: a fast path can be density-dependent (win sparse, lose
 moderate) - gate it to its win zone (cheap count) rather than delegate-all (keep the win) or keep-all
 (eat the loss). 51 wins.
+
+## 2026-06-22: ma.filled generic-typed WIN (9f5cb763) - int/uint/f32 5-11x -> 0.03-0.8x (dtype-gap)
+filled fast path was f64-only -> int/uint/f32 cold extract (i64 10.9x, i32 7.7x, f32 5.5x). Generalized
+try_zerocopy_ma_filled_typed<T> (i8..i64/u8..u64/f32 + f64): one-pass gather out=mask?fill:data, output
+dtype matched. i64 0.21x, i32/f32 0.03x (30x), i16 0.8x, u8 0.77x. bit-exact (widths/default/N-D);
+fill-not-fitting-T (2.5->int) delegates. conformance_ma_utils 24. GOTCHA: pyo3 FromPyObject = 2 lifetimes
+(for<a,b>); separate getattr+extract (extract::Error != PyErr breaks .and_then). 52 wins.
+QUEUED: ma.argmax 3.33x (masked argmax - moderate, next). np.ma family otherwise dominated (compressed
+3b6a93c0, filled 9f5cb763 fixed; std/var/median/min/ptp/prod/cumsum/anom/average/power/abs win/parity;
+getmaskarray O(1) overhead-noise).
