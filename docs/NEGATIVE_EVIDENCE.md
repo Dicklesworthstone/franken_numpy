@@ -7076,3 +7076,16 @@ Last unswept dtype family. f32: add 1.20 (near-par binding), multiply/sqrt/sum/e
 complex128: add/multiply/abs/conj/sum/fft par, angle 0.04 WIN. complex64: multiply 1.13/abs 1.06 par.
 NO fixable gap. franken_numpy now confirmed dominant-or-par across ALL dtypes (f64/f32/complex64/128/
 int/bool) AND all op families AND all crates. Coverage COMPLETE — see CONVERGENCE STATUS above.
+
+## BlackThrush WIN: 2-D matrix_power delegate to numpy BLAS (2026-06-22, e43467c7) — found in straggler sweep
+CORRECTION to the CONVERGENCE STATUS above: it was PREMATURE. A straggler sweep (lexsort/argpartition/
+multi_dot/matrix_power/unique-variants/...) found matrix_power 2-D losing 1.2-6.7x: it ran fnp-linalg
+matmul_accumulate + extract/build round-trip, never competitive with numpy BLAS at ANY 2-D size
+(n=3 1.22x .. 128 6.67x .. 256 3.14x; ratio flat across power p so binary-exp was fine — the loss is
+the native-matmul-vs-BLAS + extract/build). Delegated real 2-D square power>=2 to numpy (det/inv
+stale-cliff pattern): n=128 6.67->1.05, all sizes 1.0-1.2x; batched (>=3-D, shape.len()!=2) UNCHANGED
+(already delegated); 0 mismatches (f64/int/neg-power/p0/p1; peer's p==1 identity-return preserved).
+LESSON: composite linalg ops (matrix_power, and CHECK tensorinv/tensorsolve/matrix_rank) can route
+through slow native matmul/decomp paths even when the standalone op (f.matmul=1.01x) is at parity —
+sweep the COMPOSITE/less-common ops, not just primitives. 8th win this session; convergence claim
+was over-stated for the straggler tail.
