@@ -6893,3 +6893,20 @@ NON-MONOTONIC/noisy (n=100 0.55 WIN, n=200 2.44 loss, n=400 0.95 par - size-gate
 a bad middle regime; heavily peer-contended, risky); inner() is par-to-win (1.04-1.13 small =
 binding overhead, 0.46-0.49 large WIN); masked ma.sum/mean/max all par (already handled). MASKED +
 EINSUM families now swept: einsum reductions fixed, contractions win, masked par.
+
+## BlackThrush: batched inv re-investigated — CONFIRMED load-noise no-ship (2026-06-22)
+
+Linalg-batched/fft-nd sweep flagged batched inv loss (200,16)=1.29, (100,32)=1.94, but (50,64)/(195,
+32)/(781,16) WIN 0.43-0.98. Re-checked the gate: BATCH_PARALLEL_MIN_TOTAL_ELEMS=1<<14=16384, and the
+LOSING cases are ABOVE it (200*256=51200, 100*1024=102400) -> already PARALLEL. So (100,32)=1.94 LOSS
+and (195,32)=0.43 WIN are BOTH parallel, n=32, differing only in batch -> NOT a gate boundary, it's
+LOAD NOISE (64 threads contending with the swarm; median-of-3 still swings 0.43<->1.94). This exactly
+reaffirms the prior no-ship (fnp-linalg L8095-8100 / batch-cholesky-noship-kernel-wall): SERIAL A/B
+(RAYON=1) is a stable 2.3-2.5x = native inv_nxn per-lane kernel ~2.3x slower than LAPACK getri.
+Native parallel batched inv WINS on a free box (64-way parallelism / 2.3x kernel ~ big net win) and
+is noise-confounded under swarm load. DELEGATING to numpy would REGRESS the free-box wins (numpy
+loops serial per lane) -> keep native. NO clean gate/delegate fix; the only real lever is a SIMD/
+blocked inv kernel (bit-exactness risk = human decision), same class as batch_cholesky. Other sweep
+results all par-or-win: det 0.59-0.91, cholesky ~1.0, eigvalsh 0.33-0.57 WIN, svd 0.18-0.20 WIN,
+fft2/fftn ~1.0. LESSON: on a loaded 64-thread box, parallel-batched-op ratios are unreliable; use
+SERIAL (RAYON=1) A/B to expose the true per-lane kernel floor before chasing a batched "gap".
