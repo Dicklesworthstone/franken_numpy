@@ -112,3 +112,13 @@ needs a tuned Rust GEMM (huge undertaking, contended). Not an actionable lever f
 ARC COMPLETE: 28 wins, all 3 medium-N fixes shipped, compress-gate closed (wall), matmul
 quantified (BLAS directive). No remaining clean lever; further gains need project-level
 decisions (lift forbid-unsafe / no-C-BLAS) or AVX-512 hardware.
+
+## BROAD REGRESSION RE-VERIFY 2026-06-22 (post stale-.so scare): all 40-arc wins intact
+Spot-checked 18 representative arc wins on a fresh current-HEAD build (incl YellowElk's mod-alias
+WIP in tree): sqrt 0.57, median 0.20, percentile 0.21, nanmedian 0.69, argmax 0.08, sort 0.39,
+unique 0.07, isclose-f64 0.02, isclose-f32 0.02, array_equal 0.93, hist_bin_edges 0.49, kaiser
+0.20, divmod 0.32, frexp 0.26, putmask 0.35, hamming 0.20, interp 0.01, nansum 0.19 — ALL <1.0
+(wins), zero regressions. Confirms the 40-win arc is solid on current source. mod (real ~2x loss)
+is YellowElk's verified-ready alias-unify WIP, uncommitted, offered (msg 2005), awaiting their
+commit. Surface exhaustively dominated across ~22 probed angles; remaining non-wins are the
+documented walls (BLAS-Gram, forbid-unsafe, numpy-introsort-dup, view-dispatch, small-array).
