@@ -18150,9 +18150,26 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
         return Ok(a);
     }
 
-    // n==0 still delegates to NumPy's identity allocation. Powers >=2 keep the
-    // existing native multiply path.
+    // n==0 still delegates to NumPy's identity allocation.
     if power == 0 && is_exact_numpy_ndarray(py, a.bind(py))? {
+        return fallback();
+    }
+
+    // Native 2-D dense matrix_power runs fnp-linalg matmul_accumulate + an extract/build
+    // round-trip, which LOSES to numpy's BLAS at EVERY 2-D size (BlackThrush 2026-06-22,
+    // median-of-3: n=3 1.22x, 64 1.57x, 128 6.67x, 256 3.14x — native never wins). Delegate
+    // real 2-D square inputs to numpy (mirrors the det/inv/solve stale-cliff delegation,
+    // [[stale-cliff-gates-after-numpy-upgrade]]); batched (>=3-D) already delegates below
+    // (1.06x par). numpy.linalg.matrix_power is the exact reference, so parity is exact.
+    if power >= 2
+        && is_exact_numpy_ndarray(py, a.bind(py))?
+        && let Ok(shape) = a
+            .bind(py)
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+        && shape.len() == 2
+        && shape[0] == shape[1]
+    {
         return fallback();
     }
 
