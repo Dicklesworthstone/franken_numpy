@@ -7108,3 +7108,17 @@ to time cleanly (LAPACK x iters) but are gated/delegated -> parity by constructi
 (e43467c7) remains the ONLY real composite-tail miss this session; the rest is dominated/par/gated.
 Composite linalg surface now covered (matrix_power/matrix_rank/qr/pinv/svd/solve/det/slogdet/cond/
 norm/tensorinv/tensorsolve/kron/multi_dot/einsum-chains).
+
+## BlackThrush WIN: window fns serial gate (hanning/hamming/blackman/kaiser, 2026-06-22, f20df36e)
+9th win. Array-API/window-alias sweep found hanning/hamming/blackman/kaiser losing 5-11x at ~100K.
+ROOT CAUSE: rayon parallel cos/Bessel-i0 gate at 1<<16 (1<<14 kaiser) — the parallel path is a
+SWARM-CONTENTION LANDMINE (8-11x at 100K when 64 threads fight the swarm). SERIAL (RAYON=1, load-
+independent) is par-or-WIN at ALL sizes: cos-windows 0.80-1.06x (100K-4M), kaiser 0.56-0.79x — so
+parallelism gave ZERO benefit (serial already beats numpy) and only added the contention risk.
+Raised all four gates -> 1<<24 (serial for practical M). After: hanning/hamming/blackman 100K 9-11x
+->1.0-1.08x + 1M 0.79-0.87 WIN; kaiser ->~0.8. BIT-IDENTICAL (parallelism only, 0 mismatches),
+window conformance unaffected. LESSON (3rd instance, cf nanvar/cov gates): a rayon parallel gate
+tuned on a FREE box is a LANDMINE on a contended shared box — for one-time setup ops (windows) where
+serial already pars/wins, just keep serial. Build took 16min under swarm (65 rustc) contention.
+Composite/alias tail keeps yielding (matrix_power, now windows) — sweep aliases + setup-op generators,
+not just hot primitives.
