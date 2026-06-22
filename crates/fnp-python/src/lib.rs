@@ -24709,6 +24709,14 @@ fn corrcoef(
     // regardless of the (deprecated) bias/ddof args passed in.
     let x_bound = x.bind(py);
     let y_binding = y.as_ref().map(|value| value.bind(py));
+    // Non-f64 input (float32 ~4-7.7x, or int): the native cov+normalize cold path widens/extracts
+    // and never beats numpy.corrcoef; delegate (cov delegates non-f64 the same way -> parity). The
+    // f64 zero-copy Gram fast paths below stay.
+    if !numpy_dtype_is_f64(py, x_bound)
+        || y_binding.is_some_and(|y_val| !y_val.is_none() && !numpy_dtype_is_f64(py, y_val))
+    {
+        return fallback(py);
+    }
     // Fast path: rowvar=True with no y maps to the zero-copy parallel-Gram cov + an
     // in-place normalize, avoiding the cold-allocation UFuncArray chain (see cov).
     if rowvar
