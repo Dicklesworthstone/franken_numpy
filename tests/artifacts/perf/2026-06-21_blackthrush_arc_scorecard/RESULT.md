@@ -297,3 +297,12 @@ fill-not-fitting-T (2.5->int) delegates. conformance_ma_utils 24. GOTCHA: pyo3 F
 QUEUED: ma.argmax 3.33x (masked argmax - moderate, next). np.ma family otherwise dominated (compressed
 3b6a93c0, filled 9f5cb763 fixed; std/var/median/min/ptp/prod/cumsum/anom/average/power/abs win/parity;
 getmaskarray O(1) overhead-noise).
+
+## 2026-06-22: ma.argmax/argmin delegate (c920a6ec) - 3-3.5x non-f64 regression -> parity; np.ma sweep DONE
+ma.argmax/argmin native extract->masked.argmax widened non-f64 (i64 3.44x, f32 3.48x) + never beat
+numpy even for f64 (1.33x) = net regression. Delegated to numpy.ma.argmax/argmin -> parity all dtypes
+(0.98-1.0x). Bit-exact (axis/dtypes); conformance_ma_utils 24. NP.MA SWEEP COMPLETE: compressed
+(3b6a93c0 int 17.6x->parity, f64 density-gated keep sparse win) + filled (9f5cb763 int/f32 5-11x->
+0.03-0.8x WIN dtype-gap) WON; argmax/argmin -> parity (regression removed); std/var/median/min/ptp/
+prod/cumsum/anom/average/power/abs/getdata/count/sum/mean/masked_where/masked_invalid/nonzero win/
+parity; getmaskarray O(1) overhead-noise. np.ma family fully dominated. 52 wins + ma-argmax parity-fix.
