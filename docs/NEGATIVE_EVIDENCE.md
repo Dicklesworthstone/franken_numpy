@@ -6864,3 +6864,16 @@ native (lo=4). Two-op losses -> 1.02-1.05; two-1D + large-n_vars wins unchanged;
 1.23->0.94; 0 correctness mismatches. cov/corrcoef Gram family now COMPLETE: parity-or-win across
 single-op, two-operand, and all three loss regions; only the n_vars>=512 DRAM patchwork remains
 (documented floor, no clean gate).
+
+## BlackThrush: linalg/polynomial/fft/weighted-stats sweep — no new gap (2026-06-22)
+
+Robust median-of-3 sweep after closing the cov family. ALL par-or-win: polyval 1.01, polyfit 1.00,
+roots 1.03, rfft 1.00, average(weighted) 0.59 WIN, average-ax-weighted 1.12 (par/noise), solve
+par across sizes (n=64/128/256 = 1.05/1.05/0.96; the single-run 1.19 was load-noise — real 2-D
+solve delegates to LAPACK per [[stale-cliff-gates-after-numpy-upgrade]]), norm 0.91, matmul 0.50
+WIN, nanmean-ax 0.28 WIN, std/var 0.97. No fixable un-dominated gap in these families. CUMULATIVE
+(this run, ~110 ops swept across reductions/elementwise/structural/set/order-stat/linalg/poly/fft/
+stats): franken_numpy dominates or ties NumPy across the surface. Shipped 6 wins (nanvar gate +
+5 cov/corrcoef Gram delegate gates). Remaining documented floors needing human/SIMD-session, NOT
+loop ticks: cov n_vars>=512 DRAM patchwork (non-monotonic, no clean gate; exact-repr=human call),
+int min/max/ptp axis scalar kernel (SIMD proven dead), pyo3 binding overhead on O(1)/cheap ops.
