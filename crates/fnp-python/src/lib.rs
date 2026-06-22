@@ -15136,6 +15136,16 @@ fn flatnonzero(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 
 #[pyfunction]
 fn argwhere(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    let numpy = py.import("numpy")?;
+    // 1-D fast path: numpy.argwhere(1-D) = transpose(nonzero) (~a reshape, very fast),
+    // but the native coordinate-build path is ~8x slower for 1-D specifically (serial-
+    // confirmed, BlackThrush 2026-06-22) while it WINS for 2-D (0.28x). Delegate 1-D to
+    // numpy; keep native for >=2-D. (composite-op slow-1-D-case fix, cf matrix_power/ix_.)
+    if a.bind(py).is_exact_instance(&numpy.getattr("ndarray")?)
+        && a.bind(py).getattr("ndim")?.extract::<usize>()? == 1
+    {
+        return Ok(numpy.getattr("argwhere")?.call1((a.bind(py),))?.unbind());
+    }
     // Zero-copy coordinate scan off the borrowed buffer (C-contiguous numeric
     // ndarray) — byte-identical to numpy.argwhere; skips the extract+build copies.
     if let Some(out) = try_zerocopy_argwhere(py, a.bind(py))? {
