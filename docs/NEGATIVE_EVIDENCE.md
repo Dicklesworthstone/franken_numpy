@@ -7026,3 +7026,14 @@ itself warns on (minor). fnp-io adds NO fixable un-dominated gap. Surface now sw
 crates (fnp-python top-level + fnp-random + fnp-io); convergence holds — every residual is binding
 overhead (O(1)/small ops), load-noise (GEMM/Gram/batched at full threads), or a documented kernel/
 BLAS floor (cov dsyrk, batch-LU golden-locked). Sole lever = bead ...cblas-large-gram-lever-8lnzn.
+
+## BlackThrush NO-SHIP: batched-SIMD-SoA cholesky prototype 1.5-3x SLOWER (2026-06-22, reverted)
+Implemented + benched the bead-yvqk9 lever (batched-SIMD across matrices, SoA, Simd<f64,8> mul_add)
+vs scalar per-lane cholesky_nxn (release, warm target, isolated test file): 1.5-3x SLOWER, worsening
+with n (8:1.52, 16:1.79, 32:2.66, 48:2.87, 64:3.08). The scalar cholesky_nxn inner dot
+(cholesky_dot_add_ordered) is ALREADY LLVM-auto-vectorized on the k-axis -> batching across matrices
+just relocates the SIMD to the batch axis while ADDING SoA gather+scatter (n^2/block) -> net loss
+growing with n. Bonus finding: Simd mul_add != scalar mul+add bytes (Rust does NOT FMA-contract by
+default), so bit-exactness would've needed separate-add too. Prototype reverted (deleted test file),
+bead closed. DEFINITIVE: batch_cholesky kernel is already vectorized; NO pure-Rust lever exists; only
+C-BLAS dpotrf could help. The last candidate pure-Rust perf lever is now disproven by measurement.
