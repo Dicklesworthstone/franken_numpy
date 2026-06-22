@@ -315,3 +315,14 @@ was correct. YellowElk's alias-unify is a GENUINE ~2x perf fix (not just object-
 their WIP to land. LESSON (the real one): to test whether a loss is real vs a peer's in-tree fix,
 build HEAD-clean (git-show HEAD:file) EXCLUDING uncommitted peer WIP — don't measure on a tree
 that already contains someone's fix. (The divmod-.so 3.49x was also real, just an older build.)
+
+## SHIPPED 2026-06-21: narrow/uint-int bincount 3x loss -> parity (24f38d11); direct-read win queued
+bincount(i8/i16/i32/u8/u16/u32) lost ~3x (u8 3.01/i8 3.03/i16 2.93/u16 2.97; i64 control WINS
+0.18x) — the int64 zero-copy fast path gated kind==i && itemsize==8, so narrow/uint fell to the
+cold int->f64 extract (8x widen). FIX: astype(int64) once + reuse the i64 tally -> parity 0.91-
+1.05x (removes the loss; bit-exact incl minlength/empty/exceed). Common for image/byte histograms
+(u8). The astype 64MB widen-copy CAPS it at parity (like the remainder no-gain). QUEUED WIN: a
+direct narrow-buffer tally (generalize try_zerocopy_bincount over int type, read &[u8]/&[i16]/...
+cast to i64 in the max-scan + privatized count, no widen) -> ~0.18x WIN like i64. Moderate
+generic refactor; deferred (disk-conscious). LESSON: loss->parity (real improvement, ship it) is
+distinct from parity->parity (no-gain, revert) — the astype removes a genuine 3x loss.
