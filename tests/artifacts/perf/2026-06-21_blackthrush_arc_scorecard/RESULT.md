@@ -450,3 +450,14 @@ residual = scalar rem_euclid div vs numpy SIMD div, niche mode). Bit-exact (OOB/
 still ValueError on OOB. conformance_reshape_ravel 19. LEVER (kwarg-variant): a kwarg (mode=) can
 bypass a fast path gated on the default -> cold; extend the fast path to handle the kwarg variant.
 59 wins/fixes. (ix_ 2.7x was us-noise on 500-elem; dropped.)
+
+## 2026-06-22: frexp/modf f32 fast paths (22dfa155) - parity -> 0.09x/0.18x WIN (~11x/5.5x)
+2-output-ufunc-at-f32 scout: frexp/modf/divmod f32 were PARITY (numpy delegate) while f64 paths WIN
+(frexp 0.26x, divmod 0.07x). Extended frexp+modf to f32: try_zerocopy_f32_frexp (frexp_one(v as f64),
+mantissa->f32 cast = exact since f32 mantissa is f32-representable; exp int32), try_zerocopy_f32_modf
+(pure f32 trunc/frac). frexp f32 0.09x (~11x, BEATS f64 0.26x - memory-bound, half the bytes), modf
+f32 0.18x. Bit-exact incl inf/nan/0/neg; float32 preserved; conformance_frexp 9. 61 wins/fixes.
+NOTE: divmod f32 (14x potential, parity now) DEFERRED - f32 arithmetic (floor-div+remainder+sign
+adjust) has f32-rounding bit-exactness RISK (unlike frexp/modf which are extraction/trunc = exact);
+verify the f32 remainder formula matches numpy f32 before extending. LEVER: parity-missed-win = extend
+a proven f64 win to f32 when bit-exact (extraction/element-wise safe; arithmetic-with-rounding = verify).
