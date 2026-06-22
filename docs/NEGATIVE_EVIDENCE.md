@@ -4,6 +4,48 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-22 - KEEP: nanargmax/nanargmin flat parallel gate 1<<21 -> 1<<18 (1.5-2x loss -> WIN)
+
+`YellowElk` (claude-code/opus). Disk-frugal BOLD-VERIFY using the warm
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc` root (no new
+target/worktree dirs; incremental `fnp-python` rebuild, 1m39s; disk ~57G held).
+
+Medium-N flat reduction sweep caught `np.nanargmax`/`np.nanargmin` (axis=None,
+f64/f32 C-contiguous) losing **1.5-2x** across the 2^18..2^21 band. Root cause:
+`try_zerocopy_f64_nanargextreme` (and its f32 twin) gated the zero-copy parallel
+single-pass scan at `NANARG_PARALLEL_MIN = 1 << 21`. Below the gate the f64 path
+returned `Ok(None)`, which fell through NOT to numpy but to
+`extract_numeric_array` + native `UFuncArray::nanargmax` (a full copy + scalar
+serial scan) — slower than numpy's own `nanargmax`. numpy's nanargmax is a
+two-pass copy-replace-NaN + argmax that thrashes cache as N grows, so a
+single-pass rayon scan over the borrowed buffer beats it decisively once N is
+large enough to amortize fan-out. Measured crossover is ~`1 << 18`.
+
+Fix: lower both `NANARG_PARALLEL_MIN` constants to `1 << 18`. No other logic
+changed; indices are bit-identical (strict-better combine = numpy
+first-occurrence among non-NaN).
+
+Same-box A/B (OMP/OPENBLAS=1, median of timed runs, `.probe/fnp_python.so`):
+
+| N | op | before fnp/np | after fnp/np |
+|---|---|---:|---:|
+| 2^18 | nanargmax | 1.97x | **0.70x** |
+| 2^18 | nanargmin | 1.58x | **0.57x** |
+| 2^20 | nanargmax | 1.54x | **0.19x** |
+| 2^20 | nanargmin | 1.57x | **0.41x** |
+| 2^22 | nanargmax | 0.02x | 0.03x (preserved) |
+
+Below the gate (2^16-2^17, sub-60us absolute) the native path is unchanged and
+still ~1.4x; left alone (rayon fan-out doesn't amortize there, and chasing it
+risks boundary regressions for no real-world payoff).
+
+Validation:
+- Correctness: 117 differential checks vs numpy (flat 1..2^20+3, f64/f32, NaN
+  fractions 0/0.01/0.5, ties, all-NaN ValueError parity, 2-D axes 0/1/-1/None,
+  non-contiguous transposed, integer dtype) — **0 fails**, indices bit-identical.
+- No regression: `scripts/perf_gap_sweep_vs_numpy.py` → 0 LOSS rows.
+- Build clean (3 pre-existing unrelated dead-code warnings only).
+
 ## 2026-06-21 - KEEP: Python-surface diagonal eigvalsh selected-triangle fast path
 
 `YellowElk`/`cod-b`, parent `franken_numpy-ixs5y`. Disk-frugal BOLD-VERIFY pass

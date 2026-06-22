@@ -27025,7 +27025,11 @@ fn try_zerocopy_f64_nanargextreme(
         return Ok(None);
     };
     let n = cells.len();
-    const NANARG_PARALLEL_MIN: usize = 1 << 21;
+    // numpy's nanargmax/min is a two-pass copy-replace-NaN + argmax that thrashes cache at
+    // large N; a single-pass parallel scan over the borrowed buffer wins decisively. The
+    // crossover where rayon fan-out beats numpy is ~1<<18 (the old 1<<21 gate left the whole
+    // 2^18..2^21 band on the slow native extract path, 1.5-2x slower than numpy).
+    const NANARG_PARALLEL_MIN: usize = 1 << 18;
     if n < NANARG_PARALLEL_MIN || rayon::current_num_threads() < 2 {
         return Ok(None);
     }
@@ -27116,7 +27120,8 @@ fn try_zerocopy_f32_nanargextreme(
             *best = Some((idx, v));
         }
     };
-    const NANARG_PARALLEL_MIN: usize = 1 << 21;
+    // Mirror the f64 gate: parallel single-pass beats numpy's copy+argmax from ~1<<18 up.
+    const NANARG_PARALLEL_MIN: usize = 1 << 18;
     let best = if n >= NANARG_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
         let chunk = n.div_ceil(rayon::current_num_threads());
