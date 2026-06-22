@@ -39892,6 +39892,100 @@ fn try_zerocopy_f64_kron2d(
     Ok(Some(out.unbind()))
 }
 
+// Generic-dtype 2-D Kronecker product (block-fill), the typed counterpart of try_zerocopy_f64_kron2d
+// for the dtypes the f64 helper leaves to the cold extract path (~6-36x for f32/int). Element-wise
+// block products out[(i*bm+k), (j*bn+l)] = a[i,j]*b[k,l] -> NO accumulation -> bit-identical to numpy
+// (integer wraps via wrapping_mul). C-contiguous 2-D operands of one shared dtype.
+fn kron2d_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T, T) -> T>(
+    py: Python<'py>,
+    numpy: &Bound<'py, PyModule>,
+    a: &Bound<'py, PyAny>,
+    b: &Bound<'py, PyAny>,
+    dtype_name: &str,
+    mul: F,
+) -> PyResult<Option<Py<PyAny>>> {
+    let (Ok(a_buffer), Ok(b_buffer)) = (PyBuffer::<T>::get(a), PyBuffer::<T>::get(b)) else {
+        return Ok(None);
+    };
+    if a_buffer.shape().len() != 2
+        || b_buffer.shape().len() != 2
+        || !a_buffer.is_c_contiguous()
+        || !b_buffer.is_c_contiguous()
+    {
+        return Ok(None);
+    }
+    let (am, an) = (a_buffer.shape()[0], a_buffer.shape()[1]);
+    let (bm, bn) = (b_buffer.shape()[0], b_buffer.shape()[1]);
+    let (Some(a_in), Some(b_in)) = (a_buffer.as_slice(py), b_buffer.as_slice(py)) else {
+        return Ok(None);
+    };
+    let out_rows = am * bm;
+    let out_cols = an * bn;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_name)?;
+    let out = numpy.call_method("empty", ((out_rows, out_cols),), Some(&kwargs))?;
+    let total = out_rows * out_cols;
+    if total > 0 {
+        let Ok(out_buffer) = PyBuffer::<T>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let bvals: Vec<T> = b_in.iter().map(|c| c.get()).collect();
+        for i in 0..am {
+            for j in 0..an {
+                let ai = a_in[i * an + j].get();
+                let col0 = j * bn;
+                for k in 0..bm {
+                    let out_base = (i * bm + k) * out_cols + col0;
+                    let b_row = &bvals[k * bn..k * bn + bn];
+                    let out_row = &output[out_base..out_base + bn];
+                    for (o, &bv) in out_row.iter().zip(b_row.iter()) {
+                        o.set(mul(ai, bv));
+                    }
+                }
+            }
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
+// Dispatch 2-D kron for f32 / integer dtypes (f64 handled by try_zerocopy_f64_kron2d). Requires a
+// and b to share one C-contiguous dtype; mismatched dtypes / other kinds fall through to numpy.
+fn try_zerocopy_typed_kron2d(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let a_dtype = a.getattr("dtype")?;
+    let b_dtype = b.getattr("dtype")?;
+    let kind = a_dtype.getattr("kind")?.extract::<String>()?;
+    let itemsize = a_dtype.getattr("itemsize")?.extract::<usize>()?;
+    if kind != b_dtype.getattr("kind")?.extract::<String>()?
+        || itemsize != b_dtype.getattr("itemsize")?.extract::<usize>()?
+    {
+        return Ok(None);
+    }
+    match (kind.as_str(), itemsize) {
+        ("f", 4) => kron2d_typed::<f32, _>(py, &numpy, a, b, "float32", |x, y| x * y),
+        ("i", 8) => kron2d_typed::<i64, _>(py, &numpy, a, b, "int64", |x, y| x.wrapping_mul(y)),
+        ("i", 4) => kron2d_typed::<i32, _>(py, &numpy, a, b, "int32", |x, y| x.wrapping_mul(y)),
+        ("i", 2) => kron2d_typed::<i16, _>(py, &numpy, a, b, "int16", |x, y| x.wrapping_mul(y)),
+        ("i", 1) => kron2d_typed::<i8, _>(py, &numpy, a, b, "int8", |x, y| x.wrapping_mul(y)),
+        ("u", 8) => kron2d_typed::<u64, _>(py, &numpy, a, b, "uint64", |x, y| x.wrapping_mul(y)),
+        ("u", 4) => kron2d_typed::<u32, _>(py, &numpy, a, b, "uint32", |x, y| x.wrapping_mul(y)),
+        ("u", 2) => kron2d_typed::<u16, _>(py, &numpy, a, b, "uint16", |x, y| x.wrapping_mul(y)),
+        ("u", 1) => kron2d_typed::<u8, _>(py, &numpy, a, b, "uint8", |x, y| x.wrapping_mul(y)),
+        _ => Ok(None),
+    }
+}
+
 // Generic zero-copy 1-D Kronecker product (= flattened outer) for one integer
 // dtype: out[i*m + j] = a[i] * b[j], length n*m, 1-D. numpy.kron of two 1-D
 // arrays returns a 1-D array; integer multiply wraps silently for ndarray ops so
@@ -39998,6 +40092,11 @@ fn kron(py: Python<'_>, a: Py<PyAny>, b: Py<PyAny>) -> PyResult<Py<PyAny>> {
     // SIMD block-fill 2-D f64 Kronecker product (~7x faster than the cold extract
     // + native build); other ndims/dtypes fall through.
     if let Some(result) = try_zerocopy_f64_kron2d(py, a.bind(py), b.bind(py))? {
+        return Ok(result);
+    }
+    // f32 / integer 2-D Kronecker product (the f64 path above is f64-only; f32/int otherwise hit the
+    // cold extract ~6-36x). Element-wise block products, bit-identical to numpy.
+    if let Some(result) = try_zerocopy_typed_kron2d(py, a.bind(py), b.bind(py))? {
         return Ok(result);
     }
 
