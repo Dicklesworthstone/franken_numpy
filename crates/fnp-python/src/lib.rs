@@ -36828,6 +36828,23 @@ fn average(
     returned: bool,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
+    // Flat (axis=None) no-weights average == mean. numpy.average routes to
+    // numpy.mean, whose SIMD pairwise sum is FASTER than our native
+    // pairwise_simd_f64 (which only ever beat the COLD extract path, never numpy) —
+    // so delegating straight to numpy is parity, while the old code ran two
+    // np.asarray dtype probes and then the slower native kernel (~1.55x). Delegate
+    // up front for every dtype; weighted and per-axis cases keep their native wins.
+    if !keepdims
+        && !returned
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && weights.as_ref().is_none_or(|w| w.bind(py).is_none())
+    {
+        return Ok(py
+            .import("numpy")?
+            .getattr("average")?
+            .call1((a.bind(py),))?
+            .unbind());
+    }
     let numpy = py.import("numpy")?;
     let avg_fn = numpy.getattr("average")?;
     let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));

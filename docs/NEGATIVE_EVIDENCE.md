@@ -6565,3 +6565,20 @@ kill a catastrophe). LEVER: a float-only zero-copy fast path leaves INTEGER/BOOL
 widen extract; for predicates whose answer is a dtype-CONSTANT on integral input (isnan/isinf/
 isfinite family), short-circuit to zeros/ones — no widen, no kernel. Grep float-gated fast paths for
 the integer/bool fall-through.
+
+---
+
+## BlackThrush: np.average no-weights flat -> delegate (1.55x loss -> parity, 2026-06-22)
+
+np.average(x) with no weights/axis (the common "mean" idiom) was 1.55x slower than numpy: the native
+path ran two np.asarray dtype probes (native_f64_reduction_preserves_dtype + numpy_dtype_is_f64) THEN
+fnp's pairwise_simd_f64. KEY FINDING: fnp.mean is a PURE PASSTHROUGH to numpy.mean, and numpy's SIMD
+pairwise sum is FASTER than fnp's pairwise_simd_f64 — so the native flat average path only ever beat
+the COLD extract, never numpy itself (1.2-1.4x slower than numpy even after I removed the probes).
+FIX: delegate the flat no-weights case straight to numpy.average up front (all dtypes). 1.55x -> 1.007x
+parity at 1M+10M. Weighted (0.65x) and per-axis native paths KEPT (those genuinely win). 6/6 average
+conformance PASS (golden sha256 axis paths untouched; empty->nan parity; zero-sum-weights ZeroDivision).
+LEVER: a native reduction "fast path" justified only against the COLD extract can still LOSE to numpy's
+own optimized kernel — benchmark the fast path vs NUMPY (not vs the cold path) before trusting it;
+delegate when numpy's kernel (here pairwise mean) wins. fnp's pairwise_simd_f64 < numpy pairwise for
+flat f64 sum (sum/mean already delegate; average was the straggler).
