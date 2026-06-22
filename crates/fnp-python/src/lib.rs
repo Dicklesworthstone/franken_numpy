@@ -26812,7 +26812,10 @@ fn try_zerocopy_f64_nanvar_axis(
         Some(if take_sqrt { var.sqrt() } else { var })
     };
     use rayon::prelude::*;
-    const NANVAR_AXIS_PARALLEL_MIN: usize = 1 << 16;
+    // Measured crossover (BlackThrush, 64-thread): per-lane nansum+sqr-dev is cheap, so
+    // rayon fan-out only pays off above ~1e5 total elements. The old 1<<16 (65536) gate sent
+    // the 256x256/288x288 bands to parallel where they ran ~1.2-1.5x SLOWER than serial.
+    const NANVAR_AXIS_PARALLEL_MIN: usize = 98_304;
     let parallel =
         outer * axis_len >= NANVAR_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
     let results: Vec<Option<f64>> = if parallel {
