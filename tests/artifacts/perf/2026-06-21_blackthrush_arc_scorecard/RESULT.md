@@ -267,3 +267,12 @@ CHAR WIN-VEIN FULLY RESOLVED: WON = swapcase/capitalize/title (Python-slow case 
 count/isX/zfill. Output-complex skip = split/join/encode/partition. char family = DONE.
 NOTE: build emitted 4 warnings (was 3) - likely a minor rustc style warning in new translate code;
 check on next clippy pass (build green, conformance green, win verified - not blocking).
+
+## 2026-06-22: strings.translate WIN (1d2edb67) - missed twin, parity->0.02x (50x) + warning fixed
+Caught a missed twin: np.strings.translate (270ns Python) was getting numpy copied-attr (1.07x) - I'd
+only added char.translate. Added strings_translate_native (same helper, namespace arg) -> 0.02x (50x).
+char.translate unchanged. conformance strings 9. ALSO fixed the rustc warning I introduced last commit:
+table.downcast::<PyDict> -> table.cast (deprecated downcast -> Bound::cast); 0 remaining (back to 3
+pre-existing fnp-python warnings). LESSON: fast-path BOTH char.X AND strings.X (numpy 2.x has both
+namespaces, both Python-slow for the won ops). char/strings WIN FAMILY COMPLETE + SYMMETRIC: swapcase/
+capitalize/title/translate all have char.X + strings.X fast paths. 50 wins total this arc.
