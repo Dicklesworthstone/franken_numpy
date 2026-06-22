@@ -316,3 +316,12 @@ PRE-EXISTING (NOT mine): conformance_statistics "cov y ddof" 1-ULP FAIL (cov([1,
 = 1.5555...554 vs numpy ...556, numpy-BLAS FMA reassociation) - documented RED on HEAD; cov path,
 unrelated to my corrcoef diff (proven: diff touches no fn cov/native_cov). 28/29 pass. conformance
 otherwise green. QUEUED: percentile/median int 1.65-1.84x (mild, next). 53 fixes.
+
+## 2026-06-22: average non-f64 delegate (f73dad86) - int 5.4x/bool 6.4x/int+wt 5.3x -> parity
+np.average int/bool data (or non-f64 weights) is f64-preserving (passed dtype checks) but the f64
+fast path is f64-buffer-only -> cold extract (~5-6.4x). Added non-f64 (data|weights) -> numpy.average
+delegate. int 0.96x, bool 1.0x, int+wt 0.91x; f64+f64wt 0.86x (fast path kept). allclose + returned/
+axis verified. conformance_statistics 28/29 (1 fail = pre-existing cov-y-ddof 1-ULP). 55 fixes.
+STATS-FAMILY dtype-gap sweep DONE: corrcoef-f32 (a8fd0bea), median/pct/quant-int (1a82738a), average
+int/bool (f73dad86) all -> parity; std/var/mean/sum/cumsum/ptp/nanmean/nanstd-int win/parity. The
+"delegate non-f64 when native widens + never beats numpy" lever applied across stats. f64 wins kept.
