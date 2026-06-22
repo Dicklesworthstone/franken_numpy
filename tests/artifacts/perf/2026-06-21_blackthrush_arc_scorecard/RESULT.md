@@ -482,3 +482,13 @@ path -> ~1.5x (Gram floor) instead of 4.8-6.8x (3-4x improvement; allclose, corr
 Same likely applies to cov(rowvar=False) - check. f32/int rowvar=False already delegate (a8fd0bea).
 PHANTOM (dropped): bincount minlength=1M single-run 1.7x -> min-of-3 0.86-0.99x WIN/parity (the large-
 minlength serial-count path is fine). histogramdd-3d 0.3x WIN, histogram2d-wt parity, cov-ddof0 1.31x mild.
+
+## 2026-06-22: cov/corrcoef rowvar=False delegate (1946bcea) - 4.8-10.4x -> parity
+Queued corrcoef rowvar=False (4.8-6.8x) + found cov rowvar=False (10.4x). Both: 2-D column-variable
+form skips the rowvar=True fast Gram -> native cold path (column access + no-C-BLAS Gram). TRIED
+transpose route (ascontiguousarray(M.T) + rowvar=True Gram) -> DISPROVEN (4.68x; the strided 4MB
+transpose-copy negated the Gram benefit). PIVOTED to delegate 2-D no-y rowvar=False -> numpy (numpy
+is the 1.0x baseline; native was the loss). corrcoef 6.76x->0.8x, cov 10.4x->1.0x. allclose; rowvar=
+True fast Gram + two-operand 1-D (cov(a,b,rowvar=F)) preserved. conformance_statistics 28/29 (1 =
+pre-existing cov-y-ddof 1-ULP FMA). 63 wins/fixes. LESSON: transpose-to-reuse-rowvar=True is copy-
+bound (cf astype-widen); delegate-when-native-loses is the clean parity fix.
