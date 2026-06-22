@@ -19400,6 +19400,16 @@ fn signbit_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
             // int/uint canonicalize lossy; non-contiguous bails the fast path into the
             // transpose-copy extract (~55x slower). Delegate both to numpy.
             let c_contiguous = x.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()?;
+            // unsigned / bool can never be negative -> signbit is identically False;
+            // return np.zeros(bool) in memset time. bool otherwise hit the cold f64
+            // widen extract (~19ms/1M); uint went to numpy. (signed int is NOT
+            // constant -> keep delegating.)
+            if c_contiguous
+                && (kind == "u" || kind == "b")
+                && let Some(out) = try_const_bool_integral(py, x, false)?
+            {
+                return Ok(out);
+            }
             if kind == "i" || kind == "u" || !c_contiguous {
                 return Ok(numpy.getattr("signbit")?.call1((x,))?.unbind());
             }

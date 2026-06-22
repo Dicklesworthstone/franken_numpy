@@ -6582,3 +6582,15 @@ LEVER: a native reduction "fast path" justified only against the COLD extract ca
 own optimized kernel — benchmark the fast path vs NUMPY (not vs the cold path) before trusting it;
 delegate when numpy's kernel (here pairwise mean) wins. fnp's pairwise_simd_f64 < numpy pairwise for
 flat f64 sum (sum/mean already delegate; average was the straggler).
+
+---
+
+## BlackThrush WIN: signbit(bool/uint) -> constant False (2026-06-22, bool 19ms->0.02ms, 200x)
+
+signbit_native already delegated signed-int/uint to numpy but BOOL fell through to the cold f64-widen
+extract (~19ms/1M). signbit is identically False for unsigned AND bool (never negative). Routed
+c-contiguous uint/bool to try_const_bool_integral -> np.zeros(bool) (memset). bool 0.005x (200x;
+numpy itself is 6.8ms slow on bool!), uint32 0.054x (18x). Signed int stays delegated (NOT constant:
+signbit(i)=x<0). 9/9 differential (bool/u8/u32/i32/i64/f64/f32 + 2-D bool + non-contig) + 2 signbit
+conformance PASS. Same lever as the is*-predicate class: float-only fast path leaves bool on the cold
+widen; a dtype-CONSTANT answer (unsigned/bool can't be negative) short-circuits to zeros.
