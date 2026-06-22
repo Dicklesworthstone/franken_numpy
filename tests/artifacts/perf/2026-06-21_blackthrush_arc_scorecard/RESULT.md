@@ -344,3 +344,14 @@ Build-free win-vein scout found 2 big dtype-gap LOSSES (fix when disk recovers):
   f64 fast path - extend to f32 (typed, WIN like f64) if mechanical, else delegate f32 (parity).
 OTHER (fine): histogram/bincount weighted f64/f32 parity, histogram2d 0.15x WIN, digitize-f32 0.76x,
 searchsorted-f32 0.57x WIN, unique-f32 parity. RE-VERIFY min-of-3 before fixing (these are min-of-2).
+
+## 2026-06-22 (build-free, REFINED queue): outer/kron-f32 = EXTEND-WIN (not delegate) + trace-f32 4x
+Broadened scout: outer-f64 WINS 0.26-0.46x (NOT parity - memory note was size-dependent), kron-f64
+WINS 0.28-0.38x, outer-int 0.53x, kron-int 0.35x WIN, outer-complex parity, tensordot-f32 1.2x mild.
+REVISED FIX (vs prior "delegate"): outer-f32 (45x) + kron-f32 (20x) -> EXTEND the f64 fast path to
+f32 typed = WIN ~0.26x (NOT delegate-parity, since f64 WINS). SAFE: outer/kron are ELEMENT-WISE
+PRODUCTS (a[:,None]*b[None,:] / Kronecker) - NO accumulation -> bit-exact f32 (unlike convolve which
+accumulates). So f32 typed extension is bit-exact + wins. HIGH VALUE (outer common in linalg).
+NEW: trace-f32 3.97-4.37x LOSS -> trace = sum(diagonal) ACCUMULATES -> f32 sum bit-exactness needs
+check (small diagonals likely OK; numpy trace-f32 sums in f32); extend-or-delegate. QUEUE (disk
+recovery, re-verify min-of-3): outer-f32 + kron-f32 (extend, safe element-wise WIN) > trace-f32 (verify).
