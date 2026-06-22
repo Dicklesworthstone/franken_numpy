@@ -44036,6 +44036,78 @@ fn try_zerocopy_int_argextreme_axis(
     }
 }
 
+// Flat argmax/argmin for a bool ndarray (axis=None). numpy short-circuits at the first True
+// (argmax) / first False (argmin) — the very common `np.argmax(cond)` find-first-True idiom — so
+// it's ~instant when the target is near the start. fnp's bool input missed the int/f64 fast paths
+// and fell to the cold bool->f64 extract + scalar scan (~40ms for 8M, ~36000x). Here we scan the
+// bool buffer as u64 words: skip all-False words (argmax) / all-True words (argmin), then locate
+// the first hit byte. Bit-identical index to numpy (first occurrence of the max/min; 0 if none).
+fn try_zerocopy_bool_argextreme_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis_val: Option<isize>,
+    want_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if axis_val.is_some() {
+        return Ok(None);
+    }
+    let numpy = py.import("numpy")?;
+    let ndarray_t = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_t)
+        || a.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b"
+        || !a
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let view = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let Ok(buf) = PyBuffer::<u8>::get(&view) else {
+        return Ok(None);
+    };
+    let Some(cells) = buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n == 0 {
+        return Ok(None); // numpy raises on empty argmax/argmin; defer
+    }
+    // SAFETY: ReadOnlyCell<u8> is repr(transparent) over u8; read-only under the GIL.
+    let bytes: &[u8] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), n) };
+    // canonical bool bytes are 0x00/0x01: all-False word = 0, all-True word = 0x0101..01.
+    let skip_word: u64 = if want_max { 0 } else { 0x0101_0101_0101_0101 };
+    let hit = |b: u8| if want_max { b != 0 } else { b == 0 };
+    let mut idx = 0usize; // all-skip (all-False for max / all-True for min) -> index 0
+    let mut done = false;
+    let mut i = 0usize;
+    while i + 8 <= n {
+        let w = u64::from_ne_bytes(bytes[i..i + 8].try_into().unwrap());
+        if w != skip_word {
+            for j in 0..8 {
+                if hit(bytes[i + j]) {
+                    idx = i + j;
+                    done = true;
+                    break;
+                }
+            }
+            if done {
+                break;
+            }
+        }
+        i += 8;
+    }
+    if !done {
+        for (k, &b) in bytes.iter().enumerate().take(n).skip(i) {
+            if hit(b) {
+                idx = k;
+                break;
+            }
+        }
+    }
+    Ok(Some(numpy.getattr("intp")?.call1((idx,))?.unbind()))
+}
+
 // Arg reductions
 // Native Rust argmax with fallback for unsupported parameters.
 #[pyfunction]
@@ -44107,6 +44179,11 @@ fn argmax(
     // Single-pass SIMD f64 fast path (axis=None): ~5-13x faster than the cold
     // extract_precise → reduce_argmax scalar scan (NaN arrays defer to numpy).
     if let Some(out) = try_zerocopy_f64_argextreme(py, a.bind(py), axis_val, true)? {
+        return Ok(out);
+    }
+    // Flat bool argmax (np.argmax(cond) find-first-True): bool missed the int/f64 paths and fell
+    // to the cold bool->f64 extract (~36000x). Short-circuit u64-word scan for the first True.
+    if let Some(out) = try_zerocopy_bool_argextreme_flat(py, a.bind(py), axis_val, true)? {
         return Ok(out);
     }
     // Narrow ints (1/2-byte) along an axis: numpy's SIMD argmax (16-64 lanes per
@@ -44247,6 +44324,11 @@ fn argmin(
     // Single-pass SIMD f64 fast path (axis=None): ~5-13x faster than the cold
     // extract_precise → reduce_argmin scalar scan (NaN arrays defer to numpy).
     if let Some(out) = try_zerocopy_f64_argextreme(py, a.bind(py), axis_val, false)? {
+        return Ok(out);
+    }
+    // Flat bool argmin (find-first-False): same cold-extract gap as argmax; short-circuit
+    // u64-word scan skipping all-True words for the first False.
+    if let Some(out) = try_zerocopy_bool_argextreme_flat(py, a.bind(py), axis_val, false)? {
         return Ok(out);
     }
     // Narrow ints (1/2-byte) along an axis: numpy's SIMD argmin beats the scalar
