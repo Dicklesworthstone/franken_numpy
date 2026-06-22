@@ -7271,3 +7271,13 @@ numpy ufunc); divide!=true_divide because divide is the re-exported numpy ufunc,
 Removed orphaned f64_ndarray_contains_zero (warning-clean). LESSON: persistence past 16 zero-hit
 sweeps still found a real 5-9x alias-bug on a VERY common op (a/b); and `f.X is <ufunc>` vs `<built-in
 function>` tells you which ops are numpy-reexports (fast) vs fnp-native (audit those for alias drift).
+
+## BlackThrush WIN: ix_ delegate to numpy (2026-06-22, abeecdaa) — 12th win, CATASTROPHIC O(N)->O(1)
+Index-generator sweep found np.ix_ scaling O(N): fnp 11us/76us/4333us at N=100/5K/100K vs numpy FLAT
+1.7us = 6.7x/32x/2530x! VERIFY-discipline caught it: looked like small-op binding floor (2.77x at
+N=500) but scaling check revealed O(N) materialization. ROOT: native cold-extracted operands +
+UFuncArray::ix_ materialized; numpy.ix_ just reshapes each 1-D input to its broadcast axis (O(1)
+view). Delegate -> flat 1.21x (binding floor). 0 mismatches (2/3-arg/bool/dtypes). LESSON: a 2-3x
+flag on a "tiny" op can hide O(N) scaling -> ALWAYS scaling-check before dismissing as binding floor
+(this + iscomplexobj show the discriminator: flat-ratio+tiny-abs=floor, growing-ratio=structural bug).
+12 wins total; ix_ found after ~12 zero-hit sweeps -> the composite/index-gen tail STILL yields.
