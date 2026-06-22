@@ -6978,3 +6978,20 @@ ordering) BUT NaT-RISKY: numpy sorts NaT LAST while NaT's int64 = i64::MIN sorts
 i64 binary search is WRONG for any haystack containing NaT, and detecting NaT cheaply is impossible
 (O(n) scan defeats O(log n)). Gain is also marginal (~1us scalar op). DEFERRED (correctness hazard
 > tiny gain). All datetime ops verified correct + non-crashing. No clean high-value fixable gap.
+
+## BlackThrush: convergence + GEMM/Gram load-noise confirmation (2026-06-22, full benches)
+
+Disk recovered (295G), full per-crate benches allowed. Swept char/structured/pad/gradient/cross/
+correlate/percentile/lstsq/bincount/convolve-long/diff-n/bool-axis/cumsum-strided/fft-nonpow2/
+histogram2d (~25 more ops; cumulative ~140 this session). ALL par-or-win: char.upper/lower 0.09,
+convolve-long 0.14-0.27, cumsum/cumprod strided 0.21-0.29, histogram2d 0.18, percentile/quantile
+multiq 0.43, bincount 0.52, gradient 0.05, correlate 0.04, interp 0.02; diff-n/bool-axis/fft-nonpow2
+/struct par. KEY: the einsum 'ij,jk->ik' matmul-pattern "2.44x loss" earlier was LOAD NOISE — with
+full benches it WINS 0.16-0.81x (n=128 1.10); f.matmul itself swings 0.50<->2.70x and batched-inv
+0.43<->1.94x between runs (GEMM/Gram/batched ops contend with the 64-thread swarm). So ALL remaining
+apparent losses are EITHER load-noise (GEMM/Gram/batched — not real, unfixable by code) OR documented
+floors (binding overhead on O(1)/cheap ops; BLAS-dsyrk large Gram; batch-LU kernel; compress
+compaction). CONVERGED on the reachable surface. Filed strategic lever bead deadlock-audit-cblas-
+large-gram-lever-8lnzn (C-BLAS opt-in vs fast-math SIMD vs accept-floor = PROJECT/HUMAN decision).
+LESSON: on a contended 64-thread box, GEMM/Gram/batched ratios are unreliable; only serial RAYON=1
+A/B exposes their true (kernel-floor) state, and those floors need C-BLAS or non-bit-exact fast-math.
