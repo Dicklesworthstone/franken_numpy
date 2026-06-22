@@ -23990,6 +23990,9 @@ fn median(
         || overwrite_input
         || keepdims
         || numpy_dtype_is_narrow_float(py, a.bind(py))
+        // Integer input widens int->f64 in extract (~2x at 1M; parity at 8M) and never beats numpy
+        // median; delegate (the f64 native path keeps its 0.5x win).
+        || numpy_dtype_is_integer(py, a.bind(py))?
     {
         return fallback();
     }
@@ -27287,6 +27290,9 @@ fn percentile(
         || weights.is_some()
         || numpy_dtype_is_narrow_float(py, a.bind(py))
         || numpy_dtype_is_bool(py, a.bind(py))
+        // Integer input widens int->f64 in extract (~1.9x at 1M; parity at 8M) and never beats
+        // numpy percentile/quantile; delegate (the f64 native path keeps its win).
+        || numpy_dtype_is_integer(py, a.bind(py))?
     {
         return fallback();
     }
@@ -38413,6 +38419,9 @@ fn quantile(
         || weights.is_some()
         || numpy_dtype_is_narrow_float(py, a.bind(py))
         || numpy_dtype_is_bool(py, a.bind(py))
+        // Integer input widens int->f64 in extract (~1.9x at 1M; parity at 8M) and never beats
+        // numpy percentile/quantile; delegate (the f64 native path keeps its win).
+        || numpy_dtype_is_integer(py, a.bind(py))?
     {
         return fallback();
     }
