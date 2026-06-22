@@ -44112,7 +44112,7 @@ fn try_zerocopy_int_argextreme_axis(
     }
     let dtype = a.getattr("dtype")?;
     let kind = dtype.getattr("kind")?.extract::<String>()?;
-    if kind != "i" && kind != "u" {
+    if kind != "i" && kind != "u" && kind != "b" {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
@@ -44126,6 +44126,12 @@ fn try_zerocopy_int_argextreme_axis(
     }
     let k = norm as usize;
     let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if kind == "b" {
+        // bool as uint8: argmax/argmin(u8 0/1) per inner = first True / first False, matching
+        // numpy bool semantics. Reuse the u8 typed path on a uint8 view (no bool->f64 widen).
+        let view = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+        return argextreme_axis_int_typed::<u8>(py, &numpy, &view, &shape, k, take_max);
+    }
     match (kind.as_str(), itemsize) {
         ("i", 1) => argextreme_axis_int_typed::<i8>(py, &numpy, a, &shape, k, take_max),
         ("i", 2) => argextreme_axis_int_typed::<i16>(py, &numpy, a, &shape, k, take_max),
