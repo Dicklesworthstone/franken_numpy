@@ -46947,6 +46947,7 @@ fn divmod(py: Python<'_>, x1: Py<PyAny>, x2: Py<PyAny>) -> PyResult<Py<PyAny>> {
 }
 
 // `mod` is a reserved word in Rust — use py_mod with name override.
+#[allow(dead_code)]
 #[pyfunction]
 #[pyo3(name = "mod", signature = (*args, **kwargs))]
 fn py_mod(
@@ -50590,16 +50591,14 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?;
     m.add_function(wrap_pyfunction!(float_power, m)?)?;
     m.add_function(wrap_pyfunction!(divmod, m)?)?;
-    m.add_function(wrap_pyfunction!(py_mod, m)?)?;
-    m.add(
-        "remainder",
-        Py::new(
-            py,
-            PyUFunc {
-                kind: UFuncKind::Remainder,
-            },
-        )?,
+    let remainder_ufunc = Py::new(
+        py,
+        PyUFunc {
+            kind: UFuncKind::Remainder,
+        },
     )?;
+    m.add("mod", remainder_ufunc.clone_ref(py))?;
+    m.add("remainder", remainder_ufunc)?;
     m.add_function(wrap_pyfunction!(isnat, m)?)?;
     m.add_function(wrap_pyfunction!(ptp, m)?)?;
     m.add_function(wrap_pyfunction!(vecmat, m)?)?;
@@ -58697,6 +58696,10 @@ mod tests {
                 let ok: bool = array_equal.call1((&ours, &theirs))?.extract()?;
                 assert!(ok, "{name} passthrough diverged from numpy");
             }
+            assert!(
+                module.getattr("mod")?.is(&module.getattr("remainder")?),
+                "mod and remainder must share one ufunc object like numpy"
+            );
 
             // Unary: logical_not, bitwise_not, bitwise_invert, bitwise_count.
             for name in [

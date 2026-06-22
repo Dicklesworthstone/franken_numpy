@@ -182,6 +182,62 @@ fn bench_narrow_int_unary_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_remainder_mod_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_remainder_mod_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_mod = module.getattr("mod").expect("fnp_python.mod");
+        let fnp_remainder = module.getattr("remainder").expect("fnp_python.remainder");
+        let numpy_remainder = numpy.getattr("remainder").expect("numpy.remainder");
+
+        for (label, len) in [("1m", 1_000_000_usize), ("8m", 8_000_000_usize)] {
+            let x1 = numpy
+                .call_method1("linspace", (-1_000_000.0_f64, 1_000_000.0_f64, len))
+                .expect("f64 remainder dividend input");
+            let x2 = numpy
+                .call_method1("full", ((len,), 7.25_f64))
+                .expect("f64 remainder divisor input");
+
+            group.bench_function(format!("fnp_mod_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_mod
+                        .call1((&x1, &x2))
+                        .expect("fnp mod f64 benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("fnp_remainder_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_remainder
+                        .call1((&x1, &x2))
+                        .expect("fnp remainder f64 benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_remainder_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_remainder
+                        .call1((&x1, &x2))
+                        .expect("numpy remainder f64 benchmark call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_max_min_reduction_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_max_min_reduction_boundary");
     group.sample_size(10);
@@ -2104,6 +2160,7 @@ criterion_group!(
     bench_sqrt_input_extraction,
     bench_int32_unary_boundary,
     bench_narrow_int_unary_boundary,
+    bench_remainder_mod_boundary,
     bench_max_min_reduction_boundary,
     bench_bool_minmax_reduction_boundary,
     bench_prod_reduction_boundary,
