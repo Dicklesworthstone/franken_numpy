@@ -6621,3 +6621,28 @@ bit-identical (same simd_max fold; only saw-tracking removed). LEVER: a per-iter
 SIMD op in a min/max fold is redundant when simd_max/min already skip NaN — track all-NaN via the
 final accumulator (m==init) and defer the ambiguous +-inf case. Same DRAM-gate retune as isinf.
 nanargmax flat gate (1<<18) STILL mis-tuned (loses 1.2-1.5x at 300K-500K) -> next.
+
+---
+
+## BlackThrush nanargmax/nanargmin flat NO-SHIP (serial scalar scan loses to numpy SIMD; 2026-06-22)
+
+Attempted the same gate+serial-scan fix as nanmax: nanargmax flat is parallel-ONLY (gate 1<<18), with
+n<262K falling to the cold extract. Added a serial zero-copy scan (replacing cold extract) + raised
+gate to 1<<21. CORRECTNESS clean (28/28 + conformance). But NET PERF REGRESSION — REVERTED:
+| N | before | after | verdict |
+|---|--------|-------|---------|
+| 100K | 0.98x | 1.12x | REGRESS (serial scalar scan < numpy SIMD copy-replace+argmax) |
+| 500K | 0.96x | 1.18x | REGRESS |
+| 1M | 0.52x | 0.83x | REGRESS (gate too high -> lost parallel) |
+| 2M | 0.20x | 0.46x | REGRESS (lost parallel) |
+| 300K | 1.5x* | 1.18x | improved (but *300K loss was LOAD NOISE, not consistent) |
+ROOT: (1) nanargmax NEEDS index tracking -> the serial scan is a branchy SCALAR `if !nan {combine}`,
+which LOSES to numpy's 2-pass SIMD (copy-replace-NaN then SIMD argmax) at small/medium N — unlike
+nanmax where simd_max IS the kernel. (2) nanargmax's parallel SCALAR scan is memory-bound and
+parallelizes well from ~500K (0.5-0.2x wins), so raising the gate to 1<<21 (right for nanmax's SIMD
+kernel) wrongly serialized the 1M-2M parallel wins. LESSON: the nanmax gate+kernel recipe does NOT
+transfer to nanargmax — argmax can't drop to a pure SIMD reduce (index dependency), so a scalar serial
+scan is no faster than the cold path it replaces, and the parallel crossover differs. A real
+nanargmax win needs a SIMD argmax (vector max + index blend), deferred. The "300K loss" that motivated
+this was load noise (box was at load 58 mid-investigation); original code is fine. nanmax/nanmin win
+(54451baa) stands; nanargmax left as-is.
