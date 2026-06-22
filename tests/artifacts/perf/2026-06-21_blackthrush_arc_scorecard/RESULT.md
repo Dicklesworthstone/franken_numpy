@@ -395,3 +395,17 @@ QUEUE PRIORITY (disk recovery): outer-f32 + kron-f32 (1-line each, WIN) > cross-
 CLEAN QUEUE (disk recovery, re-verify min-of-3): (1) outer-f32 + kron-f32 = 1-LINE each (WIN, bit-
 exact, ready-to-paste) (2) cross-f32 6x (mirror f64->f32, bit-exact) (3) trace int/f32 dtype-gap +
 f64-base 1.5x (read impl to scope). flip/diag = noise (dropped).
+
+## 2026-06-22 (build-free): trace DEPRIORITIZED (us-op overhead); cross-f32 CONFIRMED real ms loss
+- trace int/f32: ABSOLUTE time = us-op (int 2000x2000: np 4.5us/fnp 23.4us=5.2x; 8000x8000: np 30us/
+  fnp 70us=2.3x). Ratio SHRINKS with size -> OVERHEAD-bound (int-extract of the O(n) diagonal), us
+  absolute. NOT a high-value loss (cf flip/diag/getmaskarray pattern). DEPRIORITIZE (zero-copy int/f32
+  trace = tiny us win; only if nothing better). f64 trace fast path already exists.
+- cross f32: CONFIRMED REAL ms loss (1Mx3: np 8.8ms/fnp 56ms = 6.4x, 47ms absolute, real O(n) 1M cross
+  products). FIX = mirror try_zerocopy_f64_cross_n3 to f32 (bit-exact element-wise formula). HIGH value.
+FINAL CLEAN QUEUE (disk recovery, re-verify min-of-3):
+  1. outer-f32 + kron-f32 = 1-LINE each (real ms, n*m build, ~45x/20x WIN, bit-exact, ready-paste)
+  2. cross-f32 = mirror f64_cross_n3->f32 (real 47ms, 6.4x, bit-exact, ~50-line)
+  (deprioritized: trace us-overhead; dropped: flip/diag view-noise)
+LESSON reinforced: verify ABSOLUTE time, not just ratio - us-ops (trace/flip/diag) show inflated
+ratios that shrink with size = overhead, not real loss. ms-ops (cross/outer) = real.
