@@ -31391,23 +31391,147 @@ fn invert(
     core_numpy_passthrough(py, "invert", args, kwargs)
 }
 
-// Native single-pass phase unwrap for the DEFAULT float case (period=2*pi,
-// discont=pi, axis=last, f64 c-contiguous ndarray). numpy.unwrap runs many
-// full-array passes (diff, mod, two copyto masks, cumsum, slice-assign) and
-// costs ~25-44ms for 1M elements; the math is per-element O(1) along the axis,
-// so one fused sequential pass over each last-axis row is ~5-8x faster.
-//
-// Reproduces numpy's algorithm exactly per element (interval_high=pi):
+// Float element abstraction for the native unwrap kernel (f32 + f64). numpy
+// computes unwrap entirely in the input width (float32 stays float32 under weak
+// scalar promotion: period/discont are Python floats), so each width runs its
+// own recurrence to match numpy's per-width rounding bit-for-bit-or-allclose.
+trait UnwrapFloat:
+    pyo3::buffer::Element
+    + Copy
+    + Send
+    + Sync
+    + PartialOrd
+    + std::ops::Add<Output = Self>
+    + std::ops::Sub<Output = Self>
+    + std::ops::Neg<Output = Self>
+{
+    const PI: Self;
+    const TAU: Self;
+    const ZERO: Self;
+    fn uw_abs(self) -> Self;
+    fn uw_is_nan(self) -> bool;
+    fn uw_rem_euclid(self, rhs: Self) -> Self;
+}
+impl UnwrapFloat for f64 {
+    const PI: f64 = std::f64::consts::PI;
+    const TAU: f64 = std::f64::consts::TAU;
+    const ZERO: f64 = 0.0;
+    fn uw_abs(self) -> f64 {
+        self.abs()
+    }
+    fn uw_is_nan(self) -> bool {
+        self.is_nan()
+    }
+    fn uw_rem_euclid(self, rhs: f64) -> f64 {
+        self.rem_euclid(rhs)
+    }
+}
+impl UnwrapFloat for f32 {
+    const PI: f32 = std::f32::consts::PI;
+    const TAU: f32 = std::f32::consts::TAU;
+    const ZERO: f32 = 0.0;
+    fn uw_abs(self) -> f32 {
+        self.abs()
+    }
+    fn uw_is_nan(self) -> bool {
+        self.is_nan()
+    }
+    fn uw_rem_euclid(self, rhs: f32) -> f32 {
+        self.rem_euclid(rhs)
+    }
+}
+
+// Typed fill for the native unwrap fast path: reads p as a `T` buffer, writes a
+// fresh empty_like(p) of the same width, running one fused single-pass recurrence
+// per last-axis row (rows are independent -> parallelized across rows for stacked
+// inputs; a single 1-D row is a sequential cumsum chain and stays serial).
 //   dd    = p[j] - p[j-1]
 //   ddmod = mod(dd + pi, 2*pi) - pi        (rem_euclid matches numpy's float mod)
 //   if ddmod == -pi && dd > 0: ddmod = pi  (boundary_ambiguous correction)
-//   ph    = (|dd| < pi) ? 0 : ddmod - dd   (no unwrap below the discontinuity)
-//   cum  += ph;  out[j] = p[j] + cum;  out[0] = p[0]
-// N-D arrays unwrap each last-axis row independently (row-major contiguous
-// chunks). Output dtype = result_type(f64, float) = float64, fully written.
-// Non-default discont/period, non-last axis, non-f64 / non-contiguous /
-// non-ndarray, or an empty last axis -> Ok(None) (delegate to numpy).
-fn try_native_unwrap_f64_default(
+//   ph    = (|dd| < pi || NaN) ? correction : 0   (NaN flows into cum like numpy cumsum)
+fn unwrap_fill_typed<T: UnwrapFloat>(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    p: &Bound<'_, PyAny>,
+    row: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    let Ok(in_buffer) = PyBuffer::<T>::get(p) else {
+        return Ok(None);
+    };
+    let Some(p_in) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let out_arr = numpy.call_method1("empty_like", (p,))?;
+    let Ok(out_buffer) = PyBuffer::<T>::get(&out_arr) else {
+        return Ok(None);
+    };
+    let Some(output) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // Per-row phase-unwrap recurrence (one last-axis row; rows are independent).
+    let unwrap_row = |row_in: &[T], row_out: &mut [T]| {
+        let mut prev = row_in[0];
+        row_out[0] = prev;
+        let mut cum = T::ZERO;
+        for j in 1..row {
+            let cur = row_in[j];
+            let dd = cur - prev;
+            // numpy zeroes ph_correct only where `abs(dd) < discont` (=pi); the
+            // complement (|dd| >= pi, plus NaN dd) takes the correction, so NaN
+            // flows into `cum` and propagates exactly as numpy's cumsum does.
+            if dd.uw_is_nan() || dd.uw_abs() >= T::PI {
+                let mut ddmod = (dd + T::PI).uw_rem_euclid(T::TAU) - T::PI;
+                if ddmod == -T::PI && dd > T::ZERO {
+                    ddmod = T::PI;
+                }
+                cum = cum + (ddmod - dd);
+            }
+            row_out[j] = cur + cum;
+            prev = cur;
+        }
+    };
+    let n = p_in.len();
+    let nrows = n / row;
+    // Parallelize across independent rows for stacked inputs; a single row (1-D)
+    // is a sequential cumsum chain and stays serial. Gate on total work so small
+    // batches don't pay rayon overhead.
+    const UNWRAP_PARALLEL_MIN: usize = 1 << 16;
+    if nrows >= 2 && n >= UNWRAP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; the input
+        // is read-only under the GIL and `output` is a fresh numpy.empty buffer
+        // (no alias). Each row maps to a disjoint output chunk.
+        let in_data: &[T] =
+            unsafe { std::slice::from_raw_parts(p_in.as_ptr().cast::<T>(), n) };
+        let out_data: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        out_data
+            .par_chunks_mut(row)
+            .zip(in_data.par_chunks(row))
+            .for_each(|(row_out, row_in)| unwrap_row(row_in, row_out));
+    } else {
+        // SAFETY: same repr(transparent) T view; serial single-threaded fill.
+        let in_data: &[T] =
+            unsafe { std::slice::from_raw_parts(p_in.as_ptr().cast::<T>(), n) };
+        let out_data: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        for (row_out, row_in) in out_data.chunks_mut(row).zip(in_data.chunks(row)) {
+            unwrap_row(row_in, row_out);
+        }
+    }
+    Ok(Some(out_arr.unbind()))
+}
+
+// Native single-pass phase unwrap for the DEFAULT float case (period=2*pi,
+// discont=pi, axis=last, f32/f64 c-contiguous ndarray). numpy.unwrap runs many
+// full-array passes (diff, mod, two copyto masks, cumsum, slice-assign) and
+// costs ~25-44ms for 1M elements; the math is per-element O(1) along the axis,
+// so one fused pass per last-axis row is ~3x (1-D) to ~23x (stacked, parallel)
+// faster. N-D arrays unwrap each last-axis row independently. Output dtype =
+// input float width (float32/float64). Non-default discont/period, non-last
+// axis, non-float / float16 / non-contiguous / non-ndarray, or an empty last
+// axis -> Ok(None) (delegate to numpy).
+fn try_native_unwrap_default(
     py: Python<'_>,
     p: &Bound<'_, PyAny>,
     axis: i64,
@@ -31417,11 +31541,10 @@ fn try_native_unwrap_f64_default(
         return Ok(None);
     }
     let dtype = p.getattr("dtype")?;
-    if dtype.getattr("kind")?.extract::<String>()? != "f"
-        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
-    {
+    if dtype.getattr("kind")?.extract::<String>()? != "f" {
         return Ok(None);
     }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
     if !p
         .getattr("flags")?
         .getattr("c_contiguous")?
@@ -31444,73 +31567,11 @@ fn try_native_unwrap_f64_default(
     if row == 0 {
         return Ok(None);
     }
-    let Ok(in_buffer) = PyBuffer::<f64>::get(p) else {
-        return Ok(None);
-    };
-    let Some(p_in) = in_buffer.as_slice(py) else {
-        return Ok(None);
-    };
-    let out_arr = numpy.call_method1("empty_like", (p,))?;
-    let Ok(out_buffer) = PyBuffer::<f64>::get(&out_arr) else {
-        return Ok(None);
-    };
-    let Some(output) = out_buffer.as_mut_slice(py) else {
-        return Ok(None);
-    };
-    const PI: f64 = std::f64::consts::PI;
-    const TAU: f64 = std::f64::consts::TAU;
-    // Per-row phase-unwrap recurrence (one last-axis row; rows are independent).
-    let unwrap_row = |row_in: &[f64], row_out: &mut [f64]| {
-        let mut prev = row_in[0];
-        row_out[0] = prev;
-        let mut cum = 0.0f64;
-        for j in 1..row {
-            let cur = row_in[j];
-            let dd = cur - prev;
-            // numpy zeroes ph_correct only where `abs(dd) < discont` (=pi); the
-            // complement (|dd| >= pi, plus NaN dd) takes the correction, so NaN
-            // flows into `cum` and propagates exactly as numpy's cumsum does.
-            if dd.is_nan() || dd.abs() >= PI {
-                let mut ddmod = (dd + PI).rem_euclid(TAU) - PI;
-                if ddmod == -PI && dd > 0.0 {
-                    ddmod = PI;
-                }
-                cum += ddmod - dd;
-            }
-            row_out[j] = cur + cum;
-            prev = cur;
-        }
-    };
-    let n = p_in.len();
-    let nrows = n / row;
-    // Parallelize across independent rows for stacked inputs; a single row (1-D)
-    // is a sequential cumsum chain and stays serial. Gate on total work so small
-    // batches don't pay rayon overhead.
-    const UNWRAP_PARALLEL_MIN: usize = 1 << 16;
-    if nrows >= 2 && n >= UNWRAP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
-        use rayon::prelude::*;
-        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; the
-        // input is read-only under the GIL and `output` is a fresh numpy.empty
-        // buffer (no alias). Each row maps to a disjoint output chunk.
-        let in_data: &[f64] =
-            unsafe { std::slice::from_raw_parts(p_in.as_ptr().cast::<f64>(), n) };
-        let out_data: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
-        out_data
-            .par_chunks_mut(row)
-            .zip(in_data.par_chunks(row))
-            .for_each(|(row_out, row_in)| unwrap_row(row_in, row_out));
-    } else {
-        // SAFETY: same repr(transparent) f64 view; serial single-threaded fill.
-        let in_data: &[f64] =
-            unsafe { std::slice::from_raw_parts(p_in.as_ptr().cast::<f64>(), n) };
-        let out_data: &mut [f64] =
-            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
-        for (row_out, row_in) in out_data.chunks_mut(row).zip(in_data.chunks(row)) {
-            unwrap_row(row_in, row_out);
-        }
+    match itemsize {
+        8 => unwrap_fill_typed::<f64>(py, &numpy, p, row),
+        4 => unwrap_fill_typed::<f32>(py, &numpy, p, row),
+        _ => Ok(None), // float16 / longdouble -> delegate
     }
-    Ok(Some(out_arr.unbind()))
 }
 
 #[pyfunction]
@@ -31527,7 +31588,7 @@ fn unwrap(
     // delegate those to numpy.
     if discont.is_none()
         && period.is_none()
-        && let Some(out) = try_native_unwrap_f64_default(py, p.bind(py), axis)?
+        && let Some(out) = try_native_unwrap_default(py, p.bind(py), axis)?
     {
         return Ok(out);
     }
