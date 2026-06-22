@@ -23689,6 +23689,86 @@ fn try_zerocopy_ma_filled_f64(
     Ok(Some(flat.call_method1("reshape", (&shape_tuple,))?.unbind()))
 }
 
+// Generic-dtype counterpart of try_zerocopy_ma_filled_f64: the f64 path is f64-only, so int/uint/
+// float32 masked arrays fell to the cold extract->rebuild path (~5-11x). Same one-pass zero-copy
+// gather (out[i] = mask[i] ? fill : data[i]), typed over T, output dtype = `dtype_str`. Bit-identical
+// to the generic path (pure element selection). A fill that doesn't fit T (e.g. 2.5 into int) ->
+// extract fails -> Ok(None) (delegate, numpy does the cast).
+fn try_zerocopy_ma_filled_typed<T>(
+    py: Python<'_>,
+    value: &Bound<'_, PyAny>,
+    fill_value: Option<&Bound<'_, PyAny>>,
+    dtype_str: &str,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + for<'a, 'b> pyo3::FromPyObject<'a, 'b>,
+{
+    let numpy = py.import("numpy")?;
+    let masked_array_type = numpy.getattr("ma")?.getattr("MaskedArray")?;
+    if !value.is_instance(&masked_array_type)? {
+        return Ok(None);
+    }
+    let data_obj = value.getattr("data")?;
+    let fill: T = match fill_value {
+        Some(fv) => match fv.extract::<T>() {
+            Ok(f) => f,
+            Err(_) => return Ok(None),
+        },
+        None => {
+            let Ok(fv_attr) = value.getattr("fill_value") else {
+                return Ok(None);
+            };
+            match fv_attr.extract::<T>() {
+                Ok(f) => f,
+                Err(_) => return Ok(None),
+            }
+        }
+    };
+    let Ok(shape) = value.getattr("shape").and_then(|s| s.extract::<Vec<usize>>()) else {
+        return Ok(None);
+    };
+    let total: usize = shape.iter().product();
+    let Ok(data_buf) = PyBuffer::<T>::get(&data_obj) else {
+        return Ok(None);
+    };
+    let Some(data) = data_buf.as_slice(py) else {
+        return Ok(None); // non-contiguous
+    };
+    if data.len() != total {
+        return Ok(None);
+    }
+    let mask_obj = numpy
+        .getattr("ma")?
+        .getattr("getmaskarray")?
+        .call1((value,))?
+        .call_method1("view", (numpy.getattr("uint8")?,))?;
+    let Ok(mask_buf) = PyBuffer::<u8>::get(&mask_obj) else {
+        return Ok(None);
+    };
+    let Some(mask) = mask_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    if mask.len() != total {
+        return Ok(None);
+    }
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", dtype_str)?;
+    let flat = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    if total > 0 {
+        let Ok(out_buf) = PyBuffer::<T>::get(&flat) else {
+            return Ok(None);
+        };
+        let Some(out) = out_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for ((o, d), m) in out.iter().zip(data).zip(mask) {
+            o.set(if m.get() != 0 { fill } else { d.get() });
+        }
+    }
+    let shape_tuple = PyTuple::new(py, shape)?;
+    Ok(Some(flat.call_method1("reshape", (&shape_tuple,))?.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, fill_value=None))]
 fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResult<Py<PyAny>> {
@@ -23713,6 +23793,32 @@ fn filled(py: Python<'_>, a: Py<PyAny>, fill_value: Option<Py<PyAny>>) -> PyResu
     // failure fall through to the generic extraction.
     if let Some(out) = try_zerocopy_ma_filled_f64(py, a.bind(py), fill_value.as_ref().map(|v| v.bind(py)))? {
         return Ok(out);
+    }
+
+    // Other numeric dtypes: same zero-copy gather, typed (the f64 path is f64-only -> int/uint/f32
+    // otherwise hit the cold extract->rebuild path, ~5-11x). Complex / non-numeric fall through.
+    if let Ok(data_obj) = a.bind(py).getattr("data")
+        && let Ok(dt) = data_obj.getattr("dtype")
+        && let Ok(kind) = dt.getattr("kind").and_then(|k| k.extract::<String>())
+        && let Ok(isz) = dt.getattr("itemsize").and_then(|s| s.extract::<usize>())
+    {
+        let fv = fill_value.as_ref().map(|v| v.bind(py));
+        let ab = a.bind(py);
+        let res = match (kind.as_str(), isz) {
+            ("i", 8) => try_zerocopy_ma_filled_typed::<i64>(py, ab, fv, "int64")?,
+            ("i", 4) => try_zerocopy_ma_filled_typed::<i32>(py, ab, fv, "int32")?,
+            ("i", 2) => try_zerocopy_ma_filled_typed::<i16>(py, ab, fv, "int16")?,
+            ("i", 1) => try_zerocopy_ma_filled_typed::<i8>(py, ab, fv, "int8")?,
+            ("u", 8) => try_zerocopy_ma_filled_typed::<u64>(py, ab, fv, "uint64")?,
+            ("u", 4) => try_zerocopy_ma_filled_typed::<u32>(py, ab, fv, "uint32")?,
+            ("u", 2) => try_zerocopy_ma_filled_typed::<u16>(py, ab, fv, "uint16")?,
+            ("u", 1) => try_zerocopy_ma_filled_typed::<u8>(py, ab, fv, "uint8")?,
+            ("f", 4) => try_zerocopy_ma_filled_typed::<f32>(py, ab, fv, "float32")?,
+            _ => None,
+        };
+        if let Some(out) = res {
+            return Ok(out);
+        }
     }
 
     let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "filled")? else {
