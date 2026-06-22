@@ -47092,6 +47092,106 @@ fn try_zerocopy_unicode_ascii_case(
     ))
 }
 
+// Per-fixed-width-slot ASCII capitalize/title for '<U' arrays (numpy.char/strings.capitalize/title
+// delegate to slow per-element Python str methods). Each string occupies itemsize/4 codepoints
+// (null-padded); capitalize = first codepoint upper + rest lower; title = first letter of each word
+// (a cased char preceded by an uncased char) upper + other letters lower — matching str.capitalize/
+// str.title for ASCII. All-ASCII fast path; non-ASCII / non-U / non-contiguous delegates to numpy.
+fn try_zerocopy_unicode_ascii_cap_title(
+    py: Python<'_>,
+    input: &Bound<'_, PyAny>,
+    is_title: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !input.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = input.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "U" {
+        return Ok(None);
+    }
+    if !input
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if itemsize == 0 || itemsize % 4 != 0 {
+        return Ok(None);
+    }
+    let w = itemsize / 4; // codepoints per fixed-width string slot
+    let uint32_dtype = numpy.getattr("uint32")?;
+    let codepoints = input.call_method1("view", (&uint32_dtype,))?;
+    let Ok(in_buffer) = PyBuffer::<u32>::get(&codepoints) else {
+        return Ok(None);
+    };
+    let Some(codepoints_in) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if codepoints_in.iter().any(|c| c.get() > 0x7f) {
+        return Ok(None);
+    }
+    if codepoints_in.len() % w != 0 {
+        return Ok(None);
+    }
+    let codepoints_out = numpy.call_method1("empty_like", (&codepoints,))?;
+    let Ok(out_buffer) = PyBuffer::<u32>::get(&codepoints_out) else {
+        return Ok(None);
+    };
+    let Some(output) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    let ascii_upper =
+        |c: u32| if (u32::from(b'a')..=u32::from(b'z')).contains(&c) { c - 32 } else { c };
+    let ascii_lower =
+        |c: u32| if (u32::from(b'A')..=u32::from(b'Z')).contains(&c) { c + 32 } else { c };
+    let is_letter = |c: u32| {
+        (u32::from(b'a')..=u32::from(b'z')).contains(&c)
+            || (u32::from(b'A')..=u32::from(b'Z')).contains(&c)
+    };
+    for (slot_in, slot_out) in codepoints_in.chunks(w).zip(output.chunks(w)) {
+        if is_title {
+            let mut prev_cased = false;
+            for (s, d) in slot_in.iter().zip(slot_out.iter()) {
+                let c = s.get();
+                if is_letter(c) {
+                    d.set(if prev_cased { ascii_lower(c) } else { ascii_upper(c) });
+                    prev_cased = true;
+                } else {
+                    d.set(c);
+                    prev_cased = false;
+                }
+            }
+        } else {
+            for (j, (s, d)) in slot_in.iter().zip(slot_out.iter()).enumerate() {
+                let c = s.get();
+                d.set(if j == 0 { ascii_upper(c) } else { ascii_lower(c) });
+            }
+        }
+    }
+    Ok(Some(codepoints_out.call_method1("view", (&dtype,))?.unbind()))
+}
+
+fn unicode_ascii_cap_title_or_numpy(
+    py: Python<'_>,
+    input: Py<PyAny>,
+    namespace: &str,
+    method: &str,
+    is_title: bool,
+) -> PyResult<Py<PyAny>> {
+    if let Some(result) = try_zerocopy_unicode_ascii_cap_title(py, input.bind(py), is_title)? {
+        return Ok(result);
+    }
+    Ok(py
+        .import("numpy")?
+        .getattr(namespace)?
+        .getattr(method)?
+        .call1((input.bind(py),))?
+        .unbind())
+}
+
 fn unicode_ascii_case_or_numpy(
     py: Python<'_>,
     input: Py<PyAny>,
@@ -47124,6 +47224,16 @@ fn char_swapcase_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     unicode_ascii_case_or_numpy(py, a, "char", "swapcase")
 }
 
+#[pyfunction(name = "capitalize", signature = (a))]
+fn char_capitalize_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_cap_title_or_numpy(py, a, "char", "capitalize", false)
+}
+
+#[pyfunction(name = "title", signature = (a))]
+fn char_title_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_cap_title_or_numpy(py, a, "char", "title", true)
+}
+
 #[pyfunction(name = "upper", signature = (a))]
 fn strings_upper_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     unicode_ascii_case_or_numpy(py, a, "strings", "upper")
@@ -47137,6 +47247,16 @@ fn strings_lower_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
 #[pyfunction(name = "swapcase", signature = (a))]
 fn strings_swapcase_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
     unicode_ascii_case_or_numpy(py, a, "strings", "swapcase")
+}
+
+#[pyfunction(name = "capitalize", signature = (a))]
+fn strings_capitalize_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_cap_title_or_numpy(py, a, "strings", "capitalize", false)
+}
+
+#[pyfunction(name = "title", signature = (a))]
+fn strings_title_ascii(py: Python<'_>, a: Py<PyAny>) -> PyResult<Py<PyAny>> {
+    unicode_ascii_cap_title_or_numpy(py, a, "strings", "title", true)
 }
 
 fn copy_numpy_module_attrs(from: &Bound<'_, PyAny>, to: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -51467,6 +51587,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             strings.add_function(wrap_pyfunction!(strings_upper_ascii, &strings)?)?;
             strings.add_function(wrap_pyfunction!(strings_lower_ascii, &strings)?)?;
             strings.add_function(wrap_pyfunction!(strings_swapcase_ascii, &strings)?)?;
+            strings.add_function(wrap_pyfunction!(strings_capitalize_ascii, &strings)?)?;
+            strings.add_function(wrap_pyfunction!(strings_title_ascii, &strings)?)?;
             m.add_submodule(&strings)?;
             m.add("strings", strings)?;
         }
@@ -51476,6 +51598,8 @@ pub fn fnp_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
             char_mod.add_function(wrap_pyfunction!(char_upper_ascii, &char_mod)?)?;
             char_mod.add_function(wrap_pyfunction!(char_lower_ascii, &char_mod)?)?;
             char_mod.add_function(wrap_pyfunction!(char_swapcase_ascii, &char_mod)?)?;
+            char_mod.add_function(wrap_pyfunction!(char_capitalize_ascii, &char_mod)?)?;
+            char_mod.add_function(wrap_pyfunction!(char_title_ascii, &char_mod)?)?;
             m.add_submodule(&char_mod)?;
             m.add("char", char_mod)?;
         }
