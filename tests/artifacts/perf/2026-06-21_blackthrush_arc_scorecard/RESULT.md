@@ -176,3 +176,17 @@ axis=None only) - need f32 nan-axis path; (3) per-row short-circuit for bool-axi
   flat f32 nanargextreme but per-axis, last+non-last) = win. DEFERRED (axis machinery, moderate;
   disk-conscious). RULE confirmed again: astype/widen-reuse is copy-bound parity-at-best; only a
   true no-widen direct-read wins (cf bincount-narrow direct-read 50x vs astype-parity).
+
+## 2026-06-21: max/min(bool) flat - u8 short-circuit DISPROVEN (overhead/SIMD wall), reverted
+Probed reduction/cumulative on bool/narrow: cumsum-u8 0.45x, cumprod-i8 0.47x, prod-bool 0.19x,
+diff-bool 0.74x, max/min-bool-AXIS 0.09x — all WIN. Only gap: max/min(bool) FLAT 2.6-17x (cold
+bool->f64 extract; np.max(bool)==any/np.min(bool)==all, numpy short-circuits+SIMD). Tried u64-word
+short-circuit u8 scan -> numpy bool scalar. DISPROVEN: @early-True UNCHANGED 2.57x (overhead-bound:
+pyo3 view+buffer+bool_ ~2us vs numpy instant short-circuit), @all-False/late still 12-13x (serial
+u64-scan vs numpy SIMD reduce). min slightly better (2.8->1.97x, early-False short-circuit) but
+still a loss. UNLIKE argmax-bool (40ms CATASTROPHE justified shipping the 4-8x residual), max/min-
+bool old extract was only MILDLY slow (2.6-17x, no catastrophe) -> no justification for an overhead-
+bound residual. REVERTED. WALL: max/min(bool) flat = small-result + numpy-short-circuit/SIMD; not
+winnable via pyo3 (the result is a scalar; numpy's instant). Do not re-probe. (.so has stale
+marginal fix until next build; source clean.) RULE: ship a residual ONLY when it removes a
+catastrophe; a mild loss -> overhead-bound residual is not worth the code.
