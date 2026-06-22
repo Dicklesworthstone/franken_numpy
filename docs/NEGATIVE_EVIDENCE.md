@@ -6995,3 +6995,11 @@ compaction). CONVERGED on the reachable surface. Filed strategic lever bead dead
 large-gram-lever-8lnzn (C-BLAS opt-in vs fast-math SIMD vs accept-floor = PROJECT/HUMAN decision).
 LESSON: on a contended 64-thread box, GEMM/Gram/batched ratios are unreliable; only serial RAYON=1
 A/B exposes their true (kernel-floor) state, and those floors need C-BLAS or non-bit-exact fast-math.
+
+## BlackThrush: SERIAL kernel-floor quantification (2026-06-22, RAYON=1, noise-free)
+To cut swarm noise, measured the floor families single-threaded (numpy mostly serial too): cov
+large-n_vars dot8 vs BLAS dsyrk = 3.18x(512²)/4.85x(800²)/7.73x(1024x256) — the BIGGEST single
+un-dominated workload (3-8x pure-Rust-vs-BLAS). batched inv inv_nxn vs LAPACK getri = 1.47-1.62x.
+Full-thread "wins" are fnp's 64-way parallelism over numpy's serial loop (real on a free box, noise
+under load). Both irreducible without C-BLAS (A) or fast-math SIMD (B) — see bead deadlock-audit-
+cblas-large-gram-lever-8lnzn. Confirms convergence: no bit-exact pure-Rust code fix remains.
