@@ -7207,3 +7207,12 @@ Multi-axis reductions and kwarg-routing are clean. This completes dispatch-patte
 single-axis/multi-axis/keepdims/out/dtype/where). Sweep hit rate now ~0 across the last two passes
 (multi-axis, trace/diagonal) — reachable surface confirmed exhausted. 10 wins shipped this session;
 sole remaining lever = human C-BLAS/accept decision (bead cblas-large-gram-lever-8lnzn).
+
+## BlackThrush: non-contiguous (transposed/strided) layout sweep — all par (2026-06-22)
+Last untested input dimension = LAYOUT. Transposed (M.T F-contig) + strided ([::2]) inputs across
+sum/mean/std/prod/cumsum/argmax/sqrt/add/negative/exp/sort/nanmax = ALL par (0.96-1.16). The historical
+non-contiguous gap class (22-32x c_contiguous-bail->cold-extract) is FULLY handled (delegates to numpy).
+No loss. INPUT-SPACE COVERAGE COMPLETE across every dimension: shape x dtype x op-family x special-
+index-pattern x dispatch-kwarg x multi-axis x LAYOUT. Three consecutive zero-hit sweeps (multi-axis,
+trace/diagonal, non-contig) confirm the reachable bit-exact surface is EXHAUSTED. 10 wins shipped;
+sole remaining lever = human C-BLAS/accept decision (bead cblas-large-gram-lever-8lnzn).
