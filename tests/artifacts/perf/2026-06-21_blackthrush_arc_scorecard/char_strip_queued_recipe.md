@@ -46,3 +46,29 @@ Signature MUST allow an optional chars arg (default None) and delegate when char
 - GOTCHA: helper fns ABOVE #[pyfunction] attrs (E0433). Bit-exact width preservation is the key risk.
 
 Expected: 6 ops (strip/lstrip/rstrip x char/strings) at ~0.1-0.3x = real wins (numpy-slow confirmed).
+
+---
+
+## ADDITIONAL char win-veins (build-free assessment 2026-06-22, padding/binary ops)
+
+| op | numpy ns/el | output width | verdict |
+|----|-------------|--------------|---------|
+| char.ljust / rjust / center | 37-38 ns | = pad width (KNOWN) | WIN-VEIN, tractable (justify + fillchar pad) |
+| char.add | 36 ns | = w1 + w2 (KNOWN) | WIN-VEIN, tractable + ALL-UNICODE (concat, no ASCII gate) |
+| char.multiply | 53 ns | = w * n (KNOWN) | WIN-VEIN, tractable + all-unicode (repeat) |
+| char.expandtabs | 63 ns | variable | win-vein but variable width -> harder, defer |
+| char.zfill | 10 ns | (width) | numpy-C-fast -> NO vein (skip) |
+| char.mod | -- | -- | fnp ALREADY WINS 0.06x (16x) -> done |
+
+PRIORITY when disk recovers (batch all in ONE build):
+1. char/strings.strip/lstrip/rstrip (same-width, ASCII, see above) — cleanest.
+2. char/strings.add (concat -> w1+w2, ALL-UNICODE no ASCII gate, common) — clean + broad.
+3. char/strings.multiply (repeat -> w*n, all-unicode).
+4. char/strings.ljust/rjust/center (justify to pad width, fillchar default ' ', ASCII fast / non-ASCII
+   fillchar or content delegate). Output dtype <U(max(w, width)).
+
+add/multiply are ALL-UNICODE (pure copy/repeat, dtype-independent) -> no ASCII gate, widest win.
+ljust/center need fillchar handling (default space; non-default ASCII ok; verify numpy padding side
+for center with odd remainder = extra pad on RIGHT). zfill numpy-C-fast (skip). expandtabs deferred.
+All width-changing ops: build numpy.empty(shape, dtype='<U{outw}'), view uint32, per-slot fill, no
+re-pack (output width is known/fixed). Verify bit-exact + conformance_strings_namespace before commit.
