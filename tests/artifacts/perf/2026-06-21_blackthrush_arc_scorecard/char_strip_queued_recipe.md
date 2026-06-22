@@ -90,3 +90,28 @@ recovers): strip/lstrip/rstrip, add, multiply, ljust/rjust/center. translate (mo
 datetime_as_string + partition/join/splitlines are slow-numpy but output-complex (defer/skip).
 Everything else probed this session is numpy-C-fast or already-won. Char (slow Python str methods)
 is THE remaining win-vein; numeric/reduction/linalg/fft/set/datetime-arith families are dominated.
+
+---
+
+## CORRECTION (2026-06-22, after BUILDING strip): strip family is a LOSS, queue re-classified
+
+BUILT the strip family -> char/strings.strip/lstrip/rstrip = 1.35-1.41x LOSS (bit-exact + chars-arg-
+delegate correct, but SLOWER than numpy). REVERTED (1f2ec288 stands = case family only).
+
+ROOT CAUSE: numpy 2.x strip is a C UFUNC (~33ns/el), NOT Python-slow. My fast path (full ASCII scan
++ per-slot trim + copy ~44ns/el) can't beat a 33ns C ufunc. The build-free ns/el threshold (>15ns
+= win-vein) was WRONG: 33ns is C-ufunc territory, not slow.
+
+CORRECTED CLASSIFICATION (numpy 2.x has C ufuncs for SOME string ops, Python-delegates for others):
+- numpy C-UFUNC (~10-40ns/el) = NO-WIN (my fast path can't beat C): str_len, find/count/index/rfind,
+  isX predicates, zfill, strip/lstrip/rstrip, ADD (36ns), LJUST/RJUST/CENTER (37ns). DROP from queue.
+- numpy PYTHON-DELEGATE (~80-550ns/el) = REAL vein (beatable): swapcase/capitalize/title (DONE, won
+  7-8x), replace (80ns, length-changing-hard), translate (448ns, SAME-WIDTH 1:1-map -> tractable
+  REAL win candidate), split/join/encode (object/variable output -> skip), expandtabs (variable).
+- multiply (53ns) borderline -> skip.
+
+CORRECTED RULE: a delegator is a win-vein only if numpy is PYTHON-slow (>~60-80ns/el), NOT merely
+">15ns". Verify by absolute ns/el AND remember numpy 2.x C-ufunc'd many string ops. Only translate
+remains a clean-ish real win (448ns Python + same-width); needs table inspection (1:1 ordinal map
+fast-path, None/str values delegate). LESSON: build-free ns/el assessment can MIScLASSIFY a C ufunc
+as slow; the actual fast-path-vs-numpy comparison needs a build. char case family is the confirmed vein.
