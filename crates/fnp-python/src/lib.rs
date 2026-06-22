@@ -25017,6 +25017,25 @@ fn cov(
     {
         return fallback(py);
     }
+    // Native dot8 Gram vs numpy's BLAS dsyrk: measured (BlackThrush 2026-06-22, 64-thread)
+    // the native Gram is all-LOSS 1.3-3.7x for the mid-range n_vars band ~[48,256) across
+    // EVERY n_obs, while tiny Gram (n_vars<48) and large (n_vars>=256) WIN (0.55-0.78x). The
+    // mid band has too few output cells to amortize per-cell dot8 setup yet dsyrk stays
+    // optimal. Delegate that band to numpy for parity; preserve the native wins outside it.
+    if rowvar
+        && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
+        && m_bound
+            .getattr("ndim")
+            .ok()
+            .and_then(|n| n.extract::<usize>().ok())
+            == Some(2)
+        && let Ok(shape) = m_bound
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+        && (48..256).contains(&shape[0])
+    {
+        return fallback(py);
+    }
     // Fast path: rowvar=True with no y is the common shape and maps to a single
     // zero-copy parallel Gram (no transpose / extract / full-matrix allocations).
     if rowvar
