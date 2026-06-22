@@ -132,3 +132,14 @@ documented walls (BLAS-Gram, forbid-unsafe, numpy-introsort-dup, view-dispatch, 
   parity + numpy object-identity. The flip-flop saga ended correctly: real loss, peer-owned fix,
   landed by owner.
 ARC: 41 measured wins. Tree clean. Surface dominated across ~22 angles + narrow dtypes.
+
+## 2026-06-22: bool argmax/argmin CATASTROPHE fixed (a9f367fd) - 40ms -> us (was 36000x)
+np.argmax(cond)/argmin(cond) on bool (find-first-True/False idiom) missed int/f64 argextreme fast
+paths -> cold bool->f64 extract + scalar scan = ~40ms@8M (36000-47000x vs numpy short-circuit).
+Fix: try_zerocopy_bool_argextreme_flat (view uint8, scan u64 words skipping all-False/all-True,
+first hit). 40ms -> 4-244us (160-10000x absolute). Residual 4-8x vs numpy = small-result pyo3
+floor (view+buffer+intp ~4us vs numpy ~1us at first-hit) + u64-scan vs wider-SIMD at late-hit
+(overhead-bound on us, NOT the catastrophe). conformance argmax/argmin 10/10. FOUND via bool-dtype
+angle (same class as narrow-bincount). NOTE: all/any bool 1.17-1.44x mild (short-circuit, minor
+follow-up). LESSON: a "find-first" idiom op on bool with no fast path = pathological cold extract
+(40ms) — catastrophe-class, not just a ratio loss; the bool/narrow-dtype angle keeps surfacing these.
