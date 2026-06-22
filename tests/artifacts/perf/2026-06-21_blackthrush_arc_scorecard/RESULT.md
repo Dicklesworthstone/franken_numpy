@@ -212,3 +212,13 @@ f32 dtype-gap now complete (flat 6f515301 + last-axis ef76155f); ax0 1.08x near-
   fnp can't beat it whether full-scan or short-circuit. REVERTED + rebuilt clean. WALL: bool last-
   axis argmax residual 4-8x = output-build + numpy-tight-loop, not the scan. Catastrophe (2500x)
   already removed by u8-int-reuse; residual not winnable. Do not re-try short-circuit.
+
+## 2026-06-21: datetime/timedelta + trapezoid-axis + gradient-f32 all DOMINATED (3 fresh families)
+- datetime64/timedelta64: diff/max/min/ptp/sort/sum/mean/cumsum/unique all win/parity. diff(datetime)
+  single-call read 4.4x but min-of-3-WITH-WARMUP = 0.36x(1M)/0.93x(8M) WIN -> PHANTOM (cold first-
+  call); correctness verified (timedelta64 dtype+values+n=2). Discipline caught it (re-verify min-of-3
+  before fixing). Dominated.
+- trapezoid along axis: NOW 0.02x(ax1)/0.43x(ax0)/0.31x(3D) WIN -> my queued trapezoid_axis_recipe
+  LANDED (no longer a loss). Recipe DONE.
+- gradient f32: 0.98x(1D)/0.79x(2D-ax1) parity/win, f64-ctl 0.1x. No dtype-gap (gradient handles f32).
+No new loss this turn; surface heavily dominated across the 3 fresh families.

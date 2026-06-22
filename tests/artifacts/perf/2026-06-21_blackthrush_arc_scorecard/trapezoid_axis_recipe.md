@@ -56,3 +56,6 @@ let r = shape[0]; let inner = total / r;
 - If lib.rs carries a peer's STALE uncommitted WIP: stash-PUSH/POP (never DROP),
   verify peer diff byte-identical after pop (see 87bd6403 ledger entry). If the peer
   holds a FRESH/active reservation, do NOT touch — wait.
+
+
+## STATUS 2026-06-21: DONE/LANDED — trapezoid axis now 0.02-0.43x WIN (re-measured). No longer a loss.
