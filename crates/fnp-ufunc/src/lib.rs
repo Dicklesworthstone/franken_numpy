@@ -21495,7 +21495,10 @@ impl UFuncArray {
         // per-point formula; collect from a parallel map preserves index order).
         let point =
             |i: usize| 0.54 - 0.46 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos();
-        const HAMMING_PARALLEL_MIN: usize = 1 << 16;
+        // Serial cos-map is par-or-WIN vs numpy at ALL practical sizes (BlackThrush 2026-06-22:
+        // 100K-4M = 0.80-1.06x, load-independent); the rayon path gave NO benefit and was a
+        // swarm-contention LANDMINE (8-11x at 100K under load). Keep serial for practical M.
+        const HAMMING_PARALLEL_MIN: usize = 1 << 24;
         let values: Vec<f64> = if m >= HAMMING_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             (0..m).into_par_iter().map(point).collect()
@@ -21524,7 +21527,9 @@ impl UFuncArray {
         // sizes where numpy's single-threaded vectorized cos otherwise edged out our serial one.
         let point =
             |i: usize| 0.5 - 0.5 * (2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0)).cos();
-        const HANNING_PARALLEL_MIN: usize = 1 << 16;
+        // Serial is par-or-WIN at all practical sizes; rayon path = swarm-contention landmine
+        // (see hamming). Keep serial for practical M.
+        const HANNING_PARALLEL_MIN: usize = 1 << 24;
         let values: Vec<f64> = if m >= HANNING_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             (0..m).into_par_iter().map(point).collect()
@@ -21554,7 +21559,9 @@ impl UFuncArray {
             let x = 2.0 * std::f64::consts::PI * i as f64 / (m as f64 - 1.0);
             0.42 - 0.5 * x.cos() + 0.08 * (2.0 * x).cos()
         };
-        const BLACKMAN_PARALLEL_MIN: usize = 1 << 16;
+        // Serial is par-or-WIN at all practical sizes; rayon path = swarm-contention landmine
+        // (see hamming). Keep serial for practical M.
+        const BLACKMAN_PARALLEL_MIN: usize = 1 << 24;
         let values: Vec<f64> = if m >= BLACKMAN_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             (0..m).into_par_iter().map(point).collect()
@@ -21614,7 +21621,10 @@ impl UFuncArray {
             let arg = beta * (1.0 - r * r).max(0.0).sqrt();
             bessel_i0(arg) / denom
         };
-        const KAISER_PARALLEL_MIN: usize = 1 << 14;
+        // Serial Bessel-i0 map WINS vs numpy at all practical sizes (BlackThrush 2026-06-22:
+        // 50K-4M = 0.56-0.79x, load-independent); rayon path gave no benefit (serial 1M 0.73 <
+        // parallel 0.81) and was a swarm-contention landmine (9.6x at 100K). Keep serial.
+        const KAISER_PARALLEL_MIN: usize = 1 << 24;
         let values: Vec<f64> = if m >= KAISER_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
             use rayon::prelude::*;
             (0..m).into_par_iter().map(point).collect()
