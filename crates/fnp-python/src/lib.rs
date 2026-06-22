@@ -35675,51 +35675,25 @@ fn ma_argmax(
     out: Option<Py<PyAny>>,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        let kwargs = PyDict::new(py);
-        if let Some(axis_val) = &axis {
-            kwargs.set_item("axis", axis_val.bind(py))?;
-        }
-        if let Some(fv) = &fill_value {
-            kwargs.set_item("fill_value", fv.bind(py))?;
-        }
-        if let Some(out_val) = &out {
-            kwargs.set_item("out", out_val.bind(py))?;
-        }
-        kwargs.set_item("keepdims", keepdims)?;
-        Ok(numpy
-            .getattr("ma")?
-            .getattr("argmax")?
-            .call((a.bind(py),), Some(&kwargs))?
-            .unbind())
-    };
-
-    if fill_value.is_some() || out.is_some() {
-        return fallback();
+    // The native extract->masked.argmax path widens non-f64 masked data (~3.4x for int/f32) and
+    // never beats numpy.ma.argmax even for f64 (1.33x). Delegate to numpy for parity across dtypes.
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = &axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
     }
-    let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "ma_argmax")? else {
-        return fallback();
-    };
-    let axis = match extract_axis_spec(py, axis_for_parse, "ma_argmax") {
-        Ok(None) => None,
-        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
-        Ok(Some(_)) => return fallback(),
-        Err(_) => return fallback(),
-    };
-    if keepdims && axis.is_none() {
-        return fallback();
+    if let Some(fv) = &fill_value {
+        kwargs.set_item("fill_value", fv.bind(py))?;
     }
-    let mut result = masked
-        .argmax(axis)
-        .map_err(|err| map_ma_error("ma_argmax", err))?;
-    if keepdims && let Some(axis) = axis {
-        result = result
-            .expand_dims(axis)
-            .map_err(|err| map_ufunc_error(format!("ma_argmax: {err}")))?;
+    if let Some(out_val) = &out {
+        kwargs.set_item("out", out_val.bind(py))?;
     }
-    build_numpy_scalar_or_array(py, &result)
+    kwargs.set_item("keepdims", keepdims)?;
+    Ok(numpy
+        .getattr("ma")?
+        .getattr("argmax")?
+        .call((a.bind(py),), Some(&kwargs))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -35732,51 +35706,25 @@ fn ma_argmin(
     out: Option<Py<PyAny>>,
     keepdims: bool,
 ) -> PyResult<Py<PyAny>> {
-    let axis_for_parse = axis.as_ref().map(|value| value.clone_ref(py));
-    let fallback = || -> PyResult<Py<PyAny>> {
-        let numpy = py.import("numpy")?;
-        let kwargs = PyDict::new(py);
-        if let Some(axis_val) = &axis {
-            kwargs.set_item("axis", axis_val.bind(py))?;
-        }
-        if let Some(fv) = &fill_value {
-            kwargs.set_item("fill_value", fv.bind(py))?;
-        }
-        if let Some(out_val) = &out {
-            kwargs.set_item("out", out_val.bind(py))?;
-        }
-        kwargs.set_item("keepdims", keepdims)?;
-        Ok(numpy
-            .getattr("ma")?
-            .getattr("argmin")?
-            .call((a.bind(py),), Some(&kwargs))?
-            .unbind())
-    };
-
-    if fill_value.is_some() || out.is_some() {
-        return fallback();
+    // Delegate to numpy.ma.argmin: the native extract->masked.argmin path widens non-f64 (~3x) and
+    // never beats numpy (f64 1.29x). Parity across dtypes (cf ma_argmax).
+    let numpy = py.import("numpy")?;
+    let kwargs = PyDict::new(py);
+    if let Some(axis_val) = &axis {
+        kwargs.set_item("axis", axis_val.bind(py))?;
     }
-    let Some(masked) = extract_numeric_masked_array(py, a.bind(py), "ma_argmin")? else {
-        return fallback();
-    };
-    let axis = match extract_axis_spec(py, axis_for_parse, "ma_argmin") {
-        Ok(None) => None,
-        Ok(Some(axes)) if axes.len() == 1 => Some(axes[0]),
-        Ok(Some(_)) => return fallback(),
-        Err(_) => return fallback(),
-    };
-    if keepdims && axis.is_none() {
-        return fallback();
+    if let Some(fv) = &fill_value {
+        kwargs.set_item("fill_value", fv.bind(py))?;
     }
-    let mut result = masked
-        .argmin(axis)
-        .map_err(|err| map_ma_error("ma_argmin", err))?;
-    if keepdims && let Some(axis) = axis {
-        result = result
-            .expand_dims(axis)
-            .map_err(|err| map_ufunc_error(format!("ma_argmin: {err}")))?;
+    if let Some(out_val) = &out {
+        kwargs.set_item("out", out_val.bind(py))?;
     }
-    build_numpy_scalar_or_array(py, &result)
+    kwargs.set_item("keepdims", keepdims)?;
+    Ok(numpy
+        .getattr("ma")?
+        .getattr("argmin")?
+        .call((a.bind(py),), Some(&kwargs))?
+        .unbind())
 }
 
 // Native fast path for the common case: np.pad(x, pad_width, mode="constant") with
