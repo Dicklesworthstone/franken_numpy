@@ -721,6 +721,31 @@ impl PySeedSequence {
     }
 }
 
+// Shuffle a 1-D numpy buffer in place, viewed as a fixed-width unsigned integer of
+// the array's itemsize. shuffle_slice draws the same random_interval(i) sequence as
+// permutation_range, so whole-element rearrangement is bit-identical to numpy's
+// in-place Fisher-Yates while preserving the array's dtype. Returns false (caller
+// falls through) if the buffer cannot be borrowed mutably.
+fn shuffle_buffer_inplace<T: pyo3::buffer::Element + Copy>(
+    rng: &mut RandomGenerator,
+    py: Python<'_>,
+    view: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let Ok(buffer) = PyBuffer::<T>::get(view) else {
+        return Ok(false);
+    };
+    let Some(cells) = buffer.as_mut_slice(py) else {
+        return Ok(false);
+    };
+    let n = cells.len();
+    // SAFETY: Cell<T> is repr(transparent) over T; we hold the GIL, the array is
+    // writeable, and this is the sole live mutable view of the buffer. Matches the
+    // from_raw_parts_mut pattern used by the zero-copy unary/binary output paths.
+    let data: &mut [T] = unsafe { std::slice::from_raw_parts_mut(cells.as_ptr() as *mut T, n) };
+    rng.shuffle_slice(data);
+    Ok(true)
+}
+
 #[pymethods]
 impl PyRandomGenerator {
     #[new]
@@ -1710,6 +1735,52 @@ impl PyRandomGenerator {
                 shape.len()
             ))
         })?;
+        // Fast path: a 1-D C-contiguous writeable numeric ndarray is shuffled in place
+        // through its same-width unsigned-integer view (itemsize 1/2/4/8). This matches
+        // numpy's single in-place Fisher-Yates and is bit-exact (same random_interval(i)
+        // draws as permutation_range), avoiding the index-array build + take gather +
+        // copyto — a second full random-access pass that made shuffle ~2.25x numpy.
+        // N-D / non-contiguous / read-only / complex (itemsize 16) / non-ndarray fall
+        // through to the dtype-preserving take+copyto path below.
+        if shape.len() == 1
+            && bound.is_exact_instance(&numpy.getattr("ndarray")?)
+            && bound
+                .getattr("flags")?
+                .getattr("c_contiguous")?
+                .extract::<bool>()?
+            && bound
+                .getattr("flags")?
+                .getattr("writeable")?
+                .extract::<bool>()?
+        {
+            let dtype = bound.getattr("dtype")?;
+            let kind = dtype.getattr("kind")?.extract::<String>()?;
+            let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+            if matches!(kind.as_str(), "i" | "u" | "f" | "b") {
+                let handled = match itemsize {
+                    1 => {
+                        let v = bound.call_method1("view", (numpy.getattr("uint8")?,))?;
+                        shuffle_buffer_inplace::<u8>(&mut self.inner, py, &v)?
+                    }
+                    2 => {
+                        let v = bound.call_method1("view", (numpy.getattr("uint16")?,))?;
+                        shuffle_buffer_inplace::<u16>(&mut self.inner, py, &v)?
+                    }
+                    4 => {
+                        let v = bound.call_method1("view", (numpy.getattr("uint32")?,))?;
+                        shuffle_buffer_inplace::<u32>(&mut self.inner, py, &v)?
+                    }
+                    8 => {
+                        let v = bound.call_method1("view", (numpy.getattr("uint64")?,))?;
+                        shuffle_buffer_inplace::<u64>(&mut self.inner, py, &v)?
+                    }
+                    _ => false,
+                };
+                if handled {
+                    return Ok(py.None());
+                }
+            }
+        }
         let order = self
             .inner
             .permutation_range(shape[axis])

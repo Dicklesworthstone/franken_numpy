@@ -4,6 +4,46 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-22 - KEEP: Generator.shuffle 1-D in-place buffer Fisher-Yates (2.25x loss -> WIN)
+
+`YellowElk` (claude-code/opus). Third disk-frugal BOLD-VERIFY cycle, warm
+`CARGO_TARGET_DIR=.rch-targets/franken_numpy-cc` (incremental fnp-random +
+fnp-python rebuild, 1m05s; disk ~57G). Probed the previously-unswept random
+Generator family vs numpy.
+
+`rng.shuffle(arr)` (1-D) lost **2.25x** (1M f64: numpy 9410us, fnp 21011us). Root
+cause: the Python `shuffle` ran Fisher-Yates over an *index* vector
+(`permutation_range`, one full random-access pass) and then `arr.take(order)` +
+`copyto` (a SECOND full random-access gather) to preserve dtype. numpy does a
+single in-place Fisher-Yates on the data; fnp paid the cache-miss-bound
+random-access penalty twice.
+
+Fix: the Fisher-Yates swap sequence (`random_interval(i)` draws) depends only on
+length + RNG state, never the payload — so a 1-D C-contiguous writeable numeric
+ndarray is shuffled IN PLACE through its same-width unsigned-int view (itemsize
+1/2/4/8), exactly like the compress/extract compaction kernel. New generic
+`Generator::shuffle_slice<T>` in fnp-random (same draw loop as the f64 `shuffle`/
+`permutation_range`); `shuffle_buffer_inplace::<u8/u16/u32/u64>` in fnp-python via
+the established `from_raw_parts_mut` buffer pattern. N-D / non-contiguous /
+read-only / complex (itemsize 16) / strings fall through to the existing
+take+copyto path unchanged.
+
+| N | dtype | before | after |
+|---|---|---:|---:|
+| 1M | int64 | 2.25x | **0.89x** |
+| 1M | float64 | 2.25x | **0.86x** |
+| 1M | int32 | (widen path) | **0.61x** |
+| 4M | int32 | — | **0.60x** |
+
+Validation:
+- 84 differential checks vs numpy: bit-exact + dtype-preserved across int8..int64,
+  uint8/uint64, float16/32/64, bool, complex128, strings; sizes 0/1/2/5/100/1k/100k;
+  2-D and strided non-contiguous (fall-through) — **0 fails**.
+- Untouched random ops (standard_normal/random/integers/permutation) still
+  bit-exact; `perf_gap_sweep_vs_numpy.py` 0 LOSS rows; build clean.
+- NOTE (deferred): `rng.choice(N, N)` with replacement still reads 1.5-5x (noisy);
+  separate path (`choice_indices_unweighted` + gather) — not addressed this cycle.
+
 ## 2026-06-22 - NO-SHIP / DEFER: post-nanargmax broad sweep (~150 op/shape/dtype combos)
 
 `YellowElk` (claude-code/opus). Second disk-frugal BOLD-VERIFY cycle after the

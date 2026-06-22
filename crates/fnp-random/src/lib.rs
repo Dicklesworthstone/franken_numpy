@@ -5502,6 +5502,20 @@ impl Generator {
         Ok(())
     }
 
+    /// In-place Fisher-Yates shuffle over a slice of any element type, drawing the
+    /// exact same `random_interval(i)` sequence as [`shuffle`]/[`permutation_range`].
+    /// The draw sequence depends only on the length and RNG state, never the payload,
+    /// so this is bit-exact with `rng.shuffle(x)` for whole-element rearrangement and
+    /// lets callers shuffle a numpy buffer in place (viewed by itemsize) instead of
+    /// shuffling an index vector and gathering — one random-access pass instead of two.
+    pub fn shuffle_slice<T>(&mut self, x: &mut [T]) {
+        let n = x.len();
+        for i in (1..n).rev() {
+            let j = self.random_interval(i as u64) as usize;
+            x.swap(i, j);
+        }
+    }
+
     /// Return a shuffled copy of the input (or a random permutation of integers).
     ///
     /// Mimics `rng.permutation(x)`.
