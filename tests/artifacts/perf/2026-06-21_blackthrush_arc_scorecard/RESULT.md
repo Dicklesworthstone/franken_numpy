@@ -471,3 +471,14 @@ f32 stays parity (numpy delegate). Build-free verification prevented a conforman
 LEVER reinforced: parity-missed-win extend requires BIT-EXACTNESS VERIFICATION - frexp/modf (extraction/
 trunc = exact) PASSED + shipped (22dfa155); divmod (arithmetic w/ floor_divide rounding) FAILED + dropped.
 Element-wise/extraction f32 extends are safe; arithmetic-with-rounding f32 extends must be verified first.
+
+## 2026-06-22 (disk-critical, build-free): QUEUE corrcoef rowvar=False 4.8-6.8x; bincount-minlength=PHANTOM
+multi-d scout (min-of-3): corrcoef(M, rowvar=False) 2-D = REAL LOSS 6.76x@(10000,50) / 4.84x@(5000,100)
+- the rowvar=False case skips the rowvar=True fast Gram (try_ufunc_rowvar_f64_cov_core / try_zerocopy_
+corrcoef_rowvar_f64, both gated rowvar && no-y) -> native cov+normalize cold path. rowvar=True ctl on
+M.T is 1.39-1.75x (cov-Gram small-shape no-C-BLAS floor). FIX (queue, disk recovery): corrcoef(M,
+rowvar=False, 2-D, no-y) == corrcoef(ascontiguousarray(M.T)) -> route to the rowvar=True fast Gram
+path -> ~1.5x (Gram floor) instead of 4.8-6.8x (3-4x improvement; allclose, corrcoef is not bit-exact).
+Same likely applies to cov(rowvar=False) - check. f32/int rowvar=False already delegate (a8fd0bea).
+PHANTOM (dropped): bincount minlength=1M single-run 1.7x -> min-of-3 0.86-0.99x WIN/parity (the large-
+minlength serial-count path is fine). histogramdd-3d 0.3x WIN, histogram2d-wt parity, cov-ddof0 1.31x mild.
