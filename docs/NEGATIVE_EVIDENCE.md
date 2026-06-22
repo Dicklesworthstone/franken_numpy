@@ -7070,3 +7070,9 @@ SOLE REMAINING LEVER = a PROJECT/HUMAN decision (bead deadlock-audit-cblas-large
  (C) accept the floors (status quo — already dominant everywhere else).
  [Option B / fast-math is a red herring: cov bar is allclose but dot8 is maxed; batched is golden-locked.]
 An autonomous bit-exact pure-Rust perf loop has NO further shippable win. Recommend the human decide A vs C.
+
+## BlackThrush: float32/complex dtype surface swept — converged (2026-06-22, completes coverage)
+Last unswept dtype family. f32: add 1.20 (near-par binding), multiply/sqrt/sum/exp/sin/sort par/win.
+complex128: add/multiply/abs/conj/sum/fft par, angle 0.04 WIN. complex64: multiply 1.13/abs 1.06 par.
+NO fixable gap. franken_numpy now confirmed dominant-or-par across ALL dtypes (f64/f32/complex64/128/
+int/bool) AND all op families AND all crates. Coverage COMPLETE — see CONVERGENCE STATUS above.
