@@ -27855,7 +27855,6 @@ fn percentile(
 
     if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
         || overwrite_input
-        || keepdims
         || method.is_some()
         || weights.is_some()
         || numpy_dtype_is_narrow_float(py, a.bind(py))
@@ -27867,6 +27866,13 @@ fn percentile(
         return fallback();
     }
 
+    // Original ndim for keepdims axis re-insertion (the gate used to bail on keepdims,
+    // forgoing the scalar-q native win; keepdims-on-axis class, BlackThrush 2026-06-22).
+    let orig_ndim = a
+        .bind(py)
+        .getattr("ndim")
+        .ok()
+        .and_then(|d| d.extract::<usize>().ok());
     let a = match extract_numeric_array(py, a.bind(py), "percentile(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -27883,6 +27889,11 @@ fn percentile(
     if a.values().is_empty() {
         return fallback();
     }
+    // keepdims over the full array (axis=None) reshapes to all-ones dims; delegate that
+    // rare case. Single-axis keepdims runs the native path then re-inserts the axis.
+    if keepdims && axis.is_none() {
+        return fallback();
+    }
     // Scalar q: one native percentile (parallel radix-select for large n).
     if let Ok(q) = q.bind(py).extract::<f64>() {
         let result = match a.percentile(q, axis) {
@@ -27890,6 +27901,12 @@ fn percentile(
             Err(_) => return fallback(),
         };
         let output = build_numpy_array_from_ufunc(py, &result)?;
+        if keepdims && let Some(ax) = axis {
+            let Some(ndim) = orig_ndim else {
+                return fallback();
+            };
+            return keepdims_expand_axis(py, &numpy, output, ax as i64, ndim);
+        }
         if result.shape().is_empty() {
             return Ok(output.bind(py).get_item(())?.unbind());
         }
@@ -27897,8 +27914,9 @@ fn percentile(
     }
     // 1-D array q with axis=None: numpy returns a (len(q),) array. Share the
     // large-input order-statistic work across all q values; 2-D q or q with an
-    // axis falls through to numpy for the full output-shape semantics.
-    if axis.is_none() {
+    // axis falls through to numpy for the full output-shape semantics. keepdims
+    // (array-q) reshapes each q-slice — delegate that rarer case.
+    if axis.is_none() && !keepdims {
         if let Ok(qs) = q.bind(py).extract::<Vec<f64>>() {
             let result = match a.percentiles_axis_none(&qs) {
                 Ok(result) => result,
@@ -39170,7 +39188,6 @@ fn quantile(
 
     if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
         || overwrite_input
-        || keepdims
         || method.is_some()
         || weights.is_some()
         || numpy_dtype_is_narrow_float(py, a.bind(py))
@@ -39182,6 +39199,12 @@ fn quantile(
         return fallback();
     }
 
+    // Original ndim for keepdims axis re-insertion (keepdims-on-axis class, BlackThrush 2026-06-22).
+    let orig_ndim = a
+        .bind(py)
+        .getattr("ndim")
+        .ok()
+        .and_then(|d| d.extract::<usize>().ok());
     let a = match extract_numeric_array(py, a.bind(py), "quantile(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -39198,18 +39221,29 @@ fn quantile(
     if a.values().is_empty() {
         return fallback();
     }
+    // keepdims over the full array (axis=None) reshapes to all-ones dims; delegate. Single-axis
+    // keepdims runs the native path then re-inserts the reduced axis.
+    if keepdims && axis.is_none() {
+        return fallback();
+    }
     if let Ok(q) = q.bind(py).extract::<f64>() {
         let result = match a.quantile(q, axis) {
             Ok(result) => result,
             Err(_) => return fallback(),
         };
         let output = build_numpy_array_from_ufunc(py, &result)?;
+        if keepdims && let Some(ax) = axis {
+            let Some(ndim) = orig_ndim else {
+                return fallback();
+            };
+            return keepdims_expand_axis(py, &numpy, output, ax as i64, ndim);
+        }
         if result.shape().is_empty() {
             return Ok(output.bind(py).get_item(())?.unbind());
         }
         return Ok(output);
     }
-    if axis.is_none() {
+    if axis.is_none() && !keepdims {
         if let Ok(qs) = q.bind(py).extract::<Vec<f64>>() {
             let result = match a.quantiles_axis_none(&qs) {
                 Ok(result) => result,
