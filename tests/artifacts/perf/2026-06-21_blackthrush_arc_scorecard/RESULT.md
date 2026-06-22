@@ -409,3 +409,11 @@ FINAL CLEAN QUEUE (disk recovery, re-verify min-of-3):
   (deprioritized: trace us-overhead; dropped: flip/diag view-noise)
 LESSON reinforced: verify ABSOLUTE time, not just ratio - us-ops (trace/flip/diag) show inflated
 ratios that shrink with size = overhead, not real loss. ms-ops (cross/outer) = real.
+
+## 2026-06-22 (build-free): matmul f64 2.27x = no-C-BLAS WALL (contended, skip); queue stands
+matmul f64 1000x1000: 2.27x (5.2ms real) - fnp native band-parallel GEMM vs numpy BLAS dgemm. This
+is the documented no-C-BLAS architectural wall (cf cov/corrcoef Gram). matmul f32 1.27x (same wall,
+milder vs sgemm). matmul is HEAVILY PEER-CONTENDED (GEMM is a multi-agent frontier) -> NOT my area,
+NOT a quick dtype-gap fix. Batched inv-f32 0.34x WIN, solve/matmul-batch-f32 parity. No new queuable
+loss. (Test note: "@ f32" 0.23x was a test bug - both sides numpy.) QUEUE UNCHANGED: outer-f32 +
+kron-f32 (1-line) + cross-f32 (mirror) await disk recovery.
