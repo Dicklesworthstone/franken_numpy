@@ -7159,3 +7159,10 @@ compute kernel is fine, the 1.25x is pyo3 setup on an uncommon op -> binding-flo
 worth a build. NET: the only fixable contention-landmine class is COMPUTE-BOUND one-time/cheap SETUP
 ops (windows, shipped); memory-bound ops are par, compute-bound hot transforms (sinc/angle) keep
 parallel (artifact), select is binding-floor. Gate audit essentially complete.
+
+## BlackThrush: FFT-variant + masked-array surface sweep — all par (2026-06-22)
+rfft/irfft/hfft/ifft/rfft2/fftshift = par (0.92-1.08); ma.std/var/argmax/cumsum/compressed/filled/
+dot/median = par (0.97-1.04, largely delegate to numpy.ma). No new gap. These broad surfaces are
+clean; the recent wins (matrix_power, windows) were in specific less-trodden composite/setup ops, not
+broad families. Surface coverage now: primitives + all dtypes + random + io + composites (linalg) +
+generators/setup + FFT-variants + masked-array — all dominated/par or documented floor/artifact.
