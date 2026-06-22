@@ -6877,3 +6877,19 @@ stats): franken_numpy dominates or ties NumPy across the surface. Shipped 6 wins
 5 cov/corrcoef Gram delegate gates). Remaining documented floors needing human/SIMD-session, NOT
 loop ticks: cov n_vars>=512 DRAM patchwork (non-monotonic, no clean gate; exact-repr=human call),
 int min/max/ptp axis scalar kernel (SIMD proven dead), pyo3 binding overhead on O(1)/cheap ops.
+
+## BlackThrush WIN: einsum single-operand reduction delegate (2026-06-22, f82bc70a)
+
+Masked/einsum sweep found einsum single-operand REDUCTIONS ('ijk->k', 'ijk->', 'ij->i') losing
+1.6-4.2x: they fell through the transpose-view + diagonal fast paths to the generic native
+contraction kernel, slower than numpy's optimized einsum reduction. Added einsum_spec_is_single_
+reduce (explicit arrow, no ellipsis/comma, unique input labels, output strict unique subset =
+sum over dropped axes) + early delegate to numpy.einsum. ijk->k 1.88->1.01, ijk-> 4.16->1.03,
+ijk->ik 1.77->1.02, ij->i/j/-> ~1.0; WINNING two-operand contractions (ij,jk->ik 0.40, ij,ij->
+0.70) + transpose/diagonal views UNCHANGED. Note routing to f.sum(axis=tuple) only reached 1.28x
+(numpy einsum reduction beats np.sum-over-axes 0.81x) -> delegate-to-numpy.einsum is the better
+fix. 0 correctness mismatches. NOT pursued (same sweep): einsum 'ij,jk->ik' matmul-pattern is
+NON-MONOTONIC/noisy (n=100 0.55 WIN, n=200 2.44 loss, n=400 0.95 par - size-gated native GEMM with
+a bad middle regime; heavily peer-contended, risky); inner() is par-to-win (1.04-1.13 small =
+binding overhead, 0.46-0.49 large WIN); masked ma.sum/mean/max all par (already handled). MASKED +
+EINSUM families now swept: einsum reductions fixed, contractions win, masked par.
