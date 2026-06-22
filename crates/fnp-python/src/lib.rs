@@ -24369,7 +24369,6 @@ fn median(
 
     if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
         || overwrite_input
-        || keepdims
         || numpy_dtype_is_narrow_float(py, a.bind(py))
         // Integer input widens int->f64 in extract (~2x at 1M; parity at 8M) and never beats numpy
         // median; delegate (the f64 native path keeps its 0.5x win).
@@ -24378,6 +24377,14 @@ fn median(
         return fallback();
     }
 
+    // Capture the original ndim before `a` is shadowed by the extracted UFuncArray — needed to
+    // re-insert the reduced axis for keepdims (keepdims-on-axis class; the old gate bailed on
+    // keepdims entirely, forgoing the ~0.26x native win, BlackThrush 2026-06-22).
+    let orig_ndim = a
+        .bind(py)
+        .getattr("ndim")
+        .ok()
+        .and_then(|d| d.extract::<usize>().ok());
     let a = match extract_numeric_array(py, a.bind(py), "median(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -24388,11 +24395,22 @@ fn median(
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
+    // keepdims over the full array (axis=None) reshapes the scalar to all-ones dims; delegate
+    // that rare case. Single-axis keepdims runs the fast path then re-inserts the axis below.
+    if keepdims && axis.is_none() {
+        return fallback();
+    }
     let result = match a.median(axis) {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
     let output = build_numpy_array_from_ufunc(py, &result)?;
+    if keepdims && let Some(ax) = axis {
+        let Some(ndim) = orig_ndim else {
+            return fallback();
+        };
+        return keepdims_expand_axis(py, &numpy, output, ax as i64, ndim);
+    }
     if result.shape().is_empty() {
         return Ok(output.bind(py).get_item(())?.unbind());
     }
