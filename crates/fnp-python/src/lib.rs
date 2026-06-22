@@ -24744,6 +24744,15 @@ fn cov(
     {
         return fallback(py);
     }
+    // cov(M, rowvar=False) 2-D column-variable form: native cov is ~10x (column access + no-C-BLAS
+    // Gram; a transpose copy doesn't help). numpy.cov is faster -> delegate for parity (rowvar=True /
+    // two-1-D-operand stay on the fast Gram below).
+    if !rowvar
+        && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
+        && m_bound.getattr("ndim").ok().and_then(|n| n.extract::<usize>().ok()) == Some(2)
+    {
+        return fallback(py);
+    }
     // Fast path: rowvar=True with no y is the common shape and maps to a single
     // zero-copy parallel Gram (no transpose / extract / full-matrix allocations).
     if rowvar
@@ -24839,6 +24848,15 @@ fn corrcoef(
     // f64 zero-copy Gram fast paths below stay.
     if !numpy_dtype_is_f64(py, x_bound)
         || y_binding.is_some_and(|y_val| !y_val.is_none() && !numpy_dtype_is_f64(py, y_val))
+    {
+        return fallback(py);
+    }
+    // corrcoef(M, rowvar=False) 2-D column-variable form: the native cov+normalize path is ~4.8-6.8x
+    // (column access + no-C-BLAS Gram; a contiguous transpose doesn't help — the strided copy negates
+    // it). numpy.corrcoef is faster, so delegate for parity (rowvar=True / two-1-D-operand stay fast).
+    if !rowvar
+        && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
+        && x_bound.getattr("ndim").ok().and_then(|n| n.extract::<usize>().ok()) == Some(2)
     {
         return fallback(py);
     }
