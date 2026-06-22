@@ -13875,6 +13875,110 @@ fn try_zerocopy_digitize(
 // reproduces numpy's exact ValueError. Returns Ok(None) — caller falls through —
 // for weights, a non-int64 dtype, a multi-dim array, or any non-contiguous /
 // non-ndarray input.
+// Generic narrow/unsigned-int counterpart of try_zerocopy_bincount: reads the narrow buffer
+// DIRECTLY (i8/i16/i32/u8/u16/u32 — no int->f64/int64 widen copy) and tallies, casting each to
+// i64. Same max-scan + privatized-parallel count as the int64 path -> bit-identical counts, but
+// avoids the 64MB astype widen so it WINS like int64 (~0.18x) instead of parity. Common for
+// image/byte histograms (uint8). Negative -> Ok(None) (numpy raises in the general path).
+fn try_zerocopy_bincount_narrow<T>(
+    py: Python<'_>,
+    buffer: &PyBuffer<T>,
+    minlength: i64,
+) -> PyResult<Option<Py<PyAny>>>
+where
+    T: pyo3::buffer::Element + Copy + Sync,
+    i64: From<T>,
+{
+    use rayon::prelude::*;
+    let numpy = py.import("numpy")?;
+    if buffer.shape().len() != 1 {
+        return Ok(None);
+    }
+    let Some(input) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = input.len();
+    // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL.
+    let data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
+    const BINCOUNT_PARALLEL_MIN: usize = 1 << 19;
+    const BINCOUNT_PARALLEL_K_MAX: usize = 1 << 16;
+    let parallel_scan = n >= BINCOUNT_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let (max_val, any_neg) = if parallel_scan {
+        data.par_iter()
+            .fold(
+                || (-1i64, false),
+                |(mx, neg), &v| {
+                    let iv = i64::from(v);
+                    (mx.max(iv), neg || iv < 0)
+                },
+            )
+            .reduce(|| (-1i64, false), |a, b| (a.0.max(b.0), a.1 || b.1))
+    } else {
+        let mut mx = -1i64;
+        let mut neg = false;
+        for &v in data {
+            let iv = i64::from(v);
+            if iv < 0 {
+                neg = true;
+                break;
+            }
+            if iv > mx {
+                mx = iv;
+            }
+        }
+        (mx, neg)
+    };
+    if any_neg {
+        return Ok(None);
+    }
+    let length = std::cmp::max(max_val + 1, minlength).max(0) as usize;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "int64")?;
+    let out = numpy.call_method("zeros", (length,), Some(&kwargs))?;
+    if length > 0 && n > 0 {
+        let Ok(out_buffer) = PyBuffer::<i64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        let parallel_count =
+            parallel_scan && length <= BINCOUNT_PARALLEL_K_MAX && n >= length.saturating_mul(32);
+        if parallel_count {
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            let merged = data
+                .par_chunks(chunk)
+                .fold(
+                    || vec![0i64; length],
+                    |mut acc, c| {
+                        for &v in c {
+                            acc[i64::from(v) as usize] += 1;
+                        }
+                        acc
+                    },
+                )
+                .reduce(
+                    || vec![0i64; length],
+                    |mut a, b| {
+                        for (slot, add) in a.iter_mut().zip(b.iter()) {
+                            *slot += add;
+                        }
+                        a
+                    },
+                );
+            for (slot, &count) in output.iter().zip(merged.iter()) {
+                slot.set(count);
+            }
+        } else {
+            for &v in data {
+                let slot = &output[i64::from(v) as usize];
+                slot.set(slot.get() + 1);
+            }
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 fn try_zerocopy_bincount(
     py: Python<'_>,
     x: &Bound<'_, PyAny>,
@@ -14118,16 +14222,48 @@ fn bincount(
     {
         return Ok(out);
     }
-    // Narrow / unsigned integer inputs (i8/i16/i32/u8/u16/u32 — all fit in i64) miss the int64
-    // fast path above and fall to the cold int->f64 extract (~3x; common for image/byte
-    // histograms on uint8). Cast once to int64 (fast C astype) and reuse the zero-copy int64
-    // tally — bit-identical (bincount is value-based; narrow widths fit i64 exactly). Removes
-    // the 3x loss to parity. (int64 handled above; uint64 overflow-risk + weighted keep the
-    // general path. A direct narrow-buffer tally would WIN ~0.18x but needs a generic refactor.)
+    // Narrow / unsigned int (i8/i16/i32/u8/u16/u32) miss the int64 fast path above and would
+    // fall to the cold int->f64 extract (~3x; common for uint8 image/byte histograms). Read the
+    // narrow buffer DIRECTLY and tally -> WIN ~0.18x like int64. int64 handled above; uint64
+    // (overflow risk) + weighted keep the general path.
     if weights.as_ref().is_none_or(|w| w.bind(py).is_none())
         && (kind == "i" || kind == "u")
         && input_dtype.getattr("itemsize")?.extract::<usize>()? < 8
     {
+        let xb = x.bind(py);
+        let it = input_dtype.getattr("itemsize")?.extract::<usize>()?;
+        let direct: PyResult<Option<Py<PyAny>>> = match (kind.as_str(), it) {
+            ("i", 1) => match PyBuffer::<i8>::get(xb) {
+                Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
+                _ => Ok(None),
+            },
+            ("i", 2) => match PyBuffer::<i16>::get(xb) {
+                Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
+                _ => Ok(None),
+            },
+            ("i", 4) => match PyBuffer::<i32>::get(xb) {
+                Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
+                _ => Ok(None),
+            },
+            ("u", 1) => match PyBuffer::<u8>::get(xb) {
+                Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
+                _ => Ok(None),
+            },
+            ("u", 2) => match PyBuffer::<u16>::get(xb) {
+                Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
+                _ => Ok(None),
+            },
+            ("u", 4) => match PyBuffer::<u32>::get(xb) {
+                Ok(b) => try_zerocopy_bincount_narrow(py, &b, minlength),
+                _ => Ok(None),
+            },
+            _ => Ok(None),
+        };
+        if let Some(out) = direct? {
+            return Ok(out);
+        }
+        // Fallback for narrow array-like that isn't a direct-bufferable ndarray (e.g. a Python
+        // list): cast to int64 and reuse the int64 tally (still avoids the cold f64 extract).
         let xi = numpy
             .getattr("asarray")?
             .call1((x.bind(py),))?
