@@ -222,3 +222,13 @@ f32 dtype-gap now complete (flat 6f515301 + last-axis ef76155f); ax0 1.08x near-
   LANDED (no longer a loss). Recipe DONE.
 - gradient f32: 0.98x(1D)/0.79x(2D-ax1) parity/win, f64-ctl 0.1x. No dtype-gap (gradient handles f32).
 No new loss this turn; surface heavily dominated across the 3 fresh families.
+
+## 2026-06-21: char/strings.swapcase ASCII fast path WIN (9082f7c3) - parity -> 0.12x (8x)
+np.char/strings.upper/lower had the ASCII codepoint fast path (0.14x) but swapcase/capitalize/title/
+strip DELEGATED to numpy (parity ~1.0x). Generalized try_zerocopy_unicode_ascii_case (uppercase bool
+-> method str: upper/lower/swapcase). swapcase flips ASCII a-z<->A-Z per codepoint; all-ASCII fast,
+non-ASCII/non-U/non-contig delegates (bit-exact). 1.0x->0.12x (8x), char+strings. conformance strings
+_namespace 9. upper/lower unchanged. FOUND via np.char family probe (numpy's char is Python-slow ->
+ASCII-codepoint Rust path wins). QUEUED FOLLOW-UPS: capitalize (first cp upper rest lower per fixed-
+width slot = itemsize/4) + title (per-word-boundary) -> same ASCII-fast + numpy-fallback pattern, win
+opportunity; strip (whitespace trim per slot). All niche but real + safe (ASCII fast / numpy fallback).
