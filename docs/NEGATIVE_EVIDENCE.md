@@ -6424,3 +6424,36 @@ op (kron-2D from kron-1D) is often a separate gap. (3) PARITY-MISSED-WIN: extend
 f32 when bit-exact (extraction/element-wise = safe like frexp/modf/kron; arithmetic-w-rounding = VERIFY
 like divmod-f32 which failed). (4) ascontiguousarray-operands cheap when operands << output. (5)
 SINGLE-RUN scout ratios inflate (norm-vec-2, sum-c128, bincount-minlength = phantoms; min-of-3 verdict).
+
+---
+
+## BlackThrush char/strings strip+pad+concat NO-SHIP — numpy 2.4.3 C-vectorized them (2026-06-22)
+
+DISPROOF of the queued char win-vein recipe (2026-06-21_blackthrush_arc_scorecard/char_strip_queued_recipe.md).
+Implemented strip/lstrip/rstrip (6 pyfns, ASCII fixed-width slot, width-preserving, whitespace set
+0x09-0x0D/0x1C-0x1F/0x20) — **bit-EXACT (57/57 cases incl both namespaces, all widths, N-D, NUL/embedded,
+chars-arg-delegate, non-ASCII-delegate)** but **1.5-1.7x LOSS** at N=200K <U16. REVERTED.
+
+ROOT CAUSE: the recipe's build-free "numpy ns/el" estimates were OVERHEAD-INFLATED (measured on tiny
+arrays). Re-measured pure-numpy ABSOLUTE ns/el at N=200K (realistic):
+| op | numpy ns/el | class |
+|----|-------------|-------|
+| strings.strip/lstrip/rstrip | 18 ns | **C-fast ufunc -> NO vein** |
+| strings.add | 25 ns | C-fast -> NO vein |
+| strings.multiply | 28 ns | C-fast -> NO vein |
+| strings.ljust/rjust/center | 22-24 ns | C-fast -> NO vein |
+| strings.zfill | 23 ns | C-fast -> NO vein |
+| strings.expandtabs | 28 ns | C-fast -> NO vein |
+| strings.replace | 52 ns | slowish but LENGTH-CHANGING (defer; small margin) |
+| strings.encode | 234 ns | slow but BYTES-output + encoding (hard) |
+| strings.upper/lower/swapcase/title/capitalize | 165-270 ns | SLOW -> the ONLY real veins (ALREADY SHIPPED) |
+
+numpy 2.4.3 vectorized the whole whitespace-strip + padding + concat string-ufunc family in C; only
+CASE-MAPPING (Unicode case folding, per-codepoint table) + encode stayed slow. The earlier case wins
+(swapcase 0.14x, upper 0.10x, capitalize 0.06x) are REAL because numpy is genuinely slow there.
+
+REFINED RULE (hardened): a parity-delegate is a win-vein ONLY if numpy is ALSO slow there — and
+"slow" MUST be re-measured at N>=100K on the EXACT op (build-free, pure numpy), NEVER trusted from a
+prior ns/el note or a small-array probe (overhead inflates 18ns->33ns, flipping a loss into a phantom
+"vein"). The entire char strip/pad/concat queued recipe is CLOSED as no-ship. encode/replace remain
+the only unclaimed slow string ops and both have output-shape complications (defer).
