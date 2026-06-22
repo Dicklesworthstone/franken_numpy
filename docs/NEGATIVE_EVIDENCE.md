@@ -7003,3 +7003,15 @@ un-dominated workload (3-8x pure-Rust-vs-BLAS). batched inv inv_nxn vs LAPACK ge
 Full-thread "wins" are fnp's 64-way parallelism over numpy's serial loop (real on a free box, noise
 under load). Both irreducible without C-BLAS (A) or fast-math SIMD (B) — see bead deadlock-audit-
 cblas-large-gram-lever-8lnzn. Confirms convergence: no bit-exact pure-Rust code fix remains.
+
+## BlackThrush: random (Generator) family sweep — no fixable gap (2026-06-22)
+Swept fnp.random.default_rng distributions vs numpy (N=1e6, median-of-3): random 0.78 WIN, uniform
+0.47 WIN, exponential 0.80, gamma 0.84, lognormal 0.77, standard_cauchy 0.61 WIN; integers/binomial/
+beta/standard_t/geometric/chisquare/poisson par (0.86-1.22). standard_normal 1.27 at 1M LOOKED like
+a loss but is BINDING OVERHEAD: bit-exact vs numpy (max|diff|=0.0), and size-dependent (100K=1.14,
+1M=1.30, 5M=0.99 PAR) = fixed per-call overhead amortizing, NOT a kernel gap. Random streams are
+sequential + bit-exact (can't parallelize without breaking the PCG64 stream), so no gate lever; the
+generation kernel matches numpy at large N. Random family adds NO fixable un-dominated gap. Surface
+now swept end-to-end (elementwise/reduction/structural/view/order-stat/set/linalg/poly/fft/char/
+datetime/fancy-index/RANDOM) — all dominated-or-par or documented floors (binding overhead, no-C-BLAS
+Gram/LU, compaction). Sole open lever = bead deadlock-audit-cblas-large-gram-lever-8lnzn (human A/B/C).
