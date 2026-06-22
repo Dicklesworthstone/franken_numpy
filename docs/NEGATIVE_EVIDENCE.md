@@ -7305,3 +7305,13 @@ take sorter and index a indirectly (no a[sorter] copy) -> would turn par->win. A
 AND array), sort kind=merge/stable/heap + axis, take mode=clip/wrap, choose 0.20x, interp left/right/
 period, digitize right, histogram weights/density, bincount weights/minlength. Per-arity seam = mined
 out of CLEAR wins (yielded matrix_power/true_divide/ix_/argwhere; cross-2vec=deprecated-binding phantom).
+
+## BlackThrush WIN: count_nonzero(axis,keepdims=True) keepdims-on-axis (2026-06-22, 17905bfd) — 14th win
+Per-kwarg sweep (where=/keepdims/dtype/initial) found count_nonzero(axis,keepdims=True) 3.7-5.3x slow
+while keepdims=False WINS 0.4x and flat-keepdims WINS 0.08x. ROOT: try_zerocopy_count_nonzero returns
+None for ANY keepdims=True -> single-axis keepdims fell to cold extract. FIX: run fast no-keepdims
+count + keepdims_expand_axis(np.expand_dims) — SAME keepdims-on-axis class as the nan-family fix
+(memory parallel-privatized-buffer-reductions). 5x->0.16-0.45x, 0 mismatches (axis 0/1/2/neg, int/bool,
+non-contig, flat). LESSON: the keepdims-on-axis loss class wasn't fully swept — count_nonzero was a
+residual the nan-family fix missed. Grep other axis-reductions still gated on !keepdims in try_zerocopy.
+14 wins; per-KWARG dispatch (keepdims) is a live sub-seam of per-case testing.
