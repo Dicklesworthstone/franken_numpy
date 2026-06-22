@@ -290,3 +290,17 @@ zero-copy parallel -> add zero-copy parallel single-output remainder path (r=a%b
 (r>0)!=(b>0){r+=b} elif r==0 {0.copysign(b)}; defer zero/inf/nan; gate 1<<18), mod routes to it.
 Est -> ~0.1-0.2x WIN. BLOCKED: fnp-python + docs/NEGATIVE_EVIDENCE.md both exclusive-reserved by
 YellowElk (fresh, ~01:35). Recorded here (own artifact) since canonical ledger is peer-locked.
+
+## RESOLVED 2026-06-21: mod "3.49x loss" was STALE-.so phantom; YellowElk fixing alias; zero-copy remainder = no-gain
+On a FRESH rebuild, f.mod == f.remainder == f.fmod == PARITY 1.0x. The earlier "mod 3.49x"
+(min-of-3, reproduced) was a STALE .so artifact (rch content-hash build caching served an old
+mod cold-path while remainder was fresh — same hazard as the .probe stale-.so note). LESSON:
+REBUILD before trusting a single-op anomaly where its twin is fine; rch caching can serve a
+mixed .so. YellowElk (responding to my FYI 1992) is implementing the proper alias-unify in their
+fnp-python WIP: register `mod` + `remainder` as the SAME PyUFunc object (m.add("mod", remainder_
+ufunc.clone) + test `mod is remainder`) — left their WIP untouched. SEPARATELY tried zero-copy
+parallel remainder (parity->win, divmod precedent): NO GAIN (0.91-1.0x). Reverted. WHY: divmod
+won big because TWO-output (cold builds 2 arrays); remainder is ONE-output so its cold path was
+already parity (1 build), and the defer-scan pass eats the parallel gain. RULE: zero-copy-parallel
+wins big only when the cold path is expensive (multi-output build OR extract-dominated); for cheap
+one-output ops already at parity, scan+compute == numpy single pass == parity.
