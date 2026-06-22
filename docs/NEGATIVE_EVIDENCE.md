@@ -6659,3 +6659,27 @@ used simd_nanextreme_slice (simd_max + per-iter simd_eq for saw). Switched to th
 (1000,5000) 0.349->0.351 (neutral, long lane = bandwidth-bound). 12/12 differential (ax0/ax1/3-D +
 all-NaN lane + ±inf-extreme lane + mixed inf/nan) allclose. Bit-identical (same simd_max fold; the
 re-check preserves the all-NaN-vs-±inf distinction the axis path needs).
+
+---
+
+## BlackThrush WIN: nanmax/nanmin DOWN-AXIS (non-last) — SIMD fold + drop saw + inner-gate (1.78-3.01x loss -> parity-or-win, 2026-06-22)
+
+nanmax/nanmin down a NON-last axis (axis=0 on 2-D etc., inner>1) lost 1.78-3.01x. Three fixes:
+(1) the per-column fold tracked `*sw |= v==v` per element -> the scalar compare stopped the max loop
+from autovectorizing; DROPPED it (all-NaN/±inf columns left at `init` are re-scanned afterward, rare).
+(2) the running fold used scalar `acc[i].max(v)` (NaN-aware f64::max does NOT vectorize to vmaxpd);
+replaced with fold_row_extreme_simd (Simd<f64,8> simd_max = IEEE maxNum, nan-skipping, vmaxpd) ->
+bit-identical. (3) even SIMD'd, WIDE inner (>128 columns) stays acc-reload-traffic-bound and loses to
+numpy's cache-blocked reduce kernel — so inner>128 DELEGATES to numpy (the cold-extract path that
+Ok(None) would hit is even slower, so delegate explicitly).
+| shape (axis=0) | before | after |
+|----------------|--------|-------|
+| (10000,64) inner=64 | loss | 0.34x WIN (native SIMD) |
+| (5000,200)/(500,2000)/(1000,1000)/(2000,500) | 1.78-3.01x LOSS | ~1.02x parity (delegate) |
+Crossover measured: inner<=128 native wins (0.34-0.99x), inner>=256 loses (1.15-1.9x) -> gate at 128.
+CORRECTNESS 26/26 differential (ax0/ax1 of 2-D/3-D, all-NaN col, ±inf-extreme col, mixed, tail
+inner%8!=0, inner=128/129/256 boundary) + keepdims wide-inner shape/value OK. LEVER: (a) NaN-aware
+f64::max/min don't autovectorize -> use Simd simd_max/min (vmaxpd, same IEEE nan-skip) for the inner
+fold; (b) a per-element condition flag (saw) interleaved with the reduction blocks vectorization —
+recover it from the final accumulator (==init) + a rare re-scan; (c) when a layout is fundamentally
+acc-traffic-bound (wide reduction), DELEGATE to numpy's blocked kernel rather than lose.
