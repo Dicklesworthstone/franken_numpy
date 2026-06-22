@@ -7133,3 +7133,16 @@ chased (no phantom, cf matrix_rank). permute_dims/matrix_transpose 2x = O(1)-vie
 view-materialization bug was already fixed -> delegate). So windows (f20df36e) was the sole real win
 in the generator/alias/setup-op class; the rest is par-or-win or binding floor. Generator/setup-op
 surface now covered.
+
+## BlackThrush: sinc/angle parallel "landmines" are CONTENTION ARTIFACTS — do NOT fix (2026-06-22)
+Gate-audit spot-check: angle (1.6-5.8x) and sinc (3.3x) LOOK like the window landmine at the gate
+band (1<<15) under swarm load. BUT serial (RAYON=1, load-independent) is par-or-WIN: angle 1.08x
+(all sizes), sinc 0.48-0.54x (WIN). So arctan2/sin are COMPUTE-BOUND and the parallel gate gives a
+genuine DEDICATED-MACHINE win (~20-50x on a free box); the 1.6-5.8x "loss" is a CONTENTION ARTIFACT
+of this 64-thread shared swarm box, not a real defect. CRITICAL DISTINCTION from windows: windows are
+ONE-TIME SETUP ops (parallel benefit negligible + serial already wins -> serial correct, shipped
+f20df36e), but sinc/angle are HOT compute-bound TRANSFORMS where parallel legitimately wins on a
+dedicated machine. Raising their gate would REGRESS real performance to optimize a broken measurement
+env. NOT FIXED (correct call). LESSON: a contended-box "parallel landmine" is only a real defect when
+serial already wins AND the op is one-time/cheap-per-element (windows); for hot compute-bound maps it
+is a measurement artifact — keep the parallel gate. Don't optimize for the swarm-contention artifact.
