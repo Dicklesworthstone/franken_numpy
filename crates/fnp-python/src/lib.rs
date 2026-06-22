@@ -26815,6 +26815,88 @@ fn try_zerocopy_f64_nanargextreme(
     }
 }
 
+// f32 counterpart of try_zerocopy_f64_nanargextreme. The f64 path is f64-only, so nanargmax/
+// nanargmin on float32 fell to the cold f32->f64 widen extract (~6-8x). Read the f32 buffer
+// directly and find the first non-NaN argmax/argmin comparing in f32 (order-preserving, so the
+// index matches numpy bit-for-bit). Covers ALL sizes (serial small + parallel large) since the
+// f32 cold path WIDENS (unlike the f64 cold path which is only mild). all-NaN -> defer.
+fn try_zerocopy_f32_nanargextreme(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f32(a) {
+        return Ok(None);
+    }
+    if !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f32>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n == 0 {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
+    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), n) };
+    let combine = |best: &mut Option<(usize, f32)>, idx: usize, v: f32| {
+        let take = match *best {
+            None => true,
+            Some(b) => {
+                if take_max {
+                    v > b.1
+                } else {
+                    v < b.1
+                }
+            }
+        };
+        if take {
+            *best = Some((idx, v));
+        }
+    };
+    const NANARG_PARALLEL_MIN: usize = 1 << 21;
+    let best = if n >= NANARG_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        let chunk = n.div_ceil(rayon::current_num_threads());
+        let partials: Vec<Option<(usize, f32)>> = data
+            .par_chunks(chunk)
+            .enumerate()
+            .map(|(ci, c)| {
+                let base = ci * chunk;
+                let mut best: Option<(usize, f32)> = None;
+                for (i, &v) in c.iter().enumerate() {
+                    if !v.is_nan() {
+                        combine(&mut best, base + i, v);
+                    }
+                }
+                best
+            })
+            .collect();
+        let mut best: Option<(usize, f32)> = None;
+        for p in partials.into_iter().flatten() {
+            combine(&mut best, p.0, p.1);
+        }
+        best
+    } else {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, &v) in data.iter().enumerate() {
+            if !v.is_nan() {
+                combine(&mut best, i, v);
+            }
+        }
+        best
+    };
+    match best {
+        Some((idx, _)) => Ok(Some(numpy.getattr("intp")?.call1((idx,))?.unbind())),
+        None => Ok(None),
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
 fn nanargmax(
@@ -26852,6 +26934,12 @@ fn nanargmax(
     }
     if axis.is_none()
         && let Some(result) = try_zerocopy_f64_nanargextreme(py, &numpy, a.bind(py), true)?
+    {
+        return Ok(result);
+    }
+    // float32: read f32 directly (the f64 path is f64-only; f32 otherwise widen-extracts ~6-8x).
+    if axis.is_none()
+        && let Some(result) = try_zerocopy_f32_nanargextreme(py, &numpy, a.bind(py), true)?
     {
         return Ok(result);
     }
@@ -26913,6 +27001,12 @@ fn nanargmin(
     }
     if axis.is_none()
         && let Some(result) = try_zerocopy_f64_nanargextreme(py, &numpy, a.bind(py), false)?
+    {
+        return Ok(result);
+    }
+    // float32: read f32 directly (the f64 path is f64-only; f32 otherwise widen-extracts ~6-8x).
+    if axis.is_none()
+        && let Some(result) = try_zerocopy_f32_nanargextreme(py, &numpy, a.bind(py), false)?
     {
         return Ok(result);
     }
