@@ -6646,3 +6646,16 @@ scan is no faster than the cold path it replaces, and the parallel crossover dif
 nanargmax win needs a SIMD argmax (vector max + index blend), deferred. The "300K loss" that motivated
 this was load noise (box was at load 58 mid-investigation); original code is fine. nanmax/nanmin win
 (54451baa) stands; nanargmax left as-is.
+
+---
+
+## BlackThrush WIN: nanmax/nanmin AXIS (last-axis) value-kernel (2026-06-22, 5-15% faster lanes)
+
+Extended the flat nanmax simd_eq-removal to the per-lane axis path (inner==1, last axis). Each lane
+used simd_nanextreme_slice (simd_max + per-iter simd_eq for saw). Switched to the fast value kernel
+(simd_max only); a lane re-runs the accurate saw kernel ONLY when its extreme == init (all-NaN or
+±inf-extreme, rare). Lanes are L1-resident (compute-bound), so halving SIMD ops helps. A/B (both /numpy):
+(2000,500) 0.465->0.394 (15%), (20000,200) 0.404->0.349 (14%), (5000,1000) 0.365->0.346 (5%),
+(1000,5000) 0.349->0.351 (neutral, long lane = bandwidth-bound). 12/12 differential (ax0/ax1/3-D +
+all-NaN lane + ±inf-extreme lane + mixed inf/nan) allclose. Bit-identical (same simd_max fold; the
+re-check preserves the all-NaN-vs-±inf distinction the axis path needs).

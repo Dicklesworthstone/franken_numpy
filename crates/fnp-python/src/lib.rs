@@ -26483,14 +26483,22 @@ fn try_zerocopy_f64_nanextreme_axis(
         // Contiguous last axis: each lane is an independent contiguous run, reduced
         // with the direct-SIMD nan-extreme kernel. numpy runs this single-threaded,
         // so fan the per-lane reductions across the rayon pool. Order is preserved.
+        // Fast path per lane: the value-only kernel (no per-iteration simd_eq). When
+        // its extreme is anything but `init` the lane definitely had a non-NaN, so
+        // saw=true; only the rare all-NaN / ±inf-extreme lane (m==init) re-runs the
+        // accurate saw-tracking kernel to distinguish all-NaN from a real ±inf.
+        let lane_reduce = |lane: &[f64]| -> (f64, bool) {
+            let m = simd_nanextreme_value(lane, take_max);
+            if m != init {
+                (m, true)
+            } else {
+                simd_nanextreme_slice(lane, take_max)
+            }
+        };
         let per_lane: Vec<(f64, bool)> = if parallel {
-            data.par_chunks_exact(axis_len)
-                .map(|lane| simd_nanextreme_slice(lane, take_max))
-                .collect()
+            data.par_chunks_exact(axis_len).map(lane_reduce).collect()
         } else {
-            data.chunks_exact(axis_len)
-                .map(|lane| simd_nanextreme_slice(lane, take_max))
-                .collect()
+            data.chunks_exact(axis_len).map(lane_reduce).collect()
         };
         let mut out: Vec<f64> = Vec::with_capacity(outer);
         for (m, saw) in per_lane {
