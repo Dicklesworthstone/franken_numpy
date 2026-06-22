@@ -7281,3 +7281,13 @@ view). Delegate -> flat 1.21x (binding floor). 0 mismatches (2/3-arg/bool/dtypes
 flag on a "tiny" op can hide O(N) scaling -> ALWAYS scaling-check before dismissing as binding floor
 (this + iscomplexobj show the discriminator: flat-ratio+tiny-abs=floor, growing-ratio=structural bug).
 12 wins total; ix_ found after ~12 zero-hit sweeps -> the composite/index-gen tail STILL yields.
+
+## BlackThrush WIN: argwhere 1-D delegate (2026-06-22, 03129e32) — 13th win
+Scaling2 sweep flagged argwhere (diluted to 1.38x by in-lambda rng); isolating the timing + SERIAL
+(RAYON=1) check revealed argwhere-1D is genuinely 8.0/7.5x slower (load-independent) while argwhere-
+2D WINS 0.28x and nonzero is par. numpy.argwhere(1-D)=transpose(nonzero) ~reshape; fnp's native
+coordinate-build is slow for 1-D specifically. Early-delegate 1-D ndarray to numpy (keep native >=2-D
+win) -> 1-D 8x->1.00x, 0 mismatches. LESSON: (a) don't put rng INSIDE the timed lambda (dilutes the
+ratio - hid this as 1.38x); (b) a SLOW path can hide in ONE dimensionality while another wins -
+test 1-D AND 2-D AND 3-D separately. 13 wins; argwhere found via the scaling/native-op audit seam
+which keeps yielding (ix_, argwhere) - composite ops with per-shape/per-arity dispatch are the vein.
