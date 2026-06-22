@@ -276,3 +276,14 @@ table.downcast::<PyDict> -> table.cast (deprecated downcast -> Bound::cast); 0 r
 pre-existing fnp-python warnings). LESSON: fast-path BOTH char.X AND strings.X (numpy 2.x has both
 namespaces, both Python-slow for the won ops). char/strings WIN FAMILY COMPLETE + SYMMETRIC: swapcase/
 capitalize/title/translate all have char.X + strings.X fast paths. 50 wins total this arc.
+
+## 2026-06-22: ma.compressed fix (3b6a93c0) - int dtype-gap 17.6x + f64 50% 3.6x -> parity, sparse win kept
+np.ma re-assessment found 2 losses: getmaskarray 7.9x (= O(1) overhead-noise, np 0.2us/fnp 2.1us both
+us -> SKIP, not real) and compressed (real). compressed: int/non-f64 hit cold extract->rebuild (17.6x
+dtype-gap); f64 fast path won sparse-mask (0.13x) but LOST 3.6x at ~50% density (numpy C boolean-index).
+FIX: (1) non-f64 -> numpy delegate (parity, removes 17.6x); (2) f64 fast path gated to >=90% kept
+(cheap count pass already there) -> sparse WIN kept (0.13x), moderate -> numpy (1.08x parity). Bit-exact
+f64/int/nomask; conformance_ma_utils 24. Rest of np.ma (filled 0.2x/getdata/count/sum/mean/max/masked_
+invalid/masked_where/nonzero) win/parity. LESSON: a fast path can be density-dependent (win sparse, lose
+moderate) - gate it to its win zone (cheap count) rather than delegate-all (keep the win) or keep-all
+(eat the loss). 51 wins.
