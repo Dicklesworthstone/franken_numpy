@@ -6660,34 +6660,6 @@ fn structured_to_unstructured(
         .unbind())
 }
 
-fn extract_ix_array(
-    py: Python<'_>,
-    value: &Bound<'_, PyAny>,
-    context: &str,
-) -> PyResult<UFuncArray> {
-    let numpy = py.import("numpy")?;
-    let builtins = py.import("builtins")?;
-    let ndarray = numpy.getattr("ndarray")?;
-    let is_ndarray = builtins
-        .call_method1("isinstance", (value, ndarray))?
-        .extract::<bool>()?;
-
-    let mut array = numpy.call_method1("asarray", (value,))?;
-    if array.getattr("ndim")?.extract::<usize>()? != 1 {
-        return Err(PyValueError::new_err("Cross index must be 1 dimensional"));
-    }
-
-    let dtype = array.getattr("dtype")?;
-    let kind = dtype.getattr("kind")?.extract::<String>()?;
-    if kind == "b" {
-        array = array.call_method0("nonzero")?.get_item(0)?;
-    } else if !is_ndarray && array.getattr("size")?.extract::<usize>()? == 0 {
-        array = array.call_method1("astype", ("int64",))?;
-    }
-
-    extract_precise_numeric_array(py, &array, context)
-}
-
 fn validate_meshgrid_indexing(indexing: &str) -> PyResult<()> {
     match indexing {
         "xy" | "ij" => Ok(()),
@@ -41724,13 +41696,16 @@ fn fill_diagonal(py: Python<'_>, a: Py<PyAny>, val: Py<PyAny>, wrap: bool) -> Py
 #[pyfunction]
 #[pyo3(signature = (*args))]
 fn ix_(py: Python<'_>, args: &Bound<'_, PyTuple>) -> PyResult<Py<PyAny>> {
-    let arrays = args
-        .iter()
-        .enumerate()
-        .map(|(index, value)| extract_ix_array(py, &value, &format!("ix_[{index}]")))
-        .collect::<PyResult<Vec<_>>>()?;
-    let result = UFuncArray::ix_(&arrays).map_err(map_ufunc_error)?;
-    build_numpy_tuple_from_ufuncs(py, &result)
+    // numpy.ix_ just reshapes each 1-D input to its broadcast axis ((N,1)/(1,N)/...) —
+    // O(1) view-reshapes, ~1.7us flat. The native path cold-extracted each operand and
+    // materialized via UFuncArray::ix_, scaling O(N) and hitting 2530x at N=100K
+    // (BlackThrush 2026-06-22). Delegate to numpy.ix_ for parity. (composite-op-routes-
+    // to-slow-native-path fix, cf matrix_power / einsum-diagonal / true_divide.)
+    Ok(py
+        .import("numpy")?
+        .getattr("ix_")?
+        .call(args, None)?
+        .unbind())
 }
 
 // Build np.repeat(v, times).reshape(len(v), times): each row i is the scalar v[i]
