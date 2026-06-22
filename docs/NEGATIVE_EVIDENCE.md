@@ -7258,3 +7258,16 @@ Only lever would be a C-level fast-dispatch (major architecture change = human d
 no fixable gap. Reachable bit-exact algorithmic surface remains exhausted (10 wins); the remaining
 un-dominated workloads are BOTH architectural-human-decision floors: small-array pyo3 crossing, and
 the C-BLAS Gram/LU kernel floor (bead cblas-large-gram-lever-8lnzn).
+
+## BlackThrush WIN: true_divide array-API-alias fix (2026-06-22, 73beebbe) — 11th win, found after 16 zero-hit sweeps
+Probing remaining ufuncs found true_divide 5-9x LOSS (serial-confirmed real, not contention) while
+divide was par. ROOT: fnp exposes `divide` as numpy's own ufunc (re-export, <ufunc 'divide'>), but
+`true_divide` ran a bespoke native path (pre-scan whole divisor for zero via f64_ndarray_contains_zero
+= extra O(n) pass + non-competitive native divide). np.true_divide IS np.divide -> delegate true_divide
+to numpy.true_divide -> 0.90-1.00x. 0 mismatches (f64/f32/int/zero-div/scalar/broadcast). FALSE START
+caught by verify-discipline: first routed to native_binary_divide_or_passthrough (the `fn divide`
+[#[allow(dead_code)]] body) -> 32x WORSE (it's a dead cold-extract path never reached since divide=
+numpy ufunc); divide!=true_divide because divide is the re-exported numpy ufunc, not that dead fn.
+Removed orphaned f64_ndarray_contains_zero (warning-clean). LESSON: persistence past 16 zero-hit
+sweeps still found a real 5-9x alias-bug on a VERY common op (a/b); and `f.X is <ufunc>` vs `<built-in
+function>` tells you which ops are numpy-reexports (fast) vs fnp-native (audit those for alias drift).
