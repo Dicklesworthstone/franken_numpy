@@ -21682,6 +21682,15 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
         }
 
         let last_bin = nbins - 1;
+        // Direct equal-width index (numpy's algorithm), NOT partition_point: the
+        // edges are uniform (linspace), so idx = floor((x-first)/(last-first)*nbins)
+        // plus numpy's ±1-ULP edge corrections is O(1) per element vs the binary
+        // search's O(log nbins) — bit-identical to the serial path above (which is
+        // already conformance-verified against numpy) and to numpy itself. For data
+        // gated to [first,last], idx is always in [0,nbins] (==nbins only at x==last),
+        // and the decrement never fires at idx==0 (x>=first=edges[0]).
+        let norm_denom = last - first;
+        let norm_numerator = nbins as f64;
         let local_counts = data
             .par_iter()
             .fold(
@@ -21689,9 +21698,17 @@ fn histogram_typed<T: pyo3::buffer::Element + Copy + Sync>(
                 |mut local, &raw| {
                     let x = to_f64(raw);
                     if x >= first && x <= last {
-                        let count_le = edges_vec.partition_point(|edge| *edge <= x);
-                        let idx = if count_le == 0 { 0 } else { count_le - 1 };
-                        local[idx.min(last_bin)] += 1;
+                        let mut idx = (((x - first) / norm_denom) * norm_numerator) as usize;
+                        if idx == nbins {
+                            idx -= 1;
+                        }
+                        if idx != 0 && x < edges_vec[idx] {
+                            idx -= 1;
+                        }
+                        if idx != last_bin && x >= edges_vec[idx + 1] {
+                            idx += 1;
+                        }
+                        local[idx] += 1;
                     }
                     local
                 },

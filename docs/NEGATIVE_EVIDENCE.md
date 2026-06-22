@@ -6683,3 +6683,29 @@ f64::max/min don't autovectorize -> use Simd simd_max/min (vmaxpd, same IEEE nan
 fold; (b) a per-element condition flag (saw) interleaved with the reduction blocks vectorization —
 recover it from the final accumulator (==init) + a rare re-scan; (c) when a layout is fundamentally
 acc-traffic-bound (wide reduction), DELEGATE to numpy's blocked kernel rather than lose.
+
+---
+
+## BlackThrush WIN: histogram parallel binning partition_point -> direct index (2026-06-22, 12-35% faster)
+
+np.histogram's PARALLEL fold (n>=1<<16) binned each element with `edges.partition_point(|e| e<=x)` —
+an O(log nbins) BINARY SEARCH — while the SERIAL path (n<65K) already used numpy's O(1) direct method
+(idx = floor((x-first)/(last-first)*nbins) + the ±1-ULP decrement/increment edge corrections). Ported
+the proven serial logic into the parallel fold. The loss scaled with bin count (more edges = deeper
+search): in the L3 band it lost up to 1.65x at bins=256. A/B (both fnp builds, absolute ms):
+| N,bins | partition_point | direct | speedup |
+|--------|-----------------|--------|---------|
+| 1.5M,256 | 2.531ms | 1.867ms | 26% |
+| 2M,256 | 2.838ms | 2.021ms | 29% |
+| 3M,256 | 4.431ms | 2.889ms | 35% |
+| 3M,50 | 2.943ms | 2.267ms | 23% |
+vs numpy: 1.5M+ now 0.38-0.92x WIN (was up to 1.65x LOSS at bins=256). BIT-IDENTICAL — the serial
+path already shipped this exact algorithm (conformance-passing); 22/22 differential incl on-edge
+values / tiny-range / all-same / clustered / integer-as-float + histogram conformance (3) PASS.
+NO-SHIP (reverted): raising the gate 1<<16->1<<20 to serialize the small-array (100K-500K) parallel-
+overhead losses — the SERIAL histogram is itself ~1.25x slower than numpy (scalar vs numpy SIMD
+binning), so serializing made 100K-1M a CONSISTENT 1.25x loss AND lost the 1M parallel win. Small-array
+histogram needs SIMD-vectorized binning to win (numpy's edge); deferred. LEVER: a fast path with TWO
+binning impls (serial direct, parallel binary-search) — port the better one to both. partition_point
+in a hot binning loop is O(log nbins); equal-width edges admit O(1) direct indexing (numpy's algorithm
+w/ ±1-ULP correction is bit-exact).
