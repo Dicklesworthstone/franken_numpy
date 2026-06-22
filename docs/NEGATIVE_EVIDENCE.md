@@ -7227,3 +7227,11 @@ disproved (batched-SIMD cholesky slower, int-SIMD ~0-gain), every op-family/dtyp
 kwarg/layout swept. Sole remaining un-dominated workload = the C-BLAS kernel floor (cov large-Gram
 3-8x, batched LU) — a HUMAN A(link C-BLAS)/C(accept) decision (bead cblas-large-gram-lever-8lnzn).
 Further "find a gap" sweeps now have ~0 hit rate; the productive lever is the bead decision.
+
+## BlackThrush: np.char + polynomial sweep — clean (2026-06-22, 5th zero-hit)
+np.char full family: title/capitalize/swapcase 0.05-0.07x WIN; zfill/center/ljust/rjust/split/rsplit/
+partition/encode/endswith/isdigit/isalpha/lstrip/rstrip/expandtabs/replace/multiply all par. poly
+(polyadd 1.36/polymul 1.06/polyder 1.15/polyint 1.17) = tiny-op binding floor (~50-coeff, microsecond
+ops where dispatch dominates -> not real workloads). No fixable gap. 5TH consecutive zero-hit sweep
+(multi-axis/trace-diag/non-contig/broadcast-matmul/char-poly). Reachable surface exhausted beyond
+doubt. 10 wins shipped; sole lever = human C-BLAS/accept decision (bead cblas-large-gram-lever-8lnzn).
