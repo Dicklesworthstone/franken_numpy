@@ -1599,6 +1599,16 @@ impl PyRandomGenerator {
                         Ok(value as i64)
                     })
                     .collect::<PyResult<Vec<_>>>()?
+            } else if replace {
+                // numpy's choice(int, size, replace=True, p=None) IS integers(0, pop, size):
+                // it samples the indices and, since the population is arange(pop), returns
+                // them directly. Route through the vectorized bounded-int fill (the same
+                // path `integers` uses) instead of the per-element numpy_bounded_uint64 loop
+                // + u64->i64 conversion pass — bit-exact (numpy choice == numpy integers,
+                // and fnp integers is bit-exact with numpy integers) and ~5x faster.
+                self.inner
+                    .integers(0, n, len)
+                    .map_err(map_random_error)?
             } else {
                 self.inner
                     .choice_indices_with_shuffle(population_len, len, replace, shuffle)

@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-22 - KEEP: Generator.choice(int, replace=True, p=None) -> integers fill (was 5x its own integers)
+
+`YellowElk` (claude-code/opus). Fourth disk-frugal cycle, warm target (fnp-python
+incremental rebuild). Follow-up on the choice loss deferred last cycle.
+
+`rng.choice(N, size)` for an integer-scalar population (replace=True, p=None) ran
+the generic `choice_indices_with_shuffle` path: per-element `numpy_bounded_uint64`
+(the 64-bit Lemire draw) into a `Vec<u64>`, then a `u64 -> i64` checked-conversion
+map+collect, then `build_random_i64_parts`. numpy's `choice(int, size,
+replace=True, p=None)` is literally `integers(0, pop, size)` — and fnp's own
+`integers` is bit-exact with numpy's AND ~5x faster than this choice path (it uses
+the hoisted-threshold 32-bit Lemire fill for ranges < 2^32 and returns `Vec<i64>`
+directly). So choice was paying a 5x tax over its own `integers`.
+
+Fix: in the int-population branch, when `replace`, draw via `self.inner.integers(0,
+n, len)` directly (one crate, no fnp-random change). Transitively bit-exact (numpy
+choice == numpy integers == fnp integers); large ranges (>= 2^32) still hit the
+same 64-bit path inside `integers`, so no regression there either. replace=False /
+weighted / array-population paths untouched.
+
+Load-cancelling A/B (same engine, so contention divides out) — the load-INDEPENDENT
+proof:
+
+| N, size | before: fnp.choice / fnp.integers | after: fnp.choice / fnp.integers |
+|---|---:|---:|
+| 1M, 1M | ~5.3x | **~0.96x** |
+
+i.e. choice now performs identically to integers. vs-numpy ratio is therefore
+whatever `integers` is — parity/WIN on a calm box (measured 0.80x on a calm box
+last session); the box was at load ~92 this cycle so absolute vs-numpy numbers are
+contention noise and not quoted as the verdict.
+
+Validation: 79 differential checks vs numpy — bit-exact + dtype + shape across
+seeds {0,1,7,42}, N {1..1M}, sizes {1,5,1000}, size=None scalar, 2-D size tuple,
+replace=False (incl. 100k/50k), weighted p, array population, and range 2^40
+(64-bit path) — **0 fails**. Build clean.
+
 ## 2026-06-22 - KEEP: Generator.shuffle 1-D in-place buffer Fisher-Yates (2.25x loss -> WIN)
 
 `YellowElk` (claude-code/opus). Third disk-frugal BOLD-VERIFY cycle, warm
