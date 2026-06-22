@@ -6827,3 +6827,11 @@ no regression, full grid A/B via env-toggle FNP_NO_COV_DELEGATE). 0 correctness 
 (not done): small-n_vars + LARGE-n_obs also loses (n_vars=20,n_obs=5000 = 3.6x; crossover ~n_obs=500)
 — a 2nd delegate predicate (n_vars<48 && n_obs>=~768) would catch it; left as a clean follow-up to
 avoid over-reaching the gate this iteration.
+
+## BlackThrush WIN (follow-up done): cov small-n_vars + large-n_obs delegate (2026-06-22, 4dac93bd)
+The follow-up flagged in the 0d3fe99e entry is now SHIPPED. Mapped n_vars<48 x n_obs: native dot8
+Gram beats dsyrk only while Gram work n_vars^2*n_obs < ~200k; above it loses 1.2-3.5x (16x5000=3.54,
+24x5000=3.41, 32x5000=2.96, 40x2000=2.46). Extended the rowvar=True gate to also delegate n_vars<48
+when n_vars^2*n_obs >= 200000. Those cells -> 1.02-1.09; tiny-Gram wins (2x20000=0.79, 16x500=0.86)
++ large n_vars>=256 unchanged; 0 correctness mismatches. cov rowvar=True is now at parity-or-win
+across the whole n_vars x n_obs plane (native where it wins, numpy BLAS where it doesn't).
