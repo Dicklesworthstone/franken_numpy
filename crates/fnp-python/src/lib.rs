@@ -39972,6 +39972,11 @@ fn try_zerocopy_typed_kron2d(
     {
         return Ok(None);
     }
+    // ascontiguousarray handles non-contiguous operands (e.g. a sliced sub-block): no-op when
+    // already C-contiguous, and the operands are << the kron output so a copy is cheap. Preserves dtype.
+    let a_owned = numpy.call_method1("ascontiguousarray", (a,))?;
+    let b_owned = numpy.call_method1("ascontiguousarray", (b,))?;
+    let (a, b) = (&a_owned, &b_owned);
     match (kind.as_str(), itemsize) {
         ("f", 4) => kron2d_typed::<f32, _>(py, &numpy, a, b, "float32", |x, y| x * y),
         ("i", 8) => kron2d_typed::<i64, _>(py, &numpy, a, b, "int64", |x, y| x.wrapping_mul(y)),
