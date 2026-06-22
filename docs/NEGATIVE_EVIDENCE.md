@@ -6709,3 +6709,33 @@ histogram needs SIMD-vectorized binning to win (numpy's edge); deferred. LEVER: 
 binning impls (serial direct, parallel binary-search) — port the better one to both. partition_point
 in a hot binning loop is O(log nbins); equal-width edges admit O(1) direct indexing (numpy's algorithm
 w/ ±1-ULP correction is bit-exact).
+
+---
+
+## BlackThrush WIN: nanvar/nanstd axis parallel gate 1<<16 -> 98304 (2026-06-22, 256²/288² 1.2-1.5x faster)
+
+`try_zerocopy_f64_nanvar_axis` (shared nanvar+nanstd last-axis) gated rayon fan-out at
+`outer*axis_len >= 1<<16` (65536). Per-lane work is just pairwise nansum + pairwise sqr-dev
+(two cheap passes), so at the gate shape the fan-out cost exceeded the work. A/B (local build,
+64-thread, py3.14/numpy2.4.3), fnp parallel vs serial, both bit-exact:
+| shape | work | parallel us | serial us | winner |
+|-------|------|-------------|-----------|--------|
+| 256x256 | 65536 | 59.0 | 38.3 | serial 1.54x |
+| 288x288 | 82944 | 63.5 | 52.4 | serial 1.21x |
+| 304x304 | 92416 | 61.2 | 59.8 | ~tie |
+| 320x320 | 102400 | 66.7 | 66.6 | tie |
+| 352x352 | 123904 | 64.0 | 69.7 | parallel |
+| 384x384 | 147456 | 58.4 | 86.2 | parallel |
+Crossover ~98k; set gate to 98304. >=gate stays parallel (preserved). numpy ALREADY dominated
+4-20x both ways (not a numpy loss — an internal mis-tuned-gate fix). 0 mismatches across
+shapes/ddof/keepdims/nan-lanes for nanvar+nanstd. SHIPPED 98171ddd.
+
+## BlackThrush NO-SHIP: ptp int64 axis parallel gate retune ~0-gain (2026-06-22, reverted)
+
+`ptp_axis_typed` (wide-int last-axis) gates at `outer*axis_len*inner >= 1<<16`. Unlike nanvar,
+the lane_ptp scalar min/max single-pass loop sees NO measurable parallel overhead at the gate
+shape: A/B parallel vs serial at 256x256 = 28.4 vs 28.6 us (noise), and ~identical at all larger
+shapes. fnp ptp-int64-axis is at PARITY with numpy (0.88-1.05x; numpy's own ptp timing is noisy
++/-20% at this scale), so the apparent ~1.09x "loss" was numpy variance, not a real gap. The
+residual 1.0-1.05x is the scalar min/max KERNEL floor vs numpy's vectorized reduction — NOT
+fixable by gate tuning. Real lever would be SIMD min/max fold (separate work). Gate change reverted.
