@@ -6236,3 +6236,30 @@ when the native path widens and never beats numpy. (2) DENSITY-GATE a fast path 
 f32 -> f64 kernel can't match (WALL). (4) Verify ABSOLUTE time not ratio (us-ops trace/flip/diag show
 inflated ratios that shrink with size = overhead/view-noise, NOT real); SINGLE-RUN ratios inflate
 (norm-vec-2 1.97x, sum-c128 1.68x = phantoms; min-of-3 = 0.5-0.94x). matmul = no-C-BLAS wall (contended).
+
+---
+
+## BlackThrush kwarg-variant + 2-D-variant + 2-output-f32 arc (2026-06-22, post-disk-recovery)
+
+WINS/FIXES (fnp/np, <1=win; bit-exact-or-allclose, conformance-green; f64/other paths kept):
+| op | before | after | commit | lever |
+|----|--------|-------|--------|-------|
+| ravel_multi_index mode=clip/wrap | 11-12x | 1.32x/2.05x | 59405ef2 | kwarg-variant bypass (mode= skipped fast path -> handle clip clamp/wrap rem_euclid) |
+| frexp f32 | 1.0x(parity) | 0.09x WIN (~11x) | 22dfa155 | 2-output-f32 extend (frexp_one(v as f64), mantissa->f32 exact) |
+| modf f32 | 1.0x | 0.18x WIN | 22dfa155 | 2-output-f32 extend (pure f32 trunc/frac) |
+| cov rowvar=False (2-D) | 10.4x | 1.0x | 1946bcea | delegate non-fast-path orientation to numpy (transpose-route disproven copy-bound) |
+| corrcoef rowvar=False (2-D) | 4.8-6.8x | 0.8x | 1946bcea | delegate (same) |
+| kron 2-D f32 | 7.5x | 0.86x WIN | fbc0c384 | dtype-gap: generic kron2d_typed<T> (element-wise block products, bit-exact) |
+| kron 2-D int (i8..u64) | 6.3x | 0.74-0.88x WIN | fbc0c384 | same typed |
+| kron 2-D non-contiguous | 6x | 0.85x WIN | 683b7cb3 | ascontiguousarray operands (op<<output -> cheap copy; no-op if contig) |
+
+DISPROVEN/DEFERRED (verification prevented bad ships): divmod-f32 NOT bit-exact-extendable (quotient
+floor_divide-f32 mismatch 3/2M; remainder matched) - stays parity. corrcoef/cov rowvar=False transpose-
+route (ascontiguousarray(M.T)+rowvar=T Gram) copy-bound 4.68x -> delegated instead.
+
+LEVERS (new this arc): (1) KWARG-VARIANT-BYPASS: a non-default kwarg (mode=, rowvar=) can skip a fast
+path gated on the default -> cold; handle the variant OR delegate. (2) 2-D-VARIANT of a fixed 1-D/f64
+op (kron-2D from kron-1D) is often a separate gap. (3) PARITY-MISSED-WIN: extend a proven f64 win to
+f32 when bit-exact (extraction/element-wise = safe like frexp/modf/kron; arithmetic-w-rounding = VERIFY
+like divmod-f32 which failed). (4) ascontiguousarray-operands cheap when operands << output. (5)
+SINGLE-RUN scout ratios inflate (norm-vec-2, sum-c128, bincount-minlength = phantoms; min-of-3 verdict).
