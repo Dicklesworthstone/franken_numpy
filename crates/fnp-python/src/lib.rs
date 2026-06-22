@@ -20015,9 +20015,81 @@ fn try_zerocopy_f64_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Opti
     ))
 }
 
+// f32 counterpart of try_zerocopy_f64_frexp. numpy.frexp(float32) -> (mantissa float32, exponent
+// int32). For an f32 value x = m*2^e (m in [0.5,1)), m is exactly representable in f32, so computing
+// frexp_one(x as f64) and casting the mantissa back to f32 is bit-identical to numpy's frexpf.
+fn try_zerocopy_f32_frexp(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !x.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f32(x) {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f32>::get(x) else {
+        return Ok(None);
+    };
+    let Some(input) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    if shape.is_empty() {
+        return Ok(None);
+    }
+    let n = input.len();
+    let mkw = PyDict::new(py);
+    mkw.set_item("dtype", "float32")?;
+    let mantissa = numpy.call_method("empty", (n,), Some(&mkw))?;
+    let ekw = PyDict::new(py);
+    ekw.set_item("dtype", "int32")?;
+    let exponent = numpy.call_method("empty", (n,), Some(&ekw))?;
+    if n > 0 {
+        let (Ok(m_buf), Ok(e_buf)) = (
+            PyBuffer::<f32>::get(&mantissa),
+            PyBuffer::<i32>::get(&exponent),
+        ) else {
+            return Ok(None);
+        };
+        let (Some(m_out), Some(e_out)) = (m_buf.as_mut_slice(py), e_buf.as_mut_slice(py)) else {
+            return Ok(None);
+        };
+        // SAFETY: repr(transparent) cells; input read-only under GIL; outputs are fresh owned arrays.
+        let data: &[f32] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
+        let m_slice: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(m_out.as_ptr() as *mut f32, n) };
+        let e_slice: &mut [i32] =
+            unsafe { std::slice::from_raw_parts_mut(e_out.as_ptr() as *mut i32, n) };
+        let kernel = |m: &mut [f32], e: &mut [i32], d: &[f32]| {
+            for ((ms, es), &v) in m.iter_mut().zip(e.iter_mut()).zip(d) {
+                let (mm, ee) = frexp_one(v as f64);
+                *ms = mm as f32;
+                *es = ee;
+            }
+        };
+        const FREXP_PARALLEL_MIN: usize = 1 << 19;
+        if n >= FREXP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            m_slice
+                .par_chunks_mut(chunk)
+                .zip(e_slice.par_chunks_mut(chunk))
+                .zip(data.par_chunks(chunk))
+                .for_each(|((m, e), d)| kernel(m, e, d));
+        } else {
+            kernel(m_slice, e_slice, data);
+        }
+    }
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let mantissa = mantissa.call_method1("reshape", (&output_shape,))?;
+    let exponent = exponent.call_method1("reshape", (&output_shape,))?;
+    Ok(Some(
+        PyTuple::new(py, [&mantissa, &exponent])?.into_any().unbind(),
+    ))
+}
+
 #[pyfunction]
 fn frexp(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f64_frexp(py, x.bind(py))? {
+        return Ok(out);
+    }
+    if let Some(out) = try_zerocopy_f32_frexp(py, x.bind(py))? {
         return Ok(out);
     }
     // numpy.frexp preserves the input float width for the mantissa (float16->float16,
@@ -20119,9 +20191,59 @@ fn try_zerocopy_f64_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
     Ok(Some(PyTuple::new(py, [frac_arr, int_arr])?.unbind().into()))
 }
 
+// f32 counterpart of try_zerocopy_f64_modf. numpy.modf(float32) -> (fractional f32, integral f32),
+// both computed in f32 (integral = trunc toward zero; fractional carries the sign of x) -> the same
+// f32 ops are bit-identical to numpy. Non-f32 / 0-d / non-contiguous defer.
+fn try_zerocopy_f32_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !x.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f32(x) {
+        return Ok(None);
+    }
+    if x.getattr("ndim")?.extract::<usize>()? == 0 {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f32>::get(x) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let shape = x.getattr("shape")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float32")?;
+    let frac_arr = numpy.call_method("empty", (&shape,), Some(&kwargs))?;
+    let int_arr = numpy.call_method("empty", (&shape,), Some(&kwargs))?;
+    if !cells.is_empty() {
+        let (Ok(frac_buf), Ok(int_buf)) = (
+            PyBuffer::<f32>::get(&frac_arr),
+            PyBuffer::<f32>::get(&int_arr),
+        ) else {
+            return Ok(None);
+        };
+        let (Some(frac_out), Some(int_out)) = (frac_buf.as_mut_slice(py), int_buf.as_mut_slice(py))
+        else {
+            return Ok(None);
+        };
+        for ((c, fo), io) in cells.iter().zip(frac_out.iter()).zip(int_out.iter()) {
+            let v = c.get();
+            let t = v.trunc();
+            io.set(t);
+            let base = if v.is_infinite() { 0.0 } else { v - t };
+            fo.set(base.copysign(v));
+        }
+    }
+    Ok(Some(PyTuple::new(py, [frac_arr, int_arr])?.unbind().into()))
+}
+
 #[pyfunction]
 fn modf(py: Python<'_>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f64_modf(py, x.bind(py))? {
+        return Ok(out);
+    }
+    if let Some(out) = try_zerocopy_f32_modf(py, x.bind(py))? {
         return Ok(out);
     }
     // numpy.modf preserves the input float width for both outputs (float16->float16,
