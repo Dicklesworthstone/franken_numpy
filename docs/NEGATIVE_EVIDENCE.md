@@ -6851,3 +6851,16 @@ plane (mid-band [48,256), small-vars work>=200k/400k, large-vars short-obs box).
 documented cov-gram tiling no-ship (DRAM-bound at 64-thread; real unlock = SIMD-across-obs breaks
 exact-repr = human decision). Also residual: n_obs 256-500 transitional band for n_vars 256-512
 (~1.1-1.3, left native to avoid regressing the nearby n_obs>=500 wins).
+
+## BlackThrush WIN: cov two-operand delegate + shared helper (2026-06-22, 0dd37113)
+
+cov(m,y) two-operand bypassed the single-operand gate (y present) but shares the Gram loss regions
+(effective n_vars = m_vars + y_vars): cov(M=50,y)=2.12, both-(25,1000)=2.30, M=(20,5000)=1.72 LOSS.
+Factored the 3-region predicate into cov_gram_should_delegate(n_vars,n_obs,small_work_min,
+work_vars_lo) and applied to the two-operand path + refactored the single cov/corrcoef gates onto
+it (behavior-identical). work_vars_lo distinguishes the paths: single-op n_vars=2 (2,1e6) loses
+1.23x -> delegate (lo=0); two-op n_vars=2 (two 1-D series) zero-copy Gram WINS 0.94x at 1e6 obs ->
+native (lo=4). Two-op losses -> 1.02-1.05; two-1D + large-n_vars wins unchanged; single-op (2,1e6)
+1.23->0.94; 0 correctness mismatches. cov/corrcoef Gram family now COMPLETE: parity-or-win across
+single-op, two-operand, and all three loss regions; only the n_vars>=512 DRAM patchwork remains
+(documented floor, no clean gate).
