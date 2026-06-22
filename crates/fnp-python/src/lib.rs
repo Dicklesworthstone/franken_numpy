@@ -45954,6 +45954,31 @@ fn einsum_spec_is_single_reduce(spec: &str) -> bool {
     out.len() < inp.len() // must drop (sum) at least one axis
 }
 
+// True for a single-operand spec with a REPEATED input index = diagonal extraction.
+// The plain "ii->i" 2-D case is handled by the buffered-diagonal fast path earlier; this
+// catches the variants it misses — "bii->bi" (batched), "...ii->...i" (ellipsis), "iij->ij",
+// "ii" (trace) — which the generic native kernel runs 43-1339x slower than numpy's strided
+// diagonal. Multi-operand contractions (comma) are excluded.
+fn einsum_spec_is_single_diag(spec: &str) -> bool {
+    let spec: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+    if spec.contains(',') {
+        return false;
+    }
+    let input = spec.split("->").next().unwrap_or("");
+    let input = input.replace("...", ""); // ellipsis = broadcast dims, irrelevant to the repeat test
+    if input.is_empty() || !input.bytes().all(|b| b.is_ascii_alphabetic()) {
+        return false;
+    }
+    let mut seen = [false; 256];
+    for &b in input.as_bytes() {
+        if seen[b as usize] {
+            return true; // a repeated input index -> diagonal-like
+        }
+        seen[b as usize] = true;
+    }
+    false
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn einsum(
@@ -45977,6 +46002,15 @@ fn einsum(
     if args.len() == 2
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_single_reduce(&spec)
+    {
+        return core_numpy_passthrough(py, "einsum", args, kwargs);
+    }
+    // Single-operand diagonal extraction with a repeated index ("bii->bi", "...ii->...i",
+    // "iij->ij", "ii"=trace) that the plain-"ii->i" fast path above misses: the generic
+    // native kernel is 43-1339x slower than numpy's strided diagonal -> delegate for parity.
+    if args.len() == 2
+        && let Ok(spec) = args.get_item(0)?.extract::<String>()
+        && einsum_spec_is_single_diag(&spec)
     {
         return core_numpy_passthrough(py, "einsum", args, kwargs);
     }
