@@ -26897,6 +26897,89 @@ fn try_zerocopy_f32_nanargextreme(
     }
 }
 
+// f32 nanargmax/nanargmin along the contiguous LAST axis (e.g. np.nanargmax(M, axis=-1) per-row).
+// The native axis path extracts f32->f64 (widen, ~7x); read the f32 buffer directly and run a
+// per-lane first-non-NaN argmax/argmin comparing in f32 (order-preserving -> index bit-identical
+// to numpy). Lanes are independent contiguous runs -> serial/parallel identical. An all-NaN lane
+// defers the whole call (numpy raises ValueError). Non-f32 / non-last-axis / 1-D / non-contiguous
+// -> Ok(None) (the flat path handles axis=None 1-D; the native path handles the rest).
+fn try_zerocopy_f32_nanarg_lastaxis(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+    take_max: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f32(a) {
+        return Ok(None);
+    }
+    if !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len();
+    if ndim < 2 {
+        return Ok(None); // 1-D flat is handled by try_zerocopy_f32_nanargextreme
+    }
+    let norm = if axis < 0 { axis + ndim as isize } else { axis };
+    if norm < 0 || norm as usize != ndim - 1 {
+        return Ok(None); // contiguous last axis only
+    }
+    let lane = shape[ndim - 1];
+    if lane == 0 {
+        return Ok(None); // numpy raises on a zero-length reduction axis
+    }
+    let outer: usize = shape[..ndim - 1].iter().product();
+    let Ok(buffer) = PyBuffer::<f32>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    if cells.len() != outer * lane {
+        return Ok(None);
+    }
+    // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
+    let data: &[f32] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f32>(), cells.len()) };
+    let per_lane = |l: &[f32]| -> Option<usize> {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, &v) in l.iter().enumerate() {
+            if !v.is_nan() {
+                let take = match best {
+                    None => true,
+                    Some(b) => {
+                        if take_max {
+                            v > b.1
+                        } else {
+                            v < b.1
+                        }
+                    }
+                };
+                if take {
+                    best = Some((i, v));
+                }
+            }
+        }
+        best.map(|(i, _)| i)
+    };
+    const NANARG_LASTAXIS_PARALLEL_MIN: usize = 1 << 20;
+    let parallel =
+        outer * lane >= NANARG_LASTAXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let per: Vec<Option<usize>> = if parallel {
+        use rayon::prelude::*;
+        data.par_chunks_exact(lane).map(per_lane).collect()
+    } else {
+        data.chunks_exact(lane).map(per_lane).collect()
+    };
+    if per.iter().any(|x| x.is_none()) {
+        return Ok(None); // an all-NaN lane -> defer (numpy ValueError)
+    }
+    let indices: Vec<i64> = per.into_iter().map(|i| i.unwrap() as i64).collect();
+    let out_shape: Vec<usize> = shape[..ndim - 1].to_vec();
+    let flat = numpy_array_from_slice(py, numpy, &indices, "intp")?;
+    Ok(Some(flat.call_method1("reshape", (out_shape,))?.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
 fn nanargmax(
@@ -26940,6 +27023,13 @@ fn nanargmax(
     // float32: read f32 directly (the f64 path is f64-only; f32 otherwise widen-extracts ~6-8x).
     if axis.is_none()
         && let Some(result) = try_zerocopy_f32_nanargextreme(py, &numpy, a.bind(py), true)?
+    {
+        return Ok(result);
+    }
+    // float32 along the last axis: per-lane nan-skip arg reading f32 directly (~7x widen avoided).
+    if let Some(ax_obj) = axis.as_ref()
+        && let Ok(ax) = ax_obj.bind(py).extract::<isize>()
+        && let Some(result) = try_zerocopy_f32_nanarg_lastaxis(py, &numpy, a.bind(py), ax, true)?
     {
         return Ok(result);
     }
@@ -27007,6 +27097,13 @@ fn nanargmin(
     // float32: read f32 directly (the f64 path is f64-only; f32 otherwise widen-extracts ~6-8x).
     if axis.is_none()
         && let Some(result) = try_zerocopy_f32_nanargextreme(py, &numpy, a.bind(py), false)?
+    {
+        return Ok(result);
+    }
+    // float32 along the last axis: per-lane nan-skip arg reading f32 directly (~7x widen avoided).
+    if let Some(ax_obj) = axis.as_ref()
+        && let Ok(ax) = ax_obj.bind(py).extract::<isize>()
+        && let Some(result) = try_zerocopy_f32_nanarg_lastaxis(py, &numpy, a.bind(py), ax, false)?
     {
         return Ok(result);
     }
