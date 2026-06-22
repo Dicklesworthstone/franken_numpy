@@ -6963,3 +6963,18 @@ vs_numpy_pcg64_uint8_full_range -- --sample-size 10 --warm-up-time 1 --measureme
 (win retained). Correctness/state proof: widened `full_range_byte_integers_match_scalar_narrow_
 stream_and_state` to cover 65,536, 100,000, and 262,161 elements for PCG64 and PCG64DXSM, both
 uint8 and int8; filtered release test green. KEEP.
+
+## BlackThrush: fancy-index + datetime64 sweep — floors + NaT-risky marginal (2026-06-22)
+
+Fancy-indexing/datetime sweep (median-of-3). Results: take 1.11 (near-par binding overhead),
+compress 1.88 / extract 1.87 LOSS = the DOCUMENTED inherent branchless-compaction floor
+([[roll-compress-zerocopy-cell-loop-leads]] compress no-ship; extract shares compress's
+try_zerocopy_any_compact kernel, L20718) — 1.88 vs prior 1.36 is mask-density (30% here); numpy's
+boolean compaction C loop is hard to beat, branchless 8-lane already optimal. datetime64: diff 0.36
+WIN, max/argmax/sort par, searchsorted-SCALAR 1.73x LOSS. The 1.73x is the scalar fast path
+(try_zerocopy_scalar_searchsorted, L21277) gating only ('f'|'i'|'u',8) -> datetime ('M')/timedelta
+('m') defer to numpy (double-crossing). FIXABLE in principle (view datetime64 as int64, same
+ordering) BUT NaT-RISKY: numpy sorts NaT LAST while NaT's int64 = i64::MIN sorts FIRST, so a plain
+i64 binary search is WRONG for any haystack containing NaT, and detecting NaT cheaply is impossible
+(O(n) scan defeats O(log n)). Gain is also marginal (~1us scalar op). DEFERRED (correctness hazard
+> tiny gain). All datetime ops verified correct + non-crashing. No clean high-value fixable gap.
