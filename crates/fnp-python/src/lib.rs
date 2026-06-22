@@ -26290,6 +26290,41 @@ fn simd_nanextreme_slice(data: &[f64], take_max: bool) -> (f64, bool) {
     (m, saw)
 }
 
+// Value-only nan-extreme fold (no saw-tracking). simd_max/simd_min already skip
+// NaN (IEEE maxNum), so the extreme is exact; this drops the per-iteration
+// `simd_eq` that the saw-returning kernel runs (halving the SIMD ops in the hot
+// loop). The caller detects the all-NaN / empty case via `m == init` (defer),
+// which it must do anyway for the ±inf-extreme tie — so no accuracy is lost.
+fn simd_nanextreme_value(data: &[f64], take_max: bool) -> f64 {
+    use std::simd::num::SimdFloat;
+    use std::simd::Simd;
+    const L: usize = 8;
+    type V = Simd<f64, L>;
+    let init = if take_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+    let n = data.len();
+    let full = n - n % L;
+    let mut acc = V::splat(init);
+    let mut off = 0;
+    while off < full {
+        let c = V::from_slice(&data[off..off + L]);
+        acc = if take_max { acc.simd_max(c) } else { acc.simd_min(c) };
+        off += L;
+    }
+    let mut m = init;
+    for &v in &acc.to_array() {
+        m = if take_max { m.max(v) } else { m.min(v) };
+    }
+    // f64::max/min return the non-NaN operand, so the scalar tail skips NaN too.
+    for &v in &data[full..] {
+        m = if take_max { m.max(v) } else { m.min(v) };
+    }
+    m
+}
+
 fn simd_nanextreme_f64(cells: &[pyo3::buffer::ReadOnlyCell<f64>], take_max: bool) -> Option<f64> {
     if cells.is_empty() {
         return None;
@@ -26299,35 +26334,31 @@ fn simd_nanextreme_f64(cells: &[pyo3::buffer::ReadOnlyCell<f64>], take_max: bool
     // read-only PyBuffer slice held under the GIL, so reading it as &[f64] for the
     // duration of this fold is sound. Avoids staging each block through `buf`.
     let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    let init = if take_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
     // numpy runs nanmax/nanmin single-threaded; this reduction is order-independent
-    // (NaN-skipping min/max, and the ±0-sign tie defers below), so a parallel fold
-    // across the rayon pool exploits the extra memory channels and beats it. The +1
-    // identity for an empty chunk is the same init value, so the merge is exact.
-    const NANEXTREME_PARALLEL_MIN: usize = 1 << 20;
-    let (m, saw) = if n >= NANEXTREME_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+    // (NaN-skipping min/max), so a parallel fold across the rayon pool exploits the
+    // extra memory channels and beats it — but ONLY once the array is DRAM-bound.
+    // While it fits L3 the rayon task overhead dominates (measured: parallel LOSES
+    // up to 2.5x at 1.2-2M = L3-resident, WINS at >=3M = DRAM), so gate at 1<<21.
+    const NANEXTREME_PARALLEL_MIN: usize = 1 << 21;
+    let m = if n >= NANEXTREME_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
         use rayon::prelude::*;
         const CHUNK: usize = 1 << 15; // 256 KiB of f64 per task
-        let init = if take_max {
-            f64::NEG_INFINITY
-        } else {
-            f64::INFINITY
-        };
         data.par_chunks(CHUNK)
-            .map(|c| simd_nanextreme_slice(c, take_max))
+            .map(|c| simd_nanextreme_value(c, take_max))
             .reduce(
-                || (init, false),
-                |(am, asaw), (bm, bsaw)| {
-                    (
-                        if take_max { am.max(bm) } else { am.min(bm) },
-                        asaw || bsaw,
-                    )
-                },
+                || init,
+                |am, bm| if take_max { am.max(bm) } else { am.min(bm) },
             )
     } else {
-        simd_nanextreme_slice(data, take_max)
+        simd_nanextreme_value(data, take_max)
     };
-    if !saw {
-        return None; // all-NaN or empty — defer to numpy for warning/NaN/error parity
+    if m == init {
+        return None; // all-NaN / empty / ±inf-extreme — defer to numpy (warning/NaN/inf parity)
     }
     if m == 0.0 {
         // The extreme is a zero. numpy's RETURNED SIGN of a ±0 tie is

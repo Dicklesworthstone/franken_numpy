@@ -6594,3 +6594,30 @@ numpy itself is 6.8ms slow on bool!), uint32 0.054x (18x). Signed int stays dele
 signbit(i)=x<0). 9/9 differential (bool/u8/u32/i32/i64/f64/f32 + 2-D bool + non-contig) + 2 signbit
 conformance PASS. Same lever as the is*-predicate class: float-only fast path leaves bool on the cold
 widen; a dtype-CONSTANT answer (unsigned/bool can't be negative) short-circuits to zeros.
+
+---
+
+## BlackThrush WIN: nanmax/nanmin flat — drop redundant simd_eq + DRAM-gate (1.06-2.49x loss -> 0.39-1.02x, 2026-06-22)
+
+Flat nanmax/nanmin (axis=None f64) lost 1.06-2.49x across 200K-2M: TWO problems. (1) the SIMD kernel
+ran `vsaw |= c.simd_eq(c)` EVERY iteration to track "saw non-NaN" — but simd_max/simd_min already skip
+NaN (IEEE maxNum), so that doubled the hot-loop SIMD ops for nothing. (2) the parallel gate was 1<<20
+(1M) but the rayon path LOSES on L3-resident data (worst 2.49x at 1.2M) and only wins DRAM-bound
+(>=3M) — the same L3->DRAM crossover as the isinf gate.
+FIX: added simd_nanextreme_value (value-only fold, one SIMD op/iter); the flat path detects all-NaN/
+empty via `m == init` (must defer the +-inf-extreme tie anyway, so no accuracy lost) and drops the saw
+tuple. Raised gate 1<<20 -> 1<<21. The AXIS path keeps the accurate saw kernel (it pushes results
+directly and must distinguish all-NaN from a +-inf extreme).
+| N | before | after |
+|---|--------|-------|
+| 100K | 0.95x | 0.83x |
+| 500K | 1.15x LOSS | 0.93x WIN |
+| 1.5M | 1.96x LOSS | 0.97x WIN |
+| 2M | 1.78x LOSS | 1.02x |
+| 4M | 0.43x | 0.42-0.52x |
+CORRECTNESS 20/20 differential (plain/withnan/all-nan/posinf/neginf/all-neginf/all-posinf/zeros/3M/
+empty) + axis path intact + nanmax/nanmin conformance (29 + axis/keepdims/all-nan) PASS. m is
+bit-identical (same simd_max fold; only saw-tracking removed). LEVER: a per-iteration NaN-detection
+SIMD op in a min/max fold is redundant when simd_max/min already skip NaN — track all-NaN via the
+final accumulator (m==init) and defer the ambiguous +-inf case. Same DRAM-gate retune as isinf.
+nanargmax flat gate (1<<18) STILL mis-tuned (loses 1.2-1.5x at 300K-500K) -> next.
