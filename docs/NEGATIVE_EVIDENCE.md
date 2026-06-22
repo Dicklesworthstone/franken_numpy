@@ -6739,3 +6739,22 @@ shapes. fnp ptp-int64-axis is at PARITY with numpy (0.88-1.05x; numpy's own ptp 
 +/-20% at this scale), so the apparent ~1.09x "loss" was numpy variance, not a real gap. The
 residual 1.0-1.05x is the scalar min/max KERNEL floor vs numpy's vectorized reduction — NOT
 fixable by gate tuning. Real lever would be SIMD min/max fold (separate work). Gate change reverted.
+
+## BlackThrush NO-SHIP: int max/min axis parallel gate retune ~0-gain — KERNEL floor (2026-06-22, reverted)
+
+`minmax_int_typed` last-axis (int64 max/min, axis=1) LOSES to numpy: 256x256=65536 1.26x,
+288² 1.23x, 320² 1.19x, decaying to 1024² 1.04x — the classic overhead-at-gate decay shape, so
+it LOOKED like a too-low gate (1<<16). But the A/B (FNP_FORCE_SERIAL toggle, one build) proved
+otherwise: parallel vs serial are IDENTICAL at every shape (256² 17.1 vs 17.1us; 512² 40.7 vs
+40.5). rayon fan-out over the cheap scalar lanes adds ~0 overhead AND ~0 benefit — 64 threads
+still lose to numpy's SINGLE-threaded SIMD int reduction. The residual 1.04-1.26x is the
+`lane_fold` scalar data-dependent-branch min/max KERNEL floor vs numpy's vectorized fused pass.
+Gate change reverted (no-op). nanprod axis (also checked) DOMINATES numpy 0.07-0.58x (skip);
+average(weights) axis is 0.83x win at 256² / ~1.05x at large (marginal, gate-neutral — large is
+parallel and a gate raise would only serialize it). REAL lever for int min/max/ptp axis =
+portable_simd horizontal min/max fold over the contiguous lane (bit-EXACT for ints: min/max
+associative). DEFERRED: per [[mistuned-parallel-gates-systematic-lever]] argextreme evidence,
+Rust SIMD reductions frequently DON'T beat numpy's fused C loops (the f64 SIMD argextreme path
+delegates large) — uncertain payoff, needs a focused generic-over-int-T SIMD session, not a quick
+gate tweak. CONFIRMS the refined lesson: cheap-per-lane scalar reductions (ptp/min/max int) are
+gate-INSENSITIVE; only heavy-per-lane (nanvar 2 pairwise passes) pay fan-out at the gate.
