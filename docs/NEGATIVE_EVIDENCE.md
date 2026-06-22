@@ -7291,3 +7291,17 @@ win) -> 1-D 8x->1.00x, 0 mismatches. LESSON: (a) don't put rng INSIDE the timed 
 ratio - hid this as 1.38x); (b) a SLOW path can hide in ONE dimensionality while another wins -
 test 1-D AND 2-D AND 3-D separately. 13 wins; argwhere found via the scaling/native-op audit seam
 which keeps yielding (ix_, argwhere) - composite ops with per-shape/per-arity dispatch are the vein.
+
+## BlackThrush: searchsorted(sorter=) materialization — documented low-EV candidate, DECLINED (2026-06-22)
+Per-arity seam check found searchsorted with sorter= is serial 2.17x slower (native zerocopy path
+gated `sorter.is_none()` at lib.rs ~21137 -> sorter case falls to general path that materializes
+a[sorter] gather). BUT at FULL THREADS it's par-to-1.25x@2M (0.92x@500K) — fnp parallelism compensates
+the extra gather vs numpy's single-threaded indirect search; full-threads is the verdict criterion for
+fnp-parallel-vs-numpy-single-thread. DECLINED: niche idiom + non-trivial fix (new indirect-binary-
+search zerocopy path comparing a[sorter[mid]] with NaN/side handling) + mild full-threads gain + box
+cyclically saturated (16min build risk). KNOWN FIX if ever wanted: extend the zerocopy searchsorted to
+take sorter and index a indirectly (no a[sorter] copy) -> would turn par->win. Also re-confirmed clean
+(serial): percentile/quantile/nanpercentile (axis 0.25-0.32x win), partition/argpartition (kth scalar
+AND array), sort kind=merge/stable/heap + axis, take mode=clip/wrap, choose 0.20x, interp left/right/
+period, digitize right, histogram weights/density, bincount weights/minlength. Per-arity seam = mined
+out of CLEAR wins (yielded matrix_power/true_divide/ix_/argwhere; cross-2vec=deprecated-binding phantom).
