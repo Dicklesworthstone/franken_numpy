@@ -122,3 +122,13 @@ unique 0.07, isclose-f64 0.02, isclose-f32 0.02, array_equal 0.93, hist_bin_edge
 is YellowElk's verified-ready alias-unify WIP, uncommitted, offered (msg 2005), awaiting their
 commit. Surface exhaustively dominated across ~22 probed angles; remaining non-wins are the
 documented walls (BLAS-Gram, forbid-unsafe, numpy-introsort-dup, view-dispatch, small-array).
+
+## 2026-06-22 RESOLUTION: bincount direct-read WIN (41st) shipped + mod LANDED by YellowElk
+- narrow-int bincount direct-read (fb253d2e): u8 0.02x, i8 0.02x, i16/u16 0.03x, i32 0.20x
+  (was ~3x loss). Generic try_zerocopy_bincount_narrow<T> reads the narrow buffer directly
+  (no widen), bit-identical to the int64 tally. uint8 image/byte histograms = 50x. conformance 32.
+- mod (~2x loss I found/HEAD-clean-verified/coordinated): LANDED by YellowElk (d632b15d, "make
+  np.mod alias the same remainder ufunc object as numpy") — the coordination resolved; mod now
+  parity + numpy object-identity. The flip-flop saga ended correctly: real loss, peer-owned fix,
+  landed by owner.
+ARC: 41 measured wins. Tree clean. Surface dominated across ~22 angles + narrow dtypes.
