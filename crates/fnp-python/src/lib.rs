@@ -31459,12 +31459,13 @@ fn try_native_unwrap_f64_default(
     };
     const PI: f64 = std::f64::consts::PI;
     const TAU: f64 = std::f64::consts::TAU;
-    for (row_in, row_out) in p_in.chunks(row).zip(output.chunks(row)) {
-        let mut prev = row_in[0].get();
-        row_out[0].set(prev);
+    // Per-row phase-unwrap recurrence (one last-axis row; rows are independent).
+    let unwrap_row = |row_in: &[f64], row_out: &mut [f64]| {
+        let mut prev = row_in[0];
+        row_out[0] = prev;
         let mut cum = 0.0f64;
         for j in 1..row {
-            let cur = row_in[j].get();
+            let cur = row_in[j];
             let dd = cur - prev;
             // numpy zeroes ph_correct only where `abs(dd) < discont` (=pi); the
             // complement (|dd| >= pi, plus NaN dd) takes the correction, so NaN
@@ -31476,8 +31477,37 @@ fn try_native_unwrap_f64_default(
                 }
                 cum += ddmod - dd;
             }
-            row_out[j].set(cur + cum);
+            row_out[j] = cur + cum;
             prev = cur;
+        }
+    };
+    let n = p_in.len();
+    let nrows = n / row;
+    // Parallelize across independent rows for stacked inputs; a single row (1-D)
+    // is a sequential cumsum chain and stays serial. Gate on total work so small
+    // batches don't pay rayon overhead.
+    const UNWRAP_PARALLEL_MIN: usize = 1 << 16;
+    if nrows >= 2 && n >= UNWRAP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; the
+        // input is read-only under the GIL and `output` is a fresh numpy.empty
+        // buffer (no alias). Each row maps to a disjoint output chunk.
+        let in_data: &[f64] =
+            unsafe { std::slice::from_raw_parts(p_in.as_ptr().cast::<f64>(), n) };
+        let out_data: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+        out_data
+            .par_chunks_mut(row)
+            .zip(in_data.par_chunks(row))
+            .for_each(|(row_out, row_in)| unwrap_row(row_in, row_out));
+    } else {
+        // SAFETY: same repr(transparent) f64 view; serial single-threaded fill.
+        let in_data: &[f64] =
+            unsafe { std::slice::from_raw_parts(p_in.as_ptr().cast::<f64>(), n) };
+        let out_data: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+        for (row_out, row_in) in out_data.chunks_mut(row).zip(in_data.chunks(row)) {
+            unwrap_row(row_in, row_out);
         }
     }
     Ok(Some(out_arr.unbind()))

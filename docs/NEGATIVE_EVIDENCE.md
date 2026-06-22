@@ -6484,4 +6484,4 @@ and drops numpy's NaN propagation -> caught by the with_nan case). rem_euclid(2p
 float mod. LEVER (reusable): a PASSTHROUGH op where numpy itself is structurally slow (many temp-
 array passes for an O(1)-per-element recurrence: unwrap/gradient-class) is a native-single-pass vein
 even when "inherently sequential" (cumsum) — sequential Rust still beats numpy's 5+ vectorized
-passes. TODO: parallelize N-D last-axis rows (independent) for a further win on stacked inputs.
+passes. FOLLOW-UP LANDED: N-D last-axis rows parallelized (rayon par_chunks, gate n>=1<<16 & nrows>=2) — 2-D 200x5000 0.31x->0.043x (23x), 1000x1000 0.046x (22x), 100000x10 0.086x; 1-D single-row stays serial 0.31x. 15/15 differential incl nan2d/all_nan2d/two-rows/row1. Bit-identical (rows independent, per-row cumsum, no cross-row state).
