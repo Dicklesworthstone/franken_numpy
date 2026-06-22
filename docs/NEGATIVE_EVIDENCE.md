@@ -7199,3 +7199,11 @@ is binding overhead (gather-diagonal+sum vs numpy strided sum). tensordot axes=1
 take_along_axis 2D 0.66 WIN, put_along_axis/fill_diagonal par. No fixable gap. The special-pattern
 tail (matrix_power/windows/einsum-diag = 3 wins) is now exhausted; remaining index/view-op residuals
 are all the irreducible binding floor. Hit rate on further narrow sweeps = ~0.
+
+## BlackThrush: multi-axis reductions + kwarg combos — all par (2026-06-22)
+Last distinct dispatch class: sum/mean/std/max/min/prod over axis TUPLES (0,1)/(0,2)/(1,2) all par
+(0.89-1.06); kwarg combos out=/dtype=f32/keepdims/where= + add out= all par (0.91-1.02). No gap.
+Multi-axis reductions and kwarg-routing are clean. This completes dispatch-pattern coverage (flat/
+single-axis/multi-axis/keepdims/out/dtype/where). Sweep hit rate now ~0 across the last two passes
+(multi-axis, trace/diagonal) — reachable surface confirmed exhausted. 10 wins shipped this session;
+sole remaining lever = human C-BLAS/accept decision (bead cblas-large-gram-lever-8lnzn).
