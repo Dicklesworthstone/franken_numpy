@@ -6791,3 +6791,23 @@ loops do NOT reliably block autovectorization — LLVM handles simple indexed Ce
 raw-slice rewrite can be neutral OR a regression. Do NOT rewrite Cell loops to raw slices on a
 vectorization hunch — A/B with an env-toggle FIRST (and use min+median, the box is load-noisy:
 single-run sweeps overstate losses by 20-35%). diff is NOT an un-dominated gap.
+
+## BlackThrush: untouched-surface robust sweep — O(1) view-op losses are binding-overhead floors (2026-06-22)
+
+Swept bit-ops / casting / datetime64 / char-string / structural families (robust median-of-3, to
+beat swarm-load noise). Result: DOMINATED or par everywhere except two O(1) VIEW ops:
+ravel 1.69x, diagonal 1.63x. VERIFIED these are NOT the view-materialization bug class
+([[view-returning-ops-delegate-not-copy]]): np.shares_memory(fnp_result, src)==True for both,
+writeable flags match numpy (ravel writeable, diagonal read-only), F-order ravel correctly copies
+(shares==False both), values bit-equal. So semantics are CORRECT — the 1.6-1.7x is pure pyo3
+double-crossing overhead on a ~2us O(1) op (fnp delegates to numpy's view but pays an extra Python
+boundary crossing numpy's in-C path skips). NOT fixable — cf [[small-array-dispatch-passthrough-cache]]
+("don't try to make O(1)/small ops WIN; the ~790ns pyo3 crossing is irreducible"). Other results:
+packbits/unpackbits/astype/char.upper/char.add/dt-sort par; dt-diff 0.37x WIN, triu/tril 0.72-0.75x
+WIN; bitwise_count uint8 1.25x (near-noise narrow path). META (7 iterations / ~90 ops swept this
+session): franken_numpy DOMINATES numpy across the elementwise/reduction/order-stat/set/structural
+surface. The only genuine un-dominated gaps are 3 documented ARCHITECTURAL floors, none a quick edit:
+(1) cov/corrcoef Gram ~2.1x (no-C-BLAS; SIMD-across-obs breaks exact-repr = human decision),
+(2) int min/max/ptp axis 1.04-1.26x (scalar-vs-SIMD kernel; filed bead deadlock-audit-simd-int-axis
+-minmax-1n50c), (3) cheap-f64-unary + O(1)-view binding overhead (irreducible pyo3 crossing). Stop
+re-sweeping the dominated surface; the remaining work is the 3 floors (2 need human/SIMD-session).
