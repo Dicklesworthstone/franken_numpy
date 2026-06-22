@@ -7245,3 +7245,16 @@ pure-Rust surface is exhausted; 10 wins shipped+verified-intact, both candidate 
 disproved by implementation. The ONLY remaining un-dominated workload is the C-BLAS kernel floor
 (cov large-Gram 3-8x, batched LU) = human A(C-BLAS)/C(accept) decision (bead cblas-large-gram-lever-
 8lnzn). Further benchmark sweeps have ~0 hit rate (6 in a row); the productive lever is the decision.
+
+## BlackThrush: small-array regime empirically confirmed = irreducible binding floor (2026-06-22)
+Direct N=100/1000 sweep (2000-iter best): add 2.95, sqrt 2.97, maximum 2.90, dot 2.57, sort 2.49,
+argmax 2.26 at N=100 (sum/mean/exp/cumsum lower 1.1-1.4). UNIFORM ~2.2-3.0x across ops, no single op
+catastrophically worse -> signature of FIXED per-call pyo3 *args double-crossing (~790ns), NOT a per-op
+slow path. This is the documented irreducible binding floor ([[small-array-dispatch-passthrough-cache]];
+cached-numpy-module -20% already applied). It is arguably the BIGGEST CONSISTENT un-dominated class
+(every op, 2-3x on small arrays) but is ARCHITECTURAL (pyo3 boundary), NOT a bit-exact kernel/algorithm
+fix an autonomous loop can ship — numpy's C ufuncs have ~0 Python overhead; fnp pays the pyo3 crossing.
+Only lever would be a C-level fast-dispatch (major architecture change = human decision). 16th sweep,
+no fixable gap. Reachable bit-exact algorithmic surface remains exhausted (10 wins); the remaining
+un-dominated workloads are BOTH architectural-human-decision floors: small-array pyo3 crossing, and
+the C-BLAS Gram/LU kernel floor (bead cblas-large-gram-lever-8lnzn).
