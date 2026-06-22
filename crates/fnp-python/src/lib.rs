@@ -24936,6 +24936,37 @@ fn native_cov_unweighted(
     Ok(Some(result))
 }
 
+// (n_vars_contributed, n_obs) for one cov operand under rowvar=True: a 2-D (r,c)
+// array is r variables over c observations; a 1-D (n,) array is 1 variable over n.
+fn cov_operand_vars_obs(a: &Bound<'_, PyAny>) -> Option<(usize, usize)> {
+    let shape: Vec<usize> = a.getattr("shape").ok()?.extract().ok()?;
+    match shape.as_slice() {
+        [n] => Some((1, *n)),
+        [r, c] => Some((*r, *c)),
+        _ => None,
+    }
+}
+
+// Shared cov/corrcoef Gram delegate predicate: native dot8 Gram loses to numpy's
+// BLAS dsyrk in three measured regions (BlackThrush 2026-06-22) — the mid n_vars
+// band [48,256), small n_vars with large obs (Gram work >= small_work_min), and
+// large n_vars with short obs ([256,512) x n_obs<256). Native wins outside these.
+// `work_vars_lo` is the smallest n_vars eligible for the small-work delegation: the
+// single-operand path uses 0 (its n_vars=2 (2,huge-obs) Gram loses, so delegate it),
+// but the two-operand path uses 4 — its n_vars=2 (two 1-D series) zero-copy Gram WINS
+// even at 1e6 obs (0.83x), so those must stay native.
+fn cov_gram_should_delegate(
+    n_vars: usize,
+    n_obs: usize,
+    small_work_min: u64,
+    work_vars_lo: usize,
+) -> bool {
+    (48..256).contains(&n_vars)
+        || ((work_vars_lo..48).contains(&n_vars)
+            && (n_vars as u64) * (n_vars as u64) * (n_obs as u64) >= small_work_min)
+        || ((256..512).contains(&n_vars) && n_obs < 256)
+}
+
 #[pyfunction]
 #[pyo3(signature = (m, y=None, rowvar=true, bias=false, ddof=None, fweights=None, aweights=None))]
 #[allow(clippy::too_many_arguments)]
@@ -25034,15 +25065,7 @@ fn cov(
             .getattr("shape")
             .and_then(|s| s.extract::<Vec<usize>>())
         && shape.len() == 2
-        && {
-            let (nv, no) = (shape[0], shape[1]);
-            (48..256).contains(&nv)
-                || (nv < 48 && (nv as u64) * (nv as u64) * (no as u64) >= 200_000)
-                // large n_vars + SHORT obs: many output cells, short dots -> dsyrk
-                // dominates the per-cell dot8 (256x50=4.68x, 300x50=2.67x). Native
-                // reclaims the win at n_obs>=~500 or n_vars>=512, so bound the box.
-                || ((256..512).contains(&nv) && no < 256)
-        }
+        && cov_gram_should_delegate(shape[0], shape[1], 200_000, 0)
     {
         return fallback(py);
     }
@@ -25069,6 +25092,19 @@ fn cov(
     // pre-existing bug where cov(a,b,rowvar=False) on two 1-D arrays returned a
     // scalar instead of the 2x2 matrix. 2-D rowvar=False needs a transpose, so it
     // still defers to numpy below.
+    // Two-operand cov shares the same native-Gram-vs-dsyrk loss regions; effective
+    // n_vars = (m's vars) + (y's vars) over the shared observation count. Delegate the
+    // same loss box (rowvar=True only — 1-D/1-D rowvar=False is n_vars=2 and wins).
+    if let Some(y_val) = y_binding
+        && !y_val.is_none()
+        && rowvar
+        && let (Some((mv, mo)), Some((yv, yo))) =
+            (cov_operand_vars_obs(m_bound), cov_operand_vars_obs(y_val))
+        && mo == yo
+        && cov_gram_should_delegate(mv + yv, mo, 200_000, 4)
+    {
+        return fallback(py);
+    }
     if let Some(y_val) = y_binding
         && !y_val.is_none()
         && (rowvar || (ndim_is_1(m_bound) && ndim_is_1(y_val)))
@@ -25168,14 +25204,7 @@ fn corrcoef(
             .getattr("shape")
             .and_then(|s| s.extract::<Vec<usize>>())
         && shape.len() == 2
-        && {
-            let (nv, no) = (shape[0], shape[1]);
-            (48..256).contains(&nv)
-                || (nv < 48 && (nv as u64) * (nv as u64) * (no as u64) >= 400_000)
-                // large n_vars + SHORT obs strip (same as cov): 256x50=1.96x, 400x50
-                // =2.38x; native reclaims at n_obs>=~500 / n_vars>=512.
-                || ((256..512).contains(&nv) && no < 256)
-        }
+        && cov_gram_should_delegate(shape[0], shape[1], 400_000, 0)
     {
         return fallback(py);
     }
