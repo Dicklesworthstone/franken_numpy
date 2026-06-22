@@ -441,3 +441,12 @@ are f32-fine (where/cumsum/diff/digitize/searchsorted/ptp/sign/isin/put/min all 
 0.09x). outer/kron/cross were THE f32 product gaps. trace deprioritized (us-overhead), flip/diag
 dropped (view-noise). PROVES build-free-prep strategy: ~17 freeze turns -> scope+verify-abs-time+pre-
 confirm-bit-exact+ready-paste -> fast zero-investigation ship. 58 wins/fixes.
+
+## 2026-06-22: ravel_multi_index clip/wrap fast path (59405ef2) - 11-12x -> 1.3-2.0x
+kwarg-variant scout found: ravel_multi_index mode=clip 12x / wrap 11x bypassed the int64 zero-copy
+fast path (gated mode==raise) -> cold extract. Added clip (coord.clamp(0,dim-1)) + wrap (rem_euclid)
+per-coord in the flat multiply-add loop. clip 12.2x->1.32x (parity), wrap 11x->2.05x (5x better;
+residual = scalar rem_euclid div vs numpy SIMD div, niche mode). Bit-exact (OOB/negative/3-D); raise
+still ValueError on OOB. conformance_reshape_ravel 19. LEVER (kwarg-variant): a kwarg (mode=) can
+bypass a fast path gated on the default -> cold; extend the fast path to handle the kwarg variant.
+59 wins/fixes. (ix_ 2.7x was us-noise on 500-elem; dropped.)
