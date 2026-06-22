@@ -45899,6 +45899,44 @@ fn try_einsum_transpose_view(
     ))
 }
 
+// True for a single-operand pure REDUCTION spec ("ijk->k", "ij->", "ijk->ik"):
+// explicit arrow, no ellipsis/comma, unique input labels (no diagonal), output a
+// strict unique subset of the input labels. Such a spec is just a sum over the
+// dropped axes (with an optional reorder), which our generic native kernel runs
+// 1.6-2.6x slower than numpy's optimized einsum reduction -> delegate for parity.
+// (Pure permutations / diagonals / multi-operand contractions are excluded and keep
+// their existing fast paths.)
+fn einsum_spec_is_single_reduce(spec: &str) -> bool {
+    let spec: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+    if spec.contains("...") || spec.contains(',') {
+        return false;
+    }
+    let Some((inp, out)) = spec.split_once("->") else {
+        return false;
+    };
+    if inp.is_empty()
+        || !inp.bytes().all(|b| b.is_ascii_alphabetic())
+        || !out.bytes().all(|b| b.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    let mut in_seen = [false; 256];
+    for &b in inp.as_bytes() {
+        if in_seen[b as usize] {
+            return false; // repeated input label = diagonal, not a plain reduction
+        }
+        in_seen[b as usize] = true;
+    }
+    let mut out_seen = [false; 256];
+    for &b in out.as_bytes() {
+        if !in_seen[b as usize] || out_seen[b as usize] {
+            return false; // output label absent from input, or repeated
+        }
+        out_seen[b as usize] = true;
+    }
+    out.len() < inp.len() // must drop (sum) at least one axis
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn einsum(
@@ -45914,6 +45952,16 @@ fn einsum(
     }
     if let Some(view) = try_buffered_f64_einsum_single_diagonal(py, args, kwargs)? {
         return Ok(view);
+    }
+    // Single-operand reduction ("ijk->k") = sum over the dropped axes. Our generic
+    // native kernel is 1.6-2.6x slower than numpy's optimized einsum reduction here
+    // (which beats even np.sum-over-axes), so delegate this pattern for parity. The
+    // winning two-operand contractions and the transpose/diagonal views are excluded.
+    if args.len() == 2
+        && let Ok(spec) = args.get_item(0)?.extract::<String>()
+        && einsum_spec_is_single_reduce(&spec)
+    {
+        return core_numpy_passthrough(py, "einsum", args, kwargs);
     }
     // Route the common case (string subscripts, real-float operands, no special
     // kwargs) through our native UFuncArray::einsum — which sends GEMM-shaped
