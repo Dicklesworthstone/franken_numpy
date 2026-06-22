@@ -428,3 +428,16 @@ READY: scoped + coded (outer/kron 1-line, cross-f32 helper written) + absolute-t
 ms) + bit-exactness-verified. Disk recovery = paste -> build -> verify ratio+conformance -> ship.
 Build-free prep COMPLETE; further scouts confirm dominated/walls (matmul no-C-BLAS contended,
 generation/manip parity). 55 wins/fixes + 3 queued f32 dtype-gap wins ready.
+
+## 2026-06-22: QUEUE SHIPPED on disk recovery (0f9a99eb) - outer/kron/cross-f32 6-45x -> 0.17-0.26x WIN
+Disk reopened (warm target). The disk-critical-prepped queue shipped in ONE incremental build (0.08s):
+- outer-f32: 45x -> 0.26x (~170x faster). 1-line: ("f",4)=>outer_typed::<f32> |x,y| x*y.
+- kron-f32: 20x -> 0.25x (~80x). 1-line: ("f",4)=>kron1d_typed::<f32>.
+- cross-f32: 6x -> 0.17x (~35x). f32 mirror of try_zerocopy_f64_cross_n3.
+All bit-exact (element-wise/fixed-formula, no accum - exactly as pre-verified during freeze), float32
+dtype preserved, f64/int unchanged. conformance cross 11/linalg_basic 56/block_concat 15.
+F32-GAP VEIN MINED: systematic grep (int-typed dispatches lacking ("f",4)) + probe confirmed the rest
+are f32-fine (where/cumsum/diff/digitize/searchsorted/ptp/sign/isin/put/min all parity/win; isin-f32
+0.09x). outer/kron/cross were THE f32 product gaps. trace deprioritized (us-overhead), flip/diag
+dropped (view-noise). PROVES build-free-prep strategy: ~17 freeze turns -> scope+verify-abs-time+pre-
+confirm-bit-exact+ready-paste -> fast zero-investigation ship. 58 wins/fixes.
