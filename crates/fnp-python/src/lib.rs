@@ -25149,6 +25149,29 @@ fn corrcoef(
     {
         return fallback(py);
     }
+    // Same native-dot8-Gram-vs-BLAS-dsyrk loss regions as cov (corrcoef shares the Gram
+    // + a cheap normalize): delegate the mid n_vars band [48,256) and small n_vars (<48)
+    // once Gram work n_vars^2*n_obs crosses ~400k (corrcoef's win region runs a bit larger
+    // than cov's: 16x1000=0.89, 24x500=0.95 still win). Preserve native wins outside.
+    if rowvar
+        && y_binding.as_ref().is_none_or(|y_val| y_val.is_none())
+        && x_bound
+            .getattr("ndim")
+            .ok()
+            .and_then(|n| n.extract::<usize>().ok())
+            == Some(2)
+        && let Ok(shape) = x_bound
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+        && shape.len() == 2
+        && {
+            let (nv, no) = (shape[0], shape[1]);
+            (48..256).contains(&nv)
+                || (nv < 48 && (nv as u64) * (nv as u64) * (no as u64) >= 400_000)
+        }
+    {
+        return fallback(py);
+    }
     // Fast path: rowvar=True with no y maps to the zero-copy parallel-Gram cov + an
     // in-place normalize, avoiding the cold-allocation UFuncArray chain (see cov).
     if rowvar
