@@ -43899,6 +43899,15 @@ fn try_zerocopy_lastaxis_argextreme(
             Some(v) => v,
             None => return Ok(None),
         }
+    } else if kind == "b" {
+        // bool as uint8: argmax = first 0x01 (first True) / index 0 if all-False; argmin = first
+        // 0x00 (first False) / index 0 if all-True — exactly numpy argmax/argmin(bool). Reuse the
+        // u8 int path on a uint8 view, avoiding the cold bool->f64 widen (~2500x along last axis).
+        let view = a.call_method1("view", (numpy.getattr("uint8")?,))?;
+        match lastaxis_argextreme_int::<u8>(py, &view, outer, lane, take_max) {
+            Some(v) => v,
+            None => return Ok(None),
+        }
     } else {
         return Ok(None);
     };
