@@ -4,6 +4,48 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-22 - NO-SHIP / DEFER: post-nanargmax broad sweep (~150 op/shape/dtype combos)
+
+`YellowElk` (claude-code/opus). Second disk-frugal BOLD-VERIFY cycle after the
+nanargmax win below, reusing the same warm `.probe/fnp_python.so` (no rebuild).
+Swept f64/f32/int reductions (flat + axis), nan-reductions, sort/partition/set/
+take/index families, 2-D manipulation, complex elementwise, FFT, transcendental
+unary, and integer binary ops at N = 2^14..2^23. Box load ~8-10/64 (noisy).
+Verdict: ratio = fnp/numpy; <0.9 WIN, 0.9-1.4 ok, >1.4 LOSS.
+
+The surface is overwhelmingly win/parity. The apparent losses all resolve to
+known no-ship classes or measurement artifacts — recorded so they are not
+re-chased:
+
+- **Transcendental unary medium-N (sin/cos/expm1 ~1.4-1.5x at 2^20)** — DEFER.
+  These f64 maps run serial below the shared `UNARY_PARALLEL_MIN = 1 << 21` gate
+  in `unary_map_f64` while numpy uses SIMD libm single-threaded; they flip to WIN
+  at 2^22 once parallel engages (expm1 0.91x, sin/cos win at 2^19 when the box is
+  quiet). A *per-op lower gate for compute-bound transcendentals* is a real lever
+  (the cheap memory-bound ops abs/negative/floor genuinely need the high gate, so
+  it cannot be lowered globally without regressing them — the existing comment
+  documents parallel LOSING at 131K-1M for the cheap maps). Not shipped: (a)
+  requires per-op compute-vs-memory classification (bigger change), (b) upside is
+  modest (numpy SIMD libm is strong), (c) UNVERIFIABLE on this loaded box — the
+  same N measured sin at both 0.47x and 1.60x across runs. Retry predicate: quiet
+  box (load <2), full threads, per-op gate, re-confirm crossover before editing.
+- **compress / extract (1.7-2.2x at 50% selectivity)** — NO-SHIP stands. Kernel
+  `try_zerocopy_any_compact` is already a branchless 16-lane mask compaction;
+  worst-case (balanced random mask) is inherently scatter/gather-bound and not
+  beatable in safe Rust over `ReadOnlyCell`. Selectivity-dependent (parity at
+  low/high selectivity). Consistent with the prior compress no-ship note.
+- **left_shift int64 "2.82x at 2^20" — ARTIFACT.** Only with degenerate shift
+  amounts >= 64 (overflow). Realistic shifts (0-30, scalar or array) are parity,
+  WIN at 2^22. Not a real-world loss.
+- **Sub-microsecond view/scalar ops** (np.real, flip/fliplr/rot90 of a 2-D view,
+  trace/diagonal small) read 1.6-2.6x but are 0.4-7 us pure pyo3 binding overhead
+  on O(1) views — noise, not addressable.
+- **f32 reductions at 2^23** (sum/nansum/mean) sit at parity, not WIN like f64,
+  because they are DRAM-bandwidth-saturated at 32 MB — no headroom either way.
+
+Decision: no code change this cycle (no new stably-verifiable win). nanargmax
+fix below stands.
+
 ## 2026-06-22 - KEEP: nanargmax/nanargmin flat parallel gate 1<<21 -> 1<<18 (1.5-2x loss -> WIN)
 
 `YellowElk` (claude-code/opus). Disk-frugal BOLD-VERIFY using the warm
