@@ -461,3 +461,13 @@ NOTE: divmod f32 (14x potential, parity now) DEFERRED - f32 arithmetic (floor-di
 adjust) has f32-rounding bit-exactness RISK (unlike frexp/modf which are extraction/trunc = exact);
 verify the f32 remainder formula matches numpy f32 before extending. LEVER: parity-missed-win = extend
 a proven f64 win to f32 when bit-exact (extraction/element-wise safe; arithmetic-with-rounding = verify).
+
+## 2026-06-22 (build-free): divmod-f32 CONFIRMED not bit-exact-extendable -> stays deferred (parity)
+Verified the deferred divmod-f32 (14x potential): remainder matches numpy f32 (fmod+sign-adjust), but
+the QUOTIENT does NOT - q=floor(a/b) has 3/2M edge mismatches vs numpy floor_divide-f32 (f32 division
+rounding at integer boundaries), and q=(a-r)/b is far worse (137403 mismatches). numpy's floor_divide-
+f32 has special edge handling I'd have to reverse-engineer (fragile + niche). CONFIRMED-DEFER: divmod-
+f32 stays parity (numpy delegate). Build-free verification prevented a conformance-failing ship.
+LEVER reinforced: parity-missed-win extend requires BIT-EXACTNESS VERIFICATION - frexp/modf (extraction/
+trunc = exact) PASSED + shipped (22dfa155); divmod (arithmetic w/ floor_divide rounding) FAILED + dropped.
+Element-wise/extraction f32 extends are safe; arithmetic-with-rounding f32 extends must be verified first.
