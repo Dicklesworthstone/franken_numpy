@@ -306,3 +306,13 @@ numpy even for f64 (1.33x) = net regression. Delegated to numpy.ma.argmax/argmin
 0.03-0.8x WIN dtype-gap) WON; argmax/argmin -> parity (regression removed); std/var/median/min/ptp/
 prod/cumsum/anom/average/power/abs/getdata/count/sum/mean/masked_where/masked_invalid/nonzero win/
 parity; getmaskarray O(1) overhead-noise. np.ma family fully dominated. 52 wins + ma-argmax parity-fix.
+
+## 2026-06-22: corrcoef non-f64 delegate (a8fd0bea) - f32 4-7.7x + int -> parity (dtype-gap)
+np.corrcoef f32 hit native cov+normalize cold path (~4-7.7x); the f64 zero-copy Gram fast paths are
+f64-only (cov already delegates non-f64). Added non-f64 (f32/int) -> numpy.corrcoef delegate. f32
+7.69x->1.01x / 4.32x->0.97x, int->parity; f64 unchanged (large 1.05x; small-shape 2.87x = pre-existing
+cov-Gram no-C-BLAS wall). allclose f32/int/f64/two-operand. Diff is corrcoef-ONLY (8 lines).
+PRE-EXISTING (NOT mine): conformance_statistics "cov y ddof" 1-ULP FAIL (cov([1,2,4],y=[2,1,0],ddof=0)
+= 1.5555...554 vs numpy ...556, numpy-BLAS FMA reassociation) - documented RED on HEAD; cov path,
+unrelated to my corrcoef diff (proven: diff touches no fn cov/native_cov). 28/29 pass. conformance
+otherwise green. QUEUED: percentile/median int 1.65-1.84x (mild, next). 53 fixes.
