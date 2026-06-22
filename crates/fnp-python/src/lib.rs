@@ -36291,6 +36291,17 @@ fn average(
         return fallback();
     }
 
+    // Integer/bool data or weights are f64-preserving (so they pass the checks above) but the f64
+    // fast path below is f64-buffer-only -> they fell to the cold extract path (~5-6.4x). Delegate
+    // to numpy.average for parity (the f64 fast path stays for true f64 data + f64 weights).
+    if !numpy_dtype_is_f64(py, a.bind(py))
+        || weights
+            .as_ref()
+            .is_some_and(|w| !w.bind(py).is_none() && !numpy_dtype_is_f64(py, w.bind(py)))
+    {
+        return fallback();
+    }
+
     // Fused one-pass flat weighted average (axis=None) — avoids numpy's
     // multiply-into-temp + sum + the cold extract path (~3.6x slower).
     let axis_is_none = axis.as_ref().is_none_or(|v| v.bind(py).is_none());
