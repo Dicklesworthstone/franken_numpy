@@ -164,3 +164,15 @@ QUEUED FOLLOW-UPS (arg-family axis dtype-gaps, milder): (1) bool NON-last-axis a
 u8-reuse trick); (2) nanargmax/nanargmin(f32) along axis ~7.3x (my f32 nanarg fix was flat
 axis=None only) - need f32 nan-axis path; (3) per-row short-circuit for bool-axis -> parity
 (vs current 4-8x). FOUND via arg-family x dtype x axis cross-probe.
+
+## 2026-06-22: bool ax0 argmax WIN (6b1bd8ef); nanargmax-f32-axis astype DISPROVEN (copy-bound, deferred)
+- bool non-last-axis argmax/argmin (10x) -> 0.67-0.74x WIN (6b1bd8ef): int_argextreme_axis +bool
+  branch (uint8 view -> argextreme_axis_int_typed::<u8>). Completes bool-axis (last-axis dabd5f21
+  4-8x + non-last-axis win). conformance argmax 10.
+- nanargmax/nanargmin(f32) along axis 7.2x: tried astype-f64-then-reuse-f64-native -> DISPROVEN
+  (7.2->5.69x ax1, HURT ax0 1.08->1.22x). It's COPY-BOUND: the f32->f64 widen (astype OR extract,
+  64MB/call) dominates, not the extract path; the native nanarg needs f64. REVERTED. The REAL fix
+  is a zero-copy f32 nan-axis path (read f32 directly, per-lane f32 nan-arg, no widen — like the
+  flat f32 nanargextreme but per-axis, last+non-last) = win. DEFERRED (axis machinery, moderate;
+  disk-conscious). RULE confirmed again: astype/widen-reuse is copy-bound parity-at-best; only a
+  true no-widen direct-read wins (cf bincount-narrow direct-read 50x vs astype-parity).
