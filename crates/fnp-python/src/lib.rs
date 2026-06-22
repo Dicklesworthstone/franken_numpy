@@ -8461,21 +8461,6 @@ fn try_zerocopy_f64_i32_ldexp(
     Ok(Some(output))
 }
 
-// True iff `x` is a buffer-readable float64 array containing a zero (±0.0).
-// Used to gate the fmod zero-copy: numpy emits an "invalid value encountered
-// in fmod" warning (and nan) for a zero divisor, which the existing extract
-// path preserves by deferring to numpy — so the fast path must skip those.
-// Returns false when the buffer can't be read (the zero-copy then returns None
-// and the caller falls through unchanged).
-fn f64_ndarray_contains_zero(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<bool> {
-    if let Ok(buffer) = PyBuffer::<f64>::get(x)
-        && let Some(slice) = buffer.as_slice(py)
-    {
-        return Ok(slice.iter().any(|cell| cell.get() == 0.0));
-    }
-    Ok(false)
-}
-
 // Zero-copy clip for exact C-contiguous float64 ndarrays with scalar bounds.
 // numpy's clip is min(max(x, lo), hi) with NaN propagating; the two comparisons
 // below reproduce that bit-for-bit (NaN fails both `<`/`>` so it passes through;
@@ -33756,45 +33741,11 @@ fn true_divide(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Fast path for simple two-arg calls
-    if kwargs.is_none_or(|k| k.is_empty()) && args.len() == 2 {
-        // true_divide derives a narrow float for narrow/int inputs (float32 stays
-        // float32); the f64 elementwise path widens them, so only run native when
-        // both operands are float64 and defer everything else to numpy.
-        if !numpy_dtype_is_f64(py, &args.get_item(0)?)
-            || !numpy_dtype_is_f64(py, &args.get_item(1)?)
-        {
-            return core_numpy_passthrough(py, "true_divide", args, kwargs);
-        }
-        // Zero-copy fast path for same-shape f64 ndarrays with no zero divisor
-        // (zero divisors defer to numpy for the divide-by-zero RuntimeWarning).
-        if !f64_ndarray_contains_zero(py, &args.get_item(1)?)?
-            && let Some(out) =
-                try_zerocopy_f64_binary(py, &args.get_item(0)?, &args.get_item(1)?, BinaryOp::Div)?
-        {
-            return Ok(out);
-        }
-        let x1 = match extract_numeric_array(py, &args.get_item(0)?, "true_divide(x1)") {
-            Ok(arr) => arr,
-            Err(_) => return core_numpy_passthrough(py, "true_divide", args, kwargs),
-        };
-        let x2 = match extract_numeric_array(py, &args.get_item(1)?, "true_divide(x2)") {
-            Ok(arr) => arr,
-            Err(_) => return core_numpy_passthrough(py, "true_divide", args, kwargs),
-        };
-        if x1.has_integer_sidecar() || x2.has_integer_sidecar() {
-            return core_numpy_passthrough(py, "true_divide", args, kwargs);
-        }
-        // Fall back to NumPy if divisor contains zero so RuntimeWarning is emitted
-        if x2.values().contains(&0.0) {
-            return core_numpy_passthrough(py, "true_divide", args, kwargs);
-        }
-        let result = match x1.elementwise_binary(&x2, BinaryOp::Div) {
-            Ok(r) => r,
-            Err(_) => return core_numpy_passthrough(py, "true_divide", args, kwargs),
-        };
-        return build_numpy_scalar_or_array(py, &result);
-    }
+    // np.true_divide IS np.divide. fnp exposes `divide` as numpy's own ufunc (re-export),
+    // which is at parity; fnp's bespoke native true_divide path was 5-9x SLOWER than numpy
+    // (an O(n) pre-scan for zero divisors + a non-competitive native divide; serial-confirmed,
+    // BlackThrush 2026-06-22). Delegate to numpy.true_divide for divide-parity. (ARRAY-API-
+    // ALIAS fix: route the alias to numpy's optimized impl, cf atan2->arctan2.)
     core_numpy_passthrough(py, "true_divide", args, kwargs)
 }
 
