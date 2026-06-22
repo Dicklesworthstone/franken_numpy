@@ -417,3 +417,14 @@ milder vs sgemm). matmul is HEAVILY PEER-CONTENDED (GEMM is a multi-agent fronti
 NOT a quick dtype-gap fix. Batched inv-f32 0.34x WIN, solve/matmul-batch-f32 parity. No new queuable
 loss. (Test note: "@ f32" 0.23x was a test bug - both sides numpy.) QUEUE UNCHANGED: outer-f32 +
 kron-f32 (1-line) + cross-f32 (mirror) await disk recovery.
+
+## 2026-06-22 (build-free): queue bit-exactness PRE-VERIFIED vs numpy f32 semantics - fully ready
+Confirmed (numpy-side, build-free) the planned f32 fix formulas exactly match numpy f32 ops:
+- outer-f32: a[i]*b[j] in f32 == np.outer (array_equal True, float32). [outer_typed::<f32> |x,y| x*y]
+- kron-f32 1d: == flat outer (True, float32). [kron1d_typed::<f32>]
+- cross-f32: component formula ay*bz-az*by etc. in f32 == np.cross (True, float32). [f32 mirror]
+All bit-exact (element-wise/fixed-formula f32, no accumulation -> no reassociation). QUEUE FULLY
+READY: scoped + coded (outer/kron 1-line, cross-f32 helper written) + absolute-time-verified (real
+ms) + bit-exactness-verified. Disk recovery = paste -> build -> verify ratio+conformance -> ship.
+Build-free prep COMPLETE; further scouts confirm dominated/walls (matmul no-C-BLAS contended,
+generation/manip parity). 55 wins/fixes + 3 queued f32 dtype-gap wins ready.
