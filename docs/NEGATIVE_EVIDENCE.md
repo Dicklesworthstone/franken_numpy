@@ -7315,3 +7315,13 @@ count + keepdims_expand_axis(np.expand_dims) — SAME keepdims-on-axis class as 
 non-contig, flat). LESSON: the keepdims-on-axis loss class wasn't fully swept — count_nonzero was a
 residual the nan-family fix missed. Grep other axis-reductions still gated on !keepdims in try_zerocopy.
 14 wins; per-KWARG dispatch (keepdims) is a live sub-seam of per-case testing.
+
+## BlackThrush WIN: median(axis,keepdims=True) keepdims-on-axis (2026-06-22, fbb1fa79) — 15th win
+After count_nonzero, swept ALL reductions for keepdims-on-axis residuals: no other LOSSES (all par-or-
+win), but found a CLUSTER of order-stat ops that are PAR under keepdims=True while their keepdims=False
+WINS big (forgo the fast path via '|| keepdims' gate): median (0.26 noKD), percentile (0.23), quantile
+(0.22), nanmedian (0.18), nanpercentile/nanquantile (0.10), nanargmin/nanargmax (0.46). Fixed MEDIAN
+(common, clean): fast single-axis path + keepdims_expand_axis; par->0.26-0.33x, 0/54 mismatches.
+TODO (same fix, riskier - interpolation/q-array/nan): percentile/quantile/nanmedian/nanpercentile/
+nanquantile/nanargmin/nanargmax all gated '|| keepdims' -> par instead of their noKD win. 15 wins.
+LESSON: keepdims-on-axis isn't just a LOSS class; it's also a PAR-forgoing-WIN class across order-stats.
