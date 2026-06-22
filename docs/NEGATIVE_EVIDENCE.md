@@ -6145,3 +6145,34 @@ matches numpy. Two-output ufuncs now all good: frexp (82c7f7e4), divmod (f8c2634
 already a win). LESSON: multi-output ufuncs without a zero-copy path fall to cold extract+build
 (2 in + N out copies) that SCALES with n -> add a zero-copy N-output parallel path (frexp-class).
 GOTCHA: place helper BELOW the pyfunction's #[pyfunction]/#[pyo3] attrs (else E0433 detaches them).
+
+---
+
+## BlackThrush late-arc consolidation (2026-06-22): wins + levers + no-ships (was peer-locked, now landed)
+
+WINS (fnp/np ratio, <1=win; all bit-exact-or-allclose, conformance-green):
+| op | before | after | commit | lever |
+|----|--------|-------|--------|-------|
+| divmod(f64) two-output | 2.7-3.75x | 0.08-0.13x | f8c26343 | two-output cold-extract+build (scales with n) |
+| frexp | 1.11x | 0.11-0.24x | 82c7f7e4 | serial zero-copy loop -> parallel |
+| putmask | 1.18x | 0.35-0.69x | c8eba276 | serial in-place scatter -> parallel (cycles by FLAT pos) |
+| hamming/hanning/blackman | 1.06-1.15x | 0.12-0.46x | 99c281bc | serial cos-map -> parallel (kaiser lever, fnp-ufunc) |
+| isclose(f32,scalar) | 12-14x | 0.02x | 5ef2b313 | dtype-gap (f64-only path left f32 coldest) |
+| isclose(int/bool,scalar) | 4-7x | 0.5x | 8bb3033d | dtype-gap (astype + reuse) |
+| bincount(narrow/uint int) | ~3x | 0.02-0.20x | fb253d2e | narrow-buffer direct-read (no f64 widen); u8 image-hist 50x |
+
+mod(~2x, py_mod cold pyfunction vs remainder PyUFunc): found + HEAD-clean-verified + coordinated;
+LANDED by YellowElk (d632b15d, alias mod->remainder ufunc). The find I surfaced; owner landed.
+
+NO-SHIPS / DISPROVEN (reverted): remainder/fmod zero-copy (one-output cold ALREADY parity ->
+defer-scan eats parallel gain, no gain); sparse compress/extract block-skip (overhead-bound not
+scan-bound; small-array pyo3 wall); dup/low-cardinality sort/argsort (numpy introsort 3-way-
+partition + fnp matches numpy EXACT tie-breaking => algorithm change breaks conformance).
+
+LEVERS (reusable): serial-loop/two-output-cold-extract -> parallel (numpy single-threaded);
+dtype-gap (re-audit f32/int/bool/narrow after any f64-only fast path); alias-misses-twin
+(mod->remainder, atan2->arctan2); narrow-int-extract-widen (count/index ops that don't need f64).
+RULE: zero-copy-parallel wins BIG only when cold path is expensive (multi-output build OR widen-
+extract); one-output ops already at parity gain nothing. METHOD: min-of-3 + HEAD-clean rebuild
+(EXCLUDING peer in-tree WIP) before trusting any single-op anomaly — caught the mod stale-.so
+flip-flop and ~5 phantom "residuals" that dissolved to parity under re-verify.
