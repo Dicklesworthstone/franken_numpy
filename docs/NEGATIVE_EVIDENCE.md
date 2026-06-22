@@ -7166,3 +7166,15 @@ dot/median = par (0.97-1.04, largely delegate to numpy.ma). No new gap. These br
 clean; the recent wins (matrix_power, windows) were in specific less-trodden composite/setup ops, not
 broad families. Surface coverage now: primitives + all dtypes + random + io + composites (linalg) +
 generators/setup + FFT-variants + masked-array — all dominated/par or documented floor/artifact.
+
+## BlackThrush WIN: einsum single-operand diagonal delegate (2026-06-22, 5a965da7) — biggest gap of session
+10th win. Narrow-corner sweep found single-operand DIAGONAL einsum with a repeated index losing
+43-1339x: 'bii->bi' batched (1000,32,32)=1339x!, (40,40,40)=43x, '...ii->...i'=44x, 'iij->ij'=65x,
+'ii' trace. The plain 'ii->i' buffered-diagonal fast path missed all the variants -> generic native
+kernel = catastrophic. Added einsum_spec_is_single_diag (single operand, repeated input index) +
+delegate to numpy (sibling of single-reduce f82bc70a). 1339->1.25x, 43-65x->1.9-2.0x (residual =
+wrapper crossing on small diagonals), trace 0.51 WIN; plain ii->i + contractions + transposes
+PRESERVED; 0 mismatches. LESSON (reinforces matrix_power/windows): the narrow composite/alias/special-
+pattern tail keeps yielding REAL wins (now 3: matrix_power, windows, einsum-diag) even after broad
+surfaces converged — single-operand einsum special-forms (reduce, diag) need explicit fast-path-or-
+delegate; the generic kernel is 40-1300x off numpy on them. Sweep special index patterns, not just shapes.
