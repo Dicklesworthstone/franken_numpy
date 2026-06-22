@@ -7099,3 +7099,12 @@ contended box; its gate (MATRIX_RANK_NATIVE_MAX_DIM=16, max(M,N)>16 -> numpy fal
 ONLY real composite miss (now fixed e43467c7); the composite tail is otherwise dominated/par. NOTE:
 SVD/GEMM-based composite ops are EXTREMELY load-noisy (0.03<->18x swings) — re-measure 3-4x before
 trusting any single ratio. Verified-not-fixed > chasing a noise spike.
+
+## BlackThrush: composite linalg round 2 (qr/pinv/svd/solve) — par, no new gap (2026-06-22)
+Robust (median-of-3/5) check of the remaining composite ops: qr 200 0.95 / 1000x100 1.13 par;
+pinv 200x100 0.97 par (size-gate <=32 native + delegate-larger working, [[pinv-2d-dense-svd-sizegate]]);
+qr/solve/det/slogdet par or delegated per prior wins. Large pinv/svd benches (600x400) are too slow
+to time cleanly (LAPACK x iters) but are gated/delegated -> parity by construction. matrix_power
+(e43467c7) remains the ONLY real composite-tail miss this session; the rest is dominated/par/gated.
+Composite linalg surface now covered (matrix_power/matrix_rank/qr/pinv/svd/solve/det/slogdet/cond/
+norm/tensorinv/tensorsolve/kron/multi_dot/einsum-chains).
