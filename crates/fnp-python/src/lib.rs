@@ -50468,6 +50468,145 @@ fn nancumsum(
 }
 
 // Piecewise + shape intro (2).
+// Native single-pass np.piecewise for the common SCALAR-funclist case (x f64
+// c-contiguous; condlist a list of same-shape bool ndarrays; funclist all scalar
+// numbers, no callables). numpy builds zeros_like(x) then boolean-index-assigns
+// each condition (N fancy-index passes) ~6ms for 1M; the result is per-element
+// last-wins: out[i] = funclist[last k with cond[k][i]] else default (funclist[N]
+// if len==N+1 else 0). One fused pass over the masks is ~2x. Values are assigned
+// verbatim (no arithmetic) -> bit-identical (array_equal). Returns None (delegate)
+// for callable funcs, non-f64 / non-contiguous x, a non-list/mismatched-shape
+// condlist, a wrong funclist length, extra *args/**kwargs, or any buffer miss.
+fn piecewise_native(
+    py: Python<'_>,
+    args: &Bound<'_, PyTuple>,
+    kwargs: Option<&Bound<'_, PyDict>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if args.len() != 3 {
+        return Ok(None); // extra *args feed callables; scalar form takes exactly (x, condlist, funclist)
+    }
+    if kwargs.is_some_and(|kw| !kw.is_empty()) {
+        return Ok(None);
+    }
+    let x = args.get_item(0)?;
+    let numpy = py.import("numpy")?;
+    let ndarray = numpy.getattr("ndarray")?;
+    if !x.is_exact_instance(&ndarray) {
+        return Ok(None);
+    }
+    let dtype = x.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    if !x
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let x_shape: Vec<usize> = x.getattr("shape")?.extract()?;
+    // funclist: all scalar numbers, none callable.
+    let Ok(funcs) = args.get_item(2)?.extract::<Vec<Bound<'_, PyAny>>>() else {
+        return Ok(None);
+    };
+    let mut fvals: Vec<f64> = Vec::with_capacity(funcs.len());
+    for f in &funcs {
+        if f.is_callable() {
+            return Ok(None);
+        }
+        let Ok(v) = f.extract::<f64>() else {
+            return Ok(None); // array-valued or non-numeric entry -> delegate
+        };
+        fvals.push(v);
+    }
+    // condlist: list of same-shape c-contiguous bool ndarrays.
+    let Ok(conds) = args.get_item(1)?.extract::<Vec<Bound<'_, PyAny>>>() else {
+        return Ok(None);
+    };
+    let ncond = conds.len();
+    if ncond == 0 {
+        return Ok(None);
+    }
+    let has_default = fvals.len() == ncond + 1;
+    if fvals.len() != ncond && !has_default {
+        return Ok(None);
+    }
+    let default = if has_default { fvals[ncond] } else { 0.0 };
+    let uint8 = numpy.getattr("uint8")?;
+    let mut cond_bufs: Vec<PyBuffer<u8>> = Vec::with_capacity(ncond);
+    for c in &conds {
+        if !c.is_exact_instance(&ndarray) {
+            return Ok(None);
+        }
+        if c.getattr("dtype")?.getattr("kind")?.extract::<String>()? != "b" {
+            return Ok(None);
+        }
+        if !c
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        {
+            return Ok(None);
+        }
+        if c.getattr("shape")?.extract::<Vec<usize>>()? != x_shape {
+            return Ok(None); // numpy boolean-indexes y with each cond -> exact shape only
+        }
+        let cu8 = c.call_method1("view", (&uint8,))?;
+        let Ok(cb) = PyBuffer::<u8>::get(&cu8) else {
+            return Ok(None);
+        };
+        cond_bufs.push(cb);
+    }
+    let cond_slices: Vec<&[pyo3::buffer::ReadOnlyCell<u8>]> =
+        match cond_bufs.iter().map(|b| b.as_slice(py)).collect::<Option<Vec<_>>>() {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+    let n: usize = x_shape.iter().product();
+    let out_arr = numpy.call_method1("empty_like", (&x,))?;
+    let Ok(out_buf) = PyBuffer::<f64>::get(&out_arr) else {
+        return Ok(None);
+    };
+    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: ReadOnlyCell<u8>/Cell<f64> are repr(transparent); cond buffers are
+    // read-only under the GIL and out_arr is a fresh empty (no alias). One write
+    // per slot. Last-true condition wins (forward overwrite); no cond -> default.
+    let cond_raw: Vec<&[u8]> = cond_slices
+        .iter()
+        .map(|s| unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<u8>(), n) })
+        .collect();
+    let out: &mut [f64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+    let fill = |base: usize, sub: &mut [f64]| {
+        for (lj, slot) in sub.iter_mut().enumerate() {
+            let i = base + lj;
+            let mut val = default;
+            for k in 0..ncond {
+                if cond_raw[k][i] != 0 {
+                    val = fvals[k];
+                }
+            }
+            *slot = val;
+        }
+    };
+    const PIECEWISE_PARALLEL_MIN: usize = 1 << 18;
+    if n >= PIECEWISE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        let chunk = n.div_ceil(rayon::current_num_threads());
+        out.par_chunks_mut(chunk)
+            .enumerate()
+            .for_each(|(c, sub)| fill(c * chunk, sub));
+    } else {
+        fill(0, out);
+    }
+    Ok(Some(out_arr.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn piecewise(
@@ -50475,6 +50614,9 @@ fn piecewise(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
+    if let Some(result) = piecewise_native(py, args, kwargs)? {
+        return Ok(result);
+    }
     core_numpy_passthrough(py, "piecewise", args, kwargs)
 }
 

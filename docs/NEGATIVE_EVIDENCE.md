@@ -6485,3 +6485,30 @@ float mod. LEVER (reusable): a PASSTHROUGH op where numpy itself is structurally
 array passes for an O(1)-per-element recurrence: unwrap/gradient-class) is a native-single-pass vein
 even when "inherently sequential" (cumsum) — sequential Rust still beats numpy's 5+ vectorized
 passes. FOLLOW-UP LANDED: N-D last-axis rows parallelized (rayon par_chunks, gate n>=1<<16 & nrows>=2) — 2-D 200x5000 0.31x->0.043x (23x), 1000x1000 0.046x (22x), 100000x10 0.086x; 1-D single-row stays serial 0.31x. 15/15 differential incl nan2d/all_nan2d/two-rows/row1. Bit-identical (rows independent, per-row cumsum, no cross-row state). DTYPE-GAP EXTENSION: generalized the kernel over a tiny UnwrapFloat trait (f32+f64) — numpy keeps float32 input as float32 (weak scalar promotion of period/discont), and a native f32 recurrence (rem_euclid in f32) is BIT-EXACT to numpy's f32 (maxdiff 0.0, 100% match on 500K). f32 1-D 1M 0.35x (2.8x), f32 2-D 200x5000 0.047x (21x). float16/longdouble delegate. 14/14 f32+f64 differential incl nan/exact-pi/3-D/neg-axis + f16 delegate.
+
+---
+
+## BlackThrush WIN: np.piecewise scalar-funclist native single-pass (2026-06-22, 6-8x)
+
+np.piecewise was a pure passthrough; numpy builds zeros_like(x) then boolean-index-assigns each
+condition (N fancy-index passes) = ~6ms (no default) / ~15ms (default form) for 1M. For the common
+SCALAR-funclist case (no callables) the result is per-element last-wins: out[i] = funclist[last k
+with cond[k][i]] else default (funclist[N] if len==N+1, else 0). Added piecewise_native: one fused
+parallel pass over the bool masks; values assigned verbatim -> BIT-IDENTICAL (array_equal).
+
+| case | before | after | ratio |
+|------|--------|-------|-------|
+| 2-cond 1M | 1.0x (6.4ms) | 1.03ms | 0.170x (6x) |
+| 3-cond+default 1M | 1.0x (14.7ms) | 1.51ms | 0.119x (8x) |
+| 2-D 500x2000 | 1.0x (7.8ms) | 0.90ms | 0.136x |
+
+GATES (delegate->numpy otherwise): callable funcs, non-f64/non-contig x, condlist not a list of
+same-shape c-contiguous bool ndarrays, funclist len != ncond/ncond+1, extra *args/**kwargs.
+CORRECTNESS: 15/15 differential (default/no-default/overlap-last-wins/int-values/2-D/all-false/all-
+true/small + callable/int-x/f32-x delegations) array_equal + conformance_piecewise 11/11 PASS.
+GOTCHA (cost me a build): the new helper went BETWEEN piecewise's #[pyfunction]/#[pyo3(signature)]
+attrs and `fn piecewise` -> E0433 "wrapped_pyfunction not a module" (attrs detached onto the helper).
+FIX: helper above the attrs, attrs immediately above the pyfunction. LEVER (same as unwrap): a
+PASSTHROUGH where numpy is structurally multi-pass (here N boolean-fancy-index assignments) is a
+native-single-pass vein; the scalar form needs NO x values (mask-only), pure verbatim assignment =
+bit-exact. Callable form stays delegated (must run Python funcs).
