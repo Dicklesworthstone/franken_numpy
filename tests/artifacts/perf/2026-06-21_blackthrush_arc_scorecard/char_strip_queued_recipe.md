@@ -72,3 +72,21 @@ ljust/center need fillchar handling (default space; non-default ASCII ok; verify
 for center with odd remainder = extra pad on RIGHT). zfill numpy-C-fast (skip). expandtabs deferred.
 All width-changing ops: build numpy.empty(shape, dtype='<U{outw}'), view uint32, per-slot fill, no
 re-pack (output width is known/fixed). Verify bit-exact + conformance_strings_namespace before commit.
+
+---
+
+## Final build-free sweep (2026-06-22) — other slow-numpy candidates
+
+| op | numpy ns/el | verdict |
+|----|-------------|---------|
+| char.translate | 448 ns | WIN-VEIN, MODERATE: same-width per-codepoint remap, BUT must inspect table (1:1 ordinal map -> fast; None/str values = delete/expand -> width-change -> delegate). Queue after the clean ones. |
+| datetime_as_string | 242 ns | WIN-VEIN, HARDER: string-FORMATTING output (ISO date per element); fiddly (units/timezone). Defer. |
+| char.partition / join / splitlines | 87-550 ns | win-veins but OBJECT/variable output (tuple/joined/list) -> skip |
+| is_busday | 4 ns | numpy-C-fast -> no vein |
+| busday_count | 15 ns | numpy-C-fast (borderline) -> no vein |
+
+SCOUTING COMPLETE. Confirmed clean tractable char win-vein priority (one-build batch when disk
+recovers): strip/lstrip/rstrip, add, multiply, ljust/rjust/center. translate (moderate) after.
+datetime_as_string + partition/join/splitlines are slow-numpy but output-complex (defer/skip).
+Everything else probed this session is numpy-C-fast or already-won. Char (slow Python str methods)
+is THE remaining win-vein; numeric/reduction/linalg/fft/set/datetime-arith families are dominated.
