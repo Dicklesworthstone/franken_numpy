@@ -369,3 +369,17 @@ handled by try_zerocopy_f64_outer/kron1d first so ("f",4) only catches f32. (kro
 -> try_zerocopy_f64_kron2d is f64-only; lower priority, 1-D is the common case + the probe's case.)
 DISK-RECOVERY: paste 2 lines -> build -> verify outer-f32/kron-f32 WIN + bit-exact + conformance.
 trace-f32 4x separate (sum-accum, verify f32 order). RE-VERIFY min-of-3.
+
+## 2026-06-22 (build-free scout cont'd): QUEUE cross-f32 6x + trace (all-dtype); flip/diag = view-noise?
+More gaps found (re-verify min-of-3 on disk recovery):
+- cross f32: 6.0x LOSS (real product, O(n)). Likely dtype-gap (check cross f64). FIX: extend/typed or
+  zero-copy f32 cross (3-component cross = element-wise, bit-exact, no accum -> safe like outer).
+- trace: f64 1.51x + int 4.74x + f32 4x LOSS. trace=sum(diagonal); slow across dtypes (base + widen).
+  FIX: zero-copy strided diagonal sum, typed (int/f32 = dtype-gap; sum accumulation -> f32/f64 order
+  must match numpy, verify bit-exact like trace). Moderate.
+PROBABLE VIEW-NOISE (NOT real losses, verify): flip f32 2.23x, diag f32 1.90x - both VIEW ops (numpy
+returns O(1) strided view; ratio on instant op = overhead-noise, cf memory "flip 3.46x=O(1) view
+noise", getmaskarray). Verify shares_memory + min-of-3 before treating as losses.
+FINE: concatenate/stack/roll/tile/repeat f32 parity/win.
+QUEUE PRIORITY (disk recovery): outer-f32 + kron-f32 (1-line each, WIN) > cross-f32 (6x) > trace
+(dtype-gap+base) > [verify flip/diag noise]. trace-f32 from earlier folds into the trace item.
