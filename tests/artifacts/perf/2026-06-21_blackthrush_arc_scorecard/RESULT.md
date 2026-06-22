@@ -190,3 +190,12 @@ bound residual. REVERTED. WALL: max/min(bool) flat = small-result + numpy-short-
 winnable via pyo3 (the result is a scalar; numpy's instant). Do not re-probe. (.so has stale
 marginal fix until next build; source clean.) RULE: ship a residual ONLY when it removes a
 catastrophe; a mild loss -> overhead-bound residual is not worth the code.
+
+## 2026-06-21: f32 nanargmax/nanargmin LAST-AXIS WIN (ef76155f) - 7.2x -> 0.03-0.04x (30x)
+The queued real fix landed. nanargmax/nanargmin(f32, axis=-1) widened f32->f64 (copy-bound 7.2x;
+last turn's astype-f64 shortcut DISPROVEN same-class copy-bound). try_zerocopy_f32_nanarg_lastaxis:
+read f32 directly, per-lane first-non-NaN arg in f32 (order-preserving bit-exact), parallel lanes.
+7.2x->0.03-0.04x. Bit-exact (2-D/3-D/ties); all-NaN lane defers (numpy ValueError); f64 unchanged;
+conformance nan_funcs 34. VALIDATES the direct-read-vs-astype rule AGAIN: astype-widen is copy-bound
+(parity-at-best, here it FAILED), only a no-widen direct-read WINS (cf bincount-narrow 50x). nanargmax-
+f32 dtype-gap now complete (flat 6f515301 + last-axis ef76155f); ax0 1.08x near-parity left as-is.
