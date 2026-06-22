@@ -242,3 +242,16 @@ apostrophes/digit-before-letter (title), empty, U1, non-ASCII-delegate. conforma
 CHAR CASE FAMILY COMPLETE: upper/lower (pre-existing) + swapcase (9082f7c3) + capitalize/title
 (054c4a64), all ASCII-fast/numpy-fallback. DEFERRED: strip (changes string length -> needs slot
 re-pack, fiddlier). char family was the live win-vein after many dominated families.
+
+## 2026-06-21: char str_len DISPROVEN (numpy already C-fast); REFINES the char win-rule
+Probed char predicate cluster (isalpha/isdigit/isalnum/isspace/isupper/islower/istitle/str_len/
+startswith/endswith): ALL parity-delegate. Implemented str_len ASCII/all-unicode fast path (per-slot
+logical length, trailing-NUL strip, int64, works for ALL unicode no ASCII gate). RESULT: char 1.04x,
+strings 1.13x = NO WIN (bit-exact incl empty/unicode/N-D/U1/embedded-null verified). REVERTED.
+ROOT CAUSE: numpy 2.x str_len is a FAST C ufunc -> fnp delegating = parity-with-fast = no win
+opportunity. CONTRAST the case ops (swapcase/capitalize/title WON 7-8x) where numpy delegates to
+SLOW per-element Python str methods. REFINED RULE: "parity-delegate" is a win-opportunity ONLY when
+numpy is ALSO slow there (Python-level); if numpy has a C ufunc (str_len), fast-pathing = no gain.
+MUST verify numpy-is-slow before assuming a char win. The other predicates (isalpha/isdigit/etc.)
+are LIKELY numpy C ufuncs too (numpy 2.x np.strings) -> probably no-win; do NOT chase without
+confirming numpy slowness. char case family (slow in numpy) remains the only confirmed char win-vein.
