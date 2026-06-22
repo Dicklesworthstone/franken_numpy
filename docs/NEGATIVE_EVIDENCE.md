@@ -6512,3 +6512,31 @@ FIX: helper above the attrs, attrs immediately above the pyfunction. LEVER (same
 PASSTHROUGH where numpy is structurally multi-pass (here N boolean-fancy-index assignments) is a
 native-single-pass vein; the scalar form needs NO x values (mask-only), pure verbatim assignment =
 bit-exact. Callable form stays delegated (must run Python funcs).
+
+---
+
+## BlackThrush WIN: isposinf/isneginf zero-copy + mis-tuned-gate fix (2026-06-22, 8-15x loss -> 2-5.8x win)
+
+isposinf/isneginf ran the COLD path: extract_numeric_array (widen whole array to f64 UFuncArray) ->
+kernel -> build bool UFuncArray across the export bridge = THREE full copies -> 8-15x slower than
+numpy (which is one elementwise compare to +-inf). Added try_zerocopy_isinf_signed (f32/f64
+c-contiguous): read x buffer directly, write bool (uint8 0/1) in place, out[i]=(x[i]==target),
+target=+inf/-inf. NaN compares false -> BIT-IDENTICAL (array_equal). float16/non-contig/non-float/
+scalar -> native path.
+
+PARALLEL-GATE LESSON (re-confirmed my own mistuned-parallel-gates lever): first cut gated parallel at
+1<<18 and it LOST at 300K-1M (ratio 1.6-2.5x) — rayon overhead on L3-resident data — while WINNING at
+>=4M. Raised PAR_MIN to 1<<22 (parallel only when DRAM-bound). Final curve (isneginf):
+| N | ratio |
+|---|-------|
+| 100K | 0.52x | (serial, 2x) |
+| 1M | 0.44x | (serial, was 1.6x LOSS at gate 1<<18) |
+| 4M | 0.45x | (serial, numpy DRAM-slow 3.3ms) |
+| 8M | 0.17x | (parallel, 5.8x) |
+
+CORRECTNESS 12/12 differential (f64/f32, all-inf/nan/zero edges, 2-D, empty, 0-d scalar, non-contig/
+int/float16 delegations) array_equal + conformance isposinf_matches_numpy / isinf_multidim PASS.
+LEVER: a `extract_numeric_array -> kernel -> build` native path on a SIMPLE elementwise/bool-output op
+is a cold-copy vein (3 copies); zero-copy in/out (read buffer, write bool in place) kills it. And
+ALWAYS re-tune the parallel gate by measuring the L3->DRAM crossover (serial wins cache-resident,
+parallel wins DRAM-bound); a too-low gate turns the win into a mid-size loss band.

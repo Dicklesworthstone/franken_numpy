@@ -19192,7 +19192,117 @@ fn solve_triangular(
     build_numpy_array_from_ufunc(py, &result)
 }
 
+// Zero-copy np.isposinf / np.isneginf for a float (f32/f64) c-contiguous ndarray.
+// The old native path extracted the whole array to a widened-f64 UFuncArray, ran
+// the kernel, then built a fresh bool UFuncArray across the export bridge (three
+// full copies -> 8-15x numpy). numpy itself is one elementwise compare to ±inf.
+// This reads x's buffer directly and writes the bool (uint8 0/1) output in place:
+// out[i] = (x[i] == target) where target is +inf (positive) or -inf. NaN compares
+// false, so this is bit-identical to numpy. Non-float / non-contiguous / non-
+// ndarray -> Ok(None) (caller keeps the native path for scalars and odd dtypes).
+fn try_zerocopy_isinf_signed(
+    py: Python<'_>,
+    x: &Bound<'_, PyAny>,
+    positive: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    if !x.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = x.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f" {
+        return Ok(None);
+    }
+    let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+    if !matches!(itemsize, 4 | 8) {
+        return Ok(None); // float16 / longdouble -> native path
+    }
+    if !x
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let shape = x.getattr("shape")?;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "bool")?;
+    let out_arr = numpy.call_method("empty", (shape,), Some(&kwargs))?;
+    let out_u8 = out_arr.call_method1("view", (numpy.getattr("uint8")?,))?;
+    let Ok(out_buf) = PyBuffer::<u8>::get(&out_u8) else {
+        return Ok(None);
+    };
+    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    let n = out_cells.len();
+    // SAFETY: Cell<u8> is repr(transparent) over u8; out_arr is a fresh empty
+    // (no alias) and each slot is written exactly once.
+    let out: &mut [u8] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut u8, n) };
+    // Memory-bound compare: serial wins ~2x while the input fits cache; rayon only
+    // pays off once the array is DRAM-bound and multi-channel bandwidth helps
+    // (measured: parallel LOSES at 300K-1M = L3-resident, WINS 4.5x at >=4M).
+    const PAR_MIN: usize = 1 << 22;
+    let parallel = n >= PAR_MIN && rayon::current_num_threads() >= 2;
+    if itemsize == 8 {
+        let Ok(in_buf) = PyBuffer::<f64>::get(x) else {
+            return Ok(None);
+        };
+        let Some(in_cells) = in_buf.as_slice(py) else {
+            return Ok(None);
+        };
+        let target = if positive { f64::INFINITY } else { f64::NEG_INFINITY };
+        // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+        let xin: &[f64] = unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<f64>(), n) };
+        if parallel {
+            use rayon::prelude::*;
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out.par_chunks_mut(chunk)
+                .zip(xin.par_chunks(chunk))
+                .for_each(|(o, i)| {
+                    for (s, &v) in o.iter_mut().zip(i.iter()) {
+                        *s = u8::from(v == target);
+                    }
+                });
+        } else {
+            for (s, &v) in out.iter_mut().zip(xin.iter()) {
+                *s = u8::from(v == target);
+            }
+        }
+    } else {
+        let Ok(in_buf) = PyBuffer::<f32>::get(x) else {
+            return Ok(None);
+        };
+        let Some(in_cells) = in_buf.as_slice(py) else {
+            return Ok(None);
+        };
+        let target = if positive { f32::INFINITY } else { f32::NEG_INFINITY };
+        // SAFETY: ReadOnlyCell<f32> is repr(transparent) over f32; read-only under the GIL.
+        let xin: &[f32] = unsafe { std::slice::from_raw_parts(in_cells.as_ptr().cast::<f32>(), n) };
+        if parallel {
+            use rayon::prelude::*;
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out.par_chunks_mut(chunk)
+                .zip(xin.par_chunks(chunk))
+                .for_each(|(o, i)| {
+                    for (s, &v) in o.iter_mut().zip(i.iter()) {
+                        *s = u8::from(v == target);
+                    }
+                });
+        } else {
+            for (s, &v) in out.iter_mut().zip(xin.iter()) {
+                *s = u8::from(v == target);
+            }
+        }
+    }
+    Ok(Some(out_arr.unbind()))
+}
+
 fn isposinf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_isinf_signed(py, x, true)? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x, "isposinf(x)")?;
     let result = ufunc_isposinf(&x).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
@@ -19215,6 +19325,9 @@ fn isposinf(
 }
 
 fn isneginf_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
+    if let Some(out) = try_zerocopy_isinf_signed(py, x, false)? {
+        return Ok(out);
+    }
     let x = extract_numeric_array(py, x, "isneginf(x)")?;
     let result = ufunc_isneginf(&x).map_err(map_ufunc_error)?;
     build_numpy_scalar_or_array(py, &result)
