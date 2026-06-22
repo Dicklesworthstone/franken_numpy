@@ -7235,3 +7235,13 @@ partition/encode/endswith/isdigit/isalpha/lstrip/rstrip/expandtabs/replace/multi
 ops where dispatch dominates -> not real workloads). No fixable gap. 5TH consecutive zero-hit sweep
 (multi-axis/trace-diag/non-contig/broadcast-matmul/char-poly). Reachable surface exhausted beyond
 doubt. 10 wins shipped; sole lever = human C-BLAS/accept decision (bead cblas-large-gram-lever-8lnzn).
+
+## BlackThrush: ufunc-method sweep — all par (2026-06-22, 6th zero-hit; coverage COMPLETE)
+ufunc methods add/maximum/multiply .reduce/.accumulate/.reduceat/.outer all par (1.00-1.14); fnp
+supports all four method forms. No gap. 6TH consecutive zero-hit sweep. SURFACE COVERAGE COMPLETE:
+op-families x dtypes x shapes x special-index-patterns x dispatch-kwargs x multi-axis x layout x
+broadcast x matmul-dispatch x string(char) x polynomial x ufunc-methods. The reachable bit-exact
+pure-Rust surface is exhausted; 10 wins shipped+verified-intact, both candidate kernel levers
+disproved by implementation. The ONLY remaining un-dominated workload is the C-BLAS kernel floor
+(cov large-Gram 3-8x, batched LU) = human A(C-BLAS)/C(accept) decision (bead cblas-large-gram-lever-
+8lnzn). Further benchmark sweeps have ~0 hit rate (6 in a row); the productive lever is the decision.
