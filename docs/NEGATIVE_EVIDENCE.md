@@ -7015,3 +7015,14 @@ generation kernel matches numpy at large N. Random family adds NO fixable un-dom
 now swept end-to-end (elementwise/reduction/structural/view/order-stat/set/linalg/poly/fft/char/
 datetime/fancy-index/RANDOM) — all dominated-or-par or documented floors (binding overhead, no-C-BLAS
 Gram/LU, compaction). Sole open lever = bead deadlock-audit-cblas-large-gram-lever-8lnzn (human A/B/C).
+
+## BlackThrush: fnp-io surface swept — no fixable gap (2026-06-22)
+Swept binary/text parsing. frombuffer 2.5x LOOKED like a loss but is O(1)-binding-overhead: BOTH
+numpy (0.38us) and fnp (1.00us) are FLAT across N=1K-2M (no copy), fnp correctly shares the buffer
+memory + writeable=False (numpy-exact semantics) — the 2.5x is the ~0.6us pyo3 crossing on a near-
+bare C call, irreducible (cf [[small-array-dispatch-passthrough-cache]]). loadtxt/genfromtxt/
+array2string par (delegate/match). fromstring ERRs on the numpy-deprecated sep-parse usage numpy
+itself warns on (minor). fnp-io adds NO fixable un-dominated gap. Surface now swept across ALL
+crates (fnp-python top-level + fnp-random + fnp-io); convergence holds — every residual is binding
+overhead (O(1)/small ops), load-noise (GEMM/Gram/batched at full threads), or a documented kernel/
+BLAS floor (cov dsyrk, batch-LU golden-locked). Sole lever = bead ...cblas-large-gram-lever-8lnzn.
