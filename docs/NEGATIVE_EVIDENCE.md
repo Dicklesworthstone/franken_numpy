@@ -6210,3 +6210,29 @@ delegate=win-vein ONLY if numpy is also slow (string ops: case/strip/add/multipl
 find/count/zfill/str_len = numpy C-fast = no-vein). (4) re-measure SAME binary to reject load-noise
 phantoms. QUEUED (disk-critical, build-free scoped): char strip/add/multiply/ljust/rjust/center
 win-veins -> tests/artifacts/perf/2026-06-21_blackthrush_arc_scorecard/char_strip_queued_recipe.md
+
+---
+
+## BlackThrush stats/ma/f32-product arc consolidation (2026-06-22)
+
+DTYPE-GAP wins/fixes (fnp/np ratio, <1=win; bit-exact-or-allclose, conformance-green; f64 paths kept):
+| op | before | after | commit | fix |
+|----|--------|-------|--------|-----|
+| ma.compressed (int / f64 50%-mask) | 17.6x / 3.6x | parity / 0.13x-sparse | 3b6a93c0 | non-f64 delegate + f64 density-gate (>=90% kept) |
+| ma.filled (int/uint/f32) | 5-11x | 0.03-0.8x WIN | 9f5cb763 | generic try_zerocopy_ma_filled_typed<T> |
+| ma.argmax/argmin (non-f64) | 3-3.5x | parity | c920a6ec | delegate to numpy (native widen never wins) |
+| corrcoef (f32/int) | 4-7.7x | parity | a8fd0bea | non-f64 delegate (cov already did) |
+| median/percentile/quantile (int) | 1.9-2.2x@1M | parity | 1a82738a | numpy_dtype_is_integer -> delegate |
+| average (int/bool/non-f64-wt) | 5-6.4x | parity | f73dad86 | non-f64 delegate |
+| outer (f32) | 45x | 0.26x WIN (~170x) | 0f9a99eb | ("f",4)=>outer_typed::<f32> 1-line |
+| kron (f32) | 20x | 0.25x WIN (~80x) | 0f9a99eb | ("f",4)=>kron1d_typed::<f32> 1-line |
+| cross (f32) | 6x | 0.17x WIN (~35x) | 0f9a99eb | f32 mirror of try_zerocopy_f64_cross_n3 |
+
+LEVERS: (1) DTYPE-GAP - a f64(/int)-only fast path leaves f32/int/bool to a cold widen-extract; EXTEND
+(typed helper, bit-exact element-wise WIN) when the f64 path WINS, else DELEGATE to numpy (parity)
+when the native path widens and never beats numpy. (2) DENSITY-GATE a fast path to its win zone
+(ma.compressed >=90% kept) rather than delegate-all or keep-all. (3) Element-wise/fixed-formula f32
+(outer/kron/cross) = bit-exact (no accumulation); accumulating f32 (convolve) = numpy accumulates in
+f32 -> f64 kernel can't match (WALL). (4) Verify ABSOLUTE time not ratio (us-ops trace/flip/diag show
+inflated ratios that shrink with size = overhead/view-noise, NOT real); SINGLE-RUN ratios inflate
+(norm-vec-2 1.97x, sum-c128 1.68x = phantoms; min-of-3 = 0.5-0.94x). matmul = no-C-BLAS wall (contended).
