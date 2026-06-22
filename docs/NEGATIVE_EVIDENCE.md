@@ -7122,3 +7122,14 @@ tuned on a FREE box is a LANDMINE on a contended shared box — for one-time set
 serial already pars/wins, just keep serial. Build took 16min under swarm (65 rustc) contention.
 Composite/alias tail keeps yielding (matrix_power, now windows) — sweep aliases + setup-op generators,
 not just hot primitives.
+
+## BlackThrush: generator/setup-op + nan-order-stat sweep — no new gap (2026-06-22)
+After the window win, swept the same class for the free-box-gate-landmine pattern: linspace/logspace/
+geomspace/arange/vander/tri/eye/fromfunction all par-or-win (geomspace 1M 0.70 win). nan-order-stats
+nanmedian/nanquantile RE-MEASURE 0.56/0.48 WIN (the earlier sweep's 3.51/1.98 were LOAD NOISE — re-
+measure discipline). vander/meshgrid have 1<<14 parallel gates (same structural pattern as the window
+landmine) BUT measure par (vander 2000x50=100K par), so no contention landmine at tested sizes — NOT
+chased (no phantom, cf matrix_rank). permute_dims/matrix_transpose 2x = O(1)-view binding floor (the
+view-materialization bug was already fixed -> delegate). So windows (f20df36e) was the sole real win
+in the generator/alias/setup-op class; the rest is par-or-win or binding floor. Generator/setup-op
+surface now covered.
