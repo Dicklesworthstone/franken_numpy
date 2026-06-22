@@ -6835,3 +6835,19 @@ Gram beats dsyrk only while Gram work n_vars^2*n_obs < ~200k; above it loses 1.2
 when n_vars^2*n_obs >= 200000. Those cells -> 1.02-1.09; tiny-Gram wins (2x20000=0.79, 16x500=0.86)
 + large n_vars>=256 unchanged; 0 correctness mismatches. cov rowvar=True is now at parity-or-win
 across the whole n_vars x n_obs plane (native where it wins, numpy BLAS where it doesn't).
+
+## BlackThrush WIN: cov+corrcoef large-n_vars short-obs box delegate (2026-06-22, 21b11654)
+
+Third (final clean) cov/corrcoef loss region: large n_vars + SHORT n_obs (many output cells, short
+dots -> dsyrk dominates per-cell dot8). Mapped n_vars>=256 x n_obs (median-of-3): the box
+n_vars[256,512) AND n_obs<256 is UNIFORMLY loss (cov 256x50=4.68, 300x50=2.67, 400x200=1.19;
+corrcoef 256x50=1.96, 400x50=2.38) while native reclaims the win OUTSIDE it (n_obs>=~500:
+cov 400x500/1000/2000=0.91/0.76/0.72; n_vars>=512: cov 600x50=0.97, corrcoef 600x50=0.82).
+Delegated only that provably-safe box for both ops -> 1.0-1.05; wins UNCHANGED (grid A/B), 0
+correctness mismatches. cov/corrcoef rowvar=True now parity-or-win across the cleanly-separable
+plane (mid-band [48,256), small-vars work>=200k/400k, large-vars short-obs box). REMAINING FLOOR
+(no clean gate): n_vars>=512 is a NON-MONOTONIC DRAM-saturated patchwork (600/1000 rows mixed
+0.68-2.71, wins and losses interleaved with no separating predicate) — left native, matches the
+documented cov-gram tiling no-ship (DRAM-bound at 64-thread; real unlock = SIMD-across-obs breaks
+exact-repr = human decision). Also residual: n_obs 256-500 transitional band for n_vars 256-512
+(~1.1-1.3, left native to avoid regressing the nearby n_obs>=500 wins).
