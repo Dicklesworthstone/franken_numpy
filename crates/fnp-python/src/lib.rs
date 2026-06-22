@@ -14118,6 +14118,24 @@ fn bincount(
     {
         return Ok(out);
     }
+    // Narrow / unsigned integer inputs (i8/i16/i32/u8/u16/u32 — all fit in i64) miss the int64
+    // fast path above and fall to the cold int->f64 extract (~3x; common for image/byte
+    // histograms on uint8). Cast once to int64 (fast C astype) and reuse the zero-copy int64
+    // tally — bit-identical (bincount is value-based; narrow widths fit i64 exactly). Removes
+    // the 3x loss to parity. (int64 handled above; uint64 overflow-risk + weighted keep the
+    // general path. A direct narrow-buffer tally would WIN ~0.18x but needs a generic refactor.)
+    if weights.as_ref().is_none_or(|w| w.bind(py).is_none())
+        && (kind == "i" || kind == "u")
+        && input_dtype.getattr("itemsize")?.extract::<usize>()? < 8
+    {
+        let xi = numpy
+            .getattr("asarray")?
+            .call1((x.bind(py),))?
+            .call_method1("astype", (numpy.getattr("int64")?,))?;
+        if let Some(out) = try_zerocopy_bincount(py, &xi, minlength)? {
+            return Ok(out);
+        }
+    }
     // Zero-copy weighted tally (float64), single forward pass matching numpy's
     // accumulation order; mismatched length / negative / non-int64 fall through.
     if let Some(w) = weights.as_ref() {
