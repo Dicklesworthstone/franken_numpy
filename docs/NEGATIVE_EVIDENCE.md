@@ -6811,3 +6811,19 @@ surface. The only genuine un-dominated gaps are 3 documented ARCHITECTURAL floor
 (2) int min/max/ptp axis 1.04-1.26x (scalar-vs-SIMD kernel; filed bead deadlock-audit-simd-int-axis
 -minmax-1n50c), (3) cheap-f64-unary + O(1)-view binding overhead (irreducible pyo3 crossing). Stop
 re-sweeping the dominated surface; the remaining work is the 3 floors (2 need human/SIMD-session).
+
+## BlackThrush WIN: cov rowvar=True mid-band delegate to numpy BLAS (2026-06-22, 2.4-3.7x loss -> ~1.0x)
+
+cov's native dot8 Gram (no-C-BLAS) vs numpy's BLAS dsyrk: clean full n_vars x n_obs grid A/B
+(median-of-3, 64-thread) showed a NON-MONOTONIC boundary — native WINS at tiny Gram (n_vars<48,
+small n_obs: 20x100=0.52) and large balanced (n_vars>=256: 500x500=0.78, 300x1000=0.88) but is
+ALL-LOSS 1.3-3.7x for the mid-band n_vars ~[48,256) across EVERY n_obs (too few output cells to
+amortize per-cell dot8 setup while dsyrk stays optimal). FIX (delegate-when-native-loses, cf
+[[stale-cliff-gates-after-numpy-upgrade]]): gate rowvar=True 2-D n_vars in [48,256) to numpy.cov.
+Band 2.47/3.01/3.72 -> 1.04/1.04/1.03; win region (256/300/500) + tiny (20) UNCHANGED (verified
+no regression, full grid A/B via env-toggle FNP_NO_COV_DELEGATE). 0 correctness mismatches
+(bias/ddof/rowvar=False/shapes — delegate IS numpy's result). SHIPPED 0d3fe99e. Residual in-band
+~1.0-1.3x on tiny shapes = irreducible pyo3 binding overhead (numpy.cov via the wrapper). FOLLOW-UP
+(not done): small-n_vars + LARGE-n_obs also loses (n_vars=20,n_obs=5000 = 3.6x; crossover ~n_obs=500)
+— a 2nd delegate predicate (n_vars<48 && n_obs>=~768) would catch it; left as a clean follow-up to
+avoid over-reaching the gate this iteration.
