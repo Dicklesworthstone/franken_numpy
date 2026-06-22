@@ -355,3 +355,17 @@ accumulates). So f32 typed extension is bit-exact + wins. HIGH VALUE (outer comm
 NEW: trace-f32 3.97-4.37x LOSS -> trace = sum(diagonal) ACCUMULATES -> f32 sum bit-exactness needs
 check (small diagonals likely OK; numpy trace-f32 sums in f32); extend-or-delegate. QUEUE (disk
 recovery, re-verify min-of-3): outer-f32 + kron-f32 (extend, safe element-wise WIN) > trace-f32 (verify).
+
+## 2026-06-22 (build-free): outer-f32/kron-f32 fixes scoped to ONE LINE each (typed helpers exist!)
+Read the impls: outer + kron BOTH have generic typed helpers (outer_typed<T>, kron1d_typed<T>) + int
+dispatch matches gated on same-dtype (kind==b_kind, itemsize match). f64 handled separately first.
+f32 is MISSING from the int-dispatch match -> falls cold (45x/20x). FIX = add ONE LINE each:
+- outer-f32: in try_zerocopy_int_outer match (~line 40012, before `_ => Ok(None)`):
+    ("f", 4) => outer_typed::<f32, _>(py, &numpy, a, b, "float32", |x, y| x * y),
+- kron-f32 (1-D): in try_zerocopy_int_kron1d match (~line 39756):
+    ("f", 4) => kron1d_typed::<f32, _>(py, &numpy, a, b, "float32", |x, y| x * y),
+Bit-exact (element-wise f32 product, NO accumulation), WIN like int/f64 (~0.26x). f64 already
+handled by try_zerocopy_f64_outer/kron1d first so ("f",4) only catches f32. (kron 2-D f32 still cold
+-> try_zerocopy_f64_kron2d is f64-only; lower priority, 1-D is the common case + the probe's case.)
+DISK-RECOVERY: paste 2 lines -> build -> verify outer-f32/kron-f32 WIN + bit-exact + conformance.
+trace-f32 4x separate (sum-accum, verify f32 order). RE-VERIFY min-of-3.
