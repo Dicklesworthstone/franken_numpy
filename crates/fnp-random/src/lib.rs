@@ -2356,10 +2356,7 @@ fn parallel_pcg_uniform<R: PcgAdvanceFill>(
 /// Inverse-CDF standard exponential sampling for PCG-family cores. This method
 /// consumes exactly one f64 uniform per output, so jump-ahead chunking preserves
 /// the serial stream while fusing `-ln1p(-u)` into each cache-hot chunk.
-fn parallel_pcg_standard_exponential_inv<R: PcgAdvanceFill>(
-    rng: &mut R,
-    size: usize,
-) -> Vec<f64> {
+fn parallel_pcg_standard_exponential_inv<R: PcgAdvanceFill>(rng: &mut R, size: usize) -> Vec<f64> {
     use rayon::prelude::*;
     let mut out = vec![0.0f64; size];
     let threads = rayon::current_num_threads();
@@ -4191,12 +4188,7 @@ impl Generator {
         *buf as u8
     }
 
-    fn buffered_bounded_lemire_uint16(
-        &mut self,
-        rng: u16,
-        bcnt: &mut u8,
-        buf: &mut u32,
-    ) -> u16 {
+    fn buffered_bounded_lemire_uint16(&mut self, rng: u16, bcnt: &mut u8, buf: &mut u32) -> u16 {
         let rng_excl = u32::from(rng) + 1;
         let mut m = u32::from(self.buffered_uint16(bcnt, buf)) * rng_excl;
         let mut leftover = m as u16;
@@ -4212,12 +4204,7 @@ impl Generator {
         (m >> 16) as u16
     }
 
-    fn buffered_bounded_lemire_uint8(
-        &mut self,
-        rng: u8,
-        bcnt: &mut u8,
-        buf: &mut u32,
-    ) -> u8 {
+    fn buffered_bounded_lemire_uint8(&mut self, rng: u8, bcnt: &mut u8, buf: &mut u32) -> u8 {
         let rng_excl = u16::from(rng) + 1;
         let mut m = u16::from(self.buffered_uint8(bcnt, buf)) * rng_excl;
         let mut leftover = m as u8;
@@ -4254,7 +4241,7 @@ impl Generator {
     }
 
     fn full_range_u8_from_byte_stream(&mut self, off: u8, size: usize) -> Vec<u8> {
-        if size >= PCG_BYTES_DIRECT_MIN_LEN + 4 && self.bit_generator.rng.has_pcg_byte_fill() {
+        if size >= PCG_PARALLEL_MIN_LEN && self.bit_generator.rng.has_pcg_byte_fill() {
             let mut values = self.bytes(size);
             if off != 0 {
                 for value in &mut values {
@@ -4699,8 +4686,7 @@ impl Generator {
         if size == 0 {
             return Ok(Vec::new());
         }
-        let high =
-            Self::narrow_integer_high_inclusive(low, high, 0, i64::from(u8::MAX), endpoint)?;
+        let high = Self::narrow_integer_high_inclusive(low, high, 0, i64::from(u8::MAX), endpoint)?;
         let off = low as u8;
         let rng = (high - low) as u8;
         if rng == u8::MAX {
@@ -7923,11 +7909,7 @@ print("after:" + ",".join(str(float(value)) for value in after.tolist()))
         ))
     }
 
-    fn numpy_oracle_gamma(
-        shape: f64,
-        scale: f64,
-        size: usize,
-    ) -> Result<Vec<f64>, &'static str> {
+    fn numpy_oracle_gamma(shape: f64, scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
         let script = r#"
 import sys
 import numpy as np
@@ -8083,11 +8065,7 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
-    fn numpy_oracle_gumbel(
-        loc: f64,
-        scale: f64,
-        size: usize,
-    ) -> Result<Vec<f64>, &'static str> {
+    fn numpy_oracle_gumbel(loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
         let script = r#"
 import sys
 import numpy as np
@@ -8105,11 +8083,7 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
-    fn numpy_oracle_logistic(
-        loc: f64,
-        scale: f64,
-        size: usize,
-    ) -> Result<Vec<f64>, &'static str> {
+    fn numpy_oracle_logistic(loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
         let script = r#"
 import sys
 import numpy as np
@@ -8166,11 +8140,7 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
-    fn numpy_oracle_laplace(
-        loc: f64,
-        scale: f64,
-        size: usize,
-    ) -> Result<Vec<f64>, &'static str> {
+    fn numpy_oracle_laplace(loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
         let script = r#"
 import sys
 import numpy as np
@@ -8188,11 +8158,7 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
-    fn numpy_oracle_uniform(
-        low: f64,
-        high: f64,
-        size: usize,
-    ) -> Result<Vec<f64>, &'static str> {
+    fn numpy_oracle_uniform(low: f64, high: f64, size: usize) -> Result<Vec<f64>, &'static str> {
         let script = r#"
 import sys
 import numpy as np
@@ -8226,11 +8192,7 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
-    fn numpy_oracle_normal(
-        loc: f64,
-        scale: f64,
-        size: usize,
-    ) -> Result<Vec<f64>, &'static str> {
+    fn numpy_oracle_normal(loc: f64, scale: f64, size: usize) -> Result<Vec<f64>, &'static str> {
         let script = r#"
 import sys
 import numpy as np
@@ -8313,9 +8275,7 @@ print(",".join(str(float(value)) for value in values.tolist()))
         parse_oracle_f64_csv(stdout.trim())
     }
 
-    fn numpy_oracle_logseries_then_random(
-        p: &str,
-    ) -> Result<(Vec<u64>, Vec<f64>), &'static str> {
+    fn numpy_oracle_logseries_then_random(p: &str) -> Result<(Vec<u64>, Vec<f64>), &'static str> {
         let script = r#"
 import sys
 import numpy as np
@@ -11468,7 +11428,11 @@ for child in rng.spawn(n_children):
             .map_err(|_| "random_shaped scalar live oracle")?;
         assert!(scalar.is_scalar());
         assert!(scalar.shape().is_empty());
-        assert_f64_seq("random_shaped_scalar_live_numpy", scalar.values(), &expected);
+        assert_f64_seq(
+            "random_shaped_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
 
         let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
         let zero_dim = zero_dim_rng
@@ -11476,7 +11440,11 @@ for child in rng.spawn(n_children):
             .map_err(|_| "random_shaped zero-dim live oracle")?;
         assert!(!zero_dim.is_scalar());
         assert!(zero_dim.shape().is_empty());
-        assert_f64_seq("random_shaped_zero_dim_live_numpy", zero_dim.values(), &expected);
+        assert_f64_seq(
+            "random_shaped_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
         Ok(())
     }
 
@@ -11512,7 +11480,11 @@ for child in rng.spawn(n_children):
         assert_eq!(zero_axis.shape(), &[2, 0, 3]);
         assert!(zero_axis.is_empty());
         let after = rng.random(1);
-        assert_f64_seq("random_shaped_zero_axis_after_live_numpy", &after, &expected_after);
+        assert_f64_seq(
+            "random_shaped_zero_axis_after_live_numpy",
+            &after,
+            &expected_after,
+        );
         Ok(())
     }
 
@@ -11564,7 +11536,11 @@ for child in rng.spawn(n_children):
             .random_shaped(Some(&[2, 2]))
             .map_err(|_| "random_shaped live oracle")?;
         assert_eq!(random.shape(), &[2, 2]);
-        assert_f64_seq("random_shaped_live_numpy", random.values(), &expected_random);
+        assert_f64_seq(
+            "random_shaped_live_numpy",
+            random.values(),
+            &expected_random,
+        );
 
         let expected_standard_normal = numpy_oracle_standard_normal(6)?;
         let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
@@ -11584,7 +11560,11 @@ for child in rng.spawn(n_children):
             .uniform_shaped(-1.0, 2.0, Some(&[2, 2]))
             .map_err(|_| "uniform_shaped live oracle")?;
         assert_eq!(uniform.shape(), &[2, 2]);
-        assert_f64_seq("uniform_shaped_live_numpy", uniform.values(), &expected_uniform);
+        assert_f64_seq(
+            "uniform_shaped_live_numpy",
+            uniform.values(),
+            &expected_uniform,
+        );
 
         let expected_normal = numpy_oracle_normal(5.0, 2.0, 4)?;
         let mut rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
@@ -11592,7 +11572,11 @@ for child in rng.spawn(n_children):
             .normal_shaped(5.0, 2.0, Some(&[4]))
             .map_err(|_| "normal_shaped live oracle")?;
         assert_eq!(normal.shape(), &[4]);
-        assert_f64_seq("normal_shaped_live_numpy", normal.values(), &expected_normal);
+        assert_f64_seq(
+            "normal_shaped_live_numpy",
+            normal.values(),
+            &expected_normal,
+        );
         Ok(())
     }
 
@@ -11610,7 +11594,11 @@ for child in rng.spawn(n_children):
             .map_err(|_| "uniform_shaped scalar live oracle")?;
         assert!(scalar.is_scalar());
         assert!(scalar.shape().is_empty());
-        assert_f64_seq("uniform_shaped_scalar_live_numpy", scalar.values(), &expected);
+        assert_f64_seq(
+            "uniform_shaped_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
 
         let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
         let zero_dim = zero_dim_rng
@@ -11618,7 +11606,11 @@ for child in rng.spawn(n_children):
             .map_err(|_| "uniform_shaped zero-dim live oracle")?;
         assert!(!zero_dim.is_scalar());
         assert!(zero_dim.shape().is_empty());
-        assert_f64_seq("uniform_shaped_zero_dim_live_numpy", zero_dim.values(), &expected);
+        assert_f64_seq(
+            "uniform_shaped_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
 
         let expected_after = numpy_oracle_random(1)?;
         let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
@@ -11628,7 +11620,11 @@ for child in rng.spawn(n_children):
         assert_eq!(empty.shape(), &[2, 0, 3]);
         assert!(empty.is_empty());
         let after = empty_rng.random(1);
-        assert_f64_seq("uniform_shaped_empty_after_live_numpy", &after, &expected_after);
+        assert_f64_seq(
+            "uniform_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
         Ok(())
     }
 
@@ -11694,7 +11690,11 @@ for child in rng.spawn(n_children):
             .map_err(|_| "normal_shaped scalar live oracle")?;
         assert!(scalar.is_scalar());
         assert!(scalar.shape().is_empty());
-        assert_f64_seq("normal_shaped_scalar_live_numpy", scalar.values(), &expected);
+        assert_f64_seq(
+            "normal_shaped_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
 
         let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
         let zero_dim = zero_dim_rng
@@ -11702,7 +11702,11 @@ for child in rng.spawn(n_children):
             .map_err(|_| "normal_shaped zero-dim live oracle")?;
         assert!(!zero_dim.is_scalar());
         assert!(zero_dim.shape().is_empty());
-        assert_f64_seq("normal_shaped_zero_dim_live_numpy", zero_dim.values(), &expected);
+        assert_f64_seq(
+            "normal_shaped_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
 
         let expected_after = numpy_oracle_random(1)?;
         let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
@@ -11712,7 +11716,11 @@ for child in rng.spawn(n_children):
         assert_eq!(empty.shape(), &[2, 0, 3]);
         assert!(empty.is_empty());
         let after = empty_rng.random(1);
-        assert_f64_seq("normal_shaped_empty_after_live_numpy", &after, &expected_after);
+        assert_f64_seq(
+            "normal_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
         Ok(())
     }
 
@@ -11891,12 +11899,17 @@ for child in rng.spawn(n_children):
         assert_eq!(empty.shape(), &[2, 0, 3]);
         assert!(empty.is_empty());
         let after = empty_rng.random(1);
-        assert_f64_seq("integers_shaped_empty_after_live_numpy", &after, &expected_after);
+        assert_f64_seq(
+            "integers_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
         Ok(())
     }
 
     #[test]
-    fn integers_endpoint_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+    fn integers_endpoint_shaped_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str>
+    {
         if !numpy_oracle_available() {
             return Ok(());
         }
@@ -12348,7 +12361,12 @@ for child in rng.spawn(n_children):
         }
 
         for (label, pool, size, replace) in [
-            ("choice_replace_live_numpy", &[1.0, 2.0, 3.0][..], 10_usize, true),
+            (
+                "choice_replace_live_numpy",
+                &[1.0, 2.0, 3.0][..],
+                10_usize,
+                true,
+            ),
             (
                 "choice_no_replace_live_numpy",
                 &[1.0, 2.0, 3.0, 4.0, 5.0][..],
@@ -12556,7 +12574,11 @@ for child in rng.spawn(n_children):
             .map_err(|_| "choice_shaped scalar live oracle")?;
         assert!(scalar.is_scalar());
         assert!(scalar.shape().is_empty());
-        assert_f64_seq("choice_shaped_scalar_live_numpy", scalar.values(), &expected);
+        assert_f64_seq(
+            "choice_shaped_scalar_live_numpy",
+            scalar.values(),
+            &expected,
+        );
 
         let mut zero_dim_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
         let zero_dim = zero_dim_rng
@@ -12564,7 +12586,11 @@ for child in rng.spawn(n_children):
             .map_err(|_| "choice_shaped zero-dim live oracle")?;
         assert!(!zero_dim.is_scalar());
         assert!(zero_dim.shape().is_empty());
-        assert_f64_seq("choice_shaped_zero_dim_live_numpy", zero_dim.values(), &expected);
+        assert_f64_seq(
+            "choice_shaped_zero_dim_live_numpy",
+            zero_dim.values(),
+            &expected,
+        );
 
         let expected_after = numpy_oracle_random(1)?;
         let mut empty_rng = Generator::from_pcg64_dxsm(12345).map_err(|_| "pcg64dxsm seed")?;
@@ -12574,12 +12600,17 @@ for child in rng.spawn(n_children):
         assert_eq!(empty.shape(), &[2, 0, 3]);
         assert!(empty.is_empty());
         let after = empty_rng.random(1);
-        assert_f64_seq("choice_shaped_empty_after_live_numpy", &after, &expected_after);
+        assert_f64_seq(
+            "choice_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
         Ok(())
     }
 
     #[test]
-    fn choice_shaped_no_replace_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str> {
+    fn choice_shaped_no_replace_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str>
+    {
         if !numpy_oracle_available() {
             return Ok(());
         }
@@ -12628,8 +12659,8 @@ for child in rng.spawn(n_children):
     }
 
     #[test]
-    fn choice_shaped_unshuffled_scalar_empty_matches_live_numpy_oracle()
-    -> Result<(), &'static str> {
+    fn choice_shaped_unshuffled_scalar_empty_matches_live_numpy_oracle() -> Result<(), &'static str>
+    {
         if !numpy_oracle_available() {
             return Ok(());
         }
@@ -14980,9 +15011,7 @@ for child in rng.spawn(n_children):
 
         let expected = numpy_oracle_uniform(2.0, 5.0, 10)?;
         let mut g = oracle_gen();
-        let actual = g
-            .uniform(2.0, 5.0, 10)
-            .map_err(|_| "uniform live oracle")?;
+        let actual = g.uniform(2.0, 5.0, 10).map_err(|_| "uniform live oracle")?;
         assert_f64_seq("uniform_live_numpy", &actual, &expected);
         Ok(())
     }
@@ -15046,9 +15075,7 @@ for child in rng.spawn(n_children):
 
         let expected = numpy_oracle_normal(5.0, 2.0, 10)?;
         let mut g = oracle_gen();
-        let actual = g
-            .normal(5.0, 2.0, 10)
-            .map_err(|_| "normal live oracle")?;
+        let actual = g.normal(5.0, 2.0, 10).map_err(|_| "normal live oracle")?;
         assert_f64_seq("normal_live_numpy", &actual, &expected);
         Ok(())
     }
@@ -15312,9 +15339,7 @@ for child in rng.spawn(n_children):
 
         let expected = numpy_oracle_laplace(0.0, 1.0, 10)?;
         let mut g = oracle_gen();
-        let actual = g
-            .laplace(0.0, 1.0, 10)
-            .map_err(|_| "laplace live oracle")?;
+        let actual = g.laplace(0.0, 1.0, 10).map_err(|_| "laplace live oracle")?;
         assert_f64_seq("laplace_live_numpy", &actual, &expected);
         Ok(())
     }
@@ -15361,9 +15386,7 @@ for child in rng.spawn(n_children):
 
         let expected = numpy_oracle_gumbel(0.0, 1.0, 10)?;
         let mut g = oracle_gen();
-        let actual = g
-            .gumbel(0.0, 1.0, 10)
-            .map_err(|_| "gumbel live oracle")?;
+        let actual = g.gumbel(0.0, 1.0, 10).map_err(|_| "gumbel live oracle")?;
         assert_f64_seq("gumbel_live_numpy", &actual, &expected);
         Ok(())
     }
@@ -15495,9 +15518,7 @@ for child in rng.spawn(n_children):
 
         let expected = numpy_oracle_rayleigh(1.0, 10)?;
         let mut g = oracle_gen();
-        let actual = g
-            .rayleigh(1.0, 10)
-            .map_err(|_| "rayleigh live oracle")?;
+        let actual = g.rayleigh(1.0, 10).map_err(|_| "rayleigh live oracle")?;
         assert_f64_seq("rayleigh_live_numpy", &actual, &expected);
         Ok(())
     }
@@ -15529,9 +15550,7 @@ for child in rng.spawn(n_children):
 
         let expected = numpy_oracle_pareto(3.0, 10)?;
         let mut g = oracle_gen();
-        let actual = g
-            .pareto(3.0, 10)
-            .map_err(|_| "pareto live oracle")?;
+        let actual = g.pareto(3.0, 10).map_err(|_| "pareto live oracle")?;
         assert_f64_seq("pareto_live_numpy", &actual, &expected);
         Ok(())
     }
@@ -15836,9 +15855,7 @@ for child in rng.spawn(n_children):
 
         let expected = numpy_oracle_gamma(2.0, 3.0, 10)?;
         let mut g = oracle_gen();
-        let actual = g
-            .gamma(2.0, 3.0, 10)
-            .map_err(|_| "gamma live oracle")?;
+        let actual = g.gamma(2.0, 3.0, 10).map_err(|_| "gamma live oracle")?;
         assert_f64_seq("gamma_live_numpy", &actual, &expected);
         Ok(())
     }
@@ -15855,7 +15872,11 @@ for child in rng.spawn(n_children):
             .gamma(2.0, 3.0, 0)
             .map_err(|_| "gamma zero-size live oracle")?;
         assert!(actual_values.is_empty());
-        assert_f64_seq("gamma_zero_size_live_numpy", &actual_values, &expected_values);
+        assert_f64_seq(
+            "gamma_zero_size_live_numpy",
+            &actual_values,
+            &expected_values,
+        );
         let actual_after = g.random(1);
         assert_f64_seq(
             "gamma_zero_size_after_live_numpy",
@@ -16056,9 +16077,7 @@ for child in rng.spawn(n_children):
 
         let expected = numpy_oracle_chisquare(5.0, 10)?;
         let mut g = oracle_gen();
-        let actual = g
-            .chisquare(5.0, 10)
-            .map_err(|_| "chisquare live oracle")?;
+        let actual = g.chisquare(5.0, 10).map_err(|_| "chisquare live oracle")?;
         assert_f64_seq("chisquare_live_numpy", &actual, &expected);
         Ok(())
     }
@@ -16075,7 +16094,11 @@ for child in rng.spawn(n_children):
             .chisquare(5.0, 0)
             .map_err(|_| "chisquare zero-size live oracle")?;
         assert!(actual_values.is_empty());
-        assert_f64_seq("chisquare_zero_size_live_numpy", &actual_values, &expected_values);
+        assert_f64_seq(
+            "chisquare_zero_size_live_numpy",
+            &actual_values,
+            &expected_values,
+        );
         let actual_after = g.random(1);
         assert_f64_seq(
             "chisquare_zero_size_after_live_numpy",
@@ -16112,9 +16135,7 @@ for child in rng.spawn(n_children):
 
         let expected = numpy_oracle_beta(2.0, 5.0, 10)?;
         let mut g = oracle_gen();
-        let actual = g
-            .beta(2.0, 5.0, 10)
-            .map_err(|_| "beta live oracle")?;
+        let actual = g.beta(2.0, 5.0, 10).map_err(|_| "beta live oracle")?;
         assert_f64_seq("beta_live_numpy", &actual, &expected);
         Ok(())
     }
@@ -16131,7 +16152,11 @@ for child in rng.spawn(n_children):
             .beta(2.0, 5.0, 0)
             .map_err(|_| "beta zero-size live oracle")?;
         assert!(actual_values.is_empty());
-        assert_f64_seq("beta_zero_size_live_numpy", &actual_values, &expected_values);
+        assert_f64_seq(
+            "beta_zero_size_live_numpy",
+            &actual_values,
+            &expected_values,
+        );
         let actual_after = g.random(1);
         assert_f64_seq(
             "beta_zero_size_after_live_numpy",
@@ -16251,9 +16276,7 @@ for child in rng.spawn(n_children):
         ] {
             let (expected_values, expected_after) = numpy_oracle_beta_then_random(a, b, 3, 5)?;
             let mut g = oracle_gen();
-            let actual_values = g
-                .beta(a, b, 3)
-                .map_err(|_| "beta nonfinite live oracle")?;
+            let actual_values = g.beta(a, b, 3).map_err(|_| "beta nonfinite live oracle")?;
             assert_f64_seq_with_nan(
                 &format!("{label}_values_live_numpy"),
                 &actual_values,
@@ -16317,9 +16340,7 @@ for child in rng.spawn(n_children):
 
         let (expected_values, expected_after) = numpy_oracle_logseries_then_random("0.6")?;
         let mut rng = oracle_gen();
-        let values = rng
-            .logseries(0.6, 5)
-            .map_err(|_| "logseries live oracle")?;
+        let values = rng.logseries(0.6, 5).map_err(|_| "logseries live oracle")?;
         assert_u64_seq("logseries_live_numpy_values", &values, &expected_values);
 
         let after = rng.random(5);
@@ -16409,9 +16430,7 @@ for child in rng.spawn(n_children):
         let expected = numpy_oracle_permutation_f64(10)?;
         let mut g = oracle_gen();
         let arr: Vec<f64> = (0..10).map(|i| i as f64).collect();
-        let actual = g
-            .permutation(&arr)
-            .map_err(|_| "permutation live oracle")?;
+        let actual = g.permutation(&arr).map_err(|_| "permutation live oracle")?;
         assert_f64_seq("permutation_live_numpy", &actual, &expected);
         Ok(())
     }
@@ -16653,7 +16672,11 @@ for child in rng.spawn(n_children):
             .standard_t(5.0, 0)
             .map_err(|_| "standard_t zero-size live oracle")?;
         assert!(actual_values.is_empty());
-        assert_f64_seq("standard_t_zero_size_live_numpy", &actual_values, &expected_values);
+        assert_f64_seq(
+            "standard_t_zero_size_live_numpy",
+            &actual_values,
+            &expected_values,
+        );
         let actual_after = g.random(1);
         assert_f64_seq(
             "standard_t_zero_size_after_live_numpy",
@@ -16941,7 +16964,9 @@ for child in rng.spawn(n_children):
                 .unwrap()
                 .into_parts()
                 .1,
-            vec![98i8, 34, 22, 48, 93, 17, 49, 47, 82, 84, 97, 68, 1, 90, 73, 18],
+            vec![
+                98i8, 34, 22, 48, 93, 17, 49, 47, 82, 84, 97, 68, 1, 90, 73, 18
+            ],
         );
         assert_eq!(
             seeded()
@@ -16949,7 +16974,9 @@ for child in rng.spawn(n_children):
                 .unwrap()
                 .into_parts()
                 .1,
-            vec![98u8, 34, 22, 48, 93, 17, 49, 47, 82, 84, 97, 68, 1, 90, 73, 18],
+            vec![
+                98u8, 34, 22, 48, 93, 17, 49, 47, 82, 84, 97, 68, 1, 90, 73, 18
+            ],
         );
         assert_eq!(
             seeded()
@@ -16957,7 +16984,9 @@ for child in rng.spawn(n_children):
                 .unwrap()
                 .into_parts()
                 .1,
-            vec![35i16, 48, 17, 47, 23, 97, 2, 10, 19, 30, 34, 28, 36, 66, 61, 24],
+            vec![
+                35i16, 48, 17, 47, 23, 97, 2, 10, 19, 30, 34, 28, 36, 66, 61, 24
+            ],
         );
         assert_eq!(
             seeded()
@@ -16965,7 +16994,9 @@ for child in rng.spawn(n_children):
                 .unwrap()
                 .into_parts()
                 .1,
-            vec![35u16, 48, 17, 47, 23, 97, 2, 10, 19, 30, 34, 28, 36, 66, 61, 24],
+            vec![
+                35u16, 48, 17, 47, 23, 97, 2, 10, 19, 30, 34, 28, 36, 66, 61, 24
+            ],
         );
         // endpoint=true with a negative low (int8), and a power-of-two range (uint16,
         // the mask path with no Lemire rejection).
@@ -16989,8 +17020,6 @@ for child in rng.spawn(n_children):
 
     #[test]
     fn full_range_byte_integers_match_scalar_narrow_stream_and_state() {
-        let n = super::PCG_BYTES_DIRECT_MIN_LEN + 17;
-
         for dxsm in [false, true] {
             let mk = |seed: u64| {
                 if dxsm {
@@ -17000,45 +17029,55 @@ for child in rng.spawn(n_children):
                 }
             };
 
-            let mut fast_u8 = mk(8181);
-            let got_u8 = fast_u8
-                .integers_u8_endpoint_mode(0, 256, n, false)
-                .unwrap();
-            let after_fast_u8: Vec<u32> = (0..17).map(|_| fast_u8.next_uint32()).collect();
+            for n in [
+                super::PCG_PARALLEL_MIN_LEN,
+                100_000,
+                super::PCG_BYTES_DIRECT_MIN_LEN + 17,
+            ] {
+                let mut fast_u8 = mk(8181);
+                let got_u8 = fast_u8.integers_u8_endpoint_mode(0, 256, n, false).unwrap();
+                let after_fast_u8: Vec<u32> = (0..17).map(|_| fast_u8.next_uint32()).collect();
 
-            let mut scalar_u8 = mk(8181);
-            let mut bcnt = 0;
-            let mut buf = 0;
-            let want_u8: Vec<u8> = (0..n)
-                .map(|_| scalar_u8.numpy_bounded_uint8(0, u8::MAX, &mut bcnt, &mut buf))
-                .collect();
-            let after_scalar_u8: Vec<u32> = (0..17).map(|_| scalar_u8.next_uint32()).collect();
+                let mut scalar_u8 = mk(8181);
+                let mut bcnt = 0;
+                let mut buf = 0;
+                let want_u8: Vec<u8> = (0..n)
+                    .map(|_| scalar_u8.numpy_bounded_uint8(0, u8::MAX, &mut bcnt, &mut buf))
+                    .collect();
+                let after_scalar_u8: Vec<u32> = (0..17).map(|_| scalar_u8.next_uint32()).collect();
 
-            assert_eq!(got_u8, want_u8, "dxsm={dxsm}: uint8 full range changed");
-            assert_eq!(
-                after_fast_u8, after_scalar_u8,
-                "dxsm={dxsm}: uint8 post-call stream changed"
-            );
+                assert_eq!(
+                    got_u8, want_u8,
+                    "dxsm={dxsm}, n={n}: uint8 full range changed"
+                );
+                assert_eq!(
+                    after_fast_u8, after_scalar_u8,
+                    "dxsm={dxsm}, n={n}: uint8 post-call stream changed"
+                );
 
-            let mut fast_i8 = mk(9191);
-            let got_i8 = fast_i8
-                .integers_i8_endpoint_mode(-128, 128, n, false)
-                .unwrap();
-            let after_fast_i8: Vec<u32> = (0..17).map(|_| fast_i8.next_uint32()).collect();
+                let mut fast_i8 = mk(9191);
+                let got_i8 = fast_i8
+                    .integers_i8_endpoint_mode(-128, 128, n, false)
+                    .unwrap();
+                let after_fast_i8: Vec<u32> = (0..17).map(|_| fast_i8.next_uint32()).collect();
 
-            let mut scalar_i8 = mk(9191);
-            let mut bcnt = 0;
-            let mut buf = 0;
-            let want_i8: Vec<i8> = (0..n)
-                .map(|_| scalar_i8.numpy_bounded_uint8(128, u8::MAX, &mut bcnt, &mut buf) as i8)
-                .collect();
-            let after_scalar_i8: Vec<u32> = (0..17).map(|_| scalar_i8.next_uint32()).collect();
+                let mut scalar_i8 = mk(9191);
+                let mut bcnt = 0;
+                let mut buf = 0;
+                let want_i8: Vec<i8> = (0..n)
+                    .map(|_| scalar_i8.numpy_bounded_uint8(128, u8::MAX, &mut bcnt, &mut buf) as i8)
+                    .collect();
+                let after_scalar_i8: Vec<u32> = (0..17).map(|_| scalar_i8.next_uint32()).collect();
 
-            assert_eq!(got_i8, want_i8, "dxsm={dxsm}: int8 full range changed");
-            assert_eq!(
-                after_fast_i8, after_scalar_i8,
-                "dxsm={dxsm}: int8 post-call stream changed"
-            );
+                assert_eq!(
+                    got_i8, want_i8,
+                    "dxsm={dxsm}, n={n}: int8 full range changed"
+                );
+                assert_eq!(
+                    after_fast_i8, after_scalar_i8,
+                    "dxsm={dxsm}, n={n}: int8 post-call stream changed"
+                );
+            }
         }
     }
 
@@ -17155,7 +17194,11 @@ for child in rng.spawn(n_children):
         assert_eq!(empty.shape(), &[2, 0, 3]);
         assert!(empty.is_empty());
         let after = empty_rng.random(1);
-        assert_f64_seq("int8_integers_shaped_empty_after_live_numpy", &after, &expected_after);
+        assert_f64_seq(
+            "int8_integers_shaped_empty_after_live_numpy",
+            &after,
+            &expected_after,
+        );
         Ok(())
     }
 
@@ -18144,7 +18187,11 @@ for child in rng.spawn(n_children):
         assert!(actual.is_empty());
         assert_eq!(actual.values(), expected.as_slice());
         let after = rng.random(1);
-        assert_f64_seq("permuted_shaped_zero_size_after_live_numpy", &after, &expected_after);
+        assert_f64_seq(
+            "permuted_shaped_zero_size_after_live_numpy",
+            &after,
+            &expected_after,
+        );
         Ok(())
     }
 
@@ -18269,7 +18316,11 @@ for child in rng.spawn(n_children):
         for v in &vals {
             hasher.update(v.to_bits().to_le_bytes());
         }
-        let digest: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(
             digest, "e1c8d1e42f6c0539cb9abf781bc22c7c87dd6cca8ed14723488479cd2d3e6d0c",
             "PCG64 uniform random golden stream changed"
@@ -18347,7 +18398,11 @@ for child in rng.spawn(n_children):
         for v in &vals {
             hasher.update(v.to_bits().to_le_bytes());
         }
-        let digest: String = hasher.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let digest: String = hasher
+            .finalize()
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(
             digest, "d0241aa054fc4a4a577d7e2acca371d43ababb4245875df2c1d77c3c118b1001",
             "PCG64 uniform(low,high) golden stream changed"
@@ -18378,8 +18433,7 @@ for child in rng.spawn(n_children):
 
                 let mut serial = mk(77);
                 let expected: Vec<f32> = (0..n).map(|_| serial.random_f32(1)[0]).collect();
-                let after_serial: Vec<u32> =
-                    (0..17).map(|_| serial.next_f32().to_bits()).collect();
+                let after_serial: Vec<u32> = (0..17).map(|_| serial.next_f32().to_bits()).collect();
 
                 assert_eq!(values.len(), expected.len());
                 for (index, (got, want)) in values.iter().zip(&expected).enumerate() {
@@ -18398,7 +18452,10 @@ for child in rng.spawn(n_children):
 
         let mut prebuffered = Generator::from_pcg64(99).unwrap();
         let mut serial = Generator::from_pcg64(99).unwrap();
-        assert_eq!(prebuffered.next_f32().to_bits(), serial.next_f32().to_bits());
+        assert_eq!(
+            prebuffered.next_f32().to_bits(),
+            serial.next_f32().to_bits()
+        );
         let got = prebuffered.random_f32(n_odd);
         let want: Vec<f32> = (0..n_odd).map(|_| serial.random_f32(1)[0]).collect();
         for (index, (got, want)) in got.iter().zip(&want).enumerate() {
@@ -18430,8 +18487,7 @@ for child in rng.spawn(n_children):
             let mut parallel = mk(31337);
             let mut combined = parallel.standard_exponential_inv(n);
             combined.extend(parallel.standard_exponential_inv(n));
-            let after_parallel: Vec<u64> =
-                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
 
             let mut serial = mk(31337);
             let expected: Vec<f64> = (0..2 * n)
@@ -18473,8 +18529,7 @@ for child in rng.spawn(n_children):
             let mut parallel = mk(4242);
             let mut combined = parallel.logistic(loc, scale, n).unwrap();
             combined.extend(parallel.logistic(loc, scale, n).unwrap());
-            let after_parallel: Vec<u64> =
-                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
 
             let mut serial = mk(4242);
             let expected: Vec<f64> = (0..2 * n)
@@ -18500,7 +18555,11 @@ for child in rng.spawn(n_children):
         let mut serial = Generator::from_pcg64(777).unwrap();
         assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
         let zero_scale = buffered.logistic(loc, 0.0, n).unwrap();
-        assert!(zero_scale.iter().all(|value| value.to_bits() == loc.to_bits()));
+        assert!(
+            zero_scale
+                .iter()
+                .all(|value| value.to_bits() == loc.to_bits())
+        );
         assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
     }
 
@@ -18523,8 +18582,7 @@ for child in rng.spawn(n_children):
             let mut parallel = mk(7373);
             let mut combined = parallel.laplace(loc, scale, n).unwrap();
             combined.extend(parallel.laplace(loc, scale, n).unwrap());
-            let after_parallel: Vec<u64> =
-                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
 
             let mut serial = mk(7373);
             let expected: Vec<f64> = (0..2 * n)
@@ -18591,8 +18649,7 @@ for child in rng.spawn(n_children):
             let mut parallel = mk(9292);
             let mut combined = parallel.gumbel(loc, scale, n).unwrap();
             combined.extend(parallel.gumbel(loc, scale, n).unwrap());
-            let after_parallel: Vec<u64> =
-                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
 
             let mut serial = mk(9292);
             let expected: Vec<f64> = (0..2 * n)
@@ -18654,8 +18711,7 @@ for child in rng.spawn(n_children):
             let mut parallel = mk(5150);
             let mut combined = parallel.triangular(left, mode, right, n).unwrap();
             combined.extend(parallel.triangular(left, mode, right, n).unwrap());
-            let after_parallel: Vec<u64> =
-                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
 
             let mut serial = mk(5150);
             let expected: Vec<f64> = (0..2 * n)
@@ -18680,7 +18736,12 @@ for child in rng.spawn(n_children):
         let mut buffered = Generator::from_pcg64(888).unwrap();
         let mut serial = Generator::from_pcg64(888).unwrap();
         assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
-        assert!(buffered.triangular(left, mode, right, 0).unwrap().is_empty());
+        assert!(
+            buffered
+                .triangular(left, mode, right, 0)
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(buffered.next_f32().to_bits(), serial.next_f32().to_bits());
     }
 
@@ -18703,8 +18764,7 @@ for child in rng.spawn(n_children):
             let mut parallel = mk(6262);
             let mut combined = parallel.vonmises(mu, kappa, n).unwrap();
             combined.extend(parallel.vonmises(mu, kappa, n).unwrap());
-            let after_parallel: Vec<u64> =
-                (0..17).map(|_| parallel.next_f64().to_bits()).collect();
+            let after_parallel: Vec<u64> = (0..17).map(|_| parallel.next_f64().to_bits()).collect();
 
             let mut serial = mk(6262);
             let expected: Vec<f64> = (0..2 * n)
