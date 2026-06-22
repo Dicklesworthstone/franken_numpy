@@ -6758,3 +6758,21 @@ Rust SIMD reductions frequently DON'T beat numpy's fused C loops (the f64 SIMD a
 delegates large) — uncertain payoff, needs a focused generic-over-int-T SIMD session, not a quick
 gate tweak. CONFIRMS the refined lesson: cheap-per-lane scalar reductions (ptp/min/max int) are
 gate-INSENSITIVE; only heavy-per-lane (nanvar 2 pairwise passes) pay fan-out at the gate.
+
+## BlackThrush NO-SHIP: f64 cheap-unary serial kernel raw-slice rewrite ~0-gain (2026-06-22, reverted)
+
+`square`/`abs`/`rint`/`floor`/`negative` (f64, 1D) lose ~1.0-1.30x to numpy in the 100K-1.9M band
+(below unary_map_f64's 1<<21=2M parallel gate). HYPOTHESIS: the serial branch maps over
+ReadOnlyCell<f64>/Cell<f64> via .get()/.set(); UnsafeCell is !Freeze + input/output Cell slices
+could alias, so LLVM can't auto-vectorize -> scalar loop vs numpy's SIMD pass. FIX TRIED: rewrite
+the serial branch to raw &[f64]/&mut [f64] (noalias, like the parallel branch already does) to
+enable SIMD. RESULT: ~0-gain — square still 1.17-1.30x, abs 1.17-1.22x (within the heavy
+swarm-load noise; no flip to win). So the Cell loop was NOT the bottleneck. DIAGNOSIS: the residual
+is (a) per-call pyo3 binding overhead (PyBuffer::get + numpy.empty + dtype-dict + reshape — fixed
+cost numpy's C ufunc skips; cf [[small-array-dispatch-passthrough-cache]]) + (b) numpy's tuned
+memory-bound SIMD on the cheapest maps (mul/round/bitand) which is hard to beat when both are
+bandwidth-bound. KEY DISCRIMINATOR: EXPENSIVE per-element f64 unary ops through the SAME
+zerocopy_f64_unary_flat path already WIN big (reciprocal 0.52x, sign 0.44-0.55x, sqrt-family) —
+fnp beats numpy when compute/element is high; only the cheapest bandwidth-bound maps lose, and the
+gate (2M) is correct (parallel only helps >2M for these). Reverted; no kernel lever here. Broader
+unary/binary sweep: sort/argsort par, clip 0.69x win, unique 0.17x win, maximum/minimum/where par.
