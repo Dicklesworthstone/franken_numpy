@@ -39185,6 +39185,71 @@ fn try_zerocopy_f64_cross_n3(
     Ok(Some(out.unbind()))
 }
 
+// f32 counterpart of try_zerocopy_f64_cross_n3: the f64 path is f64-only so float32 cross fell to
+// the cold extract (~6x, 47ms@1Mx3). numpy.cross(float32) computes each component in f32 via the
+// fixed formula (ay*bz - az*by, ...) -> no accumulation/reassociation -> bit-identical here.
+fn try_zerocopy_f32_cross_n3(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    b: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) || !b.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    if !numpy_dtype_is_f32(a) || !numpy_dtype_is_f32(b) {
+        return Ok(None);
+    }
+    let a_shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let b_shape: Vec<usize> = b.getattr("shape")?.extract()?;
+    if a_shape.len() != 2 || a_shape[1] != 3 || a_shape != b_shape {
+        return Ok(None);
+    }
+    if !a
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+        || !b
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let n = a_shape[0];
+    let (Ok(a_buf), Ok(b_buf)) = (PyBuffer::<f32>::get(a), PyBuffer::<f32>::get(b)) else {
+        return Ok(None);
+    };
+    let (Some(a_in), Some(b_in)) = (a_buf.as_slice(py), b_buf.as_slice(py)) else {
+        return Ok(None);
+    };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float32")?;
+    let out = numpy.call_method("empty", ((n, 3),), Some(&kwargs))?;
+    if n > 0 {
+        let Ok(out_buf) = PyBuffer::<f32>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(output) = out_buf.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        for i in 0..n {
+            let base = i * 3;
+            let ax = a_in[base].get();
+            let ay = a_in[base + 1].get();
+            let az = a_in[base + 2].get();
+            let bx = b_in[base].get();
+            let by = b_in[base + 1].get();
+            let bz = b_in[base + 2].get();
+            output[base].set(ay * bz - az * by);
+            output[base + 1].set(az * bx - ax * bz);
+            output[base + 2].set(ax * by - ay * bx);
+        }
+    }
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, b, axisa=-1, axisb=-1, axisc=-1, axis=None))]
 fn cross(
@@ -39218,6 +39283,10 @@ fn cross(
     // Zero-copy fast path for the common (N, 3) f64 batch: skips both extract copies
     // and the build round-trip the native path pays. Other dtypes/shapes fall through.
     if let Some(out) = try_zerocopy_f64_cross_n3(py, a.bind(py), b.bind(py))? {
+        return Ok(out);
+    }
+    // f32 (N,3) cross: read f32 directly (the f64 path is f64-only; f32 otherwise ~6x cold extract).
+    if let Some(out) = try_zerocopy_f32_cross_n3(py, a.bind(py), b.bind(py))? {
         return Ok(out);
     }
 
@@ -39762,6 +39831,9 @@ fn try_zerocopy_int_kron1d(
         ("u", 4) => kron1d_typed::<u32, _>(py, &numpy, a, b, "uint32", |x, y| x.wrapping_mul(y)),
         ("u", 2) => kron1d_typed::<u16, _>(py, &numpy, a, b, "uint16", |x, y| x.wrapping_mul(y)),
         ("u", 1) => kron1d_typed::<u8, _>(py, &numpy, a, b, "uint8", |x, y| x.wrapping_mul(y)),
+        // f32: f64 helper is f64-only -> float32 fell cold (~20x). Element-wise f32 product (no
+        // accumulation) is bit-identical to numpy.kron(float32, 1-D). f64 handled above.
+        ("f", 4) => kron1d_typed::<f32, _>(py, &numpy, a, b, "float32", |x, y| x * y),
         _ => Ok(None),
     }
 }
@@ -40018,6 +40090,9 @@ fn try_zerocopy_int_outer(
         ("u", 4) => outer_typed::<u32, _>(py, &numpy, a, b, "uint32", |x, y| x.wrapping_mul(y)),
         ("u", 2) => outer_typed::<u16, _>(py, &numpy, a, b, "uint16", |x, y| x.wrapping_mul(y)),
         ("u", 1) => outer_typed::<u8, _>(py, &numpy, a, b, "uint8", |x, y| x.wrapping_mul(y)),
+        // f32: the f64 helper is f64-only -> float32 fell to the cold extract (~45x). Element-wise
+        // f32 product (no accumulation) is bit-identical to numpy.outer(float32). f64 handled above.
+        ("f", 4) => outer_typed::<f32, _>(py, &numpy, a, b, "float32", |x, y| x * y),
         _ => Ok(None),
     }
 }
