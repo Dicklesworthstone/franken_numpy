@@ -4,6 +4,39 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-22 - NO-SHIP / VERIFY: einsum matmul-shaped contraction remains a native WIN
+
+`BlackThrush`/`cod-b`, bead `deadlock-audit-einsum-keyword-outcomes-c795y`.
+Disk-frugal BOLD-VERIFY restart, using the requested local target root
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`; RCH selected
+`hz2` and rewrote to its worker-scoped pool. No production code change shipped.
+
+Candidate from `/alien-graveyard` + `/extreme-software-optimization`: route the
+suspect `np.einsum("ij,jk->ik", a, b)` middle regime through the same incumbent
+replacement gate used by `matmul`/`dot` if current evidence still showed a
+NumPy/OpenBLAS win. Current head-to-head does not justify that lever. The native
+Rust einsum GEMM path beats NumPy on all measured rows:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `einsum("ij,jk->ik")`, n=100 | 106,889 | 236,864 | 0.451x | native win |
+| `einsum("ij,jk->ik")`, n=200 | 723,835 | 1,651,580 | 0.438x | native win |
+| `einsum("ij,jk->ik")`, n=400 | 2,672,567 | 12,390,430 | 0.216x | native win |
+
+Command:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-python --bench criterion_python_surface einsum_matmul_f64 -- --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher`
+
+Decision: no delegate/gate patch. The prior "n=200 loss" note was contention or
+old-tree noise, not a current gap. Retry predicate: only revisit if a quiet,
+same-worker Criterion row shows `FNP/NumPy > 1.4x` on current HEAD after the
+bench rows added in this pass.
+
+Conformance added for the claimed einsum keyword bead:
+`einsum_keyword_outcomes_match_numpy` covers dtype/order/casting, optimize,
+`out=`, scalar output metadata, `einsum_path` tuple metadata, and malformed
+subscript error-type parity. Focused validation passed:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-python einsum_keyword_outcomes_match_numpy -- --nocapture`.
+
 ## 2026-06-22 - KEEP: Generator.choice(int, replace=True, p=None) -> integers fill (was 5x its own integers)
 
 `YellowElk` (claude-code/opus). Fourth disk-frugal cycle, warm target (fnp-python
@@ -6910,3 +6943,23 @@ blocked inv kernel (bit-exactness risk = human decision), same class as batch_ch
 results all par-or-win: det 0.59-0.91, cholesky ~1.0, eigvalsh 0.33-0.57 WIN, svd 0.18-0.20 WIN,
 fft2/fftn ~1.0. LESSON: on a loaded 64-thread box, parallel-batched-op ratios are unreliable; use
 SERIAL (RAYON=1) A/B to expose the true per-lane kernel floor before chasing a batched "gap".
+
+## BlackThrush WIN: PCG full-range uint8 medium byte stream (2026-06-22)
+
+Random-vs-NumPy sweep found one clean random-family loss: `Generator.integers(..., dtype=uint8,
+endpoint=False)` over the full `[0, 256)` range at 100k elements was 1.41x slower than NumPy
+(franken 107,469 ns vs numpy 76,221 ns). The large row was already a win because it crossed the
+direct byte-fill threshold. Alien-graveyard mapping: use vectorized/batched word movement and
+cache-friendly byte stores, not per-element scalar extraction. Lever: route PCG64/PCG64DXSM
+full-range byte integers through the existing `bytes()` PCG u64 stream once `size >= 65536`,
+instead of walking `next_uint32()` and pushing four bytes at a time until the 262k direct-fill gate.
+This preserves NumPy's low-then-high half-word schedule via the same buffered-byte contract already
+used by `bytes()`.
+
+Focused head-to-head after change (`rch exec -- cargo bench -p fnp-random --bench random_vs_numpy
+vs_numpy_pcg64_uint8_full_range -- --sample-size 10 --warm-up-time 1 --measurement-time 2
+--output-format bencher`, worker ovh-a): 100k franken 32,951 ns vs numpy 72,067 ns = 0.46x
+(3.26x self speedup, loss flipped to win); 1M franken 120,000 ns vs numpy 774,733 ns = 0.15x
+(win retained). Correctness/state proof: widened `full_range_byte_integers_match_scalar_narrow_
+stream_and_state` to cover 65,536, 100,000, and 262,161 elements for PCG64 and PCG64DXSM, both
+uint8 and int8; filtered release test green. KEEP.

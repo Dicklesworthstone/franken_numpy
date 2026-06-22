@@ -1612,6 +1612,27 @@ fn bench_einsum_boundary(c: &mut Criterion) {
             .expect("einsum reduction f64 input")
             .call_method1("reshape", ((reduce_n, reduce_n),))
             .expect("einsum reduction square input");
+        let make_matmul_pair = |n: usize| {
+            let left = numpy
+                .call_method1("arange", (n * n,))
+                .expect("einsum matmul lhs raw input")
+                .call_method1("astype", ("float64",))
+                .expect("einsum matmul lhs f64 input")
+                .call_method1("reshape", ((n, n),))
+                .expect("einsum matmul lhs shape")
+                .call_method1("__mul__", (0.0001_f64,))
+                .expect("scale einsum matmul lhs");
+            let right = numpy
+                .call_method1("arange", (n * n,))
+                .expect("einsum matmul rhs raw input")
+                .call_method1("astype", ("float64",))
+                .expect("einsum matmul rhs f64 input")
+                .call_method1("reshape", ((n, n),))
+                .expect("einsum matmul rhs shape")
+                .call_method1("__mul__", (0.0002_f64,))
+                .expect("scale einsum matmul rhs");
+            (left, right)
+        };
         let fnp_einsum = module.getattr("einsum").expect("fnp_python.einsum");
         let numpy_einsum = numpy.getattr("einsum").expect("numpy.einsum");
 
@@ -1704,6 +1725,28 @@ fn bench_einsum_boundary(c: &mut Criterion) {
                 black_box(result);
             });
         });
+
+        for n in [100_usize, 200, 400] {
+            let (left, right) = make_matmul_pair(n);
+
+            group.bench_function(format!("fnp_einsum_matmul_f64_n{n}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_einsum
+                        .call1(("ij,jk->ik", &left, &right))
+                        .expect("fnp einsum matmul benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_einsum_matmul_f64_n{n}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_einsum
+                        .call1(("ij,jk->ik", &left, &right))
+                        .expect("numpy einsum matmul benchmark call");
+                    black_box(result);
+                });
+            });
+        }
     });
 
     group.finish();

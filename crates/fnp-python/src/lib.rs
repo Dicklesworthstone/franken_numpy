@@ -95139,6 +95139,179 @@ mod tests {
     }
 
     #[test]
+    fn einsum_keyword_outcomes_match_numpy() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let einsum_fn = module.getattr("einsum")?;
+            let einsum_path_fn = module.getattr("einsum_path")?;
+            let numpy = py.import("numpy")?;
+            let np_einsum = numpy.getattr("einsum")?;
+            let np_einsum_path = numpy.getattr("einsum_path")?;
+            let allclose = numpy.getattr("allclose")?;
+            let shape_fn = numpy.getattr("shape")?;
+
+            let a_f32 = numpy
+                .getattr("arange")?
+                .call1((12_i64,))?
+                .call_method1("astype", ("float32",))?
+                .call_method1("reshape", ((3_i64, 4_i64),))?;
+            let a_f64 = numpy
+                .getattr("arange")?
+                .call1((12_i64,))?
+                .call_method1("astype", ("float64",))?
+                .call_method1("reshape", ((3_i64, 4_i64),))?
+                .call_method1("__mul__", (0.125_f64,))?;
+            let b_f64 = numpy
+                .getattr("arange")?
+                .call1((20_i64,))?
+                .call_method1("astype", ("float64",))?
+                .call_method1("reshape", ((4_i64, 5_i64),))?
+                .call_method1("__sub__", (3.0_f64,))?;
+
+            let assert_same_array =
+                |label: &str, ours: &Bound<'_, PyAny>, theirs: &Bound<'_, PyAny>| -> PyResult<()> {
+                    let close: bool = allclose.call1((ours, theirs))?.extract()?;
+                    assert!(close, "{label}: values diverged from numpy");
+                    assert_eq!(
+                        ours.getattr("dtype")?.str()?.to_string(),
+                        theirs.getattr("dtype")?.str()?.to_string(),
+                        "{label}: dtype mismatch"
+                    );
+                    assert_eq!(
+                        ours.getattr("shape")?.extract::<Vec<usize>>()?,
+                        theirs.getattr("shape")?.extract::<Vec<usize>>()?,
+                        "{label}: shape mismatch"
+                    );
+                    Ok(())
+                };
+
+            let dtype_order_kwargs = PyDict::new(py);
+            dtype_order_kwargs.set_item("dtype", numpy.getattr("float64")?)?;
+            dtype_order_kwargs.set_item("casting", "unsafe")?;
+            dtype_order_kwargs.set_item("order", "F")?;
+            let ours_dtype_order =
+                einsum_fn.call(("ij->ji", a_f32.clone()), Some(&dtype_order_kwargs))?;
+            let theirs_dtype_order =
+                np_einsum.call(("ij->ji", a_f32.clone()), Some(&dtype_order_kwargs))?;
+            assert_same_array(
+                "einsum dtype/order/casting",
+                &ours_dtype_order,
+                &theirs_dtype_order,
+            )?;
+            assert_eq!(
+                ours_dtype_order
+                    .getattr("flags")?
+                    .getattr("f_contiguous")?
+                    .extract::<bool>()?,
+                theirs_dtype_order
+                    .getattr("flags")?
+                    .getattr("f_contiguous")?
+                    .extract::<bool>()?,
+                "einsum order='F' contiguity mismatch"
+            );
+
+            let optimize_kwargs = PyDict::new(py);
+            optimize_kwargs.set_item("optimize", true)?;
+            let ours_opt = einsum_fn.call(
+                ("ij,jk->ik", a_f64.clone(), b_f64.clone()),
+                Some(&optimize_kwargs),
+            )?;
+            let theirs_opt = np_einsum.call(
+                ("ij,jk->ik", a_f64.clone(), b_f64.clone()),
+                Some(&optimize_kwargs),
+            )?;
+            assert_same_array("einsum optimize=True", &ours_opt, &theirs_opt)?;
+
+            let ours_out = numpy
+                .getattr("empty")?
+                .call1(((3_i64, 5_i64),))?
+                .call_method1("astype", ("float64",))?;
+            let theirs_out = numpy
+                .getattr("empty")?
+                .call1(((3_i64, 5_i64),))?
+                .call_method1("astype", ("float64",))?;
+            let ours_out_kwargs = PyDict::new(py);
+            ours_out_kwargs.set_item("out", ours_out.clone())?;
+            let theirs_out_kwargs = PyDict::new(py);
+            theirs_out_kwargs.set_item("out", theirs_out.clone())?;
+            let ours_return = einsum_fn.call(
+                ("ij,jk->ik", a_f64.clone(), b_f64.clone()),
+                Some(&ours_out_kwargs),
+            )?;
+            let theirs_return = np_einsum.call(
+                ("ij,jk->ik", a_f64.clone(), b_f64.clone()),
+                Some(&theirs_out_kwargs),
+            )?;
+            assert!(
+                ours_return.is(&ours_out),
+                "einsum out= must return the supplied output array"
+            );
+            assert!(
+                theirs_return.is(&theirs_out),
+                "numpy einsum out= did not return the supplied output array"
+            );
+            assert_same_array("einsum out=", &ours_return, &theirs_return)?;
+
+            let vector = numpy
+                .getattr("arange")?
+                .call1((5_i64,))?
+                .call_method1("astype", ("float64",))?;
+            let ours_scalar = einsum_fn.call1(("i,i->", vector.clone(), vector.clone()))?;
+            let theirs_scalar = np_einsum.call1(("i,i->", vector.clone(), vector.clone()))?;
+            let scalar_close: bool = allclose.call1((&ours_scalar, &theirs_scalar))?.extract()?;
+            assert!(scalar_close, "einsum scalar result diverged from numpy");
+            assert_eq!(
+                repr_string(&shape_fn.call1((&ours_scalar,))?),
+                repr_string(&shape_fn.call1((&theirs_scalar,))?),
+                "einsum scalar output shape metadata mismatch"
+            );
+            assert_eq!(
+                ours_scalar.getattr("dtype")?.str()?.to_string(),
+                theirs_scalar.getattr("dtype")?.str()?.to_string(),
+                "einsum scalar dtype mismatch"
+            );
+
+            let path_kwargs = PyDict::new(py);
+            path_kwargs.set_item("optimize", "greedy")?;
+            let ours_path = einsum_path_fn.call(
+                ("ij,jk->ik", a_f64.clone(), b_f64.clone()),
+                Some(&path_kwargs),
+            )?;
+            let theirs_path = np_einsum_path.call(
+                ("ij,jk->ik", a_f64.clone(), b_f64.clone()),
+                Some(&path_kwargs),
+            )?;
+            let ours_path_tuple = ours_path.cast::<PyTuple>()?;
+            let theirs_path_tuple = theirs_path.cast::<PyTuple>()?;
+            assert_eq!(ours_path_tuple.len()?, theirs_path_tuple.len()?);
+            assert_eq!(
+                repr_string(&ours_path_tuple.get_item(0)?),
+                repr_string(&theirs_path_tuple.get_item(0)?),
+                "einsum_path path-list metadata mismatch"
+            );
+            assert_eq!(
+                ours_path_tuple.get_item(1)?.extract::<String>()?,
+                theirs_path_tuple.get_item(1)?.extract::<String>()?,
+                "einsum_path report metadata mismatch"
+            );
+
+            let ours_err = einsum_fn.call1(("ij->z", a_f64.clone()));
+            let theirs_err = np_einsum.call1(("ij->z", a_f64));
+            match (ours_err, theirs_err) {
+                (Err(ours), Err(theirs)) => assert_pyerr_matches_numpy(py, ours, theirs)?,
+                _ => panic!("einsum invalid subscript surface must match numpy error"),
+            }
+
+            Ok(())
+        });
+    }
+
+    #[test]
     fn einsum_multi_operand_values_match_numpy_within_tolerance() {
         // The ≥3-operand structural fast path reassociates the contraction into
         // pairwise GEMMs (O(n³)) instead of the full-Cartesian general loop
