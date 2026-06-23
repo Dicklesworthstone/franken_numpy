@@ -7492,3 +7492,15 @@ residual=view-crossing floor), reduces->par. Multi-op ellipsis kept native (elli
 multi-op ellipsis non-GEMM ('...ij,...j->...i' 3.18x matvec, 'i...,i...->...' 42x), 'ii,jj->ij' 12x
 (2-op double-diagonal-outer), 'ijij->ij' 1.83x (single-op double-diagonal not caught by single_diag).
 LESSON: einsum ellipsis is a whole separate slow path from non-ellipsis (detectors all skipped '...').
+
+## BlackThrush WIN: einsum 2-operand diagonal delegate (2026-06-23, f1eb5fed) — 35th win [bead x6ndg]
+einsum_spec_is_diagonal_2op: 2-op contraction where an operand has a repeated index (diagonal) ->
+never GEMM-able -> delegate. FIXED 'ii,jj->ij' 22x, 'iij,jk->ik' 41x, 'ij,jj->ij' 11x -> par. GEMM
+controls preserved (matmul/gram/full/batched 0.26-0.44x). 35 WINS. einsum delegate family now:
+transpose-view/single-reduce/single-diag/single-op-ellipsis/outer/vector-contraction/batched-vector/
+op2-multifree/diagonal-2op. REMAINING einsum tail (lower-value, TODO): multi-op ELLIPSIS non-GEMM
+('...ij,...j->...i' 3.2x matvec, 'i...,i...->...' 42x dot — need ellipsis-strip + reuse detectors),
+'ijij->ij' 1.83x (single-op DOUBLE diagonal - buffered_single_diagonal handles single-repeat as a
+view but not double-repeat). LESSON: fnp einsum native kernel wins ONLY for GEMM (all-distinct-index
+matrix-matrix); EVERY non-GEMM form (diagonal/outer/matvec/tensor-vec/broadcast/ellipsis-non-gemm)
+loses 1.8-5000x and is delegated. ~10 einsum delegate detectors now cover the non-GEMM space.
