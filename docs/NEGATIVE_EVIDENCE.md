@@ -7563,3 +7563,11 @@ exact. BROADCAST SWEEP COMPLETE: all 4 try_zerocopy_f64_binary callers (hypot/ar
 nextafter) now delegate scalar+broadcast (were 2-10x); float_power/fmod/remainder/heaviside/copysign/
 divide/maximum/add/multiply/etc broadcast fine already. 39 WINS. Broadcasting vein (where + 4 binary
 ufuncs) = 3 commits / 5 ops fixed this stretch.
+
+## BlackThrush WIN: rint non-contiguous delegate (2026-06-23, a2b2637a) — 40th win
+Unary non-contig sweep: of all unary ufuncs on transposed input, only rint lost (40x transposed, 6.5x
+strided) - siblings round/floor/ceil/trunc/around + sin/exp/sqrt/etc all delegate non-contig (par).
+rint_native did a transpose-copy extract instead of delegating. Added non-contig bail to numpy. 40x->
+par, contiguous bit-exact preserved. 0 mismatches. 40 WINS. LESSON: most unary ufuncs delegate non-
+contig but stragglers (rint) extract+transpose-copy (6-40x) - grep unary ops that extract after
+try_zerocopy_f64_unary without a non-contig bail. (Only rint found across ~18 unary ops; others clean.)
