@@ -46308,9 +46308,7 @@ fn einsum_spec_is_op2_multifree_contraction(spec: &str) -> bool {
         return false;
     }
     // a contracted index: in both operands, absent from output
-    let has_contraction = g0
-        .iter()
-        .any(|&c| g1.contains(&c) && !outb.contains(&c));
+    let has_contraction = g0.iter().any(|&c| g1.contains(&c) && !outb.contains(&c));
     if !has_contraction {
         return false; // pure outer / no contraction handled elsewhere
     }
