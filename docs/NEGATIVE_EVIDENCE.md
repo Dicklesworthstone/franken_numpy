@@ -7555,3 +7555,11 @@ exact). arctan2/logaddexp -> 1.00x par, hypot bcast 1.00x (scalar 1.22x). 0 mism
 unused ufunc_* imports (warning-clean). 38 WINS. LESSON: native binary ufuncs with a SAME-SHAPE-only
 zero-copy fast path lose 2-4x on scalar/broadcast operands (extract+broadcast) — grep try_zerocopy_f64_
 binary callers, delegate the non-same-shape residual. copysign/nextafter already broadcast fine (different impl).
+
+## BlackThrush WIN: nextafter scalar+broadcast delegate (2026-06-23, 2f754ab1) — 39th win
+4th broadcasting-vein win. nextafter (4th try_zerocopy_f64_binary caller) had the same same-shape-only
+fast path -> scalar 10x/row 4.9x/col 6.4x. Delegate scalar/broadcast residual -> par, same-shape bit-
+exact. BROADCAST SWEEP COMPLETE: all 4 try_zerocopy_f64_binary callers (hypot/arctan2/logaddexp/
+nextafter) now delegate scalar+broadcast (were 2-10x); float_power/fmod/remainder/heaviside/copysign/
+divide/maximum/add/multiply/etc broadcast fine already. 39 WINS. Broadcasting vein (where + 4 binary
+ufuncs) = 3 commits / 5 ops fixed this stretch.
