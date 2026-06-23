@@ -7451,3 +7451,13 @@ einsum delegate family COMPLETE: transpose-view, single-reduce, single-diag, out
 batched-vector-contraction, op2-multi-free. LESSON: fnp's einsum native kernel wins ONLY for GEMM-shaped
 matrix-matrix contractions (matmul_accumulate); every non-GEMM form (outer/matvec/tensor-vec/broadcast)
 loses 2-39x and is now routed to numpy. A 6-form seam found by probing multi-operand einsum at "convergence".
+
+## BlackThrush WIN: convolve/correlate gather gate 48->128 (2026-06-22, d11e5397) — 32nd win
+Kernel-size sweep found a cliff at k=48->56: the zero-copy short-kernel gather was gated k<=48 ("< FFT
+min 64"), leaving k=56..128 on convolve_mode's FFT path = 1.5-1.8x SLOWER than numpy's direct convolve.
+numpy.convolve is ALWAYS direct O(n*m); fnp's FFT path NEVER beats it (measured 1.04-1.47x at k=256..4096
+- underperforming). The zero-copy gather matches numpy's kernel + saves 2 copies -> WINS k<=96 (0.46-
+0.92x), beats FFT at k=128 (1.3x vs 1.76x). Raised 48->128. CROSSOVER (measured, noisy): gather O(n*m)
+compute dominates above ~128 (k=256 gather 1.7x > FFT 1.47x), so 128 is the safe cap; >128 keeps FFT.
+0/44 (conv+corr, all modes, k=8..129, f64+int). 32 WINS. LESSON: a perf gate set as a heuristic
+boundary (k<=48 vs FFT-min-64) can be MIS-TUNED vs the actual measured crossover -> sweep the parameter.
