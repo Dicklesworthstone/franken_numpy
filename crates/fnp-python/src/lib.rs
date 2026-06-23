@@ -19875,6 +19875,18 @@ fn rint_native(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
     if let Some(out) = try_zerocopy_f64_unary(py, x, UnaryOp::Rint)? {
         return Ok(out);
     }
+    // Non-contiguous (transposed/strided) f64: extract_numeric_array does a transpose-copy that is
+    // 6-40x slower than numpy's strided rint; the sibling round/floor/ceil/trunc all delegate this.
+    // Delegate. (BlackThrush 2026-06-23.)
+    let numpy = py.import("numpy")?;
+    if x.is_exact_instance(&numpy.getattr("ndarray")?)
+        && !x
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(numpy.getattr("rint")?.call1((x,))?.unbind());
+    }
     let x = extract_numeric_array(py, x, "rint(x)")?;
     build_numpy_scalar_or_array(py, &x.elementwise_unary(UnaryOp::Rint))
 }
