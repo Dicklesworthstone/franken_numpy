@@ -50877,8 +50877,11 @@ fn unique_values(
 // Convolve is commutative (signal = longer operand, kernel = shorter, reversed);
 // correlate is NOT, so it requires len(a) >= len(v) and uses the kernel as-is
 // (correlate(a,v) == convolve(a, v[::-1]); the gather pre-reverses, so kr = v).
-// Gated to the pure-gather regime (kernel <= 48 < the FFT min of 64) so it never
-// shadows convolve_mode's FFT/scatter paths for long kernels.
+// Gated to the direct-gather regime (kernel <= 128). The zero-copy gather saves the two copies
+// numpy avoids: for k<=64 it WINS 0.47-0.74x, and k=96..128 it beats convolve_mode's FFT path
+// (FFT measured 1.5-1.8x slower than numpy there; gather ~1.1-1.2x). Above ~128 the gather's O(n*m)
+// compute dominates and FFT is faster (gather ~1.7x vs FFT ~1.47x at k=256), so 128 is the safe
+// crossover — the old k<=48 cap left the whole k=56..128 band on the slow FFT. (BlackThrush 2026-06-22.)
 fn try_zerocopy_conv_corr_f64(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -50887,7 +50890,7 @@ fn try_zerocopy_conv_corr_f64(
     is_correlate: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     use rayon::prelude::*;
-    const GATHER_MAX_M: usize = 48;
+    const GATHER_MAX_M: usize = 128;
     const MIN_SIGNAL: usize = 256;
     if !matches!(mode, "full" | "same" | "valid") {
         return Ok(None);
