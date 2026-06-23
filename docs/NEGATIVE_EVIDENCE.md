@@ -7428,3 +7428,14 @@ KEPT native: matvec-RIGHT 'ij,j->i' (0.46x, last/contiguous axis), matmul/gram/f
 contiguous=fast native; first=strided=slow) + tensor (3-D+) always slow. REMAINING in x6ndg: batched-
 matvec 'bij,bj->bi' (3.45-12x, NO 1-D operand so this detector misses it - both operands >=2-D, batch
 + matvec). 29 wins. einsum delegate family: single-reduce/single-diag/outer/vector-contraction.
+
+## BlackThrush WIN: einsum batched vector contraction (2026-06-22, 72c195b9) — 30th win [bead x6ndg]
+einsum_spec_is_batched_vector_contraction: strip shared batch indices (in both operands AND output),
+delegate when reduced per-batch op = vector-vs-matrix/tensor contraction. FIXED: 'bij,bj->bi' 4x,
+'bi,bij->bj' 8x, 'bijk,bk->bij' 3x -> par. Batched matmul/gram/full/row-reduce (>=2-idx reduced
+operands) kept native (0.45-0.99x). 0 mismatches incl multi-batch 'abij,abj->abi'. KEY: batching makes
+even last-axis matvec slow (per-batch GEMV loop), so no last-axis exception (unlike non-batched).
+30 WINS. bead x6ndg REMAINING: broadcast-matmul 'ij,bjk->bik' 39x (op1 LACKS the batch index op2+out
+have -> operand-order asymmetry: 'bij,jk->bik' WINS but mirror 'ij,bjk->bik' loses 39x; separate
+class, needs broadcast-aware detector or kernel fix). einsum delegate family now: transpose-view/
+single-reduce/single-diag/outer/vector-contraction/batched-vector-contraction.
