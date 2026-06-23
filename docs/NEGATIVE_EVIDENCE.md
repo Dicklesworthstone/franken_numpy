@@ -7343,3 +7343,12 @@ mismatches (all shapes/axes/neg/None, kd T/F, NaNs incl all-NaN slices). CLUSTER
 REMAINING (TODO): nanargmin/nanargmax (par under keepdims, noKD wins 0.46x) — arg-ops, slightly diff
 output dtype (intp) but same expand pattern. 20 wins total. The keepdims '|| keepdims' gate was a
 SYSTEMATIC anti-pattern across order-stats — grep '|| keepdims' for any remaining.
+
+## BlackThrush WIN: nanargmax/nanargmin keepdims-on-axis (2026-06-22, 8fd54ce4) — 21st+22nd wins; CLUSTER COMPLETE
+Both gated 'keepdims.is_some()->fallback'. Wrapped the no-keepdims fast paths in 'if !keep' (they
+return non-keepdims shapes), general path + keepdims_expand_axis. par->0.07-0.63x, 0/68 (shapes/axes/
+neg/None, kd T/F, nan/f32/int). KEEPDIMS-ON-AXIS CLUSTER NOW COMPLETE = 9 ops: count_nonzero, median,
+percentile, quantile, nanmedian, nanpercentile, nanquantile, nanargmax, nanargmin. Remaining '|| keepdims'
+gates (any/all/argmin/argmax/ptp) verified NOT worth fixing: any/all/argmin/ptp par-both-ways (no win to
+capture); argmax noKD LOSES 1.24x (routing keepdims there would WORSEN). 22 wins. The '|| keepdims' anti-
+pattern grep is now exhausted (all 7 remaining gates triaged: 2 fixed, 5 correctly-skipped).
