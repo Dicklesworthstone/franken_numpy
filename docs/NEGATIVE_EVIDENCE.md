@@ -7325,3 +7325,12 @@ WINS big (forgo the fast path via '|| keepdims' gate): median (0.26 noKD), perce
 TODO (same fix, riskier - interpolation/q-array/nan): percentile/quantile/nanmedian/nanpercentile/
 nanquantile/nanargmin/nanargmax all gated '|| keepdims' -> par instead of their noKD win. 15 wins.
 LESSON: keepdims-on-axis isn't just a LOSS class; it's also a PAR-forgoing-WIN class across order-stats.
+
+## BlackThrush WIN: percentile+quantile(axis,keepdims=True) keepdims-on-axis (2026-06-22, 67ebf633) — 16th+17th wins
+Continued the keepdims-on-axis order-stat cluster after median. percentile/quantile both gated
+'|| keepdims' -> par; only their SCALAR-q path handles a real axis (array-q-with-axis already
+delegates), so fix = remove keepdims from gate, scalar-q path runs native + keepdims_expand_axis,
+axis=None/array-q keepdims still delegate. par->0.24-0.33x, 0/152 mismatches (both ops, scalar+array
+q, all shapes/axes/neg/None, kd T/F). 17 wins. REMAINING in cluster (TODO, riskier nan handling):
+nanmedian/nanpercentile/nanquantile (par, noKD wins 0.10-0.18x) + nanargmin/nanargmax (par, noKD
+0.46x). Pattern fully proven now across count_nonzero/median/percentile/quantile — 4 keepdims ops.
