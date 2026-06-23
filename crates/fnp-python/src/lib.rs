@@ -27693,33 +27693,45 @@ fn nanargmax(
         Ok(nanargmax_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) || keepdims.is_some() {
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
         return fallback();
     }
+    // keepdims-on-axis: the gate used to bail on ANY keepdims, forgoing the ~0.45x native win.
+    // Skip the no-keepdims fast paths when keepdims is set; the general path re-inserts the reduced
+    // axis via expand_dims (axis=None+keepdims -> all-ones reshape, delegated). (BlackThrush 2026-06-22.)
+    let keep = keepdims == Some(true);
 
-    // Integer input cannot contain NaN, so nannanargmax == the plain reduction; route to
+    // Integer input cannot contain NaN, so nanargmax == the plain reduction; route to
     // numpy's fast reduction (via fallback) instead of the slow native f64 path.
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
-    if axis.is_none()
-        && let Some(result) = try_zerocopy_f64_nanargextreme(py, &numpy, a.bind(py), true)?
-    {
-        return Ok(result);
+    if !keep {
+        if axis.is_none()
+            && let Some(result) = try_zerocopy_f64_nanargextreme(py, &numpy, a.bind(py), true)?
+        {
+            return Ok(result);
+        }
+        // float32: read f32 directly (the f64 path is f64-only; f32 otherwise widen-extracts ~6-8x).
+        if axis.is_none()
+            && let Some(result) = try_zerocopy_f32_nanargextreme(py, &numpy, a.bind(py), true)?
+        {
+            return Ok(result);
+        }
+        // float32 along the last axis: per-lane nan-skip arg reading f32 directly (~7x widen avoided).
+        if let Some(ax_obj) = axis.as_ref()
+            && let Ok(ax) = ax_obj.bind(py).extract::<isize>()
+            && let Some(result) =
+                try_zerocopy_f32_nanarg_lastaxis(py, &numpy, a.bind(py), ax, true)?
+        {
+            return Ok(result);
+        }
     }
-    // float32: read f32 directly (the f64 path is f64-only; f32 otherwise widen-extracts ~6-8x).
-    if axis.is_none()
-        && let Some(result) = try_zerocopy_f32_nanargextreme(py, &numpy, a.bind(py), true)?
-    {
-        return Ok(result);
-    }
-    // float32 along the last axis: per-lane nan-skip arg reading f32 directly (~7x widen avoided).
-    if let Some(ax_obj) = axis.as_ref()
-        && let Ok(ax) = ax_obj.bind(py).extract::<isize>()
-        && let Some(result) = try_zerocopy_f32_nanarg_lastaxis(py, &numpy, a.bind(py), ax, true)?
-    {
-        return Ok(result);
-    }
+    let orig_ndim = a
+        .bind(py)
+        .getattr("ndim")
+        .ok()
+        .and_then(|d| d.extract::<usize>().ok());
     let a = match extract_numeric_array(py, a.bind(py), "nanargmax(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -27730,11 +27742,21 @@ fn nanargmax(
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
+    // keepdims over the full array (axis=None) reshapes to all-ones dims; delegate.
+    if keep && axis.is_none() {
+        return fallback();
+    }
     let result = match a.nanargmax(axis) {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
     let output = build_numpy_array_from_ufunc(py, &result)?;
+    if keep && let Some(ax) = axis {
+        let Some(ndim) = orig_ndim else {
+            return fallback();
+        };
+        return keepdims_expand_axis(py, &numpy, output, ax as i64, ndim);
+    }
     if result.shape().is_empty() {
         return Ok(output.bind(py).get_item(())?.unbind());
     }
@@ -27767,33 +27789,45 @@ fn nanargmin(
         Ok(nanargmin_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) || keepdims.is_some() {
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) {
         return fallback();
     }
+    // keepdims-on-axis: the gate used to bail on ANY keepdims, forgoing the ~0.45x native win.
+    // Skip the no-keepdims fast paths when keepdims is set; the general path re-inserts the reduced
+    // axis via expand_dims (axis=None+keepdims -> all-ones reshape, delegated). (BlackThrush 2026-06-22.)
+    let keep = keepdims == Some(true);
 
-    // Integer input cannot contain NaN, so nannanargmin == the plain reduction; route to
+    // Integer input cannot contain NaN, so nanargmin == the plain reduction; route to
     // numpy's fast reduction (via fallback) instead of the slow native f64 path.
     if numpy_dtype_is_integer(py, a.bind(py))? {
         return fallback();
     }
-    if axis.is_none()
-        && let Some(result) = try_zerocopy_f64_nanargextreme(py, &numpy, a.bind(py), false)?
-    {
-        return Ok(result);
+    if !keep {
+        if axis.is_none()
+            && let Some(result) = try_zerocopy_f64_nanargextreme(py, &numpy, a.bind(py), false)?
+        {
+            return Ok(result);
+        }
+        // float32: read f32 directly (the f64 path is f64-only; f32 otherwise widen-extracts ~6-8x).
+        if axis.is_none()
+            && let Some(result) = try_zerocopy_f32_nanargextreme(py, &numpy, a.bind(py), false)?
+        {
+            return Ok(result);
+        }
+        // float32 along the last axis: per-lane nan-skip arg reading f32 directly (~7x widen avoided).
+        if let Some(ax_obj) = axis.as_ref()
+            && let Ok(ax) = ax_obj.bind(py).extract::<isize>()
+            && let Some(result) =
+                try_zerocopy_f32_nanarg_lastaxis(py, &numpy, a.bind(py), ax, false)?
+        {
+            return Ok(result);
+        }
     }
-    // float32: read f32 directly (the f64 path is f64-only; f32 otherwise widen-extracts ~6-8x).
-    if axis.is_none()
-        && let Some(result) = try_zerocopy_f32_nanargextreme(py, &numpy, a.bind(py), false)?
-    {
-        return Ok(result);
-    }
-    // float32 along the last axis: per-lane nan-skip arg reading f32 directly (~7x widen avoided).
-    if let Some(ax_obj) = axis.as_ref()
-        && let Ok(ax) = ax_obj.bind(py).extract::<isize>()
-        && let Some(result) = try_zerocopy_f32_nanarg_lastaxis(py, &numpy, a.bind(py), ax, false)?
-    {
-        return Ok(result);
-    }
+    let orig_ndim = a
+        .bind(py)
+        .getattr("ndim")
+        .ok()
+        .and_then(|d| d.extract::<usize>().ok());
     let a = match extract_numeric_array(py, a.bind(py), "nanargmin(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -27804,11 +27838,21 @@ fn nanargmin(
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
+    // keepdims over the full array (axis=None) reshapes to all-ones dims; delegate.
+    if keep && axis.is_none() {
+        return fallback();
+    }
     let result = match a.nanargmin(axis) {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
     let output = build_numpy_array_from_ufunc(py, &result)?;
+    if keep && let Some(ax) = axis {
+        let Some(ndim) = orig_ndim else {
+            return fallback();
+        };
+        return keepdims_expand_axis(py, &numpy, output, ax as i64, ndim);
+    }
     if result.shape().is_empty() {
         return Ok(output.bind(py).get_item(())?.unbind());
     }
