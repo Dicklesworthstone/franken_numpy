@@ -11603,6 +11603,57 @@ fn try_zerocopy_f32_cumsum_axis(
     Ok(Some(output))
 }
 
+// Per-axis float32 nancumsum/nancumprod: numpy replaces NaN with the identity (0 for sum,
+// 1 for prod) IN float32 then runs the plain f32 cumulative, so mapping NaN->identity in the
+// `convert` closure of cumsum_axis_typed (which applies to every element) is bit-identical —
+// and reuses the fast slab kernel instead of delegating (par -> ~0.25x). The f64 cumulative
+// helper is f64-only; f32 cannot widen (numpy keeps the f32 accumulator). (BlackThrush 2026-06-22.)
+fn try_zerocopy_f32_nancumulative_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis: isize,
+    is_prod: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    if !a.is_exact_instance(&ndarray_type) {
+        return Ok(None);
+    }
+    let dtype = a.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 4
+    {
+        return Ok(None);
+    }
+    let result = if is_prod {
+        cumsum_axis_typed::<f32, f32, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "float32",
+            |v| if v.is_nan() { 1.0 } else { v },
+            |a, b| a * b,
+        )?
+    } else {
+        cumsum_axis_typed::<f32, f32, _, _>(
+            py,
+            &numpy,
+            a,
+            axis,
+            "float32",
+            |v| if v.is_nan() { 0.0 } else { v },
+            |a, b| a + b,
+        )?
+    };
+    let Some((flat, shape)) = result else {
+        return Ok(None);
+    };
+    let output_shape = PyTuple::new(py, shape.iter().copied())?;
+    let output = flat.call_method1("reshape", (&output_shape,))?.unbind();
+    Ok(Some(output))
+}
+
 // Zero-copy integer cumprod for the flatten case (axis=None any ndim, or 1-D with
 // axis 0/-1). The multiplicative sibling of try_zerocopy_int_cumsum: numpy promotes
 // the accumulator identically (signed -> int64, unsigned -> uint64) and the running
@@ -51006,6 +51057,11 @@ fn nancumprod(
         {
             return Ok(out);
         }
+        if let Some(ax) = axis_val
+            && let Some(out) = try_zerocopy_f32_nancumulative_axis(py, &a, ax, true)?
+        {
+            return Ok(out);
+        }
         // Integers carry no NaN, so nancumprod == cumprod (int64/uint64 accumulator).
         if let Some(out) = try_zerocopy_int_cumprod(py, &a, axis_val)? {
             return Ok(out);
@@ -51030,6 +51086,11 @@ fn nancumsum(
         // (NaN -> 0 identity) wins like plain cumsum-axis. (BlackThrush 2026-06-22.)
         if let Some(ax) = axis_val
             && let Some(out) = try_zerocopy_f64_cumulative_axis(py, &a, ax, false, true)?
+        {
+            return Ok(out);
+        }
+        if let Some(ax) = axis_val
+            && let Some(out) = try_zerocopy_f32_nancumulative_axis(py, &a, ax, false)?
         {
             return Ok(out);
         }
