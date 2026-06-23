@@ -7405,3 +7405,16 @@ no repeated index, out.len()==inp.len()) -> delegate. par, 0 mismatches. PRESERV
 'ij,jk,kl->il' 0.06x (excluded - has repeated/contracted indices j,k), 2-op outer 'i,j->ij' 0.43x
 (<2 commas). 27 wins. LESSON: multi-operand einsum has its own special-form tail (like single-operand
 reduce/diag); the per-case einsum delegate family now covers single-reduce/single-diag/multi-outer.
+
+## BlackThrush WIN: einsum 2-op matrix/tensor outer + CONTRACTION SEAM filed (2026-06-22, dee6416d) — 28th win
+Probing einsum mixed forms found a rich seam. FIXED (this win): 2-op outer with matrix/tensor operand
+('ij,k->ijk' 2.05x, 'ij,kl->ijkl' 1.99x) -> einsum_spec_is_outer delegates them (keeps all-vector
+'i,j->ij' native win). All contraction wins preserved (matmul/gram/matvec-right/full/batched 0.34-0.49x).
+OPEN SEAM (bead deadlock-audit-einsum-nongemm-contraction): non-GEMM CONTRACTIONS lose 6-12x and GROW
+with n: 'i,ij->j' (matvec-LEFT, contract first/strided index) 6.7x, 'ijk,k->ij' (tensor-vector) 12.65x@500,
+'bij,bj->bi' (batched matvec) 12.25x@500. fnp's matmul_accumulate kicks in for matrix-matrix GEMM (wins)
+but vector/tensor contractions fall to the slow generic kernel. numpy's einsum handles all well. FIX needs
+a careful GEMM-detector that delegates non-GEMM contractions WITHOUT regressing matvec-RIGHT 'ij,j->i'
+(wins 0.48x, last/contiguous-axis contraction) — the win/loss split is last-axis(contiguous,fast) vs
+first-axis(strided,slow) contraction. Multi-fire/bold-lever work. NOT a loss: 'ijk->ikj' transpose 1.41x
+= VIEW (shares_memory=True), binding-floor. 28 wins.
