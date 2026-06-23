@@ -46142,12 +46142,13 @@ fn einsum_spec_is_single_diag(spec: &str) -> bool {
     false
 }
 
-// True for a 3+-operand GENERALIZED OUTER product ("i,j,k->ijk"): every index appears
-// exactly once across all operands (no contraction, no diagonal) and the output is all of
-// them (no axis summed). The generic native kernel runs this 8-16x slower than numpy's
-// optimized einsum (which builds the large outer product directly), so delegate. The 2-
-// operand outer ("i,j->ij") already WINS natively, so require >=3 operands (>=2 commas).
-fn einsum_spec_is_multi_outer(spec: &str) -> bool {
+// True for a GENERALIZED OUTER product ("i,j,k->ijk", "ij,k->ijk", "ij,kl->ijkl"): every
+// index appears exactly once across all operands (no contraction, no diagonal) and the output
+// is all of them (no axis summed). The generic native kernel runs these 2-16x slower than
+// numpy's optimized outer build, so delegate — EXCEPT the small all-vector 2-operand outer
+// ("i,j->ij"), which WINS natively. Delegate when 3+ operands OR any operand has >=2 indices
+// (i.e. a matrix/tensor operand -> large output where the native build loses).
+fn einsum_spec_is_outer(spec: &str) -> bool {
     let spec: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
     if spec.contains("...") {
         return false;
@@ -46155,10 +46156,16 @@ fn einsum_spec_is_multi_outer(spec: &str) -> bool {
     let Some((inp, out)) = spec.split_once("->") else {
         return false;
     };
-    if inp.bytes().filter(|&b| b == b',').count() < 2 {
-        return false; // need 3+ operands; 2-operand outer wins natively
+    let groups: Vec<&str> = inp.split(',').collect();
+    if groups.len() < 2 {
+        return false; // single operand is not an outer product
     }
-    let inp_clean: String = inp.chars().filter(|&c| c != ',').collect();
+    // Keep the small all-single-char 2-operand outer ("i,j->ij") native (it wins); delegate
+    // 3+ operands or any matrix/tensor operand (the slow large-output builds).
+    if groups.len() < 3 && !groups.iter().any(|g| g.len() >= 2) {
+        return false;
+    }
+    let inp_clean: String = groups.concat();
     if inp_clean.is_empty()
         || !inp_clean.bytes().all(|b| b.is_ascii_alphabetic())
         || !out.bytes().all(|b| b.is_ascii_alphabetic())
@@ -46217,12 +46224,13 @@ fn einsum(
     {
         return core_numpy_passthrough(py, "einsum", args, kwargs);
     }
-    // Multi-operand generalized outer product ("i,j,k->ijk", 3+ operands, no contraction):
-    // the generic native kernel is 8-16x slower than numpy's optimized outer build. Delegate.
+    // Generalized outer product ("i,j,k->ijk", "ij,k->ijk", "ij,kl->ijkl", no contraction):
+    // the generic native kernel is 2-16x slower than numpy's optimized outer build. Delegate
+    // (the small all-vector 2-op outer "i,j->ij" is kept native by the detector — it wins).
     // (BlackThrush 2026-06-22; cf single-reduce / single-diag delegates above.)
-    if args.len() >= 4
+    if args.len() >= 3
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
-        && einsum_spec_is_multi_outer(&spec)
+        && einsum_spec_is_outer(&spec)
     {
         return core_numpy_passthrough(py, "einsum", args, kwargs);
     }
