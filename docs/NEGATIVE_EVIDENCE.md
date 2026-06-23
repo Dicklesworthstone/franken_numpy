@@ -7513,3 +7513,16 @@ detectors; only known residual = 'ijij->ij' single-op DOUBLE-diagonal 1.83x (buf
 handles single-repeat as a view but a second repeated index falls through; low value, niche). einsum is
 now effectively GEMM-or-delegated: native wins ONLY all-distinct-index matrix-matrix (matmul/gram/full/
 batched-matmul/ellipsis-batched-matmul); ALL else delegated to numpy. einsum seam = 10 wins this session.
+
+## BlackThrush: batched inv/solve/eigvalsh 2x serial loss reconfirmed — DELEGATE lever deferred (2026-06-23, load 143)
+Batched linalg landscape (serial, RAYON=1): det/slogdet WIN (0.54-1.16x), cholesky PAR (already
+delegates via should_delegate_stacked_cholesky_to_numpy), but inv/solve/eigvalsh LOSE 2x at n=32-64
+(batch=50-200): inv 2.0-2.1x, solve 1.35-1.76x, eigvalsh 2.0x. Matches documented kernel-wall (native
+inv_nxn/eig per-lane ~2.3x slower than LAPACK). NEW ANGLE (unexplored): the prior batch_inv no-ship
+only tried NATIVE-PATH GATE changes; DELEGATING to numpy (like cholesky-batched already does) is
+untried. BUT fnp's batched ops PARALLELIZE over the batch (par_iter), so the serial 2x is per-lane;
+the VERDICT is full-threads (fnp-parallel-batch vs numpy's getri/syevd loop) — UNMEASURABLE at load 143.
+DEFERRED (defer-under-load discipline, cf argmax-last-axis which full-threads turned into a WIN).
+TODO (calm box): measure inv/solve/eigvalsh batched at FULL THREADS for n=16-64; if fnp-parallel-batch
+loses there too -> delegate to numpy (size-gated, native wins small-n: inv 0.82x at n=8); if it wins ->
+keep native (serial 2x irrelevant). Why cholesky delegates but inv doesn't = the key question to resolve.
