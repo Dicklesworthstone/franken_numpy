@@ -46142,6 +46142,46 @@ fn einsum_spec_is_single_diag(spec: &str) -> bool {
     false
 }
 
+// True for a 3+-operand GENERALIZED OUTER product ("i,j,k->ijk"): every index appears
+// exactly once across all operands (no contraction, no diagonal) and the output is all of
+// them (no axis summed). The generic native kernel runs this 8-16x slower than numpy's
+// optimized einsum (which builds the large outer product directly), so delegate. The 2-
+// operand outer ("i,j->ij") already WINS natively, so require >=3 operands (>=2 commas).
+fn einsum_spec_is_multi_outer(spec: &str) -> bool {
+    let spec: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+    if spec.contains("...") {
+        return false;
+    }
+    let Some((inp, out)) = spec.split_once("->") else {
+        return false;
+    };
+    if inp.bytes().filter(|&b| b == b',').count() < 2 {
+        return false; // need 3+ operands; 2-operand outer wins natively
+    }
+    let inp_clean: String = inp.chars().filter(|&c| c != ',').collect();
+    if inp_clean.is_empty()
+        || !inp_clean.bytes().all(|b| b.is_ascii_alphabetic())
+        || !out.bytes().all(|b| b.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    let mut in_seen = [false; 256];
+    for &b in inp_clean.as_bytes() {
+        if in_seen[b as usize] {
+            return false; // a repeated index = contraction/diagonal, not a pure outer
+        }
+        in_seen[b as usize] = true;
+    }
+    let mut out_seen = [false; 256];
+    for &b in out.as_bytes() {
+        if !in_seen[b as usize] || out_seen[b as usize] {
+            return false; // output label absent from input, or repeated
+        }
+        out_seen[b as usize] = true;
+    }
+    out.len() == inp_clean.len() // every index kept (none summed) = pure outer
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn einsum(
@@ -46174,6 +46214,15 @@ fn einsum(
     if args.len() == 2
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_single_diag(&spec)
+    {
+        return core_numpy_passthrough(py, "einsum", args, kwargs);
+    }
+    // Multi-operand generalized outer product ("i,j,k->ijk", 3+ operands, no contraction):
+    // the generic native kernel is 8-16x slower than numpy's optimized outer build. Delegate.
+    // (BlackThrush 2026-06-22; cf single-reduce / single-diag delegates above.)
+    if args.len() >= 4
+        && let Ok(spec) = args.get_item(0)?.extract::<String>()
+        && einsum_spec_is_multi_outer(&spec)
     {
         return core_numpy_passthrough(py, "einsum", args, kwargs);
     }
