@@ -7545,3 +7545,13 @@ BEFORE the cold condition extract (first attempt checked AFTER -> only got row/c
 ->1.00-1.01x, same-shape/scalar preserved (0.15-1.01x), 0 mismatches (row/col/cond/both/int bcast).
 37 WINS. LESSON: place a delegate gate BEFORE any cold extract, else the wasted copy caps the win
 (row-bcast 8x->3.75x with check-after-extract vs ->1.0x with check-before).
+
+## BlackThrush WIN: hypot/arctan2/logaddexp scalar+broadcast delegate (2026-06-23, 71121ad1) — 38th win
+Broadcasting-angle sweep (after where-broadcast win): most binary ufuncs broadcast fine (add/multiply/
+maximum/clip/copysign par-win), but hypot/arctan2/logaddexp had a same-shape-f64-only fast path and fell
+to extract+ufunc_*(broadcast) for scalar/broadcast: hypot scalar 3.7x/bcast 3.3x, arctan2 2.3-2.8x,
+logaddexp 2.0-3.6x. Delegate the scalar/broadcast residual to numpy (same-shape native preserved bit-
+exact). arctan2/logaddexp -> 1.00x par, hypot bcast 1.00x (scalar 1.22x). 0 mismatches. Removed 3 now-
+unused ufunc_* imports (warning-clean). 38 WINS. LESSON: native binary ufuncs with a SAME-SHAPE-only
+zero-copy fast path lose 2-4x on scalar/broadcast operands (extract+broadcast) — grep try_zerocopy_f64_
+binary callers, delegate the non-same-shape residual. copysign/nextafter already broadcast fine (different impl).
