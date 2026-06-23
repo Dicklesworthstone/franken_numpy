@@ -46235,6 +46235,44 @@ fn einsum_spec_is_slow_vector_contraction(spec: &str) -> bool {
     mat[mat.len() - 1] != vchar
 }
 
+// True for a 2-operand ELLIPSIS contraction that is NOT a GEMM ("i...,i...->..." 42x dot,
+// "...ij,...j->...i" 3.2x batched-matvec). The ellipsis is a batch; strip it and inspect the
+// per-batch operands: if either is a vector (<2 distinct indices) or a diagonal (repeated index),
+// it's non-GEMM and the native kernel loses, so delegate. The ellipsis-batched-matmul case
+// "...ij,...jk->...ik" (both per-batch operands 2 distinct indices) WINS natively and is kept. (x6ndg.)
+fn einsum_spec_is_ellipsis_2op_nongemm(spec: &str) -> bool {
+    let spec: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+    if !spec.contains("...") {
+        return false;
+    }
+    let Some((inp, _out)) = spec.split_once("->") else {
+        return false; // implicit-output ellipsis: leave to the generic path
+    };
+    let groups: Vec<&str> = inp.split(',').collect();
+    if groups.len() != 2 {
+        return false;
+    }
+    for g in &groups {
+        let core = g.replace("...", "");
+        if !core.bytes().all(|b| b.is_ascii_alphabetic()) {
+            return false; // unexpected form -> keep native
+        }
+        let mut seen = [false; 256];
+        let mut distinct = 0usize;
+        for &b in core.as_bytes() {
+            if seen[b as usize] {
+                return true; // diagonal operand -> non-GEMM
+            }
+            seen[b as usize] = true;
+            distinct += 1;
+        }
+        if distinct < 2 {
+            return true; // vector/scalar per-batch operand -> non-GEMM (batched matvec/dot)
+        }
+    }
+    false // both per-batch operands are 2+ distinct indices: GEMM-shape, keep native
+}
+
 // True for a 2-operand contraction where some operand has a REPEATED index (a diagonal), e.g.
 // "ii,jj->ij" (22x), "iij,jk->ik" (41x), "ij,jj->ij" (11x). A repeated index means the operand is
 // a diagonal/trace, not a plain matrix, so the native kernel never hits matmul_accumulate and loses
@@ -46431,6 +46469,14 @@ fn einsum(
     if args.len() == 3
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_diagonal_2op(&spec)
+    {
+        return core_numpy_passthrough(py, "einsum", args, kwargs);
+    }
+    // 2-operand ellipsis non-GEMM ("i...,i->..." dot 42x, "...ij,...j->...i" batched-matvec 3.2x):
+    // ellipsis-batched-matmul stays native (wins). (bead x6ndg, BlackThrush 2026-06-23.)
+    if args.len() == 3
+        && let Ok(spec) = args.get_item(0)?.extract::<String>()
+        && einsum_spec_is_ellipsis_2op_nongemm(&spec)
     {
         return core_numpy_passthrough(py, "einsum", args, kwargs);
     }
