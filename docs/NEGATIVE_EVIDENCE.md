@@ -7472,3 +7472,13 @@ fnp FFT). FIX PATH: a SIMD-blocked DIRECT convolve (kernel resident in registers
 across output positions) to beat numpy's scalar loop at k=128-256; OR fix fnp's underperforming FFT
 convolve (should be O(n log n) but barely pars numpy's O(n*m) even at k=4096 => high constant/inefficient).
 Kernel-level fnp-ufunc work. 32 wins stand; this is a documented kernel-quality residual, not a gate issue.
+
+## BlackThrush WIN: convolve/correlate mid-kernel delegate (2026-06-22, 75f932a4) — 33rd win [bead 1nzxt]
+Cleaner fix than a kernel rewrite: since fnp's native FFT/scatter convolve NEVER beats numpy's direct
+O(n*m) loop (1.02-1.46x at k=256-4096), DELEGATE the mid-kernel band 128<k<=2048 (two 1-D f64) to
+numpy. k=192-2048 1.3-1.7x -> 1.00x par. gather wins k<=128 + native long-kernel >2048 unchanged. 0
+mismatches. 33 WINS. bead 1nzxt: mid-band now PAR (no longer a loss); deeper kernel-quality work (a
+SIMD-blocked DIRECT convolve to BEAT numpy mid-band, fix the underperforming FFT, + k=128 gather 1.22x
+residual) remains for if convolve becomes a win-priority. LESSON: when a native path NEVER beats the
+library impl across the tested range, delegating that range to the library is a clean par (turns loss
+-> par) without a kernel rewrite — verify the native path truly never wins first.
