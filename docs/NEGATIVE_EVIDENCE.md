@@ -7535,3 +7535,13 @@ REGRESS the eigvalsh/solve wins. This is why inv/solve/eigvalsh stay native whil
 delegates (cholesky native must lose even full-threads). DEFER-UNDER-LOAD VALIDATED A 3RD TIME (after
 argmax-last-axis): a parallel op's SERIAL loss is NOT the verdict. Only mild residual: inv n=32-48 ~1.2x
 full-threads (narrow, marginal) - not worth a risky delegate. Candidate closed. 36 wins stand.
+
+## BlackThrush WIN: where 3-arg broadcasting delegate (2026-06-23, 22029a77) — 37th win
+Fresh per-kwarg probe found np.where(cond,x,y) with a BROADCASTING operand loses 7-15x: row-bcast 8x,
+col-bcast 7x, cond-bcast 15x (same-shape f64/int + array-scalar already fast-path WIN). Native
+UFuncArray::where_select broadcasts but is 7-15x slower than numpy's C where. FIX: detect shape mismatch
+BEFORE the cold condition extract (first attempt checked AFTER -> only got row/col to 3.75x because the
+4MB condition copy was wasted; moving the check before the extract -> par) and delegate to numpy. 7-15x
+->1.00-1.01x, same-shape/scalar preserved (0.15-1.01x), 0 mismatches (row/col/cond/both/int bcast).
+37 WINS. LESSON: place a delegate gate BEFORE any cold extract, else the wasted copy caps the win
+(row-bcast 8x->3.75x with check-after-extract vs ->1.0x with check-before).
