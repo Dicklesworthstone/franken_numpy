@@ -7366,3 +7366,14 @@ medium+large last-axis argmax/argmin; if it loses BOTH ways at all sizes -> dele
 (like the stale-cliff-gate det/inv fixes); if large+full-threads wins -> size-gate the delegate. Do NOT
 fix blind under load (risk regressing the documented parallel win). 22 wins stand; this is the next
 concrete candidate to verify when the box calms.
+
+## BlackThrush WIN: nancumsum/nancumprod n-D axis (2026-06-22, b2d49b1a) — 23rd+24th wins
+Serial-decidable seam (prefix scans single-threaded both sides -> load-robust verdict). nancumsum/
+nancumprod with 2-D+ explicit axis delegated to numpy (par) because try_zerocopy_f64_nancum* only
+handled axis=None/1-D, while plain cumsum/cumprod-axis WON 0.12-0.27x via try_zerocopy_f64_cumulative_
+axis (all-axis slab kernel). FIX: added skip_nan param to that shared kernel (NaN->identity 0/1) +
+routed nancum* n-D axis through it. par->0.04-0.08x (12-25x! numpy does nan->0 copy + cumsum 2-pass +
+materialize; fnp fuses 1 pass). 0/60 (shapes/axes/neg/None, NaN+inf+all-NaN, int, non-contig->delegate);
+plain cumsum/cumprod bit-identical (skip_nan=false). 24 wins. METHOD: serial-decidable seams (scans,
+delegate-fixes) give reliable verdicts even under load — productive when box saturated (vs argmax
+last-axis which is parallel = needs calm-box full-threads, still deferred).
