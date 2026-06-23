@@ -7334,3 +7334,12 @@ axis=None/array-q keepdims still delegate. par->0.24-0.33x, 0/152 mismatches (bo
 q, all shapes/axes/neg/None, kd T/F). 17 wins. REMAINING in cluster (TODO, riskier nan handling):
 nanmedian/nanpercentile/nanquantile (par, noKD wins 0.10-0.18x) + nanargmin/nanargmax (par, noKD
 0.46x). Pattern fully proven now across count_nonzero/median/percentile/quantile — 4 keepdims ops.
+
+## BlackThrush WIN: nanmedian/nanpercentile/nanquantile keepdims-on-axis (2026-06-22, bfa26bd8) — 18-20th wins
+Completed the order-stat keepdims-on-axis cluster. All three gated '|| keepdims' -> par; native
+single-axis path + keepdims_expand_axis (axis=None+keepdims delegates). par->0.11-0.19x (~5-9x), 0/114
+mismatches (all shapes/axes/neg/None, kd T/F, NaNs incl all-NaN slices). CLUSTER COMPLETE: count_nonzero
++ median + percentile + quantile + nanmedian + nanpercentile + nanquantile = 7 keepdims-on-axis wins.
+REMAINING (TODO): nanargmin/nanargmax (par under keepdims, noKD wins 0.46x) — arg-ops, slightly diff
+output dtype (intp) but same expand pattern. 20 wins total. The keepdims '|| keepdims' gate was a
+SYSTEMATIC anti-pattern across order-stats — grep '|| keepdims' for any remaining.
