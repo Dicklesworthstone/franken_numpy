@@ -7526,3 +7526,12 @@ DEFERRED (defer-under-load discipline, cf argmax-last-axis which full-threads tu
 TODO (calm box): measure inv/solve/eigvalsh batched at FULL THREADS for n=16-64; if fnp-parallel-batch
 loses there too -> delegate to numpy (size-gated, native wins small-n: inv 0.82x at n=8); if it wins ->
 keep native (serial 2x irrelevant). Why cholesky delegates but inv doesn't = the key question to resolve.
+
+## BlackThrush: batched inv/solve/eigvalsh delegate candidate RESOLVED = NOT a loss (2026-06-23, calm-box full-threads)
+Full-threads verdict (load~20) that load-143 blocked: the serial 2x losses are FULLY parallel-compensated
+(fnp parallelizes over the batch; numpy loops). eigvalsh batched WINS 0.24-0.51x, solve WINS 0.67-0.96x,
+inv mostly par/win (0.42x@n=64, 0.98x@n=16, mild 1.20-1.23x only at n=32-48). NO DELEGATE — it would
+REGRESS the eigvalsh/solve wins. This is why inv/solve/eigvalsh stay native while cholesky-batched
+delegates (cholesky native must lose even full-threads). DEFER-UNDER-LOAD VALIDATED A 3RD TIME (after
+argmax-last-axis): a parallel op's SERIAL loss is NOT the verdict. Only mild residual: inv n=32-48 ~1.2x
+full-threads (narrow, marginal) - not worth a risky delegate. Candidate closed. 36 wins stand.
