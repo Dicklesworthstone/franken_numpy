@@ -46281,6 +46281,47 @@ fn einsum_spec_is_batched_vector_contraction(spec: &str) -> bool {
     mat.contains(&v) && !rout.contains(&v) // the vector index is contracted (summed)
 }
 
+// True for a 2-operand contraction where the SECOND operand carries >=2 free indices (present
+// in op2 and the output, absent from op1) over a contraction — e.g. "ij,bjk->bik" (free b,k).
+// numpy reshapes op2's free dims into one and runs a single GEMM; fnp's native kernel does not
+// reshape op2's multiple free dims and loops inefficiently (39x). The MIRROR "bij,jk->bik"
+// (op1 carries the multiple free dims) reshapes fine and WINS, so this is intentionally
+// asymmetric: only op2-multi-free is delegated. (bead x6ndg.)
+fn einsum_spec_is_op2_multifree_contraction(spec: &str) -> bool {
+    let spec: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+    if spec.contains("...") {
+        return false;
+    }
+    let Some((inp, out)) = spec.split_once("->") else {
+        return false;
+    };
+    let groups: Vec<&str> = inp.split(',').collect();
+    if groups.len() != 2 {
+        return false;
+    }
+    let (g0, g1) = (groups[0].as_bytes(), groups[1].as_bytes());
+    let outb = out.as_bytes();
+    if !g0.iter().all(|b| b.is_ascii_alphabetic())
+        || !g1.iter().all(|b| b.is_ascii_alphabetic())
+        || !outb.iter().all(|b| b.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    // a contracted index: in both operands, absent from output
+    let has_contraction = g0
+        .iter()
+        .any(|&c| g1.contains(&c) && !outb.contains(&c));
+    if !has_contraction {
+        return false; // pure outer / no contraction handled elsewhere
+    }
+    // op2-free indices: in op2 AND output, absent from op1
+    let op2_free = outb
+        .iter()
+        .filter(|&&c| g1.contains(&c) && !g0.contains(&c))
+        .count();
+    op2_free >= 2
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn einsum(
@@ -46340,6 +46381,15 @@ fn einsum(
     if args.len() == 3
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_batched_vector_contraction(&spec)
+    {
+        return core_numpy_passthrough(py, "einsum", args, kwargs);
+    }
+    // Second-operand multi-free contraction ("ij,bjk->bik" 39x): op2 carries >=2 free dims the
+    // native kernel won't reshape into one GEMM. The op1-multi-free mirror "bij,jk->bik" WINS and
+    // is kept native. (bead x6ndg, BlackThrush 2026-06-22.)
+    if args.len() == 3
+        && let Ok(spec) = args.get_item(0)?.extract::<String>()
+        && einsum_spec_is_op2_multifree_contraction(&spec)
     {
         return core_numpy_passthrough(py, "einsum", args, kwargs);
     }
