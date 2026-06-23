@@ -14927,6 +14927,28 @@ fn where_py(
         return fallback();
     }
 
+    // Broadcasting (mismatched operand shapes): the native where_select broadcasts but runs 7-15x
+    // slower than numpy's C where (row/col-bcast 7-8x, cond-bcast 15x). Same-shape f64/int/array-scalar
+    // already took a fast path above; the only same-shape cases left are mixed-dtype/complex (kept
+    // native). Check shapes BEFORE the cold condition extract so the broadcasting fallback doesn't
+    // pay a wasted copy of a large condition. (BlackThrush 2026-06-23.)
+    if args.len() == 2
+        && let Ok(cshape) = condition_bound
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+        && let Ok(xshape) = args
+            .get_item(0)?
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+        && let Ok(yshape) = args
+            .get_item(1)?
+            .getattr("shape")
+            .and_then(|s| s.extract::<Vec<usize>>())
+        && (cshape != xshape || xshape != yshape)
+    {
+        return fallback();
+    }
+
     let condition = match extract_precise_numeric_array(py, condition_bound, "where(condition)") {
         Ok(array) => array,
         Err(_) => return fallback(),
