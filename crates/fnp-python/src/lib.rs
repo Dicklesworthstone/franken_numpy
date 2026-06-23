@@ -46338,6 +46338,17 @@ fn einsum(
     if let Some(view) = try_buffered_f64_einsum_single_diagonal(py, args, kwargs)? {
         return Ok(view);
     }
+    // Single-operand ELLIPSIS einsum: the native kernel handles ellipsis catastrophically slowly
+    // — "...ij->...ji" (transpose) is 1000-5000x (numpy returns an O(1) view), "...ij->...i"/
+    // "...ii->...i" (reduce/diagonal) 1.9-5.4x. No single-operand ellipsis form can hit a native
+    // win, so delegate them all to numpy. (Multi-operand ellipsis is handled below / kept native
+    // for the GEMM case.) (BlackThrush 2026-06-22.)
+    if args.len() == 2
+        && let Ok(spec) = args.get_item(0)?.extract::<String>()
+        && spec.contains("...")
+    {
+        return core_numpy_passthrough(py, "einsum", args, kwargs);
+    }
     // Single-operand reduction ("ijk->k") = sum over the dropped axes. Our generic
     // native kernel is 1.6-2.6x slower than numpy's optimized einsum reduction here
     // (which beats even np.sum-over-axes), so delegate this pattern for parity. The
