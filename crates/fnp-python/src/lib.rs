@@ -38,15 +38,15 @@ use fnp_random::{
 use fnp_ufunc::{
     BinaryOp, FromPyFuncReduceAxisSpec, FromPyFuncReduceError, FromPyFuncReduceIdentity,
     FromPyFuncReduceOptions, GridSpec, IntegerSidecar, MAError, MaskedArray, UFuncArray, UnaryOp,
-    arctan2 as ufunc_arctan2, bitwise_and as ufunc_bitwise_and,
+    bitwise_and as ufunc_bitwise_and,
     bitwise_count as ufunc_bitwise_count, bitwise_or as ufunc_bitwise_or,
     bitwise_xor as ufunc_bitwise_xor, divide as ufunc_divide,
     divmod_arrays as ufunc_divmod, equal as ufunc_equal, fmax as ufunc_fmax,
     fmin as ufunc_fmin, frexp as ufunc_frexp,
     greater as ufunc_greater, greater_equal as ufunc_greater_equal,
-    hypot as ufunc_hypot, isneginf as ufunc_isneginf,
+    isneginf as ufunc_isneginf,
     isposinf as ufunc_isposinf, left_shift as ufunc_left_shift,
-    less as ufunc_less, less_equal as ufunc_less_equal, logaddexp as ufunc_logaddexp,
+    less as ufunc_less, less_equal as ufunc_less_equal,
     logaddexp2 as ufunc_logaddexp2, logical_and as ufunc_logical_and,
     logical_not as ufunc_logical_not, logical_or as ufunc_logical_or,
     logical_xor as ufunc_logical_xor, ma_is_masked, ma_make_mask, ma_mask_or,
@@ -20130,10 +20130,13 @@ fn hypot(
             .call1((x1.bind(py), x2.bind(py)))?
             .unbind());
     }
-    let x1 = extract_numeric_array(py, x1.bind(py), "hypot(x1)")?;
-    let x2 = extract_numeric_array(py, x2.bind(py), "hypot(x2)")?;
-    let result = ufunc_hypot(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array(py, &result)
+    // Scalar / broadcasting f64 operands: the same-shape zero-copy path won above; the residual
+    // here is scalar or broadcast, where ufunc_hypot's extract+broadcast is 2-3.7x slower than
+    // numpy's C hypot (scalar 3.7x, row/col-bcast 3.3x). Delegate. (BlackThrush 2026-06-23.)
+    Ok(numpy
+        .getattr("hypot")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -20189,10 +20192,12 @@ fn logaddexp(
             .call1((x1.bind(py), x2.bind(py)))?
             .unbind());
     }
-    let x1 = extract_numeric_array(py, x1.bind(py), "logaddexp(x1)")?;
-    let x2 = extract_numeric_array(py, x2.bind(py), "logaddexp(x2)")?;
-    let result = ufunc_logaddexp(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array(py, &result)
+    // Scalar / broadcasting f64 operands: ufunc_logaddexp's extract+broadcast is 2-3.6x slower than
+    // numpy's C logaddexp (the same-shape case won above). Delegate. (BlackThrush 2026-06-23.)
+    Ok(numpy
+        .getattr("logaddexp")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
 }
 
 #[pyfunction]
@@ -30693,10 +30698,9 @@ fn native_binary_arctan2_or_passthrough(
         {
             return core_numpy_passthrough(py, "arctan2", args, kwargs);
         }
-        let x1 = extract_numeric_array(py, &args.get_item(0)?, "arctan2(x1)")?;
-        let x2 = extract_numeric_array(py, &args.get_item(1)?, "arctan2(x2)")?;
-        let result = ufunc_arctan2(&x1, &x2).map_err(map_ufunc_error)?;
-        build_numpy_scalar_or_array(py, &result)
+        // Scalar / broadcasting f64 operands: ufunc_arctan2's extract+broadcast is 2-2.8x slower
+        // than numpy's C arctan2 (the same-shape case won above). Delegate. (BlackThrush 2026-06-23.)
+        core_numpy_passthrough(py, "arctan2", args, kwargs)
     } else {
         core_numpy_passthrough(py, "arctan2", args, kwargs)
     }
