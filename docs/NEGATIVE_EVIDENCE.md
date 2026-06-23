@@ -7386,3 +7386,13 @@ identical + reuses the fast f32 slab kernel. New try_zerocopy_f32_nancumulative_
 0/34 (shapes/axes/neg, f32 dtype kept, f64 unregressed, non-contig delegates). 26 wins. nancum-axis
 family now COMPLETE (f64+f32, sum+prod). MINOR residual left (niche, deferred): f32 nancum FLAT
 (axis=None) still delegates; f32 reductions axis all par (no win to capture).
+
+## BlackThrush: argmax/argmin last-axis CANDIDATE RESOLVED = NOT A LOSS (2026-06-22, calm-box verify)
+Verified on a CALM box (load 7) what load-75 blocked: argmax last-axis is PAR serial (0.95-1.18x) and
+a 2-3x WIN at full threads (0.34-0.48x at 2000x1000/8000x2000/500x100000). The earlier "1.3-1.9x serial
+/ 2.1-2.76x full-threads loss" was ENTIRELY load-75 contention artifact. NO CODE CHANGE — it's a parallel
+win, not a loss. VALIDATES THE DISCIPLINE: deferring under load 75 instead of blind-delegating SAVED a
+regression (delegating last-axis to numpy would have killed the 2-3x parallel win). RULE CONFIRMED: for
+fnp-parallel-vs-numpy-single-thread ops, the FULL-THREADS-on-CALM-BOX number is the only valid verdict;
+serial is contention-robust for DETECTION but a parallel op's serial loss is NOT the verdict. Candidate
+closed. 26 wins stand.
