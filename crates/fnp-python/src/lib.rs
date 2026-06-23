@@ -46189,6 +46189,52 @@ fn einsum_spec_is_outer(spec: &str) -> bool {
     out.len() == inp_clean.len() // every index kept (none summed) = pure outer
 }
 
+// True for a 2-operand vector contraction the native kernel runs slowly: one operand is a
+// vector (1 index) whose index is contracted (summed) against a matrix/tensor operand, EXCEPT
+// the fast matvec-RIGHT case ("ij,j->i", contracting the matrix's LAST/contiguous axis — that
+// WINS natively). Delegated: matvec-LEFT "i,ij->j" (first/strided axis, 6-7x) and tensor-vector
+// "ijk,k->ij" (3-D+, 3-12x). Spec group lengths give operand ndims (no shapes needed). numpy's
+// einsum reshapes these to a contiguous GEMV; fnp's generic kernel doesn't. (bead x6ndg.)
+fn einsum_spec_is_slow_vector_contraction(spec: &str) -> bool {
+    let spec: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+    if spec.contains("...") {
+        return false;
+    }
+    let Some((inp, out)) = spec.split_once("->") else {
+        return false;
+    };
+    let groups: Vec<&str> = inp.split(',').collect();
+    if groups.len() != 2
+        || !groups
+            .iter()
+            .all(|g| g.bytes().all(|b| b.is_ascii_alphabetic()))
+        || !out.bytes().all(|b| b.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    // exactly one operand is a vector (one index); the other a matrix/tensor (>=2 indices)
+    let (vec_i, mat_i) = if groups[0].len() == 1 && groups[1].len() >= 2 {
+        (0, 1)
+    } else if groups[1].len() == 1 && groups[0].len() >= 2 {
+        (1, 0)
+    } else {
+        return false;
+    };
+    let vchar = groups[vec_i].as_bytes()[0];
+    let mat = groups[mat_i].as_bytes();
+    // the vector index must be contracted: present in the matrix operand, absent from output
+    if !mat.contains(&vchar) || out.as_bytes().contains(&vchar) {
+        return false;
+    }
+    // tensor-vector (matrix operand >=3-D) is always slow; a 2-D matvec is slow ONLY when the
+    // contracted index is NOT the matrix's last axis (matvec-LEFT / strided). matvec-RIGHT
+    // (last axis == vchar) wins natively and is kept.
+    if mat.len() >= 3 {
+        return true;
+    }
+    mat[mat.len() - 1] != vchar
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn einsum(
@@ -46231,6 +46277,15 @@ fn einsum(
     if args.len() >= 3
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_outer(&spec)
+    {
+        return core_numpy_passthrough(py, "einsum", args, kwargs);
+    }
+    // 2-operand vector contraction the native kernel runs slowly (matvec-LEFT "i,ij->j" 6-7x,
+    // tensor-vector "ijk,k->ij" 3-12x). The fast matvec-RIGHT "ij,j->i" is kept native by the
+    // detector. (bead x6ndg, BlackThrush 2026-06-22.)
+    if args.len() == 3
+        && let Ok(spec) = args.get_item(0)?.extract::<String>()
+        && einsum_spec_is_slow_vector_contraction(&spec)
     {
         return core_numpy_passthrough(py, "einsum", args, kwargs);
     }
