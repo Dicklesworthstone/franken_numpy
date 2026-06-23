@@ -7396,3 +7396,12 @@ regression (delegating last-axis to numpy would have killed the 2-3x parallel wi
 fnp-parallel-vs-numpy-single-thread ops, the FULL-THREADS-on-CALM-BOX number is the only valid verdict;
 serial is contention-robust for DETECTION but a parallel op's serial loss is NOT the verdict. Candidate
 closed. 26 wins stand.
+
+## BlackThrush WIN: einsum multi-operand outer 'i,j,k->ijk' delegate (2026-06-22, 3a61b3a1) — 27th win
+Fresh corner (multi-operand einsum, only 2-op + single-op special forms were tested before). 3+-operand
+generalized outer (every index once, no contraction, output=all) ran the generic native kernel 8-16x
+slower than numpy (grows with n: 8.18@50 / 16.21@100). einsum_spec_is_multi_outer detector (>=2 commas,
+no repeated index, out.len()==inp.len()) -> delegate. par, 0 mismatches. PRESERVED native wins: chain
+'ij,jk,kl->il' 0.06x (excluded - has repeated/contracted indices j,k), 2-op outer 'i,j->ij' 0.43x
+(<2 commas). 27 wins. LESSON: multi-operand einsum has its own special-form tail (like single-operand
+reduce/diag); the per-case einsum delegate family now covers single-reduce/single-diag/multi-outer.
