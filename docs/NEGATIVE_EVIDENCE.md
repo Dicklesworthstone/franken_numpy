@@ -7418,3 +7418,13 @@ a careful GEMM-detector that delegates non-GEMM contractions WITHOUT regressing 
 (wins 0.48x, last/contiguous-axis contraction) — the win/loss split is last-axis(contiguous,fast) vs
 first-axis(strided,slow) contraction. Multi-fire/bold-lever work. NOT a loss: 'ijk->ikj' transpose 1.41x
 = VIEW (shares_memory=True), binding-floor. 28 wins.
+
+## BlackThrush WIN: einsum vector-contraction delegate (2026-06-22, f520cd90) — 29th win [bead x6ndg partial]
+Tackled bead x6ndg. einsum_spec_is_slow_vector_contraction (spec group lengths = operand ndims):
+delegate 2-op vector-vs-matrix/tensor contractions that the native kernel runs slowly: matvec-LEFT
+'i,ij->j' (6.7x, contracts matrix's FIRST/strided axis) + tensor-vector 'ijk,k->ij' (12.65x, 3-D+).
+KEPT native: matvec-RIGHT 'ij,j->i' (0.46x, last/contiguous axis), matmul/gram/full (0.36-0.51x).
+6-12x->par, 0 mismatches. KEY: the win/loss split is WHICH axis of the matrix is contracted (last=
+contiguous=fast native; first=strided=slow) + tensor (3-D+) always slow. REMAINING in x6ndg: batched-
+matvec 'bij,bj->bi' (3.45-12x, NO 1-D operand so this detector misses it - both operands >=2-D, batch
++ matvec). 29 wins. einsum delegate family: single-reduce/single-diag/outer/vector-contraction.
