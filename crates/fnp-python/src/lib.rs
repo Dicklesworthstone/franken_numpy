@@ -51,7 +51,7 @@ use fnp_ufunc::{
     logical_not as ufunc_logical_not, logical_or as ufunc_logical_or,
     logical_xor as ufunc_logical_xor, ma_is_masked, ma_make_mask, ma_mask_or,
     maximum as ufunc_maximum, minimum as ufunc_minimum, modf as ufunc_modf,
-    nextafter as ufunc_nextafter, not_equal as ufunc_not_equal, power as ufunc_power,
+    not_equal as ufunc_not_equal, power as ufunc_power,
     reduce_frompyfunc_values, remainder as ufunc_remainder, right_shift as ufunc_right_shift,
     signbit as ufunc_signbit, spacing as ufunc_spacing,
 };
@@ -20091,10 +20091,12 @@ fn nextafter(
     if let Some(out) = try_zerocopy_f64_binary(py, x1.bind(py), x2.bind(py), BinaryOp::Nextafter)? {
         return Ok(out);
     }
-    let x1 = extract_numeric_array(py, x1.bind(py), "nextafter(x1)")?;
-    let x2 = extract_numeric_array(py, x2.bind(py), "nextafter(x2)")?;
-    let result = ufunc_nextafter(&x1, &x2).map_err(map_ufunc_error)?;
-    build_numpy_scalar_or_array(py, &result)
+    // Scalar / broadcasting f64 operands: ufunc_nextafter's extract+broadcast is 5-10x slower than
+    // numpy's C nextafter (scalar 10x, row/col-bcast 5-6x; same-shape won above). Delegate. (BlackThrush 2026-06-23.)
+    Ok(numpy
+        .getattr("nextafter")?
+        .call1((x1.bind(py), x2.bind(py)))?
+        .unbind())
 }
 
 #[pyfunction]
