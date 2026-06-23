@@ -7439,3 +7439,15 @@ even last-axis matvec slow (per-batch GEMV loop), so no last-axis exception (unl
 have -> operand-order asymmetry: 'bij,jk->bik' WINS but mirror 'ij,bjk->bik' loses 39x; separate
 class, needs broadcast-aware detector or kernel fix). einsum delegate family now: transpose-view/
 single-reduce/single-diag/outer/vector-contraction/batched-vector-contraction.
+
+## BlackThrush WIN: einsum op2-multi-free contraction (2026-06-22, fe07a697) — 31st win; bead x6ndg CLOSED
+Broadcast-matmul 'ij,bjk->bik' 39x: op2 carries >=2 free dims the native kernel won't reshape into one
+GEMM. einsum_spec_is_op2_multifree_contraction (output indices in op2 not op1, count>=2, with a
+contraction) -> delegate. ASYMMETRIC: op1-multi-free mirror 'bij,jk->bik' reshapes fine, WINS, kept
+native. 39x->par, 0 mismatches (matmul/gram/batched-matmul/matvec-right preserved). BEAD x6ndg CLOSED:
+the einsum non-GEMM contraction seam (matvec-left/tensor-vector/batched-matvec/broadcast-matmul) fully
+delegated; GEMM-shaped wins (matmul/gram/full/batched-matmul/matvec-right/outer-small) intact. 31 WINS.
+einsum delegate family COMPLETE: transpose-view, single-reduce, single-diag, outer, vector-contraction,
+batched-vector-contraction, op2-multi-free. LESSON: fnp's einsum native kernel wins ONLY for GEMM-shaped
+matrix-matrix contractions (matmul_accumulate); every non-GEMM form (outer/matvec/tensor-vec/broadcast)
+loses 2-39x and is now routed to numpy. A 6-form seam found by probing multi-operand einsum at "convergence".
