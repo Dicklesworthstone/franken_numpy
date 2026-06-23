@@ -7377,3 +7377,12 @@ materialize; fnp fuses 1 pass). 0/60 (shapes/axes/neg/None, NaN+inf+all-NaN, int
 plain cumsum/cumprod bit-identical (skip_nan=false). 24 wins. METHOD: serial-decidable seams (scans,
 delegate-fixes) give reliable verdicts even under load — productive when box saturated (vs argmax
 last-axis which is parallel = needs calm-box full-threads, still deferred).
+
+## BlackThrush WIN: f32 nancumsum/nancumprod axis (2026-06-22, 4601498f) — 25th+26th wins; nancum-axis family complete
+f32 nancum-axis was still par (my f64 cumulative_axis is f64-only; f32 can't widen - numpy keeps the
+f32 accumulator). KEY: numpy replaces NaN with identity (0/1) IN f32 then plain f32 cumulative, so
+mapping NaN->identity in the cumsum_axis_typed `convert` closure (applies to every element) is bit-
+identical + reuses the fast f32 slab kernel. New try_zerocopy_f32_nancumulative_axis. par->0.04-0.15x,
+0/34 (shapes/axes/neg, f32 dtype kept, f64 unregressed, non-contig delegates). 26 wins. nancum-axis
+family now COMPLETE (f64+f32, sum+prod). MINOR residual left (niche, deferred): f32 nancum FLAT
+(axis=None) still delegates; f32 reductions axis all par (no win to capture).
