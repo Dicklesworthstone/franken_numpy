@@ -27972,7 +27972,6 @@ fn nanpercentile(
 
     if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
         || overwrite_input
-        || keepdims
         || method.is_some()
         || weights.is_some()
         || interpolation.is_some()
@@ -27980,6 +27979,12 @@ fn nanpercentile(
         return fallback();
     }
 
+    // Original ndim for keepdims axis re-insertion (keepdims-on-axis class, BlackThrush 2026-06-22).
+    let orig_ndim = a
+        .bind(py)
+        .getattr("ndim")
+        .ok()
+        .and_then(|d| d.extract::<usize>().ok());
     let a = match extract_numeric_array(py, a.bind(py), "nanpercentile(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -27994,11 +27999,22 @@ fn nanpercentile(
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
+    // keepdims over the full array (axis=None) reshapes to all-ones dims; delegate. Single-axis
+    // keepdims runs the native path then re-inserts the reduced axis.
+    if keepdims && axis.is_none() {
+        return fallback();
+    }
     let result = match a.nanpercentile(q, axis) {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
     let output = build_numpy_array_from_ufunc(py, &result)?;
+    if keepdims && let Some(ax) = axis {
+        let Some(ndim) = orig_ndim else {
+            return fallback();
+        };
+        return keepdims_expand_axis(py, &numpy, output, ax as i64, ndim);
+    }
     if result.shape().is_empty() {
         return Ok(output.bind(py).get_item(())?.unbind());
     }
@@ -28049,7 +28065,6 @@ fn nanquantile(
 
     if out.as_ref().is_some_and(|value| !value.bind(py).is_none())
         || overwrite_input
-        || keepdims
         || method.is_some()
         || weights.is_some()
         || interpolation.is_some()
@@ -28057,6 +28072,12 @@ fn nanquantile(
         return fallback();
     }
 
+    // Original ndim for keepdims axis re-insertion (keepdims-on-axis class, BlackThrush 2026-06-22).
+    let orig_ndim = a
+        .bind(py)
+        .getattr("ndim")
+        .ok()
+        .and_then(|d| d.extract::<usize>().ok());
     let a = match extract_numeric_array(py, a.bind(py), "nanquantile(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -28071,11 +28092,22 @@ fn nanquantile(
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
+    // keepdims over the full array (axis=None) reshapes to all-ones dims; delegate. Single-axis
+    // keepdims runs the native path then re-inserts the reduced axis.
+    if keepdims && axis.is_none() {
+        return fallback();
+    }
     let result = match a.nanquantile(q, axis) {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
     let output = build_numpy_array_from_ufunc(py, &result)?;
+    if keepdims && let Some(ax) = axis {
+        let Some(ndim) = orig_ndim else {
+            return fallback();
+        };
+        return keepdims_expand_axis(py, &numpy, output, ax as i64, ndim);
+    }
     if result.shape().is_empty() {
         return Ok(output.bind(py).get_item(())?.unbind());
     }
@@ -38760,7 +38792,7 @@ fn nanmedian(
         Ok(nanmedian_fn.call((a.bind(py),), Some(&kwargs))?.unbind())
     };
 
-    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) || overwrite_input || keepdims {
+    if out.as_ref().is_some_and(|value| !value.bind(py).is_none()) || overwrite_input {
         return fallback();
     }
 
@@ -38772,6 +38804,13 @@ fn nanmedian(
         return fallback();
     }
 
+    // Original ndim for keepdims axis re-insertion (keepdims-on-axis class; the gate used to
+    // bail on keepdims, forgoing the native win. BlackThrush 2026-06-22).
+    let orig_ndim = a
+        .bind(py)
+        .getattr("ndim")
+        .ok()
+        .and_then(|d| d.extract::<usize>().ok());
     let a = match extract_numeric_array(py, a.bind(py), "nanmedian(a)") {
         Ok(array) => array,
         Err(_) => return fallback(),
@@ -38782,11 +38821,22 @@ fn nanmedian(
         Ok(Some(_)) => return fallback(),
         Err(_) => return fallback(),
     };
+    // keepdims over the full array (axis=None) reshapes to all-ones dims; delegate. Single-axis
+    // keepdims runs the native path then re-inserts the reduced axis.
+    if keepdims && axis.is_none() {
+        return fallback();
+    }
     let result = match a.nanmedian(axis) {
         Ok(result) => result,
         Err(_) => return fallback(),
     };
     let output = build_numpy_array_from_ufunc(py, &result)?;
+    if keepdims && let Some(ax) = axis {
+        let Some(ndim) = orig_ndim else {
+            return fallback();
+        };
+        return keepdims_expand_axis(py, &numpy, output, ax as i64, ndim);
+    }
     if result.shape().is_empty() {
         return Ok(output.bind(py).get_item(())?.unbind());
     }
