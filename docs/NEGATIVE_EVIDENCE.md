@@ -7504,3 +7504,12 @@ op2-multifree/diagonal-2op. REMAINING einsum tail (lower-value, TODO): multi-op 
 view but not double-repeat). LESSON: fnp einsum native kernel wins ONLY for GEMM (all-distinct-index
 matrix-matrix); EVERY non-GEMM form (diagonal/outer/matvec/tensor-vec/broadcast/ellipsis-non-gemm)
 loses 1.8-5000x and is delegated. ~10 einsum delegate detectors now cover the non-GEMM space.
+
+## BlackThrush WIN: einsum 2-op ellipsis non-GEMM delegate (2026-06-23, a7bda11e) — 36th win [bead x6ndg]
+einsum_spec_is_ellipsis_2op_nongemm: strip '...' (batch), delegate if a per-batch operand is a vector
+(<2 distinct idx) or diagonal. FIXED 'i...,i...->...' 42x dot, '...ij,...j->...i' 3.2x batched-matvec
+-> par. Ellipsis-matmul/gram kept native (0.82-0.83x win). 36 WINS. einsum delegate family ~11
+detectors; only known residual = 'ijij->ij' single-op DOUBLE-diagonal 1.83x (buffered_single_diagonal
+handles single-repeat as a view but a second repeated index falls through; low value, niche). einsum is
+now effectively GEMM-or-delegated: native wins ONLY all-distinct-index matrix-matrix (matmul/gram/full/
+batched-matmul/ellipsis-batched-matmul); ALL else delegated to numpy. einsum seam = 10 wins this session.
