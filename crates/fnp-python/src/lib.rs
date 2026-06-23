@@ -46235,6 +46235,38 @@ fn einsum_spec_is_slow_vector_contraction(spec: &str) -> bool {
     mat[mat.len() - 1] != vchar
 }
 
+// True for a 2-operand contraction where some operand has a REPEATED index (a diagonal), e.g.
+// "ii,jj->ij" (22x), "iij,jk->ik" (41x), "ij,jj->ij" (11x). A repeated index means the operand is
+// a diagonal/trace, not a plain matrix, so the native kernel never hits matmul_accumulate and loses
+// 10-41x to numpy. GEMM operands have all-distinct indices, so they are never caught. Single-operand
+// diagonals are handled earlier (buffered view / single_diag). Ellipsis handled separately. (x6ndg.)
+fn einsum_spec_is_diagonal_2op(spec: &str) -> bool {
+    let spec: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+    if spec.contains("...") {
+        return false;
+    }
+    let Some((inp, _out)) = spec.split_once("->") else {
+        return false;
+    };
+    let groups: Vec<&str> = inp.split(',').collect();
+    if groups.len() != 2 {
+        return false;
+    }
+    groups.iter().any(|g| {
+        if !g.bytes().all(|b| b.is_ascii_alphabetic()) {
+            return false;
+        }
+        let mut seen = [false; 256];
+        for &b in g.as_bytes() {
+            if seen[b as usize] {
+                return true; // a repeated index within an operand = diagonal
+            }
+            seen[b as usize] = true;
+        }
+        false
+    })
+}
+
 // True for a 2-operand BATCHED vector contraction ("bij,bj->bi", "bi,bij->bj", "bijk,bk->bij"):
 // after removing the shared batch indices (present in both operands AND output), the per-batch
 // op is a vector-vs-matrix/tensor contraction. The native kernel's per-batch loop runs these
@@ -46390,6 +46422,15 @@ fn einsum(
     if args.len() == 3
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_batched_vector_contraction(&spec)
+    {
+        return core_numpy_passthrough(py, "einsum", args, kwargs);
+    }
+    // 2-operand contraction with a diagonal operand ("ii,jj->ij" 22x, "iij,jk->ik" 41x): a repeated
+    // index makes the operand a diagonal -> never GEMM-able -> native kernel loses 10-41x. Delegate.
+    // (bead x6ndg, BlackThrush 2026-06-23.)
+    if args.len() == 3
+        && let Ok(spec) = args.get_item(0)?.extract::<String>()
+        && einsum_spec_is_diagonal_2op(&spec)
     {
         return core_numpy_passthrough(py, "einsum", args, kwargs);
     }
