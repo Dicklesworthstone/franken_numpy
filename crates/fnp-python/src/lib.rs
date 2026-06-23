@@ -50882,6 +50882,39 @@ fn unique_values(
 // (FFT measured 1.5-1.8x slower than numpy there; gather ~1.1-1.2x). Above ~128 the gather's O(n*m)
 // compute dominates and FFT is faster (gather ~1.7x vs FFT ~1.47x at k=256), so 128 is the safe
 // crossover — the old k<=48 cap left the whole k=56..128 band on the slow FFT. (BlackThrush 2026-06-22.)
+// Mid-kernel delegate predicate (bead 1nzxt): true for two 1-D float64 ndarrays whose shorter
+// operand (the kernel) is in (128, 2048]. The zero-copy gather caps at 128; above it fnp's native
+// FFT/scatter convolve loses 1.2-1.7x to numpy's direct O(n*m) loop (which fnp's FFT never beats up
+// to k~4096), so this band is fastest delegated to numpy. Long kernels (>2048) keep the native path.
+fn conv_corr_should_delegate_midkernel(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    v: &Bound<'_, PyAny>,
+) -> PyResult<bool> {
+    let numpy = py.import("numpy")?;
+    let ndarray_type = numpy.getattr("ndarray")?;
+    let f64_1d_len = |o: &Bound<'_, PyAny>| -> PyResult<Option<usize>> {
+        if !o.is_exact_instance(&ndarray_type) {
+            return Ok(None);
+        }
+        let dt = o.getattr("dtype")?;
+        if dt.getattr("kind")?.extract::<String>()? != "f"
+            || dt.getattr("itemsize")?.extract::<usize>()? != 8
+        {
+            return Ok(None);
+        }
+        let shape: Vec<usize> = o.getattr("shape")?.extract()?;
+        if shape.len() != 1 {
+            return Ok(None);
+        }
+        Ok(Some(shape[0]))
+    };
+    let (Some(la), Some(lv)) = (f64_1d_len(a)?, f64_1d_len(v)?) else {
+        return Ok(false);
+    };
+    Ok((129..=2048).contains(&la.min(lv)))
+}
+
 fn try_zerocopy_conv_corr_f64(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -50997,6 +51030,12 @@ fn convolve(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult<
     if let Some(out) = try_zerocopy_conv_corr_f64(py, a.bind(py), v.bind(py), mode, false)? {
         return Ok(out);
     }
+    // Mid-kernel band (128 < k <= 2048): the gather caps at 128 and fnp's native FFT/scatter path
+    // loses 1.2-1.7x to numpy's direct O(n*m) convolve (which fnp's FFT never beats up to k~4096).
+    // Delegate this band to numpy. (bead 1nzxt, BlackThrush 2026-06-22.)
+    if conv_corr_should_delegate_midkernel(py, a.bind(py), v.bind(py))? {
+        return fallback();
+    }
 
     // Fast path: 1D f64 arrays with standard modes
     let a_arr = match extract_numeric_array(py, a.bind(py), "convolve(a)") {
@@ -51063,6 +51102,11 @@ fn correlate(py: Python<'_>, a: Py<PyAny>, v: Py<PyAny>, mode: &str) -> PyResult
     // not commutative). Closes the 9-15x short-kernel loss to parity.
     if let Some(out) = try_zerocopy_conv_corr_f64(py, a.bind(py), v.bind(py), mode, true)? {
         return Ok(out);
+    }
+    // Mid-kernel band (128 < k <= 2048): native FFT/scatter loses 1.2-1.7x to numpy's direct
+    // correlate; delegate. (bead 1nzxt, BlackThrush 2026-06-22.)
+    if conv_corr_should_delegate_midkernel(py, a.bind(py), v.bind(py))? {
+        return fallback();
     }
 
     // Fast path: 1D f64 arrays with standard modes
