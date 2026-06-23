@@ -7482,3 +7482,13 @@ SIMD-blocked DIRECT convolve to BEAT numpy mid-band, fix the underperforming FFT
 residual) remains for if convolve becomes a win-priority. LESSON: when a native path NEVER beats the
 library impl across the tested range, delegating that range to the library is a clean par (turns loss
 -> par) without a kernel rewrite — verify the native path truly never wins first.
+
+## BlackThrush WIN: einsum single-operand ellipsis delegate (2026-06-22, 71e378df) — 34th win
+NEW ellipsis seam. Single-op ellipsis hit the generic native kernel which MATERIALIZES transposes
+('...ij->...ji' 4951x! '...ij...->...' etc) instead of numpy's O(1) view, + reduce/diagonal 1.9-5.4x.
+Delegate all single-op ellipsis (args.len()==2 && '...') to numpy: transpose 4951x->1.69x (now a view,
+residual=view-crossing floor), reduces->par. Multi-op ellipsis kept native (ellipsis-batched-matmul
+'...ij,...jk->...ik' WINS 0.86x). 34 WINS. REMAINING ellipsis/diagonal seam (TODO, file follow-up):
+multi-op ellipsis non-GEMM ('...ij,...j->...i' 3.18x matvec, 'i...,i...->...' 42x), 'ii,jj->ij' 12x
+(2-op double-diagonal-outer), 'ijij->ij' 1.83x (single-op double-diagonal not caught by single_diag).
+LESSON: einsum ellipsis is a whole separate slow path from non-ellipsis (detectors all skipped '...').
