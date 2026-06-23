@@ -7352,3 +7352,17 @@ percentile, quantile, nanmedian, nanpercentile, nanquantile, nanargmax, nanargmi
 gates (any/all/argmin/argmax/ptp) verified NOT worth fixing: any/all/argmin/ptp par-both-ways (no win to
 capture); argmax noKD LOSES 1.24x (routing keepdims there would WORSEN). 22 wins. The '|| keepdims' anti-
 pattern grep is now exhausted (all 7 remaining gates triaged: 2 fixed, 5 correctly-skipped).
+
+## BlackThrush: argmax/argmin LAST-axis serial 1.3-1.9x loss — CANDIDATE, deferred (load 75, 2026-06-22)
+Per-shape sweep: argmax/argmin along the LAST (contiguous inner) axis lose serial 1.34-1.92x (2000x1000
+ax=1 1.34, 100^3 ax=2 1.92) while NON-last axis (ax=0) WINS 0.41-0.68x. Flat (axis=None) is par.
+LIKELY CAUSE: my own gate-raise (argmax last-axis 1<<16->1<<20, mistuned-parallel-gates memory) made
+MEDIUM last-axis argmax run SERIAL to avoid parallel-contention losses -> but fnp's per-row scalar
+argmax kernel is 1.3-1.9x slower than numpy's optimized last-axis argmax -> traded contention-loss for
+kernel-loss (kernel-wall, like cholesky/batch_inv). CONFLICTS with memory note claiming last-axis
+parallel WIN (4-55x) — needs reconciling. CANNOT VERIFY under load 75 (full-threads unreliable: showed
+2.1-2.76x but contention-inflated). DEFERRED: on a CALM box, measure serial AND full-threads for
+medium+large last-axis argmax/argmin; if it loses BOTH ways at all sizes -> delegate last-axis to numpy
+(like the stale-cliff-gate det/inv fixes); if large+full-threads wins -> size-gate the delegate. Do NOT
+fix blind under load (risk regressing the documented parallel win). 22 wins stand; this is the next
+concrete candidate to verify when the box calms.
