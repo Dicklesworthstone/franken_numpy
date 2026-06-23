@@ -46235,6 +46235,52 @@ fn einsum_spec_is_slow_vector_contraction(spec: &str) -> bool {
     mat[mat.len() - 1] != vchar
 }
 
+// True for a 2-operand BATCHED vector contraction ("bij,bj->bi", "bi,bij->bj", "bijk,bk->bij"):
+// after removing the shared batch indices (present in both operands AND output), the per-batch
+// op is a vector-vs-matrix/tensor contraction. The native kernel's per-batch loop runs these
+// 3-12x slower than numpy (which batches the GEMV) — and UNLIKE the non-batched case, even the
+// "last-axis" matvec loses once batched, so delegate regardless of contracted-axis position.
+// Batched matmul/gram/full/row-reduce keep >=2-index reduced operands and are NOT caught (wins).
+fn einsum_spec_is_batched_vector_contraction(spec: &str) -> bool {
+    let spec: String = spec.chars().filter(|c| !c.is_whitespace()).collect();
+    if spec.contains("...") {
+        return false;
+    }
+    let Some((inp, out)) = spec.split_once("->") else {
+        return false;
+    };
+    let groups: Vec<&str> = inp.split(',').collect();
+    if groups.len() != 2 {
+        return false;
+    }
+    let (g0, g1) = (groups[0].as_bytes(), groups[1].as_bytes());
+    let outb = out.as_bytes();
+    if !g0.iter().all(|b| b.is_ascii_alphabetic())
+        || !g1.iter().all(|b| b.is_ascii_alphabetic())
+        || !outb.iter().all(|b| b.is_ascii_alphabetic())
+    {
+        return false;
+    }
+    // batch index = present in op1 AND op2 AND output
+    let is_batch = |c: u8| g0.contains(&c) && g1.contains(&c) && outb.contains(&c);
+    let r0: Vec<u8> = g0.iter().copied().filter(|&c| !is_batch(c)).collect();
+    let r1: Vec<u8> = g1.iter().copied().filter(|&c| !is_batch(c)).collect();
+    if r0.len() == g0.len() {
+        return false; // no batch index removed -> not a batched contraction
+    }
+    let rout: Vec<u8> = outb.iter().copied().filter(|&c| !is_batch(c)).collect();
+    // one reduced operand is a vector (1 index), the other a matrix/tensor (>=2 indices)
+    let (vec, mat) = if r0.len() == 1 && r1.len() >= 2 {
+        (&r0, &r1)
+    } else if r1.len() == 1 && r0.len() >= 2 {
+        (&r1, &r0)
+    } else {
+        return false;
+    };
+    let v = vec[0];
+    mat.contains(&v) && !rout.contains(&v) // the vector index is contracted (summed)
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn einsum(
@@ -46286,6 +46332,14 @@ fn einsum(
     if args.len() == 3
         && let Ok(spec) = args.get_item(0)?.extract::<String>()
         && einsum_spec_is_slow_vector_contraction(&spec)
+    {
+        return core_numpy_passthrough(py, "einsum", args, kwargs);
+    }
+    // Batched vector contraction ("bij,bj->bi" 4x, "bi,bij->bj" 8x, "bijk,bk->bij" 3x): the
+    // per-batch GEMV loop loses to numpy's batched build. (bead x6ndg, BlackThrush 2026-06-22.)
+    if args.len() == 3
+        && let Ok(spec) = args.get_item(0)?.extract::<String>()
+        && einsum_spec_is_batched_vector_contraction(&spec)
     {
         return core_numpy_passthrough(py, "einsum", args, kwargs);
     }
