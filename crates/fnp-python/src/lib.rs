@@ -11300,6 +11300,7 @@ fn try_zerocopy_f64_cumulative_axis(
     a: &Bound<'_, PyAny>,
     axis: isize,
     is_prod: bool,
+    skip_nan: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
     let ndarray_type = numpy.getattr("ndarray")?;
@@ -11340,17 +11341,28 @@ fn try_zerocopy_f64_cumulative_axis(
             return Ok(None);
         };
         let lane = axis_len * inner;
+        // skip_nan (nancumsum/nancumprod): a NaN contributes the identity (0 for sum,
+        // 1 for prod) so the running accumulator carries through unchanged, matching
+        // numpy.nancumsum/nancumprod. skip_nan=false keeps NaN verbatim (plain cum*).
+        let ident = if is_prod { 1.0 } else { 0.0 };
         if inner == 1 {
             // Last-axis case: each outer lane is a contiguous run, so carry the
             // accumulator in a register (no read-back of the previous output cell)
             // exactly like the 1-D flatten scan — much faster than slab-by-slab.
             for o in 0..outer {
                 let obase = o * axis_len;
-                let mut acc = input[obase].get();
+                let first = input[obase].get();
+                let mut acc = if skip_nan && first.is_nan() {
+                    ident
+                } else {
+                    first
+                };
                 output[obase].set(acc);
                 for a_idx in 1..axis_len {
                     let value = input[obase + a_idx].get();
-                    acc = if is_prod { acc * value } else { acc + value };
+                    if !(skip_nan && value.is_nan()) {
+                        acc = if is_prod { acc * value } else { acc + value };
+                    }
                     output[obase + a_idx].set(acc);
                 }
             }
@@ -11360,9 +11372,11 @@ fn try_zerocopy_f64_cumulative_axis(
             // out block a = (out block a-1) op (in block a).
             for o in 0..outer {
                 let obase = o * lane;
-                // First slab along the axis is copied verbatim (preserves -0.0).
+                // First slab along the axis is copied verbatim (preserves -0.0); under
+                // skip_nan a NaN in the first slab becomes the identity.
                 for i in 0..inner {
-                    output[obase + i].set(input[obase + i].get());
+                    let v = input[obase + i].get();
+                    output[obase + i].set(if skip_nan && v.is_nan() { ident } else { v });
                 }
                 for a_idx in 1..axis_len {
                     let cur = obase + a_idx * inner;
@@ -11370,10 +11384,15 @@ fn try_zerocopy_f64_cumulative_axis(
                     for i in 0..inner {
                         let carried = output[prev + i].get();
                         let value = input[cur + i].get();
-                        output[cur + i].set(if is_prod {
-                            carried * value
+                        let contrib = if skip_nan && value.is_nan() {
+                            ident
                         } else {
-                            carried + value
+                            value
+                        };
+                        output[cur + i].set(if is_prod {
+                            carried * contrib
+                        } else {
+                            carried + contrib
                         });
                     }
                 }
@@ -44500,7 +44519,7 @@ fn cumsum(
     // Zero-copy per-axis cumsum for multi-dim f64 ndarrays (explicit axis); slab-
     // by-slab accumulation. Bit-identical; out-of-range axes fall through.
     if let Some(ax) = axis_val
-        && let Some(result) = try_zerocopy_f64_cumulative_axis(py, a.bind(py), ax, false)?
+        && let Some(result) = try_zerocopy_f64_cumulative_axis(py, a.bind(py), ax, false, false)?
     {
         return Ok(result);
     }
@@ -44623,7 +44642,7 @@ fn cumprod(
     // Zero-copy per-axis cumprod for multi-dim f64 ndarrays (explicit axis); slab-
     // by-slab accumulation. Bit-identical; out-of-range axes fall through.
     if let Some(ax) = axis_val
-        && let Some(result) = try_zerocopy_f64_cumulative_axis(py, a.bind(py), ax, true)?
+        && let Some(result) = try_zerocopy_f64_cumulative_axis(py, a.bind(py), ax, true, false)?
     {
         return Ok(result);
     }
@@ -50980,6 +50999,13 @@ fn nancumprod(
         if let Some(out) = try_zerocopy_f64_nancumprod(py, &a, axis_val)? {
             return Ok(out);
         }
+        // n-D explicit axis: shared cumulative-axis kernel with skip_nan (NaN -> 1 identity)
+        // wins like plain cumprod-axis (the flatten helper only handles axis=None / 1-D).
+        if let Some(ax) = axis_val
+            && let Some(out) = try_zerocopy_f64_cumulative_axis(py, &a, ax, true, true)?
+        {
+            return Ok(out);
+        }
         // Integers carry no NaN, so nancumprod == cumprod (int64/uint64 accumulator).
         if let Some(out) = try_zerocopy_int_cumprod(py, &a, axis_val)? {
             return Ok(out);
@@ -50997,6 +51023,14 @@ fn nancumsum(
 ) -> PyResult<Py<PyAny>> {
     if let Some((a, axis_val)) = parse_nan_cumulative_args(args, kwargs)? {
         if let Some(out) = try_zerocopy_f64_nancumsum(py, &a, axis_val)? {
+            return Ok(out);
+        }
+        // n-D explicit axis: the flatten helper above only handles axis=None / 1-D, so a
+        // 2-D+ axis used to delegate (par). The shared cumulative-axis kernel with skip_nan
+        // (NaN -> 0 identity) wins like plain cumsum-axis. (BlackThrush 2026-06-22.)
+        if let Some(ax) = axis_val
+            && let Some(out) = try_zerocopy_f64_cumulative_axis(py, &a, ax, false, true)?
+        {
             return Ok(out);
         }
         // Integers carry no NaN, so nancumsum == cumsum (int64/uint64 accumulator).
