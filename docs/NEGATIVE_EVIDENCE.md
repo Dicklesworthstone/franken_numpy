@@ -7461,3 +7461,14 @@ numpy.convolve is ALWAYS direct O(n*m); fnp's FFT path NEVER beats it (measured 
 compute dominates above ~128 (k=256 gather 1.7x > FFT 1.47x), so 128 is the safe cap; >128 keeps FFT.
 0/44 (conv+corr, all modes, k=8..129, f64+int). 32 WINS. LESSON: a perf gate set as a heuristic
 boundary (k<=48 vs FFT-min-64) can be MIS-TUNED vs the actual measured crossover -> sweep the parameter.
+
+## BlackThrush: linalg stragglers clean; convolve-kernel bead filed (2026-06-22)
+Probed multi_dot/tensorsolve/tensorinv/kron/outer/trace/matrix_power/diagonal — all par (matrix_power
+2-D confirmed par 1.01-1.04x precomputed; the 1.34x flag was rng-in-lambda noise). No new gap. FILED
+bead deadlock-audit-1nzxt: convolve/correlate k=128-256 kernel-quality loss (1.3-1.7x). After the gate
+fix (d11e5397, gather<=128), k=128-256 still trails numpy: fnp's gather O(n*m) SIMD band-parallel AND
+fnp's FFT path BOTH lose to numpy's direct scalar C convolve (numpy 1.04-1.47x faster at k=256-4096 vs
+fnp FFT). FIX PATH: a SIMD-blocked DIRECT convolve (kernel resident in registers, stream signal, vectorize
+across output positions) to beat numpy's scalar loop at k=128-256; OR fix fnp's underperforming FFT
+convolve (should be O(n log n) but barely pars numpy's O(n*m) even at k=4096 => high constant/inefficient).
+Kernel-level fnp-ufunc work. 32 wins stand; this is a documented kernel-quality residual, not a gate issue.
