@@ -27323,6 +27323,80 @@ fn try_zerocopy_f64_vector_norm_axis(
     Ok(Some(reshaped.unbind()))
 }
 
+// np.linalg.norm(x, ord in {None,'fro','f'}, axis=(<-2>,<-1>)) - the Frobenius norm
+// over the TRAILING two (contiguous) axes of a C-contiguous f64 stack. numpy runs
+// `sqrt(np.add.reduce((x.conj()*x).real, axis=(row,col)))`, materializing a whole
+// (..., M, N) squared temporary then a single-threaded 2-axis reduce. For a
+// C-contiguous array each (M, N) matrix is one contiguous M*N block, and numpy's
+// 2-axis reduce is bit-identical to a flat pairwise sum-of-squares over that block
+// (verified: add.reduce(x, axis=(-2,-1)) == add.reduce(x.reshape(B, M*N), axis=-1)).
+// So pairwise_sq_f64 over each block + sqrt, parallel across blocks, is bit-exact
+// and avoids the temporary. NaN/Inf propagate (no defer). Note `norm(x)` with
+// axis=None ravels to a BLAS dot (fast) and is NOT this path - only an explicit
+// trailing 2-tuple axis reaches here. ax0/ax1 are the raw (possibly negative) axis
+// pair; this validates they resolve to the last two axes and bails otherwise.
+fn try_zerocopy_f64_frobenius_lastaxes(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    ax0: i64,
+    ax1: i64,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    if ndim < 2 {
+        return Ok(None);
+    }
+    let resolve = |ax: i64| if ax < 0 { ax + ndim } else { ax };
+    let (r0, r1) = (resolve(ax0), resolve(ax1));
+    let mut pair = [r0, r1];
+    pair.sort_unstable();
+    if r0 < 0 || r1 < 0 || pair != [ndim - 2, ndim - 1] {
+        return Ok(None); // only the trailing two (contiguous) axes
+    }
+    let nd = ndim as usize;
+    let block = shape[nd - 2] * shape[nd - 1];
+    if block == 0 {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let outer: usize = shape[..nd - 2].iter().product();
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
+    // under the GIL -> &[f64] (Sync) for the parallel per-block fold below.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let lane_norm = |blk: &[f64]| -> f64 {
+        let mut buf = [0.0f64; 128];
+        pairwise_sq_f64(blk, &mut buf).sqrt()
+    };
+    use rayon::prelude::*;
+    const NORM_AXIS_PARALLEL_MIN: usize = 98_304;
+    let parallel =
+        outer * block >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let out: Vec<f64> = if parallel {
+        data.par_chunks_exact(block).map(lane_norm).collect()
+    } else {
+        data.chunks_exact(block).map(lane_norm).collect()
+    };
+    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let mut out_shape: Vec<usize> = shape[..nd - 2].to_vec();
+    if keepdims {
+        out_shape.push(1);
+        out_shape.push(1);
+    }
+    let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
 fn nanmax(
@@ -41765,6 +41839,27 @@ fn norm(
                 kind,
                 keepdims,
             )?
+        {
+            return Ok(result);
+        }
+    }
+    // Batched Frobenius norm (ord None/'fro'/'f' over an explicit trailing 2-tuple
+    // axis): numpy materializes (x*x).real then a single-threaded add.reduce over
+    // both axes; the per-(M*N)-block pairwise-sq fold avoids the temporary. See
+    // try_zerocopy_f64_frobenius_lastaxes. (ord=None with axis=None is the BLAS-dot
+    // ravel path and is left to numpy - this only fires for a 2-tuple axis.)
+    if let Some(axis_val) = axis.as_ref() {
+        let is_fro = match ord.as_ref() {
+            None => true,
+            Some(o) => o
+                .bind(py)
+                .extract::<String>()
+                .is_ok_and(|s| s == "fro" || s == "f"),
+        };
+        if is_fro
+            && let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>()
+            && let Some(result) =
+                try_zerocopy_f64_frobenius_lastaxes(py, x.bind(py), ax0, ax1, keepdims)?
         {
             return Ok(result);
         }

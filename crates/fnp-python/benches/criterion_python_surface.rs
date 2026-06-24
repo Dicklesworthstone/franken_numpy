@@ -1662,6 +1662,68 @@ fn bench_norm_axis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_norm_frobenius_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_norm_frobenius_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_norm = module.getattr("norm").expect("fnp_python.norm");
+        let numpy_norm = numpy
+            .getattr("linalg")
+            .expect("numpy.linalg")
+            .getattr("norm")
+            .expect("numpy.linalg.norm");
+
+        for (label, b, m, n) in [
+            ("4096x16x16", 4096_i64, 16_i64, 16_i64),
+            ("2048x32x32", 2048_i64, 32_i64, 32_i64),
+        ] {
+            let size = b * m * n;
+            let input = numpy
+                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
+                .expect("frobenius f64 input")
+                .call_method1("reshape", ((b, m, n),))
+                .expect("frobenius 3-D shape");
+
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs
+                .set_item("axis", (-2_i64, -1_i64))
+                .expect("fnp axis kwarg");
+            let numpy_kwargs = PyDict::new(py);
+            numpy_kwargs
+                .set_item("axis", (-2_i64, -1_i64))
+                .expect("numpy axis kwarg");
+
+            group.bench_function(format!("fnp_norm_fro_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_norm
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp frobenius benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_norm_fro_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_norm
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy frobenius benchmark call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_compress_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_compress_boundary");
     group.sample_size(10);
@@ -2417,6 +2479,7 @@ criterion_group!(
     bench_statistics_boundary,
     bench_std_var_axis_boundary,
     bench_norm_axis_boundary,
+    bench_norm_frobenius_boundary,
     bench_compress_boundary,
     bench_roll_boundary,
     bench_einsum_boundary,

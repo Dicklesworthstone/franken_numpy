@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: linalg.norm batched Frobenius (trailing 2-axis) native fold
+
+`CreamEagle`/`cod-b`. Fourth member of the last-axis vector-norm fold family,
+generalized to the matrix Frobenius case: `ord in {None,'fro','f'}` over an explicit
+2-tuple axis resolving to the trailing two (contiguous) axes. The committed `norm()`
+only fast-pathed SVD orders (2/-2/nuc) and single-int-axis vector norms; a 2-tuple
+Frobenius fell to numpy, which materializes a whole `(...,M,N)` squared temp then a
+single-threaded 2-axis `add.reduce`.
+
+Key precondition verified empirically: for a C-contiguous array numpy's 2-axis
+reduce is BIT-IDENTICAL to a flat pairwise sum-of-squares over the `M*N` contiguous
+block (`add.reduce(x, axis=(-2,-1)) == add.reduce(x.reshape(B, M*N), axis=-1)`,
+maxulp 0.0 across shapes). So `pairwise_sq_f64` per block + sqrt, parallel across
+blocks, reuses the existing kernel and is bit-exact; NaN/Inf propagate (no defer).
+`axis=None` (BLAS-dot ravel) and non-trailing axes still delegate to numpy.
+
+`cc`/`vmi1153651` head-to-head, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `norm(axis=(-2,-1))`, 4096x16x16 f64 | 136,826 | 480,724 | 0.285x | native win |
+| `norm(axis=(-2,-1))`, 2048x32x32 f64 | 155,441 | 1,206,268 | 0.129x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface norm_frobenius -- --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_linalg_basic`
+
+Validation: `conformance_linalg_basic` 60/60 (new `norm_frobenius_lastaxes_matches_numpy`
+is the 60th), bit-exact under `np.allclose(rtol=0, atol=0, equal_nan=True)` across 3-D/4-D
+stacks, plain 2-D axis=(0,1), reversed axis order (-1,-2), keepdims, non-trailing-axis
+fallthrough, and a NaN/Inf block. Artifacts:
+`tests/artifacts/perf/2026-06-24_linalg_norm_frobenius_cod_b/`.
+
 ## 2026-06-24 - KEEP: linalg.norm axis=-1 native vector +-inf (ord=±inf) extension
 
 `CreamEagle`/`cod-b`. Third member of the last-axis vector-norm fold family

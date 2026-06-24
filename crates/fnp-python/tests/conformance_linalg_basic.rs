@@ -713,6 +713,56 @@ print(all_pass)
 }
 
 #[test]
+fn norm_frobenius_lastaxes_matches_numpy() -> Result<(), String> {
+    // Exercises the native batched-Frobenius fold (ord None/'fro'/'f' over the
+    // trailing 2-tuple axis) against numpy bit-exactly (atol=0, equal_nan=True),
+    // incl dtype/shape: 3-D and 4-D stacks, plain 2-D with axis=(0,1), reversed
+    // axis order, keepdims, a non-trailing axis fallthrough, and a NaN/Inf block.
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+s3 = np.linspace(-4.0, 6.0, 4 * 5 * 6, dtype=np.float64).reshape(4, 5, 6)
+s4 = np.linspace(-2.0, 3.0, 2 * 3 * 4 * 5, dtype=np.float64).reshape(2, 3, 4, 5)
+m2 = np.linspace(-1.0, 2.0, 7 * 8, dtype=np.float64).reshape(7, 8)
+nanblk = np.array([[[1.0, np.nan], [3.0, 4.0]], [[1.0, np.inf], [2.0, 5.0]]], dtype=np.float64)
+cases = [
+    (s3, None, (-2, -1), False),
+    (s3, "fro", (-2, -1), True),
+    (s4, "f", (-2, -1), False),
+    (m2, None, (0, 1), False),
+    (s3, "fro", (-1, -2), False),
+    (s3, None, (0, 1), False),
+    (nanblk, "fro", (-2, -1), False),
+]
+all_pass = True
+for arr, ord_arg, axis, keepdims in cases:
+    if ord_arg is None:
+        fnp_result = fnp.linalg.norm(arr, axis=axis, keepdims=keepdims)
+        np_result = np.linalg.norm(arr, axis=axis, keepdims=keepdims)
+    else:
+        fnp_result = fnp.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+        np_result = np.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    if not same(fnp_result, np_result):
+        print("FAIL", ord_arg, axis, keepdims, np.asarray(fnp_result), np.asarray(np_result))
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm Frobenius trailing-axes parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn norm_vector_inf() -> Result<(), String> {
     let script = fnp_script(
         r#"

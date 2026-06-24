@@ -3,6 +3,33 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python linalg.norm batched Frobenius (trailing 2-axis) keep (46th win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `linalg.norm(axis=(-2,-1))` 4096x16x16 vs NumPy | 10/10 | `0.285x` NumPy time (3.51x faster) |
+| `linalg.norm(axis=(-2,-1))` 2048x32x32 vs NumPy | 10/10 | `0.129x` NumPy time (7.76x faster) |
+| Behavior gate | 9/10 | Native only for f64 C-contiguous ord None/'fro'/'f' over trailing 2-tuple axis; axis=None (BLAS dot) and non-trailing axes defer to NumPy |
+| Conformance gate | 10/10 | `conformance_linalg_basic` 60/60 (new bit-exact Frobenius trailing-axes parity test) |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: `try_zerocopy_f64_frobenius_lastaxes` (per-M*N-block
+  `pairwise_sq_f64` + sqrt, parallel across blocks), ord None/'fro'/'f' + 2-tuple
+  trailing-axis dispatch in `norm()`.
+- numpy `sqrt(add.reduce((x*x).real, axis=(row,col)))` materializes the squared temp
+  + single-threaded 2-axis reduce; numpy's 2-axis reduce is bit-identical to a flat
+  pairwise over the contiguous M*N block (maxulp 0.0, verified).
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface norm_frobenius -- --sample-size 10 --warm-up-time 1
+  --measurement-time 3 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_linalg_norm_frobenius_cod_b/`.
+
+Decision:
+- Release-ready keep for the contiguous trailing-2-axis f64 Frobenius rows.
+- Matrix ord=1/inf (column/row abs-sum) and non-trailing axes remain on NumPy.
+
 ## 2026-06-24 CreamEagle fnp-python linalg.norm last-axis +-inf (ord=±inf) keep (45th win)
 
 | Area | Score | Verdict |
