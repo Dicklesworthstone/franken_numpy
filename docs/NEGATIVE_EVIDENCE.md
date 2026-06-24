@@ -4,6 +4,45 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: linalg.norm induced matrix p-norm (ord ±1/±inf, trailing 2-axis)
+
+`CreamEagle`/`cod-b`. Fifth member of the trailing-axis norm fold family (vector
+L1/L2/±inf, Frobenius): induced matrix p-norms `ord in {1,-1,inf,-inf}` over an
+explicit 2-tuple axis resolving to the trailing two contiguous axes. The committed
+`norm()` only fast-pathed SVD orders (2/-2/'nuc') and Frobenius; ord 1/±inf with a
+2-tuple axis fell to numpy, which materializes `abs(x)` then a per-row/col
+`add.reduce` + max/min (three single-threaded passes).
+
+`try_zerocopy_f64_matrix_norm_lastaxes` (`MatrixNormKind` = MaxRowSum/MinRowSum=±inf,
+MaxColSum/MinColSum=±1): per (M,N) contiguous block reuse `pairwise_abs_f64` per
+contiguous ROW (±inf) or per gathered COLUMN (±1, small M-buffer gather), then a
+NaN-propagating max/min, parallel across blocks. Bit-exact (each row/col abs-sum
+matches numpy's pairwise reduce; verified `add.reduce(|x|,axis=-1).max(-1) == inf`,
+`add.reduce(|x|,axis=-2).max(-1) == 1`). **Axis ORDER matters** (1 and inf are
+transposes): requires row_axis==ndim-2 AND col_axis==ndim-1 exactly; reversed
+(-1,-2) defers to numpy. NaN/Inf propagate (no defer).
+
+`cc`/`vmi1153651` head-to-head, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `norm(ord=inf, axis=(-2,-1))`, 4096x16x16 f64 | 334,369 | 1,559,593 | 0.214x | native win |
+| `norm(ord=inf, axis=(-2,-1))`, 2048x32x32 f64 | 336,430 | 2,461,451 | 0.137x | native win |
+| `norm(ord=1, axis=(-2,-1))`, 4096x16x16 f64 | 501,909 | 1,849,520 | 0.271x | native win |
+| `norm(ord=1, axis=(-2,-1))`, 2048x32x32 f64 | 1,045,776 | 2,757,652 | 0.379x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface norm_frobenius -- --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_linalg_basic`
+
+Validation: `conformance_linalg_basic` 61/61 (new `norm_matrix_induced_lastaxes_matches_numpy`,
+13 cases), bit-exact under `np.allclose(rtol=0, atol=0, equal_nan=True)` across ord
+1/-1/inf/-inf, 3-D/4-D stacks, plain 2-D axis=(0,1), keepdims, reversed-axis (-1,-2)
+fallthrough, non-trailing-axis fallthrough, and NaN/Inf blocks. Artifacts:
+`tests/artifacts/perf/2026-06-24_linalg_norm_matrix_induced_cod_b/`.
+
 ## 2026-06-24 - KEEP: linalg.norm batched Frobenius (trailing 2-axis) native fold
 
 `CreamEagle`/`cod-b`. Fourth member of the last-axis vector-norm fold family,

@@ -1,0 +1,8 @@
+test python_norm_frobenius_boundary/fnp_norm_inf_f64_4096x16x16 ... bench:     334,369 ns/iter (+/- 95,024)
+test python_norm_frobenius_boundary/numpy_norm_inf_f64_4096x16x16 ... bench:   1,559,593 ns/iter (+/- 89,890)
+test python_norm_frobenius_boundary/fnp_norm_l1_f64_4096x16x16 ... bench:     501,909 ns/iter (+/- 105,877)
+test python_norm_frobenius_boundary/numpy_norm_l1_f64_4096x16x16 ... bench:   1,849,520 ns/iter (+/- 23,865)
+test python_norm_frobenius_boundary/fnp_norm_inf_f64_2048x32x32 ... bench:     336,430 ns/iter (+/- 67,464)
+test python_norm_frobenius_boundary/numpy_norm_inf_f64_2048x32x32 ... bench:   2,461,451 ns/iter (+/- 158,779)
+test python_norm_frobenius_boundary/fnp_norm_l1_f64_2048x32x32 ... bench:   1,045,776 ns/iter (+/- 140,162)
+test python_norm_frobenius_boundary/numpy_norm_l1_f64_2048x32x32 ... bench:   2,757,652 ns/iter (+/- 560,509)

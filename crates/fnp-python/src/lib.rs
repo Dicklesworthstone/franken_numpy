@@ -27397,6 +27397,141 @@ fn try_zerocopy_f64_frobenius_lastaxes(
     Ok(Some(reshaped.unbind()))
 }
 
+// Which induced matrix p-norm the native fold computes over the trailing 2 axes.
+#[derive(Clone, Copy)]
+enum MatrixNormKind {
+    MaxRowSum, // ord +inf: max over rows of add.reduce(|x|, axis=-1)
+    MinRowSum, // ord -inf: min over rows of the same row abs-sums
+    MaxColSum, // ord 1:    max over cols of add.reduce(|x|, axis=-2)
+    MinColSum, // ord -1:   min over cols of the same column abs-sums
+}
+
+// NaN-propagating max/min over a slice of (already non-negative) abs-sums - the
+// bit-exact analog of numpy's `.max(axis)` / `.min(axis)` over the reduced sums
+// (np.maximum/minimum.reduce propagate NaN, unlike f64::max/min).
+fn reduce_extreme_f64(sums: &[f64], want_max: bool) -> f64 {
+    let mut acc = if want_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+    let mut saw_nan = false;
+    for &s in sums {
+        if s.is_nan() {
+            saw_nan = true;
+        } else if (want_max && s > acc) || (!want_max && s < acc) {
+            acc = s;
+        }
+    }
+    if saw_nan {
+        f64::NAN
+    } else {
+        acc
+    }
+}
+
+// np.linalg.norm(x, ord in {1,-1,+inf,-inf}, axis=(<-2>,<-1>)) - an induced matrix
+// p-norm over the TRAILING two (contiguous) axes of a C-contiguous f64 stack.
+// numpy computes a whole-array `abs(x)` temporary, then for ord=+-inf a per-ROW
+// abs-sum `add.reduce(|x|, axis=-1)` followed by max/min over rows, and for
+// ord=+-1 a per-COLUMN abs-sum `add.reduce(|x|, axis=-2)` followed by max/min over
+// columns - three passes over the materialized temp, single-threaded. This
+// per-(M,N)-block fold reuses pairwise_abs_f64 (rows are contiguous; columns are
+// gathered into a small M-buffer) so each row/column abs-sum matches numpy's
+// pairwise reduce bit-for-bit, then a NaN-propagating max/min, parallel across
+// blocks. Verified bit-exact: add.reduce(|x|,axis=-1).max(-1) == numpy inf-norm,
+// add.reduce(|x|,axis=-2).max(-1) == numpy 1-norm. NaN/Inf propagate (no defer).
+// ax0/ax1 are the raw axis pair; validated to resolve to the last two axes.
+fn try_zerocopy_f64_matrix_norm_lastaxes(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    ax0: i64,
+    ax1: i64,
+    kind: MatrixNormKind,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    if ndim < 2 {
+        return Ok(None);
+    }
+    let resolve = |ax: i64| if ax < 0 { ax + ndim } else { ax };
+    let (r0, r1) = (resolve(ax0), resolve(ax1));
+    // Induced matrix p-norms are NOT axis-symmetric (ord=1 and ord=inf are
+    // transposes), so axis ORDER matters: require row_axis == ndim-2 and
+    // col_axis == ndim-1 exactly. A reversed pair (-1,-2) defers to numpy, which
+    // would swap the row/column roles.
+    if r0 != ndim - 2 || r1 != ndim - 1 {
+        return Ok(None);
+    }
+    let nd = ndim as usize;
+    let (m, n) = (shape[nd - 2], shape[nd - 1]);
+    let block = m * n;
+    if block == 0 {
+        return Ok(None); // empty matrices: defer to numpy's reduction semantics
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let outer: usize = shape[..nd - 2].iter().product();
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
+    // under the GIL -> &[f64] (Sync) for the parallel per-block fold below.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let (by_row, want_max) = match kind {
+        MatrixNormKind::MaxRowSum => (true, true),
+        MatrixNormKind::MinRowSum => (true, false),
+        MatrixNormKind::MaxColSum => (false, true),
+        MatrixNormKind::MinColSum => (false, false),
+    };
+    let block_norm = move |blk: &[f64]| -> f64 {
+        let mut buf = [0.0f64; 128];
+        if by_row {
+            // per contiguous row: pairwise abs-sum, then extreme over the M rows
+            let row_sums: Vec<f64> = (0..m)
+                .map(|r| pairwise_abs_f64(&blk[r * n..r * n + n], &mut buf))
+                .collect();
+            reduce_extreme_f64(&row_sums, want_max)
+        } else {
+            // per column: gather the M strided entries, pairwise abs-sum, extreme over N
+            let mut col = vec![0.0f64; m];
+            let col_sums: Vec<f64> = (0..n)
+                .map(|c| {
+                    for r in 0..m {
+                        col[r] = blk[r * n + c];
+                    }
+                    pairwise_abs_f64(&col, &mut buf)
+                })
+                .collect();
+            reduce_extreme_f64(&col_sums, want_max)
+        }
+    };
+    use rayon::prelude::*;
+    const NORM_AXIS_PARALLEL_MIN: usize = 98_304;
+    let parallel =
+        outer * block >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let out: Vec<f64> = if parallel {
+        data.par_chunks_exact(block).map(&block_norm).collect()
+    } else {
+        data.chunks_exact(block).map(&block_norm).collect()
+    };
+    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let mut out_shape: Vec<usize> = shape[..nd - 2].to_vec();
+    if keepdims {
+        out_shape.push(1);
+        out_shape.push(1);
+    }
+    let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, out=None, keepdims=None))]
 fn nanmax(
@@ -41860,6 +41995,34 @@ fn norm(
             && let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>()
             && let Some(result) =
                 try_zerocopy_f64_frobenius_lastaxes(py, x.bind(py), ax0, ax1, keepdims)?
+        {
+            return Ok(result);
+        }
+    }
+    // Induced matrix p-norm (ord 1/-1/+inf/-inf over an explicit trailing 2-tuple
+    // axis): numpy materializes abs(x) then a per-row/col add.reduce + max/min (three
+    // passes); the per-block fold avoids the temporary. ord=2/-2/'nuc' are the SVD
+    // path above; this only handles the row/column abs-sum orders. See
+    // try_zerocopy_f64_matrix_norm_lastaxes.
+    if let (Some(ord_val), Some(axis_val)) = (ord.as_ref(), axis.as_ref()) {
+        let ob = ord_val.bind(py);
+        let as_i = ob.extract::<i64>().ok();
+        let as_f = ob.extract::<f64>().ok();
+        let kind = if as_i == Some(1) || as_f == Some(1.0) {
+            Some(MatrixNormKind::MaxColSum)
+        } else if as_i == Some(-1) || as_f == Some(-1.0) {
+            Some(MatrixNormKind::MinColSum)
+        } else if as_f == Some(f64::INFINITY) {
+            Some(MatrixNormKind::MaxRowSum)
+        } else if as_f == Some(f64::NEG_INFINITY) {
+            Some(MatrixNormKind::MinRowSum)
+        } else {
+            None
+        };
+        if let Some(kind) = kind
+            && let Ok((ax0, ax1)) = axis_val.bind(py).extract::<(i64, i64)>()
+            && let Some(result) =
+                try_zerocopy_f64_matrix_norm_lastaxes(py, x.bind(py), ax0, ax1, kind, keepdims)?
         {
             return Ok(result);
         }

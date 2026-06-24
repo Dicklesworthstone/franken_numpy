@@ -3,6 +3,35 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python linalg.norm induced matrix p-norm (ord ±1/±inf) keep (47th win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `linalg.norm(ord=inf, axis=(-2,-1))` 4096x16x16 vs NumPy | 10/10 | `0.214x` NumPy time (4.66x faster) |
+| `linalg.norm(ord=inf, axis=(-2,-1))` 2048x32x32 vs NumPy | 10/10 | `0.137x` NumPy time (7.32x faster) |
+| `linalg.norm(ord=1, axis=(-2,-1))` 4096x16x16 vs NumPy | 10/10 | `0.271x` NumPy time (3.69x faster) |
+| `linalg.norm(ord=1, axis=(-2,-1))` 2048x32x32 vs NumPy | 10/10 | `0.379x` NumPy time (2.64x faster) |
+| Behavior gate | 9/10 | Native only for f64 C-contiguous ord {1,-1,inf,-inf} over exact trailing-order 2-tuple axis; reversed/non-trailing axes + other dtypes defer to NumPy |
+| Conformance gate | 10/10 | `conformance_linalg_basic` 61/61 (new 13-case bit-exact induced-matrix-norm parity test) |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: `try_zerocopy_f64_matrix_norm_lastaxes`
+  (`MatrixNormKind` ±inf=row abs-sum, ±1=col abs-sum; per-row contiguous /
+  per-col gathered `pairwise_abs_f64` + NaN-prop max/min), ord 1/-1/±inf + exact
+  trailing 2-tuple-axis dispatch in `norm()`.
+- numpy materializes abs(x) + a per-row/col add.reduce + max/min (3 single-threaded
+  passes); each row/col abs-sum is bit-identical to a contiguous pairwise reduce.
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface norm_frobenius -- --sample-size 10 --warm-up-time 1
+  --measurement-time 3 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_linalg_norm_matrix_induced_cod_b/`.
+
+Decision:
+- Release-ready keep for the contiguous trailing-2-axis f64 induced matrix p-norm rows.
+- ord=0/general p and reversed/non-trailing axes remain on NumPy.
+
 ## 2026-06-24 CreamEagle fnp-python linalg.norm batched Frobenius (trailing 2-axis) keep (46th win)
 
 | Area | Score | Verdict |

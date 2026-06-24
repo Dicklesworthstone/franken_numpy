@@ -763,6 +763,59 @@ print(all_pass)
 }
 
 #[test]
+fn norm_matrix_induced_lastaxes_matches_numpy() -> Result<(), String> {
+    // Exercises the native induced matrix p-norm fold (ord 1/-1/+inf/-inf over the
+    // trailing 2-tuple axis) against numpy bit-exactly (atol=0, equal_nan=True),
+    // incl dtype/shape: 3-D and 4-D stacks, plain 2-D axis=(0,1), keepdims, a
+    // reversed-axis (-1,-2) fallthrough (axis order matters for 1 vs inf), a
+    // non-trailing axis fallthrough, and a NaN/Inf block.
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+s3 = np.linspace(-4.0, 6.0, 4 * 5 * 6, dtype=np.float64).reshape(4, 5, 6)
+s4 = np.linspace(-2.0, 3.0, 2 * 3 * 4 * 5, dtype=np.float64).reshape(2, 3, 4, 5)
+m2 = np.linspace(-1.0, 2.0, 7 * 8, dtype=np.float64).reshape(7, 8)
+nanblk = np.array([[[1.0, np.nan], [3.0, 4.0]], [[1.0, np.inf], [2.0, 5.0]]], dtype=np.float64)
+cases = [
+    (s3, 1, (-2, -1), False),
+    (s3, -1, (-2, -1), True),
+    (s3, np.inf, (-2, -1), False),
+    (s3, -np.inf, (-2, -1), True),
+    (s4, 1, (-2, -1), False),
+    (s4, np.inf, (-2, -1), False),
+    (m2, 1, (0, 1), False),
+    (m2, np.inf, (0, 1), False),
+    (s3, 1, (-1, -2), False),
+    (s3, np.inf, (-1, -2), False),
+    (s3, 1, (0, 1), False),
+    (nanblk, 1, (-2, -1), False),
+    (nanblk, np.inf, (-2, -1), False),
+]
+all_pass = True
+for arr, ord_arg, axis, keepdims in cases:
+    fnp_result = fnp.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    np_result = np.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    if not same(fnp_result, np_result):
+        print("FAIL", ord_arg, axis, keepdims, np.asarray(fnp_result), np.asarray(np_result))
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm induced matrix p-norm parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn norm_vector_inf() -> Result<(), String> {
     let script = fnp_script(
         r#"

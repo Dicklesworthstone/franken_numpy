@@ -1718,6 +1718,62 @@ fn bench_norm_frobenius_boundary(c: &mut Criterion) {
                     black_box(result);
                 });
             });
+
+            // Induced matrix inf-norm (max abs row sum).
+            let fnp_inf = PyDict::new(py);
+            fnp_inf.set_item("ord", f64::INFINITY).expect("fnp inf ord");
+            fnp_inf
+                .set_item("axis", (-2_i64, -1_i64))
+                .expect("fnp inf axis");
+            let np_inf = PyDict::new(py);
+            np_inf.set_item("ord", f64::INFINITY).expect("np inf ord");
+            np_inf
+                .set_item("axis", (-2_i64, -1_i64))
+                .expect("np inf axis");
+            group.bench_function(format!("fnp_norm_inf_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_norm
+                        .call((&input,), Some(&fnp_inf))
+                        .expect("fnp matrix inf-norm call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_norm_inf_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_norm
+                        .call((&input,), Some(&np_inf))
+                        .expect("numpy matrix inf-norm call");
+                    black_box(result);
+                });
+            });
+
+            // Induced matrix 1-norm (max abs col sum).
+            let fnp_l1 = PyDict::new(py);
+            fnp_l1.set_item("ord", 1_i64).expect("fnp l1 ord");
+            fnp_l1
+                .set_item("axis", (-2_i64, -1_i64))
+                .expect("fnp l1 axis");
+            let np_l1 = PyDict::new(py);
+            np_l1.set_item("ord", 1_i64).expect("np l1 ord");
+            np_l1
+                .set_item("axis", (-2_i64, -1_i64))
+                .expect("np l1 axis");
+            group.bench_function(format!("fnp_norm_l1_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_norm
+                        .call((&input,), Some(&fnp_l1))
+                        .expect("fnp matrix 1-norm call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_norm_l1_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_norm
+                        .call((&input,), Some(&np_l1))
+                        .expect("numpy matrix 1-norm call");
+                    black_box(result);
+                });
+            });
         }
     });
 
