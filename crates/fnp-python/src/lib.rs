@@ -27217,8 +27217,36 @@ fn try_zerocopy_f64_var_axis(
 // Which contiguous-last-axis vector norm the native fold computes.
 #[derive(Clone, Copy)]
 enum VectorNormKind {
-    L2, // ord None / 2: sqrt(add.reduce(x*x))
-    L1, // ord 1:        add.reduce(abs(x))
+    L2,     // ord None / 2: sqrt(add.reduce(x*x))
+    L1,     // ord 1:        add.reduce(abs(x))
+    MaxAbs, // ord +inf:     abs(x).max(axis)  (NaN-propagating)
+    MinAbs, // ord -inf:     abs(x).min(axis)  (NaN-propagating)
+}
+
+// NaN-propagating max/min of |x| over a lane — the bit-exact analog of numpy's
+// `abs(x).max(axis)` / `.min(axis)` (np.maximum/minimum.reduce, which propagate
+// NaN, unlike f64::max/min). abs() and max/min are exact, so this matches numpy
+// bit-for-bit; any NaN in the lane yields NaN, +-Inf flow through naturally.
+fn lane_extreme_abs_f64(lane: &[f64], want_max: bool) -> f64 {
+    let mut acc = if want_max {
+        f64::NEG_INFINITY
+    } else {
+        f64::INFINITY
+    };
+    let mut saw_nan = false;
+    for &v in lane {
+        let a = v.abs();
+        if a.is_nan() {
+            saw_nan = true;
+        } else if (want_max && a > acc) || (!want_max && a < acc) {
+            acc = a;
+        }
+    }
+    if saw_nan {
+        f64::NAN
+    } else {
+        acc
+    }
 }
 
 // np.linalg.norm(x, ord in {None, 1, 2}, axis=<int last axis>) - a vector L1 or L2
@@ -27268,6 +27296,8 @@ fn try_zerocopy_f64_vector_norm_axis(
         match kind {
             VectorNormKind::L2 => pairwise_sq_f64(lane, &mut buf).sqrt(),
             VectorNormKind::L1 => pairwise_abs_f64(lane, &mut buf),
+            VectorNormKind::MaxAbs => lane_extreme_abs_f64(lane, true),
+            VectorNormKind::MinAbs => lane_extreme_abs_f64(lane, false),
         }
     };
     use rayon::prelude::*;
@@ -41703,10 +41733,10 @@ fn norm(
             }
         }
     }
-    // Vector L1 / L2 norm along the contiguous last axis (ord None/1/2, single int
-    // axis): numpy materializes abs(x) (L1) or (x.conj()*x).real (L2) then
-    // add.reduce(.., axis) (+sqrt for L2); the native per-lane fold avoids the
-    // temporary. See try_zerocopy_f64_vector_norm_axis.
+    // Vector norm along the contiguous last axis (ord None/1/2/+-inf, single int
+    // axis): numpy materializes abs(x) (L1, +-inf) or (x.conj()*x).real (L2) then a
+    // per-axis reduce (add.reduce +sqrt for L2; max/min for +-inf); the native
+    // per-lane fold avoids the temporary. See try_zerocopy_f64_vector_norm_axis.
     if let Some(axis_val) = axis.as_ref() {
         let kind = match ord.as_ref() {
             None => Some(VectorNormKind::L2),
@@ -41718,6 +41748,10 @@ fn norm(
                     Some(VectorNormKind::L2)
                 } else if as_i == Some(1) || as_f == Some(1.0) {
                     Some(VectorNormKind::L1)
+                } else if as_f == Some(f64::INFINITY) {
+                    Some(VectorNormKind::MaxAbs)
+                } else if as_f == Some(f64::NEG_INFINITY) {
+                    Some(VectorNormKind::MinAbs)
                 } else {
                     None
                 }

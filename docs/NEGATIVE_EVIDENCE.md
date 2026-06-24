@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: linalg.norm axis=-1 native vector +-inf (ord=±inf) extension
+
+`CreamEagle`/`cod-b`. Third member of the last-axis vector-norm fold family
+(after L2 `6355309e`, L1 `657a1137`): `ord=+inf` (max|x|) and `ord=-inf` (min|x|).
+NumPy's axis-int inf-norm is `abs(x).max(axis)` / `.min(axis)` - it materializes a
+whole-array `abs(x)` temporary then a SEPARATE max/min reduce (two passes over the
+temp), so numpy's inf-norm is even slower than its own L1/L2 (3.18M vs 1.26M ns at
+4096x512). The native `lane_extreme_abs_f64` fold takes max/min of |x| in one pass,
+no temp, parallel across lanes.
+
+`lane_extreme_abs_f64(lane, want_max)` is NaN-PROPAGATING (numpy's
+maximum/minimum.reduce propagate NaN, unlike `f64::max`/`min` which drop it) - any
+NaN lane -> NaN; abs() + max/min are exact -> bit-identical; +-Inf flow through.
+`VectorNormKind::{MaxAbs, MinAbs}`; `norm()` maps `ord=+inf`/`-inf`. Empty axis
+defers to numpy (zero-size reduce raise). All other orders still delegate.
+
+`cc`/`vmi1153651` head-to-head, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `norm(ord=inf, axis=-1)`, 4096x512 f64 | 338,984 | 3,175,403 | 0.107x | native win |
+| `norm(ord=inf, axis=-1)`, 8192x1024 f64 | 1,670,441 | 11,513,939 | 0.145x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface norm_axis -- --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_linalg_basic`
+
+Validation: `conformance_linalg_basic` 59/59 (new `norm_axis_vector_inf_matches_numpy`
+is the 59th), bit-exact under `np.allclose(rtol=0, atol=0, equal_nan=True)` across
++inf/-inf, axis=-1 keepdims both, non-last-axis fallthrough, 1-D scalar axis, and
+NaN/Inf lanes for both max and min. Artifacts:
+`tests/artifacts/perf/2026-06-24_linalg_norm_inf_axis_cod_b/`.
+
 ## 2026-06-24 - KEEP: linalg.norm axis=-1 native vector L1 (ord=1) extension
 
 `CreamEagle`/`cod-b`. Extends the just-landed last-axis vector-norm fold

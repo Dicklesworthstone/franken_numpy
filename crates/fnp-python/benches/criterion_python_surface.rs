@@ -1624,6 +1624,38 @@ fn bench_norm_axis_boundary(c: &mut Criterion) {
                     black_box(result);
                 });
             });
+
+            let inf = f64::INFINITY;
+            let fnp_inf_kwargs = PyDict::new(py);
+            fnp_inf_kwargs.set_item("ord", inf).expect("fnp inf ord kwarg");
+            fnp_inf_kwargs
+                .set_item("axis", -1_i64)
+                .expect("fnp inf axis kwarg");
+            let numpy_inf_kwargs = PyDict::new(py);
+            numpy_inf_kwargs
+                .set_item("ord", inf)
+                .expect("numpy inf ord kwarg");
+            numpy_inf_kwargs
+                .set_item("axis", -1_i64)
+                .expect("numpy inf axis kwarg");
+
+            group.bench_function(format!("fnp_norm_inf_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_norm
+                        .call((&input,), Some(&fnp_inf_kwargs))
+                        .expect("fnp norm inf axis benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_norm_inf_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_norm
+                        .call((&input,), Some(&numpy_inf_kwargs))
+                        .expect("numpy norm inf axis benchmark call");
+                    black_box(result);
+                });
+            });
         }
     });
 
