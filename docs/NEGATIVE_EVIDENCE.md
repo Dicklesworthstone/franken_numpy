@@ -7571,3 +7571,25 @@ rint_native did a transpose-copy extract instead of delegating. Added non-contig
 par, contiguous bit-exact preserved. 0 mismatches. 40 WINS. LESSON: most unary ufuncs delegate non-
 contig but stragglers (rint) extract+transpose-copy (6-40x) - grep unary ops that extract after
 try_zerocopy_f64_unary without a non-contig bail. (Only rint found across ~18 unary ops; others clean.)
+
+## BlackThrush WIN: std/var flat (axis=None) native two-pass fast path (2026-06-24) — 41st win
+np.std / np.var were PURE delegation to numpy (numpy.getattr("std"/"var")) — no native path
+at all, so they sat at exact parity even at 8M (46-55ms). numpy.var allocates TWO whole-array
+temporaries (x = a - mean, then x*x) before its pairwise sum; the flat reduction is therefore
+memory-bound on those temps. Added compute_f64_var_flat: a no-allocation two-pass pairwise fold
+(pairwise_simd_f64 for the mean, pairwise_sqr_dev_f64 for the squared deviations — the SAME
+helpers nanvar already uses), wired into py_std/var before the numpy delegate. Gated to axis=None,
+C-contiguous f64 ndarray, no out/dtype/keepdims, native ddof, empty kwargs; std = var.sqrt().
+NaN-PROPAGATING (numpy.var does NOT skip NaN, unlike nanvar): any NaN/Inf makes the mean
+non-finite -> defer to numpy for exact special-value semantics (avoids the all-NaN -> 0 divergence
+the NaN->0 squared-dev leaf would otherwise produce). n==0 / n<=ddof defer (numpy warns + NaN).
+PERF (new vs numpy): var/std N=8M 8.7ms vs 51ms = 0.17x (5.8x faster), N=16M 17ms vs 95ms = 0.18x,
+N=1M 0.74-0.78x, N=100k 0.87x, N=1000 0.17x (6x). Wins at every size, no regression. BIT-EXACT:
+0 mismatches across 14 shapes x {ddof 0,1,2} x {var,std} incl NaN/Inf/all-NaN/f32/int/2D-flat
+(all correctly deferred), same pairwise summation/blocksize as numpy. conformance_var 15/15,
+conformance_std 15/15. (3 conformance_statistics cov/corrcoef failures are PRE-EXISTING golden-drift
++ cov-y-ddof 1-ULP RED on HEAD — confirmed identical with my change stashed; I did not touch cov.)
+41 WINS. LESSON: a stats op that "delegates to numpy" and reads at exact parity is a HIDDEN gap —
+numpy's two-pass var/std materializes temp arrays; a no-alloc pairwise fold (reusing the nan* kernel)
+wins big at large n while staying bit-exact. Grep getattr("<op>") passthroughs that are memory-bound
+two-pass reductions. (axis / keepdims / out / dtype residual still delegates — same-as-numpy parity.)

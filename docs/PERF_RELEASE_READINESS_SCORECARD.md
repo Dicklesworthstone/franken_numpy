@@ -3,6 +3,26 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 BlackThrush fnp-python std/var flat native two-pass keep (41st win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `var`/`std` N=8M vs NumPy | 10/10 | No-alloc two-pass pairwise fold is `0.17x` NumPy time (5.8x faster) |
+| `var`/`std` N=16M vs NumPy | 10/10 | `0.18x` NumPy time; numpy materializes two whole-array temps |
+| `var`/`std` N=1M / 100k vs NumPy | 8/10 | `0.74-0.78x` / `0.87x` — wins, gap narrows in-cache |
+| Small N=1000 vs NumPy | 9/10 | `0.17x` (6x) — no small-array regression |
+| Bit-exactness vs NumPy | 10/10 | 0 mismatches over 14 shapes × {ddof 0,1,2} × {var,std}; same pairwise/blocksize |
+| Special-value safety | 9/10 | NaN/Inf/all-NaN/f32/int/2D all correctly defer to numpy |
+| Conformance/build gates | 9/10 | conformance_var 15/15, conformance_std 15/15; fmt/clippy clean on hunk |
+
+Evidence:
+- Agent `BlackThrush`; source lever: `compute_f64_var_flat` wired into `py_std`/`var`
+  before the numpy delegate (axis=None, C-contiguous f64, no out/dtype/keepdims, native
+  ddof). Reuses `pairwise_simd_f64` + `pairwise_sqr_dev_f64` (the nanvar kernel).
+- Ledger: `docs/NEGATIVE_EVIDENCE.md` "std/var flat … 41st win".
+- The 3 `conformance_statistics` cov/corrcoef failures are PRE-EXISTING (golden-drift +
+  cov-y-ddof 1-ULP) — confirmed identical (26 passed / 3 failed) with the change stashed.
+
 ## 2026-06-21 cod-b fnp-linalg batch_cholesky n=64 direct-write keep
 
 | Area | Score | Verdict |

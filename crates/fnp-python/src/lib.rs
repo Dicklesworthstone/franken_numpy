@@ -26106,6 +26106,45 @@ fn compute_f64_nanvar_flat(
     Ok(Some(sqr_sum / (count - ddof) as f64))
 }
 
+// Bit-exact flat var value (axis=None) for the PLAIN (NaN-propagating) np.var via
+// numpy's two-pass pairwise algorithm: avg = pairwise sum / n, then
+// var = pairwise sum((x-avg)^2) / (n - ddof). numpy.var allocates two whole-array
+// temporaries (x = a - mean, then x*x) before its pairwise sum; this fold reads the
+// contiguous buffer twice with NO allocation, so it beats numpy at large n while
+// staying bit-exact (same pairwise summation, same blocksize). Unlike nanvar this
+// does NOT skip NaN: numpy.var propagates NaN/Inf, so any non-finite mean defers to
+// numpy for exact special-value semantics (avoids the all-NaN -> 0 divergence the
+// NaN->0 squared-deviation leaf would otherwise produce). C-contiguous f64 only.
+fn compute_f64_var_flat(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    ddof: usize,
+) -> PyResult<Option<f64>> {
+    let numpy = py.import("numpy")?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+        return Ok(None);
+    };
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n == 0 || n <= ddof {
+        return Ok(None); // numpy warns + returns NaN for n - ddof <= 0 — defer
+    }
+    let mut buf = [0.0f64; 128];
+    // NaN-propagating pairwise sum (nan_to_zero = false): any NaN/Inf makes the mean
+    // non-finite below, where we defer to numpy.
+    let total = pairwise_simd_f64(cells, 0, n, false, &mut buf);
+    let avg = total / n as f64;
+    if !avg.is_finite() {
+        return Ok(None);
+    }
+    // avg is finite => no NaN/Inf in the input, so pairwise_sqr_dev_f64's NaN->0 leaf
+    // never fires and the result is bit-exact with numpy's two-pass var.
+    let sqr_sum = pairwise_sqr_dev_f64(cells, 0, n, avg, &mut buf);
+    Ok(Some(sqr_sum / (n - ddof) as f64))
+}
+
 #[pyfunction]
 #[pyo3(signature = (a, axis=None, dtype=None, out=None, keepdims=false))]
 fn nansum(
@@ -44032,6 +44071,19 @@ fn py_std(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
+    // Native bit-exact flat fast path (axis=None, f64 contiguous, no out/dtype/keepdims,
+    // native ddof): two-pass pairwise fold with no whole-array temporaries beats numpy's
+    // allocate-two-temps var at large n; std = var.sqrt(). [BlackThrush]
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && !keepdims
+        && let DdofArg::Native(d) = &ddof
+        && let Some(v) = compute_f64_var_flat(py, a.bind(py), *d)?
+    {
+        return Ok(numpy.getattr("float64")?.call1((v.sqrt(),))?.unbind());
+    }
     let std_fn = numpy.getattr("std")?;
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
@@ -44063,6 +44115,19 @@ fn var(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     let numpy = py.import("numpy")?;
+    // Native bit-exact flat fast path — see py_std. numpy.var allocates two whole-array
+    // temporaries before its pairwise sum; our two-pass fold reads the buffer twice with
+    // no allocation -> big win at large n, bit-exact pairwise. [BlackThrush]
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && !keepdims
+        && let DdofArg::Native(d) = &ddof
+        && let Some(v) = compute_f64_var_flat(py, a.bind(py), *d)?
+    {
+        return Ok(numpy.getattr("float64")?.call1((v,))?.unbind());
+    }
     let var_fn = numpy.getattr("var")?;
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
