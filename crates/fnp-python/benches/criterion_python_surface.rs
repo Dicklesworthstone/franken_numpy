@@ -1470,6 +1470,75 @@ fn bench_statistics_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_std_var_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_std_var_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_std = module.getattr("std").expect("fnp_python.std");
+        let numpy_std = numpy.getattr("std").expect("numpy.std");
+        let fnp_var = module.getattr("var").expect("fnp_python.var");
+        let numpy_var = numpy.getattr("var").expect("numpy.var");
+
+        for (label, rows, cols) in [
+            ("4096x512", 4096_i64, 512_i64),
+            ("8192x1024", 8192_i64, 1024_i64),
+        ] {
+            let size = rows * cols;
+            let input = numpy
+                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
+                .expect("std/var axis f64 input")
+                .call_method1("reshape", ((rows, cols),))
+                .expect("std/var axis 2-D shape");
+
+            group.bench_function(format!("fnp_var_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_var
+                        .call1((&input, -1_i64))
+                        .expect("fnp var axis benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_var_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_var
+                        .call1((&input, -1_i64))
+                        .expect("numpy var axis benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("fnp_std_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_std
+                        .call1((&input, -1_i64))
+                        .expect("fnp std axis benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_std_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_std
+                        .call1((&input, -1_i64))
+                        .expect("numpy std axis benchmark call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_compress_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_compress_boundary");
     group.sample_size(10);
@@ -2223,6 +2292,7 @@ criterion_group!(
     bench_setops_boundary,
     bench_sort_complex_boundary,
     bench_statistics_boundary,
+    bench_std_var_axis_boundary,
     bench_compress_boundary,
     bench_roll_boundary,
     bench_einsum_boundary,

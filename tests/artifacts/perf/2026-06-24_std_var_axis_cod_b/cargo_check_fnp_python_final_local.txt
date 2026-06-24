@@ -1,0 +1,46 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on build directory
+warning: method `nan_filtered` is never used
+     --> crates/fnp-ufunc/src/lib.rs:25364:8
+      |
+ 4913 | impl UFuncArray {
+      | --------------- method in this implementation
+...
+25364 |     fn nan_filtered(&self) -> Self {
+      |        ^^^^^^^^^^^^
+      |
+      = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `fnp-ufunc` (lib) generated 1 warning
+    Checking fnp-python v0.1.0 (/data/projects/franken_numpy/crates/fnp-python)
+warning: variants `Depth` and `Column` are never constructed
+    --> crates/fnp-python/src/lib.rs:2600:5
+     |
+2597 | enum StackHelperKind {
+     |      --------------- variants in this enum
+...
+2600 |     Depth,
+     |     ^^^^^
+2601 |     Column,
+     |     ^^^^^^
+     |
+     = note: `StackHelperKind` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `extract_mask_operand` is never used
+    --> crates/fnp-python/src/lib.rs:5232:4
+     |
+5232 | fn extract_mask_operand(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: function `count_valid_elements` is never used
+    --> crates/fnp-python/src/lib.rs:5254:4
+     |
+5254 | fn count_valid_elements(
+     |    ^^^^^^^^^^^^^^^^^^^^
+
+warning: `fnp-python` (lib) generated 3 warnings
+warning: `fnp-python` (lib test) generated 3 warnings (3 duplicates)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 16s

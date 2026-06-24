@@ -4,6 +4,51 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: std/var axis=-1 native two-pass fast path (NumPy temp allocation cliff)
+
+`AmberWillow`/`codex-cli`, parent bead `franken_numpy-ixs5y`. Resumed an
+uncommitted `std`/`var(axis=-1)` candidate in the main worktree, validated it
+against NumPy, and kept it because current head-to-head evidence is decisive.
+Agent Mail reservations were degraded: a failed bootstrap identity
+`CreamEagle` held stale leases that normal release calls reported as `released=0`;
+the edit surface was kept to `crates/fnp-python/src/lib.rs`, the existing
+`criterion_python_surface` bench addition, and this ledger.
+
+Candidate from `/alien-graveyard` + `/alien-artifact-coding` +
+`/extreme-software-optimization`: exploit the measured NumPy incumbent weakness
+for `var/std(axis=-1)` on large C-contiguous f64 arrays. NumPy materializes
+whole-array temporaries for centered values and squared deviations; the native
+path reuses the existing pairwise summation primitives per contiguous lane and
+allocates only the reduced output. Gate remains narrow: ndarray, C-contiguous
+f64, last axis only, native `ddof`, no `out`/`dtype`, empty kwargs; non-finite
+means and degrees-of-freedom warning cases defer to NumPy.
+
+`hz2` head-to-head, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`
+(RCH rewrote to the worker-scoped hz2 pool):
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `var(axis=-1)`, 4096x512 f64 | 263,262 | 2,655,856 | 0.099x | native win |
+| `std(axis=-1)`, 4096x512 f64 | 246,053 | 2,836,324 | 0.087x | native win |
+| `var(axis=-1)`, 8192x1024 f64 | 665,753 | 16,890,251 | 0.039x | native win |
+| `std(axis=-1)`, 8192x1024 f64 | 660,617 | 15,716,533 | 0.042x | native win |
+
+Proof commands:
+
+`AGENT_NAME=AmberWillow RCH_WORKER=hz2 RCH_WORKERS=hz2 RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface`
+
+`AGENT_NAME=AmberWillow RCH_WORKER=hz2 RCH_WORKERS=hz2 RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --test conformance_var -- --nocapture`
+
+`AGENT_NAME=AmberWillow RCH_WORKER=hz2 RCH_WORKERS=hz2 RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --test conformance_std -- --nocapture`
+
+`AGENT_NAME=AmberWillow RCH_WORKER=hz2 RCH_WORKERS=hz2 RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --bench criterion_python_surface -- python_std_var_axis_boundary --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+Validation: `conformance_var` 15/15 and `conformance_std` 15/15 passed. The
+per-crate check passed with pre-existing/default dead-code warnings in
+`fnp-ufunc` and `fnp-python`; no source error was introduced. An earlier RCH
+attempt on `ovh-b` failed before this crate with `zerocopy` build-script SIGILL,
+so it was discarded as an environment failure.
+
 ## 2026-06-22 - NO-SHIP / VERIFY: einsum matmul-shaped contraction remains a native WIN
 
 `BlackThrush`/`cod-b`, bead `deadlock-audit-einsum-keyword-outcomes-c795y`.

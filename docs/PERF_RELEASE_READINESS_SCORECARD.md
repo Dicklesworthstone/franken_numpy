@@ -3,6 +3,33 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python std/var last-axis native two-pass keep (42nd win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `var(axis=-1)` 4096x512 vs NumPy | 10/10 | `0.114x` NumPy time (8.77x faster) |
+| `std(axis=-1)` 4096x512 vs NumPy | 10/10 | `0.117x` NumPy time (8.53x faster) |
+| `var(axis=-1)` 8192x1024 vs NumPy | 10/10 | `0.082x` NumPy time (12.20x faster) |
+| `std(axis=-1)` 8192x1024 vs NumPy | 10/10 | `0.084x` NumPy time (11.93x faster) |
+| Behavior gate | 9/10 | Native only for finite C-contiguous f64 last-axis rows; unsupported/special cases defer to NumPy |
+| Conformance gate | 10/10 | `conformance_std` 15/15 and `conformance_var` 15/15 passed through RCH |
+| Tool hygiene | 7/10 | Per-crate check passed; fmt/clippy still expose pre-existing crate warnings/drift outside this lever |
+
+Evidence:
+- Agent `CreamEagle`; source lever: `try_zerocopy_f64_var_axis` wired into
+  `py_std`/`var` after the existing flat native path.
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface std_var_axis -- --sample-size 10 --warm-up-time 1
+  --measurement-time 3 --output-format bencher`.
+- Artifact directory:
+  `tests/artifacts/perf/2026-06-24_std_var_axis_cod_b/`.
+
+Decision:
+- Release-ready keep for the exact contiguous last-axis f64 `std`/`var` row.
+- Do not broaden to non-last axes or non-finite lanes without a separate
+  proof/benchmark pass; those remain on the NumPy fallback.
+
 ## 2026-06-24 BlackThrush fnp-python std/var flat native two-pass keep (41st win)
 
 | Area | Score | Verdict |

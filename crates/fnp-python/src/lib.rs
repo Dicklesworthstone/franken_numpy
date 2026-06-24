@@ -27070,14 +27070,97 @@ fn try_zerocopy_f64_nanvar_axis(
     } else {
         data.chunks_exact(axis_len).map(lane_var).collect()
     };
-    if results.iter().any(|r| r.is_none()) {
+    let Some(out): Option<Vec<f64>> = results.into_iter().collect() else {
         return Ok(None);
-    }
-    let out: Vec<f64> = results.into_iter().map(|r| r.unwrap()).collect();
+    };
     let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = shape[..ax].to_vec();
     if keepdims {
         // numpy keeps the reduced last axis as length 1.
+        out_shape.push(1);
+    }
+    let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
+}
+
+// Plain (NaN-propagating) np.var / np.std along the contiguous LAST axis, the analog of
+// try_zerocopy_f64_nanvar_axis. numpy.var(axis=-1) allocates whole-array temporaries
+// (a - mean broadcast, then squared) before its pairwise sum; this per-lane two-pass
+// pairwise fold reads each contiguous lane twice with no allocation, parallel across
+// lanes -> big win at large outer counts, bit-exact (same pairwise/blocksize as numpy).
+// NaN-propagating (unlike nanvar): a lane whose mean is non-finite (any NaN/Inf) makes
+// lane_var return None, which defers the WHOLE call to numpy for exact special-value
+// semantics (numpy would emit NaN there; the NaN->0 squared-dev leaf cannot reproduce
+// an all-NaN lane -> 0). axis_len <= ddof also defers (numpy warns + NaN).
+fn try_zerocopy_f64_var_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis_obj: &Bound<'_, PyAny>,
+    ddof: usize,
+    take_sqrt: bool,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+        return Ok(None);
+    };
+    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
+    if ax < 0 || ax != ndim - 1 {
+        return Ok(None); // only the contiguous last axis (inner == 1)
+    }
+    let ax = ax as usize;
+    let axis_len = shape[ax];
+    if axis_len == 0 || axis_len <= ddof {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let outer: usize = shape[..ax].iter().product();
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
+    // under the GIL -> &[f64] (Sync) for the parallel per-lane fold below.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let lane_var = |lane: &[f64]| -> Option<f64> {
+        let mut buf = [0.0f64; 128];
+        let lc: &[pyo3::buffer::ReadOnlyCell<f64>] =
+            unsafe { std::slice::from_raw_parts(lane.as_ptr().cast(), lane.len()) };
+        // NaN-propagating pairwise sum (nan_to_zero = false): any NaN/Inf -> non-finite
+        // mean -> defer the whole call to numpy below.
+        let sum = pairwise_simd_f64(lc, 0, lane.len(), false, &mut buf);
+        let avg = sum / lane.len() as f64;
+        if !avg.is_finite() {
+            return None;
+        }
+        let sq = pairwise_sqr_dev_f64(lc, 0, lane.len(), avg, &mut buf);
+        let var = sq / (lane.len() - ddof) as f64;
+        Some(if take_sqrt { var.sqrt() } else { var })
+    };
+    use rayon::prelude::*;
+    // Same crossover as nanvar_axis: per-lane two-pass fold is cheap, so rayon fan-out
+    // only pays off above ~1e5 total elements.
+    const VAR_AXIS_PARALLEL_MIN: usize = 98_304;
+    let parallel =
+        outer * axis_len >= VAR_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let results: Vec<Option<f64>> = if parallel {
+        data.par_chunks_exact(axis_len).map(lane_var).collect()
+    } else {
+        data.chunks_exact(axis_len).map(lane_var).collect()
+    };
+    let Some(out): Option<Vec<f64>> = results.into_iter().collect() else {
+        return Ok(None);
+    };
+    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let mut out_shape: Vec<usize> = shape[..ax].to_vec();
+    if keepdims {
         out_shape.push(1);
     }
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
@@ -44084,6 +44167,19 @@ fn py_std(
     {
         return Ok(numpy.getattr("float64")?.call1((v.sqrt(),))?.unbind());
     }
+    // Native last-axis fast path (single contiguous axis, f64, no out/dtype, native ddof):
+    // per-lane no-alloc two-pass pairwise fold parallel across lanes beats numpy's
+    // allocate-temps var(axis=-1).
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let DdofArg::Native(d) = &ddof
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(o) =
+            try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, true, keepdims)?
+    {
+        return Ok(o);
+    }
     let std_fn = numpy.getattr("std")?;
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
@@ -44127,6 +44223,17 @@ fn var(
         && let Some(v) = compute_f64_var_flat(py, a.bind(py), *d)?
     {
         return Ok(numpy.getattr("float64")?.call1((v,))?.unbind());
+    }
+    // Native last-axis fast path — see py_std. take_sqrt = false for var.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let DdofArg::Native(d) = &ddof
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(o) =
+            try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, false, keepdims)?
+    {
+        return Ok(o);
     }
     let var_fn = numpy.getattr("var")?;
     let kw = clone_py_kwargs(py, kwargs)?;
