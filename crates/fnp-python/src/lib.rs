@@ -26101,6 +26101,28 @@ fn pairwise_sq_f64(values: &[f64], buf: &mut [f64; 128]) -> f64 {
     left + right
 }
 
+// Pairwise sum of absolute values with NO NaN masking - the bit-exact analog of
+// numpy's `np.add.reduce(abs(x), axis)` (the vector L1 / ord=1 norm) for a real
+// f64 lane. Same pairwise block tree as pairwise_sq_f64, but takes |v| instead of
+// v*v. abs() only clears the sign bit (exact), so this matches numpy's reduce over
+// the materialized abs temporary bit-for-bit; NaN/Inf propagate (abs(NaN)=NaN,
+// abs(Inf)=Inf), so non-finite lanes need no special-casing.
+fn pairwise_abs_f64(values: &[f64], buf: &mut [f64; 128]) -> f64 {
+    let n = values.len();
+    if n <= 128 {
+        for (j, v) in values.iter().enumerate() {
+            buf[j] = v.abs();
+        }
+        return base_sum_simd(&buf[..n]);
+    }
+    let mut n2 = n / 2;
+    n2 -= n2 % 8;
+    let (left_values, right_values) = values.split_at(n2);
+    let left = pairwise_abs_f64(left_values, buf);
+    let right = pairwise_abs_f64(right_values, buf);
+    left + right
+}
+
 // Bit-exact flat nanvar value (axis=None) via numpy's two-pass algorithm:
 // avg = pairwise nansum / count, then var = pairwise sum((x-avg)^2, NaN->0) /
 // (count - ddof). Returns None to defer when there is no C-contiguous f64 buffer
@@ -27192,19 +27214,27 @@ fn try_zerocopy_f64_var_axis(
     Ok(Some(reshaped.unbind()))
 }
 
-// np.linalg.norm(x, ord in {None, 2}, axis=<int last axis>) - the Euclidean vector
-// 2-norm along the contiguous last axis. numpy materializes a whole-array temporary
-// s = (x.conj()*x).real then returns sqrt(np.add.reduce(s, axis=axis)); this per-lane
-// fold squares + pairwise-sums each contiguous lane with NO temporary, parallel
-// across lanes -> big win at large outer counts. Bit-exact: pairwise_sq_f64 reuses
-// the same pairwise sum-of-squares tree as numpy's add.reduce over the squared temp,
-// then sqrt. NaN/Inf propagate naturally (sqrt(Inf)=Inf, sqrt(NaN)=NaN), so
-// unlike var, no non-finite defer is needed. Gated to f64 C-contiguous ndarray, single
-// last-axis reduction; everything else falls through to the numpy passthrough.
+// Which contiguous-last-axis vector norm the native fold computes.
+#[derive(Clone, Copy)]
+enum VectorNormKind {
+    L2, // ord None / 2: sqrt(add.reduce(x*x))
+    L1, // ord 1:        add.reduce(abs(x))
+}
+
+// np.linalg.norm(x, ord in {None, 1, 2}, axis=<int last axis>) - a vector L1 or L2
+// norm along the contiguous last axis. numpy materializes a whole-array temporary
+// (s = (x.conj()*x).real for L2, abs(x) for L1) then a per-axis add.reduce (plus
+// sqrt for L2); this per-lane fold reduces each contiguous lane with NO temporary,
+// parallel across lanes -> big win at large outer counts. Bit-exact: pairwise_sq_f64
+// / pairwise_abs_f64 reuse the same pairwise tree numpy's add.reduce uses over the
+// materialized temp. NaN/Inf propagate naturally (sqrt(Inf)=Inf, sqrt(NaN)=NaN;
+// abs(NaN)=NaN), so no non-finite defer is needed. Gated to f64 C-contiguous
+// ndarray, single last-axis reduction; everything else falls through to numpy.
 fn try_zerocopy_f64_vector_norm_axis(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
     axis_obj: &Bound<'_, PyAny>,
+    kind: VectorNormKind,
     keepdims: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     let numpy = py.import("numpy")?;
@@ -27235,7 +27265,10 @@ fn try_zerocopy_f64_vector_norm_axis(
         unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
     let lane_norm = |lane: &[f64]| -> f64 {
         let mut buf = [0.0f64; 128];
-        pairwise_sq_f64(lane, &mut buf).sqrt()
+        match kind {
+            VectorNormKind::L2 => pairwise_sq_f64(lane, &mut buf).sqrt(),
+            VectorNormKind::L1 => pairwise_abs_f64(lane, &mut buf),
+        }
     };
     use rayon::prelude::*;
     // Same crossover as var_axis: the per-lane fold is cheap, rayon only pays off
@@ -41670,21 +41703,34 @@ fn norm(
             }
         }
     }
-    // Vector 2-norm along the contiguous last axis (ord None or 2, single int axis):
-    // numpy materializes (x.conj()*x).real then sqrt(add.reduce(.., axis)); the native
-    // per-lane fold avoids the temporary. See try_zerocopy_f64_vector_norm_axis.
+    // Vector L1 / L2 norm along the contiguous last axis (ord None/1/2, single int
+    // axis): numpy materializes abs(x) (L1) or (x.conj()*x).real (L2) then
+    // add.reduce(.., axis) (+sqrt for L2); the native per-lane fold avoids the
+    // temporary. See try_zerocopy_f64_vector_norm_axis.
     if let Some(axis_val) = axis.as_ref() {
-        let ord_is_two_norm = match ord.as_ref() {
-            None => true,
+        let kind = match ord.as_ref() {
+            None => Some(VectorNormKind::L2),
             Some(o) => {
                 let ob = o.bind(py);
-                ob.extract::<i64>().is_ok_and(|v| v == 2)
-                    || ob.extract::<f64>().is_ok_and(|v| v == 2.0)
+                let as_i = ob.extract::<i64>().ok();
+                let as_f = ob.extract::<f64>().ok();
+                if as_i == Some(2) || as_f == Some(2.0) {
+                    Some(VectorNormKind::L2)
+                } else if as_i == Some(1) || as_f == Some(1.0) {
+                    Some(VectorNormKind::L1)
+                } else {
+                    None
+                }
             }
         };
-        if ord_is_two_norm
-            && let Some(result) =
-                try_zerocopy_f64_vector_norm_axis(py, x.bind(py), axis_val.bind(py), keepdims)?
+        if let Some(kind) = kind
+            && let Some(result) = try_zerocopy_f64_vector_norm_axis(
+                py,
+                x.bind(py),
+                axis_val.bind(py),
+                kind,
+                keepdims,
+            )?
         {
             return Ok(result);
         }

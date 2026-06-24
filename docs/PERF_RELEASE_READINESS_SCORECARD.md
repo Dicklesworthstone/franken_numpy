@@ -3,6 +3,32 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python linalg.norm last-axis L1 (ord=1) keep (44th win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `linalg.norm(ord=1, axis=-1)` 4096x512 vs NumPy | 10/10 | `0.243x` NumPy time (4.11x faster) |
+| `linalg.norm(ord=1, axis=-1)` 8192x1024 vs NumPy | 10/10 | `0.081x` NumPy time (12.38x faster) |
+| Behavior gate | 9/10 | Native only for f64 C-contiguous last-axis `ord in {1,1.0}`; all other orders/axes/dtypes defer to NumPy |
+| Conformance gate | 10/10 | `conformance_linalg_basic` 58/58 (new bit-exact L1 axis parity test) |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; source lever: `pairwise_abs_f64` + `VectorNormKind::L1`
+  threaded into `try_zerocopy_f64_vector_norm_axis`, `ord=1` dispatch in `norm()`.
+- Extends commit `6355309e` (which covered `ord in {None,2}`) to the still-delegated
+  `ord=1` vector L1 norm; NumPy materializes `abs(x)` then `add.reduce(.., axis)`.
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface norm_axis -- --sample-size 10 --warm-up-time 1
+  --measurement-time 3 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_linalg_norm_l1_axis_cod_b/`.
+
+Decision:
+- Release-ready keep for the exact contiguous last-axis f64 `ord=1` row.
+- Do not broaden to `ord=inf/-inf/0/p` or non-last axes without a separate
+  proof/benchmark pass; those remain on the NumPy fallback.
+
 ## 2026-06-24 CreamEagle fnp-python linalg.norm last-axis native keep (43rd win)
 
 | Area | Score | Verdict |

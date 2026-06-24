@@ -1593,6 +1593,37 @@ fn bench_norm_axis_boundary(c: &mut Criterion) {
                     black_box(result);
                 });
             });
+
+            let fnp_l1_kwargs = PyDict::new(py);
+            fnp_l1_kwargs.set_item("ord", 1_i64).expect("fnp l1 ord kwarg");
+            fnp_l1_kwargs
+                .set_item("axis", -1_i64)
+                .expect("fnp l1 axis kwarg");
+            let numpy_l1_kwargs = PyDict::new(py);
+            numpy_l1_kwargs
+                .set_item("ord", 1_i64)
+                .expect("numpy l1 ord kwarg");
+            numpy_l1_kwargs
+                .set_item("axis", -1_i64)
+                .expect("numpy l1 axis kwarg");
+
+            group.bench_function(format!("fnp_norm_l1_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_norm
+                        .call((&input,), Some(&fnp_l1_kwargs))
+                        .expect("fnp norm l1 axis benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_norm_l1_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_norm
+                        .call((&input,), Some(&numpy_l1_kwargs))
+                        .expect("numpy norm l1 axis benchmark call");
+                    black_box(result);
+                });
+            });
         }
     });
 

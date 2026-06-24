@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: linalg.norm axis=-1 native vector L1 (ord=1) extension
+
+`CreamEagle`/`cod-b`. Extends the just-landed last-axis vector-norm fold
+(commit `6355309e`, which covered `ord in {None, 2}`) to the still-delegated
+`ord=1` case. NumPy's axis-int L1 norm is `np.add.reduce(abs(x), axis)`, which
+materializes a whole-array `abs(x)` temporary before the per-axis pairwise reduce;
+the native per-lane fold reduces each contiguous last-axis row with no temporary,
+parallel across lanes above the existing `98_304` element crossover.
+
+New kernel `pairwise_abs_f64` (same pairwise tree as `pairwise_sq_f64`, sums `|v|`
+- abs only clears the sign bit -> exact -> bit-identical to numpy's reduce over the
+materialized abs temp; NaN/Inf propagate). `VectorNormKind { L2, L1 }` threaded
+into `try_zerocopy_f64_vector_norm_axis`; `norm()` maps `ord in {1, 1.0}` -> L1 and
+`ord in {None, 2, 2.0}` -> L2. All other orders, non-last/tuple axes,
+non-f64/non-contiguous, complex, and matrix norms still delegate to numpy.
+
+`cc`/`vmi1153651` head-to-head, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `norm(ord=1, axis=-1)`, 4096x512 f64 | 391,714 | 1,610,950 | 0.243x | native win |
+| `norm(ord=1, axis=-1)`, 8192x1024 f64 | 899,202 | 11,135,812 | 0.081x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface norm_axis -- --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_linalg_basic`
+
+Validation: `conformance_linalg_basic` 58/58 (the new `norm_axis_vector_l1_matches_numpy`
+is the 58th), bit-exact under `np.allclose(rtol=0, atol=0, equal_nan=True)` across
+ord=1 int/1.0 float, axis=-1 keepdims both, non-last-axis fallthrough, 1-D scalar
+axis, and a NaN/Inf lane. Same-run L2 control re-confirmed prior win (4096x512 5.30x,
+8192x1024 9.63x). Artifacts: `tests/artifacts/perf/2026-06-24_linalg_norm_l1_axis_cod_b/`.
+
 ## 2026-06-24 - KEEP: linalg.norm axis=-1 native no-temp vector 2-norm
 
 `AmberWillow`/`codex-cli`, parent bead `franken_numpy-ixs5y`. No scratch branch

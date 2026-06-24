@@ -632,6 +632,46 @@ print(all_pass)
 }
 
 #[test]
+fn norm_axis_vector_l1_matches_numpy() -> Result<(), String> {
+    // Exercises the native last-axis L1 (ord=1) fold against numpy bit-exactly
+    // (atol=0, equal_nan=True), including dtype/shape, ord=1 int vs 1.0 float,
+    // keepdims, a non-last axis fallthrough, a 1-D scalar axis, and a NaN/Inf lane.
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+base = np.linspace(-4.0, 6.0, 60, dtype=np.float64).reshape(3, 4, 5)
+cases = [
+    (base, 1, -1, False),
+    (base, 1.0, -1, True),
+    (base, 1, 1, False),
+    (base[0, 0], 1, 0, False),
+    (np.array([[1.0, np.nan, 3.0], [1.0, np.inf, 2.0]], dtype=np.float64), 1, -1, False),
+]
+all_pass = True
+for arr, ord_arg, axis, keepdims in cases:
+    fnp_result = fnp.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    np_result = np.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    if not same(fnp_result, np_result):
+        print("FAIL", ord_arg, axis, keepdims, np.asarray(fnp_result), np.asarray(np_result))
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm axis vector L1 parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn norm_vector_inf() -> Result<(), String> {
     let script = fnp_script(
         r#"
