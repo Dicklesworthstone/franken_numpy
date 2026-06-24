@@ -4,6 +4,47 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: linalg.norm axis=-1 native no-temp vector 2-norm
+
+`AmberWillow`/`codex-cli`, parent bead `franken_numpy-ixs5y`. No scratch branch
+head was missing from `main` (`git merge-base --is-ancestor` returned true for
+all named scratch branches), but the shared worktree contained an uncommitted
+`np.linalg.norm(axis=-1)` candidate. Kept after BOLD-VERIFY because the
+head-to-head ratios are decisive and the focused linalg norm conformance stayed
+green. Agent Mail writes were unavailable because the MCP mail database
+corruption breaker refused writes.
+
+Lever: for C-contiguous f64 ndarrays with a single last-axis vector norm
+(`ord=None`, `ord=2`, or `ord=2.0`), compute per-lane Euclidean norm directly
+with a no-allocation pairwise sum-of-squares fold, parallel across lanes above
+the existing `98_304` element crossover. NumPy's implementation materializes a
+squared temporary before reducing; this native path allocates only the reduced
+output. All other norm cases still delegate to NumPy: non-last axes,
+non-contiguous/non-f64 arrays, tuple axes, matrix norms, non-2 orders, and
+complex inputs.
+
+`ovh-a` head-to-head, requested
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`
+(RCH selected `ovh-a` and rewrote to its worker-scoped pool):
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `linalg.norm(axis=-1)`, 4096x512 f64 | 206,514 | 1,237,703 | 0.167x | native win |
+| `linalg.norm(axis=-1)`, 8192x1024 f64 | 1,489,302 | 10,618,072 | 0.140x | native win |
+
+Proof commands:
+
+`AGENT_NAME=AmberWillow RCH_WORKER=hz2 RCH_WORKERS=hz2 RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo check -p fnp-python --lib --bench criterion_python_surface --test conformance_linalg_basic`
+
+`AGENT_NAME=AmberWillow RCH_WORKER=hz2 RCH_WORKERS=hz2 RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --test conformance_linalg_basic norm -- --nocapture`
+
+`AGENT_NAME=AmberWillow RCH_WORKER=hz2 RCH_WORKERS=hz2 RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --bench criterion_python_surface -- python_norm_axis_boundary --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+Validation: per-crate check passed with the known pre-existing dead-code
+warnings in `fnp-ufunc`/`fnp-python`; focused norm conformance passed 13/13,
+including the new axis-specific parity case for `axis=-1`, `axis=1`, scalar
+axis output, `keepdims`, `ord=None`, `ord=2`, `ord=2.0`, NaN, and Inf.
+
 ## 2026-06-24 - KEEP: std/var axis=-1 native two-pass fast path (NumPy temp allocation cliff)
 
 `AmberWillow`/`codex-cli`, parent bead `franken_numpy-ixs5y`. Resumed an

@@ -26079,6 +26079,28 @@ fn pairwise_sqr_dev_f64(
     left + right
 }
 
+// Pairwise sum of squares with NO NaN masking - the bit-exact analog of numpy's
+// `np.add.reduce((x.conj()*x).real)` for a real f64 lane (s = x*x). Same pairwise
+// block structure (<=128 leaf, split trimmed to a multiple of 8) as
+// pairwise_sqr_dev_f64, but squares the raw value (no avg subtraction, no NaN->0)
+// so NaN/Inf propagate - norm of a lane containing a non-finite entry is NaN/Inf,
+// matching numpy, which removes any need to special-case non-finite lanes.
+fn pairwise_sq_f64(values: &[f64], buf: &mut [f64; 128]) -> f64 {
+    let n = values.len();
+    if n <= 128 {
+        for (j, v) in values.iter().enumerate() {
+            buf[j] = v * v;
+        }
+        return base_sum_simd(&buf[..n]);
+    }
+    let mut n2 = n / 2;
+    n2 -= n2 % 8;
+    let (left_values, right_values) = values.split_at(n2);
+    let left = pairwise_sq_f64(left_values, buf);
+    let right = pairwise_sq_f64(right_values, buf);
+    left + right
+}
+
 // Bit-exact flat nanvar value (axis=None) via numpy's two-pass algorithm:
 // avg = pairwise nansum / count, then var = pairwise sum((x-avg)^2, NaN->0) /
 // (count - ddof). Returns None to defer when there is no C-contiguous f64 buffer
@@ -27157,6 +27179,74 @@ fn try_zerocopy_f64_var_axis(
     };
     let Some(out): Option<Vec<f64>> = results.into_iter().collect() else {
         return Ok(None);
+    };
+    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let mut out_shape: Vec<usize> = shape[..ax].to_vec();
+    if keepdims {
+        out_shape.push(1);
+    }
+    let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
+}
+
+// np.linalg.norm(x, ord in {None, 2}, axis=<int last axis>) - the Euclidean vector
+// 2-norm along the contiguous last axis. numpy materializes a whole-array temporary
+// s = (x.conj()*x).real then returns sqrt(np.add.reduce(s, axis=axis)); this per-lane
+// fold squares + pairwise-sums each contiguous lane with NO temporary, parallel
+// across lanes -> big win at large outer counts. Bit-exact: pairwise_sq_f64 reuses
+// the same pairwise sum-of-squares tree as numpy's add.reduce over the squared temp,
+// then sqrt. NaN/Inf propagate naturally (sqrt(Inf)=Inf, sqrt(NaN)=NaN), so
+// unlike var, no non-finite defer is needed. Gated to f64 C-contiguous ndarray, single
+// last-axis reduction; everything else falls through to the numpy passthrough.
+fn try_zerocopy_f64_vector_norm_axis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis_obj: &Bound<'_, PyAny>,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+        return Ok(None);
+    };
+    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
+    if ax < 0 || ax != ndim - 1 {
+        return Ok(None); // only the contiguous last axis (inner == 1)
+    }
+    let ax = ax as usize;
+    let axis_len = shape[ax];
+    if axis_len == 0 {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let outer: usize = shape[..ax].iter().product();
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
+    // under the GIL -> &[f64] (Sync) for the parallel per-lane fold below.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let lane_norm = |lane: &[f64]| -> f64 {
+        let mut buf = [0.0f64; 128];
+        pairwise_sq_f64(lane, &mut buf).sqrt()
+    };
+    use rayon::prelude::*;
+    // Same crossover as var_axis: the per-lane fold is cheap, rayon only pays off
+    // above ~1e5 total elements.
+    const NORM_AXIS_PARALLEL_MIN: usize = 98_304;
+    let parallel =
+        outer * axis_len >= NORM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let out: Vec<f64> = if parallel {
+        data.par_chunks_exact(axis_len).map(lane_norm).collect()
+    } else {
+        data.chunks_exact(axis_len).map(lane_norm).collect()
     };
     let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
     let mut out_shape: Vec<usize> = shape[..ax].to_vec();
@@ -41578,6 +41668,25 @@ fn norm(
                     }
                 }
             }
+        }
+    }
+    // Vector 2-norm along the contiguous last axis (ord None or 2, single int axis):
+    // numpy materializes (x.conj()*x).real then sqrt(add.reduce(.., axis)); the native
+    // per-lane fold avoids the temporary. See try_zerocopy_f64_vector_norm_axis.
+    if let Some(axis_val) = axis.as_ref() {
+        let ord_is_two_norm = match ord.as_ref() {
+            None => true,
+            Some(o) => {
+                let ob = o.bind(py);
+                ob.extract::<i64>().is_ok_and(|v| v == 2)
+                    || ob.extract::<f64>().is_ok_and(|v| v == 2.0)
+            }
+        };
+        if ord_is_two_norm
+            && let Some(result) =
+                try_zerocopy_f64_vector_norm_axis(py, x.bind(py), axis_val.bind(py), keepdims)?
+        {
+            return Ok(result);
         }
     }
     // Passthrough to np.linalg.norm so ord (None/fro/nuc/int/inf/-inf/real),

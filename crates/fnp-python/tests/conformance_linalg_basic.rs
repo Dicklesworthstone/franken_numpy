@@ -590,6 +590,48 @@ print(np.allclose(fnp_result, np_result))
 }
 
 #[test]
+fn norm_axis_vector_l2_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a)
+    b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+base = np.linspace(-4.0, 6.0, 60, dtype=np.float64).reshape(3, 4, 5)
+cases = [
+    (base, None, -1, False),
+    (base, 2, -1, False),
+    (base, 2.0, -1, True),
+    (base, None, 1, False),
+    (base[0, 0], None, 0, False),
+    (np.array([[1.0, np.nan, 3.0], [1.0, np.inf, 2.0]], dtype=np.float64), None, -1, False),
+]
+all_pass = True
+for arr, ord_arg, axis, keepdims in cases:
+    if ord_arg is None:
+        fnp_result = fnp.linalg.norm(arr, axis=axis, keepdims=keepdims)
+        np_result = np.linalg.norm(arr, axis=axis, keepdims=keepdims)
+    else:
+        fnp_result = fnp.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+        np_result = np.linalg.norm(arr, ord=ord_arg, axis=axis, keepdims=keepdims)
+    if not same(fnp_result, np_result):
+        print("FAIL", ord_arg, axis, keepdims, np.asarray(fnp_result), np.asarray(np_result))
+        all_pass = False
+print(all_pass)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "norm axis vector L2 parity should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn norm_vector_inf() -> Result<(), String> {
     let script = fnp_script(
         r#"

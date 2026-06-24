@@ -3,6 +3,31 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python linalg.norm last-axis native keep (43rd win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `linalg.norm(axis=-1)` 4096x512 vs NumPy | 10/10 | `0.136x` NumPy time (7.35x faster) |
+| `linalg.norm(axis=-1)` 8192x1024 vs NumPy | 10/10 | `0.0585x` NumPy time (17.09x faster) |
+| Behavior gate | 9/10 | Native only for C-contiguous f64 last-axis vector 2-norm; unsupported orders/axes defer to NumPy |
+| Conformance gate | 10/10 | Existing norm filter, dedicated axis-norm parity test, and per-crate all-targets check passed through RCH |
+| Tool hygiene | 8/10 | Existing default warnings remain outside this lever |
+
+Evidence:
+- Agent `CreamEagle`; source lever: `try_zerocopy_f64_vector_norm_axis` wired
+  into `np.linalg.norm` for `ord=None`/`2` and single last-axis reductions.
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface norm_axis -- --sample-size 10 --warm-up-time 1
+  --measurement-time 3 --output-format bencher`.
+- Artifact directory:
+  `tests/artifacts/perf/2026-06-24_norm_axis_cod_b/`.
+
+Decision:
+- Release-ready keep for the exact contiguous last-axis f64 vector 2-norm row.
+- Do not broaden to matrix norms, tuple axes, non-f64, or non-contiguous inputs
+  without a separate proof/benchmark pass.
+
 ## 2026-06-24 CreamEagle fnp-python std/var last-axis native two-pass keep (42nd win)
 
 | Area | Score | Verdict |

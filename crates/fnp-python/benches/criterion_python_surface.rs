@@ -1539,6 +1539,66 @@ fn bench_std_var_axis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_norm_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_norm_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_norm = module.getattr("norm").expect("fnp_python.norm");
+        let numpy_norm = numpy
+            .getattr("linalg")
+            .expect("numpy.linalg")
+            .getattr("norm")
+            .expect("numpy.linalg.norm");
+
+        for (label, rows, cols) in [
+            ("4096x512", 4096_i64, 512_i64),
+            ("8192x1024", 8192_i64, 1024_i64),
+        ] {
+            let size = rows * cols;
+            let input = numpy
+                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
+                .expect("norm axis f64 input")
+                .call_method1("reshape", ((rows, cols),))
+                .expect("norm axis 2-D shape");
+
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs.set_item("axis", -1_i64).expect("fnp axis kwarg");
+            let numpy_kwargs = PyDict::new(py);
+            numpy_kwargs
+                .set_item("axis", -1_i64)
+                .expect("numpy axis kwarg");
+
+            group.bench_function(format!("fnp_norm_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_norm
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp norm axis benchmark call");
+                    black_box(result);
+                });
+            });
+
+            group.bench_function(format!("numpy_norm_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_norm
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy norm axis benchmark call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_compress_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_compress_boundary");
     group.sample_size(10);
@@ -2293,6 +2353,7 @@ criterion_group!(
     bench_sort_complex_boundary,
     bench_statistics_boundary,
     bench_std_var_axis_boundary,
+    bench_norm_axis_boundary,
     bench_compress_boundary,
     bench_roll_boundary,
     bench_einsum_boundary,
