@@ -22,18 +22,31 @@ worker-scoped target dir on the remote):
 | `sum(axis=-1)`, 8192x1024 f64 | 1.1513 ms | 4.5198 ms | 0.255x | native win |
 | `sum(axis=-1)`, 65536x256 f64 | 2.4695 ms | 8.8303 ms | 0.280x | native win |
 
+Fresh `cod-b` reverify on 2026-06-25 with the requested warm target dir, rerouted by RCH
+to `vmi1264463`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `sum(axis=-1)`, 8192x1024 f64 | 3,525,188 | 6,056,761 | 0.582x | native win |
+| `sum(axis=-1)`, 65536x256 f64 | 4,905,593 | 11,854,597 | 0.414x | native win |
+
 Proof commands:
 
 `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- python_sum_lastaxis_boundary`
 
 `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --test conformance_sum -- --nocapture`
 
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface sum_lastaxis -- --sample-size 15 --warm-up-time 2 --measurement-time 4 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-python --test conformance_sum`
+
 Validation: `conformance_sum` 27/27 passed, including signed zero, NaN/Inf, dtype,
 `out`, `where`, `initial`, tuple axis, negative axis, and the new native
 `sum_lastaxis_native_pairwise_bitexact_matches_numpy` bit-exact row for 2-D, 3-D,
 keepdims, NaN/Inf, and non-last-axis fallback via exact shape/dtype/raw-byte equality.
 `cargo check -p fnp-python --all-targets`
-passed on `hz2`. The strict clippy gate still fails before this candidate in the existing
+passed on `hz2` in both the original run and the 2026-06-25 `cod-b` reverify. The strict
+clippy gate still fails before this candidate in the existing
 dependency warning `fnp-ufunc::UFuncArray::nan_filtered` dead code; not mixed into this
 perf lever. Artifacts:
 `tests/artifacts/perf/2026-06-24_sum_lastaxis_parallel_cod_a/`.
