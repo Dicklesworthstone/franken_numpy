@@ -12166,10 +12166,25 @@ fn try_zerocopy_f64_tile(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for block in 0..r {
-            let base = block * n;
-            for i in 0..n {
-                output[base + i].set(input[i].get());
+        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is read-only
+        // under the GIL and `flat` is a fresh numpy.empty we own (no alias). Tile = r verbatim
+        // copies of the input block; copy_from_slice is a vectorized memcpy (the old Cell loop
+        // was not) and each block is independent => bit-exact regardless of chunking.
+        let in_data: &[f64] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
+        let out_data: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+        // numpy.tile is a single-threaded python helper (reshape + C repeat); a parallel memcpy
+        // of each block aggregates write bandwidth on top of dropping numpy's python overhead.
+        const TILE_PARALLEL_MIN: usize = 1 << 21;
+        if total >= TILE_PARALLEL_MIN && r >= 2 && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            out_data.par_chunks_mut(n).for_each(|block| {
+                block.copy_from_slice(in_data);
+            });
+        } else {
+            for block in out_data.chunks_mut(n) {
+                block.copy_from_slice(in_data);
             }
         }
     }

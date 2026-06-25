@@ -3585,8 +3585,41 @@ fn bench_kron_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_tile_boundary(c: &mut Criterion) {
+    // np.tile of a 1-D array (scalar reps) -> ~4M output. numpy.tile is a single-threaded
+    // python helper (reshape + C repeat); fnp does a parallel block memcpy. Bit-exact.
+    let mut group = c.benchmark_group("python_tile_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        // base 1-D of 4096 elements tiled 1024x -> ~4.19M output.
+        let base = numpy
+            .call_method1("arange", (4096_i64,))
+            .expect("base")
+            .call_method1("astype", ("float64",))
+            .expect("f64");
+        let fnp_tile = module.getattr("tile").expect("fnp tile");
+        let numpy_tile = numpy.getattr("tile").expect("numpy tile");
+        group.bench_function("fnp_tile_f64_4m", |bn| {
+            bn.iter(|| black_box(fnp_tile.call1((&base, 1024_i64)).expect("fnp tile f64")));
+        });
+        group.bench_function("numpy_tile_f64_4m", |bn| {
+            bn.iter(|| black_box(numpy_tile.call1((&base, 1024_i64)).expect("numpy tile f64")));
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_tile_boundary,
     bench_kron_boundary,
     bench_nan_to_num_boundary,
     bench_cross_boundary,

@@ -8711,3 +8711,20 @@ PERF (criterion, remote rch worker = truth; python_kron_boundary, 4M output):
 CORRECTNESS: probe 25/0 across f32 + i64/i32/i16/i8/u8 2-D (incl i64 OVERFLOW-WRAP + dtype preservation) +
 1-D f64/i32 x sizes below/at/above the gate x non-divisible/rectangular dims x special values (inf/nan/-0.0).
 Build clean. Real wins (all immune to false-loss). KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize f64 np.tile 1-D (1.75x over numpy) (2026-06-25) — 57th win
+try_zerocopy_f64_tile (1-D scalar-reps tile) filled the r output blocks with an element-wise Cell loop.
+Replaced with a vectorized copy_from_slice memcpy per block, parallelized over blocks (par_chunks_mut(n) =
+one block per chunk). numpy.tile is a single-threaded python helper (reshape + C repeat) and on this build
+its f64 path runs slow (~11 GB/s); fnp's parallel block memcpy (~20 GB/s) wins. Each block is an independent
+verbatim copy => BIT-EXACT regardless of chunking. Gate total>=1<<21 and r>=2.
+PERF (criterion, remote rch worker hz2 = truth; python_tile_boundary, 4096-vec tiled 1024x -> 4.19M):
+  tile_f64: fnp 1.580ms vs NumPy 2.769ms = 0.571x (1.75x faster)
+CORRECTNESS: probe 45/0 across 8 dtypes (the f64 path + the any_tile byte path) x sizes below/at/above the
+gate x non-pow2 x special values (inf/nan/-0.0) x reps 0/1 x multi-element reps tuple (fallthrough). Build
+clean (f64-tile change is a strict subset of the verified build). KEEP.
+REJECTED SUB-CASE (any_tile narrow-dtype byte path): the same memcpy+parallel on the dtype-agnostic byte
+path measured tile_i32 fnp 0.258ms vs NumPy 0.262ms = 0.987x (PARITY). numpy.tile for i32 is already
+memcpy-saturated (~61 GB/s at 16 MB output), so the parallel byte copy is bandwidth-bound and cannot beat it
+— REVERTED any_tile to the original loop (no parity-only unsafe code shipped). The f64 win exists only because
+numpy's f64 tile path is anomalously slow on this build, NOT because tile is generally beatable. AGENT_NAME=BlackThrush.
