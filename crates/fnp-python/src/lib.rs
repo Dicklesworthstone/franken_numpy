@@ -8666,10 +8666,34 @@ fn try_zerocopy_f32_clip(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            let v = cell.get();
-            let t = if v < lo { lo } else { v };
-            slot.set(if t > hi { hi } else { t });
+        // The f64/int clip paths already use the same raw-slice fan-out for large
+        // buffers. Keep the exact scalar comparison sequence so NaN propagation and
+        // lo>hi behavior stay identical to the serial f32 path.
+        const CLIP_F32_PARALLEL_MIN: usize = 1 << 21;
+        if n >= CLIP_F32_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
+            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+            let in_data: &[f32] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
+            let out_data: &mut [f32] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(in_data.par_chunks(chunk))
+                .for_each(|(o, i)| {
+                    for (slot, &v) in o.iter_mut().zip(i.iter()) {
+                        let t = if v < lo { lo } else { v };
+                        *slot = if t > hi { hi } else { t };
+                    }
+                });
+        } else {
+            for (slot, cell) in output.iter().zip(input.iter()) {
+                let v = cell.get();
+                let t = if v < lo { lo } else { v };
+                slot.set(if t > hi { hi } else { t });
+            }
         }
     }
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
@@ -20741,12 +20765,43 @@ fn try_zerocopy_f64_modf(py: Python<'_>, x: &Bound<'_, PyAny>) -> PyResult<Optio
         else {
             return Ok(None);
         };
-        for ((c, fo), io) in cells.iter().zip(frac_out.iter()).zip(int_out.iter()) {
-            let v = c.get();
-            let t = v.trunc();
-            io.set(t);
-            let base = if v.is_infinite() { 0.0 } else { v - t };
-            fo.set(base.copysign(v));
+        // numpy.modf is single-threaded; this map is compute-moderate (trunc + copysign +
+        // branch) writing TWO outputs (~24 B/elem), so a parallel raw-slice map aggregates
+        // ALU+bandwidth and wins. Same per-element math => bit-identical.
+        let n = cells.len();
+        const MODF_PARALLEL_MIN: usize = 1 << 21;
+        if n >= MODF_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
+            // read-only under the GIL and frac/int are distinct fresh numpy.empty buffers
+            // we own (no alias with the input or each other).
+            let in_data: &[f64] =
+                unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+            let frac_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(frac_out.as_ptr() as *mut f64, n) };
+            let int_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(int_out.as_ptr() as *mut f64, n) };
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            frac_data
+                .par_chunks_mut(chunk)
+                .zip(int_data.par_chunks_mut(chunk))
+                .zip(in_data.par_chunks(chunk))
+                .for_each(|((fo, io), ci)| {
+                    for ((f, i), &v) in fo.iter_mut().zip(io.iter_mut()).zip(ci.iter()) {
+                        let t = v.trunc();
+                        *i = t;
+                        let base = if v.is_infinite() { 0.0 } else { v - t };
+                        *f = base.copysign(v);
+                    }
+                });
+        } else {
+            for ((c, fo), io) in cells.iter().zip(frac_out.iter()).zip(int_out.iter()) {
+                let v = c.get();
+                let t = v.trunc();
+                io.set(t);
+                let base = if v.is_infinite() { 0.0 } else { v - t };
+                fo.set(base.copysign(v));
+            }
         }
     }
     Ok(Some(PyTuple::new(py, [frac_arr, int_arr])?.unbind().into()))

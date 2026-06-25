@@ -8513,3 +8513,16 @@ and win. Confirmed by re-measuring with the size_of<=4 cap: i64 reverts to the S
 is gated OUT (stays serial, no regression). LESSON: the parallel-elementwise lever's win is BANDWIDTH-
 bound by itemsize on bandwidth-limited machines — wider dtypes can cross from win to loss; measure per
 width and cap by size_of. KEEP (i32/u32/i16/u16). AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize f64 np.modf (2026-06-25) — 49th win
+Serial-Cell-loop lever: try_zerocopy_f64_modf (np.modf -> frac + int parts) was a SERIAL two-output Cell
+loop (trunc + copysign + branch). numpy.modf is single-threaded AND slow (28.3ms@8M); fnp's parallel
+single-pass two-output map (one read, two writes ~24 B/elem) aggregates ALU+bandwidth and crushes it.
+Same per-element math (t=trunc(v); int=t; frac=(inf?0:v-t).copysign(v)) => BIT-EXACT. Gate 1<<21
+(below-gate serial unchanged; existing 1M bench stays serial). f32 modf left untouched (separate path).
+PERF (criterion, remote rch worker = truth; python_modf_boundary, 8M f64):
+  modf_f64: fnp 6.646ms vs NumPy 28.341ms = 0.23x (4.26x faster) — biggest win of the lever
+CORRECTNESS: probe 7/0 across sizes below/at/above the 1<<21 gate, non-pow2 (chunk remainder), 2-D, and
+special values (+-inf -> frac 0 w/ sign, nan, +-0.0, exact ints, negatives -> frac carries sign of x).
+Build clean. Real win (fnp BEATS numpy 4.26x). Committed source+ledger only (bench file shared w/ a peer's
+in-flight diff bench — my modf 8M bench lines left for the peer's commit). KEEP. AGENT_NAME=BlackThrush.
