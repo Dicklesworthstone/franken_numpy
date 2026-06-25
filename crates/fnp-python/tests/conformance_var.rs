@@ -645,3 +645,53 @@ print(fnp_result == np_result == 0.0)
     assert_eq!(result.trim(), "True", "var of single element should be 0");
     Ok(())
 }
+
+#[test]
+fn var_std_multiaxis_trailing_matches_numpy() -> Result<(), String> {
+    // Exercises the native multi-axis trailing var/std fold (axis a tuple resolving
+    // to the contiguous trailing axes) against numpy bit-exactly (atol=0,
+    // equal_nan=True) incl dtype/shape: var and std, ddof 0/1, keepdims, reversed
+    // axis order (variance is symmetric), 2-D axis=(0,1), a non-trailing axis
+    // fallthrough, and a NaN block (which must defer + match numpy's NaN).
+    let script = fnp_var_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a); b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+s3 = np.linspace(-4.0, 6.0, 4 * 5 * 6, dtype=np.float64).reshape(4, 5, 6)
+s4 = np.linspace(-2.0, 3.0, 2 * 3 * 4 * 5, dtype=np.float64).reshape(2, 3, 4, 5)
+m2 = np.linspace(-1.0, 2.0, 7 * 8, dtype=np.float64).reshape(7, 8)
+nanblk = np.array([[[1.0, np.nan], [3.0, 4.0]], [[1.0, 2.0], [2.0, 5.0]]], dtype=np.float64)
+ok = True
+cases = [
+    (s3, (-2, -1), 0, False, False),
+    (s3, (-2, -1), 1, True, False),
+    (s3, (-1, -2), 0, False, False),
+    (s4, (-3, -2, -1), 0, False, False),
+    (s4, (-2, -1), 0, False, True),
+    (m2, (0, 1), 1, False, False),
+    (s3, (0, 1), 0, False, False),
+    (nanblk, (-2, -1), 0, False, False),
+]
+for arr, axis, ddof, keepdims, use_std in cases:
+    if use_std:
+        f = fnp.std(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+        n = np.std(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+    else:
+        f = fnp.var(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+        n = np.var(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+    if not same(f, n):
+        print("FAIL", axis, ddof, keepdims, use_std, np.asarray(f), np.asarray(n)); ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "multi-axis trailing var/std parity should match numpy: {result}"
+    );
+    Ok(())
+}

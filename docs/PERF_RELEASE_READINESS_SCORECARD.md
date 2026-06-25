@@ -3,6 +3,34 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python var/std multi-axis trailing two-pass keep (48th win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `var(axis=(-2,-1))` 4096x16x16 vs NumPy | 10/10 | `0.342x` NumPy time (2.93x faster) |
+| `std(axis=(-2,-1))` 4096x16x16 vs NumPy | 10/10 | `0.360x` NumPy time (2.78x faster) |
+| `var(axis=(-2,-1))` 2048x32x32 vs NumPy | 10/10 | `0.120x` NumPy time (8.30x faster) |
+| `std(axis=(-2,-1))` 2048x32x32 vs NumPy | 10/10 | `0.100x` NumPy time (9.96x faster) |
+| Behavior gate | 9/10 | Native only for f64 C-contiguous axis tuple == trailing `[ndim-k..ndim)`, native ddof, no out/dtype; non-trailing/duplicate axes, non-finite blocks defer to NumPy |
+| Conformance gate | 10/10 | `conformance_var` 16/16 (new var+std multi-axis test) + `conformance_std` 15/15 |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: generalized `try_zerocopy_f64_var_axis` to accept a
+  trailing-axis tuple (per-block "lane" = product of trailing dims; symmetric so sorted).
+- numpy materializes mean-broadcast + squared temp + multi-axis reduce (single-threaded);
+  the multi-axis reduce over a contiguous trailing block is bit-identical to a flat
+  per-block two-pass.
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface var_multiaxis -- --sample-size 10 --warm-up-time 1
+  --measurement-time 3 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_std_var_multiaxis_cod_b/`.
+
+Decision:
+- Release-ready keep for the contiguous trailing-axes f64 var/std rows.
+- Non-trailing/strided axes and non-finite blocks remain on NumPy.
+
 ## 2026-06-24 CreamEagle fnp-python linalg.norm induced matrix p-norm (ord ±1/±inf) keep (47th win)
 
 | Area | Score | Verdict |

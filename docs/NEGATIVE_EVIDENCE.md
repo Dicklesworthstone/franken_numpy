@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: var/std multi-axis trailing native two-pass fold
+
+`CreamEagle`/`cod-b`. Generalizes the committed `try_zerocopy_f64_var_axis` (single
+contiguous last axis) to accept an axis TUPLE resolving to the contiguous trailing
+axes (per-block "lane" = product of those trailing dims). numpy.var allocates
+whole-array temporaries (a - mean broadcast, then squared) before its multi-axis
+pairwise reduce; the native per-block two-pass pairwise fold reads each contiguous
+block twice with no allocation, parallel across blocks.
+
+Bit-exact: numpy's multi-axis reduce over a contiguous trailing block is identical to
+a flat per-block reduce (verified `var(x, axis=(-2,-1)) == var(x.reshape(B,M*N), -1)`
+bit-for-bit, ddof 0/1, var and std). Variance is symmetric in the reduced axes, so the
+tuple is sorted (order irrelevant - unlike the matrix 1/inf norms). Gate: f64
+C-contiguous, axis tuple == exactly `[ndim-k .. ndim)`, native ddof, no out/dtype,
+empty kwargs; non-trailing/duplicate axes, axis_len<=ddof, non-finite block means defer.
+
+`cc`/`vmi1153651` head-to-head, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `var(axis=(-2,-1))`, 4096x16x16 f64 | 843,892 | 2,470,544 | 0.342x | native win |
+| `std(axis=(-2,-1))`, 4096x16x16 f64 | 380,081 | 1,056,932 | 0.360x | native win |
+| `var(axis=(-2,-1))`, 2048x32x32 f64 | 300,667 | 2,496,925 | 0.120x | native win |
+| `std(axis=(-2,-1))`, 2048x32x32 f64 | 252,473 | 2,514,051 | 0.100x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface var_multiaxis -- --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_var --test conformance_std`
+
+Validation: `conformance_var` 16/16 (new `var_std_multiaxis_trailing_matches_numpy`,
+tests var AND std) + `conformance_std` 15/15, bit-exact under `np.allclose(rtol=0,
+atol=0, equal_nan=True)` across ddof 0/1, keepdims, reversed axis order, 3-axis
+trailing reduce, plain 2-D axis=(0,1), non-trailing-axis fallthrough, and a NaN block.
+Artifacts: `tests/artifacts/perf/2026-06-24_std_var_multiaxis_cod_b/`.
+
 ## 2026-06-24 - KEEP: linalg.norm induced matrix p-norm (ord ±1/±inf, trailing 2-axis)
 
 `CreamEagle`/`cod-b`. Fifth member of the trailing-axis norm fold family (vector
