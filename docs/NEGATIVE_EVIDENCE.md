@@ -8413,3 +8413,22 @@ f32, square overflow). Build clean (3 pre-existing dead-code warnings, none mine
 LESSON: when an op WINS for f64 but LOSES for f32/int, the narrow-dtype kernel is usually a serial/
 unvectorized sibling of a parallelized f64 path — grep `unary_map_<narrow>` / fast-path helpers that
 lack the f64 path's rayon+raw-slice branch. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush: roll 2-D per-axis (axis0/axis1) "1.70x loss" = FALSE LOSS, clean-box parity — memmove ~0-gain, REVERTED (2026-06-25)
+DIG sweep on the LOADED local box flagged np.roll(2-D, scalar shift, axis=0) 1.70x and axis=None
+1.73x slow (vs numpy), while axis=1 won. ROOT-looked-real: try_zerocopy_f64_roll_axis (and the byte
+sibling try_zerocopy_any_roll_axis) did per-element `Cell` get/set loops, NOT copy_from_slice — the
+flat 1-D roll got the memmove treatment (84f52074) but the per-axis path was left as element loops.
+Built a copy_from_slice (memmove) version; bit-exact (probe 1392/0 across 8 dtypes x 7 shapes x all
+axes x shift signs). BUT the rch-worker A/B (the TRUTH; loaded-box ratios lie) disproved the loss:
+  OLD (Cell loop), clean light load: axis0 fnp 1.443ms vs numpy 1.441ms = 1.00x PARITY; axis1 0.98x.
+  NEW (memmove),    clean light load: axis0 fnp 1.356ms vs numpy 1.347ms = 1.01x PARITY; axis1 0.93x.
+The OLD per-element loop was ALREADY at parity on a clean box (the compiler vectorizes it / it is
+memory-bound at the limit); the "1.70x" was pure loaded-box CONTENTION (under memory pressure the
+scalar loop is load-insensitive and numpy's memmove degrades, which even INVERTS the ratio to a false
+"win" 0.82x). NEW vs OLD absolute is ~6% (1.356 vs 1.443ms) — within the +/-3-4% bench noise. So vs
+numpy this is parity->parity = ~0-gain. REVERTED (memmove fix left unapplied / parked in a stash; not
+dropped per no-destructive-git). 2-D per-axis roll criterion coverage landed separately (23cc995b).
+LESSON (Nth confirmation): a loaded-box "Nx loss" on a memory-bound op is a FALSE LOSS — re-verify
+OLD-vs-NEW on the rch worker at the SAME (light) load BEFORE building a fix. The per-element-Cell-vs-
+memmove rewrite felt like a guaranteed win but the Cell loop already hit parity. AGENT_NAME=BlackThrush.
