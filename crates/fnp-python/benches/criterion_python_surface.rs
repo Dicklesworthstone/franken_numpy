@@ -3392,8 +3392,55 @@ fn bench_around_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_cross_boundary(c: &mut Criterion) {
+    // np.cross on stacked 3-vectors at 4M lanes (12M floats/operand) — above the 1<<21
+    // parallel gate. The serial Cell loop reached numpy parity (single-thread, memory-bound);
+    // the per-lane parallel map aggregates bandwidth + ALU (6 mul + 3 sub/lane) and should
+    // win. Each output 3-vec depends only on its matching input 3-vecs => bit-exact.
+    let mut group = c.benchmark_group("python_cross_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let n: i64 = 4_000_000;
+        let total = n * 3;
+        let a = numpy
+            .call_method1("arange", (total,))
+            .expect("a base")
+            .call_method1("astype", ("float64",))
+            .expect("a f64")
+            .call_method1("reshape", ((n, 3_i64),))
+            .expect("a reshape");
+        let b = numpy
+            .call_method1("arange", (total,))
+            .expect("b base")
+            .call_method1("__mul__", (2_i64,))
+            .expect("b scaled")
+            .call_method1("astype", ("float64",))
+            .expect("b f64")
+            .call_method1("reshape", ((n, 3_i64),))
+            .expect("b reshape");
+        let fnp_cross = module.getattr("cross").expect("fnp cross");
+        let numpy_cross = numpy.getattr("cross").expect("numpy cross");
+        group.bench_function("fnp_cross_f64_4m", |bch| {
+            bch.iter(|| black_box(fnp_cross.call1((&a, &b)).expect("fnp cross")));
+        });
+        group.bench_function("numpy_cross_f64_4m", |bch| {
+            bch.iter(|| black_box(numpy_cross.call1((&a, &b)).expect("numpy cross")));
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_cross_boundary,
     bench_sqrt_input_extraction,
     bench_around_boundary,
     bench_where_boundary,

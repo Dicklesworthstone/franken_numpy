@@ -8578,3 +8578,19 @@ CORRECTNESS: probe 7/0 across sizes below/at/above the 1<<21 gate, non-pow2 (chu
 special values (+-inf -> frac 0 w/ sign, nan, +-0.0, exact ints, negatives -> frac carries sign of x).
 Build clean. Real win (fnp BEATS numpy 4.26x). Committed source+ledger only (bench file shared w/ a peer's
 in-flight diff bench — my modf 8M bench lines left for the peer's commit). KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize f64 np.cross (stacked 3-vectors) (2026-06-25) — 50th win
+Serial-Cell-loop lever: try_zerocopy_f64_cross_n3 (np.cross of two (n,3) f64 stacks) was a SERIAL
+per-lane Cell loop (6 mul + 3 sub per 3-vec). numpy.cross is single-threaded AND allocates THREE
+whole-array temporaries (tmp/cp1/cp2 = separate multiply+subtract passes, each a full memory sweep) ->
+slow. fnp fuses all 9 ops into ONE parallel per-lane pass (read 6, write 3, no temp). So the win stacks
+temp-elimination ON TOP of parallel bandwidth+ALU. Each output 3-vec depends only on its matching input
+3-vecs (identical expressions, identical order) => BIT-EXACT regardless of chunking; chunk is a multiple
+of 3 so no lane is split. Gate: total output elems n*3 >= 1<<21 (below-gate serial unchanged). cross is
+compute-heavy so it wins even at f64 itemsize (ALU parallelism, per the size_of refinement).
+PERF (criterion, remote rch worker = truth; python_cross_boundary, 4M lanes = 12M floats/operand):
+  cross_f64: fnp 21.818ms vs NumPy 162.004ms = 0.135x (7.43x faster) — biggest win of the lever so far
+CORRECTNESS: probe 7/0 across sizes below/at/above the n*3>=1<<21 gate, non-pow2 (chunk remainder), and
+special values (inf/nan/-0.0/+-1e300 -> overflow & NaN propagation in the mul-sub match numpy bit-exact,
+including numpy's own overflow RuntimeWarnings). Build clean. Real win (fnp BEATS numpy 7.43x, immune to
+the loaded-box false-loss trap). KEEP. AGENT_NAME=BlackThrush.

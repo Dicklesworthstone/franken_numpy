@@ -41758,17 +41758,55 @@ fn try_zerocopy_f64_cross_n3(
         let Some(output) = out_buf.as_mut_slice(py) else {
             return Ok(None);
         };
-        for i in 0..n {
-            let base = i * 3;
-            let ax = a_in[base].get();
-            let ay = a_in[base + 1].get();
-            let az = a_in[base + 2].get();
-            let bx = b_in[base].get();
-            let by = b_in[base + 1].get();
-            let bz = b_in[base + 2].get();
-            output[base].set(ay * bz - az * by);
-            output[base + 1].set(az * bx - ax * bz);
-            output[base + 2].set(ax * by - ay * bx);
+        let total = n * 3;
+        // numpy.cross is single-threaded; each output 3-vec depends only on its matching
+        // input 3-vecs, so a per-lane parallel map is bit-identical (same expressions, same
+        // order) and aggregates memory bandwidth + ALU to beat numpy for large stacks. cross
+        // is compute-heavy (6 mul + 3 sub per lane) so it wins even at f64 itemsize.
+        const CROSS_PARALLEL_MIN: usize = 1 << 21;
+        if total >= CROSS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; inputs are
+            // read-only under the GIL and `out` is a fresh numpy.empty we own (no alias).
+            let a_data: &[f64] =
+                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), total) };
+            let b_data: &[f64] =
+                unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f64>(), total) };
+            let out_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+            // Chunk on whole lanes (multiple of 3) so no 3-vec is split across threads.
+            let chunk = n.div_ceil(rayon::current_num_threads()) * 3;
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(a_data.par_chunks(chunk))
+                .zip(b_data.par_chunks(chunk))
+                .for_each(|((o, a), b)| {
+                    for k in 0..(o.len() / 3) {
+                        let base = k * 3;
+                        let ax = a[base];
+                        let ay = a[base + 1];
+                        let az = a[base + 2];
+                        let bx = b[base];
+                        let by = b[base + 1];
+                        let bz = b[base + 2];
+                        o[base] = ay * bz - az * by;
+                        o[base + 1] = az * bx - ax * bz;
+                        o[base + 2] = ax * by - ay * bx;
+                    }
+                });
+        } else {
+            for i in 0..n {
+                let base = i * 3;
+                let ax = a_in[base].get();
+                let ay = a_in[base + 1].get();
+                let az = a_in[base + 2].get();
+                let bx = b_in[base].get();
+                let by = b_in[base + 1].get();
+                let bz = b_in[base + 2].get();
+                output[base].set(ay * bz - az * by);
+                output[base + 1].set(az * bx - ax * bz);
+                output[base + 2].set(ax * by - ay * bx);
+            }
         }
     }
     Ok(Some(out.unbind()))
