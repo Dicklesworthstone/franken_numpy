@@ -223,3 +223,52 @@ print(np.all(result == 1))
     assert_eq!(result.trim(), "True", "ones should be all one");
     Ok(())
 }
+
+#[test]
+fn vander_native_cumprod_bitexact_matches_numpy() -> Result<(), String> {
+    // Exercises the native fused-cumprod vander fast path against numpy bit-exactly
+    // (atol=0, equal_nan=True) incl dtype/shape: default N, explicit N (wider and
+    // narrower than len(x)), increasing True/False, negative/large x, a NaN/Inf x,
+    // and an int-x fallthrough (numpy keeps int64 dtype).
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a); b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+rng = np.random.default_rng(31)
+x = rng.standard_normal(5000) * 2.0
+xspec = np.array([0.0, 1.0, -2.0, np.inf, -np.inf, np.nan, 1e3], dtype=np.float64)
+xint = np.array([1, 2, 3, 4], dtype=np.int64)
+ok = True
+cases = [
+    (x, None, False),
+    (x, None, True),
+    (x, 8, False),
+    (x, 8, True),
+    (x, 3, False),      # N < len(x)
+    (xspec, 6, False),
+    (xspec, 6, True),
+    (xint, 4, False),   # int x -> numpy keeps int64 (fallthrough)
+]
+for xv, N, inc in cases:
+    if N is None:
+        f = fnp.vander(xv, increasing=inc)
+        n = np.vander(xv, increasing=inc)
+    else:
+        f = fnp.vander(xv, N=N, increasing=inc)
+        n = np.vander(xv, N=N, increasing=inc)
+    if not same(f, n):
+        print("FAIL", N, inc, np.asarray(f).ravel()[:6], np.asarray(n).ravel()[:6]); ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native vander parity should match numpy: {result}"
+    );
+    Ok(())
+}

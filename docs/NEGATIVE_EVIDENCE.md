@@ -4,6 +4,37 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: np.vander native fused cumulative-product
+
+`CreamEagle`/`cod-b`. Second member of the "numpy builds via broadcast temp +
+accumulate" class (after polyval). `vander` was a pure passthrough. numpy builds the
+Vandermonde matrix via `tmp[:,1:] = x[:,None]; multiply.accumulate(tmp, axis=1)` — a
+broadcast temp + strided in-place cumulative product — ~11 ms for a tiny 200k x 8 output,
+~43 ms for 500k x 12. `try_zerocopy_f64_vander` computes each row's powers as a per-row
+left-to-right cumulative product in registers, writing the output buffer directly, no
+temp, parallel across rows. Bit-exact: same cumulative-product multiplications numpy's
+accumulate does (1, x, x*x, ...); `increasing=False` only stores that sequence in reversed
+column positions. f64 1-D x only (numpy keeps int64 for int input -> defer); N==0/empty defer.
+
+`cc`/`vmi1153651`, sample-size 20 + 2 s warmup, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `vander`, 200k x8 f64 | 3,253,763 | 11,236,864 | 0.290x | native win |
+| `vander`, 500k x12 f64 | 5,738,239 | 42,925,213 | 0.134x | native win |
+
+(fnp had ~30-50% run variance on the loaded box, but NumPy was stable and 3-7x slower —
+win unambiguous.) Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface vander -- --sample-size 20 --warm-up-time 2 --measurement-time 4 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_array_creation_base`
+
+Validation: `conformance_array_creation_base` 12/12 (new `vander_native_cumprod_bitexact_matches_numpy`),
+bit-exact under `np.allclose(rtol=0, atol=0, equal_nan=True)` across default/explicit N
+(wider+narrower), increasing True/False, NaN/Inf x, and int-x fallthrough. Artifacts:
+`tests/artifacts/perf/2026-06-24_vander_cumprod_cod_b/`.
+
 ## 2026-06-24 - KEEP: np.polyval native fused Horner (Python-loop temp avoidance)
 
 `CreamEagle`/`cod-b`. First lever OUTSIDE the reduction family with a big win. `polyval`

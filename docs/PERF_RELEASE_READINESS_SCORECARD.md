@@ -3,6 +3,31 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python vander native fused cumprod keep (55th win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `vander` 200k x8 vs NumPy | 10/10 | `0.290x` NumPy time (3.45x faster) |
+| `vander` 500k x12 vs NumPy | 10/10 | `0.134x` NumPy time (7.48x faster) |
+| Behavior gate | 9/10 | Native only for f64 C-contiguous 1-D x; int x (numpy keeps int64), N==0/empty, non-1-D defer to NumPy |
+| Conformance gate | 10/10 | `conformance_array_creation_base` 12/12 (new bit-exact vander test incl increasing/NaN/int) |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: `try_zerocopy_f64_vander` per-row register cumulative product
+  (same multiplications numpy's accumulate does), parallel across rows, no temp.
+- numpy builds via `x[:,None]` broadcast + `multiply.accumulate` (~11-43 ms); this writes
+  the output buffer directly.
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface vander -- --sample-size 20 --warm-up-time 2
+  --measurement-time 4 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_vander_cumprod_cod_b/`.
+
+Decision:
+- Release-ready keep for f64 1-D vander.
+- Int-coefficient x (int64 preservation) and non-1-D remain on NumPy.
+
 ## 2026-06-24 CreamEagle fnp-python polyval native fused Horner keep (54th win)
 
 | Area | Score | Verdict |

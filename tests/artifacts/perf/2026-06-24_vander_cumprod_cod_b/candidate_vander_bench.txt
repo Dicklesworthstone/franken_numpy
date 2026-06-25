@@ -1,0 +1,5 @@
+# sample-size 20, warm-up 2s, measurement 4s
+test python_vander_boundary/fnp_vander_f64_200k_x8 ... bench:   3,253,763 ns/iter (+/- 1,616,116)
+test python_vander_boundary/numpy_vander_f64_200k_x8 ... bench:  11,236,864 ns/iter (+/- 376,856)
+test python_vander_boundary/fnp_vander_f64_500k_x12 ... bench:   5,738,239 ns/iter (+/- 1,715,823)
+test python_vander_boundary/numpy_vander_f64_500k_x12 ... bench:  42,925,213 ns/iter (+/- 3,603,843)

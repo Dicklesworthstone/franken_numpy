@@ -1775,6 +1775,53 @@ fn bench_var_axis0_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_vander_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_vander_boundary");
+    group.sample_size(20);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_vander = module.getattr("vander").expect("fnp_python.vander");
+        let numpy_vander = numpy.getattr("vander").expect("numpy.vander");
+
+        for (label, n, cols) in [("200k_x8", 200_000_i64, 8_i64), ("500k_x12", 500_000_i64, 12_i64)]
+        {
+            let x = numpy
+                .call_method1("linspace", (-1.5_f64, 1.5_f64, n))
+                .expect("vander x input");
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs.set_item("N", cols).expect("fnp N kwarg");
+            let numpy_kwargs = PyDict::new(py);
+            numpy_kwargs.set_item("N", cols).expect("numpy N kwarg");
+
+            group.bench_function(format!("fnp_vander_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_vander
+                        .call((&x,), Some(&fnp_kwargs))
+                        .expect("fnp vander call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_vander_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_vander
+                        .call((&x,), Some(&numpy_kwargs))
+                        .expect("numpy vander call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_polyval_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_polyval_boundary");
     group.sample_size(10);
@@ -2871,6 +2918,7 @@ criterion_group!(
     bench_std_var_axis_boundary,
     bench_var_multiaxis_boundary,
     bench_var_axis0_boundary,
+    bench_vander_boundary,
     bench_polyval_boundary,
     bench_gradient_axis_boundary,
     bench_norm_axis_boundary,

@@ -30286,15 +30286,107 @@ fn try_zerocopy_int_isin(
     ))
 }
 
+// Native np.vander for an f64 C-contiguous 1-D x. numpy builds the Vandermonde matrix via
+// `tmp[:,1:] = x[:,None]; multiply.accumulate(tmp, axis=1)` — a broadcast temp + a strided
+// in-place cumulative product, ~7 ms even for a tiny 200k x 8 output. This per-row fused
+// cumulative product writes each (len(x), N) row directly with no temp, parallel across
+// rows. Bit-exact: the powers are the SAME left-to-right cumulative product numpy's
+// accumulate performs (1, x, x*x, x^2*x, ...); `increasing=False` only stores that
+// sequence into reversed column positions (the multiplications are identical). f64
+// C-contiguous 1-D x only (numpy preserves int64 for int input -> defer); N==0 / empty x
+// defer.
+fn try_zerocopy_f64_vander(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    x: &Bound<'_, PyAny>,
+    n: Option<usize>,
+    increasing: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !x.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let xdt = x.getattr("dtype")?;
+    if xdt.getattr("kind")?.extract::<String>()? != "f"
+        || xdt.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() || in_buffer.shape().len() != 1 {
+        return Ok(None); // numpy.vander requires 1-D x
+    }
+    let rows = in_buffer.shape()[0];
+    let cols = n.unwrap_or(rows);
+    if rows == 0 || cols == 0 {
+        return Ok(None); // empty output: defer for numpy's exact (rows, cols) shape
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), rows) };
+    let total = rows * cols;
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias x; each slot written once.
+        let o: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
+        // Fill one output row (length `cols`) from x value xv: left-to-right cumulative
+        // product 1, xv, xv*xv, ... stored increasing (col j = xv^j) or reversed
+        // (col j = xv^(cols-1-j)) — same multiplications either way.
+        let fill_row = |xv: f64, row: &mut [f64]| {
+            let mut pw = 1.0f64;
+            if increasing {
+                for slot in row.iter_mut() {
+                    *slot = pw;
+                    pw *= xv;
+                }
+            } else {
+                for slot in row.iter_mut().rev() {
+                    *slot = pw;
+                    pw *= xv;
+                }
+            }
+        };
+        use rayon::prelude::*;
+        const VANDER_PARALLEL_MIN: usize = 1 << 16;
+        let parallel = total >= VANDER_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        if parallel {
+            o.par_chunks_mut(cols)
+                .zip(data.par_iter())
+                .for_each(|(row, &xv)| fill_row(xv, row));
+        } else {
+            o.chunks_mut(cols)
+                .zip(data.iter())
+                .for_each(|(row, &xv)| fill_row(xv, row));
+        }
+    }
+    let reshaped = out.call_method1("reshape", ((rows, cols),))?;
+    Ok(Some(reshaped.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (x, N=None, increasing=false))]
 #[allow(non_snake_case)]
 fn vander(py: Python<'_>, x: Py<PyAny>, N: Option<usize>, increasing: bool) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.vander so width selection, increasing-order
-    // columns, dtype preservation (numpy keeps int64 for int inputs,
-    // which UFuncArray::vander currently promotes to f64), and 1-D
+    // Native fused cumulative-product path for f64 1-D x; numpy's broadcast +
+    // multiply.accumulate is far slower. Other dtypes/shapes fall through so width
+    // selection, increasing-order columns, int64 dtype preservation, and 1-D
     // input validation all match numpy exactly.
     let numpy = py.import("numpy")?;
+    if let Some(out) = try_zerocopy_f64_vander(py, &numpy, x.bind(py), N, increasing)? {
+        return Ok(out);
+    }
     let vander_fn = numpy.getattr("vander")?;
     let kwargs = PyDict::new(py);
     if let Some(width) = N {
