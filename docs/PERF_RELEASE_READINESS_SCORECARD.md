@@ -3,6 +3,32 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python nanmean axis=0 streaming fused pass keep (53rd win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `nanmean(axis=0)` 4096x512 vs NumPy | 10/10 | `0.424x` NumPy time (2.36x faster) |
+| `nanmean(axis=0)` 50000x64 vs NumPy | 10/10 | `0.342x` NumPy time (2.92x faster) |
+| Behavior gate | 9/10 | Native only for f64 C-contiguous axis=0 (>=2-D); non-axis-0 single non-trailing axes and non-f64 defer (all-NaN column handled inline as NaN + warning) |
+| Conformance gate | 10/10 | `conformance_nan_funcs` 37/37 (new nanmean axis=0 test, incl all-NaN column) |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: `try_zerocopy_f64_nanmean_axis0` single fused streaming pass
+  (per-column NaN->0 sum + non-NaN count; numpy reduces axis=0 sequentially -> bit-exact).
+- numpy materializes a NaN->0 copy + mask + two reduces (~19x slower than plain mean(0));
+  this streams once. Benched input all-finite, so it understates the gap (numpy on
+  10%-NaN data ~6.8 ms vs ~3.3 ms here).
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface var_axis0 -- --sample-size 20 --warm-up-time 1
+  --measurement-time 3 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_nanmean_axis0_cod_b/`.
+
+Decision:
+- Release-ready keep for the f64 C-contiguous axis=0 nanmean rows.
+- Non-axis-0 single non-trailing axes remain on NumPy.
+
 ## 2026-06-24 CreamEagle fnp-python nanvar/nanstd axis=0 streaming keep (52nd win)
 
 | Area | Score | Verdict |

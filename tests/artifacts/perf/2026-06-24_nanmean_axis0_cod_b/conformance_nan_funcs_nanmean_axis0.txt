@@ -1,0 +1,2 @@
+test nanmean_axis0_first_axis_matches_numpy ... ok
+test result: ok. 37 passed; 0 failed

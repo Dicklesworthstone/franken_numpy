@@ -4,6 +4,48 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - NO-GO: weighted np.average bit-exactness is numpy-internal-dependent
+
+`CreamEagle`/`cod-b`. Considered `np.average(a, axis=0/-1, weights=w)` (a reduction that
+materializes the `a*w` temp; numpy ~2.66 ms at 4096x512). REJECTED on bit-exactness:
+even numpy's OWN documented formula `np.multiply(a, wgt).sum(axis) / wgt.sum(axis)` does
+NOT reproduce `np.average` bit-for-bit, and `wgt.sum(axis=0)[0] != w.sum()` — reducing a
+BROADCAST (stride-0) weight array over axis 0 uses a different summation than a direct
+sum. So a streaming `num += a[i]*w[i]; den += w[i]` cannot be guaranteed bit-exact
+without replicating numpy's broadcast-reduction internals. Not pursued. Also ptp(axis=0):
+fused single-pass max/min IS bit-exact but numpy is already C-fast (~0.93 ms) -> modest
+only; skipped.
+
+## 2026-06-24 - KEEP: nanmean along axis=0 (first axis) native streaming fused pass
+
+`CreamEagle`/`cod-b`. The committed nanmean fast path covered the contiguous last axis; a
+first-axis (axis=0) reduction fell to numpy. numpy.nanmean materializes a NaN->0 copy +
+isnan mask, then TWO sequential axis-0 reduces (NaN->0 sum AND ~mask count) -> ~19x slower
+than plain mean(axis=0). `try_zerocopy_f64_nanmean_axis0`: a SINGLE streaming pass
+accumulates per column both the NaN->0 sum and the non-NaN count, then mean = sum/count.
+Serial cache-friendly (column-block parallelism cache-hostile, see var_axis0). Bit-exact
+(numpy reduces axis=0 sequentially; masked->0 both sides). All-NaN column (count==0) ->
+0.0/0.0 == numpy's NaN directly + "Mean of empty slice" warning -> no defer.
+
+`cc`/`vmi1153651`, sample-size 20, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`
+(all-finite input UNDERSTATES the gap — numpy on 10%-NaN data was ~6.8 ms vs ~3.3 ms here):
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `nanmean(axis=0)`, 4096x512 f64 | 1,415,014 | 3,337,235 | 0.424x | native win |
+| `nanmean(axis=0)`, 50000x64 f64 | 2,129,479 | 6,218,453 | 0.342x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface var_axis0 -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_nan_funcs`
+
+Validation: `conformance_nan_funcs` 37/37 (new `nanmean_axis0_first_axis_matches_numpy`),
+bit-exact under `np.allclose(rtol=0, atol=0, equal_nan=True)` across keepdims, negative
+axis, 3-D axis=0, NaN columns, an Inf column, and an all-NaN column (NaN + warning).
+Artifacts: `tests/artifacts/perf/2026-06-24_nanmean_axis0_cod_b/`.
+
 ## 2026-06-24 - KEEP: nanvar/nanstd along axis=0 (first axis) native streaming
 
 `CreamEagle`/`cod-b`. NaN-aware sibling of the axis=0 var streaming fold (47942af4).

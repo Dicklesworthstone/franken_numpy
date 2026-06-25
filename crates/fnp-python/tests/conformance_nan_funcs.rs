@@ -990,3 +990,52 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn nanmean_axis0_first_axis_matches_numpy() -> Result<(), String> {
+    // Exercises the native first-axis (axis=0) streaming nanmean fold against numpy
+    // bit-exactly (atol=0, equal_nan=True) incl dtype/shape: keepdims, negative axis,
+    // 3-D axis=0, NaN columns, an Inf column, and an all-NaN column (-> NaN + "Mean of
+    // empty slice" warning, computed directly as 0/0, not deferred).
+    let script = fnp_script(
+        r#"
+import warnings
+def same(a, b):
+    a = np.asarray(a); b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+rng = np.random.default_rng(23)
+m2 = rng.standard_normal((1000, 257)); m2[rng.random((1000, 257)) < 0.1] = np.nan
+tall = rng.standard_normal((50000, 16)); tall[rng.random((50000, 16)) < 0.1] = np.nan
+s3 = rng.standard_normal((64, 9, 7)); s3[rng.random((64, 9, 7)) < 0.1] = np.nan
+infm = rng.standard_normal((40, 8)); infm[3, 2] = np.inf
+allnan = rng.standard_normal((20, 5)); allnan[:, 2] = np.nan  # column 2 all NaN
+ok = True
+cases = [
+    (m2, 0, False),
+    (m2, 0, True),
+    (m2, -2, False),
+    (tall, 0, True),
+    (s3, 0, False),
+    (infm, 0, False),
+    (allnan, 0, False),
+]
+for arr, axis, keepdims in cases:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        f = fnp.nanmean(arr, axis=axis, keepdims=keepdims)
+        n = np.nanmean(arr, axis=axis, keepdims=keepdims)
+    if not same(f, n):
+        print("FAIL", axis, keepdims, np.asarray(f), np.asarray(n)); ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "axis=0 nanmean parity should match numpy: {result}"
+    );
+    Ok(())
+}

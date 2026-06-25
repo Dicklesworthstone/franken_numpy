@@ -25890,6 +25890,14 @@ fn nanmean(
         }
         return Ok(out);
     }
+    // Native first-axis (axis=0) streaming nanmean — single fused sum+count pass; numpy
+    // materializes a NaN->0 copy + mask + two reduces. See try_zerocopy_f64_nanmean_axis0.
+    if let Some(axis_val) = axis.as_ref()
+        && !axis_val.bind(py).is_none()
+        && let Some(out) = try_zerocopy_f64_nanmean_axis0(py, a.bind(py), axis_val.bind(py), keepdims)?
+    {
+        return Ok(out);
+    }
     // Non-contiguous (transposed/strided) ndarrays bail out of the zero-copy paths
     // into the cold extract → scalar scan (3-9x slower than numpy's cache-blocked
     // strided reduction). Delegate them to numpy (same parity).
@@ -27155,6 +27163,92 @@ fn try_zerocopy_f64_nanmean_axis(
     }
     let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
     let out_shape: Vec<usize> = shape[..ax].to_vec();
+    let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
+}
+
+// NaN-ignoring np.nanmean along the FIRST axis (axis=0) of a C-contiguous f64 ndarray —
+// the missing-data imputation reduction `np.nanmean(X, axis=0)`. numpy.nanmean
+// materializes a NaN->0 copy + an isnan mask, then TWO sequential axis-0 reduces (the
+// NaN->0 sum AND the ~mask count) -> ~19x slower than plain mean(axis=0). This single
+// streaming pass accumulates per column both the NaN->0 sum and the non-NaN count (numpy
+// reduces axis=0 SEQUENTIALLY, so bit-exact), then mean = sum / count. An all-NaN column
+// (count==0) yields 0.0/0.0 == numpy's NaN bit pattern directly + the single "Mean of
+// empty slice" RuntimeWarning (so no defer needed). Serial cache-friendly streaming
+// (column-block parallelism is cache-hostile on row-major; see try_zerocopy_f64_var_axis0).
+// Only the first axis of a >=2-D array; everything else defers.
+fn try_zerocopy_f64_nanmean_axis0(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis_obj: &Bound<'_, PyAny>,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+        return Ok(None);
+    };
+    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    if ndim < 1 {
+        return Ok(None);
+    }
+    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
+    if ax != 0 || ndim < 2 {
+        return Ok(None);
+    }
+    let m = shape[0];
+    if m == 0 {
+        return Ok(None);
+    }
+    let inner: usize = shape[1..].iter().product();
+    if inner == 0 {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let mut sum = vec![0.0f64; inner];
+    let mut cnt = vec![0u64; inner];
+    for i in 0..m {
+        let base = i * inner;
+        let row = &data[base..base + inner];
+        for j in 0..inner {
+            let v = row[j];
+            if !v.is_nan() {
+                sum[j] += v;
+                cnt[j] += 1;
+            }
+        }
+    }
+    let mut any_empty = false;
+    let mut out = vec![0.0f64; inner];
+    for j in 0..inner {
+        // 0.0 / 0.0 == numpy's NaN for an all-NaN column (same bit pattern its
+        // nansum/count division produces); don't substitute f64::NAN.
+        out[j] = sum[j] / cnt[j] as f64;
+        if cnt[j] == 0 {
+            any_empty = true;
+        }
+    }
+    if any_empty {
+        let warnings = py.import("warnings")?;
+        let category = py.get_type::<pyo3::exceptions::PyRuntimeWarning>();
+        warnings.call_method1("warn", ("Mean of empty slice", &category))?;
+    }
+    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let mut out_shape: Vec<usize> = shape[1..].to_vec();
+    if keepdims {
+        out_shape.insert(0, 1);
+    }
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {
         return Ok(Some(reshaped.get_item(())?.unbind()));
