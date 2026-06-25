@@ -8694,7 +8694,7 @@ fn clip_typed<'py, T>(
     hi: T,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
 where
-    T: pyo3::buffer::Element + Copy + Ord,
+    T: pyo3::buffer::Element + Copy + Ord + Send + Sync,
 {
     let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
         return Ok(None);
@@ -8714,8 +8714,38 @@ where
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            slot.set(cell.get().max(lo).min(hi));
+        // numpy.clip is single-threaded; a parallel raw-slice clamp aggregates bandwidth
+        // and wins for 2-4 byte int widths. Byte-gate (like unary_map_int) keeps 1-byte
+        // types serial (numpy's u8/i8 ufunc is bandwidth-saturated, fan-out doesn't pay).
+        // 8-byte (i64/u64) is ALSO kept serial: measured a 1.11x LOSS — its 2x byte traffic
+        // saturates memory bandwidth so the parallel clamp can't beat numpy's SIMD clip,
+        // while i32/u32 win ~2.2x. Both excluded paths stay on the original serial loop
+        // (no regression). Integer max/min are exact (Ord) so the clamp is bit-identical.
+        const CLIP_PARALLEL_MIN_BYTES: usize = 1 << 23;
+        if std::mem::size_of::<T>() <= 4
+            && n.saturating_mul(std::mem::size_of::<T>()) >= CLIP_PARALLEL_MIN_BYTES
+            && rayon::current_num_threads() >= 2
+        {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; input is
+            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+            let in_data: &[T] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
+            let out_data: &mut [T] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(in_data.par_chunks(chunk))
+                .for_each(|(o, i)| {
+                    for (s, &v) in o.iter_mut().zip(i.iter()) {
+                        *s = v.max(lo).min(hi);
+                    }
+                });
+        } else {
+            for (slot, cell) in output.iter().zip(input.iter()) {
+                slot.set(cell.get().max(lo).min(hi));
+            }
         }
     }
     Ok(Some((flat, shape)))

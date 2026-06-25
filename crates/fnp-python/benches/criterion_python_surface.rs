@@ -3259,6 +3259,26 @@ fn bench_clip_boundary(c: &mut Criterion) {
         group.bench_function("numpy_clip_f64_8m", |b| {
             b.iter(|| black_box(numpy_clip.call1((&input, -1000.0_f64, 1000.0_f64)).expect("numpy clip")));
         });
+
+        let ibase = numpy
+            .call_method1("arange", (8_000_000_i64,))
+            .expect("8M ibase")
+            .call_method1("__sub__", (4_000_000_i64,))
+            .expect("centered ibase");
+        let i64_in = ibase.call_method1("astype", ("int64",)).expect("i64");
+        let i32_in = ibase.call_method1("astype", ("int32",)).expect("i32");
+        macro_rules! iclip {
+            ($label:literal, $arr:expr, $lo:expr, $hi:expr) => {{
+                group.bench_function(concat!("fnp_", $label), |b| {
+                    b.iter(|| black_box(fnp_clip.call1(($arr, $lo, $hi)).expect("fnp iclip")));
+                });
+                group.bench_function(concat!("numpy_", $label), |b| {
+                    b.iter(|| black_box(numpy_clip.call1(($arr, $lo, $hi)).expect("numpy iclip")));
+                });
+            }};
+        }
+        iclip!("clip_i64_8m", &i64_in, -1000_i64, 1000_i64);
+        iclip!("clip_i32_8m", &i32_in, -1000_i32, 1000_i32);
     });
 
     group.finish();

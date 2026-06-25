@@ -8496,3 +8496,20 @@ PERF (criterion, remote rch worker = truth; python_around_boundary, 8M f64, deci
 CORRECTNESS: probe 38/0 across sizes below/at/above the 1<<21 gate, non-pow2, 2-D, decimals 0/1/2/3/5/-1/-2,
 half-to-even ties, NaN/Inf/-0.0. Build clean. Real win (fnp BEATS numpy 2.74x), immune to false-loss trap.
 KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize integer np.clip for 2-4 byte widths (2026-06-25) — 48th win
+Serial-Cell-loop lever: clip_typed<T> (backing integer np.clip all widths) was a serial `v.max(lo).min(hi)`
+clamp. Parallelized the raw-slice clamp (integer max/min exact via Ord => BIT-EXACT). Threaded Send+Sync
+through clip_typed (concrete int callers). Gate: byte-gate 1<<23 AND size_of<=4.
+PERF (criterion, remote rch worker = truth; python_clip_boundary, 8M):
+  clip_i32: fnp 1.670ms vs NumPy 3.718ms = 0.45x (2.23x faster)  [i16/u16/u32 same lever]
+CORRECTNESS: probe 49/0 across 8 int widths x sizes below/at/above gate x non-pow2 x 2-D x edge
+(min/max, lo>hi). Build clean.
+REJECTED SUB-CASE (8-byte i64/u64): an initial all-width version parallelized i64 too and MEASURED A
+1.11x LOSS (fnp 8.257ms vs NumPy 7.463ms, same machine ovh-a) — i64's 2x byte traffic saturates memory
+bandwidth so the parallel clamp can't beat numpy's SIMD clip, while i32/u32 (half the bytes) have headroom
+and win. Confirmed by re-measuring with the size_of<=4 cap: i64 reverts to the SERIAL path = 0.97x PARITY
+(fnp 7.176ms vs NumPy 7.412ms), i.e. parallel had REGRESSED i64 from parity to a loss. So 8-byte int clip
+is gated OUT (stays serial, no regression). LESSON: the parallel-elementwise lever's win is BANDWIDTH-
+bound by itemsize on bandwidth-limited machines — wider dtypes can cross from win to loss; measure per
+width and cap by size_of. KEEP (i32/u32/i16/u16). AGENT_NAME=BlackThrush.
