@@ -40466,14 +40466,114 @@ fn quantile(
     fallback()
 }
 
+// Native fused Horner np.polyval(p, x) for real coefficients and an f64 C-contiguous x
+// array. numpy.polyval runs a PYTHON loop `y = zeros_like(x); for pv in p: y = y*x + pv`,
+// materializing two whole-array temporaries (y*x, then +pv) per coefficient -> O(deg)
+// passes + temps, multi-ms for large x. This evaluates the polynomial per element in
+// registers (a single pass over x, deg fused mul-then-add steps), parallel across
+// elements, writing the output buffer directly. Bit-exact: it reproduces numpy's exact
+// recurrence including the first `0.0*x + p[0]` step (so x = +-inf -> 0*inf = NaN matches)
+// and uses SEPARATE multiply then add (Rust does NOT contract a*b+c to FMA), the same two
+// roundings numpy's `y*x` then `y+pv` produce. Real (int/uint/float) coefficients only
+// (cast to f64, matching numpy's promotion with an f64 x); complex p, non-f64 / scalar /
+// non-contiguous x, and 0-d x defer to numpy.
+fn try_zerocopy_f64_polyval(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    p: &Bound<'_, PyAny>,
+    x: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !x.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let xdt = x.getattr("dtype")?;
+    if xdt.getattr("kind")?.extract::<String>()? != "f"
+        || xdt.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    // Coefficients must be real (int/uint/float); complex defers. Cast to f64 (numpy
+    // promotes int/float coeffs against an f64 x to f64).
+    let p_arr = numpy.call_method1("asarray", (p,))?;
+    let pkind = p_arr.getattr("dtype")?.getattr("kind")?.extract::<String>()?;
+    if pkind != "f" && pkind != "i" && pkind != "u" {
+        return Ok(None);
+    }
+    let coeffs: Vec<f64> = match p_arr
+        .call_method1("astype", ("float64",))
+        .and_then(|a| a.call_method0("ravel"))
+        .and_then(|a| a.extract::<Vec<f64>>())
+    {
+        Ok(c) => c,
+        Err(_) => return Ok(None),
+    };
+    let Ok(in_buffer) = PyBuffer::<f64>::get(x) else {
+        return Ok(None);
+    };
+    if !in_buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = in_buffer.shape().to_vec();
+    if shape.is_empty() {
+        return Ok(None); // 0-d x: defer (scalar/0-d return semantics)
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let total = cells.len();
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias x; each slot written once.
+        let o: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
+        let coeffs = &coeffs;
+        let horner = move |xv: f64| -> f64 {
+            let mut y = 0.0f64;
+            for &pv in coeffs {
+                // separate multiply then add (no FMA) -> numpy's two roundings.
+                y = y * xv + pv;
+            }
+            y
+        };
+        use rayon::prelude::*;
+        const POLYVAL_PARALLEL_MIN: usize = 1 << 16;
+        let parallel = total.saturating_mul(coeffs.len().max(1)) >= POLYVAL_PARALLEL_MIN
+            && rayon::current_num_threads() >= 2;
+        if parallel {
+            o.par_iter_mut()
+                .zip(data.par_iter())
+                .for_each(|(slot, &xv)| *slot = horner(xv));
+        } else {
+            for (slot, &xv) in o.iter_mut().zip(data.iter()) {
+                *slot = horner(xv);
+            }
+        }
+    }
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    Ok(Some(out.call_method1("reshape", (&shape_tuple,))?.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (p, x))]
 fn polyval(py: Python<'_>, p: Py<PyAny>, x: Py<PyAny>) -> PyResult<Py<PyAny>> {
-    // Passthrough to np.polyval. Coefficients `p` are in decreasing
-    // powers (p[0]*x^n + ... + p[n]). `x` may be scalar or array-like;
-    // output matches numpy's dtype-promotion rules (including complex
-    // coefficients broadcasting up).
+    // Coefficients `p` are in decreasing powers (p[0]*x^n + ... + p[n]). `x` may be
+    // scalar or array-like; output matches numpy's dtype-promotion rules (including
+    // complex coefficients broadcasting up).
     let numpy = py.import("numpy")?;
+    // Native fused Horner for real coefficients + an f64 C-contiguous x array.
+    if let Some(out) = try_zerocopy_f64_polyval(py, &numpy, p.bind(py), x.bind(py))? {
+        return Ok(out);
+    }
     Ok(numpy
         .getattr("polyval")?
         .call1((p.bind(py), x.bind(py)))?

@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: np.polyval native fused Horner (Python-loop temp avoidance)
+
+`CreamEagle`/`cod-b`. First lever OUTSIDE the reduction family with a big win. `polyval`
+was a pure numpy passthrough. numpy.polyval runs a PYTHON loop `y = zeros_like(x); for pv
+in p: y = y*x + pv`, materializing two whole-array temps (y*x, then +pv) per coefficient
+-> O(deg) passes + temps (tens of ms for large x). `try_zerocopy_f64_polyval` evaluates
+the polynomial per element in registers (one pass over x, deg fused mul-then-add steps),
+parallel across elements, output buffer written directly, no temporaries.
+
+Bit-exact: reproduces numpy's EXACT recurrence including the first `0.0*x + p[0]` step
+(so x=+-inf -> 0*inf=NaN matches), and uses SEPARATE multiply then add — Rust does NOT
+contract a*b+c to FMA (verified by the bit-exact conformance test), the same two roundings
+numpy's `y*x` then `y+pv` produce. Real (i/u/f) coeffs cast to f64; complex p, non-f64 /
+scalar / non-contiguous / 0-d x defer.
+
+`cc`/`vmi1153651`, sample-size 30 + 2 s warmup (sample-size 10 was DISCARDED — cold/
+loaded-machine warmup gave ~100% variance; learn: bump samples/warmup when fnp variance is
+huge), `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `polyval`, 1M deg5 f64 | 412,178 | 2,858,107 | 0.144x | native win |
+| `polyval`, 4M deg8 f64 | 5,389,886 | 33,273,713 | 0.162x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface polyval -- --sample-size 30 --warm-up-time 2 --measurement-time 5 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_poly_ops`
+
+Validation: `conformance_poly_ops` 24/24 (new `polyval_native_horner_bitexact_matches_numpy`),
+bit-exact under `np.allclose(rtol=0, atol=0, equal_nan=True)` across degrees 5/13/4, 1-D/2-D
+x, integer coeffs, degree-0, and a +-inf/NaN x. Artifacts:
+`tests/artifacts/perf/2026-06-24_polyval_horner_cod_b/`. **GENERAL: numpy functions
+implemented as a PYTHON loop over array ops (polyval, and earlier gradient) materialize a
+temp per iteration — a native register-fused per-element kernel is a big win class. Other
+candidates: polyval-family, but NOT np.average (broadcast-weight reduce bit-exact-hostile).**
+
 ## 2026-06-24 - NO-GO: weighted np.average bit-exactness is numpy-internal-dependent
 
 `CreamEagle`/`cod-b`. Considered `np.average(a, axis=0/-1, weights=w)` (a reduction that

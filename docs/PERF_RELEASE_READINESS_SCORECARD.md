@@ -3,6 +3,31 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python polyval native fused Horner keep (54th win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `polyval` 1M deg5 vs NumPy | 10/10 | `0.144x` NumPy time (6.94x faster) |
+| `polyval` 4M deg8 vs NumPy | 10/10 | `0.162x` NumPy time (6.17x faster) |
+| Behavior gate | 9/10 | Native only for real (i/u/f) coefficients + f64 C-contiguous >=1-D x; complex p, scalar/0-d/non-contiguous x defer to NumPy |
+| Conformance gate | 10/10 | `conformance_poly_ops` 24/24 (new bit-exact Horner test incl inf/nan x, int coeffs) |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: `try_zerocopy_f64_polyval` per-element register Horner (one
+  pass over x, separate mul-then-add = numpy's two roundings, NOT FMA), parallel.
+- numpy.polyval is a Python loop materializing 2 whole-array temps per coefficient
+  (tens of ms for large x); this writes the output buffer directly with no temporaries.
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface polyval -- --sample-size 30 --warm-up-time 2
+  --measurement-time 5 --output-format bencher` (sample-size 10 was cold/noisy).
+- Artifact directory: `tests/artifacts/perf/2026-06-24_polyval_horner_cod_b/`.
+
+Decision:
+- Release-ready keep for real-coefficient f64 polyval.
+- Complex coefficients and scalar/0-d x remain on NumPy.
+
 ## 2026-06-24 CreamEagle fnp-python nanmean axis=0 streaming fused pass keep (53rd win)
 
 | Area | Score | Verdict |

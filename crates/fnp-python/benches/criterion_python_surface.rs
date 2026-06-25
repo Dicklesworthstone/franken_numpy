@@ -1775,6 +1775,52 @@ fn bench_var_axis0_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_polyval_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_polyval_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_polyval = module.getattr("polyval").expect("fnp_python.polyval");
+        let numpy_polyval = numpy.getattr("polyval").expect("numpy.polyval");
+
+        for (label, n, deg) in [("1M_deg5", 1_000_000_i64, 5_i64), ("4M_deg8", 4_000_000_i64, 8_i64)]
+        {
+            let x = numpy
+                .call_method1("linspace", (-3.0_f64, 3.0_f64, n))
+                .expect("polyval x input");
+            let p = numpy
+                .call_method1("linspace", (0.5_f64, 2.0_f64, deg + 1))
+                .expect("polyval coeffs");
+
+            group.bench_function(format!("fnp_polyval_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_polyval
+                        .call1((&p, &x))
+                        .expect("fnp polyval call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_polyval_f64_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_polyval
+                        .call1((&p, &x))
+                        .expect("numpy polyval call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_gradient_axis_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_gradient_axis_boundary");
     group.sample_size(10);
@@ -2825,6 +2871,7 @@ criterion_group!(
     bench_std_var_axis_boundary,
     bench_var_multiaxis_boundary,
     bench_var_axis0_boundary,
+    bench_polyval_boundary,
     bench_gradient_axis_boundary,
     bench_norm_axis_boundary,
     bench_norm_frobenius_boundary,

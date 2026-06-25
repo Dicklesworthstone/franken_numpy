@@ -1,0 +1,5 @@
+# sample-size 30, warm-up 2s, measurement 5s (sample-size 10 was cold/loaded-machine noisy)
+test python_polyval_boundary/fnp_polyval_f64_1M_deg5 ... bench:     412,178 ns/iter (+/- 33,477)
+test python_polyval_boundary/numpy_polyval_f64_1M_deg5 ... bench:   2,858,107 ns/iter (+/- 105,919)
+test python_polyval_boundary/fnp_polyval_f64_4M_deg8 ... bench:   5,389,886 ns/iter (+/- 652,381)
+test python_polyval_boundary/numpy_polyval_f64_4M_deg8 ... bench:  33,273,713 ns/iter (+/- 927,281)
