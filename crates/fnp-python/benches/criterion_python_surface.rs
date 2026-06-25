@@ -3388,6 +3388,18 @@ fn bench_around_boundary(c: &mut Criterion) {
             b.iter(|| black_box(numpy_around.call1((&input, 3_i64)).expect("numpy around")));
         });
 
+        // complex128 sibling — numpy rounds complex via a slow multi-pass; fnp views the
+        // 4M complex as 8M f64 components and reuses the parallel f64 around path.
+        let input_c = input
+            .call_method1("view", ("complex128",))
+            .expect("c128 view");
+        group.bench_function("fnp_around_c128_4m", |b| {
+            b.iter(|| black_box(fnp_around.call1((&input_c, 3_i64)).expect("fnp around c128")));
+        });
+        group.bench_function("numpy_around_c128_4m", |b| {
+            b.iter(|| black_box(numpy_around.call1((&input_c, 3_i64)).expect("numpy around c128")));
+        });
+
         // f32 sibling — compute-heavy (round-ties-even + mul/div) so wins at 4-byte.
         let input32 = input.call_method1("astype", ("float32",)).expect("f32 input");
         group.bench_function("fnp_around_f32_8m", |b| {

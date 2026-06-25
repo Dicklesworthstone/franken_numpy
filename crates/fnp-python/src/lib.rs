@@ -52968,6 +52968,45 @@ fn around(
         return Ok(result);
     }
 
+    // complex128/complex64: numpy.around rounds the real and imaginary parts INDEPENDENTLY
+    // (multiply->rint->divide is applied element-wise to the complex value, which acts per
+    // component), so viewing the array as its component float and running the proven real
+    // around path is bit-exact (verified: array_equal incl nan across decimals -3..8, both
+    // dtypes). c128 reuses the parallel f64 path; c64 reuses the f32 divide-first path; the
+    // result is viewed back to the complex dtype, beating numpy's slow complex round.
+    // Only for ndim>=1 (a 0-d complex view is a degenerate length-2 float — defer to numpy).
+    {
+        let ab = a.bind(py);
+        if ab.is_exact_instance(&numpy.getattr("ndarray")?) {
+            let dtype = ab.getattr("dtype")?;
+            let is_complex = dtype.getattr("kind")?.extract::<String>()? == "c";
+            let ndim = ab.getattr("ndim")?.extract::<usize>()?;
+            // A complex->float .view() changes itemsize, which numpy only allows when the
+            // last axis is contiguous; gate on c_contiguous so a transposed/strided array
+            // falls through to the existing non-contiguous numpy delegate below (no raise).
+            let c_contig = ab
+                .getattr("flags")?
+                .getattr("c_contiguous")?
+                .extract::<bool>()?;
+            if is_complex && ndim >= 1 && c_contig {
+                let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+                if itemsize == 16 {
+                    let view = ab.call_method1("view", (numpy.getattr("float64")?,))?;
+                    if let Some(out) = try_zerocopy_f64_around(py, &view, decimals)? {
+                        let restored = out.bind(py).call_method1("view", (&dtype,))?;
+                        return Ok(restored.unbind());
+                    }
+                } else if itemsize == 8 {
+                    let view = ab.call_method1("view", (numpy.getattr("float32")?,))?;
+                    if let Some(out) = try_zerocopy_f32_around(py, &view, decimals)? {
+                        let restored = out.bind(py).call_method1("view", (&dtype,))?;
+                        return Ok(restored.unbind());
+                    }
+                }
+            }
+        }
+    }
+
     // Bool input reaches here (the zero-copy f64/int/f32 paths above don't take it).
     // numpy.around(bool) PROMOTES to float16 (a numpy quirk) — the native extract path
     // would instead return a bool array (wrong dtype). And around(float16) rounds via an

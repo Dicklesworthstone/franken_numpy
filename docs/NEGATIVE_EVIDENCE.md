@@ -8786,3 +8786,24 @@ CORRECTNESS: probe 15/0 across complex128 + complex64 x sizes below/at/above the
 custom nan/posinf/neginf args (applied to both components) x all-special (nan/+-inf/-0.0) x all-finite x 0-d
 fallthrough — np.array_equal incl equal_nan, shape + dtype preserved. conformance_nan_to_num_clip 18/18 GREEN
 (real paths unchanged). Build clean. Real win (6x >> false-loss noise floor). KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: complex np.around via component-float view (5.2x over numpy) (2026-06-25) — 59th win
+Same component-float-view lever as the 58th win (complex nan_to_num): numpy.around on a COMPLEX array
+applies multiply->rint->divide element-wise, which acts on the real and imaginary parts INDEPENDENTLY, so
+viewing the complex array as its component float (float64 for c128, float32 for c64) and running the proven
+real around path is BIT-EXACT. c128 reuses the parallel try_zerocopy_f64_around (54th-family) and c64 reuses
+the f32 divide-first try_zerocopy_f32_around (54th win), then views the result back to the complex dtype.
+Before this, c-contiguous complex around fell to extract_precise_numeric_array (a full wasted Vec extract)
+THEN delegated to numpy.around. Gated is_complex && ndim>=1 && c_contiguous (a complex->float .view changes
+itemsize, which numpy only allows on a last-axis-contiguous array; non-contiguous falls through to the
+existing numpy delegate, no raise). 0-d falls through. Real f64/int/f32/bool paths untouched (purely additive).
+PERF (criterion, remote rch worker hz2 = truth; python_around_boundary, 4M complex128 = 8M f64 components,
+decimals=3):
+  around c128: fnp 4.378ms vs NumPy 22.857ms = 0.192x (5.2x faster)
+  (f64 8M control 11.503ms / f32 8M 0.658ms re-confirmed, consistent with the landed 54th-family wins)
+The c64 path uses the same lever (correctness-verified below; numpy's complex64 around is also multi-pass).
+CORRECTNESS: probe 45/0 across complex128 + complex64 x decimals -2/0/1/2/4 x sizes below/at/above the 1<<21
+component gate x 2-D x transposed (non-contiguous -> numpy delegate, no raise) x 0-d fallthrough x absurd
+decimals (f32 path delegates internally) x special values (inf/nan/-0.0) — np.array_equal incl equal_nan,
+shape + dtype preserved. conformance_around 16/16 + conformance_rounding 23/23 + conformance_nan_to_num_clip
+18/18 GREEN (real paths unchanged). Build clean. Real win (5.2x >> false-loss noise floor). KEEP. AGENT_NAME=BlackThrush.
