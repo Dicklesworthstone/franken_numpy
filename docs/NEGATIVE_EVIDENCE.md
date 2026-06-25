@@ -8381,3 +8381,8 @@ intersect 0.329x, f64 intersect 0.966x. CONFORMANCE: targeted unit parity passed
 2/2 MAY; remote `cargo check -p fnp-python --all-targets` passed (pre-existing dead-code warnings only).
 `cargo fmt --check -p fnp-python` remains blocked by pre-existing package-wide formatting drift in
 untouched benches/tests, so it was not applied. KEEP. AGENT_NAME=BlackThrush.
+Fresh cod-b reverify before landing: remote hz2
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-python
+--profile release --bench criterion_python_surface python_setops_boundary -- --sample-size 10
+--warm-up-time 1 --measurement-time 3 --output-format bencher` measured f32 setxor 10.946ms vs NumPy
+70.058ms = 0.156x; i32 setdiff 0.224x, i64 intersect 0.327x, f64 intersect parity/slight loss 1.005x.

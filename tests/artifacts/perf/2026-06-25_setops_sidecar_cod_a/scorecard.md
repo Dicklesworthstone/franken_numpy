@@ -41,6 +41,23 @@ Criterion JSON mean point estimates:
 
 JSON sources under `/data/projects/.rch-targets/franken_numpy-cod-a/criterion/python_setops_boundary/*/new/estimates.json`.
 
+## Fresh cod-b reverify before landing
+
+Command:
+
+```bash
+CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface python_setops_boundary -- --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher
+```
+
+Remote worker: `hz2`
+
+| row | FNP | NumPy | FNP/NumPy |
+| --- | ---: | ---: | ---: |
+| setdiff1d_i32_smallrange_1m | 1.3967 ms | 6.2321 ms | 0.224x |
+| intersect1d_i64_smallrange_1m | 2.5381 ms | 7.7635 ms | 0.327x |
+| intersect1d_f64_repeated_1m | 119.47 ms | 118.85 ms | 1.005x |
+| setxor1d_f32_repeated_1m | 10.946 ms | 70.058 ms | 0.156x |
+
 ## Validation
 
 ```bash
