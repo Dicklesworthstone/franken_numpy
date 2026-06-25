@@ -3303,9 +3303,43 @@ fn bench_where_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_around_boundary(c: &mut Criterion) {
+    // f64 np.around(a, 3) at 8M — serial Cell map (mul+round+divide) vs parallel raw-slice.
+    let mut group = c.benchmark_group("python_around_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let input = numpy
+            .call_method1("arange", (8_000_000_i64,))
+            .expect("8M")
+            .call_method1("astype", ("float64",))
+            .expect("f64")
+            .call_method1("__mul__", (0.12345_f64,))
+            .expect("scaled");
+        let fnp_around = module.getattr("around").expect("fnp around");
+        let numpy_around = numpy.getattr("around").expect("numpy around");
+        group.bench_function("fnp_around_f64_8m", |b| {
+            b.iter(|| black_box(fnp_around.call1((&input, 3_i64)).expect("fnp around")));
+        });
+        group.bench_function("numpy_around_f64_8m", |b| {
+            b.iter(|| black_box(numpy_around.call1((&input, 3_i64)).expect("numpy around")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sqrt_input_extraction,
+    bench_around_boundary,
     bench_where_boundary,
     bench_clip_boundary,
     bench_unary_parallel_boundary,

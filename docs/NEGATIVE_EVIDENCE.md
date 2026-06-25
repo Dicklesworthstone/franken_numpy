@@ -8483,3 +8483,16 @@ CORRECTNESS: probe 9/0 across sizes below/at/above the 1<<21 gate, non-pow2 (chu
 reshape, special values (NaN/Inf selected verbatim on either side), + scalar-branch sanity. Build clean.
 Real win (fnp BEATS numpy), immune to the loaded-box false-loss trap. Multi-thread aggregate bandwidth is
 what beats numpy's single thread (cf. roll single-thread memmove = parity = reverted). KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize f64 np.around/round (2026-06-25) — 47th win
+Serial-Cell-loop sweep (clip/where/unary lever): try_zerocopy_f64_around's map
+`(x*scale).round_ties_even()/scale` was SERIAL. It's compute-HEAVY per element (multiply + round-ties-even
++ divide), so parallelizing aggregates both ALU and bandwidth -> biggest of the lever's wins. numpy.around
+is single-threaded. Exact expression preserved => BIT-EXACT (incl. negative decimals via the multiply-form
+the f64 helper "can afford", half-to-even ties, NaN/Inf). Gate 1<<21 (below-gate serial unchanged). f64 only
+(f32 around uses a separate divide-first form for negative decimals).
+PERF (criterion, remote rch worker = truth; python_around_boundary, 8M f64, decimals=3):
+  around_f64: fnp 4.437ms vs NumPy 12.145ms = 0.37x (2.74x faster)
+CORRECTNESS: probe 38/0 across sizes below/at/above the 1<<21 gate, non-pow2, 2-D, decimals 0/1/2/3/5/-1/-2,
+half-to-even ties, NaN/Inf/-0.0. Build clean. Real win (fnp BEATS numpy 2.74x), immune to false-loss trap.
+KEEP. AGENT_NAME=BlackThrush.
