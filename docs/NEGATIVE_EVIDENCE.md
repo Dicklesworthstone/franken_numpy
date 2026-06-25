@@ -8386,3 +8386,30 @@ Fresh cod-b reverify before landing: remote hz2
 --profile release --bench criterion_python_surface python_setops_boundary -- --sample-size 10
 --warm-up-time 1 --measurement-time 3 --output-format bencher` measured f32 setxor 10.946ms vs NumPy
 70.058ms = 0.156x; i32 setdiff 0.224x, i64 intersect 0.327x, f64 intersect parity/slight loss 1.005x.
+
+## BlackThrush WIN: parallel f32/i64/i32 unary maps (square/abs/negative family) (2026-06-25) — 43rd win
+DIG sweep (fresh .so vs NumPy across ~50 ops/dtypes) surfaced square/f32 2.01x LOSS and square/i64
+1.46x LOSS while square/f64 WINS 0.54x — an f64-vs-narrow asymmetry. ROOT: `unary_map_f64` casts the
+PyBuffer cells to raw `&[f64]`/`&mut[f64]` and runs a rayon-parallel map at n>=1<<21 (numpy's unary
+ufuncs are single-threaded, so aggregate memory bandwidth wins); but the narrow-dtype siblings
+`unary_map_f32`/`unary_map_i64`/`unary_map_i32` were SERIAL per-element `Cell` loops — no `+ Sync`, no
+parallelism, and `Cell` access blocked autovectorization — so large f32/int square/abs lost to numpy's
+vectorized ufunc. FIX: mirror unary_map_f64 in all three (raw-slice parallel branch at n>=1<<21, serial
+Cell loop below the gate unchanged => no small-array regression). Elementwise => BIT-EXACT regardless of
+chunking (each output element depends only on the matching input element); all callers write into a
+fresh `numpy.empty` buffer (verified, no alias). Covers the whole f32/int unary family (square, abs,
+negative, sign, reciprocal, floor, ceil, trunc, rint) for free.
+PERF (criterion, remote rch worker = truth; `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface
+python_unary_parallel_boundary -- --output-format bencher`), all at 8M:
+  square_f32: fnp 0.715ms vs NumPy 1.588ms = 0.45x (2.22x faster; was 2.01x LOSS)
+  abs_f32   : fnp 0.553ms vs NumPy 1.579ms = 0.35x (2.85x faster; was ~1.1x loss)
+  square_i64: fnp 2.760ms vs NumPy 5.725ms = 0.48x (2.07x faster; was 1.46x LOSS)
+  square_i32: fnp 0.654ms vs NumPy 1.400ms = 0.47x (2.14x faster)
+CORRECTNESS: bit-exact probe on the fresh build, CHECKS=105 FAILS=0 across sizes below/at/above the
+1<<21 gate, non-power-of-2 (chunk remainder), 2-D reshape path, all three dtypes, ops square/abs/
+negative/sign/reciprocal/floor/ceil/trunc/rint, and edge values (i64::MIN abs/negate wrap, NaN/Inf/-0.0
+f32, square overflow). Build clean (3 pre-existing dead-code warnings, none mine).
+LESSON: when an op WINS for f64 but LOSES for f32/int, the narrow-dtype kernel is usually a serial/
+unvectorized sibling of a parallelized f64 path — grep `unary_map_<narrow>` / fast-path helpers that
+lack the f64 path's rayon+raw-slice branch. KEEP. AGENT_NAME=BlackThrush.

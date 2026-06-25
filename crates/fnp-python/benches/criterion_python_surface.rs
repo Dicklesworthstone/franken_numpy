@@ -3141,9 +3141,59 @@ fn bench_linalg_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_unary_parallel_boundary(c: &mut Criterion) {
+    // f32 / i64 / i32 elementwise unary maps (square, abs) at 8M — above the 1<<21
+    // parallel gate. The serial Cell loop lost to numpy's vectorized ufunc (square/f32
+    // ~2x, square/i64 ~1.5x); the parallel raw-slice map should win. Bit-exact.
+    let mut group = c.benchmark_group("python_unary_parallel_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+
+        let base = numpy
+            .call_method1("arange", (8_000_000_i64,))
+            .expect("8M base")
+            .call_method1("__sub__", (4_000_000_i64,))
+            .expect("centered base");
+        let f32_in = base.call_method1("astype", ("float32",)).expect("f32 input");
+        let i64_in = base.call_method1("astype", ("int64",)).expect("i64 input");
+        let i32_in = base.call_method1("astype", ("int32",)).expect("i32 input");
+
+        let fnp_square = module.getattr("square").expect("fnp square");
+        let fnp_abs = module.getattr("abs").expect("fnp abs");
+        let numpy_square = numpy.getattr("square").expect("numpy square");
+        let numpy_abs = numpy.getattr("abs").expect("numpy abs");
+
+        macro_rules! pair {
+            ($label:literal, $fnpf:expr, $npf:expr, $arg:expr) => {{
+                group.bench_function(concat!("fnp_", $label), |b| {
+                    b.iter(|| black_box($fnpf.call1(($arg,)).expect("fnp call")));
+                });
+                group.bench_function(concat!("numpy_", $label), |b| {
+                    b.iter(|| black_box($npf.call1(($arg,)).expect("numpy call")));
+                });
+            }};
+        }
+        pair!("square_f32_8m", fnp_square, numpy_square, &f32_in);
+        pair!("abs_f32_8m", fnp_abs, numpy_abs, &f32_in);
+        pair!("square_i64_8m", fnp_square, numpy_square, &i64_in);
+        pair!("square_i32_8m", fnp_square, numpy_square, &i32_in);
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sqrt_input_extraction,
+    bench_unary_parallel_boundary,
     bench_int32_unary_boundary,
     bench_narrow_int_unary_boundary,
     bench_remainder_mod_boundary,

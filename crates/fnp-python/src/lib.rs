@@ -7276,13 +7276,39 @@ fn numpy_sign_f32(x: f32) -> f32 {
 
 // float32 counterpart of unary_map_f64: monomorphic, inlined, autovectorizable.
 #[inline(always)]
-fn unary_map_f32<F: Fn(f32) -> f32>(
+fn unary_map_f32<F: Fn(f32) -> f32 + Sync>(
     input: &[pyo3::buffer::ReadOnlyCell<f32>],
     output: &[std::cell::Cell<f32>],
     f: F,
 ) {
-    for (slot, cell) in output.iter().zip(input.iter()) {
-        slot.set(f(cell.get()));
+    // Mirror unary_map_f64: numpy's f32 unary ufuncs are single-threaded, so for large
+    // buffers a parallel raw-slice map aggregates memory bandwidth and wins. The raw-slice
+    // form (vs the per-element Cell loop) also autovectorizes, which the Cell loop did not —
+    // that alone was why f32 square/abs lost to numpy's vectorized ufunc while f64 won.
+    // Bit-identical: each output element depends only on the matching input element.
+    let n = input.len();
+    const UNARY_PARALLEL_MIN: usize = 1 << 21;
+    if n >= UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; the input is
+        // read-only under the GIL and `output` is a fresh numpy.empty buffer (no alias).
+        let in_data: &[f32] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
+        let out_data: &mut [f32] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+        let chunk = n.div_ceil(rayon::current_num_threads());
+        out_data
+            .par_chunks_mut(chunk)
+            .zip(in_data.par_chunks(chunk))
+            .for_each(|(o, i)| {
+                for (s, &v) in o.iter_mut().zip(i.iter()) {
+                    *s = f(v);
+                }
+            });
+    } else {
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            slot.set(f(cell.get()));
+        }
     }
 }
 
@@ -7370,14 +7396,37 @@ fn zerocopy_f32_unary_flat<'py>(
 }
 
 // int64 counterpart of unary_map_f64: monomorphic, inlined, autovectorizable.
-#[inline(always)]
-fn unary_map_i64<F: Fn(i64) -> i64>(
+fn unary_map_i64<F: Fn(i64) -> i64 + Sync>(
     input: &[pyo3::buffer::ReadOnlyCell<i64>],
     output: &[std::cell::Cell<i64>],
     f: F,
 ) {
-    for (slot, cell) in output.iter().zip(input.iter()) {
-        slot.set(f(cell.get()));
+    // Mirror unary_map_f64: parallel raw-slice map for large buffers (numpy's integer
+    // ufuncs are single-threaded; square=wrapping_mul lost ~1.5x serial). Bit-identical:
+    // each output element depends only on the matching input element.
+    let n = input.len();
+    const UNARY_PARALLEL_MIN: usize = 1 << 21;
+    if n >= UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        // SAFETY: ReadOnlyCell<i64>/Cell<i64> are repr(transparent) over i64; input is
+        // read-only under the GIL and `output` is a fresh numpy.empty buffer (no alias).
+        let in_data: &[i64] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<i64>(), n) };
+        let out_data: &mut [i64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, n) };
+        let chunk = n.div_ceil(rayon::current_num_threads());
+        out_data
+            .par_chunks_mut(chunk)
+            .zip(in_data.par_chunks(chunk))
+            .for_each(|(o, i)| {
+                for (s, &v) in o.iter_mut().zip(i.iter()) {
+                    *s = f(v);
+                }
+            });
+    } else {
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            slot.set(f(cell.get()));
+        }
     }
 }
 
@@ -7445,14 +7494,36 @@ fn zerocopy_i64_unary_flat<'py>(
 }
 
 // int32 counterpart of unary_map_i64.
-#[inline(always)]
-fn unary_map_i32<F: Fn(i32) -> i32>(
+fn unary_map_i32<F: Fn(i32) -> i32 + Sync>(
     input: &[pyo3::buffer::ReadOnlyCell<i32>],
     output: &[std::cell::Cell<i32>],
     f: F,
 ) {
-    for (slot, cell) in output.iter().zip(input.iter()) {
-        slot.set(f(cell.get()));
+    // Mirror unary_map_f64: parallel raw-slice map for large buffers. Bit-identical:
+    // each output element depends only on the matching input element.
+    let n = input.len();
+    const UNARY_PARALLEL_MIN: usize = 1 << 21;
+    if n >= UNARY_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        // SAFETY: ReadOnlyCell<i32>/Cell<i32> are repr(transparent) over i32; input is
+        // read-only under the GIL and `output` is a fresh numpy.empty buffer (no alias).
+        let in_data: &[i32] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<i32>(), n) };
+        let out_data: &mut [i32] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i32, n) };
+        let chunk = n.div_ceil(rayon::current_num_threads());
+        out_data
+            .par_chunks_mut(chunk)
+            .zip(in_data.par_chunks(chunk))
+            .for_each(|(o, i)| {
+                for (s, &v) in o.iter_mut().zip(i.iter()) {
+                    *s = f(v);
+                }
+            });
+    } else {
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            slot.set(f(cell.get()));
+        }
     }
 }
 
