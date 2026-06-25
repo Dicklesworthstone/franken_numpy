@@ -8361,3 +8361,23 @@ conformance_std 15/15. (3 conformance_statistics cov/corrcoef failures are PRE-E
 numpy's two-pass var/std materializes temp arrays; a no-alloc pairwise fold (reusing the nan* kernel)
 wins big at large n while staying bit-exact. Grep getattr("<op>") passthroughs that are memory-bound
 two-pass reductions. (axis / keepdims / out / dtype residual still delegates — same-as-numpy parity.)
+
+## BlackThrush WIN: setxor1d float32 eighth-step range bitmap (2026-06-25) -- 42nd win
+BOLD-VERIFY setops worktree scan: the non-main i64 sidecar worktree win was NOT landed because current
+main already beats NumPy at the Python boundary for the measured i64 row (baseline vmi1152480:
+fnp_intersect1d_i64_smallrange_1m 3.9149ms vs NumPy 72.727ms = 0.054x). The live loss was instead
+setxor1d(float32 repeated/eighth-step): baseline vmi1152480 19.163ms vs NumPy 17.468ms = 1.097x.
+FIX: add a same-dtype exact-ndarray C-contiguous float32 setxor1d path that maps finite values exactly
+representable as value*8 integer keys into a bounded presence bitmap, emits sorted unique symmetric
+difference in float32, and defers everything else (NaN, -0.0, arbitrary floats, float64, non-contig,
+mixed dtypes, assume_unique=True) to NumPy. This is the float analogue of the existing integer range
+bitmap, but tightly gated to avoid NumPy's NaN/signed-zero float set semantics.
+PERF (remote hz2, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo
+bench -p fnp-python --profile release --bench criterion_python_surface -- python_setops_boundary`):
+fnp_setxor1d_f32_repeated_1m 11.103ms vs NumPy 70.786ms = 0.157x console ratio; Criterion JSON mean
+10.872ms vs 72.355ms = 0.150x. Other rows stayed wins/par on the same run: i32 setdiff 0.232x, i64
+intersect 0.329x, f64 intersect 0.966x. CONFORMANCE: targeted unit parity passed; remote
+`cargo test -p fnp-python --test conformance_setops -- --nocapture` passed 9/9 MUST, 13/13 SHOULD,
+2/2 MAY; remote `cargo check -p fnp-python --all-targets` passed (pre-existing dead-code warnings only).
+`cargo fmt --check -p fnp-python` remains blocked by pre-existing package-wide formatting drift in
+untouched benches/tests, so it was not applied. KEEP. AGENT_NAME=BlackThrush.

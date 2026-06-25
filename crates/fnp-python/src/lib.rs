@@ -29645,6 +29645,109 @@ fn narrow_bitmap_setop<T: Copy>(
     UFuncArray::new(vec![n], out, dt).ok()
 }
 
+fn f32_eighth_scaled_key(value: f32) -> Option<i64> {
+    if !value.is_finite() || value.to_bits() == 0x8000_0000 {
+        return None;
+    }
+    let scaled = (value as f64) * 8.0;
+    let rounded = scaled.round();
+    const MAX_EXACT_F32_INT: f64 = (1_i64 << 24) as f64;
+    if scaled != rounded || !(-MAX_EXACT_F32_INT..=MAX_EXACT_F32_INT).contains(&rounded) {
+        return None;
+    }
+    Some(rounded as i64)
+}
+
+fn try_zerocopy_f32_eighth_setxor1d(
+    py: Python<'_>,
+    ar1: &Bound<'_, PyAny>,
+    ar2: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let ndarray_t = numpy.getattr("ndarray")?;
+    if !ar1.is_exact_instance(&ndarray_t) || !ar2.is_exact_instance(&ndarray_t) {
+        return Ok(None);
+    }
+    if !numpy_dtype_is_f32(ar1) || !numpy_dtype_is_f32(ar2) {
+        return Ok(None);
+    }
+    if !ar1
+        .getattr("flags")?
+        .getattr("c_contiguous")?
+        .extract::<bool>()?
+        || !ar2
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let na = ar1.getattr("size")?.extract::<usize>()?;
+    let nb = ar2.getattr("size")?.extract::<usize>()?;
+    let (Ok(a_buf), Ok(b_buf)) = (PyBuffer::<f32>::get(ar1), PyBuffer::<f32>::get(ar2)) else {
+        return Ok(None);
+    };
+    let (Some(a_in), Some(b_in)) = (a_buf.as_slice(py), b_buf.as_slice(py)) else {
+        return Ok(None);
+    };
+
+    let mut saw = false;
+    let mut lo = 0_i64;
+    let mut hi = 0_i64;
+    for cell in a_in.iter().chain(b_in.iter()) {
+        let Some(key) = f32_eighth_scaled_key(cell.get()) else {
+            return Ok(None);
+        };
+        if saw {
+            lo = lo.min(key);
+            hi = hi.max(key);
+        } else {
+            lo = key;
+            hi = key;
+            saw = true;
+        }
+    }
+    if !saw {
+        return Ok(Some(
+            numpy_array_from_slice(py, &numpy, &[] as &[f32], "float32")?.unbind(),
+        ));
+    }
+    let span = (hi as i128 - lo as i128 + 1) as u128;
+    let budget = (6u128).saturating_mul((na + nb) as u128).max(1 << 16);
+    if span > budget || span > (1 << 22) {
+        return Ok(None);
+    }
+
+    let mut present = vec![0_u8; span as usize];
+    for cell in a_in.iter() {
+        let Some(key) = f32_eighth_scaled_key(cell.get()) else {
+            return Ok(None);
+        };
+        present[(key - lo) as usize] |= 1;
+    }
+    for cell in b_in.iter() {
+        let Some(key) = f32_eighth_scaled_key(cell.get()) else {
+            return Ok(None);
+        };
+        present[(key - lo) as usize] |= 2;
+    }
+
+    let mut out = Vec::with_capacity(
+        present
+            .iter()
+            .filter(|&&mask| mask == 1 || mask == 2)
+            .count(),
+    );
+    for (idx, &mask) in present.iter().enumerate() {
+        if mask == 1 || mask == 2 {
+            out.push(((lo + idx as i64) as f32) * 0.125);
+        }
+    }
+    Ok(Some(
+        numpy_array_from_slice(py, &numpy, &out, "float32")?.unbind(),
+    ))
+}
+
 /// Decide whether a *wide* integer set op (i32/u32/i64) should run the range
 /// bitmap, returning `Some((lo, hi))` bounds when eligible. Uses numpy's C
 /// min/max/len so the common DEFER case (range too wide for a direct table)
@@ -30029,6 +30132,9 @@ fn setxor1d(
     if let Some(r) =
         try_narrow_int_setop_native(py, ar1.bind(py), ar2.bind(py), NarrowSetOp::Setxor)?
     {
+        return Ok(r);
+    }
+    if let Some(r) = try_zerocopy_f32_eighth_setxor1d(py, ar1.bind(py), ar2.bind(py))? {
         return Ok(r);
     }
     if setop_inputs_are_float(py, ar1.bind(py), ar2.bind(py))? {
@@ -86579,6 +86685,78 @@ mod tests {
                 "ec0d35d19fdfc33accacb0c9a96cfd020ccd007989c970f193948b449a5a1e4b",
                 "float set-op numpy passthrough golden sha256 changed",
             );
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn setxor1d_f32_eighth_bitmap_matches_numpy_and_defers_edge_cases() {
+        with_python(|py| {
+            if !numpy_available(py) {
+                return Ok(());
+            }
+
+            let module = PyModule::new(py, "fnp_python_test")?;
+            fnp_python(&module)?;
+            let setxor1d_fn = module.getattr("setxor1d")?;
+            let numpy = py.import("numpy")?;
+            let numpy_setxor1d = numpy.getattr("setxor1d")?;
+            let array = numpy.getattr("array")?;
+            let dtype_kwargs = || -> PyResult<Bound<'_, PyDict>> {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("dtype", numpy.getattr("float32")?)?;
+                Ok(kwargs)
+            };
+
+            let left = array.call(
+                (vec![0.0_f32, 0.125, 0.25, 0.25, 3.0, 4.125],),
+                Some(&dtype_kwargs()?),
+            )?;
+            let right = array.call(
+                (vec![0.125_f32, 1.0, 3.0, 5.5, 5.5],),
+                Some(&dtype_kwargs()?),
+            )?;
+            assert_array_matches_numpy(
+                &setxor1d_fn.call1((left.clone(), right.clone()))?,
+                &numpy_setxor1d.call1((left.clone(), right.clone()))?,
+            )?;
+
+            let two_d_left = array.call(
+                (
+                    vec![
+                        vec![0.0_f32, 0.125, 0.25],
+                        vec![0.25_f32, 8.0, 9.125],
+                    ],
+                ),
+                Some(&dtype_kwargs()?),
+            )?;
+            let two_d_right = array.call(
+                (
+                    vec![
+                        vec![0.125_f32, 1.0, 8.0],
+                        vec![5.5_f32, 9.125, 10.0],
+                    ],
+                ),
+                Some(&dtype_kwargs()?),
+            )?;
+            assert_array_matches_numpy(
+                &setxor1d_fn.call1((two_d_left.clone(), two_d_right.clone()))?,
+                &numpy_setxor1d.call1((two_d_left.clone(), two_d_right.clone()))?,
+            )?;
+
+            let arbitrary_left = array.call(
+                (vec![0.1_f32, 0.2, 0.2],),
+                Some(&dtype_kwargs()?),
+            )?;
+            let arbitrary_right = array.call(
+                (vec![0.2_f32, 0.3],),
+                Some(&dtype_kwargs()?),
+            )?;
+            assert_array_matches_numpy(
+                &setxor1d_fn.call1((arbitrary_left.clone(), arbitrary_right.clone()))?,
+                &numpy_setxor1d.call1((arbitrary_left.clone(), arbitrary_right.clone()))?,
+            )?;
+
             Ok(())
         });
     }
