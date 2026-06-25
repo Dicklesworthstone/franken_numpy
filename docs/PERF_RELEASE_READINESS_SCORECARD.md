@@ -3,6 +3,34 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python nanvar/nanstd axis=0 streaming keep (52nd win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `nanvar(axis=0)` 4096x512 vs NumPy | 10/10 | `0.462x` NumPy time (2.16x faster) |
+| `nanstd(axis=0)` 4096x512 vs NumPy | 10/10 | `0.456x` NumPy time (2.19x faster) |
+| `nanvar(axis=0)` 50000x64 vs NumPy | 10/10 | `0.382x` NumPy time (2.62x faster) |
+| `nanstd(axis=0)` 50000x64 vs NumPy | 10/10 | `0.382x` NumPy time (2.68x faster) |
+| Behavior gate | 9/10 | Native only for f64 C-contiguous axis=0 (>=2-D), ddof>=0; any count<=ddof column (all-NaN) and everything else defer to NumPy |
+| Conformance gate | 10/10 | `conformance_nan_funcs` 36/36 (new nanvar+nanstd axis=0 test, incl all-NaN-column defer) |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: `try_zerocopy_f64_nanvar_axis0` serial streaming (NaN-skip +
+  per-column count; numpy reduces axis=0 sequentially, verified bit-exact).
+- numpy materializes NaN->0 copy + mask + count + a-mean + squared temps; this streams the
+  array twice with no temporary. Benched input is all-finite so it understates the gap
+  (numpy.nanvar(axis=0) on 10%-NaN data ~14 ms vs ~7 ms here).
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface var_axis0 -- --sample-size 20 --warm-up-time 1
+  --measurement-time 3 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_nanvar_nanstd_axis0_cod_b/`.
+
+Decision:
+- Release-ready keep for the f64 C-contiguous axis=0 nanvar/nanstd rows.
+- All-NaN/under-ddof columns and non-axis-0 single non-trailing axes remain on NumPy.
+
 ## 2026-06-24 CreamEagle fnp-python var/std axis=0 streaming two-pass keep (51st win)
 
 | Area | Score | Verdict |

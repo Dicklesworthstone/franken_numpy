@@ -1666,6 +1666,10 @@ fn bench_var_axis0_boundary(c: &mut Criterion) {
         let numpy_var = numpy.getattr("var").expect("numpy.var");
         let fnp_std = module.getattr("std").expect("fnp_python.std");
         let numpy_std = numpy.getattr("std").expect("numpy.std");
+        let fnp_nanvar = module.getattr("nanvar").expect("fnp_python.nanvar");
+        let numpy_nanvar = numpy.getattr("nanvar").expect("numpy.nanvar");
+        let fnp_nanstd = module.getattr("nanstd").expect("fnp_python.nanstd");
+        let numpy_nanstd = numpy.getattr("nanstd").expect("numpy.nanstd");
 
         for (label, rows, cols) in [
             ("4096x512", 4096_i64, 512_i64),
@@ -1712,6 +1716,38 @@ fn bench_var_axis0_boundary(c: &mut Criterion) {
                     let result = numpy_std
                         .call((&input,), Some(&numpy_kwargs))
                         .expect("numpy std axis0 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("fnp_nanvar_f64_axis0_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_nanvar
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp nanvar axis0 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_nanvar_f64_axis0_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_nanvar
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy nanvar axis0 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("fnp_nanstd_f64_axis0_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_nanstd
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp nanstd axis0 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_nanstd_f64_axis0_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_nanstd
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy nanstd axis0 call");
                     black_box(result);
                 });
             });

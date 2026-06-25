@@ -937,3 +937,56 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn nanvar_nanstd_axis0_first_axis_matches_numpy() -> Result<(), String> {
+    // Exercises the native first-axis (axis=0) streaming nanvar/nanstd fold against
+    // numpy bit-exactly (atol=0, equal_nan=True) incl dtype/shape: nanvar and nanstd,
+    // ddof 0/1, keepdims, negative axis, 3-D axis=0, NaN-containing columns, an Inf
+    // column, and an all-NaN column (which defers + matches numpy NaN + warning).
+    let script = fnp_script(
+        r#"
+import warnings
+def same(a, b):
+    a = np.asarray(a); b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+rng = np.random.default_rng(19)
+m2 = rng.standard_normal((1000, 257)); m2[rng.random((1000, 257)) < 0.1] = np.nan
+tall = rng.standard_normal((50000, 16)); tall[rng.random((50000, 16)) < 0.1] = np.nan
+s3 = rng.standard_normal((64, 9, 7)); s3[rng.random((64, 9, 7)) < 0.1] = np.nan
+infm = rng.standard_normal((40, 8)); infm[3, 2] = np.inf
+allnan = rng.standard_normal((20, 5)); allnan[:, 2] = np.nan  # column 2 all NaN -> defer
+ok = True
+cases = [
+    (m2, 0, 0, False, False),
+    (m2, 0, 1, True, False),
+    (m2, -2, 0, False, False),
+    (tall, 0, 0, False, True),
+    (s3, 0, 0, False, False),
+    (infm, 0, 0, False, False),
+    (allnan, 0, 0, False, False),
+]
+for arr, axis, ddof, keepdims, use_std in cases:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if use_std:
+            f = fnp.nanstd(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+            n = np.nanstd(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+        else:
+            f = fnp.nanvar(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+            n = np.nanvar(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+    if not same(f, n):
+        print("FAIL", axis, ddof, keepdims, use_std, np.asarray(f), np.asarray(n)); ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "axis=0 nanvar/nanstd parity should match numpy: {result}"
+    );
+    Ok(())
+}

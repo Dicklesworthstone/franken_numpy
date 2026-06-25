@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: nanvar/nanstd along axis=0 (first axis) native streaming
+
+`CreamEagle`/`cod-b`. NaN-aware sibling of the axis=0 var streaming fold (47942af4).
+`try_zerocopy_f64_nanvar_axis0`: numpy.nanvar materializes a NaN->0 copy + isnan mask +
+per-column count + a-mean broadcast + squared temp before two SEQUENTIAL axis-0 reduces.
+This streaming two-pass accumulates per column skipping NaN (= numpy's NaN->0 then sum):
+pass 1 -> per-column sum + non-NaN count -> mean; pass 2 -> sum of (slab-mean)^2 over
+non-NaN -> var; std = sqrt. Serial cache-friendly (column-block parallelism cache-hostile,
+see var_axis0). Bit-exact (numpy reduces axis=0 sequentially; masked positions contribute
+0 in both). Any column with count <= ddof (all-NaN col) defers the WHOLE call (numpy DOF
+warning + per-column NaN parity).
+
+`cc`/`vmi1153651`, sample-size 20, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`
+(input all-finite, so this UNDERSTATES the gap — numpy.nanvar(axis=0) on 10%-NaN data was
+~14 ms vs ~7 ms here):
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `nanvar(axis=0)`, 4096x512 f64 | 3,203,279 | 6,933,889 | 0.462x | native win |
+| `nanstd(axis=0)`, 4096x512 f64 | 3,169,327 | 6,956,400 | 0.456x | native win |
+| `nanvar(axis=0)`, 50000x64 f64 | 4,979,087 | 13,031,312 | 0.382x | native win |
+| `nanstd(axis=0)`, 50000x64 f64 | 4,908,205 | 13,174,345 | 0.382x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface var_axis0 -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_nan_funcs`
+
+Validation: `conformance_nan_funcs` 36/36 (new `nanvar_nanstd_axis0_first_axis_matches_numpy`,
+nanvar+nanstd), bit-exact under `np.allclose(rtol=0, atol=0, equal_nan=True)` across ddof
+0/1, keepdims, negative axis, 3-D axis=0, NaN columns, an Inf column, and an all-NaN column
+(defers). Artifacts: `tests/artifacts/perf/2026-06-24_nanvar_nanstd_axis0_cod_b/`.
+
 ## 2026-06-24 - KEEP: var/std along axis=0 (first axis) native streaming two-pass
 
 `CreamEagle`/`cod-b`. The ML feature-standardization reduction (`(X-X.mean(0))/X.std(0)`).

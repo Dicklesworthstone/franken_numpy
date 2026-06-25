@@ -27508,6 +27508,105 @@ fn try_zerocopy_f64_var_axis0(
     Ok(Some(reshaped.unbind()))
 }
 
+// NaN-ignoring np.nanvar / np.nanstd along the FIRST axis (axis=0) of a C-contiguous f64
+// ndarray — the analog of try_zerocopy_f64_var_axis0 for missing-data standardization.
+// numpy.nanvar materializes a NaN->0 copy, an isnan mask, a per-column count, the
+// a-mean broadcast, and the squared temp before two SEQUENTIAL axis-0 reduces (~5x slower
+// than plain var). This streaming two-pass accumulates per column, skipping NaN (= numpy's
+// NaN->0 then sum): pass 1 -> per-column sum + non-NaN count -> mean; pass 2 -> sum of
+// (slab-mean)^2 over non-NaN -> var; std = sqrt. Serial + cache-friendly (column-block
+// parallelism is cache-hostile on row-major; see try_zerocopy_f64_var_axis0). Bit-exact
+// (numpy reduces axis=0 sequentially; masked positions contribute 0 in both). If ANY
+// column has count <= ddof (e.g. an all-NaN column) the WHOLE call defers to numpy so its
+// "Degrees of freedom <= 0" warning + per-column NaN parity stay exact.
+fn try_zerocopy_f64_nanvar_axis0(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis_obj: &Bound<'_, PyAny>,
+    ddof: usize,
+    take_sqrt: bool,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+        return Ok(None);
+    };
+    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    if ndim < 1 {
+        return Ok(None);
+    }
+    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
+    if ax != 0 || ndim < 2 {
+        return Ok(None);
+    }
+    let m = shape[0];
+    if m == 0 {
+        return Ok(None);
+    }
+    let inner: usize = shape[1..].iter().product();
+    if inner == 0 {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let mut sum = vec![0.0f64; inner];
+    let mut cnt = vec![0u64; inner];
+    for i in 0..m {
+        let base = i * inner;
+        let row = &data[base..base + inner];
+        for j in 0..inner {
+            let v = row[j];
+            if !v.is_nan() {
+                sum[j] += v;
+                cnt[j] += 1;
+            }
+        }
+    }
+    // Any column with count <= ddof -> defer the whole call (numpy warns + NaN there).
+    if cnt.iter().any(|&c| (c as usize) <= ddof) {
+        return Ok(None);
+    }
+    let mut mean = vec![0.0f64; inner];
+    for j in 0..inner {
+        mean[j] = sum[j] / cnt[j] as f64;
+    }
+    let mut sq = vec![0.0f64; inner];
+    for i in 0..m {
+        let base = i * inner;
+        let row = &data[base..base + inner];
+        for j in 0..inner {
+            let v = row[j];
+            if !v.is_nan() {
+                let d = v - mean[j];
+                sq[j] += d * d;
+            }
+        }
+    }
+    let mut out = vec![0.0f64; inner];
+    for j in 0..inner {
+        let var = sq[j] / (cnt[j] as usize - ddof) as f64;
+        out[j] = if take_sqrt { var.sqrt() } else { var };
+    }
+    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let mut out_shape: Vec<usize> = shape[1..].to_vec();
+    if keepdims {
+        out_shape.insert(0, 1);
+    }
+    let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
+}
+
 // Which contiguous-last-axis vector norm the native fold computes.
 #[derive(Clone, Copy)]
 enum VectorNormKind {
@@ -28136,6 +28235,24 @@ fn nanstd(
     {
         return Ok(out);
     }
+    // Native first-axis (axis=0) streaming nanstd — see try_zerocopy_f64_nanvar_axis0.
+    if let Some(axis_val) = axis.as_ref()
+        && !axis_val.bind(py).is_none()
+        && let Some(ddof_val) = ddof
+            .as_ref()
+            .map_or(Some(0isize), |v| v.bind(py).extract::<isize>().ok())
+        && ddof_val >= 0
+        && let Some(out) = try_zerocopy_f64_nanvar_axis0(
+            py,
+            a.bind(py),
+            axis_val.bind(py),
+            ddof_val as usize,
+            true,
+            keepdims.unwrap_or(false),
+        )?
+    {
+        return Ok(out);
+    }
     if noncontiguous_ndarray(&numpy, a.bind(py))? {
         return fallback();
     }
@@ -28267,6 +28384,24 @@ fn nanvar(
             .map_or(Some(0isize), |v| v.bind(py).extract::<isize>().ok())
         && ddof_val >= 0
         && let Some(out) = try_zerocopy_f64_nanvar_axis(
+            py,
+            a.bind(py),
+            axis_val.bind(py),
+            ddof_val as usize,
+            false,
+            keepdims.unwrap_or(false),
+        )?
+    {
+        return Ok(out);
+    }
+    // Native first-axis (axis=0) streaming nanvar — see try_zerocopy_f64_nanvar_axis0.
+    if let Some(axis_val) = axis.as_ref()
+        && !axis_val.bind(py).is_none()
+        && let Some(ddof_val) = ddof
+            .as_ref()
+            .map_or(Some(0isize), |v| v.bind(py).extract::<isize>().ok())
+        && ddof_val >= 0
+        && let Some(out) = try_zerocopy_f64_nanvar_axis0(
             py,
             a.bind(py),
             axis_val.bind(py),
