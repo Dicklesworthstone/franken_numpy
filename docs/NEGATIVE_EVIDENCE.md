@@ -8680,3 +8680,19 @@ serial). The arr/arr win (46th) came from a clean f64-typed path with no macro/v
 parallel-elementwise lever only pays when the per-element loop dominates; a fast path wrapped in per-call
 numpy view/construct overhead caps the achievable speedup near parity. REVERTED lib.rs + bench (HEAD clean).
 AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize f64 np.kron 2-D (7.41x over numpy) (2026-06-25) — 55th win
+Serial-Cell-loop + temp-stacking lever on try_zerocopy_f64_kron2d (2-D Kronecker product). numpy.kron is a
+PYTHON-level helper: reshape both operands to higher rank, do a 6-D broadcast-multiply that materializes the
+full output, then reshape back — heavy machinery + single-threaded. fnp fills the output directly with ONE
+multiply per element and no reshape/broadcast temporaries. Parallelized over OUTPUT ROWS (par_chunks_mut(
+out_cols); output row R built independently from A-row R/bm and B-row R%bm => out[R, j*bn+l]=a[i,j]*b[k,l]) so
+it is BIT-EXACT regardless of chunking. Gate total>=1<<21 (below-gate serial unchanged). A read once into an
+owned Vec alongside the existing bvals for aligned vector loads.
+PERF (criterion, remote rch worker hz2 = truth; python_kron_boundary, A=(50,50) B=(40,40) -> 4M output):
+  kron_f64: fnp 0.516ms vs NumPy 3.820ms = 0.135x (7.41x faster)
+Effective ~62 GB/s (4M f64 output) far exceeds single-core => parallelism is the gain (NOT zero-gain); the
+rest is temp-elimination of numpy.kron's reshape/broadcast machinery. CORRECTNESS: probe 9/0 across square +
+rectangular + non-divisible/all-prime dims + extreme aspect ratios (1x2000, 2000x1) + special values
+(inf/nan/-0.0) in a 4M parallel output + 1x1 scale. Build clean. Real win (immune to false-loss). KEEP.
+AGENT_NAME=BlackThrush.

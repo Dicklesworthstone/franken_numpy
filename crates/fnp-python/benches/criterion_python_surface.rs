@@ -3506,8 +3506,50 @@ a32 = a.astype(np.float32)\n";
     group.finish();
 }
 
+fn bench_kron_boundary(c: &mut Criterion) {
+    // f64 np.kron of two 2-D arrays with a ~4M-element output (above the 1<<21 gate).
+    // numpy.kron is single-threaded (one broadcast-multiply); the row-parallel fill should
+    // aggregate bandwidth + the per-element multiply. out[(i*bm+k),(j*bn+l)] = a[i,j]*b[k,l].
+    let mut group = c.benchmark_group("python_kron_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        // A = (50,50), B = (40,40) -> output (2000,2000) = 4M elements.
+        let mk = |rows: i64, cols: i64, scale: f64| {
+            numpy
+                .call_method1("arange", (rows * cols,))
+                .expect("arange")
+                .call_method1("astype", ("float64",))
+                .expect("f64")
+                .call_method1("__mul__", (scale,))
+                .expect("scaled")
+                .call_method1("reshape", ((rows, cols),))
+                .expect("reshape")
+        };
+        let a = mk(50, 50, 0.5_f64);
+        let b = mk(40, 40, 0.25_f64);
+        let fnp_kron = module.getattr("kron").expect("fnp kron");
+        let numpy_kron = numpy.getattr("kron").expect("numpy kron");
+        group.bench_function("fnp_kron_f64_4m", |bn| {
+            bn.iter(|| black_box(fnp_kron.call1((&a, &b)).expect("fnp kron")));
+        });
+        group.bench_function("numpy_kron_f64_4m", |bn| {
+            bn.iter(|| black_box(numpy_kron.call1((&a, &b)).expect("numpy kron")));
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_kron_boundary,
     bench_nan_to_num_boundary,
     bench_cross_boundary,
     bench_sqrt_input_extraction,
