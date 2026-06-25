@@ -3387,6 +3387,15 @@ fn bench_around_boundary(c: &mut Criterion) {
         group.bench_function("numpy_around_f64_8m", |b| {
             b.iter(|| black_box(numpy_around.call1((&input, 3_i64)).expect("numpy around")));
         });
+
+        // f32 sibling — compute-heavy (round-ties-even + mul/div) so wins at 4-byte.
+        let input32 = input.call_method1("astype", ("float32",)).expect("f32 input");
+        group.bench_function("fnp_around_f32_8m", |b| {
+            b.iter(|| black_box(fnp_around.call1((&input32, 3_i64)).expect("fnp around f32")));
+        });
+        group.bench_function("numpy_around_f32_8m", |b| {
+            b.iter(|| black_box(numpy_around.call1((&input32, 3_i64)).expect("numpy around f32")));
+        });
     });
 
     group.finish();

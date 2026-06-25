@@ -408,3 +408,36 @@ print(hashlib.sha256(b''.join(chunks)).hexdigest())
     );
     Ok(())
 }
+
+#[test]
+fn around_f32_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 17
+base = (np.arange(n, dtype=np.float32) - np.float32(n // 2)) * np.float32(0.12345)
+special = np.array([0.0, -0.0, 0.5, 1.5, 2.5, -0.5, -1.5, np.inf, -np.inf, np.nan], dtype=np.float32)
+a = np.concatenate([base, special])
+ok = True
+for decimals in [3, 0, -1]:
+    actual = fnp.around(a, decimals=decimals)
+    expected = np.around(a, decimals=decimals)
+    ok = (
+        ok
+        and actual.dtype == expected.dtype
+        and actual.shape == expected.shape
+        and actual.flags["C_CONTIGUOUS"]
+        and actual.flags["WRITEABLE"]
+        and actual.tobytes() == expected.tobytes()
+    )
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large f32 around parallel path should be byte-exact"
+    );
+    Ok(())
+}

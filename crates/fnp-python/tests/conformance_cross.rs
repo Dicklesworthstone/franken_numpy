@@ -300,3 +300,35 @@ print(all_pass)
     );
     Ok(())
 }
+
+#[test]
+fn cross_f32_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = (1 << 21) // 3 + 31
+base = np.linspace(-1024.0, 1024.0, n * 3, dtype=np.float32).reshape(n, 3)
+a = base.copy()
+b = np.empty_like(a)
+b[:, 0] = base[:, 1] * np.float32(0.5) + np.float32(3.0)
+b[:, 1] = base[:, 2] * np.float32(-0.25) + np.float32(1.0)
+b[:, 2] = base[:, 0] * np.float32(1.5) - np.float32(2.0)
+actual = fnp.cross(a, b)
+expected = np.cross(a, b)
+print(
+    actual.dtype == expected.dtype
+    and actual.shape == expected.shape
+    and actual.flags["C_CONTIGUOUS"]
+    and actual.flags["WRITEABLE"]
+    and actual.tobytes() == expected.tobytes()
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large f32 cross parallel path should be byte-exact"
+    );
+    Ok(())
+}

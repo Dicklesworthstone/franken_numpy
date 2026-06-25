@@ -52682,8 +52682,39 @@ fn try_zerocopy_f32_around(
         };
         // Split by mode into three branchless loops (each autovectorizes). decimals==0
         // is a plain round-half-even (scale==1), so skip the wasted *1/÷1 the scaled
-        // forms would otherwise do.
-        if decimals == 0 {
+        // forms would otherwise do. numpy.around is single-threaded and this map is
+        // compute-heavy (round-ties-even + mul/div), so above the gate a parallel
+        // raw-slice map aggregates ALU+bandwidth and wins (same lever as f64 around,
+        // 47th win). Bit-exact: each output depends only on its matching input.
+        const AROUND_PARALLEL_MIN: usize = 1 << 21;
+        if n >= AROUND_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
+            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+            let in_data: &[f32] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
+            let out_data: &mut [f32] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(in_data.par_chunks(chunk))
+                .for_each(|(o, i)| {
+                    if decimals == 0 {
+                        for (s, &v) in o.iter_mut().zip(i.iter()) {
+                            *s = v.round_ties_even();
+                        }
+                    } else if neg {
+                        for (s, &v) in o.iter_mut().zip(i.iter()) {
+                            *s = (v / scale).round_ties_even() * scale;
+                        }
+                    } else {
+                        for (s, &v) in o.iter_mut().zip(i.iter()) {
+                            *s = (v * scale).round_ties_even() / scale;
+                        }
+                    }
+                });
+        } else if decimals == 0 {
             for (slot, cell) in output.iter().zip(input.iter()) {
                 slot.set(cell.get().round_ties_even());
             }

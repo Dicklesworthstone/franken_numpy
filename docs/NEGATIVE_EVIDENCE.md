@@ -8651,3 +8651,17 @@ not just numpy's multi-pass (NOT zero-gain). CORRECTNESS: probe 16/0 across f64+
 the 1<<21 gate x non-pow2 (chunk remainder) x 2-D x custom nan/posinf/neginf replacement args x all-special
 x all-finite x +-0.0. Build clean. Real win (fnp BEATS numpy 4.8-15x, immune to false-loss). KEEP.
 AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize f32 np.around/round (2026-06-25) — 54th win
+Extended the 47th-win f64 around lever to the float32 zero-copy sibling. try_zerocopy_f32_around kept
+NumPy's f32 arithmetic form (round-ties-even; divide-first for negative decimals) but still ran a serial
+ReadOnlyCell/Cell loop. Above 1<<21 elements, the raw-slice map now parallelizes the same per-element
+expression; below the gate the serial path is unchanged. Each output depends only on its matching input,
+so chunking is bit-exact for decimals 0, positive decimals, and negative decimals.
+
+PERF (criterion, remote RCH worker `ovh-a`, `python_around_boundary`, 8M f32, decimals=3):
+  around_f32_8m: fnp 1.765ms vs NumPy 3.561ms = 0.496x (2.02x faster)
+
+Validation added: `around_f32_parallel_large_bit_exact_matches_numpy` crosses the parallel gate and checks
+dtype, shape, C-contiguity, writeability, and exact bytes against NumPy for decimals 3, 0, and -1, including
+signed zero, half ties, infinities, and NaN. KEEP. AGENT_NAME=BlackThrush.
