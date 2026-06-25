@@ -2522,6 +2522,37 @@ fn bench_roll_boundary(c: &mut Criterion) {
                 black_box(result);
             });
         });
+
+        // 2-D per-axis roll (scalar shift + explicit axis). axis=0 (outer) was a
+        // per-element Cell loop that numpy's block roll beat ~1.7x; copy_from_slice
+        // memmove fixes it. 2000x2000 f64 (4M).
+        let input2d = numpy
+            .call_method1("arange", (2000_i64 * 2000_i64,))
+            .expect("roll 2d index")
+            .call_method1("astype", ("float64",))
+            .expect("roll 2d f64")
+            .call_method1("reshape", ((2000_i64, 2000_i64),))
+            .expect("roll 2d reshape");
+        for (label, ax) in [("axis0", 0_i64), ("axis1", 1_i64)] {
+            group.bench_function(format!("fnp_roll_f64_2d_{label}_shift7"), |bench| {
+                bench.iter(|| {
+                    black_box(
+                        fnp_roll
+                            .call1((&input2d, 7_i64, ax))
+                            .expect("fnp roll 2d call"),
+                    );
+                });
+            });
+            group.bench_function(format!("numpy_roll_f64_2d_{label}_shift7"), |bench| {
+                bench.iter(|| {
+                    black_box(
+                        numpy_roll
+                            .call1((&input2d, 7_i64, ax))
+                            .expect("numpy roll 2d call"),
+                    );
+                });
+            });
+        }
     });
 
     group.finish();
