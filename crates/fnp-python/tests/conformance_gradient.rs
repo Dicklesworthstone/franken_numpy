@@ -268,3 +268,49 @@ print(np.allclose(fnp_result, np_result))
     );
     Ok(())
 }
+
+#[test]
+fn gradient_strided_nonlast_axis_matches_numpy() -> Result<(), String> {
+    // Exercises the native non-last (strided) single-axis gradient against numpy
+    // bit-exactly (atol=0, equal_nan=True) incl dtype/shape: 2-D axis=0, 3-D middle
+    // and first axes, negative axis index, a non-uniform-spacing fallthrough (scalar
+    // dx), edge_order=2 fallthrough, a NaN-containing array, and the last-axis case
+    // (which must route through the existing contiguous path and still match).
+    let script = fnp_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a); b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+rng = np.random.default_rng(13)
+m2 = rng.standard_normal((64, 40))
+m3 = rng.standard_normal((12, 9, 7))
+nanm = rng.standard_normal((20, 8)); nanm[3, 4] = np.nan; nanm[0, 1] = np.inf
+ok = True
+cases = [
+    (m2, 0, 1.0, 1),
+    (m2, -2, 1.0, 1),
+    (m3, 1, 1.0, 1),
+    (m3, 0, 1.0, 1),
+    (m2, 0, 0.5, 1),    # scalar non-unit spacing
+    (m2, 0, 1.0, 2),    # edge_order=2 -> fallthrough to numpy
+    (nanm, 0, 1.0, 1),  # NaN/Inf propagation
+    (m2, 1, 1.0, 1),    # last axis (existing path)
+]
+for arr, axis, dx, eo in cases:
+    f = fnp.gradient(arr, dx, axis=axis, edge_order=eo)
+    n = np.gradient(arr, dx, axis=axis, edge_order=eo)
+    if not same(f, n):
+        print("FAIL", axis, dx, eo, np.asarray(f), np.asarray(n)); ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "non-last-axis gradient parity should match numpy: {result}"
+    );
+    Ok(())
+}

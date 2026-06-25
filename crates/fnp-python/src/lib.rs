@@ -22240,6 +22240,122 @@ fn try_zerocopy_f64_gradient_1d(
     }
 }
 
+// np.gradient along a single NON-last (strided) axis of a C-contiguous f64 ndarray,
+// uniform spacing, edge_order=1. numpy implements gradient in pure Python with many
+// whole-array slice temporaries (~30+ ms for a 4096x1024 axis=0 call). Here the array
+// is laid out as outer x n x inner; the central-difference stencil along the `n` axis
+// is a per-output-ROW vectorized combination of two input rows of length `inner`
+// (out[i] = (f[i+1] - f[i-1]) / (2*dx); edges forward/backward / dx) - cache-friendly
+// (sequential row reads) and parallel across all outer*n output rows. Bit-identical to
+// numpy (same subtraction/division operands and order; verified). NaN/Inf propagate.
+// Last axis (inner == 1) is handled by try_zerocopy_f64_gradient_1d; this requires a
+// strictly non-last axis (inner >= 1) so it never overlaps that path.
+fn try_zerocopy_f64_gradient_strided_axis(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    f: &Bound<'_, PyAny>,
+    ax_raw: isize,
+    dx: f64,
+    edge_order: usize,
+) -> PyResult<Option<Py<PyAny>>> {
+    if edge_order != 1 {
+        return Ok(None);
+    }
+    if !f.is_exact_instance(&numpy.getattr("ndarray")?) {
+        return Ok(None);
+    }
+    let dtype = f.getattr("dtype")?;
+    if dtype.getattr("kind")?.extract::<String>()? != "f"
+        || dtype.getattr("itemsize")?.extract::<usize>()? != 8
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(f) else {
+        return Ok(None);
+    };
+    if !buffer.is_c_contiguous() {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = buffer.shape().to_vec();
+    let ndim = shape.len() as isize;
+    if ndim < 2 {
+        return Ok(None);
+    }
+    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
+    if ax < 0 || ax >= ndim - 1 {
+        return Ok(None); // strictly non-last; the last axis goes to the 1-d/last-axis path
+    }
+    let ax = ax as usize;
+    let n = shape[ax];
+    if n < 2 {
+        return Ok(None); // numpy requires >=2 samples along the axis for edge_order=1
+    }
+    let inner: usize = shape[ax + 1..].iter().product();
+    if inner == 0 {
+        return Ok(None);
+    }
+    let block = n * inner;
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let total = cells.len();
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), total) };
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method("empty", (total,), Some(&kwargs))?;
+    {
+        let Ok(out_buffer) = PyBuffer::<f64>::get(&out) else {
+            return Ok(None);
+        };
+        let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+            return Ok(None);
+        };
+        // SAFETY: freshly allocated numpy.empty output, cannot alias f; every element is
+        // written exactly once (each output row is filled over j in 0..inner).
+        let o: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, total) };
+        use rayon::prelude::*;
+        const GRADIENT_PARALLEL_MIN: usize = 1 << 18;
+        // Fill one output row (length `inner`) at global row index g: outer block
+        // o_idx = g / n, position along the reduced axis i = g % n. Reads only input rows
+        // i-1 / i+1 of the SAME outer block, so rows are independent.
+        let fill_row = |g: usize, orow: &mut [f64]| {
+            let o_idx = g / n;
+            let i = g % n;
+            let base = o_idx * block;
+            if i == 0 {
+                let (cur, hi) = (base, base + inner);
+                for j in 0..inner {
+                    orow[j] = (data[hi + j] - data[cur + j]) / dx;
+                }
+            } else if i == n - 1 {
+                let (lo, cur) = (base + (n - 2) * inner, base + (n - 1) * inner);
+                for j in 0..inner {
+                    orow[j] = (data[cur + j] - data[lo + j]) / dx;
+                }
+            } else {
+                let (lo, hi) = (base + (i - 1) * inner, base + (i + 1) * inner);
+                for j in 0..inner {
+                    orow[j] = (data[hi + j] - data[lo + j]) / (2.0 * dx);
+                }
+            }
+        };
+        let parallel = total >= GRADIENT_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+        if parallel {
+            o.par_chunks_mut(inner)
+                .enumerate()
+                .for_each(|(g, orow)| fill_row(g, orow));
+        } else {
+            o.chunks_mut(inner)
+                .enumerate()
+                .for_each(|(g, orow)| fill_row(g, orow));
+        }
+    }
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    Ok(Some(out.call_method1("reshape", (&shape_tuple,))?.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (f, *varargs, axis=None, edge_order=1))]
 fn gradient(
@@ -22279,6 +22395,20 @@ fn gradient(
     if axis_is_last
         && let Some(dx) = uniform_dx
         && let Some(out) = try_zerocopy_f64_gradient_1d(py, &numpy, f.bind(py), dx, edge_order)?
+    {
+        return Ok(out);
+    }
+    // Native strided (non-last) single-axis gradient: numpy's pure-Python slice
+    // implementation is ~30+ ms for a 4096x1024 axis=0 call; the row-combine kernel
+    // (each output row = a vectorized combo of two input rows, parallel across rows)
+    // avoids that. Uniform scalar spacing, edge_order=1, f64 C-contiguous, single int
+    // axis resolving to a non-last axis. See try_zerocopy_f64_gradient_strided_axis.
+    if !axis_is_last
+        && let Some(dx) = uniform_dx
+        && let Some(ax_obj) = axis.as_ref()
+        && let Ok(ax_raw) = ax_obj.bind(py).extract::<isize>()
+        && let Some(out) =
+            try_zerocopy_f64_gradient_strided_axis(py, &numpy, f.bind(py), ax_raw, dx, edge_order)?
     {
         return Ok(out);
     }

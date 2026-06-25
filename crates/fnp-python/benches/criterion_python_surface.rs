@@ -1650,6 +1650,59 @@ fn bench_var_multiaxis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_gradient_axis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_gradient_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_grad = module.getattr("gradient").expect("fnp_python.gradient");
+        let numpy_grad = numpy.getattr("gradient").expect("numpy.gradient");
+
+        for (label, rows, cols) in [
+            ("4096x1024", 4096_i64, 1024_i64),
+            ("1024x4096", 1024_i64, 4096_i64),
+        ] {
+            let size = rows * cols;
+            let input = numpy
+                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
+                .expect("gradient f64 input")
+                .call_method1("reshape", ((rows, cols),))
+                .expect("gradient 2-D shape");
+            // axis=0 is the strided (non-last) path.
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs.set_item("axis", 0_i64).expect("fnp axis kwarg");
+            let numpy_kwargs = PyDict::new(py);
+            numpy_kwargs.set_item("axis", 0_i64).expect("numpy axis kwarg");
+
+            group.bench_function(format!("fnp_gradient_f64_axis0_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_grad
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp gradient axis0 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_gradient_f64_axis0_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_grad
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy gradient axis0 call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_norm_axis_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_norm_axis_boundary");
     group.sample_size(10);
@@ -2646,6 +2699,7 @@ criterion_group!(
     bench_statistics_boundary,
     bench_std_var_axis_boundary,
     bench_var_multiaxis_boundary,
+    bench_gradient_axis_boundary,
     bench_norm_axis_boundary,
     bench_norm_frobenius_boundary,
     bench_compress_boundary,

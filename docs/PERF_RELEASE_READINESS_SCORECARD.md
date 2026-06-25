@@ -3,6 +3,32 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python gradient non-last-axis row-combine keep (50th win, MODEST)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `gradient(axis=0)` 4096x1024 vs NumPy | 7/10 | `0.722x` NumPy time (1.39x faster) — modest, bandwidth-bound |
+| `gradient(axis=0)` 1024x4096 vs NumPy | 7/10 | `0.753x` NumPy time (1.33x faster) — modest, bandwidth-bound |
+| Behavior gate | 9/10 | Native only for f64 C-contiguous non-last single int axis, uniform scalar spacing, edge_order=1; edge_order=2 / coord spacing / axis=None-on-ND / non-f64 defer |
+| Conformance gate | 10/10 | `conformance_gradient` 23/23 (new strided-axis bit-exact test) + `conformance_diff_gradient` 12/12 |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: `try_zerocopy_f64_gradient_strided_axis` (per-output-row
+  vectorized combine of two input rows; parallel across outer*n rows; direct buffer write).
+- numpy.gradient(axis=0) materializes whole-array slice temporaries; the op is
+  memory-bandwidth-bound (~96 MB traffic for 4M f64) so temp-avoidance gives ~1.4x — near
+  the achievable ceiling, honestly recorded as modest (not the family's 3-11x).
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface gradient_axis -- --sample-size 10 --warm-up-time 1
+  --measurement-time 3 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_gradient_strided_axis_cod_b/`.
+
+Decision:
+- Release-ready keep for the non-last-axis f64 uniform-spacing edge_order=1 gradient.
+- edge_order=2 / coordinate spacing / axis=None-on-ND list return remain on NumPy.
+
 ## 2026-06-24 CreamEagle fnp-python nanvar/nanstd multi-axis trailing fold keep (49th win)
 
 | Area | Score | Verdict |

@@ -4,6 +4,46 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP (modest): np.gradient non-last (strided) single-axis row-combine
+
+`CreamEagle`/`cod-b`. First lever OUTSIDE the temp-reduce family this session.
+`gradient()` already fast-pathed the last (contiguous) axis; a non-last (strided) axis
+fell to numpy's pure-Python slice implementation. New helper
+`try_zerocopy_f64_gradient_strided_axis`: array laid out as outer x n x inner, the
+edge_order=1 central-difference stencil along `n` is a per-output-ROW vectorized combine
+of two input rows of length `inner` (out[i] = (f[i+1]-f[i-1])/(2*dx); edges /dx),
+cache-friendly + parallel across all outer*n output rows, writing the output buffer
+directly. Bit-exact (same operands/order; maxulp 0). edge_order=2, coordinate spacing,
+axis=None on N-D, non-f64 defer.
+
+**HONEST/MODEST: only 1.33-1.39x.** numpy.gradient(axis=0) on the worker is 8.1 ms (NOT
+the ~32 ms my loaded-box standalone read — worker bench is the truth). The op is
+MEMORY-BANDWIDTH-BOUND (each output row reads two input rows + writes ~= 96 MB traffic
+for 4M f64), so temp-avoidance is the ONLY lever and ~1.4x is near the ceiling; numpy's
+extra slice temporaries are exactly the gap. Kept because it is real, bit-exact, and a
+previously-delegated surface — NOT ~0-gain — but it does not reach the family's 3-11x.
+
+`cc`/`vmi1153651` head-to-head, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `gradient(axis=0)`, 4096x1024 f64 | 5,866,803 | 8,125,327 | 0.722x | modest win |
+| `gradient(axis=0)`, 1024x4096 f64 | 6,081,379 | 8,077,433 | 0.753x | modest win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface gradient_axis -- --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_gradient --test conformance_diff_gradient`
+
+Validation: `conformance_gradient` 23/23 (new `gradient_strided_nonlast_axis_matches_numpy`)
++ `conformance_diff_gradient` 12/12, bit-exact under `np.allclose(rtol=0, atol=0,
+equal_nan=True)` across 2-D axis=0, 3-D middle/first axes, negative axis, scalar non-unit
+spacing, edge_order=2 fallthrough, NaN/Inf, and the last-axis route. Artifacts:
+`tests/artifacts/perf/2026-06-24_gradient_strided_axis_cod_b/`. RETRY PREDICATE: a faster
+gradient needs a single-read sliding-window stencil (read each input row once, ~64 MB
+floor) — only worth it if a bandwidth-bound 1.4->~2x is wanted; not pursued.
+
 ## 2026-06-24 - KEEP: nanvar/nanstd multi-axis trailing native fold
 
 `CreamEagle`/`cod-b`. Generalizes the committed `try_zerocopy_f64_nanvar_axis` (single
