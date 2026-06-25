@@ -306,6 +306,40 @@ print(h.hexdigest())
 }
 
 #[test]
+fn modf_f64_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 65
+x = np.linspace(-1.0e6 - 0.75, 1.0e6 + 0.75, n, dtype=np.float64)
+x[0] = -0.0
+x[1] = 0.0
+x[2] = np.inf
+x[3] = -np.inf
+x[4] = np.nan
+x[5] = np.nextafter(0.0, 1.0)
+actual_f, actual_i = fnp.modf(x)
+expected_f, expected_i = np.modf(x)
+print(
+    actual_f.dtype == expected_f.dtype
+    and actual_i.dtype == expected_i.dtype
+    and actual_f.shape == expected_f.shape
+    and actual_i.shape == expected_i.shape
+    and actual_f.tobytes() == expected_f.tobytes()
+    and actual_i.tobytes() == expected_i.tobytes()
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large f64 modf parallel path must be bit-identical to numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn frexp_dtype_matches_numpy() -> Result<(), String> {
     let script =
         "import numpy as np; m, e = np.frexp(np.array([1.0, 2.0])); print(m.dtype, e.dtype)";

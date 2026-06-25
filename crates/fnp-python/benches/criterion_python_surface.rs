@@ -677,6 +677,20 @@ fn bench_modf_boundary(c: &mut Criterion) {
                 black_box(result);
             });
         });
+
+        // 8M case: above the 1<<21 parallel gate (the 1M case stays serial).
+        let input8 = numpy
+            .call_method1(
+                "linspace",
+                (-1_000_000.75_f64, 1_000_000.75_f64, 8_000_000_usize),
+            )
+            .expect("8M f64 input");
+        group.bench_function("fnp_modf_f64_8m", |bench| {
+            bench.iter(|| black_box(fnp_modf.call1((&input8,)).expect("fnp modf 8m")));
+        });
+        group.bench_function("numpy_modf_f64_8m", |bench| {
+            bench.iter(|| black_box(numpy_modf.call1((&input8,)).expect("numpy modf 8m")));
+        });
     });
 
     group.finish();

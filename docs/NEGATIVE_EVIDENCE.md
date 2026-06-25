@@ -4,6 +4,32 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-25 - KEEP: f64 `np.modf` 8M parallel bench row and conformance reverify
+
+`BlackThrush`/`cod-a`. BOLD-VERIFY pass for the landed `4e87a144`
+`try_zerocopy_f64_modf` raw-slice Rayon lever. The source was already on main;
+this pass adds the durable 8M Python-boundary Criterion row and an above-gate
+byte-exact conformance test so the parallel branch is covered directly.
+
+Same-worker evidence on `ovh-a`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a`
+(RCH worker-scoped target dir), `python_modf_boundary`, 8M float64:
+
+| Row | FNP median | NumPy median | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `modf_f64_8m` | 15.936 ms | 83.305 ms | 0.191x | keep; 5.23x faster |
+
+Control rows from the same run: `modf_f64_1m` stayed below-gate serial and still
+beat NumPy (`269.35 us` vs `1.7925 ms`, `0.150x`); the already-landed f32 clip
+row also reverified as a win (`3.0458 ms` vs `4.9897 ms`, `0.610x`).
+
+Validation: `modf_f64_parallel_large_bit_exact_matches_numpy` passed; `cargo check
+-p fnp-python --all-targets` passed on `vmi1264463`; `git diff --check` passed.
+`cargo fmt -p fnp-python -- --check` remains blocked by broad pre-existing
+formatting drift, and `cargo clippy -p fnp-python --all-targets -- -D warnings`
+is blocked before this crate by the pre-existing `fnp-ufunc::nan_filtered`
+dead-code warning. Artifacts:
+`tests/artifacts/perf/2026-06-25_modf8m_parallel_cod_a/`. AGENT_NAME=BlackThrush.
+
 ## 2026-06-25 - KEEP: f32 `np.clip` parallel raw-slice path
 
 `BlackThrush`/`cod-b`. BOLD-VERIFY pass for the remaining exact float32
