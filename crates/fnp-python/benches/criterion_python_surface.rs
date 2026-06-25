@@ -3543,6 +3543,44 @@ fn bench_kron_boundary(c: &mut Criterion) {
         group.bench_function("numpy_kron_f64_4m", |bn| {
             bn.iter(|| black_box(numpy_kron.call1((&a, &b)).expect("numpy kron")));
         });
+
+        // f32 + i64 2-D (kron2d_typed path).
+        let a32 = a.call_method1("astype", ("float32",)).expect("a f32");
+        let b32 = b.call_method1("astype", ("float32",)).expect("b f32");
+        group.bench_function("fnp_kron_f32_4m", |bn| {
+            bn.iter(|| black_box(fnp_kron.call1((&a32, &b32)).expect("fnp kron f32")));
+        });
+        group.bench_function("numpy_kron_f32_4m", |bn| {
+            bn.iter(|| black_box(numpy_kron.call1((&a32, &b32)).expect("numpy kron f32")));
+        });
+        let ai = a.call_method1("astype", ("int64",)).expect("a i64");
+        let bi = b.call_method1("astype", ("int64",)).expect("b i64");
+        group.bench_function("fnp_kron_i64_4m", |bn| {
+            bn.iter(|| black_box(fnp_kron.call1((&ai, &bi)).expect("fnp kron i64")));
+        });
+        group.bench_function("numpy_kron_i64_4m", |bn| {
+            bn.iter(|| black_box(numpy_kron.call1((&ai, &bi)).expect("numpy kron i64")));
+        });
+
+        // 1-D kron (kron1d path): two 2000-vectors -> 4M output.
+        let a1 = numpy
+            .call_method1("arange", (2000_i64,))
+            .expect("a1")
+            .call_method1("astype", ("float64",))
+            .expect("a1 f64");
+        let b1 = numpy
+            .call_method1("arange", (2000_i64,))
+            .expect("b1")
+            .call_method1("astype", ("float64",))
+            .expect("b1 f64")
+            .call_method1("__add__", (1.0_f64,))
+            .expect("b1 shifted");
+        group.bench_function("fnp_kron_1d_f64_4m", |bn| {
+            bn.iter(|| black_box(fnp_kron.call1((&a1, &b1)).expect("fnp kron 1d")));
+        });
+        group.bench_function("numpy_kron_1d_f64_4m", |bn| {
+            bn.iter(|| black_box(numpy_kron.call1((&a1, &b1)).expect("numpy kron 1d")));
+        });
     });
     group.finish();
 }

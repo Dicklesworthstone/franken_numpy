@@ -42396,11 +42396,31 @@ fn try_zerocopy_f64_kron1d(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (i, ai_cell) in a_in.iter().enumerate() {
-            let ai = ai_cell.get();
-            let row = i * m;
-            for (j, bj_cell) in b_in.iter().enumerate() {
-                output[row + j].set(ai * bj_cell.get());
+        // numpy.kron 1-D is the single-threaded python reshape+broadcast helper; fnp fills
+        // the output directly (out[i*m + j] = a[i]*b[j]). Parallelize over output rows
+        // (one chunk of m per a[i]) => bit-exact regardless of chunking. Gate on total.
+        const KRON_PARALLEL_MIN: usize = 1 << 21;
+        if total >= KRON_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            let avals: Vec<f64> = a_in.iter().map(|c| c.get()).collect();
+            let bvals: Vec<f64> = b_in.iter().map(|c| c.get()).collect();
+            // SAFETY: Cell<f64> is repr(transparent) over f64; `out` is a fresh numpy.empty we
+            // own (no alias). Each par_chunks_mut(m) chunk is exactly one output row (a[i]*b).
+            let out_raw: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+            out_raw.par_chunks_mut(m).enumerate().for_each(|(i, out_row)| {
+                let ai = avals[i];
+                for (o, &bv) in out_row.iter_mut().zip(bvals.iter()) {
+                    *o = ai * bv;
+                }
+            });
+        } else {
+            for (i, ai_cell) in a_in.iter().enumerate() {
+                let ai = ai_cell.get();
+                let row = i * m;
+                for (j, bj_cell) in b_in.iter().enumerate() {
+                    output[row + j].set(ai * bj_cell.get());
+                }
             }
         }
     }
@@ -42513,7 +42533,7 @@ fn try_zerocopy_f64_kron2d(
 // for the dtypes the f64 helper leaves to the cold extract path (~6-36x for f32/int). Element-wise
 // block products out[(i*bm+k), (j*bn+l)] = a[i,j]*b[k,l] -> NO accumulation -> bit-identical to numpy
 // (integer wraps via wrapping_mul). C-contiguous 2-D operands of one shared dtype.
-fn kron2d_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T, T) -> T>(
+fn kron2d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) -> T + Sync>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     a: &Bound<'py, PyAny>,
@@ -42550,16 +42570,45 @@ fn kron2d_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T, T) -> T>(
             return Ok(None);
         };
         let bvals: Vec<T> = b_in.iter().map(|c| c.get()).collect();
-        for i in 0..am {
-            for j in 0..an {
-                let ai = a_in[i * an + j].get();
-                let col0 = j * bn;
-                for k in 0..bm {
-                    let out_base = (i * bm + k) * out_cols + col0;
+        // Same row-parallel fill as try_zerocopy_f64_kron2d (numpy.kron is single-threaded
+        // python reshape+broadcast machinery). Output row R built from A-row R/bm and B-row
+        // R%bm => bit-exact regardless of chunking. Gate on output elements.
+        const KRON_PARALLEL_MIN: usize = 1 << 21;
+        if total >= KRON_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            let avals: Vec<T> = a_in.iter().map(|c| c.get()).collect();
+            // SAFETY: Cell<T> is repr(transparent) over T; `out` is a fresh numpy.empty we own
+            // (no alias). Each par_chunks_mut(out_cols) chunk is exactly one output row.
+            let out_raw: &mut [T] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total) };
+            out_raw
+                .par_chunks_mut(out_cols)
+                .enumerate()
+                .for_each(|(r, out_row)| {
+                    let i = r / bm;
+                    let k = r % bm;
+                    let a_row = &avals[i * an..i * an + an];
                     let b_row = &bvals[k * bn..k * bn + bn];
-                    let out_row = &output[out_base..out_base + bn];
-                    for (o, &bv) in out_row.iter().zip(b_row.iter()) {
-                        o.set(mul(ai, bv));
+                    for j in 0..an {
+                        let ai = a_row[j];
+                        let dst = &mut out_row[j * bn..j * bn + bn];
+                        for (o, &bv) in dst.iter_mut().zip(b_row.iter()) {
+                            *o = mul(ai, bv);
+                        }
+                    }
+                });
+        } else {
+            for i in 0..am {
+                for j in 0..an {
+                    let ai = a_in[i * an + j].get();
+                    let col0 = j * bn;
+                    for k in 0..bm {
+                        let out_base = (i * bm + k) * out_cols + col0;
+                        let b_row = &bvals[k * bn..k * bn + bn];
+                        let out_row = &output[out_base..out_base + bn];
+                        for (o, &bv) in out_row.iter().zip(b_row.iter()) {
+                            o.set(mul(ai, bv));
+                        }
                     }
                 }
             }

@@ -8696,3 +8696,18 @@ rest is temp-elimination of numpy.kron's reshape/broadcast machinery. CORRECTNES
 rectangular + non-divisible/all-prime dims + extreme aspect ratios (1x2000, 2000x1) + special values
 (inf/nan/-0.0) in a 4M parallel output + 1x1 scale. Build clean. Real win (immune to false-loss). KEEP.
 AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize np.kron f32/int 2-D + f64/int 1-D (2.43-6.92x over numpy) (2026-06-25) — 56th win
+Extended the 55th-win f64 kron2d row-parallel fill to its siblings: kron2d_typed (f32 + all int dtypes;
+threaded Send+Sync through the generic + Sync on the mul closure) and try_zerocopy_f64_kron1d (1-D, out[i*m+j]
+= a[i]*b[j], parallelized over output rows = one chunk of m per a[i]). Same numpy.kron python reshape+broadcast
+machinery is the thing being beaten. Gate total>=1<<21; BIT-EXACT (integer via the existing wrapping_mul; each
+output element independent of chunking).
+PERF (criterion, remote rch worker = truth; python_kron_boundary, 4M output):
+  kron_i64 2-D:   fnp 0.377ms vs NumPy 2.612ms = 0.144x (6.92x faster)
+  kron_1d f64:    fnp 0.355ms vs NumPy 2.314ms = 0.153x (6.52x faster)
+  kron_f32 2-D:   fnp 0.789ms vs NumPy 1.918ms = 0.411x (2.43x faster — numpy f32 broadcast is leaner)
+  (kron_f64 2-D control re-ran 0.393ms vs 2.751ms = 0.143x, consistent with the landed 55th win 7.41x)
+CORRECTNESS: probe 25/0 across f32 + i64/i32/i16/i8/u8 2-D (incl i64 OVERFLOW-WRAP + dtype preservation) +
+1-D f64/i32 x sizes below/at/above the gate x non-divisible/rectangular dims x special values (inf/nan/-0.0).
+Build clean. Real wins (all immune to false-loss). KEEP. AGENT_NAME=BlackThrush.
