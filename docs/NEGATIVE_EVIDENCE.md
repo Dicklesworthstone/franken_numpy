@@ -8652,16 +8652,14 @@ the 1<<21 gate x non-pow2 (chunk remainder) x 2-D x custom nan/posinf/neginf rep
 x all-finite x +-0.0. Build clean. Real win (fnp BEATS numpy 4.8-15x, immune to false-loss). KEEP.
 AGENT_NAME=BlackThrush.
 
-## BlackThrush WIN: parallelize f32 np.around/round (2026-06-25) — 54th win
-Extended the 47th-win f64 around lever to the float32 zero-copy sibling. try_zerocopy_f32_around kept
-NumPy's f32 arithmetic form (round-ties-even; divide-first for negative decimals) but still ran a serial
-ReadOnlyCell/Cell loop. Above 1<<21 elements, the raw-slice map now parallelizes the same per-element
-expression; below the gate the serial path is unchanged. Each output depends only on its matching input,
-so chunking is bit-exact for decimals 0, positive decimals, and negative decimals.
-
-PERF (criterion, remote RCH worker `ovh-a`, `python_around_boundary`, 8M f32, decimals=3):
-  around_f32_8m: fnp 1.765ms vs NumPy 3.561ms = 0.496x (2.02x faster)
-
-Validation added: `around_f32_parallel_large_bit_exact_matches_numpy` crosses the parallel gate and checks
-dtype, shape, C-contiguity, writeability, and exact bytes against NumPy for decimals 3, 0, and -1, including
-signed zero, half ties, infinities, and NaN. KEEP. AGENT_NAME=BlackThrush.
+## BlackThrush WIN: parallelize f32 np.around/round (3.80x over numpy) (2026-06-25) — 54th win
+Extended the 47th-win f64 around lever to the f32 zero-copy sibling try_zerocopy_f32_around (serial loop
+with three branchless mode forms: decimals==0 round-ties-even, positive scaled mul/round/div, negative
+scaled div/round/mul). Above the 1<<21 gate the raw-slice map parallelizes the same per-element expression
+inside each mode branch; below the gate the serial path is unchanged. Compute-heavy (round-ties-even +
+mul/div) so it wins even at 4-byte itemsize. Each output depends only on its matching input => BIT-EXACT.
+PERF (criterion, remote rch worker hz2 = truth; python_around_boundary, 8M f32, decimals=3):
+  around_f32: fnp 0.819ms vs NumPy 3.114ms = 0.263x (3.80x faster)
+  around_f64 control: fnp 3.797ms vs NumPy 10.133ms = 0.375x (matches the 47th-win ~2.74x -> build sound)
+CORRECTNESS: probe 25/0 across decimals {3,0,-2,1} x sizes below/at/above the 1<<21 gate x non-pow2 (chunk
+remainder) x half-even ties (x.5 -> even) x nan/inf/-0.0 x 2-D. Build clean. KEEP. AGENT_NAME=BlackThrush.
