@@ -8728,3 +8728,18 @@ path measured tile_i32 fnp 0.258ms vs NumPy 0.262ms = 0.987x (PARITY). numpy.til
 memcpy-saturated (~61 GB/s at 16 MB output), so the parallel byte copy is bandwidth-bound and cannot beat it
 — REVERTED any_tile to the original loop (no parity-only unsafe code shipped). The f64 win exists only because
 numpy's f64 tile path is anomalously slow on this build, NOT because tile is generally beatable. AGENT_NAME=BlackThrush.
+
+## BlackThrush REJECT: parallelize np.repeat (f64 1.5x LOSS, i64 parity) — reverted (2026-06-25)
+Tried the parallel per-run slice-fill on try_zerocopy_repeat_each's fill::<T> (byte-gated, par_chunks_mut(
+times).fill(v[i])). Bit-exact (probe 43/0 across 8 dtypes x sizes x non-pow2 k x special values x k=1 x 2-D
+flatten). But MEASURED A REGRESSION:
+PERF (criterion, remote rch worker hz2 = truth; python_repeat_boundary, 4096-vec repeated 1024x -> 4.19M):
+  repeat_f64: fnp 2.567ms vs NumPy 1.703ms = 1.507x (0.66x = a 1.5x LOSS)
+  repeat_i64: fnp 1.706ms vs NumPy 1.726ms = 0.988x (parity)
+REJECT + REVERTED. ROOT: two reasons repeat is unlike tile (which won 1.75x). (1) par_chunks_mut(times) makes
+m=4096 TINY chunks (one 1024-elem fill each) -> rayon task-spawn overhead dominates the trivial fill, and
+REGRESSES f64 from its serial parity to a 1.5x loss. (2) numpy.repeat is a clean fast C method (ndarray.repeat,
+~19 GB/s) with NO python wrapper overhead — unlike numpy.tile's slow python f64 path — so there is no gap to
+exploit. LESSON: don't parallelize at FINE granularity (one task per small run); and a copy-op only wins when
+numpy's path has python/overhead slack (tile f64), not when it's already a tight C memcpy (repeat). Serial repeat
+was already at parity (confirmed by a pre-build standalone probe) — leave it serial. AGENT_NAME=BlackThrush.
