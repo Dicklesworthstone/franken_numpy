@@ -41861,17 +41861,54 @@ fn try_zerocopy_f32_cross_n3(
         let Some(output) = out_buf.as_mut_slice(py) else {
             return Ok(None);
         };
-        for i in 0..n {
-            let base = i * 3;
-            let ax = a_in[base].get();
-            let ay = a_in[base + 1].get();
-            let az = a_in[base + 2].get();
-            let bx = b_in[base].get();
-            let by = b_in[base + 1].get();
-            let bz = b_in[base + 2].get();
-            output[base].set(ay * bz - az * by);
-            output[base + 1].set(az * bx - ax * bz);
-            output[base + 2].set(ax * by - ay * bx);
+        let total = n * 3;
+        // Same lever as the f64 cross: numpy.cross is single-threaded and allocates three
+        // whole-array temporaries; the parallel per-lane raw-slice map fuses 6 mul + 3 sub
+        // into one no-temp pass. Each output 3-vec depends only on its matching input 3-vec
+        // (identical expressions/order, chunk a multiple of 3) => bit-exact.
+        const CROSS_PARALLEL_MIN: usize = 1 << 21;
+        if total >= CROSS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; inputs are
+            // read-only under the GIL and `out` is a fresh numpy.empty we own (no alias).
+            let a_data: &[f32] =
+                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f32>(), total) };
+            let b_data: &[f32] =
+                unsafe { std::slice::from_raw_parts(b_in.as_ptr().cast::<f32>(), total) };
+            let out_data: &mut [f32] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, total) };
+            let chunk = n.div_ceil(rayon::current_num_threads()) * 3;
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(a_data.par_chunks(chunk))
+                .zip(b_data.par_chunks(chunk))
+                .for_each(|((o, a), b)| {
+                    for k in 0..(o.len() / 3) {
+                        let base = k * 3;
+                        let ax = a[base];
+                        let ay = a[base + 1];
+                        let az = a[base + 2];
+                        let bx = b[base];
+                        let by = b[base + 1];
+                        let bz = b[base + 2];
+                        o[base] = ay * bz - az * by;
+                        o[base + 1] = az * bx - ax * bz;
+                        o[base + 2] = ax * by - ay * bx;
+                    }
+                });
+        } else {
+            for i in 0..n {
+                let base = i * 3;
+                let ax = a_in[base].get();
+                let ay = a_in[base + 1].get();
+                let az = a_in[base + 2].get();
+                let bx = b_in[base].get();
+                let by = b_in[base + 1].get();
+                let bz = b_in[base + 2].get();
+                output[base].set(ay * bz - az * by);
+                output[base + 1].set(az * bx - ax * bz);
+                output[base + 2].set(ax * by - ay * bx);
+            }
         }
     }
     Ok(Some(out.unbind()))

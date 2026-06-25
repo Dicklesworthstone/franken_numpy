@@ -3434,6 +3434,15 @@ fn bench_cross_boundary(c: &mut Criterion) {
         group.bench_function("numpy_cross_f64_4m", |bch| {
             bch.iter(|| black_box(numpy_cross.call1((&a, &b)).expect("numpy cross")));
         });
+
+        let a32 = a.call_method1("astype", ("float32",)).expect("a f32");
+        let b32 = b.call_method1("astype", ("float32",)).expect("b f32");
+        group.bench_function("fnp_cross_f32_4m", |bch| {
+            bch.iter(|| black_box(fnp_cross.call1((&a32, &b32)).expect("fnp cross f32")));
+        });
+        group.bench_function("numpy_cross_f32_4m", |bch| {
+            bch.iter(|| black_box(numpy_cross.call1((&a32, &b32)).expect("numpy cross f32")));
+        });
     });
     group.finish();
 }

@@ -8594,3 +8594,17 @@ CORRECTNESS: probe 7/0 across sizes below/at/above the n*3>=1<<21 gate, non-pow2
 special values (inf/nan/-0.0/+-1e300 -> overflow & NaN propagation in the mul-sub match numpy bit-exact,
 including numpy's own overflow RuntimeWarnings). Build clean. Real win (fnp BEATS numpy 7.43x, immune to
 the loaded-box false-loss trap). KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize f32 np.cross (stacked 3-vectors) (2026-06-25) — 51st win
+Extended the 50th-win cross lever to the f32 sibling try_zerocopy_f32_cross_n3 (same serial per-lane Cell
+loop, f32 buffers). Same fused no-temp parallel per-lane map (chunk multiple of 3 => no lane split; gate
+n*3 >= 1<<21). numpy.cross still single-threaded + 3 whole-array temporaries, so f32 wins just as hard.
+BIT-EXACT (identical f32 expressions/order regardless of chunking).
+PERF (criterion, same-box A/B — remote pool was slot-starved so fnp AND numpy both ran on the loaded local
+box at identical load; a win this large is immune to the false-loss trap; python_cross_boundary, 4M lanes):
+  cross_f32: fnp 9.379ms vs NumPy 154.507ms = 0.061x (16.5x faster)
+  cross_f64: fnp 17.504ms vs NumPy 273.684ms = 0.064x (15.6x faster) [re-confirmed same run; landed remote
+             value was 7.43x — both directions agree: fnp wins by a wide margin]
+CORRECTNESS: probe 8/0 across f32 sizes below/at/above the n*3>=1<<21 gate, non-pow2 (chunk remainder),
+special values (inf/nan/-0.0/+-3e38 overflow & NaN propagation match numpy bit-exact) + an f64 no-regression
+lane. Build clean. Real win. KEEP. AGENT_NAME=BlackThrush.
