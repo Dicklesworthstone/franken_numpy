@@ -4,6 +4,49 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: var/std along axis=0 (first axis) native streaming two-pass
+
+`CreamEagle`/`cod-b`. The ML feature-standardization reduction (`(X-X.mean(0))/X.std(0)`).
+The committed var/std paths covered the contiguous last axis + trailing-axis tuples; a
+first-axis (axis=0) reduction fell to numpy. KEY DISCOVERY: numpy reduces the OUTER axis
+SEQUENTIALLY, not pairwise (`add.reduce(a, axis=0)` == straight row-by-row accumulation,
+verified bit-exact; pairwise applies only to the contiguous last axis). So a streaming
+two-pass is bit-exact.
+
+`try_zerocopy_f64_var_axis0`: M=shape[0], inner=product(shape[1..]). Pass 1 streams the M
+contiguous slabs -> row sum -> mean; pass 2 streams again -> sum((slab-mean)^2) -> var;
+std=sqrt. No temporaries (numpy materializes a-mean + squared whole-array temps). NaN/Inf
+propagate through the straight (a-mean)^2 exactly as numpy (no NaN->0 leaf) -> NO defer.
+
+**METHOD LESSON (important): column-block PARALLELISM was a TRAP.** First attempt fanned
+disjoint column blocks across rayon (each column reduced sequentially -> still bit-exact),
+but on a ROW-MAJOR array each thread strides through all M rows reading only its column
+slice -> catastrophic spatial locality. Measured ~2.6x SLOWER (var 4096x512: 1.63 ms
+parallel vs 0.63 ms serial) and far noisier (+/- 1.1 ms vs +/- 39 us). SERIAL cache-friendly
+streaming (read array sequentially, full cache lines) is bandwidth-optimal and won. RULE:
+for an OUTER-axis (axis=0) reduction on a C-contiguous array, the bit-exact-forced choice
+is serial-streaming vs strided-column-parallel; serial wins (locality > thread count).
+
+`cc`/`vmi1153651` head-to-head, sample-size 20, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `var(axis=0)`, 4096x512 f64 | 628,648 | 2,575,503 | 0.244x | native win |
+| `std(axis=0)`, 4096x512 f64 | 637,617 | 2,774,411 | 0.230x | native win |
+| `var(axis=0)`, 50000x64 f64 | 1,595,322 | 5,948,924 | 0.268x | native win |
+| `std(axis=0)`, 50000x64 f64 | 1,441,285 | 5,936,180 | 0.243x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface var_axis0 -- --sample-size 20 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_var --test conformance_std`
+
+Validation: `conformance_var` 17/17 (new `var_std_axis0_first_axis_matches_numpy`, var+std)
++ `conformance_std` 15/15, bit-exact under `np.allclose(rtol=0, atol=0, equal_nan=True)`
+across ddof 0/1, keepdims, negative axis, 3-D axis=0, NaN/Inf columns, an M<=ddof defer,
+tall/wide shapes. Artifacts: `tests/artifacts/perf/2026-06-24_var_std_axis0_cod_b/`.
+
 ## 2026-06-24 - KEEP (modest): np.gradient non-last (strided) single-axis row-combine
 
 `CreamEagle`/`cod-b`. First lever OUTSIDE the temp-reduce family this session.

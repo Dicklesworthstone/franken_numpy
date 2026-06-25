@@ -1650,6 +1650,77 @@ fn bench_var_multiaxis_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_var_axis0_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_var_axis0_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(3));
+    group.warm_up_time(Duration::from_secs(1));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_var = module.getattr("var").expect("fnp_python.var");
+        let numpy_var = numpy.getattr("var").expect("numpy.var");
+        let fnp_std = module.getattr("std").expect("fnp_python.std");
+        let numpy_std = numpy.getattr("std").expect("numpy.std");
+
+        for (label, rows, cols) in [
+            ("4096x512", 4096_i64, 512_i64),
+            ("50000x64", 50000_i64, 64_i64),
+        ] {
+            let size = rows * cols;
+            let input = numpy
+                .call_method1("linspace", (-4.0_f64, 6.0_f64, size))
+                .expect("var axis0 f64 input")
+                .call_method1("reshape", ((rows, cols),))
+                .expect("var axis0 2-D shape");
+
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs.set_item("axis", 0_i64).expect("fnp axis kwarg");
+            let numpy_kwargs = PyDict::new(py);
+            numpy_kwargs.set_item("axis", 0_i64).expect("numpy axis kwarg");
+
+            group.bench_function(format!("fnp_var_f64_axis0_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_var
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp var axis0 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_var_f64_axis0_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_var
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy var axis0 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("fnp_std_f64_axis0_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_std
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp std axis0 call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_std_f64_axis0_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_std
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy std axis0 call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_gradient_axis_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_gradient_axis_boundary");
     group.sample_size(10);
@@ -2699,6 +2770,7 @@ criterion_group!(
     bench_statistics_boundary,
     bench_std_var_axis_boundary,
     bench_var_multiaxis_boundary,
+    bench_var_axis0_boundary,
     bench_gradient_axis_boundary,
     bench_norm_axis_boundary,
     bench_norm_frobenius_boundary,

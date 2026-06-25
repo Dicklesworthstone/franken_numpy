@@ -3,6 +3,34 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python var/std axis=0 streaming two-pass keep (51st win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `var(axis=0)` 4096x512 vs NumPy | 10/10 | `0.244x` NumPy time (4.10x faster) |
+| `std(axis=0)` 4096x512 vs NumPy | 10/10 | `0.230x` NumPy time (4.35x faster) |
+| `var(axis=0)` 50000x64 vs NumPy | 10/10 | `0.268x` NumPy time (3.73x faster) |
+| `std(axis=0)` 50000x64 vs NumPy | 10/10 | `0.243x` NumPy time (4.12x faster) |
+| Behavior gate | 9/10 | Native only for f64 C-contiguous axis normalizing to 0 (>=2-D), native ddof, no out/dtype; M<=ddof and everything else defer to NumPy |
+| Conformance gate | 10/10 | `conformance_var` 17/17 (new var+std axis=0 test) + `conformance_std` 15/15 |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: `try_zerocopy_f64_var_axis0` serial cache-friendly streaming
+  two-pass (numpy reduces axis=0 SEQUENTIALLY, verified, so bit-exact).
+- numpy materializes a-mean + squared whole-array temps + 2 sequential reduces; this
+  streams the array twice with no temporary. Column-block parallelism rejected (cache-hostile
+  on row-major: ~2.6x slower + noisy) — serial streaming is bandwidth-optimal.
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface var_axis0 -- --sample-size 20 --warm-up-time 1
+  --measurement-time 3 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_var_std_axis0_cod_b/`.
+
+Decision:
+- Release-ready keep for the f64 C-contiguous axis=0 var/std rows.
+- M<=ddof, non-axis-0 single non-trailing axes, and non-f64 remain on NumPy.
+
 ## 2026-06-24 CreamEagle fnp-python gradient non-last-axis row-combine keep (50th win, MODEST)
 
 | Area | Score | Verdict |

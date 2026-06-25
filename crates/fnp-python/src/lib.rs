@@ -27405,6 +27405,109 @@ fn try_zerocopy_f64_var_axis(
     Ok(Some(reshaped.unbind()))
 }
 
+// Plain (NaN-propagating) np.var / np.std along the FIRST axis (axis=0) of a C-contiguous
+// f64 ndarray — the ubiquitous ML feature-standardization reduction. numpy.var(axis=0)
+// reduces the outer axis SEQUENTIALLY (NOT pairwise — verified: add.reduce(a, axis=0) ==
+// a straight row-by-row accumulation, unlike the last-axis pairwise path) and materializes
+// two whole-array temporaries (a - mean broadcast, then squared) before each reduce. This
+// streaming two-pass reads each contiguous slab (the i-th sub-array of `inner` elements)
+// twice with no temporary: pass 1 accumulates the row sum -> mean, pass 2 accumulates
+// (slab - mean)^2 -> var. Serial (cache-optimal sequential stream); the win is numpy's
+// temp avoidance, not threads (column-block parallelism is cache-hostile on a row-major
+// array and was rejected). NaN/Inf propagate through the straight (a-mean)^2 exactly as
+// numpy does (no NaN->0 leaf here),
+// so unlike the trailing-axis path no non-finite defer is needed. M <= ddof defers
+// (numpy warns + NaN). Only axis that normalizes to 0; everything else defers.
+fn try_zerocopy_f64_var_axis0(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis_obj: &Bound<'_, PyAny>,
+    ddof: usize,
+    take_sqrt: bool,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+        return Ok(None);
+    };
+    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    if ndim < 1 {
+        return Ok(None);
+    }
+    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
+    if ax != 0 || ndim < 2 {
+        return Ok(None); // only the first axis of a >=2-D array (1-D axis=0 = flat path)
+    }
+    let m = shape[0];
+    if m == 0 || m <= ddof {
+        return Ok(None); // numpy warns + returns NaN for m - ddof <= 0
+    }
+    let inner: usize = shape[1..].iter().product();
+    if inner == 0 {
+        return Ok(None);
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held under
+    // the GIL -> &[f64] (Sync) for the parallel disjoint-column folds below.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let denom = (m - ddof) as f64;
+    let m_f = m as f64;
+    // Fill output columns [c0 .. c0+width) by streaming all m slabs twice (sequential per
+    // column -> bit-exact with numpy's sequential axis-0 reduce).
+    let process = |c0: usize, cols: &mut [f64]| {
+        let width = cols.len();
+        let mut mean = vec![0.0f64; width];
+        for i in 0..m {
+            let base = i * inner + c0;
+            let row = &data[base..base + width];
+            for j in 0..width {
+                mean[j] += row[j];
+            }
+        }
+        for mj in mean.iter_mut() {
+            *mj /= m_f;
+        }
+        let mut sq = vec![0.0f64; width];
+        for i in 0..m {
+            let base = i * inner + c0;
+            let row = &data[base..base + width];
+            for j in 0..width {
+                let d = row[j] - mean[j];
+                sq[j] += d * d;
+            }
+        }
+        for j in 0..width {
+            let v = sq[j] / denom;
+            cols[j] = if take_sqrt { v.sqrt() } else { v };
+        }
+    };
+    let mut out = vec![0.0f64; inner];
+    // Serial streaming: the two passes read the whole array sequentially (row by row,
+    // full cache lines) — bandwidth-optimal. Column-block parallelism was tried and
+    // REJECTED: each thread strides through all m rows reading only its column slice, so
+    // a row-major array is read with poor spatial locality; it was both slower and far
+    // noisier than this cache-friendly serial stream. The win here is numpy's temp
+    // avoidance (it materializes a-mean and (a-mean)^2 whole-array temps), not threads.
+    process(0, &mut out);
+    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let mut out_shape: Vec<usize> = shape[1..].to_vec();
+    if keepdims {
+        out_shape.insert(0, 1); // numpy keeps the reduced first axis as length 1
+    }
+    let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
+}
+
 // Which contiguous-last-axis vector norm the native fold computes.
 #[derive(Clone, Copy)]
 enum VectorNormKind {
@@ -44818,6 +44921,17 @@ fn py_std(
     {
         return Ok(o);
     }
+    // Native first-axis (axis=0) streaming two-pass — the ML standardization reduction
+    // numpy materializes two temps + a sequential reduce for. See try_zerocopy_f64_var_axis0.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let DdofArg::Native(d) = &ddof
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, true, keepdims)?
+    {
+        return Ok(o);
+    }
     let std_fn = numpy.getattr("std")?;
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {
@@ -44870,6 +44984,16 @@ fn var(
         && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
         && let Some(o) =
             try_zerocopy_f64_var_axis(py, a.bind(py), ax.bind(py), *d, false, keepdims)?
+    {
+        return Ok(o);
+    }
+    // Native first-axis (axis=0) streaming two-pass — see py_std. take_sqrt = false for var.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let DdofArg::Native(d) = &ddof
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_f64_var_axis0(py, a.bind(py), ax.bind(py), *d, false, keepdims)?
     {
         return Ok(o);
     }

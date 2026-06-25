@@ -695,3 +695,58 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn var_std_axis0_first_axis_matches_numpy() -> Result<(), String> {
+    // Exercises the native first-axis (axis=0) streaming two-pass var/std fold against
+    // numpy bit-exactly (atol=0, equal_nan=True) incl dtype/shape: var and std, ddof
+    // 0/1, keepdims, negative axis index, 3-D axis=0, NaN/Inf columns (propagate, no
+    // defer), an M<=ddof defer case (numpy NaN + warning), and a wide/tall mix.
+    let script = fnp_var_script(
+        r#"
+import warnings
+def same(a, b):
+    a = np.asarray(a); b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+rng = np.random.default_rng(17)
+m2 = rng.standard_normal((1000, 257))
+tall = rng.standard_normal((50000, 16))
+wide = rng.standard_normal((97, 1024))
+s3 = rng.standard_normal((64, 9, 7))
+nanm = rng.standard_normal((40, 8)); nanm[3, 2] = np.nan; nanm[10, 5] = np.inf
+small = rng.standard_normal((1, 6))  # M=1: var ddof=1 -> numpy NaN + warning (defer)
+ok = True
+cases = [
+    (m2, 0, 0, False, False),
+    (m2, 0, 1, True, False),
+    (m2, -2, 0, False, False),
+    (tall, 0, 0, False, True),
+    (wide, 0, 1, False, False),
+    (s3, 0, 0, False, False),
+    (nanm, 0, 0, False, False),
+    (small, 0, 1, False, False),
+]
+for arr, axis, ddof, keepdims, use_std in cases:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if use_std:
+            f = fnp.std(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+            n = np.std(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+        else:
+            f = fnp.var(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+            n = np.var(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+    if not same(f, n):
+        print("FAIL", axis, ddof, keepdims, use_std, np.asarray(f), np.asarray(n)); ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "axis=0 first-axis var/std parity should match numpy: {result}"
+    );
+    Ok(())
+}
