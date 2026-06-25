@@ -3260,6 +3260,28 @@ fn bench_clip_boundary(c: &mut Criterion) {
             b.iter(|| black_box(numpy_clip.call1((&input, -1000.0_f64, 1000.0_f64)).expect("numpy clip")));
         });
 
+        let input_f32 = input
+            .call_method1("astype", ("float32",))
+            .expect("f32 input");
+        group.bench_function("fnp_clip_f32_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    fnp_clip
+                        .call1((&input_f32, -1000.0_f32, 1000.0_f32))
+                        .expect("fnp f32 clip"),
+                )
+            });
+        });
+        group.bench_function("numpy_clip_f32_8m", |b| {
+            b.iter(|| {
+                black_box(
+                    numpy_clip
+                        .call1((&input_f32, -1000.0_f32, 1000.0_f32))
+                        .expect("numpy f32 clip"),
+                )
+            });
+        });
+
         let ibase = numpy
             .call_method1("arange", (8_000_000_i64,))
             .expect("8M ibase")

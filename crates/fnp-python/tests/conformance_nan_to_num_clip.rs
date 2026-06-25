@@ -499,6 +499,35 @@ fn clip_dtype_preserved_matches_numpy() -> Result<(), String> {
 }
 
 #[test]
+fn clip_f32_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 65
+x = np.linspace(-2000.5, 2000.5, n, dtype=np.float32)
+x[0] = np.float32(np.nan)
+x[1] = np.float32(-0.0)
+x[2] = np.float32(np.inf)
+x[3] = np.float32(-np.inf)
+actual = fnp.clip(x, np.float32(-1000.0), np.float32(1000.0))
+expected = np.clip(x, np.float32(-1000.0), np.float32(1000.0))
+print(
+    actual.dtype == expected.dtype
+    and actual.shape == expected.shape
+    and actual.tobytes() == expected.tobytes()
+)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large f32 clip parallel path must be bit-identical to numpy"
+    );
+    Ok(())
+}
+
+#[test]
 fn nan_to_num_dtype_preserved_matches_numpy() -> Result<(), String> {
     let test_cases = vec![
         "np.array([np.nan, 1.0, np.inf], dtype=np.float32)",

@@ -4,6 +4,32 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-25 - KEEP: f32 `np.clip` parallel raw-slice path
+
+`BlackThrush`/`cod-b`. BOLD-VERIFY pass for the remaining exact float32
+`np.clip(a, lo, hi)` Python-boundary row. The f64 and narrow-int clip paths had
+already moved to a raw-slice rayon fan-out, but the f32 path still used the
+serial `Cell<f32>` loop. The kept lever applies the same large-buffer gate
+(`n >= 1 << 21`) while preserving the exact scalar comparison sequence
+(`t = if v < lo { lo } else { v }; out = if t > hi { hi } else { t }`), so NaN
+propagation and `lo > hi` clamp semantics remain unchanged.
+
+Same-worker evidence on `vmi1227854`, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`
+(RCH worker-scoped target dir), `python_clip_boundary`, 8M float32:
+
+| Row | FNP median | NumPy median | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| baseline serial f32 clip | 1.5496 ms | 1.5091 ms | 1.027x | slight loss |
+| parallel f32 clip candidate | 587.85 us | 1.9639 ms | 0.299x | keep |
+
+Candidate improves FNP vs its same-worker baseline by `2.64x` and beats NumPy by
+`3.34x`. The source hunk is present in `4e87a144`; this entry records the missing
+ratio proof and keeps durable Criterion rows for f32 clip.
+
+Proof commands:
+
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_WORKER=vmi1227854 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- python_clip_boundary`
+
 ## 2026-06-25 - NO-SHIP: f64 `np.unique` duplicate-heavy bit HashSet
 
 `BlackThrush`/`cod-b`. BOLD-VERIFY pass for the remaining large f64
