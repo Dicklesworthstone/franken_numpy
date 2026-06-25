@@ -3,6 +3,32 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python cumsum/cumprod/nancum* last-axis parallel keep (57th win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `cumsum(axis=-1)` 8192x1024 vs NumPy | 10/10 | `0.092x` NumPy time (10.86x faster) |
+| `cumsum(axis=-1)` 65536x256 vs NumPy | 10/10 | `0.109x` NumPy time (10.90x faster) |
+| Behavior gate | 10/10 | Bit-exact per-lane scan unchanged; only independent-lane processing order parallelized; inner>1/non-f64 paths untouched |
+| Conformance gate | 10/10 | cumulative 18/18, cumsum 2/2, cumsum_zerocopy 1/1, cumprod_zerocopy 2/2, nan_funcs 37/37 |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: parallelize the `inner==1` lane loop in
+  `try_zerocopy_f64_cumulative_axis` (`par_chunks_mut(axis_len).zip(par_chunks)`), benefiting
+  cumsum/cumprod/nancumsum/nancumprod last-axis at once.
+- numpy runs the cumulative scan single-threaded; each contiguous lane is an independent
+  prefix so fanning lanes across the pool is a free win (cache-safe: contiguous row blocks).
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface cumsum_lastaxis -- --sample-size 15 --warm-up-time 2
+  --measurement-time 4 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_cumulative_lastaxis_parallel_cod_b/`.
+
+Decision:
+- Release-ready keep for the f64 last-axis cumulative scans.
+- inner>1 (non-last axis) slab path and integer/f32 paths unchanged.
+
 ## 2026-06-24 CreamEagle fnp-python gradient full (no-axis tuple) keep (56th win)
 
 | Area | Score | Verdict |

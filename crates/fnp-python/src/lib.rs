@@ -11346,25 +11346,44 @@ fn try_zerocopy_f64_cumulative_axis(
         // numpy.nancumsum/nancumprod. skip_nan=false keeps NaN verbatim (plain cum*).
         let ident = if is_prod { 1.0 } else { 0.0 };
         if inner == 1 {
-            // Last-axis case: each outer lane is a contiguous run, so carry the
-            // accumulator in a register (no read-back of the previous output cell)
-            // exactly like the 1-D flatten scan — much faster than slab-by-slab.
-            for o in 0..outer {
-                let obase = o * axis_len;
-                let first = input[obase].get();
-                let mut acc = if skip_nan && first.is_nan() {
-                    ident
-                } else {
-                    first
-                };
-                output[obase].set(acc);
-                for a_idx in 1..axis_len {
-                    let value = input[obase + a_idx].get();
+            // Last-axis case: each outer lane is a contiguous run; carry the accumulator
+            // in a register (no read-back of the previous output cell) exactly like the
+            // 1-D flatten scan. Lanes are INDEPENDENT, so fan disjoint contiguous lane
+            // blocks across the rayon pool (numpy runs this single-threaded; the per-lane
+            // sequential add/mul latency chain parallelizes across lanes). Cache-friendly
+            // (each thread owns a contiguous row range). Bit-exact: each lane's scan is
+            // unchanged — only the order independent lanes are processed differs.
+            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; both are
+            // contiguous PyBuffer slices held under the GIL. The output is freshly
+            // numpy.empty (cannot alias the input) and each lane writes a disjoint range.
+            let in_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), total) };
+            let out_raw: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+            let scan = |(orow, irow): (&mut [f64], &[f64])| {
+                let first = irow[0];
+                let mut acc = if skip_nan && first.is_nan() { ident } else { first };
+                orow[0] = acc;
+                for k in 1..axis_len {
+                    let value = irow[k];
                     if !(skip_nan && value.is_nan()) {
                         acc = if is_prod { acc * value } else { acc + value };
                     }
-                    output[obase + a_idx].set(acc);
+                    orow[k] = acc;
                 }
+            };
+            use rayon::prelude::*;
+            const CUM_AXIS_PARALLEL_MIN: usize = 1 << 18;
+            if total >= CUM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+                out_raw
+                    .par_chunks_mut(axis_len)
+                    .zip(in_raw.par_chunks(axis_len))
+                    .for_each(scan);
+            } else {
+                out_raw
+                    .chunks_mut(axis_len)
+                    .zip(in_raw.chunks(axis_len))
+                    .for_each(scan);
             }
         } else {
             // inner > 1: accumulate slab-by-slab so the access stays sequential and

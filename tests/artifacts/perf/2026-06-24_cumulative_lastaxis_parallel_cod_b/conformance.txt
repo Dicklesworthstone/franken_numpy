@@ -1,0 +1,2 @@
+conformance_cumulative 18/18, conformance_cumsum 2/2, conformance_cumsum_zerocopy 1/1,
+conformance_cumprod_zerocopy 2/2, conformance_nan_funcs 37/37 -- 0 failed

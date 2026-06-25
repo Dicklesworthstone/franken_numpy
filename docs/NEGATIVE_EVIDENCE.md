@@ -4,6 +4,39 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: cumsum/cumprod/nancum* last-axis parallel-across-lanes
+
+`CreamEagle`/`cod-b`. The last-axis cumulative scan (`try_zerocopy_f64_cumulative_axis`
+`inner==1`) was already native+zero-copy but ran SERIALLY across the `outer` lanes. Each
+lane is an INDEPENDENT contiguous prefix scan, so the per-lane sequential add/mul latency
+chain fans across the rayon pool (numpy runs it single-threaded). Parallelized with
+`out.par_chunks_mut(axis_len).zip(in.par_chunks(axis_len))` above a 1<<18 gate.
+Cache-friendly (each thread owns a contiguous row range — NOT a strided column scan, so it
+doesn't hit the var-axis0 cache-hostile-parallel trap). Bit-exact: each lane's
+register-carried scan is unchanged; only the processing order of independent lanes differs.
+Benefits cumsum/cumprod/nancumsum/nancumprod last-axis at once. inner>1 (non-last) unchanged.
+
+`cc`/`vmi1153651`, sample-size 15 + 2 s warmup, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `cumsum(axis=-1)`, 8192x1024 f64 | 2,780,644 | 30,185,124 | 0.092x | native win |
+| `cumsum(axis=-1)`, 65536x256 f64 | 5,431,249 | 59,230,179 | 0.109x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface cumsum_lastaxis -- --sample-size 15 --warm-up-time 2 --measurement-time 4 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_cumulative --test conformance_cumsum --test conformance_cumsum_zerocopy --test conformance_cumprod_zerocopy --test conformance_nan_funcs`
+
+Validation: `conformance_cumulative` 18/18, `conformance_cumsum` 2/2,
+`conformance_cumsum_zerocopy` 1/1, `conformance_cumprod_zerocopy` 2/2,
+`conformance_nan_funcs` 37/37 — all pass (bit-exact, per-lane scan unchanged). Artifacts:
+`tests/artifacts/perf/2026-06-24_cumulative_lastaxis_parallel_cod_b/`. REUSABLE: a serial
+loop over INDEPENDENT contiguous lanes (last-axis ops) is a free rayon win vs
+single-threaded numpy — and it's cache-safe (contiguous row blocks), unlike strided
+column-parallel.
+
 ## 2026-06-24 - KEEP: np.gradient full (axis=None, N-D) native per-axis tuple
 
 `CreamEagle`/`cod-b`. The committed gradient fast paths did a single last axis and a
