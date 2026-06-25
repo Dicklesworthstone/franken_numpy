@@ -8469,3 +8469,17 @@ NOTE — contrast with the roll 2-D per-axis REVERT (13d6e0d1): roll's fix was C
 SINGLE-THREADED, so it only reached parity (~0-gain, reverted). clip PARALLELIZES (multi-thread aggregate
 bandwidth), so it BEATS numpy's single thread — a real win, immune to the loaded-box false-loss trap.
 KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize f64 np.where(mask,a,b) arr/arr select (2026-06-25) — 46th win
+Serial-Cell-loop sweep (the clip/unary lever): try_zerocopy_f64_where's arr/arr branch (the common
+np.where(mask,a,b)) blended with a SERIAL per-element Cell loop. numpy.where is single-threaded and the
+arr/arr blend is heavy traffic (cond u8 + x + y + out ~= 25 B/elem), so a parallel raw-slice select
+aggregates bandwidth and wins. Verbatim `cond!=0 ? x : y` select preserved => BIT-EXACT. Gate 1<<21
+(below-gate serial unchanged); only the arr/arr branch parallelized (scalar-blend branches left serial —
+lighter traffic).
+PERF (criterion, remote rch worker = truth; python_where_boundary, 8M f64):
+  where_f64 arr/arr: fnp 9.053ms vs NumPy 13.382ms = 0.68x (1.48x faster)
+CORRECTNESS: probe 9/0 across sizes below/at/above the 1<<21 gate, non-pow2 (chunk remainder), 2-D
+reshape, special values (NaN/Inf selected verbatim on either side), + scalar-branch sanity. Build clean.
+Real win (fnp BEATS numpy), immune to the loaded-box false-loss trap. Multi-thread aggregate bandwidth is
+what beats numpy's single thread (cf. roll single-thread memmove = parity = reverted). KEEP. AGENT_NAME=BlackThrush.

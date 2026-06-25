@@ -9062,10 +9062,41 @@ fn try_zerocopy_f64_where(
         // zipped blend (the arr/arr case is identical to the original fast path).
         match (x_in, y_in) {
             (Some(xa), Some(ya)) => {
-                for (((slot, c), xv), yv) in
-                    output.iter().zip(cond_in).zip(xa.iter()).zip(ya.iter())
-                {
-                    slot.set(if c.get() != 0 { xv.get() } else { yv.get() });
+                // numpy.where is single-threaded; the arr/arr blend is the common heavy
+                // case (cond + x + y + out ~= 25 B/elem), so a parallel raw-slice select
+                // aggregates memory bandwidth and wins. Verbatim select => bit-identical.
+                const WHERE_PARALLEL_MIN: usize = 1 << 21;
+                if n >= WHERE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+                    use rayon::prelude::*;
+                    // SAFETY: ReadOnlyCell<u8>/<f64> and Cell<f64> are repr(transparent) over
+                    // u8/f64; inputs are read-only under the GIL and `flat` is a fresh
+                    // numpy.empty we own (no alias).
+                    let c: &[u8] =
+                        unsafe { std::slice::from_raw_parts(cond_in.as_ptr().cast::<u8>(), n) };
+                    let xd: &[f64] =
+                        unsafe { std::slice::from_raw_parts(xa.as_ptr().cast::<f64>(), n) };
+                    let yd: &[f64] =
+                        unsafe { std::slice::from_raw_parts(ya.as_ptr().cast::<f64>(), n) };
+                    let od: &mut [f64] =
+                        unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+                    let chunk = n.div_ceil(rayon::current_num_threads());
+                    od.par_chunks_mut(chunk)
+                        .zip(c.par_chunks(chunk))
+                        .zip(xd.par_chunks(chunk))
+                        .zip(yd.par_chunks(chunk))
+                        .for_each(|(((o, cc), xx), yy)| {
+                            for (((s, &cv), &xv), &yv) in
+                                o.iter_mut().zip(cc).zip(xx).zip(yy)
+                            {
+                                *s = if cv != 0 { xv } else { yv };
+                            }
+                        });
+                } else {
+                    for (((slot, c), xv), yv) in
+                        output.iter().zip(cond_in).zip(xa.iter()).zip(ya.iter())
+                    {
+                        slot.set(if c.get() != 0 { xv.get() } else { yv.get() });
+                    }
                 }
             }
             (Some(xa), None) => {

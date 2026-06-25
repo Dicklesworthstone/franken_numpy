@@ -3264,9 +3264,49 @@ fn bench_clip_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_where_boundary(c: &mut Criterion) {
+    // f64 np.where(mask, a, b) arr/arr at 8M — above the 1<<21 gate. Serial Cell select
+    // was numpy-parity; parallel raw-slice select aggregates bandwidth and should win.
+    let mut group = c.benchmark_group("python_where_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let base = numpy
+            .call_method1("arange", (8_000_000_i64,))
+            .expect("8M base")
+            .call_method1("astype", ("float64",))
+            .expect("f64");
+        let a = base.call_method1("__mul__", (2.0_f64,)).expect("a");
+        let b = base.call_method1("__add__", (1.0_f64,)).expect("b");
+        let mask = base
+            .call_method1("__mod__", (2.0_f64,))
+            .expect("mod")
+            .call_method1("__gt__", (0.5_f64,))
+            .expect("mask bool");
+        let fnp_where = module.getattr("where").expect("fnp where");
+        let numpy_where = numpy.getattr("where").expect("numpy where");
+        group.bench_function("fnp_where_f64_8m", |bn| {
+            bn.iter(|| black_box(fnp_where.call1((&mask, &a, &b)).expect("fnp where")));
+        });
+        group.bench_function("numpy_where_f64_8m", |bn| {
+            bn.iter(|| black_box(numpy_where.call1((&mask, &a, &b)).expect("numpy where")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sqrt_input_extraction,
+    bench_where_boundary,
     bench_clip_boundary,
     bench_unary_parallel_boundary,
     bench_int32_unary_boundary,
