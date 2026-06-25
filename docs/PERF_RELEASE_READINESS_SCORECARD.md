@@ -3,6 +3,30 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python prod last-axis parallel-across-lanes keep (58th win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `prod(axis=-1)` 8192x1024 vs NumPy | 10/10 | `0.094x` NumPy time (10.65x faster) |
+| `prod(axis=-1)` 65536x256 vs NumPy | 10/10 | `0.083x` NumPy time (12.10x faster) |
+| Behavior gate | 10/10 | Bit-exact per-lane product unchanged; axis_len==0 empty-product (=1.0) guarded; inner>1 path untouched |
+| Conformance gate | 10/10 | `conformance_prod` 16/16 (incl empty-array) + `conformance_reductions` 1/1 |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; caught+fixed an empty-axis panic in my own change pre-commit |
+
+Evidence:
+- Agent `CreamEagle`; lever: parallelize the `inner==1` lane loop in `try_zerocopy_f64_prod`
+  (`par_iter_mut().zip(par_chunks(axis_len))`); each contiguous lane is an independent
+  sequential product, numpy single-threaded.
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface prod_lastaxis -- --sample-size 15 --warm-up-time 2
+  --measurement-time 4 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_prod_lastaxis_parallel_cod_b/`.
+
+Decision:
+- Release-ready keep for f64 last-axis prod.
+- inner>1 (non-last axis) slab path and integer/typed prod paths unchanged.
+
 ## 2026-06-24 CreamEagle fnp-python cumsum/cumprod/nancum* last-axis parallel keep (57th win)
 
 | Area | Score | Verdict |

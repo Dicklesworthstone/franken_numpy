@@ -1,0 +1,5 @@
+# sample-size 15, warm-up 2s, measurement 4s
+test python_prod_lastaxis_boundary/fnp_prod_f64_axis_last_8192x1024 ... bench:     667,937 ns/iter (+/- 49,481)
+test python_prod_lastaxis_boundary/numpy_prod_f64_axis_last_8192x1024 ... bench:   7,113,702 ns/iter (+/- 1,269,016)
+test python_prod_lastaxis_boundary/fnp_prod_f64_axis_last_65536x256 ... bench:   1,234,762 ns/iter (+/- 98,985)
+test python_prod_lastaxis_boundary/numpy_prod_f64_axis_last_65536x256 ... bench:  14,940,919 ns/iter (+/- 2,427,529)

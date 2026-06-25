@@ -4,6 +4,43 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: np.prod last-axis parallel-across-lanes (serial-lane-loop sweep)
+
+`CreamEagle`/`cod-b`. From the "grep `for o in 0..outer` serial lane loops" sweep
+(memory). `try_zerocopy_f64_prod` inner==1 (last-axis) was native+zero-copy but SERIAL
+across lanes; each lane is an INDEPENDENT contiguous product reduction and numpy runs
+prod(axis=-1) single-threaded. Parallelized via
+`out.par_iter_mut().zip(in.par_chunks(axis_len))` above a 1<<18 gate. Cache-friendly
+(contiguous row blocks). Bit-exact: each lane's left-to-right sequential product is
+unchanged; only independent-lane order differs.
+
+CAUGHT+FIXED a regression in my own change: `prod(np.array([]))` (axis=None, empty) gives
+axis_len=0, and `chunks(0)`/`par_chunks(0)` PANIC ("chunk size must be non-zero"). The old
+serial loop ran 0 inner iterations -> empty-product identity 1.0. Added an `axis_len==0 ->
+fill 1.0` branch. (cumsum's cumulative_axis already had an `axis_len==0 -> return None`
+guard, so it was safe.) LESSON: when converting a serial `for a in 0..axis_len` to
+`chunks(axis_len)`, guard axis_len==0 — empty reduction axes are a real conformance case.
+
+`cc`/`vmi1153651`, sample-size 15 + 2 s warmup, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `prod(axis=-1)`, 8192x1024 f64 | 667,937 | 7,113,702 | 0.094x | native win |
+| `prod(axis=-1)`, 65536x256 f64 | 1,234,762 | 14,940,919 | 0.083x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface prod_lastaxis -- --sample-size 15 --warm-up-time 2 --measurement-time 4 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_prod --test conformance_reductions`
+
+Validation: `conformance_prod` 16/16 (incl `prod_empty_array_matches_numpy` after the
+axis_len==0 fix) + `conformance_reductions` 1/1. Bit-exact (per-lane product unchanged).
+Artifacts: `tests/artifacts/perf/2026-06-24_prod_lastaxis_parallel_cod_b/`. Remaining serial
+lane loops in the sweep are bandwidth-bound transforms (roll/compress/diff/concatenate ->
+modest) or already-parallel reductions (nanprod has into_par_iter); prod was the
+latency-bound reduction gem.
+
 ## 2026-06-24 - KEEP: cumsum/cumprod/nancum* last-axis parallel-across-lanes
 
 `CreamEagle`/`cod-b`. The last-axis cumulative scan (`try_zerocopy_f64_cumulative_axis`

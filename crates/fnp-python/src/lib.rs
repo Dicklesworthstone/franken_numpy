@@ -44598,14 +44598,49 @@ fn try_zerocopy_f64_prod(
             return Ok(None);
         };
         if inner == 1 {
-            // Each outer lane is contiguous: accumulate the product in a register.
-            for (o, slot) in output.iter().enumerate() {
-                let base = o * axis_len;
-                let mut acc = 1.0_f64;
-                for a in 0..axis_len {
-                    acc *= input[base + a].get();
+            // Each outer lane is a contiguous, INDEPENDENT product reduction; accumulate in
+            // a register. numpy runs prod(axis=-1) single-threaded, so fan disjoint
+            // contiguous lane blocks across the rayon pool (cache-friendly: each thread owns
+            // a contiguous row range). Bit-exact: each lane's left-to-right sequential
+            // product is unchanged; only the order independent lanes are processed differs.
+            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; both are
+            // contiguous PyBuffer slices held under the GIL. The output is freshly
+            // numpy.empty (cannot alias the input); each lane writes a disjoint slot.
+            if axis_len == 0 {
+                // Empty product per lane = 1.0 identity (numpy's empty-prod result);
+                // chunks(0) would panic, so handle it directly.
+                for slot in output.iter() {
+                    slot.set(1.0);
                 }
-                slot.set(acc);
+            } else {
+                let in_raw: &[f64] = unsafe {
+                    std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len())
+                };
+                let out_raw: &mut [f64] = unsafe {
+                    std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, out_elems)
+                };
+                let lane_prod = |(slot, lane): (&mut f64, &[f64])| {
+                    let mut acc = 1.0_f64;
+                    for &v in lane {
+                        acc *= v;
+                    }
+                    *slot = acc;
+                };
+                use rayon::prelude::*;
+                const PROD_AXIS_PARALLEL_MIN: usize = 1 << 18;
+                if outer * axis_len >= PROD_AXIS_PARALLEL_MIN
+                    && rayon::current_num_threads() >= 2
+                {
+                    out_raw
+                        .par_iter_mut()
+                        .zip(in_raw.par_chunks(axis_len))
+                        .for_each(lane_prod);
+                } else {
+                    out_raw
+                        .iter_mut()
+                        .zip(in_raw.chunks(axis_len))
+                        .for_each(lane_prod);
+                }
             }
         } else {
             // inner > 1: multiply slab by slab so the access stays sequential.

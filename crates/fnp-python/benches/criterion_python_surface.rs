@@ -1775,6 +1775,57 @@ fn bench_var_axis0_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_prod_lastaxis_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_prod_lastaxis_boundary");
+    group.sample_size(15);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let fnp_prod = module.getattr("prod").expect("fnp_python.prod");
+        let numpy_prod = numpy.getattr("prod").expect("numpy.prod");
+
+        for (label, rows, cols) in [("8192x1024", 8192_i64, 1024_i64), ("65536x256", 65536_i64, 256_i64)]
+        {
+            let size = rows * cols;
+            // values near 1.0 so the product stays finite across the axis.
+            let input = numpy
+                .call_method1("linspace", (0.9999_f64, 1.0001_f64, size))
+                .expect("prod input")
+                .call_method1("reshape", ((rows, cols),))
+                .expect("prod 2-D shape");
+            let fnp_kwargs = PyDict::new(py);
+            fnp_kwargs.set_item("axis", -1_i64).expect("fnp axis kwarg");
+            let numpy_kwargs = PyDict::new(py);
+            numpy_kwargs.set_item("axis", -1_i64).expect("numpy axis kwarg");
+
+            group.bench_function(format!("fnp_prod_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_prod
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp prod call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_prod_f64_axis_last_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_prod
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy prod call");
+                    black_box(result);
+                });
+            });
+        }
+    });
+
+    group.finish();
+}
+
 fn bench_cumsum_lastaxis_boundary(c: &mut Criterion) {
     let mut group = c.benchmark_group("python_cumsum_lastaxis_boundary");
     group.sample_size(15);
@@ -2981,6 +3032,7 @@ criterion_group!(
     bench_std_var_axis_boundary,
     bench_var_multiaxis_boundary,
     bench_var_axis0_boundary,
+    bench_prod_lastaxis_boundary,
     bench_cumsum_lastaxis_boundary,
     bench_vander_boundary,
     bench_polyval_boundary,
