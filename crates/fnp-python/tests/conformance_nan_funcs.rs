@@ -881,3 +881,59 @@ print(h.hexdigest())
     );
     Ok(())
 }
+
+#[test]
+fn nanvar_nanstd_multiaxis_trailing_matches_numpy() -> Result<(), String> {
+    // Exercises the native multi-axis trailing nanvar/nanstd fold (axis a tuple
+    // resolving to the contiguous trailing axes) against numpy bit-exactly
+    // (atol=0, equal_nan=True) incl dtype/shape: nanvar and nanstd, ddof 0/1,
+    // keepdims, reversed axis order (symmetric), a 3-axis reduce, plain 2-D
+    // axis=(0,1), a non-trailing axis fallthrough, and blocks containing NaN
+    // (and an all-NaN block, which must defer + match numpy's NaN + warning).
+    let script = fnp_script(
+        r#"
+import warnings
+def same(a, b):
+    a = np.asarray(a); b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and np.allclose(a, b, rtol=0, atol=0, equal_nan=True)
+
+rng = np.random.default_rng(11)
+s3 = rng.standard_normal((4, 5, 6)); s3[s3 < -0.8] = np.nan
+s4 = rng.standard_normal((2, 3, 4, 5)); s4[s4 > 1.0] = np.nan
+m2 = rng.standard_normal((7, 8)); m2[0, 0] = np.nan
+allnan = np.full((3, 4, 4), np.nan, dtype=np.float64)
+allnan[1] = rng.standard_normal((4, 4))
+cases = [
+    (s3, (-2, -1), 0, False, False),
+    (s3, (-2, -1), 1, True, False),
+    (s3, (-1, -2), 0, False, False),
+    (s4, (-3, -2, -1), 0, False, False),
+    (s4, (-2, -1), 0, False, True),
+    (m2, (0, 1), 0, False, False),
+    (s3, (0, 1), 0, False, False),
+    (allnan, (-2, -1), 0, False, False),
+]
+ok = True
+for arr, axis, ddof, keepdims, use_std in cases:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        if use_std:
+            f = fnp.nanstd(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+            n = np.nanstd(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+        else:
+            f = fnp.nanvar(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+            n = np.nanvar(arr, axis=axis, ddof=ddof, keepdims=keepdims)
+    if not same(f, n):
+        print("FAIL", axis, ddof, keepdims, use_std, np.asarray(f), np.asarray(n)); ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "multi-axis trailing nanvar/nanstd parity should match numpy: {result}"
+    );
+    Ok(())
+}

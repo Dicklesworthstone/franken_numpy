@@ -3,6 +3,34 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python nanvar/nanstd multi-axis trailing fold keep (49th win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `nanvar(axis=(-2,-1))` 4096x16x16 vs NumPy | 10/10 | `0.088x` NumPy time (11.37x faster) |
+| `nanstd(axis=(-2,-1))` 4096x16x16 vs NumPy | 10/10 | `0.194x` NumPy time (5.17x faster) |
+| `nanvar(axis=(-2,-1))` 2048x32x32 vs NumPy | 10/10 | `0.111x` NumPy time (9.00x faster) |
+| `nanstd(axis=(-2,-1))` 2048x32x32 vs NumPy | 10/10 | `0.120x` NumPy time (8.35x faster) |
+| Behavior gate | 9/10 | Native only for f64 C-contiguous axis tuple == trailing `[ndim-k..ndim)`, ddof>=0; non-trailing/duplicate axes + all-NaN/under-ddof blocks defer to NumPy |
+| Conformance gate | 10/10 | `conformance_nan_funcs` 35/35 (new nanvar+nanstd multi-axis test, incl all-NaN block defer) |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: generalized `try_zerocopy_f64_nanvar_axis` to accept a
+  trailing-axis tuple (per-block "lane" = product of trailing dims; symmetric so sorted).
+- numpy materializes isnan mask + where temp + squared temp + multi-axis reduce
+  (single-threaded, ~7-14 ms); the multi-axis reduce over a contiguous trailing block
+  is bit-identical to a flat per-block pairwise nansum/count + sqr-dev fold.
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface var_multiaxis -- --sample-size 10 --warm-up-time 1
+  --measurement-time 3 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_nanvar_nanstd_multiaxis_cod_b/`.
+
+Decision:
+- Release-ready keep for the contiguous trailing-axes f64 nanvar/nanstd rows.
+- Non-trailing/strided axes and all-NaN/under-ddof blocks remain on NumPy.
+
 ## 2026-06-24 CreamEagle fnp-python var/std multi-axis trailing two-pass keep (48th win)
 
 | Area | Score | Verdict |

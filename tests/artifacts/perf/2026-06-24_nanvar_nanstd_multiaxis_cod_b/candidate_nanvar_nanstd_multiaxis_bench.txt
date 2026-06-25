@@ -1,0 +1,8 @@
+test python_var_multiaxis_boundary/fnp_nanvar_f64_axis_m2m1_4096x16x16 ... bench:     275,998 ns/iter (+/- 78,914)
+test python_var_multiaxis_boundary/numpy_nanvar_f64_axis_m2m1_4096x16x16 ... bench:   3,137,466 ns/iter (+/- 171,840)
+test python_var_multiaxis_boundary/fnp_nanstd_f64_axis_m2m1_4096x16x16 ... bench:     597,599 ns/iter (+/- 254,816)
+test python_var_multiaxis_boundary/numpy_nanstd_f64_axis_m2m1_4096x16x16 ... bench:   3,088,155 ns/iter (+/- 440,533)
+test python_var_multiaxis_boundary/fnp_nanvar_f64_axis_m2m1_2048x32x32 ... bench:     768,824 ns/iter (+/- 152,211)
+test python_var_multiaxis_boundary/numpy_nanvar_f64_axis_m2m1_2048x32x32 ... bench:   6,921,506 ns/iter (+/- 442,896)
+test python_var_multiaxis_boundary/fnp_nanstd_f64_axis_m2m1_2048x32x32 ... bench:     796,808 ns/iter (+/- 247,943)
+test python_var_multiaxis_boundary/numpy_nanstd_f64_axis_m2m1_2048x32x32 ... bench:   6,654,613 ns/iter (+/- 97,219)

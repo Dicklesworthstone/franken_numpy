@@ -1555,6 +1555,10 @@ fn bench_var_multiaxis_boundary(c: &mut Criterion) {
         let numpy_var = numpy.getattr("var").expect("numpy.var");
         let fnp_std = module.getattr("std").expect("fnp_python.std");
         let numpy_std = numpy.getattr("std").expect("numpy.std");
+        let fnp_nanvar = module.getattr("nanvar").expect("fnp_python.nanvar");
+        let numpy_nanvar = numpy.getattr("nanvar").expect("numpy.nanvar");
+        let fnp_nanstd = module.getattr("nanstd").expect("fnp_python.nanstd");
+        let numpy_nanstd = numpy.getattr("nanstd").expect("numpy.nanstd");
 
         for (label, b, m, n) in [
             ("4096x16x16", 4096_i64, 16_i64, 16_i64),
@@ -1597,6 +1601,38 @@ fn bench_var_multiaxis_boundary(c: &mut Criterion) {
                     let result = fnp_std
                         .call((&input,), Some(&fnp_kwargs))
                         .expect("fnp std multiaxis call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("fnp_nanvar_f64_axis_m2m1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_nanvar
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp nanvar multiaxis call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_nanvar_f64_axis_m2m1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_nanvar
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy nanvar multiaxis call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("fnp_nanstd_f64_axis_m2m1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_nanstd
+                        .call((&input,), Some(&fnp_kwargs))
+                        .expect("fnp nanstd multiaxis call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_nanstd_f64_axis_m2m1_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_nanstd
+                        .call((&input,), Some(&numpy_kwargs))
+                        .expect("numpy nanstd multiaxis call");
                     black_box(result);
                 });
             });

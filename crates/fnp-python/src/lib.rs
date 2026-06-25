@@ -27032,14 +27032,17 @@ fn try_zerocopy_f64_nanmean_axis(
     Ok(Some(reshaped.unbind()))
 }
 
-// Zero-copy per-lane pairwise nanvar/nanstd over the CONTIGUOUS LAST axis of a
-// C-contiguous f64 ndarray. Each lane is an independent 1-D reduction — exactly what
-// numpy's per-lane nanvar does — so the bit-exact pairwise nansum/count +
-// sum-of-squared-deviations (the SAME helpers as the axis=None flat fast path,
-// compute_f64_nanvar_flat) reproduce numpy's result. Any lane with count <= ddof
-// (e.g. an all-NaN lane at the default ddof=0) defers the WHOLE call to numpy so its
-// "Degrees of freedom <= 0" warning + NaN parity stays exact. Non-last axis,
-// non-contiguous, and non-f64 defer. `take_sqrt` selects nanstd vs nanvar.
+// Zero-copy per-block pairwise nanvar/nanstd over the CONTIGUOUS TRAILING axes of a
+// C-contiguous f64 ndarray — either a single last axis or a tuple resolving to the last
+// k axes (the per-block "lane" is the product of those trailing dims). Each block is an
+// independent reduction — exactly what numpy's per-lane nanvar does — so the bit-exact
+// pairwise nansum/count + sum-of-squared-deviations (the SAME helpers as the axis=None
+// flat fast path, compute_f64_nanvar_flat) reproduce numpy's result; numpy's multi-axis
+// reduce over a contiguous trailing block is bit-identical to a flat per-block reduce.
+// Any block with count <= ddof (e.g. an all-NaN block at the default ddof=0) defers the
+// WHOLE call to numpy so its "Degrees of freedom <= 0" warning + NaN parity stays exact.
+// Non-trailing/duplicate axes, non-contiguous, and non-f64 defer. `take_sqrt` selects
+// nanstd vs nanvar.
 fn try_zerocopy_f64_nanvar_axis(
     py: Python<'_>,
     a: &Bound<'_, PyAny>,
@@ -27059,17 +27062,42 @@ fn try_zerocopy_f64_nanvar_axis(
     {
         return Ok(None);
     }
-    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
-        return Ok(None);
-    };
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
     let ndim = shape.len() as i64;
-    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
-    if ax < 0 || ax != ndim - 1 {
-        return Ok(None); // only the contiguous last axis (inner == 1)
-    }
-    let ax = ax as usize;
-    let axis_len = shape[ax];
+    // Reduced axes must be the contiguous TRAILING block [keep .. ndim): either a single
+    // int (== last axis) or a tuple resolving to the last k axes (per-block "lane" =
+    // product of the trailing dims). nanvar is symmetric in the reduced axes, and a
+    // contiguous-trailing reduce over a C-contiguous array is bit-identical to a flat
+    // per-block reduce (verified: nanvar(x, axis=(-2,-1)) == nanvar(x.reshape(B,M*N), -1)).
+    let keep: usize = if let Ok(ax_raw) = axis_obj.extract::<i64>() {
+        let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
+        if ax < 0 || ax != ndim - 1 {
+            return Ok(None); // only the contiguous last axis (inner == 1)
+        }
+        (ndim - 1) as usize
+    } else if let Ok(axes) = axis_obj.extract::<Vec<i64>>() {
+        if axes.is_empty() {
+            return Ok(None);
+        }
+        let mut resolved: Vec<i64> = axes
+            .iter()
+            .map(|&ax| if ax < 0 { ax + ndim } else { ax })
+            .collect();
+        resolved.sort_unstable();
+        let k = resolved.len();
+        resolved.dedup();
+        if resolved.len() != k {
+            return Ok(None); // duplicate axes -> numpy raises; defer to match its error
+        }
+        let expected: Vec<i64> = (ndim - k as i64..ndim).collect();
+        if resolved[0] < 0 || resolved != expected {
+            return Ok(None); // non-trailing / out-of-range -> defer to numpy
+        }
+        (ndim - k as i64) as usize
+    } else {
+        return Ok(None);
+    };
+    let axis_len: usize = shape[keep..].iter().product();
     if axis_len == 0 {
         return Ok(None);
     }
@@ -27082,7 +27110,7 @@ fn try_zerocopy_f64_nanvar_axis(
     let Some(cells) = in_buffer.as_slice(py) else {
         return Ok(None);
     };
-    let outer: usize = shape[..ax].iter().product();
+    let outer: usize = shape[..keep].iter().product();
     // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held
     // under the GIL -> &[f64] (Sync) for the parallel per-lane fold below.
     let data: &[f64] =
@@ -27118,10 +27146,12 @@ fn try_zerocopy_f64_nanvar_axis(
         return Ok(None);
     };
     let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
-    let mut out_shape: Vec<usize> = shape[..ax].to_vec();
+    let mut out_shape: Vec<usize> = shape[..keep].to_vec();
     if keepdims {
-        // numpy keeps the reduced last axis as length 1.
-        out_shape.push(1);
+        // numpy keeps every reduced trailing axis as length 1.
+        for _ in keep..ndim as usize {
+            out_shape.push(1);
+        }
     }
     let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
     if out_shape.is_empty() {

@@ -4,6 +4,44 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: nanvar/nanstd multi-axis trailing native fold
+
+`CreamEagle`/`cod-b`. Generalizes the committed `try_zerocopy_f64_nanvar_axis` (single
+contiguous last axis) to accept an axis TUPLE resolving to the contiguous trailing axes
+(per-block "lane" = product of trailing dims) — the same generalization just applied to
+plain var/std (e1b17e09). numpy.nanvar materializes an isnan mask + where/zeroed temp +
+squared-deviation temps before its multi-axis reduce (very slow, ~7-14 ms at these
+sizes); the native per-block pairwise nansum/count + sum-of-squared-deviations fold reads
+each contiguous block with no allocation, parallel across blocks.
+
+Bit-exact: numpy's multi-axis reduce over a contiguous trailing block == flat per-block
+reduce (verified `nanvar(x, axis=(-2,-1)) == nanvar(x.reshape(B,M*N), -1)` bit-for-bit,
+ddof 0/1, nanvar+nanstd). nanvar symmetric in the reduced axes -> sorted. Gate: f64
+C-contiguous, axis tuple == `[ndim-k..ndim)` exactly, ddof>=0; non-trailing/duplicate
+axes defer; any block with count<=ddof (all-NaN block) defers the WHOLE call so numpy's
+"Degrees of freedom <= 0" warning + NaN parity stays exact.
+
+`cc`/`vmi1153651` head-to-head, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `nanvar(axis=(-2,-1))`, 4096x16x16 f64 | 275,998 | 3,137,466 | 0.088x | native win |
+| `nanstd(axis=(-2,-1))`, 4096x16x16 f64 | 597,599 | 3,088,155 | 0.194x | native win |
+| `nanvar(axis=(-2,-1))`, 2048x32x32 f64 | 768,824 | 6,921,506 | 0.111x | native win |
+| `nanstd(axis=(-2,-1))`, 2048x32x32 f64 | 796,808 | 6,654,613 | 0.120x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface var_multiaxis -- --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_nan_funcs`
+
+Validation: `conformance_nan_funcs` 35/35 (new `nanvar_nanstd_multiaxis_trailing_matches_numpy`,
+tests nanvar AND nanstd), bit-exact under `np.allclose(rtol=0, atol=0, equal_nan=True)`
+across ddof 0/1, keepdims, reversed axis, 3-axis reduce, 2-D axis=(0,1), non-trailing
+fallthrough, NaN blocks, and an all-NaN block (defers + matches numpy NaN/warning).
+Artifacts: `tests/artifacts/perf/2026-06-24_nanvar_nanstd_multiaxis_cod_b/`.
+
 ## 2026-06-24 - KEEP: var/std multi-axis trailing native two-pass fold
 
 `CreamEagle`/`cod-b`. Generalizes the committed `try_zerocopy_f64_var_axis` (single
