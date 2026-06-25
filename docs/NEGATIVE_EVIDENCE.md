@@ -4,6 +4,45 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-25 - NO-SHIP: f64 `np.unique` output-buffer dedup
+
+`BlackThrush`/`cod-a`. BOLD-VERIFY pass for the medium/large f64 `np.unique` boundary after
+`c6b87f00` landed the sub-`1<<20` delegate gate. No stale measured worktree win remained to
+land on main, so the fresh lever tested was an "output-owned sort" variant for the large f64
+native branch: allocate `numpy.empty(n)`, copy the borrowed input into that output, parallel
+sort in place, compact adjacent duplicates, then `resize(refcheck=False)` to the unique
+length. Hypothesis: remove the current `Vec` allocation plus final copy for high-cardinality
+large arrays.
+
+Rejected. The blanket output-buffer variant still lost the repeated 1M row on `vmi1149989`
+(`10.064 ms` vs NumPy `9.7204 ms`, `1.035x`). A narrowed high-cardinality attempt was also
+not keepable: local distinct 1M measured `13.231 ms` vs NumPy `12.700 ms` (`1.042x`), while
+the repeated row was load-sensitive and unsafe. Source change was reverted; no implementation
+lever shipped.
+
+Current main behavior after revert, with the new reproducible Criterion boundary rows:
+
+| Row | FNP mean | NumPy mean | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `unique(float64 repeated)`, 50k | 428.43 us | 417.77 us | 1.026x | delegate parity/slight loss |
+| `unique(float64 repeated)`, 512k | 5.7810 ms | 5.7695 ms | 1.002x | delegate parity |
+| `unique(float64 repeated)`, 1,048,576 | 15.611 ms | 12.170 ms | 1.283x | native loss, needs different lever |
+| `unique(float64 distinct)`, 1,048,576 | 12.467 ms | 12.627 ms | 0.987x | tiny existing native win, not enough for new lever |
+
+Durable change kept: `criterion_python_surface` now has
+`python_unique_medium_boundary`, and `unique_plain_f64_bit_exact_matches_numpy` now includes
+the above-gate f64 size (`1,048,576`) so both the delegate and native branches stay visible.
+Retry predicate: do not revisit output-buffer resize. The next plausible lever needs a
+duplicate-heavy large f64 strategy, not just moving the sort destination.
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- unique_medium`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --test conformance_unravel_unique unique_plain_f64_bit_exact_matches_numpy -- --nocapture`
+
+Artifacts: `tests/artifacts/perf/2026-06-25_unique_medium_delegate_cod_a/`.
+
 ## 2026-06-24 - KEEP: np.sum last-axis parallel pairwise lanes
 
 `BlackThrush`/`cod-a`. Follow-up to the last-axis cumulative/prod wins: `np.sum(axis=-1)`

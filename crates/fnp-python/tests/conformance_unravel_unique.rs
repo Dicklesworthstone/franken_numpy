@@ -737,7 +737,7 @@ mod = MODULE
 rng = np.random.default_rng(20260605)
 chunks = []
 # standard_normal never yields an exact +-0.0, so these are deterministic.
-for n in [1000, 100003, 500000]:
+for n in [1000, 100003, 500000, 1048576]:
     chunks.append(np.asarray(mod.unique(rng.standard_normal(n))).tobytes())
     chunks.append(np.asarray(mod.unique(np.round(rng.standard_normal(n) * 4) + 0.5)).tobytes())
 chunks.append(np.asarray(mod.unique(np.array([np.inf, -np.inf, 1.0, -1.0, 1.0, np.nan, 2.0, np.nan], dtype=np.float64))).tobytes())
