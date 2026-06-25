@@ -832,3 +832,45 @@ print(np.allclose(fnp_result, np_result, rtol=1e-10))
     );
     Ok(())
 }
+
+#[test]
+fn sum_lastaxis_native_pairwise_bitexact_matches_numpy() -> Result<(), String> {
+    // Exercises the native last-axis pairwise sum fast path against numpy bit-exactly
+    // (atol=0, equal_nan=True) incl dtype/shape: 2-D and 3-D last axis, negative axis,
+    // keepdims, a NaN/Inf lane (propagate), and a non-last axis fallthrough (axis=0).
+    let script = fnp_sum_script(
+        r#"
+def same(a, b):
+    a = np.asarray(a); b = np.asarray(b)
+    return a.shape == b.shape and a.dtype == b.dtype and a.tobytes() == b.tobytes()
+
+rng = np.random.default_rng(41)
+m2 = rng.standard_normal((4096, 1023))
+m3 = rng.standard_normal((64, 50, 41))
+nanm = m2.copy(); nanm[7, 3] = np.nan; nanm[9, 0] = np.inf
+ok = True
+cases = [
+    (m2, -1, False),
+    (m2, 1, True),
+    (m3, -1, False),
+    (m3, 2, True),
+    (nanm, -1, False),
+    (m2, 0, False),   # non-last axis -> fallthrough to numpy, must still match
+]
+for arr, axis, keepdims in cases:
+    f = fnp.sum(arr, axis=axis, keepdims=keepdims)
+    n = np.sum(arr, axis=axis, keepdims=keepdims)
+    if not same(f, n):
+        print("FAIL", axis, keepdims, np.asarray(f).ravel()[:4], np.asarray(n).ravel()[:4]); ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "native last-axis sum parity should match numpy: {result}"
+    );
+    Ok(())
+}

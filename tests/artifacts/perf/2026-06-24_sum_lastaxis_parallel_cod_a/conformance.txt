@@ -1,0 +1,17 @@
+# sum last-axis conformance
+
+Focused native row:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --test conformance_sum sum_lastaxis_native_pairwise_bitexact_matches_numpy -- --nocapture`
+
+Result: pass, 1/1.
+
+Full sum shard:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --test conformance_sum -- --nocapture`
+
+Result: pass, 27/27.
+
+Coverage includes signed zero, NaN/Inf, dtype, `out`, `where`, `initial`, tuple axis,
+negative axis, empty arrays, axis errors, and the new bit-exact native last-axis row
+covering 2-D, 3-D, keepdims, NaN/Inf propagation, and non-last-axis fallback.

@@ -44491,6 +44491,73 @@ fn array(
     core_numpy_passthrough(py, "array", args, kwargs)
 }
 
+// np.sum over the contiguous LAST axis of a C-contiguous f64 array: each lane is an
+// independent pairwise reduction (numpy sums the fast axis pairwise), so reuse the
+// bit-exact pairwise_simd_f64 kernel (the same tree numpy uses, proven by the var/std
+// mean) per lane, fanned across the rayon pool. numpy runs sum(axis=-1) single-threaded;
+// this reads each contiguous lane directly (no extract/tolist) and parallelizes across
+// lanes. Bit-exact. NaN propagates (nan_to_zero=false). Gated to f64 C-contiguous,
+// single last-axis int, no out/dtype/initial; empty axis and everything else defer.
+fn try_zerocopy_f64_sum_lastaxis(
+    py: Python<'_>,
+    a: &Bound<'_, PyAny>,
+    axis_obj: &Bound<'_, PyAny>,
+    keepdims: bool,
+) -> PyResult<Option<Py<PyAny>>> {
+    let numpy = py.import("numpy")?;
+    let Some(in_buffer) = f64_contiguous_cells(py, a, &numpy)? else {
+        return Ok(None);
+    };
+    let Ok(ax_raw) = axis_obj.extract::<i64>() else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let ndim = shape.len() as i64;
+    let ax = if ax_raw < 0 { ax_raw + ndim } else { ax_raw };
+    if ax < 0 || ax != ndim - 1 {
+        return Ok(None); // only the contiguous last axis (inner == 1)
+    }
+    let ax = ax as usize;
+    let axis_len = shape[ax];
+    if axis_len == 0 {
+        return Ok(None); // empty reduction axis: defer (chunks_exact(0) + numpy's 0.0)
+    }
+    let Some(cells) = in_buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let outer: usize = shape[..ax].iter().product();
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only buffer held under
+    // the GIL into &[f64] (Sync) for the parallel per-lane fold below.
+    let data: &[f64] =
+        unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), cells.len()) };
+    let lane_sum = |lane: &[f64]| -> f64 {
+        let mut buf = [0.0f64; 128];
+        let lc: &[pyo3::buffer::ReadOnlyCell<f64>] =
+            unsafe { std::slice::from_raw_parts(lane.as_ptr().cast(), lane.len()) };
+        // nan_to_zero = false: plain sum propagates NaN/Inf, matching numpy.sum.
+        pairwise_simd_f64(lc, 0, lane.len(), false, &mut buf)
+    };
+    use rayon::prelude::*;
+    const SUM_AXIS_PARALLEL_MIN: usize = 98_304;
+    let parallel =
+        outer * axis_len >= SUM_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2;
+    let out: Vec<f64> = if parallel {
+        data.par_chunks_exact(axis_len).map(lane_sum).collect()
+    } else {
+        data.chunks_exact(axis_len).map(lane_sum).collect()
+    };
+    let flat = numpy_array_from_slice(py, &numpy, &out, "float64")?;
+    let mut out_shape: Vec<usize> = shape[..ax].to_vec();
+    if keepdims {
+        out_shape.push(1);
+    }
+    let reshaped = flat.call_method1("reshape", (PyTuple::new(py, out_shape.iter().copied())?,))?;
+    if out_shape.is_empty() {
+        return Ok(Some(reshaped.get_item(())?.unbind()));
+    }
+    Ok(Some(reshaped.unbind()))
+}
+
 // Reductions: passthrough to NumPy because our input extraction (extract_precise_numeric_array)
 // calls .tolist() which is O(n) Python object creation. NumPy's native C path is faster.
 // See perf bead franken_numpy-c6t1m.
@@ -44507,8 +44574,20 @@ fn sum(
     initial: Option<Py<PyAny>>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Always passthrough to NumPy - our input extraction is slower
     let numpy = py.import("numpy")?;
+    // Native last-axis fast path: per-lane pairwise sum (bit-exact, the same tree numpy
+    // uses on the contiguous fast axis) parallel across lanes beats numpy's single-threaded
+    // sum(axis=-1). No out/dtype/initial, native single last-axis int, empty kwargs.
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && dtype.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && out.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && initial.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(ax) = axis.as_ref().filter(|v| !v.bind(py).is_none())
+        && let Some(o) = try_zerocopy_f64_sum_lastaxis(py, a.bind(py), ax.bind(py), keepdims)?
+    {
+        return Ok(o);
+    }
+    // Passthrough to NumPy for everything else.
     let sum_fn = numpy.getattr("sum")?;
     let kw = clone_py_kwargs(py, kwargs)?;
     if let Some(ax) = axis.as_ref() {

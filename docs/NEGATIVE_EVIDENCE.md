@@ -4,6 +4,40 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: np.sum last-axis parallel pairwise lanes
+
+`BlackThrush`/`cod-a`. Follow-up to the last-axis cumulative/prod wins: `np.sum(axis=-1)`
+over exact C-contiguous f64 arrays was still a pure NumPy passthrough. The new
+`try_zerocopy_f64_sum_lastaxis` fast path keeps NumPy's per-lane pairwise reduction tree
+via the existing `pairwise_simd_f64` helper, but fans independent contiguous rows across
+rayon. Gated to native single last-axis int, no `out`/`dtype`/`initial`, no extra kwargs,
+non-empty axis, and f64 C-contiguous input; every other case defers to NumPy.
+
+`cod-a`/`vmi1149989`, sample-size 15 + 2 s warmup + 4 s measurement,
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a` (RCH rewrote to the
+worker-scoped target dir on the remote):
+
+| Row | FNP median | NumPy median | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `sum(axis=-1)`, 8192x1024 f64 | 1.1513 ms | 4.5198 ms | 0.255x | native win |
+| `sum(axis=-1)`, 65536x256 f64 | 2.4695 ms | 8.8303 ms | 0.280x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- python_sum_lastaxis_boundary`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -p fnp-python --test conformance_sum -- --nocapture`
+
+Validation: `conformance_sum` 27/27 passed, including signed zero, NaN/Inf, dtype,
+`out`, `where`, `initial`, tuple axis, negative axis, and the new native
+`sum_lastaxis_native_pairwise_bitexact_matches_numpy` bit-exact row for 2-D, 3-D,
+keepdims, NaN/Inf, and non-last-axis fallback via exact shape/dtype/raw-byte equality.
+`cargo check -p fnp-python --all-targets`
+passed on `hz2`. The strict clippy gate still fails before this candidate in the existing
+dependency warning `fnp-ufunc::UFuncArray::nan_filtered` dead code; not mixed into this
+perf lever. Artifacts:
+`tests/artifacts/perf/2026-06-24_sum_lastaxis_parallel_cod_a/`.
+
 ## 2026-06-24 - KEEP: np.prod last-axis parallel-across-lanes (serial-lane-loop sweep)
 
 `CreamEagle`/`cod-b`. From the "grep `for o in 0..outer` serial lane loops" sweep
