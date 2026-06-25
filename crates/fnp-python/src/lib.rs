@@ -8573,10 +8573,35 @@ fn try_zerocopy_f64_clip(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            let v = cell.get();
-            let t = if v < lo { lo } else { v };
-            slot.set(if t > hi { hi } else { t });
+        // numpy.clip is single-threaded; a parallel raw-slice clamp aggregates memory
+        // bandwidth and wins for large buffers (same lever as the unary maps). The exact
+        // `if v<lo {lo} else {v}` / `if t>hi {hi} else {t}` form is preserved (NaN: both
+        // comparisons false -> NaN propagates, matching numpy), so it stays bit-identical.
+        const CLIP_PARALLEL_MIN: usize = 1 << 21;
+        if n >= CLIP_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
+            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+            let in_data: &[f64] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
+            let out_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(in_data.par_chunks(chunk))
+                .for_each(|(o, i)| {
+                    for (s, &v) in o.iter_mut().zip(i.iter()) {
+                        let t = if v < lo { lo } else { v };
+                        *s = if t > hi { hi } else { t };
+                    }
+                });
+        } else {
+            for (slot, cell) in output.iter().zip(input.iter()) {
+                let v = cell.get();
+                let t = if v < lo { lo } else { v };
+                slot.set(if t > hi { hi } else { t });
+            }
         }
     }
     let output_shape = PyTuple::new(py, shape.iter().copied())?;

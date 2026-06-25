@@ -8452,3 +8452,20 @@ PERF (criterion, remote rch worker = truth; python_unary_parallel_boundary, 8M):
 LESSON: narrow-dtype maps parallelize like wide ones, BUT gate on BYTES — for 1-byte types numpy's
 vectorized ufunc is bandwidth-bound and parallel fan-out is a net loss until much larger n. Real win
 (fnp BEATS numpy, not loss->par), so immune to the loaded-box false-loss trap. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize f64 np.clip zero-copy path (2026-06-25) — 45th win
+Source-inspection sweep for serial Cell loops over large buffers (the lever behind the unary wins):
+try_zerocopy_f64_clip clamped with a SERIAL per-element Cell loop. numpy.clip is single-threaded, so a
+parallel raw-slice clamp aggregates memory bandwidth and wins (8M f64 = 128MB traffic: 29 GB/s parallel
+vs numpy 18 GB/s single-thread). Parallelized with the exact `if v<lo {lo} else {v}` / `if t>hi {hi}
+else {t}` form preserved (NaN: both comparisons false -> propagates, matching numpy) => BIT-EXACT.
+Gate 1<<21 (below-gate serial path unchanged, no small-array regression). f32 clip left untouched (its
+`.max().min()` form has a separate pre-existing NaN question, not for a perf change); int clip untouched.
+PERF (criterion, remote rch worker = truth; python_clip_boundary, 8M f64):
+  clip_f64: fnp 4.376ms vs NumPy 7.081ms = 0.62x (1.62x faster)
+CORRECTNESS: probe 24/0 across sizes below/at/above the 1<<21 gate, non-pow2 (chunk remainder), 2-D
+reshape, and special values (NaN/Inf/-0.0 propagate/clamp exactly like numpy). Build clean.
+NOTE — contrast with the roll 2-D per-axis REVERT (13d6e0d1): roll's fix was Cell->memmove but stayed
+SINGLE-THREADED, so it only reached parity (~0-gain, reverted). clip PARALLELIZES (multi-thread aggregate
+bandwidth), so it BEATS numpy's single thread — a real win, immune to the loaded-box false-loss trap.
+KEEP. AGENT_NAME=BlackThrush.

@@ -3229,9 +3229,45 @@ fn bench_unary_parallel_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_clip_boundary(c: &mut Criterion) {
+    // f64 np.clip at 8M — above the 1<<21 parallel gate. Serial Cell clamp was at numpy
+    // parity (memory-bound single-thread); the parallel raw-slice clamp aggregates
+    // bandwidth and should win ~2x. Bit-exact (same if-form, NaN-propagating).
+    let mut group = c.benchmark_group("python_clip_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let input = numpy
+            .call_method1("arange", (8_000_000_i64,))
+            .expect("8M base")
+            .call_method1("__sub__", (4_000_000_i64,))
+            .expect("centered")
+            .call_method1("astype", ("float64",))
+            .expect("f64 input");
+        let fnp_clip = module.getattr("clip").expect("fnp clip");
+        let numpy_clip = numpy.getattr("clip").expect("numpy clip");
+        group.bench_function("fnp_clip_f64_8m", |b| {
+            b.iter(|| black_box(fnp_clip.call1((&input, -1000.0_f64, 1000.0_f64)).expect("fnp clip")));
+        });
+        group.bench_function("numpy_clip_f64_8m", |b| {
+            b.iter(|| black_box(numpy_clip.call1((&input, -1000.0_f64, 1000.0_f64)).expect("numpy clip")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_sqrt_input_extraction,
+    bench_clip_boundary,
     bench_unary_parallel_boundary,
     bench_int32_unary_boundary,
     bench_narrow_int_unary_boundary,
