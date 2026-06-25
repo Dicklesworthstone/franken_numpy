@@ -7587,13 +7587,45 @@ fn zerocopy_i32_unary_flat<'py>(
 // Monomorphic per-element map over a typed integer buffer; with `f` inlined this
 // autovectorizes per width.
 #[inline(always)]
-fn unary_map_int<T: pyo3::buffer::Element + Copy, F: Fn(T) -> T>(
+fn unary_map_int<T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T) -> T + Sync>(
     input: &[pyo3::buffer::ReadOnlyCell<T>],
     output: &[std::cell::Cell<T>],
     f: F,
 ) {
-    for (slot, cell) in output.iter().zip(input.iter()) {
-        slot.set(f(cell.get()));
+    // Mirror unary_map_f64: parallel raw-slice map for large buffers — covers every
+    // integer width's square/abs/negative (and integer sign). numpy's integer ufuncs
+    // are single-threaded, so aggregate memory bandwidth wins; raw slices also
+    // autovectorize. Bit-identical: each output element depends only on the matching
+    // input element. Every caller writes into a fresh numpy.empty buffer (no alias).
+    let n = input.len();
+    // Byte-gate (not element-gate): the parallel raw-slice map wins once total traffic is
+    // large enough that aggregate memory bandwidth beats numpy's single-threaded SIMD. For
+    // 1-byte types (u8/i8) numpy's ufunc is already bandwidth-saturated at these sizes and
+    // the rayon fan-out doesn't pay (measured u8 8M 1.14x), so they stay serial = their
+    // original path (no regression); 2/4/8-byte widths cross the gate and win ~1.5-2x.
+    const UNARY_PARALLEL_MIN_BYTES: usize = 1 << 23;
+    if n.saturating_mul(std::mem::size_of::<T>()) >= UNARY_PARALLEL_MIN_BYTES
+        && rayon::current_num_threads() >= 2
+    {
+        use rayon::prelude::*;
+        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; input is
+        // read-only under the GIL and `output` is a fresh numpy.empty buffer (no alias).
+        let in_data: &[T] = unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), n) };
+        let out_data: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n) };
+        let chunk = n.div_ceil(rayon::current_num_threads());
+        out_data
+            .par_chunks_mut(chunk)
+            .zip(in_data.par_chunks(chunk))
+            .for_each(|(o, i)| {
+                for (s, &v) in o.iter_mut().zip(i.iter()) {
+                    *s = f(v);
+                }
+            });
+    } else {
+        for (slot, cell) in output.iter().zip(input.iter()) {
+            slot.set(f(cell.get()));
+        }
     }
 }
 
@@ -7615,10 +7647,10 @@ fn zerocopy_int_unary_typed<'py, T, N, A, S>(
     sqr: S,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
 where
-    T: pyo3::buffer::Element + Copy,
-    N: Fn(T) -> T,
-    A: Fn(T) -> T,
-    S: Fn(T) -> T,
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+    N: Fn(T) -> T + Sync,
+    A: Fn(T) -> T + Sync,
+    S: Fn(T) -> T + Sync,
 {
     let Ok(in_buffer) = PyBuffer::<T>::get(x) else {
         return Ok(None);
@@ -51018,8 +51050,8 @@ fn sign_typed<'py, T, F>(
     sign_fn: F,
 ) -> PyResult<Option<(Bound<'py, PyAny>, Vec<usize>)>>
 where
-    T: pyo3::buffer::Element + Copy,
-    F: Fn(T) -> T,
+    T: pyo3::buffer::Element + Copy + Send + Sync,
+    F: Fn(T) -> T + Sync,
 {
     let Ok(in_buffer) = PyBuffer::<T>::get(a) else {
         return Ok(None);

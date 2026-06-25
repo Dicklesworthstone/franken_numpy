@@ -8432,3 +8432,23 @@ dropped per no-destructive-git). 2-D per-axis roll criterion coverage landed sep
 LESSON (Nth confirmation): a loaded-box "Nx loss" on a memory-bound op is a FALSE LOSS — re-verify
 OLD-vs-NEW on the rch worker at the SAME (light) load BEFORE building a fix. The per-element-Cell-vs-
 memmove rewrite felt like a guaranteed win but the Cell loop already hit parity. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize generic narrow-int unary map (u16/u32/u64 square/abs/negative/sign) (2026-06-25) — 44th win
+Follow-up to the f32/i64/i32 unary parallel win (613f993e): the GENERIC `unary_map_int<T>` (backing
+the narrow integer widths i8/i16/u8/u16/u32/u64 square/abs/negative, AND integer sign via sign_typed)
+was still a serial per-element Cell loop. Parallelized it (raw-slice rayon map, mirroring unary_map_f64),
+threading `Send+Sync`/`Sync` bounds through the two generic callers (zerocopy_int_unary_typed, sign_typed);
+all instantiations are concrete int types + simple closures. Elementwise => BIT-EXACT (probe 147/0 across
+6 dtypes x 5 sizes x square/abs/negative/sign incl. min/max wrap + 2-D reshape).
+KEY TUNING — BYTE-gate not element-gate: an initial element-gate (1<<21) parallelized 1-byte u8 too and
+REGRESSED it 1.14x (numpy's u8 SIMD is bandwidth-saturated at 8MB; rayon fan-out doesn't pay). Switched
+to `n*size_of::<T>() >= 1<<23` (8 MiB traffic): 1-byte types stay on the original serial path (no
+regression), 2/4/8-byte widths cross the gate and win.
+PERF (criterion, remote rch worker = truth; python_unary_parallel_boundary, 8M):
+  square_u64: fnp 3.332ms vs NumPy 5.558ms = 0.60x (1.67x faster)
+  square_u32: fnp 0.564ms vs NumPy 1.444ms = 0.39x (2.56x faster)
+  square_u16: fnp 0.331ms vs NumPy 0.603ms = 0.55x (1.82x faster)
+  square_u8 : fnp 0.228ms vs NumPy 0.226ms = 1.01x PARITY (serial; byte-gate fixed the 1.14x regression)
+LESSON: narrow-dtype maps parallelize like wide ones, BUT gate on BYTES — for 1-byte types numpy's
+vectorized ufunc is bandwidth-bound and parallel fan-out is a net loss until much larger n. Real win
+(fnp BEATS numpy, not loss->par), so immune to the loaded-box false-loss trap. KEEP. AGENT_NAME=BlackThrush.

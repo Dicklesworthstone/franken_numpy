@@ -3196,6 +3196,10 @@ fn bench_unary_parallel_boundary(c: &mut Criterion) {
         let f32_in = base.call_method1("astype", ("float32",)).expect("f32 input");
         let i64_in = base.call_method1("astype", ("int64",)).expect("i64 input");
         let i32_in = base.call_method1("astype", ("int32",)).expect("i32 input");
+        let u64_in = base.call_method1("astype", ("uint64",)).expect("u64 input");
+        let u32_in = base.call_method1("astype", ("uint32",)).expect("u32 input");
+        let u16_in = base.call_method1("astype", ("uint16",)).expect("u16 input");
+        let u8_in = base.call_method1("astype", ("uint8",)).expect("u8 input");
 
         let fnp_square = module.getattr("square").expect("fnp square");
         let fnp_abs = module.getattr("abs").expect("fnp abs");
@@ -3216,6 +3220,10 @@ fn bench_unary_parallel_boundary(c: &mut Criterion) {
         pair!("abs_f32_8m", fnp_abs, numpy_abs, &f32_in);
         pair!("square_i64_8m", fnp_square, numpy_square, &i64_in);
         pair!("square_i32_8m", fnp_square, numpy_square, &i32_in);
+        pair!("square_u64_8m", fnp_square, numpy_square, &u64_in);
+        pair!("square_u32_8m", fnp_square, numpy_square, &u32_in);
+        pair!("square_u16_8m", fnp_square, numpy_square, &u16_in);
+        pair!("square_u8_8m", fnp_square, numpy_square, &u8_in);
     });
 
     group.finish();
