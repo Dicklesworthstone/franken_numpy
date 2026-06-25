@@ -4,6 +4,50 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-25 - NO-SHIP: f64 `np.unique` duplicate-heavy bit HashSet
+
+`BlackThrush`/`cod-b`. BOLD-VERIFY pass for the remaining large f64
+`np.unique` loss after the output-buffer no-ship. The fresh lever tested a
+duplicate-density sample followed by a `HashSet<u64, FastIntBuildHasher>` over
+raw f64 bits, sorting only the resulting unique-bit set. Gated to non-NaN,
+C-contiguous `float64` inputs above the existing native threshold; mixed
+`+0.0`/`-0.0` would defer to the existing sort path.
+
+Rejected. The source change was reverted. On `hz2`, the duplicate-heavy 1M row
+went catastrophically slower than NumPy:
+
+| Row | FNP mean | NumPy mean | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `unique(float64 repeated)`, 50k | 2.0005 ms | 1.9890 ms | 1.006x | no win |
+| `unique(float64 repeated)`, 512k | 26.486 ms | 27.363 ms | 0.968x | small noisy win |
+| `unique(float64 repeated)`, 1,048,576 | 4.7610 s | 61.840 ms | 76.996x | reject |
+| `unique(float64 distinct)`, 1,048,576 | 36.267 ms | 57.284 ms | 0.633x | existing sort path still OK |
+
+Routing baseline on main before this lever, same command but on `vmi1152480`,
+still reproduced the target loss:
+
+| Row | FNP mean | NumPy mean | FNP/NumPy |
+|---|---:|---:|---:|
+| `unique(float64 repeated)`, 50k | 575.76 us | 607.13 us | 0.948x |
+| `unique(float64 repeated)`, 512k | 9.4388 ms | 9.7393 ms | 0.969x |
+| `unique(float64 repeated)`, 1,048,576 | 19.620 ms | 12.226 ms | 1.605x |
+| `unique(float64 distinct)`, 1,048,576 | 20.940 ms | 12.208 ms | 1.715x |
+
+Durable change kept: `unique_plain_f64_bit_exact_matches_numpy` now includes the
+above-gate repeated modulo f64 row so future native/delegate changes keep this
+case under byte-level oracle coverage. Retry predicate: do not revisit raw
+`HashSet<u64>` bit collection for duplicate-heavy f64 unique. The next plausible
+lever needs either a cache-local bucket/radix strategy for the exact benchmark
+domain or a deeper NumPy sort-boundary delegation rule, not general hashing.
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo test -p fnp-python --test conformance_unravel_unique unique_plain_f64_bit_exact_matches_numpy -- --nocapture`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface unique_medium -- --sample-size 10 --warm-up-time 1 --measurement-time 3 --output-format bencher`
+
+Artifacts: `tests/artifacts/perf/2026-06-25_unique_duplicate_bits_cod_b/`.
+
 ## 2026-06-25 - NO-SHIP: f64 `np.unique` output-buffer dedup
 
 `BlackThrush`/`cod-a`. BOLD-VERIFY pass for the medium/large f64 `np.unique` boundary after

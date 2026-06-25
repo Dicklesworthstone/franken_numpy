@@ -740,6 +740,8 @@ chunks = []
 for n in [1000, 100003, 500000, 1048576]:
     chunks.append(np.asarray(mod.unique(rng.standard_normal(n))).tobytes())
     chunks.append(np.asarray(mod.unique(np.round(rng.standard_normal(n) * 4) + 0.5)).tobytes())
+repeated = (np.arange(1048576, dtype=np.float64) * 37 % 65536) / 16.0
+chunks.append(np.asarray(mod.unique(repeated)).tobytes())
 chunks.append(np.asarray(mod.unique(np.array([np.inf, -np.inf, 1.0, -1.0, 1.0, np.nan, 2.0, np.nan], dtype=np.float64))).tobytes())
 chunks.append(np.asarray(mod.unique(np.array([-0.0, 1.0, 2.0, -0.0, 3.0], dtype=np.float64))).tobytes())
 chunks.append(np.asarray(mod.unique(np.full(5000, 2.5, dtype=np.float64))).tobytes())
