@@ -8930,18 +8930,50 @@ fn try_zerocopy_f64_nan_to_num(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            let v = cell.get();
-            let replaced = if v.is_nan() {
-                nan_rep
-            } else if v == f64::INFINITY {
-                posinf_rep
-            } else if v == f64::NEG_INFINITY {
-                neginf_rep
-            } else {
-                v
-            };
-            slot.set(replaced);
+        // numpy.nan_to_num runs several whole-array passes (isnan/isposinf/isneginf masks +
+        // copyto), each single-threaded; fnp does ONE fused per-element pass. Parallelizing the
+        // raw-slice map aggregates bandwidth and stacks on top of that temp-elimination. Each
+        // output element depends only on its matching input => bit-exact regardless of chunking.
+        const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 21;
+        if n >= NAN_TO_NUM_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
+            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+            let in_data: &[f64] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), n) };
+            let out_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, n) };
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(in_data.par_chunks(chunk))
+                .for_each(|(o, i)| {
+                    for (s, &v) in o.iter_mut().zip(i.iter()) {
+                        *s = if v.is_nan() {
+                            nan_rep
+                        } else if v == f64::INFINITY {
+                            posinf_rep
+                        } else if v == f64::NEG_INFINITY {
+                            neginf_rep
+                        } else {
+                            v
+                        };
+                    }
+                });
+        } else {
+            for (slot, cell) in output.iter().zip(input.iter()) {
+                let v = cell.get();
+                let replaced = if v.is_nan() {
+                    nan_rep
+                } else if v == f64::INFINITY {
+                    posinf_rep
+                } else if v == f64::NEG_INFINITY {
+                    neginf_rep
+                } else {
+                    v
+                };
+                slot.set(replaced);
+            }
         }
     }
     let output_shape = PyTuple::new(py, shape.iter().copied())?;
@@ -8997,18 +9029,49 @@ fn try_zerocopy_f32_nan_to_num(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, cell) in output.iter().zip(input.iter()) {
-            let v = cell.get();
-            let replaced = if v.is_nan() {
-                nan_rep
-            } else if v == f32::INFINITY {
-                posinf_rep
-            } else if v == f32::NEG_INFINITY {
-                neginf_rep
-            } else {
-                v
-            };
-            slot.set(replaced);
+        // Same lever as the f64 nan_to_num: numpy runs several single-threaded masked passes;
+        // fnp does one fused parallel per-element pass. Each output element depends only on its
+        // matching input => bit-exact regardless of chunking.
+        const NAN_TO_NUM_PARALLEL_MIN: usize = 1 << 21;
+        if n >= NAN_TO_NUM_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<f32>/Cell<f32> are repr(transparent) over f32; input is
+            // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+            let in_data: &[f32] =
+                unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f32>(), n) };
+            let out_data: &mut [f32] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f32, n) };
+            let chunk = n.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(in_data.par_chunks(chunk))
+                .for_each(|(o, i)| {
+                    for (s, &v) in o.iter_mut().zip(i.iter()) {
+                        *s = if v.is_nan() {
+                            nan_rep
+                        } else if v == f32::INFINITY {
+                            posinf_rep
+                        } else if v == f32::NEG_INFINITY {
+                            neginf_rep
+                        } else {
+                            v
+                        };
+                    }
+                });
+        } else {
+            for (slot, cell) in output.iter().zip(input.iter()) {
+                let v = cell.get();
+                let replaced = if v.is_nan() {
+                    nan_rep
+                } else if v == f32::INFINITY {
+                    posinf_rep
+                } else if v == f32::NEG_INFINITY {
+                    neginf_rep
+                } else {
+                    v
+                };
+                slot.set(replaced);
+            }
         }
     }
     let output_shape = PyTuple::new(py, shape.iter().copied())?;

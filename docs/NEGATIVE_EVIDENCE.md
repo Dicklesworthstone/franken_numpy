@@ -8522,6 +8522,33 @@ SINGLE-THREADED, so it only reached parity (~0-gain, reverted). clip PARALLELIZE
 bandwidth), so it BEATS numpy's single thread — a real win, immune to the loaded-box false-loss trap.
 KEEP. AGENT_NAME=BlackThrush.
 
+## 2026-06-25 - KEEP: f32 `np.cross` parallel stacked-3-vector path
+
+`BlackThrush`/`cod-b`. BOLD-VERIFY follow-up after `42c09010` landed the f64
+`try_zerocopy_f64_cross_n3` parallel path. The f32 mirror still used the serial
+`Cell<f32>` loop even though the existing f32 zero-copy path had the same
+independent `(n, 3)` lane structure. This lever applies the same raw-slice
+Rayon fan-out for `total = n * 3 >= 1 << 21`, preserves the exact scalar
+formula/order (`ay*bz - az*by`, etc.), and keeps every non-default-axis,
+non-contiguous, shape-mismatched, or non-f32 case on the existing fallback.
+
+Same-command f64 control reverified current main on `ovh-a`:
+`fnp_cross_f64_4m` `19.318 ms` vs NumPy `113.602 ms`, `0.170x`.
+
+Decision run on `hz2`, remote-only RCH with
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b`,
+`criterion_python_surface`, `cross_f32_4m`, 4M lanes:
+
+| Row | FNP mean | NumPy mean | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `cross_f32_4m` | 4.659874 ms | 41.514555 ms | 0.112x | keep; 8.91x faster |
+
+Validation added: `cross_f32_parallel_large_bit_exact_matches_numpy` checks an
+above-gate float32 `(n, 3)` stack against NumPy by dtype, shape, C-contiguity,
+writeability, and exact bytes. Proof command:
+
+`AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=2 RCH_TEST_SLOTS=2 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface -- --sample-size 10 --warm-up-time 2 --measurement-time 4 --output-format bencher cross_f32_4m`
+
 ## BlackThrush WIN: parallelize f64 np.where(mask,a,b) arr/arr select (2026-06-25) — 46th win
 Serial-Cell-loop sweep (the clip/unary lever): try_zerocopy_f64_where's arr/arr branch (the common
 np.where(mask,a,b)) blended with a SERIAL per-element Cell loop. numpy.where is single-threaded and the
@@ -8608,3 +8635,19 @@ box at identical load; a win this large is immune to the false-loss trap; python
 CORRECTNESS: probe 8/0 across f32 sizes below/at/above the n*3>=1<<21 gate, non-pow2 (chunk remainder),
 special values (inf/nan/-0.0/+-3e38 overflow & NaN propagation match numpy bit-exact) + an f64 no-regression
 lane. Build clean. Real win. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize f64+f32 np.nan_to_num (4.83x / 14.99x over numpy) (2026-06-25) — 52nd+53rd wins
+Serial-Cell-loop + temp-stacking lever (cf the 50th/51st cross wins): try_zerocopy_f64_nan_to_num and its
+f32 sibling were serial per-element branch loops (is_nan / +inf / -inf -> replace). numpy.nan_to_num runs
+SEVERAL single-threaded whole-array passes (isnan/isposinf/isneginf masks + copyto), each a full memory
+sweep with bool temporaries; fnp does ONE fused per-element pass. Parallelizing the raw-slice map (gate
+1<<21; below-gate serial unchanged) aggregates bandwidth ON TOP of that temp-elimination. Each output
+element depends only on its matching input => BIT-EXACT regardless of chunking (identical branch order).
+PERF (criterion, remote rch worker = truth; python_nan_to_num_boundary, 8M, ~1/8 elems nan/inf):
+  nan_to_num_f64: fnp 8.755ms vs NumPy 42.328ms = 0.207x (4.83x faster)
+  nan_to_num_f32: fnp 2.070ms vs NumPy 31.021ms = 0.067x (14.99x faster)
+Effective throughput (f32 ~31 GB/s, f64 ~14.6 GB/s) exceeds single-core => the parallelism is the gain,
+not just numpy's multi-pass (NOT zero-gain). CORRECTNESS: probe 16/0 across f64+f32 x sizes below/at/above
+the 1<<21 gate x non-pow2 (chunk remainder) x 2-D x custom nan/posinf/neginf replacement args x all-special
+x all-finite x +-0.0. Build clean. Real win (fnp BEATS numpy 4.8-15x, immune to false-loss). KEEP.
+AGENT_NAME=BlackThrush.

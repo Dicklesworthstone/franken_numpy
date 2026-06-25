@@ -3447,8 +3447,59 @@ fn bench_cross_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_nan_to_num_boundary(c: &mut Criterion) {
+    // np.nan_to_num at 8M — numpy runs several single-threaded masked passes
+    // (isnan/isposinf/isneginf + copyto); fnp does one fused parallel per-element pass.
+    // ~1/8 of the elements are nan/inf so the branch is exercised. Bit-exact.
+    let mut group = c.benchmark_group("python_nan_to_num_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        // base = standard_normal(8M); sprinkle nan/+inf/-inf every few elements.
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.standard_normal(8_000_000)\n\
+a[::8] = np.nan\n\
+a[1::13] = np.inf\n\
+a[2::17] = -np.inf\n\
+a32 = a.astype(np.float32)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            None,
+        )
+        .expect("nan_to_num setup");
+        let a = ns.get_item("a").expect("a");
+        let a32 = ns.get_item("a32").expect("a32");
+        let fnp_n2n = module.getattr("nan_to_num").expect("fnp nan_to_num");
+        let numpy_n2n = numpy.getattr("nan_to_num").expect("numpy nan_to_num");
+        group.bench_function("fnp_nan_to_num_f64_8m", |bch| {
+            bch.iter(|| black_box(fnp_n2n.call1((&a,)).expect("fnp nan_to_num")));
+        });
+        group.bench_function("numpy_nan_to_num_f64_8m", |bch| {
+            bch.iter(|| black_box(numpy_n2n.call1((&a,)).expect("numpy nan_to_num")));
+        });
+        group.bench_function("fnp_nan_to_num_f32_8m", |bch| {
+            bch.iter(|| black_box(fnp_n2n.call1((&a32,)).expect("fnp nan_to_num f32")));
+        });
+        group.bench_function("numpy_nan_to_num_f32_8m", |bch| {
+            bch.iter(|| black_box(numpy_n2n.call1((&a32,)).expect("numpy nan_to_num f32")));
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_nan_to_num_boundary,
     bench_cross_boundary,
     bench_sqrt_input_extraction,
     bench_around_boundary,
