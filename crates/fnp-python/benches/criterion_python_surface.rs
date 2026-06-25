@@ -1915,6 +1915,19 @@ fn bench_gradient_axis_boundary(c: &mut Criterion) {
                     black_box(result);
                 });
             });
+            // No-axis full gradient: returns a tuple of per-axis gradients.
+            group.bench_function(format!("fnp_gradient_f64_full_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = fnp_grad.call1((&input,)).expect("fnp gradient full call");
+                    black_box(result);
+                });
+            });
+            group.bench_function(format!("numpy_gradient_f64_full_{label}"), |bench| {
+                bench.iter(|| {
+                    let result = numpy_grad.call1((&input,)).expect("numpy gradient full call");
+                    black_box(result);
+                });
+            });
         }
     });
 

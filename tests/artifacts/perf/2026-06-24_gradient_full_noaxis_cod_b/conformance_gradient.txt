@@ -1,0 +1,2 @@
+test gradient_full_no_axis_tuple_matches_numpy ... ok
+test result: ok. 13 passed; 0 failed

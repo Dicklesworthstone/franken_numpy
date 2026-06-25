@@ -22412,6 +22412,44 @@ fn gradient(
     {
         return Ok(out);
     }
+    // Native FULL gradient (axis=None on an N-D array, uniform spacing): numpy returns a
+    // TUPLE of per-axis gradients, each via its slow pure-Python slice path (~27 ms for a
+    // 2048x1024 2-D call). Compute each axis with the native helpers (last axis contiguous,
+    // others strided) and return the tuple. Any axis the helpers can't take (edge_order=2,
+    // non-f64/non-contiguous) aborts to the numpy passthrough so the result matches exactly.
+    if axis.as_ref().is_none_or(|v| v.bind(py).is_none())
+        && let Some(dx) = uniform_dx
+        && let Ok(ndim) = f.bind(py).getattr("ndim").and_then(|n| n.extract::<usize>())
+        && ndim >= 2
+    {
+        let mut grads: Vec<Py<PyAny>> = Vec::with_capacity(ndim);
+        let mut all_ok = true;
+        for k in 0..ndim {
+            let step = if k == ndim - 1 {
+                try_zerocopy_f64_gradient_1d(py, &numpy, f.bind(py), dx, edge_order)?
+            } else {
+                try_zerocopy_f64_gradient_strided_axis(
+                    py,
+                    &numpy,
+                    f.bind(py),
+                    k as isize,
+                    dx,
+                    edge_order,
+                )?
+            };
+            match step {
+                Some(g) => grads.push(g),
+                None => {
+                    all_ok = false;
+                    break;
+                }
+            }
+        }
+        if all_ok {
+            let tuple = PyTuple::new(py, grads.iter().map(|g| g.bind(py)))?;
+            return Ok(tuple.into_any().unbind());
+        }
+    }
     // Passthrough to np.gradient so spacing-argument handling, axis
     // selection, return-shape conventions, and boundary schemes match
     // NumPy exactly.

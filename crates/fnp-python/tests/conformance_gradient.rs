@@ -314,3 +314,55 @@ print(ok)
     );
     Ok(())
 }
+
+#[test]
+fn gradient_full_no_axis_tuple_matches_numpy() -> Result<(), String> {
+    // Exercises the native no-axis full gradient (returns a TUPLE of per-axis gradients)
+    // against numpy bit-exactly (atol=0, equal_nan=True): 2-D and 3-D arrays, default and
+    // scalar spacing, plus 1-D (single-array return) and an edge_order=2 fallthrough.
+    let script = fnp_script(
+        r#"
+def same_seq(fs, ns):
+    if type(fs).__name__ != type(ns).__name__:
+        # 1-D returns a single ndarray, N-D returns a tuple; require the same kind
+        if isinstance(fs, np.ndarray) and isinstance(ns, np.ndarray):
+            pass
+        else:
+            return False
+    fs = fs if isinstance(fs, tuple) else (fs,)
+    ns = ns if isinstance(ns, tuple) else (ns,)
+    if len(fs) != len(ns):
+        return False
+    for a, b in zip(fs, ns):
+        a = np.asarray(a); b = np.asarray(b)
+        if a.shape != b.shape or a.dtype != b.dtype or not np.allclose(a, b, rtol=0, atol=0, equal_nan=True):
+            return False
+    return True
+
+rng = np.random.default_rng(37)
+f2 = rng.standard_normal((128, 96))
+f3 = rng.standard_normal((24, 18, 11))
+f1 = rng.standard_normal(5000)
+ok = True
+# no-axis full gradient
+for f in (f2, f3, f1):
+    if not same_seq(fnp.gradient(f), np.gradient(f)):
+        print("FAIL no-axis", f.shape); ok = False
+# scalar spacing applied to all axes
+if not same_seq(fnp.gradient(f2, 0.5), np.gradient(f2, 0.5)):
+    print("FAIL scalar-dx"); ok = False
+# edge_order=2 must defer + still match
+if not same_seq(fnp.gradient(f2, edge_order=2), np.gradient(f2, edge_order=2)):
+    print("FAIL edge_order=2"); ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "no-axis full gradient parity should match numpy: {result}"
+    );
+    Ok(())
+}

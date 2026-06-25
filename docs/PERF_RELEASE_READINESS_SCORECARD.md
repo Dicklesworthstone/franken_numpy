@@ -3,6 +3,32 @@
 Scope: rolling gauntlet verification of measured FrankenNumPy performance slices
 against original NumPy.
 
+## 2026-06-24 CreamEagle fnp-python gradient full (no-axis tuple) keep (56th win)
+
+| Area | Score | Verdict |
+|---|---:|---|
+| `gradient(f)` 4096x1024 vs NumPy | 10/10 | `0.165x` NumPy time (6.07x faster) |
+| `gradient(f)` 1024x4096 vs NumPy | 10/10 | `0.295x` NumPy time (2.95x faster) |
+| Behavior gate | 9/10 | Native only for f64 C-contiguous N-D, uniform spacing, edge_order=1; edge_order=2 / per-axis spacing / non-f64 abort to NumPy |
+| Conformance gate | 10/10 | `conformance_gradient` 13/13 (new no-axis tuple test incl 1-D/3-D/edge_order=2) |
+| Tool hygiene | 7/10 | Per-crate build+bench+test clean via RCH; pre-existing crate warnings unchanged |
+
+Evidence:
+- Agent `CreamEagle`; lever: no-axis dispatch computes each axis via the existing helpers
+  (gradient_1d last axis + gradient_strided_axis others) and returns a tuple.
+- numpy returns a tuple of per-axis gradients each via its slow pure-Python slice path
+  (~17.5 ms 2-D); fnp does both axes fast. Single strided axis alone was only 1.4x
+  (bandwidth-bound); the full both-axes case is 3-6x.
+- Benchmark command: `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc
+  rch exec -- cargo bench -p fnp-python --profile release --bench
+  criterion_python_surface gradient_axis -- --sample-size 20 --warm-up-time 2
+  --measurement-time 4 --output-format bencher`.
+- Artifact directory: `tests/artifacts/perf/2026-06-24_gradient_full_noaxis_cod_b/`.
+
+Decision:
+- Release-ready keep for f64 N-D uniform-spacing edge_order=1 full gradient.
+- edge_order=2 / per-axis coordinate spacing remain on NumPy.
+
 ## 2026-06-24 CreamEagle fnp-python vander native fused cumprod keep (55th win)
 
 | Area | Score | Verdict |

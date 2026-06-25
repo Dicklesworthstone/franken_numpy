@@ -4,6 +4,41 @@ This ledger is append-only evidence for performance hypotheses. It records wins,
 losses, neutral results, noisy discarded measurements, and retry predicates so
 dead ends are not rediscovered as fresh ideas.
 
+## 2026-06-24 - KEEP: np.gradient full (axis=None, N-D) native per-axis tuple
+
+`CreamEagle`/`cod-b`. The committed gradient fast paths did a single last axis and a
+single non-last (strided) axis; the no-axis FULL gradient (axis=None on N-D, the common
+image/field gradient) fell to numpy, which returns a TUPLE of per-axis gradients each via
+its slow pure-Python slice path (~17.5 ms for 4096x1024). New dispatch branch computes
+each axis with the existing helpers (gradient_1d for the contiguous last axis,
+gradient_strided_axis for the rest) and returns the tuple. Bit-exact per-axis; aborts to
+numpy if any axis can't take the native path (edge_order=2 / non-f64 / per-axis spacing).
+
+NOTE: numpy returns a TUPLE (not list) for multi-axis gradient on this numpy version;
+match that. The single strided axis alone was only 1.4x (bandwidth-bound), but the FULL
+no-axis case is 3-6x because numpy is slow on BOTH axes and fnp does both fast (the
+contiguous last axis via gradient_1d especially). diff(n>=2) is ALREADY covered (the diff
+dispatch iterates the n=1 zero-copy diff n times). i0/sinc skipped (exp/sin only allclose
+in fnp, not bit-exact). polyint/polyder/windows = tiny arrays, no win.
+
+`cc`/`vmi1153651`, sample-size 20 + 2 s warmup, `CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc`:
+
+| Row | FNP ns | NumPy ns | FNP/NumPy | Verdict |
+|---|---:|---:|---:|---|
+| `gradient(f)`, 4096x1024 f64 | 2,884,069 | 17,502,646 | 0.165x | native win |
+| `gradient(f)`, 1024x4096 f64 | 5,391,569 | 15,893,558 | 0.295x | native win |
+
+Proof commands:
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo bench -p fnp-python --profile release --bench criterion_python_surface gradient_axis -- --sample-size 20 --warm-up-time 2 --measurement-time 4 --output-format bencher`
+
+`CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cc rch exec -- cargo test -p fnp-python --test conformance_gradient`
+
+Validation: `conformance_gradient` 13/13 (new `gradient_full_no_axis_tuple_matches_numpy`),
+bit-exact under `np.allclose(rtol=0, atol=0, equal_nan=True)` per tuple element across 2-D/3-D,
+default+scalar spacing, 1-D single-array return, and edge_order=2 fallthrough. Artifacts:
+`tests/artifacts/perf/2026-06-24_gradient_full_noaxis_cod_b/`.
+
 ## 2026-06-24 - KEEP: np.vander native fused cumulative-product
 
 `CreamEagle`/`cod-b`. Second member of the "numpy builds via broadcast temp +
