@@ -3478,7 +3478,8 @@ a = rng.standard_normal(8_000_000)\n\
 a[::8] = np.nan\n\
 a[1::13] = np.inf\n\
 a[2::17] = -np.inf\n\
-a32 = a.astype(np.float32)\n";
+a32 = a.astype(np.float32)\n\
+ac = a.view(np.complex128)\n";
         let ns = PyDict::new(py);
         py.run(
             std::ffi::CString::new(setup).unwrap().as_c_str(),
@@ -3488,6 +3489,7 @@ a32 = a.astype(np.float32)\n";
         .expect("nan_to_num setup");
         let a = ns.get_item("a").expect("a");
         let a32 = ns.get_item("a32").expect("a32");
+        let ac = ns.get_item("ac").expect("ac");
         let fnp_n2n = module.getattr("nan_to_num").expect("fnp nan_to_num");
         let numpy_n2n = numpy.getattr("nan_to_num").expect("numpy nan_to_num");
         group.bench_function("fnp_nan_to_num_f64_8m", |bch| {
@@ -3495,6 +3497,12 @@ a32 = a.astype(np.float32)\n";
         });
         group.bench_function("numpy_nan_to_num_f64_8m", |bch| {
             bch.iter(|| black_box(numpy_n2n.call1((&a,)).expect("numpy nan_to_num")));
+        });
+        group.bench_function("fnp_nan_to_num_c128_4m", |bch| {
+            bch.iter(|| black_box(fnp_n2n.call1((&ac,)).expect("fnp nan_to_num c128")));
+        });
+        group.bench_function("numpy_nan_to_num_c128_4m", |bch| {
+            bch.iter(|| black_box(numpy_n2n.call1((&ac,)).expect("numpy nan_to_num c128")));
         });
         group.bench_function("fnp_nan_to_num_f32_8m", |bch| {
             bch.iter(|| black_box(fnp_n2n.call1((&a32,)).expect("fnp nan_to_num f32")));

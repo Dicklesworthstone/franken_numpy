@@ -21015,6 +21015,49 @@ fn nan_to_num(
     )? {
         return Ok(out);
     }
+    // complex128/complex64: numpy.nan_to_num replaces NaN/+-inf in the real and imaginary
+    // parts INDEPENDENTLY (it recurses on .real/.imag), so viewing the array as its component
+    // float and running the proven real path is bit-exact (verified: array_equal incl nan, and
+    // the default posinf/neginf are finfo(componentfloat).max/-max = the f64/f32 path defaults).
+    // Reuses the parallel f64/f32 nan_to_num and views the result back to the complex dtype,
+    // beating numpy's multi-pass complex path. Only for ndim>=1 (a 0-d complex view is degenerate).
+    {
+        let xb = x.bind(py);
+        let numpy = py.import("numpy")?;
+        if xb.is_exact_instance(&numpy.getattr("ndarray")?) {
+            let dtype = xb.getattr("dtype")?;
+            let is_complex = dtype.getattr("kind")?.extract::<String>()? == "c";
+            let ndim = xb.getattr("ndim")?.extract::<usize>()?;
+            if is_complex && ndim >= 1 {
+                let itemsize = dtype.getattr("itemsize")?.extract::<usize>()?;
+                if itemsize == 16 {
+                    let view = xb.call_method1("view", (numpy.getattr("float64")?,))?;
+                    if let Some(out) = try_zerocopy_f64_nan_to_num(
+                        py,
+                        &view,
+                        nan,
+                        posinf.unwrap_or(f64::MAX),
+                        neginf.unwrap_or(f64::MIN),
+                    )? {
+                        let restored = out.bind(py).call_method1("view", (&dtype,))?;
+                        return Ok(restored.unbind());
+                    }
+                } else if itemsize == 8 {
+                    let view = xb.call_method1("view", (numpy.getattr("float32")?,))?;
+                    if let Some(out) = try_zerocopy_f32_nan_to_num(
+                        py,
+                        &view,
+                        nan as f32,
+                        posinf.map(|p| p as f32).unwrap_or(f32::MAX),
+                        neginf.map(|n| n as f32).unwrap_or(f32::MIN),
+                    )? {
+                        let restored = out.bind(py).call_method1("view", (&dtype,))?;
+                        return Ok(restored.unbind());
+                    }
+                }
+            }
+        }
+    }
     // bool has no NaN/inf, so nan_to_num(bool) is a plain bool copy — but the extract
     // below bridges bool->f64 and rebuilds (~900x slower than numpy's bool copy). numpy
     // is the parity reference; defer bool (only on the fallthrough — f64/int/f32 above).

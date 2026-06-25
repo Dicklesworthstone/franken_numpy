@@ -8764,3 +8764,25 @@ remaining true delegations (block/hstack/vstack/column_stack/ravel_multi_index) 
 is at parity-or-winning across the board. Next real gains need a PIVOT: coordinate w/ cod-b on its active fronts
 (avoid the cross/select/around dup-work), or a HUMAN decision to relax the bit-exact golden for SIMD on the
 no-ship batch-factorization kernel walls (batch_cholesky/inv/solve 2-6x behind LAPACK). AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: complex nan_to_num via component-float view (6.0x over numpy) (2026-06-25) — 58th win
+numpy.nan_to_num on a COMPLEX array is a multi-pass python path: it recurses on x.real and x.imag
+(two float views), each running isnan/isinf masks + copyto, then recombines — so complex128 4M (=8M f64
+components) takes 51ms. nan_to_num replaces NaN/+-inf in the real and imaginary parts INDEPENDENTLY, so
+viewing the complex array as its component float (float64 for c128, float32 for c64) and running the proven
+parallel real path (try_zerocopy_f64/f32_nan_to_num, 52nd/53rd wins) then viewing the result back to the
+complex dtype is BIT-EXACT. The default posinf/neginf for the complex case are finfo(componentfloat).max/-max,
+which equal the f64/f32 path defaults (f64::MAX / f32::MAX), and an explicit scalar posinf/neginf applies to
+both components (matches numpy). Gated is_complex && ndim>=1 (0-d falls through to numpy). Added before the
+bool fallthrough; the real f64/f32/int paths are untouched (purely additive).
+PERF (criterion, remote rch worker hz2 = truth; python_nan_to_num_boundary, 4M complex128 = 8M f64 components,
+NaN/+-inf scattered):
+  nan_to_num c128: fnp 8.567ms vs NumPy 51.398ms = 0.167x (6.0x faster)
+  (f64 8M control 8.483ms vs 38.195ms = 0.222x and f32 8M 1.953ms vs 27.477ms = 0.071x re-confirmed, consistent
+   with the landed 52nd/53rd wins)
+The c64 path uses the same lever (correctness-verified below; numpy's complex64 nan_to_num is also multi-pass
+python so it wins similarly — c128 is the benched representative).
+CORRECTNESS: probe 15/0 across complex128 + complex64 x sizes below/at/above the 1<<21 component gate x 2-D x
+custom nan/posinf/neginf args (applied to both components) x all-special (nan/+-inf/-0.0) x all-finite x 0-d
+fallthrough — np.array_equal incl equal_nan, shape + dtype preserved. conformance_nan_to_num_clip 18/18 GREEN
+(real paths unchanged). Build clean. Real win (6x >> false-loss noise floor). KEEP. AGENT_NAME=BlackThrush.
