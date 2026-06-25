@@ -8663,3 +8663,20 @@ PERF (criterion, remote rch worker hz2 = truth; python_around_boundary, 8M f32, 
   around_f64 control: fnp 3.797ms vs NumPy 10.133ms = 0.375x (matches the 47th-win ~2.74x -> build sound)
 CORRECTNESS: probe 25/0 across decimals {3,0,-2,1} x sizes below/at/above the 1<<21 gate x non-pow2 (chunk
 remainder) x half-even ties (x.5 -> even) x nan/inf/-0.0 x 2-D. Build clean. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush REJECT: parallelize f64 np.where(cond, arr, scalar) — marginal 1.14x, reverted (2026-06-25)
+Tried the serial-Cell-loop lever on try_zerocopy_where_array_scalar (the select_unsigned! macro path that
+backs np.where with exactly one array + one scalar operand): byte-gated raw-slice parallel select over the
+unsigned-int view. Bit-exact (probe 63/0 across 6 dtype widths x scalar-on-either-side x sizes below/at/above
+the 8 MiB byte-gate x non-pow2 x nan/inf x 2-D x dtype-preservation).
+PERF (criterion, remote rch worker hz2 = truth; python_where_boundary, 8M f64):
+  where arr/scalar: fnp 6.974ms vs NumPy 7.945ms = 0.878x (only 1.14x faster)
+  where arr/arr control (already-landed 46th win): fnp 3.593ms vs NumPy 8.482ms = 0.424x (2.36x)
+REJECT (ABOVE the 0.85 KEEP bar): 0.878x is near-parity, NOT a clear win. ROOT: the arr/scalar path runs the
+select_unsigned! macro which does per-CALL numpy machinery (arr.view(uint), numpy.full((1,),scalar).view,
+out.view) — fnp arr/scalar (6.97ms) is ~2x its own arr/arr (3.59ms) DESPITE reading less data, so that
+view/full setup (not the per-element loop) dominates and parallelism buys almost nothing (~zero-gain over
+serial). The arr/arr win (46th) came from a clean f64-typed path with no macro/view overhead. LESSON: the
+parallel-elementwise lever only pays when the per-element loop dominates; a fast path wrapped in per-call
+numpy view/construct overhead caps the achievable speedup near parity. REVERTED lib.rs + bench (HEAD clean).
+AGENT_NAME=BlackThrush.
