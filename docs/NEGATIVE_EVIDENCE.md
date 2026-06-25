@@ -8743,3 +8743,24 @@ REGRESSES f64 from its serial parity to a 1.5x loss. (2) numpy.repeat is a clean
 exploit. LESSON: don't parallelize at FINE granularity (one task per small run); and a copy-op only wins when
 numpy's path has python/overhead slack (tile f64), not when it's already a tight C memcpy (repeat). Serial repeat
 was already at parity (confirmed by a pre-build standalone probe) — leave it serial. AGENT_NAME=BlackThrush.
+
+## BlackThrush NEGATIVE-EVIDENCE: parallelize/temp-stacking frontier EXHAUSTED — broad sweep, no new gap (2026-06-25)
+After landing 9 wins this session (cross/nan_to_num/kron/around/tile, 1.75-16.5x) + 3 rejects (where-arr-scalar
+1.14x, any_tile-i32 parity, repeat-f64 1.5x LOSS), ran a broad ~30-op standalone differential sweep + targeted
+delegation audit to find the next gap. RESULT: no reliable new loss exists for this lever.
+MEASURED (standalone, current .so) — reliable WINS confirm fnp dominates the surface:
+  unique_i 0.073x (13.7x), union1d 0.230x (4.3x), argsort 0.232x, cumsum 0.271x, triu/tril 0.28x, cumprod
+  0.280x, intersect1d 0.330x (3x), isin 0.442x (2.3x), sort 0.617x, count_nonzero 0.754x.
+FALSE-LOSS CAVEAT: the sweep flagged gradient_f as 2.56x LOSS, but RE-PROBED ALONE it is a 21.3x WIN (fnp
+0.840ms vs numpy 17.928ms @2M; numpy's gradient timing swings 3.3->17.9ms = 5x between runs on the loaded
+box). View-ops (fliplr/flip/diagonal/trace) show fake 1.6-3.5x "losses" = O(1) pyo3 crossing overhead. RULE:
+standalone timing on this loaded box CANNOT find real losses — only the rch worker (criterion) is the truth,
+and only a LARGE consistent win is a trustworthy standalone signal.
+DELEGATION AUDIT: every remaining python-multi-pass candidate already has a native fnp path — vander
+(try_zerocopy_f64_vander, parallel), gradient (cod-b 61ff91c1/5663562b, par_iter), set-ops setdiff1d/union1d/
+setxor1d/intersect1d (native UFuncArray, win 3-4x), nan_to_num/cross/kron/around/tile (this session). The
+remaining true delegations (block/hstack/vstack/column_stack/ravel_multi_index) wrap numpy's C-fast concatenate
+(no python slack -> parity, like repeat). CONCLUSION: per-op parallelize/temp-stacking lever is exhausted; fnp
+is at parity-or-winning across the board. Next real gains need a PIVOT: coordinate w/ cod-b on its active fronts
+(avoid the cross/select/around dup-work), or a HUMAN decision to relax the bit-exact golden for SIMD on the
+no-ship batch-factorization kernel walls (batch_cholesky/inv/solve 2-6x behind LAPACK). AGENT_NAME=BlackThrush.
