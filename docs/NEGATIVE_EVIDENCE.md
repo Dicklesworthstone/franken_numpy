@@ -9228,3 +9228,26 @@ CORRECTNESS: targeted conformance GREEN on hz2:
 `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 rch exec -- cargo test -j 1 -p fnp-python --test conformance_sorting sort_argsort_explicit_kind_large_unique_last_axis_matches_numpy -- --nocapture`
 => 1 passed / 0 failed. The test covers `kind in ("stable", "mergesort", "heapsort")` on a 1025x1025 f64 matrix
 with unique values and checks dtype, shape, sort values, and argsort indices against NumPy. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize generic same-width np.putmask scatter (1.78x over NumPy) (2026-06-26) — 82nd win
+BOLD-VERIFY dig pass found no unlanded `.scratch` / `.worktrees` FrankenNumPy win missing from `main`; the only
+dirty scratch diff was the already-landed digitize conformance follow-up. Fresh `hz2` routing sweep showed
+`frexp_f64_1m` still loses mildly (fnp 499.190us vs NumPy 308.622us = 1.617x) but it is already parallel at the
+1M row, so there was no obvious threshold lever. The actionable gap was `putmask_u8_1m`: the f64 putmask path
+was parallel, but the generic same-width path for u8/i32/f32 still used a serial Cell/ReadOnlyCell loop.
+FIX: putmask_scatter_typed now casts the writable array, bool mask, and values buffer to raw slices and runs
+disjoint rayon chunks above 1<<19 elements, preserving NumPy's flat-position cycling (`a.flat[i] =
+values.flat[i % values.size]`). Small rows keep the serial path; dtype/cast/shape fallback rules are unchanged.
+PERF baseline (criterion, remote rch worker hz2, current main before this hunk; python_putmask_boundary):
+  putmask u8:  fnp 895.865us vs NumPy 620.080us = 1.445x LOSS
+  putmask i32: fnp 963.086us (no NumPy pair in this bench)
+  putmask f32: fnp 977.925us (no NumPy pair in this bench)
+PERF candidate (same worker hz2, same scratch root, same bench):
+  putmask u8:  fnp 331.928us vs NumPy 592.248us = 0.560x (1.78x faster than NumPy; 2.70x faster than old fnp)
+  putmask i32: fnp 459.347us (2.10x faster than old fnp)
+  putmask f32: fnp 477.252us (2.05x faster than old fnp)
+Command: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface -- python_putmask_boundary --sample-size 10 --warm-up-time 1 --measurement-time 2 --output-format bencher --noplot`.
+Note: this repo/toolchain rejects `cargo bench --release`; `--profile release` is the accepted release-bench equivalent.
+CORRECTNESS: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -j 1 -p fnp-python --test conformance_extract_put putmask -- --nocapture`
+=> 7 passed / 0 failed (including same-dtype all-width golden). Build/bench compiled the touched fnp-python crate.
+KEEP. AGENT_NAME=BlackThrush.

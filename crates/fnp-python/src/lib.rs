@@ -11091,7 +11091,7 @@ fn try_zerocopy_f64_putmask(
 // store is bit-identical (incl. nan/inf/signed zeros) and mutates a's own buffer.
 // Returns Ok(false) — caller falls through — on a shape mismatch, empty values, a
 // read-only/non-contiguous array, or a buffer-protocol failure.
-fn putmask_scatter_typed<T: pyo3::buffer::Element + Copy>(
+fn putmask_scatter_typed<T: pyo3::buffer::Element + Copy + Send + Sync>(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     mask: &Bound<'_, PyAny>,
@@ -11119,22 +11119,48 @@ fn putmask_scatter_typed<T: pyo3::buffer::Element + Copy>(
     let Some(a_out) = a_buffer.as_mut_slice(py) else {
         return Ok(false);
     };
-    // numpy cycles values by flat position (a.flat[i] = values.flat[i % v]); track
-    // the wrapped index with a counter+reset instead of a per-element modulo. When
-    // values spans the array (v >= len, the overwhelmingly common a-shaped values
-    // and scalar-broadcast cases) the index never wraps — a plain zip with no
-    // bookkeeping, which autovectorizes the masked store.
-    if v >= mask_in.len() {
-        for (slot, (mask_cell, val_cell)) in a_out.iter().zip(mask_in.iter().zip(val_in.iter())) {
-            if mask_cell.get() != 0 {
-                slot.set(val_cell.get());
+    let n = a_out.len();
+    // SAFETY: ReadOnlyCell<u8/T>/Cell<T> are repr(transparent); mask/values are
+    // read-only under the GIL and a's buffer is written through disjoint chunks.
+    let a_slice: &mut [T] = unsafe { std::slice::from_raw_parts_mut(a_out.as_ptr() as *mut T, n) };
+    let m: &[u8] = unsafe { std::slice::from_raw_parts(mask_in.as_ptr().cast::<u8>(), n) };
+    let vals: &[T] = unsafe { std::slice::from_raw_parts(val_in.as_ptr().cast::<T>(), v) };
+    const PUTMASK_PARALLEL_MIN: usize = 1 << 19;
+    if n >= PUTMASK_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+        use rayon::prelude::*;
+        let chunk = n.div_ceil(rayon::current_num_threads());
+        a_slice
+            .par_chunks_mut(chunk)
+            .enumerate()
+            .for_each(|(ci, ac)| {
+                let base = ci * chunk;
+                if v >= n {
+                    for (j, slot) in ac.iter_mut().enumerate() {
+                        let i = base + j;
+                        if m[i] != 0 {
+                            *slot = vals[i];
+                        }
+                    }
+                } else {
+                    for (j, slot) in ac.iter_mut().enumerate() {
+                        let i = base + j;
+                        if m[i] != 0 {
+                            *slot = vals[i % v];
+                        }
+                    }
+                }
+            });
+    } else if v >= n {
+        for (slot, (&mask, &value)) in a_slice.iter_mut().zip(m.iter().zip(vals.iter())) {
+            if mask != 0 {
+                *slot = value;
             }
         }
     } else {
         let mut vi = 0usize;
-        for (slot, mask_cell) in a_out.iter().zip(mask_in.iter()) {
-            if mask_cell.get() != 0 {
-                slot.set(val_in[vi].get());
+        for (slot, &mask) in a_slice.iter_mut().zip(m.iter()) {
+            if mask != 0 {
+                *slot = vals[vi];
             }
             vi += 1;
             if vi == v {
