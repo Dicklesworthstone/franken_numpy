@@ -9273,3 +9273,34 @@ conformance_lexsort 16/16 GREEN. Build clean. Real wins. KEEP. AGENT_NAME=BlackT
 REUSABLE: a C-contiguous N-D op along AXIS 0 == the 2-D (shape[0], prod(rest)) case — a 2-D axis-0 kernel
 generalizes to all ndim for free via the trailing-dims product (output the original shape). (Last-axis is the
 mirror: cols=last dim, rows=prod(rest).) Middle axes do NOT reduce this way (genuine multi-stride) — left to numpy.
+
+## BlackThrush WIN: parallel MIDDLE-axis sort/argsort via (outer,alen,inner) gather-lane (1.2-1.6x) (2026-06-26) — 85th+86th wins
+Completes per-axis sort coverage. The prior 83rd+84th entry said "middle axes do NOT reduce — left to numpy"; that
+was WRONG about feasibility (right that it's not a trivial reshape). A C-contiguous N-D array sorted along axis `ax`
+DOES decompose generally: outer=prod(shape[..ax]) independent blocks, each of inner=prod(shape[ax+1..]) lanes of
+length alen=shape[ax] with element stride `inner`. Lane L = o*inner + t gathers its strided run src[o*alen*inner +
+j*inner + t] into a contiguous scratch lane, sorts it, and is scattered back via par_chunks_mut over the OUTPUT in
+contiguous `inner`-runs (chunk C = o*alen + j) — strided touches are READS into/from owned contiguous chunks, so no
+unsafe scatter. This reduces to the axis0 kernel when outer==1 and to last-axis when inner==1. argsort gathers VALUES
+contiguously first (the axis0 cache-hazard fix carries over) then sorts local 0..alen indices, defers on any tie/NaN.
+Gate ndim>=3 && 0<ax<ndim-1 (axis_spec_middle resolves neg axes); c-contiguous f64 only; bit-exact (value-sort =
+same multiset; argsort = unique permutation on distinct). NaN/tie/fortran/int/2-D/axis0/last all defer to existing
+paths.
+PERF (criterion, remote rch worker hz2 = truth; python_sort_axis_boundary, axis=1):
+  sort    4096x32x32: fnp 11.739ms vs NumPy 15.859ms = 0.740x (1.35x faster) [CIs non-overlapping]
+  sort    256x256x64: fnp 11.213ms vs NumPy 18.035ms = 0.622x (1.61x faster)
+  argsort 4096x32x32: fnp 18.868ms vs NumPy 22.570ms = 0.836x (1.20x faster)
+  argsort 256x256x64: fnp 19.666ms vs NumPy 29.722ms = 0.662x (1.51x faster)
+  (LOCAL serial-vs-parallel isolation, same build: SERIAL RAYON=1 = EXACT parity 0.99-1.01x on all 4 shapes;
+   PARALLEL = 2.3-4.3x — pure parallelism. The local parallel ratio (2.3-4.3x) OVERSTATES the win because LOCAL
+   numpy mid-axis sort is slow (33ms@4096x32x32) vs the WORKER's numpy (15.9ms); the worker-vs-worker ratio
+   (1.2-1.6x) is the honest number. Modest because mid-axis lanes are short (alen=32-256) so gather/scatter
+   overhead is a larger fraction and numpy's strided mid-axis penalty is only ~1.2-1.8x over its last-axis.)
+CORRECTNESS: probe 58/0 — every MIDDLE axis of 3-D/4-D/5-D shapes x sort+argsort x pos+neg axis; DEFER paths
+(NaN, ties, Fortran non-contig, int dtype); kind=stable/mergesort/heapsort/quicksort on a mid axis (peer's kind
+path reaches midaxis); + last-axis/axis0/2-D/1-D regressions intact. conformance_sorting + conformance_lexsort
+GREEN. Build clean. Real wins. KEEP. AGENT_NAME=BlackThrush.
+REUSABLE: the (outer, alen, inner) decomposition is the GENERAL per-axis lane kernel for ANY C-contiguous N-D op —
+gather strided lane (stride=inner) -> per-lane work -> scatter via par_chunks_mut over output inner-runs (chunk
+C=o*alen+j -> scratch[(o*inner+t)*alen+j]). axis0=outer1, last-axis=inner1 are the special cases. PER-AXIS SORT
+COVERAGE NOW COMPLETE for f64 (flat + last + axis0 + every middle axis, all ndim).

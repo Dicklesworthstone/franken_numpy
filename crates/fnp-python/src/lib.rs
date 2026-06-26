@@ -40891,6 +40891,111 @@ fn try_zerocopy_f64_sort_axis0(
     Ok(Some(out.unbind()))
 }
 
+// Returns Some(ax) iff `axis_spec` selects a MIDDLE axis (0 < ax < ndim-1) of an ndim>=3 array
+// (explicit positive k or negative k+ndim). axis 0 and the last axis have their own faster paths;
+// the "missing"/None default is the last axis, and Some(None) is flatten — neither is a middle axis.
+fn axis_spec_middle(axis_spec: Option<Option<isize>>, ndim: usize) -> Option<usize> {
+    let Some(Some(k)) = axis_spec else {
+        return None;
+    };
+    let resolved = if k < 0 { k + ndim as isize } else { k };
+    if resolved > 0 && resolved < ndim as isize - 1 {
+        Some(resolved as usize)
+    } else {
+        None
+    }
+}
+
+// Parallel sort along a MIDDLE axis (0 < axis < ndim-1) of an ndim>=3 C-contiguous f64 array.
+// numpy walks the strided lanes single-threaded (its middle-axis sort is ~1.2-1.8x slower than
+// its last-axis sort). A C-contiguous array sorted along axis `ax` decomposes as outer=prod(
+// shape[..ax]) independent blocks, each of inner=prod(shape[ax+1..]) lanes of length alen=
+// shape[ax] with element stride `inner`. Each lane (index L = o*inner + t) gathers its strided
+// run into a contiguous scratch lane, sorts it, and is scattered back — every step parallelized
+// via par_chunks_mut (strided touches are READS into/from owned contiguous chunks, so no unsafe
+// scatter). Reduces to the axis0 kernel when outer==1. Bit-exact (sort yields the same multiset
+// per lane); any NaN -> defer to numpy (its NaN-at-end ordering). Defers for ndim<3/non-f64/
+// non-contiguous/non-middle-axis/below crossover.
+fn try_zerocopy_f64_sort_midaxis(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    axis_spec: Option<Option<isize>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    if ndim < 3 || !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let Some(ax) = axis_spec_middle(axis_spec, ndim) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let outer: usize = shape[..ax].iter().product();
+    let alen = shape[ax];
+    let inner: usize = shape[ax + 1..].iter().product();
+    let lanes = outer * inner;
+    const SORT_MIDAXIS_PARALLEL_MIN: usize = 1 << 20;
+    if alen < 2 || lanes < 2 || outer * alen * inner < SORT_MIDAXIS_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n != outer * alen * inner {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    if src.par_iter().any(|v| v.is_nan()) {
+        return Ok(None);
+    }
+    // scratch: `lanes` contiguous lanes of `alen` each. Lane L = o*inner + t gathers the strided
+    // run src[o*alen*inner + j*inner + t] for j in 0..alen, then sorts it in place.
+    let mut scratch = vec![0.0f64; n];
+    scratch
+        .par_chunks_mut(alen)
+        .enumerate()
+        .for_each(|(lane, dstlane)| {
+            let o = lane / inner;
+            let t = lane % inner;
+            let base = o * alen * inner + t;
+            for (j, slot) in dstlane.iter_mut().enumerate() {
+                *slot = src[base + j * inner];
+            }
+            dstlane.sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
+        });
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
+    let out = numpy.call_method("empty", (shape_tuple,), Some(&kwargs))?;
+    let out_buffer = PyBuffer::<f64>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src/scratch).
+    let dst: &mut [f64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+    // Scatter back: output chunk C (length inner) holds fixed (o, j) varying t. C = o*alen + j.
+    dst.par_chunks_mut(inner).enumerate().for_each(|(c, ochunk)| {
+        let o = c / alen;
+        let j = c % alen;
+        for (t, slot) in ochunk.iter_mut().enumerate() {
+            *slot = scratch[(o * inner + t) * alen + j];
+        }
+    });
+    Ok(Some(out.unbind()))
+}
+
 fn sort_kind_fast_path(kind: Option<&str>) -> Option<bool> {
     match kind {
         None | Some("quicksort") => Some(false),
@@ -40948,6 +41053,9 @@ fn sort(
                 return Ok(out);
             }
             if let Some(out) = try_zerocopy_f64_sort_axis0(py, &numpy, &a, axis_spec)? {
+                return Ok(out);
+            }
+            if let Some(out) = try_zerocopy_f64_sort_midaxis(py, &numpy, &a, axis_spec)? {
                 return Ok(out);
             }
         }
@@ -41200,7 +41308,115 @@ fn try_zerocopy_f64_argsort_axis0(
     Ok(Some(out.unbind()))
 }
 
-// Passthrough to NumPy for everything except the parallel flat / last-axis / axis0 distinct paths.
+// Parallel argsort along a MIDDLE axis (0 < axis < ndim-1) of an ndim>=3 C-contiguous f64 array.
+// Mirrors try_zerocopy_f64_sort_midaxis but returns local indices (0..alen per numpy's per-axis
+// semantics). Like the flat/last/axis0 argsort, numpy's quicksort is UNSTABLE so any lane tie (or
+// any NaN) -> defer the whole op to numpy; distinct values give the unique permutation numpy returns.
+// The lane VALUES are gathered into a contiguous lane FIRST so the index comparator reads contiguous
+// memory (the same cache-hazard fix as the axis0 path). Defers for ndim<3/non-f64/non-contiguous/
+// non-middle-axis/below crossover.
+fn try_zerocopy_f64_argsort_midaxis(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    axis_spec: Option<Option<isize>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
+        return Ok(None);
+    }
+    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    if ndim < 3 || !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()? {
+        return Ok(None);
+    }
+    let Some(ax) = axis_spec_middle(axis_spec, ndim) else {
+        return Ok(None);
+    };
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let outer: usize = shape[..ax].iter().product();
+    let alen = shape[ax];
+    let inner: usize = shape[ax + 1..].iter().product();
+    let lanes = outer * inner;
+    const ARGSORT_MIDAXIS_PARALLEL_MIN: usize = 1 << 20;
+    if alen < 2 || lanes < 2 || outer * alen * inner < ARGSORT_MIDAXIS_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n != outer * alen * inner {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    if src.par_iter().any(|v| v.is_nan()) {
+        return Ok(None);
+    }
+    // Gather each lane's VALUES into a contiguous lane FIRST (one strided read per element), so the
+    // per-index sort comparator reads contiguous memory (strided data[base+j*inner] per comparison
+    // would cache-miss on every compare). Then sort local 0..alen indices by the contiguous values.
+    let mut vals = vec![0.0f64; n];
+    vals.par_chunks_mut(alen).enumerate().for_each(|(lane, vlane)| {
+        let o = lane / inner;
+        let t = lane % inner;
+        let base = o * alen * inner + t;
+        for (j, slot) in vlane.iter_mut().enumerate() {
+            *slot = src[base + j * inner];
+        }
+    });
+    let mut idx = vec![0i64; n];
+    let tie = std::sync::atomic::AtomicBool::new(false);
+    idx.par_chunks_mut(alen)
+        .zip(vals.par_chunks(alen))
+        .for_each(|(ilane, vlane)| {
+            for (i, slot) in ilane.iter_mut().enumerate() {
+                *slot = i as i64;
+            }
+            ilane.sort_unstable_by(|&x, &y| {
+                vlane[x as usize]
+                    .partial_cmp(&vlane[y as usize])
+                    .expect("no NaN after check")
+            });
+            for w in 1..ilane.len() {
+                if vlane[ilane[w] as usize] == vlane[ilane[w - 1] as usize] {
+                    tie.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+            }
+        });
+    // Any lane with a tie -> numpy's unstable order is algorithm-specific; defer the whole op.
+    if tie.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let out = numpy.call_method1(
+        "empty",
+        (PyTuple::new(py, shape.iter().copied())?, numpy.getattr("intp")?),
+    )?;
+    let out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
+    let dst: &mut [i64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    // Scatter back: output chunk C (length inner) holds fixed (o, j) varying t. C = o*alen + j.
+    dst.par_chunks_mut(inner).enumerate().for_each(|(c, ochunk)| {
+        let o = c / alen;
+        let j = c % alen;
+        for (t, slot) in ochunk.iter_mut().enumerate() {
+            *slot = idx[(o * inner + t) * alen + j];
+        }
+    });
+    Ok(Some(out.unbind()))
+}
+
+// Passthrough to NumPy for everything except the parallel flat / last-axis / axis0 / mid-axis paths.
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn argsort(
@@ -41237,6 +41453,9 @@ fn argsort(
                 return Ok(out);
             }
             if let Some(out) = try_zerocopy_f64_argsort_axis0(py, &numpy, &a, axis_spec)? {
+                return Ok(out);
+            }
+            if let Some(out) = try_zerocopy_f64_argsort_midaxis(py, &numpy, &a, axis_spec)? {
                 return Ok(out);
             }
         }

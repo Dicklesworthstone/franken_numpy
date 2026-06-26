@@ -3923,7 +3923,8 @@ fn bench_sort_axis_boundary(c: &mut Criterion) {
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(0)\n\
 m = rng.standard_normal((2048, 2048))\n\
-m3 = rng.standard_normal((4096, 32, 32))\n";
+m3 = rng.standard_normal((4096, 32, 32))\n\
+m3b = rng.standard_normal((256, 256, 64))\n";
         let ns = PyDict::new(py);
         py.run(
             std::ffi::CString::new(setup).unwrap().as_c_str(),
@@ -3933,6 +3934,7 @@ m3 = rng.standard_normal((4096, 32, 32))\n";
         .expect("sort axis setup");
         let m = ns.get_item("m").expect("m");
         let m3 = ns.get_item("m3").expect("m3");
+        let m3b = ns.get_item("m3b").expect("m3b");
         for op in ["sort", "argsort"] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let numpy_fn = numpy.getattr(op).expect("numpy op");
@@ -3957,6 +3959,22 @@ m3 = rng.standard_normal((4096, 32, 32))\n";
             });
             group.bench_function(format!("numpy_{op}_axis0_4096x32x32"), |bch| {
                 bch.iter(|| black_box(numpy_fn.call((&m3,), Some(&kw0)).expect("numpy call")));
+            });
+            // ndim>=3 MIDDLE axis (axis=1): gather-strided-lane -> sort -> scatter. numpy's
+            // strided middle-axis sort is ~1.2-1.8x slower than its last-axis sort, single-threaded.
+            let kw1 = PyDict::new(py);
+            kw1.set_item("axis", 1).expect("axis kwarg");
+            group.bench_function(format!("fnp_{op}_midaxis_4096x32x32"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call((&m3,), Some(&kw1)).expect("fnp call")));
+            });
+            group.bench_function(format!("numpy_{op}_midaxis_4096x32x32"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call((&m3,), Some(&kw1)).expect("numpy call")));
+            });
+            group.bench_function(format!("fnp_{op}_midaxis_256x256x64"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call((&m3b,), Some(&kw1)).expect("fnp call")));
+            });
+            group.bench_function(format!("numpy_{op}_midaxis_256x256x64"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call((&m3b,), Some(&kw1)).expect("numpy call")));
             });
         }
     });
