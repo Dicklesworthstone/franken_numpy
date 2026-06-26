@@ -389,6 +389,68 @@ print(np.array_equal(result, expected))
     Ok(())
 }
 
+#[test]
+fn digitize_parallel_large_bit_exact_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+n = (1 << 21) + 4096
+shape = (2052, 1024)
+
+def check(values, bins, right):
+    result = fnp.digitize(values, bins, right=right)
+    expected = np.digitize(values, bins, right=right)
+    return (
+        result.dtype == expected.dtype
+        and result.shape == expected.shape
+        and result.flags.c_contiguous
+        and result.tobytes() == expected.tobytes()
+    )
+
+ok = True
+
+x64 = np.linspace(-5.0, 5.0, n, dtype=np.float64).reshape(shape)
+x64_flat = x64.ravel()
+x64_flat[0] = np.nan
+x64_flat[97] = np.inf
+x64_flat[211] = -np.inf
+x64_flat[4096] = -0.0
+bins64 = np.linspace(-4.0, 4.0, 50, dtype=np.float64)
+ok = ok and check(x64, bins64, False)
+ok = ok and check(x64, bins64, True)
+
+x32 = x64.astype(np.float32, copy=True)
+bins32 = bins64.astype(np.float32)
+ok = ok and check(x32, bins32, False)
+ok = ok and check(x32, bins32, True)
+
+i64 = ((np.arange(n, dtype=np.int64) % 1000) - 500).reshape(shape)
+ibins = np.array([-500, -1, 0, 0, 1, 499], dtype=np.int64)
+ok = ok and check(i64, ibins, False)
+ok = ok and check(i64, ibins, True)
+
+u16 = (np.arange(n, dtype=np.uint32) % 1000).astype(np.uint16).reshape(shape)
+ubins = np.array([0, 1, 1, 500, 999], dtype=np.uint16)
+ok = ok and check(u16, ubins, False)
+ok = ok and check(u16, ubins, True)
+
+dec_x = np.array([0.5, 1.5, 3.5], dtype=np.float64)
+dec_bins = np.array([4.0, 3.0, 2.0, 1.0], dtype=np.float64)
+ok = ok and check(dec_x, dec_bins, False)
+ok = ok and check(dec_x, dec_bins, True)
+
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large digitize parallel path should match numpy bit-exactly"
+    );
+    Ok(())
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Relationship tests
 // ─────────────────────────────────────────────────────────────────────────────

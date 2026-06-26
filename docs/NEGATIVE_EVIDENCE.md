@@ -8819,8 +8819,10 @@ Same search => BIT-IDENTICAL regardless of chunking. Gate m>=1<<21; below-gate s
 small regression). Covers all 10 dtypes (f64/f32/i8..u64) for free (generic over T: ...+Send+Sync).
 PERF (criterion, remote rch worker hz2 = truth; python_digitize_boundary, 4M f64 values into 50 linspace bins):
   digitize f64: fnp 17.113ms vs NumPy 104.68ms = 0.163x (6.1x faster)
+BOLD-VERIFY rebench (criterion, remote rch worker hz2, same python_digitize_boundary row, current main):
+  digitize f64: fnp 8.453ms vs NumPy 105.960ms = 0.080x (12.5x faster)
 CORRECTNESS: probe 38/0 across f64/f32 + 7 integer dtypes x sizes below/at/above the 1<<21 gate x right=
 False/True x NaN/+-inf x 2-D reshape x decreasing bins (defers to numpy) x duplicate/non-strict bins x scalar
 x (defers) — np.array_equal, shape + intp dtype preserved. conformance_special_math 32/32 (incl 9 digitize-
-specific) + conformance_histogram_bincount GREEN. Build clean. Real win (6.1x >> false-loss noise floor). KEEP.
+specific) + conformance_histogram_bincount GREEN. Build clean. Real win (12.5x rebench >> false-loss noise floor). KEEP.
 AGENT_NAME=BlackThrush.
