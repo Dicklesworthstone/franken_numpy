@@ -8962,3 +8962,28 @@ CORRECTNESS: probe 24/0 across f64/i64/f32/i16/u8/complex128/bool x axis=1 (inne
 conformance_take_put 20/20 GREEN. Build clean. Real win (5.1x >> false-loss noise floor). NOTE: np.choose
 already WINS 2.7-3.7x serial (numpy.choose is slow python-level) — NOT a gap, left as-is. Landed via isolated
 worktree off origin/main. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush BOLD-VERIFY: np.searchsorted fresh rebench remains faster than NumPy (2026-06-26)
+Land-or-dig pass verified the searchsorted win already sits on main (61st win) and remeasured it head-to-head
+against NumPy on a fresh remote worker immediately before fast-forwarding through the unrelated 63rd/64th gather
+wins. Those fast-forwards added separate take_along_axis/take(axis) benches/implementations and did not alter the
+searchsorted implementation or bench body. This is not a new source lever; it is the requested BOLD-VERIFY proof
+plus a large-array conformance guard for the parallel f64 path.
+PERF (criterion, remote rch worker vmi1264463, python_searchsorted_boundary, 4M f64 queries into a 1M sorted
+haystack, per-crate fnp-python bench, release profile):
+  searchsorted f64: fnp 468.535ms vs NumPy 3217.441ms = 0.146x (6.9x faster)
+Command:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b RCH_REQUIRE_REMOTE=1
+rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface --
+python_searchsorted_boundary --sample-size 10 --warm-up-time 2 --measurement-time 4 --output-format bencher
+--noplot`.
+Note: this cargo/nightly rejects `cargo bench --release`; `--profile release` selects the same optimized release
+profile for the per-crate bench run.
+CORRECTNESS: added `searchsorted_large_f64_array_matches_numpy`, covering the parallel gate with a 2049x1025
+float64 query array, side=left/right, NaN/+inf/-inf probes, NaN in the haystack, shape preservation, dtype
+parity, and exact np.array_equal values. Remote rch proof:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b RCH_REQUIRE_REMOTE=1
+rch exec -- cargo test -j 1 -p fnp-python --test conformance_sort_search
+searchsorted_large_f64_array_matches_numpy -- --nocapture`.
+Result: 1 passed, 0 failed, 33 filtered out on vmi1227854 after fast-forwarding through the 63rd/64th gather
+wins. KEEP proof/test. AGENT_NAME=BlackThrush.

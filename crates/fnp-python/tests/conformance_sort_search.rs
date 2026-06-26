@@ -481,6 +481,45 @@ print(np.array_equal(result, expected))
 }
 
 #[test]
+fn searchsorted_large_f64_array_matches_numpy() -> Result<(), String> {
+    let script = fnp_script(
+        r#"
+rng = np.random.default_rng(123)
+a = np.concatenate([np.linspace(-4.0, 4.0, 50), np.array([np.nan])])
+v = rng.standard_normal((2049, 1025)).astype(np.float64)
+flat = v.ravel()
+flat[::499983] = np.nan
+flat[1::500003] = np.inf
+flat[2::500009] = -np.inf
+
+ok = True
+for side in ("left", "right"):
+    result = fnp.searchsorted(a, v, side=side)
+    expected = np.searchsorted(a, v, side=side)
+    if result.dtype != expected.dtype:
+        print(("dtype", side, str(result.dtype), str(expected.dtype)))
+        ok = False
+    if result.shape != expected.shape:
+        print(("shape", side, result.shape, expected.shape))
+        ok = False
+    if not np.array_equal(result, expected):
+        mismatch = np.flatnonzero(result.ravel() != expected.ravel())[:10].tolist()
+        print(("values", side, mismatch, result.ravel()[mismatch].tolist(), expected.ravel()[mismatch].tolist()))
+        ok = False
+print(ok)
+"#
+        .into(),
+    );
+    let result = numpy_oracle(&script)?;
+    assert_eq!(
+        result.trim(),
+        "True",
+        "large f64 searchsorted parallel path should match numpy: {result}"
+    );
+    Ok(())
+}
+
+#[test]
 fn searchsorted_scalar() -> Result<(), String> {
     let script = fnp_script(
         r#"
