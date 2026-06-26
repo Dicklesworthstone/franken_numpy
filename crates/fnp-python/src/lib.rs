@@ -14174,7 +14174,35 @@ fn digitize(py: Python<'_>, x: Py<PyAny>, bins: Py<PyAny>, right: bool) -> PyRes
 // T the `key != key` test is always false and folds away. Output is intp of
 // x.shape. Returns None for non-contiguous buffers or non-increasing bins so the
 // caller defers (covers decreasing/unsorted bins, which numpy handles separately).
-fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd>(
+// One digitize lookup: searchsorted-equivalent binary search of `key` over a
+// non-decreasing `bins` slice. NaN → len(bins) (matches numpy). right_probe=true
+// uses probe<=key (side="right"), false uses probe<key (side="left"). Pure and
+// branch-bound, so it parallelizes cleanly across independent output elements.
+#[inline]
+fn digitize_index<T: Copy + PartialOrd>(key: T, bins: &[T], right_probe: bool) -> usize {
+    let n = bins.len();
+    // NaN (the only value not ordered against itself) → len(bins); clippy-clean.
+    if key.partial_cmp(&key).is_none() {
+        return n;
+    }
+    let mut left = 0usize;
+    let mut len = n;
+    while len > 0 {
+        let half = len / 2;
+        let mid = left + half;
+        let probe = bins[mid];
+        let cond = if right_probe { probe <= key } else { probe < key };
+        if cond {
+            left = mid + 1;
+            len -= half + 1;
+        } else {
+            len = half;
+        }
+    }
+    left
+}
+
+fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Sync>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     x: &Bound<'py, PyAny>,
@@ -14197,7 +14225,6 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd>(
             return Ok(None);
         }
     }
-    let n = bs.len();
     let m = xs.len();
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "intp")?;
@@ -14209,29 +14236,34 @@ fn digitize_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd>(
         let Some(output) = ob.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (o, xc) in output.iter().zip(xs.iter()) {
-            let key = xc.get();
-            #[allow(clippy::eq_op)]
-            let idx = if key != key {
-                n // NaN → len(bins), matching numpy
-            } else {
-                let mut left = 0usize;
-                let mut len = n;
-                while len > 0 {
-                    let half = len / 2;
-                    let mid = left + half;
-                    let probe = bs[mid].get();
-                    let cond = if right_probe { probe <= key } else { probe < key };
-                    if cond {
-                        left = mid + 1;
-                        len -= half + 1;
-                    } else {
-                        len = half;
+        // Snapshot the (tiny, typically <100) bins once into a plain slice so the
+        // per-element search needs no Cell access and is Send+Sync to share across threads.
+        let bins_vec: Vec<T> = bs.iter().map(|c| c.get()).collect();
+        // numpy.digitize is single-threaded; the per-element binary search is independent
+        // and branch-bound, so a parallel raw-slice map aggregates ALU across cores and wins.
+        // Same search => bit-identical regardless of chunking. Gate large only.
+        const DIGITIZE_PARALLEL_MIN: usize = 1 << 21;
+        if m >= DIGITIZE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<T>/Cell<i64> are repr(transparent) over T/i64; xs is
+            // read-only under the GIL and `out` is a fresh numpy.empty we own (no alias).
+            let in_data: &[T] = unsafe { std::slice::from_raw_parts(xs.as_ptr().cast::<T>(), m) };
+            let out_data: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            let bins_ref: &[T] = &bins_vec;
+            let chunk = m.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(in_data.par_chunks(chunk))
+                .for_each(|(o, i)| {
+                    for (slot, &key) in o.iter_mut().zip(i.iter()) {
+                        *slot = digitize_index(key, bins_ref, right_probe) as i64;
                     }
-                }
-                left
-            };
-            o.set(idx as i64);
+                });
+        } else {
+            for (o, xc) in output.iter().zip(xs.iter()) {
+                o.set(digitize_index(xc.get(), &bins_vec, right_probe) as i64);
+            }
         }
     }
     let shape: Vec<usize> = x.getattr("shape")?.extract()?;

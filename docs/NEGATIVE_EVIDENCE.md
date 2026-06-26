@@ -8807,3 +8807,20 @@ component gate x 2-D x transposed (non-contiguous -> numpy delegate, no raise) x
 decimals (f32 path delegates internally) x special values (inf/nan/-0.0) — np.array_equal incl equal_nan,
 shape + dtype preserved. conformance_around 16/16 + conformance_rounding 23/23 + conformance_nan_to_num_clip
 18/18 GREEN (real paths unchanged). Build clean. Real win (5.2x >> false-loss noise floor). KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize np.digitize binary search (6.1x over numpy) (2026-06-25) — 60th win
+fnp's native digitize (digitize_typed) ran a SERIAL per-element binary search (searchsorted-equivalent
+over the bins), one Cell write per element — at parity with numpy.digitize (also single-threaded). Each
+output index is independent and the binary search is BRANCH-bound (not bandwidth-bound), so it parallelizes
+near-linearly: extracted the search to a pure `digitize_index(key, &[T] bins, right_probe)` helper (NaN ->
+len(bins) via partial_cmp().is_none(), clippy-clean), snapshot the tiny bins once into a Vec<T>, and added a
+rayon par_chunks_mut(out)/par_chunks(in) branch reading xs as a raw &[T] and writing a fresh numpy.empty(intp).
+Same search => BIT-IDENTICAL regardless of chunking. Gate m>=1<<21; below-gate serial path unchanged (no
+small regression). Covers all 10 dtypes (f64/f32/i8..u64) for free (generic over T: ...+Send+Sync).
+PERF (criterion, remote rch worker hz2 = truth; python_digitize_boundary, 4M f64 values into 50 linspace bins):
+  digitize f64: fnp 17.113ms vs NumPy 104.68ms = 0.163x (6.1x faster)
+CORRECTNESS: probe 38/0 across f64/f32 + 7 integer dtypes x sizes below/at/above the 1<<21 gate x right=
+False/True x NaN/+-inf x 2-D reshape x decreasing bins (defers to numpy) x duplicate/non-strict bins x scalar
+x (defers) — np.array_equal, shape + intp dtype preserved. conformance_special_math 32/32 (incl 9 digitize-
+specific) + conformance_histogram_bincount GREEN. Build clean. Real win (6.1x >> false-loss noise floor). KEEP.
+AGENT_NAME=BlackThrush.

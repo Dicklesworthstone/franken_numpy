@@ -3637,8 +3637,48 @@ fn bench_tile_boundary(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_digitize_boundary(c: &mut Criterion) {
+    // np.digitize(4M f64, 50 bins) — serial per-element binary search vs parallel raw-slice.
+    let mut group = c.benchmark_group("python_digitize_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+x = rng.standard_normal(4_000_000)\n\
+bins = np.linspace(-4.0, 4.0, 50)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("digitize setup");
+        let x = ns.get_item("x").expect("x");
+        let bins = ns.get_item("bins").expect("bins");
+        let fnp_dig = module.getattr("digitize").expect("fnp digitize");
+        let numpy_dig = numpy.getattr("digitize").expect("numpy digitize");
+        group.bench_function("fnp_digitize_f64_4m", |b| {
+            b.iter(|| black_box(fnp_dig.call1((&x, &bins)).expect("fnp digitize")));
+        });
+        group.bench_function("numpy_digitize_f64_4m", |b| {
+            b.iter(|| black_box(numpy_dig.call1((&x, &bins)).expect("numpy digitize")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_digitize_boundary,
     bench_tile_boundary,
     bench_kron_boundary,
     bench_nan_to_num_boundary,
