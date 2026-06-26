@@ -50,6 +50,44 @@ fn np_array_complex<'py>(py: Python<'py>) -> PyResult<pyo3::Bound<'py, pyo3::typ
 }
 
 #[test]
+fn sort_argsort_explicit_kind_large_unique_last_axis_matches_numpy() {
+    with_fnp_and_numpy(|py, module, numpy| {
+        let globals = PyDict::new(py);
+        globals.set_item("np", numpy)?;
+        globals.set_item("fnp", module)?;
+        py.run(
+            std::ffi::CString::new(
+                r#"
+rows = 1025
+cols = 1025
+n = rows * cols
+base = ((np.arange(n, dtype=np.int64) * 48271) % 2147483647).astype(np.float64)
+a = base.reshape(rows, cols)
+
+for kind in ("stable", "mergesort", "heapsort"):
+    fs = fnp.sort(a, kind=kind)
+    ns = np.sort(a, kind=kind)
+    assert fs.dtype == ns.dtype
+    assert fs.shape == ns.shape
+    assert np.array_equal(fs, ns), kind
+
+    fa = fnp.argsort(a, kind=kind)
+    na = np.argsort(a, kind=kind)
+    assert fa.dtype == na.dtype
+    assert fa.shape == na.shape
+    assert np.array_equal(fa, na), kind
+"#,
+            )
+            .unwrap()
+            .as_c_str(),
+            Some(&globals),
+            None,
+        )?;
+        Ok(())
+    });
+}
+
+#[test]
 fn conformance_sorting_matrix() {
     static TOTALS: Totals = Totals::new();
 

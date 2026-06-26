@@ -9209,3 +9209,22 @@ plus last-axis/default regression intact. Change is purely ADDITIVE (two new hel
 fn sort/fn argsort; existing flat/last-axis paths untouched). conformance_sorting 1/1 + conformance_lexsort 16/16
 GREEN (on a worker saturated by 5+ concurrent agents); sort_search remains 33/34 (the 1 fail is the pre-existing
 peer searchsorted red, unrelated). Build clean. Real wins. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: explicit sort/argsort kind reuses f64 last-axis fast path (9.22x / 17.72x) (2026-06-26) — 80th+81st wins
+BOLD-VERIFY land-or-dig pass found no measured .scratch/.worktrees win missing from main (all live worktrees were
+already ancestors of main or already represented in this ledger), so this is a fresh lever off the biggest remaining
+sort surface gap: explicit `kind=` forced `np.sort`/`np.argsort` back through NumPy even when the existing f64
+last-axis fast path was semantically valid. FIX: parse `kind` for `sort` and `argsort`; allow None/quicksort without
+extra checks; allow stable/mergesort/heapsort only when the values are distinct so algorithm-specific tie ordering is
+unobservable. Unsupported kwargs, order/stable kwargs, non-last axes, flatten axis=None on >1-D, NaNs, argsort ties,
+and duplicate sort lanes for stable/mergesort/heapsort all still defer to NumPy. This keeps NumPy compatibility while
+opening the existing parallel per-lane route for explicit kind calls.
+PERF (criterion, remote rch worker hz2 = truth; python_sort_kind_boundary, 2048x2048 f64 last-axis, kind="stable"):
+  sort:    fnp 19.697ms vs NumPy 181.715ms = 0.108x (9.22x faster)
+  argsort: fnp 12.602ms vs NumPy 223.256ms = 0.056x (17.72x faster)
+Command: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface -- python_sort_kind_boundary --sample-size 10 --warm-up-time 2 --measurement-time 4 --output-format bencher --noplot`.
+Note: this repo/toolchain rejects `cargo bench --release`; `--profile release` is the accepted release-bench equivalent.
+CORRECTNESS: targeted conformance GREEN on hz2:
+`AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 rch exec -- cargo test -j 1 -p fnp-python --test conformance_sorting sort_argsort_explicit_kind_large_unique_last_axis_matches_numpy -- --nocapture`
+=> 1 passed / 0 failed. The test covers `kind in ("stable", "mergesort", "heapsort")` on a 1025x1025 f64 matrix
+with unique values and checks dtype, shape, sort values, and argsort indices against NumPy. KEEP. AGENT_NAME=BlackThrush.

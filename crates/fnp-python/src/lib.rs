@@ -40646,6 +40646,7 @@ fn try_zerocopy_f64_sort_flat(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
+    require_distinct: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
@@ -40688,6 +40689,9 @@ fn try_zerocopy_f64_sort_flat(
     dst.copy_from_slice(src);
     // No NaN -> partial_cmp is a total order; unstable parallel sort matches numpy's values.
     dst.par_sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
+    if require_distinct && dst.par_windows(2).any(|w| w[0] == w[1]) {
+        return Ok(None);
+    }
     Ok(Some(out.unbind()))
 }
 
@@ -40713,6 +40717,7 @@ fn try_zerocopy_f64_sort_lastaxis(
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
+    require_distinct: bool,
 ) -> PyResult<Option<Py<PyAny>>> {
     if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
@@ -40765,6 +40770,13 @@ fn try_zerocopy_f64_sort_lastaxis(
     // Each contiguous lane is sorted independently; rayon distributes the lanes across cores.
     dst.par_chunks_mut(cols)
         .for_each(|lane| lane.sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN")));
+    if require_distinct
+        && dst
+            .par_chunks(cols)
+            .any(|lane| lane.windows(2).any(|w| w[0] == w[1]))
+    {
+        return Ok(None);
+    }
     Ok(Some(out.unbind()))
 }
 
@@ -40851,6 +40863,14 @@ fn try_zerocopy_f64_sort_axis0_2d(
     Ok(Some(out.unbind()))
 }
 
+fn sort_kind_fast_path(kind: Option<&str>) -> Option<bool> {
+    match kind {
+        None | Some("quicksort") => Some(false),
+        Some("stable" | "mergesort" | "heapsort") => Some(true),
+        _ => None,
+    }
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn sort(
@@ -40858,32 +40878,45 @@ fn sort(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Fast paths: np.sort on f64 C-contiguous, default kind. 1-D (axis -1/0/None) -> parallel
-    // flat sort; ndim>=2 along the LAST axis (axis missing/-1/ndim-1) -> parallel per-lane sort;
-    // 2-D along axis 0 (axis 0/-2) -> parallel column sort. Any kind/order kwarg, explicit
-    // axis=None on >1-D (flatten), or another non-last axis -> passthrough.
+    // Fast paths: np.sort on f64 C-contiguous, default/explicit supported kind.
+    // 1-D (axis -1/0/None) -> parallel flat sort; ndim>=2 along the LAST axis
+    // (axis missing/-1/ndim-1) -> parallel per-lane sort; 2-D axis 0/-2 ->
+    // parallel column sort. For stable/mergesort/heapsort, require distinct
+    // values on paths where algorithm-specific tie ordering could be observed.
+    // Any order/stable kwarg, explicit axis=None on >1-D (flatten), or another
+    // non-last/non-axis0 axis -> passthrough.
     if args.len() == 1 {
         let mut other_kwarg = false;
         let mut axis_spec: Option<Option<isize>> = None; // outer None = "axis" kwarg missing
+        let mut kind_spec: Option<String> = None;
         if let Some(kw) = kwargs {
             for (k, v) in kw.iter() {
                 if k.extract::<String>().ok().as_deref() == Some("axis") {
                     axis_spec = Some(if v.is_none() { None } else { Some(v.extract::<isize>()?) });
+                } else if k.extract::<String>().ok().as_deref() == Some("kind") {
+                    if !v.is_none() {
+                        kind_spec = Some(v.extract::<String>()?);
+                    }
                 } else {
                     other_kwarg = true;
                 }
             }
         }
-        if !other_kwarg {
+        if !other_kwarg
+            && let Some(require_distinct) = sort_kind_fast_path(kind_spec.as_deref())
+        {
             let numpy = py.import("numpy")?;
             let a = args.get_item(0)?;
             // 1-D: axis missing/None/-1/0 all collapse to the single axis.
             if matches!(axis_spec, None | Some(None) | Some(Some(-1)) | Some(Some(0)))
-                && let Some(out) = try_zerocopy_f64_sort_flat(py, &numpy, &a)?
+                && let Some(out) =
+                    try_zerocopy_f64_sort_flat(py, &numpy, &a, require_distinct)?
             {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_sort_lastaxis(py, &numpy, &a, axis_spec)? {
+            if let Some(out) =
+                try_zerocopy_f64_sort_lastaxis(py, &numpy, &a, axis_spec, require_distinct)?
+            {
                 return Ok(out);
             }
             if let Some(out) = try_zerocopy_f64_sort_axis0_2d(py, &numpy, &a, axis_spec)? {
@@ -41146,16 +41179,21 @@ fn argsort(
     if args.len() == 1 {
         let mut other_kwarg = false;
         let mut axis_spec: Option<Option<isize>> = None; // outer None = "axis" kwarg missing
+        let mut kind_spec: Option<String> = None;
         if let Some(kw) = kwargs {
             for (k, v) in kw.iter() {
                 if k.extract::<String>().ok().as_deref() == Some("axis") {
                     axis_spec = Some(if v.is_none() { None } else { Some(v.extract::<isize>()?) });
+                } else if k.extract::<String>().ok().as_deref() == Some("kind") {
+                    if !v.is_none() {
+                        kind_spec = Some(v.extract::<String>()?);
+                    }
                 } else {
                     other_kwarg = true;
                 }
             }
         }
-        if !other_kwarg {
+        if !other_kwarg && sort_kind_fast_path(kind_spec.as_deref()).is_some() {
             let numpy = py.import("numpy")?;
             let a = args.get_item(0)?;
             if matches!(axis_spec, None | Some(None) | Some(Some(-1)) | Some(Some(0)))
