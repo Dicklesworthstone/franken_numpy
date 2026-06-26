@@ -31763,7 +31763,13 @@ fn matmul_accumulate(lhs: &[f64], rhs: &[f64], m: usize, k: usize, n: usize, out
         });
 }
 
-fn matmul_accumulate_serial(
+/// Single-threaded packed f64 GEMM `out += lhs(m×k) · rhs(k×n)`, all row-major
+/// (C-contiguous). Exposed so callers that already parallelize across an outer
+/// dimension (e.g. batched matmul over the batch axis) can run one serial GEMM
+/// per work-item without nesting rayon pools. NOTE: this ACCUMULATES — `out`
+/// MUST be pre-zeroed by the caller; bit-identical to the parallel
+/// `matmul_accumulate` (which also requires a pre-zeroed `out`).
+pub fn matmul_accumulate_serial(
     lhs: &[f64],
     rhs: &[f64],
     m: usize,

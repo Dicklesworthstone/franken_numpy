@@ -4022,8 +4022,73 @@ m = rng.standard_normal((2048, 2048))\n";
     group.finish();
 }
 
+// np.matmul / np.dot on 2-D f64 squares spanning the native GEMM gate window
+// ([320..1024]). The native pure-Rust GEMM was profiled as winning here, but a
+// later numpy/OpenBLAS speedup made the gate stale (now a 1.5-6x loss vs BLAS).
+fn bench_matmul_boundary(c: &mut Criterion) {
+    let mut group = c.benchmark_group("python_matmul_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a512 = rng.standard_normal((512, 512))\n\
+b512 = rng.standard_normal((512, 512))\n\
+a1024 = rng.standard_normal((1024, 1024))\n\
+b1024 = rng.standard_normal((1024, 1024))\n\
+a3d = rng.standard_normal((64, 256, 256))\n\
+b3d = rng.standard_normal((64, 256, 256))\n\
+a3db = rng.standard_normal((256, 128, 128))\n\
+b3db = rng.standard_normal((256, 128, 128))\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("matmul setup");
+        let m_fn = module.getattr("matmul").expect("fnp matmul");
+        let np_m = numpy.getattr("matmul").expect("np matmul");
+        for op in ["matmul", "dot"] {
+            let fnp_fn = module.getattr(op).expect("fnp op");
+            let numpy_fn = numpy.getattr(op).expect("numpy op");
+            for sz in ["512", "1024"] {
+                let a = ns.get_item(format!("a{sz}")).expect("a");
+                let b = ns.get_item(format!("b{sz}")).expect("b");
+                group.bench_function(format!("fnp_{op}_{sz}x{sz}"), |bch| {
+                    bch.iter(|| black_box(fnp_fn.call1((&a, &b)).expect("fnp call")));
+                });
+                group.bench_function(format!("numpy_{op}_{sz}x{sz}"), |bch| {
+                    bch.iter(|| black_box(numpy_fn.call1((&a, &b)).expect("numpy call")));
+                });
+            }
+        }
+        // Batched (3-D) matmul: currently delegates to numpy (native gate is 2-D only).
+        for (tag, ak, bk) in [("64x256x256", "a3d", "b3d"), ("256x128x128", "a3db", "b3db")] {
+            let a = ns.get_item(ak).expect("a3d");
+            let b = ns.get_item(bk).expect("b3d");
+            group.bench_function(format!("fnp_matmul_batched_{tag}"), |bch| {
+                bch.iter(|| black_box(m_fn.call1((&a, &b)).expect("fnp call")));
+            });
+            group.bench_function(format!("numpy_matmul_batched_{tag}"), |bch| {
+                bch.iter(|| black_box(np_m.call1((&a, &b)).expect("numpy call")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_matmul_boundary,
     bench_sort_kind_boundary,
     bench_sort_axis_boundary,
     bench_parallel_binary_boundary,

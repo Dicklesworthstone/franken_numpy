@@ -9304,3 +9304,37 @@ REUSABLE: the (outer, alen, inner) decomposition is the GENERAL per-axis lane ke
 gather strided lane (stride=inner) -> per-lane work -> scatter via par_chunks_mut over output inner-runs (chunk
 C=o*alen+j -> scratch[(o*inner+t)*alen+j]). axis0=outer1, last-axis=inner1 are the special cases. PER-AXIS SORT
 COVERAGE NOW COMPLETE for f64 (flat + last + axis0 + every middle axis, all ndim).
+
+## BlackThrush WIN: batched (ndim>=3) f64 matmul native parallel-across-batch GEMM (7-12x) (2026-06-26) — 87th win
+**FIRST: a near-miss that the WORKER caught.** A broad LOCAL gap sweep flagged np.matmul/np.dot 2-D as a 2-6x LOSS
+(local numpy 1024^2 matmul = 6.45ms; fnp native packed GEMM = 28ms). The "obvious" fix (delegate 2-D f64 matmul to
+numpy, mirroring the det/inv/solve stale-cliff delegations) was DISPROVEN on the rch worker: there native 1024 matmul
+= 39.6ms vs numpy 196.7ms (fnp WINS 4.97x), dot 1024 fnp 38.4ms vs numpy 198.6ms (5.17x). **The local box has fast
+multi-threaded OpenBLAS; the WORKER's numpy has a SLOW (reference/single-thread) BLAS (~11 GFLOPS). The 2-D native
+GEMM gate is CORRECT for the worker; delegating would have catastrophically regressed a 5x WIN to parity.** RULE
+(reinforces "worker=truth"): for any BLAS-backed op (matmul/dot/inner/tensordot/solve), the LOCAL box's fast OpenBLAS
+makes fnp's native kernel look like a loss — NEVER act on a local matmul/BLAS ratio; the worker's slow BLAS is the
+deployment reality the gates are tuned for. (No code change to 2-D matmul/dot — they already win on the worker.)
+**THE WIN this opened:** since the worker's numpy BLAS is slow, ANY GEMM-reducible op that fnp delegates is a win if
+routed through the native GEMM. BATCHED (ndim>=3) np.matmul was the gap: python_native_gemm_f64_2d_eligible requires
+shape().len()==2, so 3-D+ batched matmul fell through to numpy (measured PARITY: fnp 175ms == numpy 173ms @64x256x256,
+both numpy's slow batch BLAS). FIX: new try_zerocopy_f64_batched_matmul — both EXACT ndarray, f64, C-contiguous, SAME
+batch dims (no broadcast), ndim>=3, aligned k, all finite, total_flops>=1<<24 -> read both operands zero-copy, numpy.
+empty out, parallelize ACROSS the batch (out.par_chunks_mut(m*n)), each batch one SERIAL packed GEMM
+(fnp_ufunc::matmul_accumulate_serial, newly exposed pub). The serial-per-batch + parallel-across-batch design avoids
+nested rayon and fully uses cores (numpy walks the batch single-threaded). Kernel ACCUMULATES so each out chunk is
+zeroed first. Broadcast/2-D-operand/non-contig/non-f64/non-finite/tiny defer to numpy.
+PERF (criterion, remote rch worker hz2 = truth; python_matmul_boundary, measurement-time 8s for stable BLAS):
+  batched 64x256x256:  fnp 14.86ms vs NumPy 172.18ms = 0.086x (11.59x faster) [CIs non-overlapping, fnp +/-0.18ms]
+  batched 256x128x128: fnp 10.63ms vs NumPy  75.40ms = 0.141x (7.09x faster)  [CIs non-overlapping]
+  (fnp native packed GEMM is STABLE ~150 GFLOPS; numpy's worker batch BLAS is slow AND high-variance — at 10-sample
+   measurement numpy 256x128x128 swung 11-76ms run-to-run; the 8s-measurement 75.4ms/172.2ms are the stable reads.)
+CORRECTNESS: probe 19/0 (allclose) — batched 3-D/4-D/5-D equal-batch incl rectangular m!=k!=n; DEFER paths (broadcast
+3d@2d, broadcast batch 1-vs-5, non-finite inf/nan, Fortran non-contig, int dtype, below-flops-gate tiny); 2-D/1-D
+matmul regressions intact. conformance_matmul 11/11(+1 ign) + conformance_dot 11/11(+1 ign) + conformance_dot_products
+15/15 + conformance_linalg 1/1 GREEN; native GEMM golden sha256 unit test UNCHANGED (kernel body untouched, only
+matmul_accumulate_serial made pub). Build clean. Real win. KEEP. AGENT_NAME=BlackThrush.
+REUSABLE: the worker's slow BLAS means GEMM-reducible delegated ops are win opportunities via the native packed GEMM.
+NEXT candidates with the same parallel-across-an-outer-dim shape: np.matmul with BROADCAST batch (2-D@3-D, 3-D@2-D),
+np.einsum batched-matmul forms not already native, np.linalg.matrix_power, stacked solve/inv (already native). The
+matmul_accumulate_serial export + par_chunks_mut-over-outer template is reusable for all of them.

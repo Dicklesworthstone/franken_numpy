@@ -50,7 +50,7 @@ use fnp_ufunc::{
     logaddexp2 as ufunc_logaddexp2, logical_and as ufunc_logical_and,
     logical_not as ufunc_logical_not, logical_or as ufunc_logical_or,
     logical_xor as ufunc_logical_xor, ma_is_masked, ma_make_mask, ma_mask_or,
-    maximum as ufunc_maximum, minimum as ufunc_minimum, modf as ufunc_modf,
+    matmul_accumulate_serial, maximum as ufunc_maximum, minimum as ufunc_minimum, modf as ufunc_modf,
     not_equal as ufunc_not_equal, power as ufunc_power,
     reduce_frompyfunc_values, remainder as ufunc_remainder, right_shift as ufunc_right_shift,
     signbit as ufunc_signbit, spacing as ufunc_spacing,
@@ -49224,6 +49224,120 @@ fn python_explicit_out_is_absent_or_none(py: Python<'_>, out: Option<&Py<PyAny>>
     out.is_none_or(|value| value.bind(py).is_none())
 }
 
+// Batched (ndim>=3) f64 np.matmul where numpy walks the batch single-threaded
+// through its (slow, reference) BLAS on the deployment/worker host. We parallelize
+// ACROSS the batch axis — each batch slice is one serial packed GEMM
+// (matmul_accumulate_serial) distributed over the rayon pool — so the aggregate
+// throughput beats numpy. Gate: both EXACT ndarray, f64, C-contiguous, SAME batch
+// shape (no broadcasting), ndim>=3, aligned contraction, all finite (matches the
+// 2-D native gate's allclose contract — BLAS vs packed-GEMM can order 0*inf/NaN
+// differently), and enough total flops to amortize the parallel fan-out. Everything
+// else (broadcast batch, 2-D operand, non-contiguous, non-f64, out=) falls through
+// to numpy.
+fn try_zerocopy_f64_batched_matmul(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a_obj: &Bound<'_, PyAny>,
+    b_obj: &Bound<'_, PyAny>,
+) -> PyResult<Option<Py<PyAny>>> {
+    let ndarray = numpy.getattr("ndarray")?;
+    if !a_obj.is_exact_instance(&ndarray)
+        || !b_obj.is_exact_instance(&ndarray)
+        || !numpy_dtype_is_f64(py, a_obj)
+        || !numpy_dtype_is_f64(py, b_obj)
+        || !a_obj
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+        || !b_obj
+            .getattr("flags")?
+            .getattr("c_contiguous")?
+            .extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let a_shape: Vec<usize> = a_obj.getattr("shape")?.extract()?;
+    let b_shape: Vec<usize> = b_obj.getattr("shape")?.extract()?;
+    let nd = a_shape.len();
+    if nd < 3 || b_shape.len() != nd || a_shape[..nd - 2] != b_shape[..nd - 2] {
+        return Ok(None);
+    }
+    let (m, k) = (a_shape[nd - 2], a_shape[nd - 1]);
+    let (k2, n) = (b_shape[nd - 2], b_shape[nd - 1]);
+    if k != k2 || m == 0 || k == 0 || n == 0 {
+        return Ok(None);
+    }
+    let batch: usize = a_shape[..nd - 2].iter().product();
+    let total_flops = batch
+        .saturating_mul(m)
+        .saturating_mul(k)
+        .saturating_mul(n);
+    // ~16.7M flops: below this, the extract-free fan-out doesn't beat numpy's per-call overhead.
+    const BATCHED_GEMM_MIN_FLOPS: usize = 1 << 24;
+    if batch < 2 || total_flops < BATCHED_GEMM_MIN_FLOPS || rayon::current_num_threads() < 2 {
+        return Ok(None);
+    }
+    let Ok(a_buf) = PyBuffer::<f64>::get(a_obj) else {
+        return Ok(None);
+    };
+    let Ok(b_buf) = PyBuffer::<f64>::get(b_obj) else {
+        return Ok(None);
+    };
+    let Some(a_cells) = a_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    let Some(b_cells) = b_buf.as_slice(py) else {
+        return Ok(None);
+    };
+    if a_cells.len() != batch * m * k || b_cells.len() != batch * k * n {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let a_raw: &[f64] =
+        unsafe { std::slice::from_raw_parts(a_cells.as_ptr().cast::<f64>(), a_cells.len()) };
+    let b_raw: &[f64] =
+        unsafe { std::slice::from_raw_parts(b_cells.as_ptr().cast::<f64>(), b_cells.len()) };
+    if a_raw.par_iter().any(|v| !v.is_finite()) || b_raw.par_iter().any(|v| !v.is_finite()) {
+        return Ok(None);
+    }
+    let mut out_shape = a_shape.clone();
+    out_shape[nd - 1] = n; // m at nd-2 stays; contracted k becomes n
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let out = numpy.call_method(
+        "empty",
+        (PyTuple::new(py, out_shape.iter().copied())?,),
+        Some(&kwargs),
+    )?;
+    let out_buf = PyBuffer::<f64>::get(&out)?;
+    let Some(out_cells) = out_buf.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    let out_n = batch * m * n;
+    // SAFETY: fresh numpy.empty buffer we own (no alias with a/b).
+    let out_raw: &mut [f64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, out_n) };
+    let (mk, kn, mn) = (m * k, k * n, m * n);
+    // One serial packed GEMM per batch slice, distributed across the pool. The kernel
+    // ACCUMULATES, so each output chunk is zeroed first.
+    out_raw
+        .par_chunks_mut(mn)
+        .enumerate()
+        .for_each(|(bi, ochunk)| {
+            ochunk.fill(0.0);
+            matmul_accumulate_serial(
+                &a_raw[bi * mk..bi * mk + mk],
+                &b_raw[bi * kn..bi * kn + kn],
+                m,
+                k,
+                n,
+                ochunk,
+            );
+        });
+    Ok(Some(out.unbind()))
+}
+
 // Medium-large float64 GEMM-shaped calls route to the native Rust kernel; the
 // rest pass through to NumPy so small matrices, out=, dtype/ufunc kwargs,
 // integer/complex dtypes, non-finite payloads, and unprofiled sizes retain the
@@ -49248,6 +49362,17 @@ fn matmul(
         )?
     {
         return Ok(result);
+    }
+
+    if kwargs.is_none_or(|kw| kw.is_empty())
+        && python_explicit_out_is_absent_or_none(py, out.as_ref())
+    {
+        let numpy = py.import("numpy")?;
+        if let Some(result) =
+            try_zerocopy_f64_batched_matmul(py, &numpy, x1.bind(py), x2.bind(py))?
+        {
+            return Ok(result);
+        }
     }
 
     let numpy = py.import("numpy")?;
