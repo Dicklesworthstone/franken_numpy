@@ -7061,15 +7061,6 @@ fn numpy_complex128_array_from_interleaved_f64<'py>(
     Ok(array)
 }
 
-fn sort_complex_real_cmp(left: &f64, right: &f64) -> std::cmp::Ordering {
-    match (left.is_nan(), right.is_nan()) {
-        (true, true) => std::cmp::Ordering::Equal,
-        (true, false) => std::cmp::Ordering::Greater,
-        (false, true) => std::cmp::Ordering::Less,
-        (false, false) => left.partial_cmp(right).unwrap_or(std::cmp::Ordering::Equal),
-    }
-}
-
 fn direct_f64_unary_output_supported(array: &UFuncArray, op: UnaryOp) -> bool {
     if array.dtype() != DType::F64 || array.has_integer_sidecar() {
         return false;
@@ -41528,7 +41519,8 @@ fn try_zerocopy_f64_sort_complex_flat(
     let output: &mut [f64] =
         unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n * 2) };
     output[..n].copy_from_slice(input);
-    output[..n].par_sort_by(sort_complex_real_cmp);
+    // NaNs were rejected above, so avoid paying two is_nan checks per comparator call.
+    output[..n].par_sort_by(|left, right| left.partial_cmp(right).expect("no NaN after check"));
 
     for index in (0..n).rev() {
         output[index * 2] = output[index];
