@@ -3850,8 +3850,53 @@ idx = rng.integers(0, 4096, 2048).astype(np.int64)\n";
     group.finish();
 }
 
+fn bench_parallel_binary_boundary(c: &mut Criterion) {
+    // float_power / remainder / nextafter at 8M — newly routed through the parallel kernel.
+    let mut group = c.benchmark_group("python_parallel_binary_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = np.abs(rng.standard_normal(8_000_000)) + 0.1\n\
+b = rng.standard_normal(8_000_000) * 5.0\n\
+bnz = np.where(b == 0.0, 1.0, b)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("parallel binary setup");
+        let a = ns.get_item("a").expect("a");
+        let b = ns.get_item("b").expect("b");
+        let bnz = ns.get_item("bnz").expect("bnz");
+        let _ = &bnz;
+        for (op, x, y) in [("float_power", &a, &b), ("nextafter", &a, &b)] {
+            let fnp_fn = module.getattr(op).expect("fnp op");
+            let numpy_fn = numpy.getattr(op).expect("numpy op");
+            group.bench_function(format!("fnp_{op}_f64_8m"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call1((x, y)).expect("fnp call")));
+            });
+            group.bench_function(format!("numpy_{op}_f64_8m"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call1((x, y)).expect("numpy call")));
+            });
+        }
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_parallel_binary_boundary,
     bench_take_axis_boundary,
     bench_take_along_axis_boundary,
     bench_take_boundary,

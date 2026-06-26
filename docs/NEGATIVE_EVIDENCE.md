@@ -9006,3 +9006,29 @@ f64 special values (nan/+-inf) x to_begin/to_end (f64 path) x 2-D flatten x empt
 conformance_ediff1d 15/15 + conformance_array_utils 19/19 GREEN. Build clean. Real win (3.5x >> false-loss
 noise floor). Confirms ediff1d behaves like a binary elementwise op (parallelizes), distinct from roll/memmove
 (pure copy, bandwidth-saturated single-thread, reverted). Landed via isolated worktree. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: route float_power + nextafter through the parallel binary kernel (8.4x / 6.8x) (2026-06-25) — 66th+67th wins
+The zero-copy parallel binary kernel (zerocopy_f64_binary_flat, used by arctan2/logaddexp/hypot) computes
+op.apply across rayon chunks, but several high-compute binary ufuncs never routed to it: float_power's pyfunction
+delegated EVERYTHING to numpy (a STALE note predating the no-copy from_raw_parts kernel), and nextafter routed
+to the kernel but BinaryOp::Nextafter was missing from the parallelizable allowlist (so it ran the serial
+fallback). Fixes: (1) float_power -> try_zerocopy_f64_binary(FloatPower) for same-shape c-contiguous f64
+(op.apply=lhs.powf(rhs) = numpy float_power incl NaN for negative base + fractional exp); FloatPower already in
+the allowlist. (2) added Nextafter to the parallelizable allowlist (gate 1<<21, cheaper bit-step op). Same
+op.apply serial-or-parallel => BIT-IDENTICAL.
+PERF (criterion, remote rch worker hz2 = truth; python_parallel_binary_boundary, 8M f64 operands):
+  float_power: fnp 15.201ms vs NumPy 127.40ms = 0.119x (8.4x faster)
+  nextafter:   fnp 13.173ms vs NumPy  90.06ms = 0.146x (6.8x faster)
+  (local serial vs parallel isolation, same build: float_power 127.8->13.3ms = 9.6x, nextafter 80.7->11.2ms =
+   7.2x — proving the win is parallelism; numpy runs both single-threaded)
+CORRECTNESS: probe 21/0 across both ops x sizes below/at/above the gate x nan/+-inf x negative base+fractional
+exp (->nan) x negative divisors x -0.0. conformance_float_power_remainder 21/21 + conformance_nextafter 8/8 GREEN.
+Build clean. Real wins. KEEP.
+REJECT (same pass): np.remainder did NOT win — it is registered as a PyUFunc OBJECT (UFuncKind::Remainder) whose
+__call__ forwards straight to numpy, so the native_binary_remainder_or_passthrough function is DEAD CODE for the
+m.remainder(a,b) call path. Editing it had ZERO effect (measured fnp 179ms vs numpy 184ms = 0.97x parity,
+serial unchanged). Reverted the dead edit. To win remainder (166ms serial, ~8x headroom) one must add an f64
+fast path INSIDE PyUFunc::__call__ for UFuncKind::Remainder (gated on default out/where/dtype/casting/order) —
+a shared-dispatch change deferred to a follow-up. LESSON: before optimizing a binary op, check whether it is a
+#[pyfunction] or a PyUFunc object (grep `m.add("<op>"` vs `wrap_pyfunction`); ufunc objects passthrough via
+__call__. AGENT_NAME=BlackThrush.

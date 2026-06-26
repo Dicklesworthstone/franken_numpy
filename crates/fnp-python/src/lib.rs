@@ -8361,13 +8361,14 @@ fn zerocopy_f64_binary_flat<'py>(
                 | BinaryOp::Logaddexp
                 | BinaryOp::Logaddexp2
                 | BinaryOp::Hypot
+                | BinaryOp::Nextafter
         );
         // Per-op crossover: expensive transcendentals (atan2/pow/logaddexp) amortize the
-        // rayon fan-out from ~16K, but cheap near-memory-bound ops (hypot = sqrt(a^2+b^2))
-        // only win once aggregate bandwidth dominates (~2M, like the cheap unary class) —
-        // a low gate REGRESSES medium N for them.
+        // rayon fan-out from ~16K, but cheaper near-memory-bound ops (hypot = sqrt(a^2+b^2),
+        // nextafter = bit-step) only win once aggregate bandwidth dominates (~2M, like the
+        // cheap unary class) — a low gate REGRESSES medium N for them.
         let parallel_min = match op {
-            BinaryOp::Hypot => 1 << 21,
+            BinaryOp::Hypot | BinaryOp::Nextafter => 1 << 21,
             _ => FLOAT_POWER_PARALLEL_MIN_LEN,
         };
         if parallelizable && n >= parallel_min && rayon::current_num_threads() >= 2 {
@@ -32752,12 +32753,25 @@ fn native_binary_float_power_or_passthrough(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // float_power is element-wise pow promoted to float64 — a transcendental whose
-    // cost is dominated by the scalar libm pow. Both the f64 zero-copy path
-    // (scalar pow, measured 0.07-0.87x of numpy, ~14x slower at 100K) and the
-    // extract path for f32 (~3.5x slower) lose to numpy's vectorized f64 pow, so
-    // delegate every shape to numpy (the exact oracle: f64 result, NaN for negative
-    // base with non-integer exponent, same broadcasting/error surface).
+    // float_power is element-wise pow promoted to float64 — a transcendental dominated by
+    // the scalar libm pow. numpy runs it single-threaded, so the zero-copy PARALLEL binary
+    // path (op.apply(FloatPower)=lhs.powf(rhs), same f64 result incl NaN for negative base
+    // with non-integer exponent) aggregates the powf cost across cores and wins for large
+    // same-shape c-contiguous f64 operands. Scalar/broadcast/non-f64/non-contiguous defer to
+    // numpy (its vectorized f64 pow beats the extract path there). (BlackThrush 2026-06-25:
+    // the old "delegate everything" note predated the no-copy from_raw_parts parallel kernel.)
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        if numpy_dtype_is_f64(py, &args.get_item(0)?) && numpy_dtype_is_f64(py, &args.get_item(1)?)
+            && let Some(out) = try_zerocopy_f64_binary(
+                py,
+                &args.get_item(0)?,
+                &args.get_item(1)?,
+                BinaryOp::FloatPower,
+            )?
+        {
+            return Ok(out);
+        }
+    }
     core_numpy_passthrough(py, "float_power", args, kwargs)
 }
 
