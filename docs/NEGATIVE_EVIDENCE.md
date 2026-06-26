@@ -9057,3 +9057,25 @@ conformance_float_power_remainder 21/21 + conformance_remainder 48/48 + conforma
 conformance_arithmetic_ops 11/11 GREEN (shared __call__ change verified broadly). Build clean. Real wins. KEEP.
 REUSABLE: ufunc-object ops (m.add("op", PyUFunc{kind})) win by a default-surface-gated fast path INSIDE
 PyUFunc::__call__ — the per-op pyfunction is dead for them. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: route fmod + heaviside through the parallel binary kernel (1.53x / 6.58x) (2026-06-26) — 70th+71st wins
+Follow-up to the 66th-69th binary-kernel routing. fmod and heaviside are #[pyfunction]s (NOT PyUFunc objects),
+each delegating EVERYTHING to numpy via core_numpy_passthrough behind a STALE note ("native ~2x slower", predating
+the no-copy from_raw_parts parallel kernel). numpy runs both single-threaded (SIMD). FIX: route same-shape
+c-contiguous f64 operands to try_zerocopy_f64_binary(Fmod)/(Heaviside) (op.apply is the SAME per-element op —
+fmod = lhs % rhs C-style with NaN for zero divisor; heaviside = x<0->0, x==0->x2, x>0->1, NaN->NaN — so
+bit-identical to numpy). Added Fmod + Heaviside to the kernel's parallelizable allowlist (gate 1<<21 — both are
+cheap near-bandwidth ops, a low gate would regress medium N). fmod scans the divisor buffer zero-copy and defers
+any zero divisor to numpy so its RuntimeWarning + nan surface exactly. Scalar/broadcast/non-f64/non-contiguous
+defer to numpy.
+PERF (criterion, remote rch worker hz2 = truth; python_parallel_binary_boundary, 8M f64 operands):
+  fmod:      fnp 18.794ms vs NumPy 28.764ms = 0.653x (1.53x faster) [non-overlapping CIs: fnp 17.9-19.5, np 27.5-29.5]
+  heaviside: fnp  7.790ms vs NumPy 51.275ms = 0.152x (6.58x faster)
+  (local serial vs parallel isolation, same build: fmod 189.8->19.8ms = 9.6x, heaviside 84.8->11.0ms = 7.7x
+   — proving the win is parallelism; numpy runs both single-threaded. fmod's modest cross-machine ratio is because
+   the worker's numpy fmod is unusually fast (28ms vs 74ms local); the parallel speedup itself is large.)
+CORRECTNESS: probe 18/0 across fmod/heaviside x sizes below/at/above the gate x nan/+-inf x signed zero x zero
+divisor (fmod->numpy passthrough) x x==0 (heaviside->x2) x negative x scalar/broadcast (->defer) x int dtype
+(->defer). conformance_heaviside + conformance_float_power_remainder (fmod) GREEN. Build clean. Real wins. KEEP.
+REUSABLE: #[pyfunction] passthrough ops with a "native was slower" note predating the no-copy parallel kernel are
+re-checkable wins — route to try_zerocopy_f64_binary + add the BinaryOp to the allowlist. AGENT_NAME=BlackThrush.

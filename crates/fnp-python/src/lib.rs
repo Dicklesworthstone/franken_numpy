@@ -8410,13 +8410,19 @@ fn zerocopy_f64_binary_flat<'py>(
                 | BinaryOp::Nextafter
                 | BinaryOp::Power
                 | BinaryOp::Remainder
+                | BinaryOp::Fmod
+                | BinaryOp::Heaviside
         );
         // Per-op crossover: expensive transcendentals (atan2/pow/logaddexp) amortize the
         // rayon fan-out from ~16K, but cheaper near-memory-bound ops (hypot = sqrt(a^2+b^2),
         // nextafter = bit-step, remainder = floored-mod) only win once aggregate bandwidth
         // dominates (~2M, like the cheap unary class) — a low gate REGRESSES medium N for them.
         let parallel_min = match op {
-            BinaryOp::Hypot | BinaryOp::Nextafter | BinaryOp::Remainder => 1 << 21,
+            BinaryOp::Hypot
+            | BinaryOp::Nextafter
+            | BinaryOp::Remainder
+            | BinaryOp::Fmod
+            | BinaryOp::Heaviside => 1 << 21,
             _ => FLOAT_POWER_PARALLEL_MIN_LEN,
         };
         if parallelizable && n >= parallel_min && rayon::current_num_threads() >= 2 {
@@ -32226,8 +32232,22 @@ fn heaviside(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough: native scalar heaviside was ~2x slower than numpy's SIMD at
-    // every size (2026-06-12). Byte-identical. SIMD-bound, bead 8vdtg.
+    // Heaviside step (x<0 -> 0, x==0 -> x2, x>0 -> 1, NaN -> NaN). numpy runs it
+    // single-threaded (SIMD), so the zero-copy PARALLEL binary kernel
+    // (op.apply(Heaviside) is the SAME per-element branch, bit-identical f64) fans the
+    // work across cores and wins for large same-shape c-contiguous f64. Scalar/broadcast/
+    // non-f64/non-contiguous defer to numpy. (BlackThrush 2026-06-25: the old "~2x slower
+    // native scalar" note (bead 8vdtg) predated the no-copy from_raw_parts parallel kernel.)
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let a = args.get_item(0)?;
+        let b = args.get_item(1)?;
+        if numpy_dtype_is_f64(py, &a)
+            && numpy_dtype_is_f64(py, &b)
+            && let Some(out) = try_zerocopy_f64_binary(py, &a, &b, BinaryOp::Heaviside)?
+        {
+            return Ok(out);
+        }
+    }
     core_numpy_passthrough(py, "heaviside", args, kwargs)
 }
 
@@ -32334,10 +32354,34 @@ fn fmod(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough: native fmod (even the zero-copy f64 path) was 1.6-2.3x slower
-    // than numpy's SIMD at every size, and the native path also had to scan for
-    // zero divisors and defer to numpy for the divide warning anyway. numpy's
-    // result is byte-identical and handles the warning/dtype surface exactly.
+    // fmod is C-style mod (sign of the dividend). numpy runs it single-threaded (SIMD),
+    // so the zero-copy PARALLEL binary kernel (op.apply(Fmod) = lhs % rhs, the SAME
+    // per-element op, bit-identical f64) fans the work across cores and wins for large
+    // same-shape c-contiguous f64. A zero divisor must defer to numpy so its RuntimeWarning
+    // + nan surface exactly; scan the divisor buffer zero-copy (no extract). Scalar/
+    // broadcast/non-f64/non-contiguous defer to numpy. (BlackThrush 2026-06-25: the old
+    // "1.6-2.3x slower native" note predated the no-copy from_raw_parts parallel kernel.)
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let a = args.get_item(0)?;
+        let b = args.get_item(1)?;
+        if numpy_dtype_is_f64(py, &a) && numpy_dtype_is_f64(py, &b) {
+            let zero_divisor = if let Ok(b_buf) = PyBuffer::<f64>::get(&b)
+                && let Some(b_slice) = b_buf.as_slice(py)
+            {
+                let b_raw: &[f64] = unsafe {
+                    std::slice::from_raw_parts(b_slice.as_ptr().cast::<f64>(), b_slice.len())
+                };
+                b_raw.iter().any(|&v| v == 0.0)
+            } else {
+                false
+            };
+            if !zero_divisor
+                && let Some(out) = try_zerocopy_f64_binary(py, &a, &b, BinaryOp::Fmod)?
+            {
+                return Ok(out);
+            }
+        }
+    }
     core_numpy_passthrough(py, "fmod", args, kwargs)
 }
 
