@@ -40768,6 +40768,89 @@ fn try_zerocopy_f64_sort_lastaxis(
     Ok(Some(out.unbind()))
 }
 
+// Returns true iff `axis_spec` selects axis 0 of a 2-D array (explicit 0 or -2). NOT the
+// "missing"/None default (that is the last axis for >1-D, handled by the last-axis path).
+fn axis_spec_is_first_of_2d(axis_spec: Option<Option<isize>>) -> bool {
+    matches!(axis_spec, Some(Some(0)) | Some(Some(-2)))
+}
+
+// Parallel column sort along axis 0 of a 2-D C-contiguous f64 array. numpy's axis=0 sort is
+// SLOW (~2x its last-axis sort) because each column is strided in memory and it walks the
+// columns single-threaded. Here each column is gathered into a contiguous scratch lane,
+// sorted, and scattered back — every step parallelized across columns/rows via par_chunks_mut
+// (the strided memory touches are READS into/from owned contiguous chunks, so no unsafe
+// scatter). Bit-exact (sort yields the same multiset per column); any NaN -> defer to numpy
+// (its NaN-at-end ordering). Defers for non-2D/non-f64/non-contiguous/non-axis0/below crossover.
+fn try_zerocopy_f64_sort_axis0_2d(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    axis_spec: Option<Option<isize>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !axis_spec_is_first_of_2d(axis_spec)
+        || !a.is_exact_instance(&numpy.getattr("ndarray")?)
+        || !numpy_dtype_is_f64(py, a)
+    {
+        return Ok(None);
+    }
+    if a.getattr("ndim")?.extract::<usize>()? != 2
+        || !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let (rows, cols) = (shape[0], shape[1]);
+    const SORT_AXIS0_PARALLEL_MIN: usize = 1 << 20;
+    if rows < 2 || cols < 2 || rows * cols < SORT_AXIS0_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n != rows * cols {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let src: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    if src.par_iter().any(|v| v.is_nan()) {
+        return Ok(None);
+    }
+    // Transposed scratch: column-major lanes (cols lanes of rows each). Each lane gathers its
+    // column from the strided source and sorts it — fully parallel across columns.
+    let mut scratch = vec![0.0f64; n];
+    scratch.par_chunks_mut(rows).enumerate().for_each(|(j, lane)| {
+        for (i, slot) in lane.iter_mut().enumerate() {
+            *slot = src[i * cols + j];
+        }
+        lane.sort_unstable_by(|x, y| x.partial_cmp(y).expect("no NaN after check"));
+    });
+    let kwargs = PyDict::new(py);
+    kwargs.set_item("dtype", "float64")?;
+    let shape_tuple = PyTuple::new(py, [rows, cols])?;
+    let out = numpy.call_method("empty", (shape_tuple,), Some(&kwargs))?;
+    let out_buffer = PyBuffer::<f64>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty buffer we own (no alias with src/scratch).
+    let dst: &mut [f64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut f64, n) };
+    // Scatter the sorted columns back into the C-contiguous result, one output row per chunk.
+    dst.par_chunks_mut(cols).enumerate().for_each(|(i, orow)| {
+        for (j, slot) in orow.iter_mut().enumerate() {
+            *slot = scratch[j * rows + i];
+        }
+    });
+    Ok(Some(out.unbind()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn sort(
@@ -40776,8 +40859,9 @@ fn sort(
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
     // Fast paths: np.sort on f64 C-contiguous, default kind. 1-D (axis -1/0/None) -> parallel
-    // flat sort; ndim>=2 along the LAST axis (axis missing/-1/ndim-1) -> parallel per-lane sort.
-    // Any kind/order kwarg, explicit axis=None on >1-D (flatten), or a non-last axis -> passthrough.
+    // flat sort; ndim>=2 along the LAST axis (axis missing/-1/ndim-1) -> parallel per-lane sort;
+    // 2-D along axis 0 (axis 0/-2) -> parallel column sort. Any kind/order kwarg, explicit
+    // axis=None on >1-D (flatten), or another non-last axis -> passthrough.
     if args.len() == 1 {
         let mut other_kwarg = false;
         let mut axis_spec: Option<Option<isize>> = None; // outer None = "axis" kwarg missing
@@ -40800,6 +40884,9 @@ fn sort(
                 return Ok(out);
             }
             if let Some(out) = try_zerocopy_f64_sort_lastaxis(py, &numpy, &a, axis_spec)? {
+                return Ok(out);
+            }
+            if let Some(out) = try_zerocopy_f64_sort_axis0_2d(py, &numpy, &a, axis_spec)? {
                 return Ok(out);
             }
         }
@@ -40952,7 +41039,103 @@ fn try_zerocopy_f64_argsort_lastaxis(
     Ok(Some(out.unbind()))
 }
 
-// Passthrough to NumPy for everything except the parallel flat / last-axis f64-distinct paths.
+// Parallel column argsort along axis 0 of a 2-D C-contiguous f64 array (mirror of the axis-0
+// sort). Each column's row-indices (0..rows, local per numpy's axis=0 semantics) are sorted by
+// the column's values in a contiguous scratch lane, then scattered back. Like the other
+// argsort paths, numpy's quicksort is UNSTABLE: any column with a tie (or any NaN) -> defer.
+fn try_zerocopy_f64_argsort_axis0_2d(
+    py: Python<'_>,
+    numpy: &Bound<'_, PyModule>,
+    a: &Bound<'_, PyAny>,
+    axis_spec: Option<Option<isize>>,
+) -> PyResult<Option<Py<PyAny>>> {
+    if !axis_spec_is_first_of_2d(axis_spec)
+        || !a.is_exact_instance(&numpy.getattr("ndarray")?)
+        || !numpy_dtype_is_f64(py, a)
+    {
+        return Ok(None);
+    }
+    if a.getattr("ndim")?.extract::<usize>()? != 2
+        || !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()?
+    {
+        return Ok(None);
+    }
+    let shape: Vec<usize> = a.getattr("shape")?.extract()?;
+    let (rows, cols) = (shape[0], shape[1]);
+    const ARGSORT_AXIS0_PARALLEL_MIN: usize = 1 << 20;
+    if rows < 2 || cols < 2 || rows * cols < ARGSORT_AXIS0_PARALLEL_MIN
+        || rayon::current_num_threads() < 2
+    {
+        return Ok(None);
+    }
+    let Ok(buffer) = PyBuffer::<f64>::get(a) else {
+        return Ok(None);
+    };
+    let Some(cells) = buffer.as_slice(py) else {
+        return Ok(None);
+    };
+    let n = cells.len();
+    if n != rows * cols {
+        return Ok(None);
+    }
+    use rayon::prelude::*;
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let data: &[f64] = unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<f64>(), n) };
+    if data.par_iter().any(|v| v.is_nan()) {
+        return Ok(None);
+    }
+    // Gather each column's values into a CONTIGUOUS lane FIRST (one strided read per element),
+    // so the per-index sort comparator reads contiguous memory. (Comparing via the strided
+    // data[idx*cols+j] directly would cache-miss on every comparison — fine when the array
+    // fits in cache but catastrophic under cache pressure.)
+    let mut vals = vec![0.0f64; n];
+    vals.par_chunks_mut(rows).enumerate().for_each(|(j, vlane)| {
+        for (i, slot) in vlane.iter_mut().enumerate() {
+            *slot = data[i * cols + j];
+        }
+    });
+    // Per-column scratch of local row-indices (0..rows), sorted by the contiguous lane values.
+    let mut idx = vec![0i64; n];
+    let tie = std::sync::atomic::AtomicBool::new(false);
+    idx.par_chunks_mut(rows)
+        .zip(vals.par_chunks(rows))
+        .for_each(|(ilane, vlane)| {
+            for (i, slot) in ilane.iter_mut().enumerate() {
+                *slot = i as i64;
+            }
+            ilane.sort_unstable_by(|&x, &y| {
+                vlane[x as usize]
+                    .partial_cmp(&vlane[y as usize])
+                    .expect("no NaN after check")
+            });
+            for w in 1..ilane.len() {
+                if vlane[ilane[w] as usize] == vlane[ilane[w - 1] as usize] {
+                    tie.store(true, std::sync::atomic::Ordering::Relaxed);
+                    break;
+                }
+            }
+        });
+    // Any column with a tie -> numpy's unstable order is algorithm-specific; defer the whole op.
+    if tie.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(None);
+    }
+    let out = numpy.call_method1("empty", (PyTuple::new(py, [rows, cols])?, numpy.getattr("intp")?))?;
+    let out_buffer = PyBuffer::<i64>::get(&out)?;
+    let Some(out_cells) = out_buffer.as_mut_slice(py) else {
+        return Ok(None);
+    };
+    // SAFETY: fresh numpy.empty intp buffer we own (no alias).
+    let dst: &mut [i64] =
+        unsafe { std::slice::from_raw_parts_mut(out_cells.as_ptr() as *mut i64, n) };
+    dst.par_chunks_mut(cols).enumerate().for_each(|(i, orow)| {
+        for (j, slot) in orow.iter_mut().enumerate() {
+            *slot = idx[j * rows + i];
+        }
+    });
+    Ok(Some(out.unbind()))
+}
+
+// Passthrough to NumPy for everything except the parallel flat / last-axis / axis0 distinct paths.
 #[pyfunction]
 #[pyo3(signature = (*args, **kwargs))]
 fn argsort(
@@ -40981,6 +41164,9 @@ fn argsort(
                 return Ok(out);
             }
             if let Some(out) = try_zerocopy_f64_argsort_lastaxis(py, &numpy, &a, axis_spec)? {
+                return Ok(out);
+            }
+            if let Some(out) = try_zerocopy_f64_argsort_axis0_2d(py, &numpy, &a, axis_spec)? {
                 return Ok(out);
             }
         }

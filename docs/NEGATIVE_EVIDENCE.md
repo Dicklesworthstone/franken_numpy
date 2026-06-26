@@ -9181,3 +9181,31 @@ FAILS on origin/main ("invalid side error") — introduced by peer commit 074eae
 win"), an ancestor of origin/main; my diff touches ZERO searchsorted code (sort/argsort only). numpy raises a
 different error message/type than fnp for an invalid `side=` value on a Python-container searchsorted. Filed as a
 blocker observation for whoever owns searchsorted; does not block this sort/argsort landing.
+
+## BlackThrush WIN: parallel column sort + argsort along AXIS 0 of 2-D (4.45x / 2.97x) (2026-06-26) — 78th+79th wins
+Completes the per-lane-sort vein for the non-last axis. numpy's axis=0 sort is ~2x SLOWER than its last-axis
+sort (columns are strided in memory; it walks them single-threaded). Could NOT use the transpose-then-last-axis
+trick: a pure-numpy transpose (ascontiguousarray of a 2048x2048 .T) costs ~44ms each — two of them (125ms)
+exceed numpy's own 89ms axis=0 sort. INSTEAD: try_zerocopy_f64_sort_axis0_2d / _argsort_axis0_2d gather each
+column into a CONTIGUOUS scratch lane (par_chunks_mut over the transposed scratch — strided memory touches are
+READS into owned contiguous chunks, NO unsafe scatter), sort the lane, then scatter back into the C-contiguous
+result (par_chunks_mut over output rows, strided reads from scratch). Both passes parallel across columns/rows.
+Bit-exact (sort = same multiset per column); argsort defers on any column tie (numpy quicksort UNSTABLE) or NaN.
+**CRITICAL CACHE BUG CAUGHT BY THE LOADED WORKER (not by local bench):** the FIRST argsort version sorted the
+INDEX array with a comparator that strided-read data[idx*cols+j] on EVERY comparison — a cache miss per compare.
+Local bench (32MB array fit in L3) showed a fake 4.3x WIN; the loaded worker exposed it as a 3.8x LOSS (fnp
+1.49s vs numpy 387ms — cache thrash under L3 contention). FIX: gather column values into a contiguous lane FIRST
+(one strided read/element), then the sort comparator reads contiguous memory. LESSON: a sort/select comparator
+that strided-indexes the backing array is a latent cache hazard invisible to an unloaded local bench — gather to
+contiguous before comparing; and a contended worker bench is the real correctness gate for cache behavior.
+PERF (criterion, remote rch worker hz2 = truth; python_sort_axis_boundary, 2048x2048 f64 axis=0):
+  sort:    fnp 22.142ms vs NumPy 98.517ms = 0.225x (4.45x faster) [non-overlapping CIs]
+  argsort: fnp 48.022ms vs NumPy 142.66ms = 0.336x (2.97x faster) [non-overlapping CIs]
+  (local serial vs parallel isolation, same build: sort 92.3ms / argsort 127.0ms SERIAL = EXACT parity (0.99-1.01x),
+   parallel 37.9/41.5ms WIN — pure parallelism. The gather-contiguous fix made argsort parallel reliable.)
+CORRECTNESS: probe 34/0 across sort+argsort x axis=0/-2 x shapes (2048x2048, 4096x1024, 1024x4096, (1M,4),
+(4,1M), (8192,512)) x DEFER paths: NaN, ties (argsort), Fortran non-contig, int dtype, 3-D axis0, kind=stable;
+plus last-axis/default regression intact. Change is purely ADDITIVE (two new helpers + one dispatch line each in
+fn sort/fn argsort; existing flat/last-axis paths untouched). conformance_sorting 1/1 + conformance_lexsort 16/16
+GREEN (on a worker saturated by 5+ concurrent agents); sort_search remains 33/34 (the 1 fail is the pre-existing
+peer searchsorted red, unrelated). Build clean. Real wins. KEEP. AGENT_NAME=BlackThrush.

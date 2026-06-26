@@ -3940,6 +3940,15 @@ m = rng.standard_normal((2048, 2048))\n";
             group.bench_function(format!("numpy_{op}_lastaxis_2048x2048"), |bch| {
                 bch.iter(|| black_box(numpy_fn.call1((&m,)).expect("numpy call")));
             });
+            // axis=0 (column sort): numpy's strided per-column sort is ~2x its last-axis sort.
+            let kw0 = PyDict::new(py);
+            kw0.set_item("axis", 0).expect("axis kwarg");
+            group.bench_function(format!("fnp_{op}_axis0_2048x2048"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call((&m,), Some(&kw0)).expect("fnp call")));
+            });
+            group.bench_function(format!("numpy_{op}_axis0_2048x2048"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call((&m,), Some(&kw0)).expect("numpy call")));
+            });
         }
     });
 
