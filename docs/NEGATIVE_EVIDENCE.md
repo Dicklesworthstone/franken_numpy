@@ -8826,3 +8826,26 @@ False/True x NaN/+-inf x 2-D reshape x decreasing bins (defers to numpy) x dupli
 x (defers) — np.array_equal, shape + intp dtype preserved. conformance_special_math 32/32 (incl 9 digitize-
 specific) + conformance_histogram_bincount GREEN. Build clean. Real win (12.5x rebench >> false-loss noise floor). KEEP.
 AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize np.searchsorted per-query binary search (42x over numpy) (2026-06-25) — 61st win
+Sibling of the 60th win (digitize): fnp's native searchsorted (try_zerocopy_f64_searchsorted + the generic
+integer searchsorted_typed) ran a SERIAL per-query binary search over the sorted haystack — at parity with
+single-threaded numpy.searchsorted. Each query is independent and latency-bound (the binary search over a
+large haystack is dominated by data-dependent memory loads), so running queries in parallel aggregates
+memory-level parallelism + ALU across cores and wins big. Extracted search_index_f64_raw (NaN-correct: numpy
+sorts NaN last) operating on a plain &[f64] (ReadOnlyCell is NOT Sync — must cast to raw &[f64]/&[T] first) +
+a generic integer search_index; added a rayon par_chunks_mut(out)/par_chunks(v_raw) branch reading the
+haystack/queries as raw slices and writing a fresh numpy.empty(intp). Same search => BIT-IDENTICAL regardless
+of chunking. Gate query-count m>=1<<21; below-gate serial path unchanged. Covers f64 + all integer dtypes.
+PERF (criterion, remote rch worker hz2 = truth; python_searchsorted_boundary, 4M f64 queries into a 1M sorted
+haystack):
+  searchsorted f64: fnp 22.857ms vs NumPy 969.86ms = 0.024x (42x faster)
+  (local serial vs parallel isolation on the same build: fnp serial RAYON=1 579ms -> parallel 18ms = 32x,
+   proving the win is the parallelization, not box noise; numpy single-threaded ~820-970ms everywhere)
+CORRECTNESS: probe 39/0 across f64 + 7 integer dtypes x sizes below/at/above the 1<<21 gate x side left/right
+x haystack-with-NaN x 2-D query (shape preserved) x scalar query (separate path) x sorter argument (defers to
+numpy) — np.array_equal, shape + intp dtype preserved. conformance_sort_search 32/33 (the lone fail is a
+PRE-EXISTING list-input + invalid-side error-WORDING mismatch in an unrelated fallback path, untouched by this
+search-loop change) + conformance_searching GREEN. Build clean. Real win (42x >> false-loss noise floor).
+Landed via an isolated worktree off origin/main to avoid a concurrent peer's uncommitted rustfmt of the shared
+lib.rs (committing only the 6 searchsorted hunks + the bench). KEEP. AGENT_NAME=BlackThrush.
