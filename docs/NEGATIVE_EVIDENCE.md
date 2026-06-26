@@ -9224,7 +9224,7 @@ PERF (criterion, remote rch worker hz2 = truth; python_sort_kind_boundary, 2048x
   argsort: fnp 12.602ms vs NumPy 223.256ms = 0.056x (17.72x faster)
 Command: `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 rch exec -- cargo bench -j 1 -p fnp-python --profile release --bench criterion_python_surface -- python_sort_kind_boundary --sample-size 10 --warm-up-time 2 --measurement-time 4 --output-format bencher --noplot`.
 Note: this repo/toolchain rejects `cargo bench --release`; `--profile release` is the accepted release-bench equivalent.
-CORRECTNESS: targeted conformance GREEN on hz2:
+CORRECTNESS: targeted conformance GREEN on vmi1227854 (final tree, after the raw `c_str!` test cleanup):
 `AGENT_NAME=BlackThrush CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-b RCH_REQUIRE_REMOTE=1 RCH_BUILD_SLOTS=1 RCH_TEST_SLOTS=1 rch exec -- cargo test -j 1 -p fnp-python --test conformance_sorting sort_argsort_explicit_kind_large_unique_last_axis_matches_numpy -- --nocapture`
 => 1 passed / 0 failed. The test covers `kind in ("stable", "mergesort", "heapsort")` on a 1025x1025 f64 matrix
 with unique values and checks dtype, shape, sort values, and argsort indices against NumPy. KEEP. AGENT_NAME=BlackThrush.

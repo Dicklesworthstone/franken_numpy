@@ -56,7 +56,7 @@ fn sort_argsort_explicit_kind_large_unique_last_axis_matches_numpy() {
         globals.set_item("np", numpy)?;
         globals.set_item("fnp", module)?;
         py.run(
-            std::ffi::CString::new(
+            pyo3::ffi::c_str!(
                 r#"
 rows = 1025
 cols = 1025
@@ -76,10 +76,8 @@ for kind in ("stable", "mergesort", "heapsort"):
     assert fa.dtype == na.dtype
     assert fa.shape == na.shape
     assert np.array_equal(fa, na), kind
-"#,
-            )
-            .unwrap()
-            .as_c_str(),
+"#
+            ),
             Some(&globals),
             None,
         )?;
