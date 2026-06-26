@@ -3754,8 +3754,49 @@ idx = rng.integers(0, 16_000_000, 8_000_000).astype(np.int64)\n";
     group.finish();
 }
 
+fn bench_take_along_axis_boundary(c: &mut Criterion) {
+    // np.take_along_axis(4096x4096 f64, 4096x2048 idx, axis=1) — serial gather vs parallel.
+    let mut group = c.benchmark_group("python_take_along_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.standard_normal((4096, 4096))\n\
+idx = rng.integers(0, 4096, (4096, 2048)).astype(np.int64)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("take_along_axis setup");
+        let a = ns.get_item("a").expect("a");
+        let idx = ns.get_item("idx").expect("idx");
+        let fnp_t = module.getattr("take_along_axis").expect("fnp take_along_axis");
+        let numpy_t = numpy.getattr("take_along_axis").expect("numpy take_along_axis");
+        let axis = 1_i64;
+        group.bench_function("fnp_take_along_axis_f64_8m", |b| {
+            b.iter(|| black_box(fnp_t.call1((&a, &idx, axis)).expect("fnp take_along_axis")));
+        });
+        group.bench_function("numpy_take_along_axis_f64_8m", |b| {
+            b.iter(|| black_box(numpy_t.call1((&a, &idx, axis)).expect("numpy take_along_axis")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_take_along_axis_boundary,
     bench_take_boundary,
     bench_searchsorted_boundary,
     bench_digitize_boundary,

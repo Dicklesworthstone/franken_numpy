@@ -8920,3 +8920,24 @@ The ratio looks bad only because the operation is sub-3us; the absolute delta is
 the campaign's meaningful hot-path threshold. Also reject `unique_f64_repeated_50k`: it is a 1.10x small-row
 loss while the larger/gated rows are parity-to-3.2x faster. No source edit was kept; zero-gain code reverted by
 not applying any candidate patch. Code conformance unchanged by construction. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize np.take_along_axis gather (9.0x over numpy) (2026-06-25) — 63rd win
+Same gather lever as np.take (62nd): gather_along_typed ran a serial triple-nested (outer x li x inner) gather
+at parity with single-threaded numpy.take_along_axis. Every output element is an independent random gather
+(memory-latency-bound), so parallelize over the FLAT output range (works for ANY axis, unlike par-over-outer
+which is useless when outer==1 for axis=0): for flat position f, outer index o = f/(li*inner) and inner offset
+inr = f%inner (both li*inner and inner divide the block), gathering arr[o*la*inner + k*inner + inr] with
+negative-wraparound. Cast arr/idx/out to raw &[T]/&[i64]/&mut[T] (ReadOnlyCell NOT Sync), par_chunks_mut(out)
+.enumerate() to recover the flat base; OOB sets a shared AtomicBool -> bail AFTER the pass (partial output
+dropped, gather has no side effects) so numpy raises the exact IndexError. Same gather => BIT-IDENTICAL. Gate
+total_out>=1<<21; below-gate serial unchanged. Generic over T (bit-mover by itemsize) -> all dtypes free.
+PERF (criterion, remote rch worker hz2 = truth; python_take_along_axis_boundary, 4096x4096 f64 source,
+4096x2048 int64 indices, axis=1 -> 8.4M output gather):
+  take_along_axis f64: fnp 14.993ms vs NumPy 135.46ms = 0.111x (9.0x faster)
+  (local serial vs parallel isolation, same build, 4096x4096 / 4096x2048: 113ms -> 15.5ms = 7.3x, proving the
+   win is parallelism not box noise; numpy take_along_axis single-threaded)
+CORRECTNESS: probe 24/0 across f64/i64/f32/i16/u8/complex128/bool x axis=0 (inner>1) and axis=1 (inner=1) x
+sizes below/at/above the 1<<21 total-output gate x 3-D middle axis x negative-index wraparound x OOB->IndexError
+both sides. conformance_take_put 20/20 GREEN (incl 5 take_along_axis cases). Build clean. Real win (9.0x >>
+false-loss noise floor). Landed via isolated worktree off origin/main (peer holds uncommitted shared-lib rustfmt).
+KEEP. AGENT_NAME=BlackThrush.

@@ -44962,7 +44962,7 @@ fn put_along_axis(
 // index returns None so the caller defers to numpy for the exact IndexError (the
 // half-filled fresh buffer is simply dropped). Returns the flat uintN output.
 #[allow(clippy::too_many_arguments)]
-fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy>(
+fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     arr_u: &Bound<'py, PyAny>,
@@ -44991,20 +44991,67 @@ fn gather_along_typed<'py, T: pyo3::buffer::Element + Copy>(
             return Ok(None);
         };
         let la_i = la as i64;
-        for o in 0..outer {
-            let abase = o * la * inner;
-            let obase = o * li * inner;
-            for l in 0..li {
-                let dbase = obase + l * inner;
-                for inr in 0..inner {
-                    let mut k = idx_in[dbase + inr].get();
-                    if k < 0 {
-                        k += la_i;
+        // numpy take_along_axis is single-threaded; every output element is an independent
+        // random gather (memory-latency-bound), so parallelize over the flat output range:
+        // for flat position f, outer index = f / (li*inner) and inner offset = f % inner
+        // (li*inner and inner both divide the block), gathering arr[o*la*inner + k*inner + inr].
+        // Same gather => bit-identical. OOB sets a shared flag -> bail AFTER the pass (partial
+        // output dropped; gather has no side effects) so numpy raises the exact IndexError.
+        const GATHER_ALONG_PARALLEL_MIN: usize = 1 << 21;
+        if total_out >= GATHER_ALONG_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            // SAFETY: ReadOnlyCell<T>/<i64> and Cell<T> are repr(transparent) over their value;
+            // arr+idx are read-only under the GIL and `flat` is a fresh numpy.empty we own (no
+            // alias). Raw slices are Sync for the worker threads.
+            let arr_raw: &[T] =
+                unsafe { std::slice::from_raw_parts(arr_s.as_ptr().cast::<T>(), arr_s.len()) };
+            let idx_raw: &[i64] =
+                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), total_out) };
+            let out_data: &mut [T] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total_out) };
+            let ok = AtomicBool::new(true);
+            let block = li * inner;
+            let chunk = total_out.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .enumerate()
+                .for_each(|(ci, o_chunk)| {
+                    let base = ci * chunk;
+                    for (j, slot) in o_chunk.iter_mut().enumerate() {
+                        let f = base + j;
+                        let o = f / block;
+                        let inr = f % inner;
+                        let mut k = idx_raw[f];
+                        if k < 0 {
+                            k += la_i;
+                        }
+                        if k < 0 || k >= la_i {
+                            ok.store(false, Ordering::Relaxed);
+                        } else {
+                            *slot = arr_raw[o * la * inner + (k as usize) * inner + inr];
+                        }
                     }
-                    if k < 0 || k >= la_i {
-                        return Ok(None); // OOB → defer to numpy for exact IndexError
+                });
+            if !ok.load(Ordering::Relaxed) {
+                return Ok(None);
+            }
+        } else {
+            for o in 0..outer {
+                let abase = o * la * inner;
+                let obase = o * li * inner;
+                for l in 0..li {
+                    let dbase = obase + l * inner;
+                    for inr in 0..inner {
+                        let mut k = idx_in[dbase + inr].get();
+                        if k < 0 {
+                            k += la_i;
+                        }
+                        if k < 0 || k >= la_i {
+                            return Ok(None); // OOB → defer to numpy for exact IndexError
+                        }
+                        output[dbase + inr].set(arr_s[abase + (k as usize) * inner + inr].get());
                     }
-                    output[dbase + inr].set(arr_s[abase + (k as usize) * inner + inr].get());
                 }
             }
         }
