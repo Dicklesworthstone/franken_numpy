@@ -9079,3 +9079,32 @@ divisor (fmod->numpy passthrough) x x==0 (heaviside->x2) x negative x scalar/bro
 (->defer). conformance_heaviside + conformance_float_power_remainder (fmod) GREEN. Build clean. Real wins. KEEP.
 REUSABLE: #[pyfunction] passthrough ops with a "native was slower" note predating the no-copy parallel kernel are
 re-checkable wins — route to try_zerocopy_f64_binary + add the BinaryOp to the allowlist. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: route maximum + minimum + copysign through the parallel binary kernel (1.43x / 1.58x / 2.07x) (2026-06-26) — 72nd+73rd+74th wins
+Continued binary-kernel-routing sweep. maximum/minimum delegated to numpy via the native extract path (2 input
+extracts + ufunc + rebuild); copysign passthroughed behind a STALE "3.7-4.7x slower native scalar" note (bead
+8vdtg, predating the no-copy from_raw_parts kernel). numpy runs all three single-threaded. FIX: route same-shape
+c-contiguous f64 to try_zerocopy_f64_binary(Maximum/Minimum/Copysign) (op.apply: maximum/minimum NaN-propagating
++ lhs==rhs->rhs = correct signed-zero; copysign = lhs.copysign(rhs) pure sign-bit copy — all bit-identical),
+added all three to the kernel's parallelizable allowlist + gate 1<<21 (cheap bandwidth-bound).
+**CRITICAL RE-CONFIRMATION of the PyUFunc-object dead-code lesson (cf 68th/69th remainder/power):** maximum and
+minimum are registered as PyUFunc OBJECTS (m.add("maximum", PyUFunc{kind: UFuncKind::Maximum})), so the FIRST
+edit to native_binary_maximum_or_passthrough was DEAD CODE — measured EXACT parity (parallel==serial==numpy
+~39ms, no change) while copysign (a real wrap_pyfunction!) won immediately. DIAGNOSED by the parallel==serial
+tell, reverted the dead native edits, added UFuncKind::Maximum/Minimum->BinaryOp to the PyUFunc::__call__ top
+fast path (gated all-default kwargs) — THEN maximum/minimum engaged and won. So a binary op that shows
+parallel==serial after routing is almost certainly a ufunc object whose pyfunction is dead; grep m.add("<op>".
+PERF (criterion, remote rch worker hz2 = truth; python_parallel_binary_boundary, 8M f64 operands):
+  maximum:  fnp 5.191ms vs NumPy 7.404ms = 0.701x (1.43x faster) [non-overlapping CIs]
+  minimum:  fnp 5.105ms vs NumPy 8.058ms = 0.633x (1.58x faster) [non-overlapping CIs]
+  copysign: fnp 4.102ms vs NumPy 8.480ms = 0.484x (2.07x faster) [non-overlapping CIs]
+  (local serial vs parallel isolation, same build: maximum 52.3->13.2ms, minimum 54.3->12.7ms, copysign
+   48.98->12.3ms — serial LOSES to numpy, parallel WINS, proving the win is parallelism not box noise. The
+   worker ratios are smaller than local because the worker's numpy is unloaded ~7-8ms vs the 39ms local floor.)
+CORRECTNESS: probe 0-fail across maximum/minimum/copysign x signed-zero (signbit checked) x nan-propagation x
++-inf x sizes below/at/above the gate x 2-D contiguous x non-contiguous transpose (->defer) x int/f32 (->defer)
+x scalar/broadcast (->defer). conformance copysign 7/7 + maximum 10/10 + minimum 10/10 + maximum_minimum 17/17
++ arithmetic_ops 1/1 GREEN. Build clean. Real wins. KEEP. AGENT_NAME=BlackThrush.
+REJECT-DEFER (same pass): np.divide measured PARITY (fnp 40.25ms vs numpy 39.93ms local, not routed) — divide
+has divide-by-zero + overflow RuntimeWarning surface (a/0->inf, big/small->inf) that needs a careful scan to
+preserve exactly, so deferred (a clean ~3x is likely available with a zero-divisor scan like fmod, follow-up).

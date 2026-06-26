@@ -343,6 +343,8 @@ impl PyUFunc {
             let binop = match self.kind {
                 UFuncKind::Remainder => Some(BinaryOp::Remainder),
                 UFuncKind::Power => Some(BinaryOp::Power),
+                UFuncKind::Maximum => Some(BinaryOp::Maximum),
+                UFuncKind::Minimum => Some(BinaryOp::Minimum),
                 _ => None,
             };
             if let Some(op) = binop {
@@ -8412,6 +8414,9 @@ fn zerocopy_f64_binary_flat<'py>(
                 | BinaryOp::Remainder
                 | BinaryOp::Fmod
                 | BinaryOp::Heaviside
+                | BinaryOp::Maximum
+                | BinaryOp::Minimum
+                | BinaryOp::Copysign
         );
         // Per-op crossover: expensive transcendentals (atan2/pow/logaddexp) amortize the
         // rayon fan-out from ~16K, but cheaper near-memory-bound ops (hypot = sqrt(a^2+b^2),
@@ -8422,7 +8427,10 @@ fn zerocopy_f64_binary_flat<'py>(
             | BinaryOp::Nextafter
             | BinaryOp::Remainder
             | BinaryOp::Fmod
-            | BinaryOp::Heaviside => 1 << 21,
+            | BinaryOp::Heaviside
+            | BinaryOp::Maximum
+            | BinaryOp::Minimum
+            | BinaryOp::Copysign => 1 << 21,
             _ => FLOAT_POWER_PARALLEL_MIN_LEN,
         };
         if parallelizable && n >= parallel_min && rayon::current_num_threads() >= 2 {
@@ -20612,9 +20620,23 @@ fn copysign(
     args: &Bound<'_, PyTuple>,
     kwargs: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<Py<PyAny>> {
-    // Passthrough: the native scalar copysign (even the zero-copy f64 path) was
-    // 3.7-4.7x slower than numpy's SIMD bit-twiddle at every size (2026-06-12).
-    // Byte-identical (a pure sign-bit copy). SIMD-bound, bead 8vdtg.
+    // copysign(x,y) = |x| with the sign bit of y — numpy runs it single-threaded at the
+    // binary bandwidth floor (~np.add ~39ms @8M here). Route same-shape c-contiguous f64
+    // to the zero-copy PARALLEL binary kernel (op.apply(Copysign)=lhs.copysign(rhs), a pure
+    // sign-bit copy = bit-identical including nan/inf/-0.0); 64-thread aggregate bandwidth
+    // beats numpy's single thread. Scalar/broadcast/non-f64/non-contiguous defer to numpy.
+    // (BlackThrush 2026-06-26: the old "3.7-4.7x slower native scalar" note (bead 8vdtg)
+    // predated the no-copy from_raw_parts parallel kernel.)
+    if kwargs.is_none_or(|kwargs| kwargs.is_empty()) && args.len() == 2 {
+        let a = args.get_item(0)?;
+        let b = args.get_item(1)?;
+        if numpy_dtype_is_f64(py, &a)
+            && numpy_dtype_is_f64(py, &b)
+            && let Some(out) = try_zerocopy_f64_binary(py, &a, &b, BinaryOp::Copysign)?
+        {
+            return Ok(out);
+        }
+    }
     core_numpy_passthrough(py, "copysign", args, kwargs)
 }
 

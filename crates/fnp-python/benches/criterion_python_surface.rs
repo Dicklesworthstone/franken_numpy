@@ -3851,8 +3851,9 @@ idx = rng.integers(0, 4096, 2048).astype(np.int64)\n";
 }
 
 fn bench_parallel_binary_boundary(c: &mut Criterion) {
-    // float_power / remainder / nextafter / power / fmod / heaviside at 8M — routed through
-    // the zero-copy parallel binary kernel (numpy runs these single-threaded).
+    // float_power / remainder / nextafter / power / fmod / heaviside / maximum / minimum /
+    // copysign at 8M — routed through the zero-copy parallel binary kernel (numpy runs these
+    // single-threaded).
     let mut group = c.benchmark_group("python_parallel_binary_boundary");
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(4));
@@ -3886,6 +3887,9 @@ bnz = np.where(b == 0.0, 1.0, b)\n";
             ("power", &a, &b),
             ("fmod", &a, &bnz),
             ("heaviside", &b, &a),
+            ("maximum", &a, &b),
+            ("minimum", &a, &b),
+            ("copysign", &a, &b),
         ] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let numpy_fn = numpy.getattr(op).expect("numpy op");
