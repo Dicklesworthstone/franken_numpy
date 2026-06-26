@@ -3922,7 +3922,8 @@ fn bench_sort_axis_boundary(c: &mut Criterion) {
         let numpy = py.import("numpy").expect("numpy oracle");
         let setup = "import numpy as np\n\
 rng = np.random.default_rng(0)\n\
-m = rng.standard_normal((2048, 2048))\n";
+m = rng.standard_normal((2048, 2048))\n\
+m3 = rng.standard_normal((4096, 32, 32))\n";
         let ns = PyDict::new(py);
         py.run(
             std::ffi::CString::new(setup).unwrap().as_c_str(),
@@ -3931,6 +3932,7 @@ m = rng.standard_normal((2048, 2048))\n";
         )
         .expect("sort axis setup");
         let m = ns.get_item("m").expect("m");
+        let m3 = ns.get_item("m3").expect("m3");
         for op in ["sort", "argsort"] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let numpy_fn = numpy.getattr(op).expect("numpy op");
@@ -3940,7 +3942,7 @@ m = rng.standard_normal((2048, 2048))\n";
             group.bench_function(format!("numpy_{op}_lastaxis_2048x2048"), |bch| {
                 bch.iter(|| black_box(numpy_fn.call1((&m,)).expect("numpy call")));
             });
-            // axis=0 (column sort): numpy's strided per-column sort is ~2x its last-axis sort.
+            // axis=0 (lane sort): numpy's strided per-lane sort is ~2x its last-axis sort.
             let kw0 = PyDict::new(py);
             kw0.set_item("axis", 0).expect("axis kwarg");
             group.bench_function(format!("fnp_{op}_axis0_2048x2048"), |bch| {
@@ -3948,6 +3950,13 @@ m = rng.standard_normal((2048, 2048))\n";
             });
             group.bench_function(format!("numpy_{op}_axis0_2048x2048"), |bch| {
                 bch.iter(|| black_box(numpy_fn.call((&m,), Some(&kw0)).expect("numpy call")));
+            });
+            // ndim>=2 axis=0 on a 3-D batched shape (cols = prod(shape[1:]) lanes).
+            group.bench_function(format!("fnp_{op}_axis0_4096x32x32"), |bch| {
+                bch.iter(|| black_box(fnp_fn.call((&m3,), Some(&kw0)).expect("fnp call")));
+            });
+            group.bench_function(format!("numpy_{op}_axis0_4096x32x32"), |bch| {
+                bch.iter(|| black_box(numpy_fn.call((&m3,), Some(&kw0)).expect("numpy call")));
             });
         }
     });

@@ -9251,3 +9251,25 @@ Note: this repo/toolchain rejects `cargo bench --release`; `--profile release` i
 CORRECTNESS: `AGENT_NAME=BlackThrush RCH_REQUIRE_REMOTE=1 CARGO_TARGET_DIR=/data/projects/.rch-targets/franken_numpy-cod-a rch exec -- cargo test -j 1 -p fnp-python --test conformance_extract_put putmask -- --nocapture`
 => 7 passed / 0 failed (including same-dtype all-width golden). Build/bench compiled the touched fnp-python crate.
 KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: generalize parallel axis-0 sort/argsort to ndim>=2 (3-D 7.18x / 6.09x) (2026-06-26) — 83rd+84th wins
+Follow-up to the 78th+79th 2-D axis-0 sort. A C-contiguous (s0,s1,..,sk) array sorted along AXIS 0 is IDENTICAL
+to the 2-D (s0, s1*..*sk) array sorted along axis 0 (same memory; the axis-0 lane structure is preserved exactly
+by a trailing-dims reshape). So the 2-D axis0 kernel generalizes for free: relaxed the ndim==2 gate to ndim>=2,
+rows=shape[0], cols=product(shape[1:]), output the ORIGINAL shape; axis check is now ndim-aware (axis 0 or -ndim,
+via the generalized axis_spec_is_first). Same gather-column->sort-contiguous-lane->scatter (all par_chunks_mut, no
+unsafe scatter); argsort gathers VALUES contiguously first (the cache-hazard fix from the 78th+79th carries over).
+Bit-exact; NaN/tie/non-axis0/non-contiguous/non-f64 defer. numpy's 3-D strided axis-0 sort is even SLOWER than the
+2-D case (more, smaller strided lanes), so the win is BIGGER on batched shapes.
+PERF (criterion, remote rch worker hz2 = truth; python_sort_axis_boundary, 4096x32x32 f64 axis=0):
+  sort:    fnp 22.069ms vs NumPy 158.42ms = 0.139x (7.18x faster) [non-overlapping CIs]
+  argsort: fnp 30.381ms vs NumPy 184.96ms = 0.164x (6.09x faster) [non-overlapping CIs]
+  (local serial vs parallel isolation, same build: 3-D axis0 SERIAL = parity (0.99-1.03x), parallel WIN — pure
+   parallelism; local ratios 0.18-0.29x across (128,512,128)/(256,256,64)/(4096,32,32).)
+CORRECTNESS: probe 30/0 across sort+argsort x axis=0/-ndim x 3-D (128,512,128)/(256,256,64)/(4096,32,32) + 4-D
+(64,64,64,16) shapes x DEFER paths: NaN, ties (argsort), Fortran non-contig, 3-D non-axis0 (middle axis=1/2 +
+last-axis passthrough); plus 2-D axis0 + last-axis + 1-D regression intact. conformance_sorting 1/1 +
+conformance_lexsort 16/16 GREEN. Build clean. Real wins. KEEP. AGENT_NAME=BlackThrush.
+REUSABLE: a C-contiguous N-D op along AXIS 0 == the 2-D (shape[0], prod(rest)) case — a 2-D axis-0 kernel
+generalizes to all ndim for free via the trailing-dims product (output the original shape). (Last-axis is the
+mirror: cols=last dim, rows=prod(rest).) Middle axes do NOT reduce this way (genuine multi-stride) — left to numpy.

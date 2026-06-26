@@ -40806,38 +40806,40 @@ fn try_zerocopy_f64_sort_lastaxis(
     Ok(Some(out.unbind()))
 }
 
-// Returns true iff `axis_spec` selects axis 0 of a 2-D array (explicit 0 or -2). NOT the
-// "missing"/None default (that is the last axis for >1-D, handled by the last-axis path).
-fn axis_spec_is_first_of_2d(axis_spec: Option<Option<isize>>) -> bool {
-    matches!(axis_spec, Some(Some(0)) | Some(Some(-2)))
+// Returns true iff `axis_spec` selects axis 0 of an `ndim`-D array (explicit 0 or -ndim). NOT
+// the "missing"/None default (that is the last axis for >1-D, handled by the last-axis path).
+fn axis_spec_is_first(axis_spec: Option<Option<isize>>, ndim: usize) -> bool {
+    matches!(axis_spec, Some(Some(k)) if k == 0 || k == -(ndim as isize))
 }
 
-// Parallel column sort along axis 0 of a 2-D C-contiguous f64 array. numpy's axis=0 sort is
-// SLOW (~2x its last-axis sort) because each column is strided in memory and it walks the
-// columns single-threaded. Here each column is gathered into a contiguous scratch lane,
-// sorted, and scattered back — every step parallelized across columns/rows via par_chunks_mut
-// (the strided memory touches are READS into/from owned contiguous chunks, so no unsafe
-// scatter). Bit-exact (sort yields the same multiset per column); any NaN -> defer to numpy
-// (its NaN-at-end ordering). Defers for non-2D/non-f64/non-contiguous/non-axis0/below crossover.
-fn try_zerocopy_f64_sort_axis0_2d(
+// Parallel sort along axis 0 of an ndim>=2 C-contiguous f64 array. numpy's axis=0 sort is
+// SLOW (~2x its last-axis sort) because each lane is strided in memory and it walks the lanes
+// single-threaded. A C-contiguous (s0, s1, ..) array sorted along axis 0 is identical to the
+// 2-D (s0, s1*..*sk) case sorted along axis 0, so we treat it as rows=shape[0] lanes-of-length
+// and cols=product(shape[1:]) lanes: each lane is gathered into a contiguous scratch lane,
+// sorted, and scattered back — every step parallelized via par_chunks_mut (the strided memory
+// touches are READS into/from owned contiguous chunks, so no unsafe scatter). Bit-exact (sort
+// yields the same multiset per lane); any NaN -> defer to numpy (its NaN-at-end ordering).
+// Defers for ndim<2/non-f64/non-contiguous/non-axis0/below crossover.
+fn try_zerocopy_f64_sort_axis0(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !axis_spec_is_first_of_2d(axis_spec)
-        || !a.is_exact_instance(&numpy.getattr("ndarray")?)
-        || !numpy_dtype_is_f64(py, a)
-    {
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
-    if a.getattr("ndim")?.extract::<usize>()? != 2
+    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    if ndim < 2
+        || !axis_spec_is_first(axis_spec, ndim)
         || !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()?
     {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
-    let (rows, cols) = (shape[0], shape[1]);
+    let rows = shape[0];
+    let cols: usize = shape[1..].iter().product();
     const SORT_AXIS0_PARALLEL_MIN: usize = 1 << 20;
     if rows < 2 || cols < 2 || rows * cols < SORT_AXIS0_PARALLEL_MIN
         || rayon::current_num_threads() < 2
@@ -40861,7 +40863,7 @@ fn try_zerocopy_f64_sort_axis0_2d(
         return Ok(None);
     }
     // Transposed scratch: column-major lanes (cols lanes of rows each). Each lane gathers its
-    // column from the strided source and sorts it — fully parallel across columns.
+    // axis-0 column from the strided source and sorts it — fully parallel across lanes.
     let mut scratch = vec![0.0f64; n];
     scratch.par_chunks_mut(rows).enumerate().for_each(|(j, lane)| {
         for (i, slot) in lane.iter_mut().enumerate() {
@@ -40871,7 +40873,7 @@ fn try_zerocopy_f64_sort_axis0_2d(
     });
     let kwargs = PyDict::new(py);
     kwargs.set_item("dtype", "float64")?;
-    let shape_tuple = PyTuple::new(py, [rows, cols])?;
+    let shape_tuple = PyTuple::new(py, shape.iter().copied())?;
     let out = numpy.call_method("empty", (shape_tuple,), Some(&kwargs))?;
     let out_buffer = PyBuffer::<f64>::get(&out)?;
     let Some(out_cells) = out_buffer.as_mut_slice(py) else {
@@ -40906,11 +40908,11 @@ fn sort(
 ) -> PyResult<Py<PyAny>> {
     // Fast paths: np.sort on f64 C-contiguous, default/explicit supported kind.
     // 1-D (axis -1/0/None) -> parallel flat sort; ndim>=2 along the LAST axis
-    // (axis missing/-1/ndim-1) -> parallel per-lane sort; 2-D axis 0/-2 ->
-    // parallel column sort. For stable/mergesort/heapsort, require distinct
-    // values on paths where algorithm-specific tie ordering could be observed.
-    // Any order/stable kwarg, explicit axis=None on >1-D (flatten), or another
-    // non-last/non-axis0 axis -> passthrough.
+    // (axis missing/-1/ndim-1) -> parallel per-lane sort; ndim>=2 along axis 0
+    // (axis 0/-ndim) -> parallel column sort. For stable/mergesort/heapsort,
+    // require distinct values on paths where algorithm-specific tie ordering
+    // could be observed. Any order/stable kwarg, explicit axis=None on >1-D
+    // (flatten), or another non-last/non-axis0 axis -> passthrough.
     if args.len() == 1 {
         let mut other_kwarg = false;
         let mut axis_spec: Option<Option<isize>> = None; // outer None = "axis" kwarg missing
@@ -40945,7 +40947,7 @@ fn sort(
             {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_sort_axis0_2d(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_f64_sort_axis0(py, &numpy, &a, axis_spec)? {
                 return Ok(out);
             }
         }
@@ -41098,29 +41100,30 @@ fn try_zerocopy_f64_argsort_lastaxis(
     Ok(Some(out.unbind()))
 }
 
-// Parallel column argsort along axis 0 of a 2-D C-contiguous f64 array (mirror of the axis-0
-// sort). Each column's row-indices (0..rows, local per numpy's axis=0 semantics) are sorted by
-// the column's values in a contiguous scratch lane, then scattered back. Like the other
-// argsort paths, numpy's quicksort is UNSTABLE: any column with a tie (or any NaN) -> defer.
-fn try_zerocopy_f64_argsort_axis0_2d(
+// Parallel argsort along axis 0 of an ndim>=2 C-contiguous f64 array (mirror of the axis-0
+// sort; a C-contiguous array's axis-0 argsort equals the (shape[0], product(shape[1:])) 2-D
+// case). Each lane's axis-0 indices (0..rows, local per numpy's axis=0 semantics) are sorted by
+// the lane's values in a contiguous scratch lane, then scattered back. Like the other argsort
+// paths, numpy's quicksort is UNSTABLE: any lane with a tie (or any NaN) -> defer.
+fn try_zerocopy_f64_argsort_axis0(
     py: Python<'_>,
     numpy: &Bound<'_, PyModule>,
     a: &Bound<'_, PyAny>,
     axis_spec: Option<Option<isize>>,
 ) -> PyResult<Option<Py<PyAny>>> {
-    if !axis_spec_is_first_of_2d(axis_spec)
-        || !a.is_exact_instance(&numpy.getattr("ndarray")?)
-        || !numpy_dtype_is_f64(py, a)
-    {
+    if !a.is_exact_instance(&numpy.getattr("ndarray")?) || !numpy_dtype_is_f64(py, a) {
         return Ok(None);
     }
-    if a.getattr("ndim")?.extract::<usize>()? != 2
+    let ndim = a.getattr("ndim")?.extract::<usize>()?;
+    if ndim < 2
+        || !axis_spec_is_first(axis_spec, ndim)
         || !a.getattr("flags")?.getattr("c_contiguous")?.extract::<bool>()?
     {
         return Ok(None);
     }
     let shape: Vec<usize> = a.getattr("shape")?.extract()?;
-    let (rows, cols) = (shape[0], shape[1]);
+    let rows = shape[0];
+    let cols: usize = shape[1..].iter().product();
     const ARGSORT_AXIS0_PARALLEL_MIN: usize = 1 << 20;
     if rows < 2 || cols < 2 || rows * cols < ARGSORT_AXIS0_PARALLEL_MIN
         || rayon::current_num_threads() < 2
@@ -41178,7 +41181,10 @@ fn try_zerocopy_f64_argsort_axis0_2d(
     if tie.load(std::sync::atomic::Ordering::Relaxed) {
         return Ok(None);
     }
-    let out = numpy.call_method1("empty", (PyTuple::new(py, [rows, cols])?, numpy.getattr("intp")?))?;
+    let out = numpy.call_method1(
+        "empty",
+        (PyTuple::new(py, shape.iter().copied())?, numpy.getattr("intp")?),
+    )?;
     let out_buffer = PyBuffer::<i64>::get(&out)?;
     let Some(out_cells) = out_buffer.as_mut_slice(py) else {
         return Ok(None);
@@ -41230,7 +41236,7 @@ fn argsort(
             if let Some(out) = try_zerocopy_f64_argsort_lastaxis(py, &numpy, &a, axis_spec)? {
                 return Ok(out);
             }
-            if let Some(out) = try_zerocopy_f64_argsort_axis0_2d(py, &numpy, &a, axis_spec)? {
+            if let Some(out) = try_zerocopy_f64_argsort_axis0(py, &numpy, &a, axis_spec)? {
                 return Ok(out);
             }
         }
