@@ -12895,18 +12895,34 @@ fn try_zerocopy_f64_ediff1d(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        let mut w = 0usize;
-        for value in &begin {
-            output[w].set(*value);
-            w += 1;
-        }
-        for i in 0..n_diff {
-            output[w].set(input[i + 1].get() - input[i].get());
-            w += 1;
-        }
-        for value in &end {
-            output[w].set(*value);
-            w += 1;
+        // SAFETY: ReadOnlyCell<f64>/Cell<f64> are repr(transparent) over f64; input is
+        // read-only under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+        let in_raw: &[f64] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<f64>(), input.len()) };
+        let out_raw: &mut [f64] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, total) };
+        // tiny begin/end prefixes (usually scalar) stay serial
+        out_raw[..begin.len()].copy_from_slice(&begin);
+        out_raw[begin.len() + n_diff..].copy_from_slice(&end);
+        let diff = &mut out_raw[begin.len()..begin.len() + n_diff];
+        // numpy.ediff1d is a single-threaded subtract of consecutive elements; each diff is
+        // independent so a parallel map aggregates memory bandwidth across cores and wins.
+        // Same expression (in[i+1]-in[i]) => bit-identical regardless of chunking.
+        const EDIFF1D_PARALLEL_MIN: usize = 1 << 21;
+        if n_diff >= EDIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            let chunk = n_diff.div_ceil(rayon::current_num_threads());
+            diff.par_chunks_mut(chunk).enumerate().for_each(|(ci, o)| {
+                let base = ci * chunk;
+                for (j, slot) in o.iter_mut().enumerate() {
+                    let i = base + j;
+                    *slot = in_raw[i + 1] - in_raw[i];
+                }
+            });
+        } else {
+            for (i, slot) in diff.iter_mut().enumerate() {
+                *slot = in_raw[i + 1] - in_raw[i];
+            }
         }
     }
     Ok(Some(flat.unbind()))
@@ -12916,7 +12932,7 @@ fn try_zerocopy_f64_ediff1d(
 // to_begin/to_end). Reads the C-order `T` buffer (== numpy's ravel order) and
 // writes wrapping out[i] = in[i+1] - in[i] into a fresh same-dtype buffer via a
 // slice-iterator triple-zip so bounds checks elide and it autovectorizes.
-fn ediff1d_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T, T) -> T>(
+fn ediff1d_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync, F: Fn(T, T) -> T + Sync>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     ary: &Bound<'py, PyAny>,
@@ -12940,8 +12956,29 @@ fn ediff1d_typed<'py, T: pyo3::buffer::Element + Copy, F: Fn(T, T) -> T>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for ((slot, cur), nxt) in output.iter().zip(input.iter()).zip(input[1..].iter()) {
-            slot.set(sub(nxt.get(), cur.get()));
+        // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; input is read-only
+        // under the GIL and `flat` is a fresh numpy.empty we own (no alias).
+        let in_raw: &[T] =
+            unsafe { std::slice::from_raw_parts(input.as_ptr().cast::<T>(), input.len()) };
+        let out_raw: &mut [T] =
+            unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, n_out) };
+        // numpy ediff1d is single-threaded; each consecutive diff is independent so a parallel
+        // map aggregates memory bandwidth across cores. Same sub(in[i+1],in[i]) => bit-identical.
+        const EDIFF1D_PARALLEL_MIN: usize = 1 << 21;
+        if n_out >= EDIFF1D_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            let chunk = n_out.div_ceil(rayon::current_num_threads());
+            out_raw.par_chunks_mut(chunk).enumerate().for_each(|(ci, o)| {
+                let base = ci * chunk;
+                for (j, slot) in o.iter_mut().enumerate() {
+                    let i = base + j;
+                    *slot = sub(in_raw[i + 1], in_raw[i]);
+                }
+            });
+        } else {
+            for (i, slot) in out_raw.iter_mut().enumerate() {
+                *slot = sub(in_raw[i + 1], in_raw[i]);
+            }
         }
     }
     Ok(Some(flat.unbind()))

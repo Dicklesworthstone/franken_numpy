@@ -460,6 +460,21 @@ fn bench_ediff1d_boundary(c: &mut Criterion) {
                 black_box(result);
             });
         });
+
+        // 8M fnp-vs-numpy comparison (parallel consecutive-diff vs single-threaded numpy).
+        let big = numpy
+            .call_method1(
+                "linspace",
+                (-1_000_000.0_f64, 1_000_000.0_f64, 8_000_000_usize),
+            )
+            .expect("8M f64 input");
+        let numpy_ediff1d = numpy.getattr("ediff1d").expect("numpy ediff1d");
+        group.bench_function("fnp_ediff1d_f64_8m", |bench| {
+            bench.iter(|| black_box(ediff1d.call1((&big,)).expect("fnp ediff1d 8m")));
+        });
+        group.bench_function("numpy_ediff1d_f64_8m", |bench| {
+            bench.iter(|| black_box(numpy_ediff1d.call1((&big,)).expect("numpy ediff1d 8m")));
+        });
     });
 
     group.finish();

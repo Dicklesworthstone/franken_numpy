@@ -8987,3 +8987,22 @@ rch exec -- cargo test -j 1 -p fnp-python --test conformance_sort_search
 searchsorted_large_f64_array_matches_numpy -- --nocapture`.
 Result: 1 passed, 0 failed, 33 filtered out on vmi1227854 after fast-forwarding through the 63rd/64th gather
 wins. KEEP proof/test. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize np.ediff1d consecutive-diff (3.5x over numpy) (2026-06-25) — 65th win
+New target outside the gather family: np.ediff1d (flat consecutive differences out[i]=a[i+1]-a[i]) ran a serial
+diff loop in both try_zerocopy_f64_ediff1d and the generic ediff1d_typed — at parity with numpy.ediff1d (a
+single-threaded `a[1:]-a[:-1]` C subtract). Each diff is independent and reads two near-sequential elements +
+one subtract (like a binary elementwise op, NOT a pure memmove — so it parallelizes, unlike roll which was
+reverted), so a parallel raw-slice map aggregates memory bandwidth across cores and wins. Cast input/output to
+raw &[f64]/&[T] + &mut (ReadOnlyCell NOT Sync), par_chunks_mut().enumerate(), tiny to_begin/to_end prefixes
+stay serial via copy_from_slice. Same in[i+1]-in[i] => BIT-IDENTICAL regardless of chunking. Gate n_diff>=1<<21;
+below-gate serial unchanged. Generic over T + Sub closure (Send+Sync) -> all integer/float dtypes free.
+PERF (criterion, remote rch worker hz2 = truth; python_ediff1d_boundary, 8M f64 linspace -> 8M-1 diffs):
+  ediff1d f64: fnp 11.321ms vs NumPy 39.537ms = 0.286x (3.5x faster)
+  (local serial vs parallel isolation, same build: 35.13ms -> 11.34ms = 3.1x, proving the win is parallelism
+   not box noise; numpy ediff1d single-threaded subtract ufunc)
+CORRECTNESS: probe 52/0 across f64/f32 + i64/i32/i16/i8/u8/u32/u64 x sizes below/at/above the 1<<21 gate x
+f64 special values (nan/+-inf) x to_begin/to_end (f64 path) x 2-D flatten x empty/single x i8 overflow-wrap.
+conformance_ediff1d 15/15 + conformance_array_utils 19/19 GREEN. Build clean. Real win (3.5x >> false-loss
+noise floor). Confirms ediff1d behaves like a binary elementwise op (parallelizes), distinct from roll/memmove
+(pure copy, bandwidth-saturated single-thread, reverted). Landed via isolated worktree. KEEP. AGENT_NAME=BlackThrush.
