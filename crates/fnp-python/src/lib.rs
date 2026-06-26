@@ -327,6 +327,52 @@ impl PyUFunc {
         signature: Option<Py<PyAny>>,
     ) -> PyResult<Py<PyAny>> {
         let numpy = py.import("numpy")?;
+        // Fast parallel f64 path for the high-compute binary ufuncs numpy runs single-threaded
+        // (remainder = floored-mod, power = libm pow). Only the plain call surface (every kwarg
+        // at its default) routes to the zero-copy parallel kernel; any out/where/dtype/casting/
+        // order/subok/signature override falls through to numpy verbatim. op.apply is the SAME
+        // per-element function as numpy's (powf; floored-mod), so the result is bit-identical.
+        if out.is_none()
+            && r#where.is_none()
+            && dtype.is_none()
+            && signature.is_none()
+            && casting == "same_kind"
+            && order == "K"
+            && subok
+        {
+            let binop = match self.kind {
+                UFuncKind::Remainder => Some(BinaryOp::Remainder),
+                UFuncKind::Power => Some(BinaryOp::Power),
+                _ => None,
+            };
+            if let Some(op) = binop {
+                let a = x1.bind(py);
+                let b = x2.bind(py);
+                // remainder by zero must defer to numpy so its RuntimeWarning + nan surface
+                // exactly; scan the divisor buffer zero-copy (no extract).
+                let zero_divisor = if matches!(op, BinaryOp::Remainder) {
+                    if let Ok(b_buf) = PyBuffer::<f64>::get(b)
+                        && let Some(b_slice) = b_buf.as_slice(py)
+                    {
+                        let b_raw: &[f64] = unsafe {
+                            std::slice::from_raw_parts(b_slice.as_ptr().cast::<f64>(), b_slice.len())
+                        };
+                        b_raw.iter().any(|&v| v == 0.0)
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+                if !zero_divisor
+                    && numpy_dtype_is_f64(py, a)
+                    && numpy_dtype_is_f64(py, b)
+                    && let Some(out_val) = try_zerocopy_f64_binary(py, a, b, op)?
+                {
+                    return Ok(out_val);
+                }
+            }
+        }
         let np_ufunc = numpy.getattr(self.kind.name())?;
         let kwargs = PyDict::new(py);
         if let Some(o) = out.as_ref() {
@@ -8362,13 +8408,15 @@ fn zerocopy_f64_binary_flat<'py>(
                 | BinaryOp::Logaddexp2
                 | BinaryOp::Hypot
                 | BinaryOp::Nextafter
+                | BinaryOp::Power
+                | BinaryOp::Remainder
         );
         // Per-op crossover: expensive transcendentals (atan2/pow/logaddexp) amortize the
         // rayon fan-out from ~16K, but cheaper near-memory-bound ops (hypot = sqrt(a^2+b^2),
-        // nextafter = bit-step) only win once aggregate bandwidth dominates (~2M, like the
-        // cheap unary class) — a low gate REGRESSES medium N for them.
+        // nextafter = bit-step, remainder = floored-mod) only win once aggregate bandwidth
+        // dominates (~2M, like the cheap unary class) — a low gate REGRESSES medium N for them.
         let parallel_min = match op {
-            BinaryOp::Hypot | BinaryOp::Nextafter => 1 << 21,
+            BinaryOp::Hypot | BinaryOp::Nextafter | BinaryOp::Remainder => 1 << 21,
             _ => FLOAT_POWER_PARALLEL_MIN_LEN,
         };
         if parallelizable && n >= parallel_min && rayon::current_num_threads() >= 2 {

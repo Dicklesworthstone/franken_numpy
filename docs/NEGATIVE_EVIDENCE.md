@@ -9032,3 +9032,28 @@ fast path INSIDE PyUFunc::__call__ for UFuncKind::Remainder (gated on default ou
 a shared-dispatch change deferred to a follow-up. LESSON: before optimizing a binary op, check whether it is a
 #[pyfunction] or a PyUFunc object (grep `m.add("<op>"` vs `wrap_pyfunction`); ufunc objects passthrough via
 __call__. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallel f64 path inside PyUFunc::__call__ for remainder + power (7.6x / 8.1x) (2026-06-25) — 68th+69th wins
+Follow-up to the 66th/67th binary-kernel routing: remainder and power are PyUFunc OBJECTS (UFuncKind::Remainder
+/Power, registered via m.add) whose __call__ forwarded STRAIGHT to numpy (single-threaded) — the prior-iteration
+attempt to edit native_binary_remainder_or_passthrough was dead code (rejected). FIX: added an f64 fast path at
+the TOP of the shared PyUFunc::__call__ that, ONLY when every kwarg is at its default (out=None, where=None,
+dtype=None, signature=None, casting=="same_kind", order=="K", subok), maps UFuncKind::Remainder/Power to
+BinaryOp::Remainder/Power and routes to the zero-copy PARALLEL binary kernel try_zerocopy_f64_binary (op.apply =
+numpy floored-mod / lhs.powf(rhs), bit-identical). Any kwarg override or non-f64/non-contiguous/scalar/shape-
+mismatch falls through to numpy verbatim. remainder by zero is detected by a zero-copy divisor scan and deferred
+to numpy so its RuntimeWarning+nan surface exactly. Added Power+Remainder to the kernel's parallelizable allowlist
+(Power gate 16K transcendental, Remainder gate 1<<21).
+PERF (criterion, remote rch worker hz2 = truth; python_parallel_binary_boundary, 8M f64 operands):
+  remainder: fnp 23.186ms vs NumPy 177.02ms = 0.131x (7.6x faster)
+  power:     fnp 15.836ms vs NumPy 128.35ms = 0.123x (8.1x faster)
+  (local serial vs parallel isolation, same build: remainder 128.4->18.0ms = 7.1x, power 138.1->13.2ms = 10.5x
+   — proving the win is parallelism; numpy runs both single-threaded; this also confirms the __call__ fast path
+   ENGAGES, unlike the prior dead-code edit which measured 164ms unchanged)
+CORRECTNESS: probe 21/0 across remainder/power/mod(alias) x sizes below/at/above the gate x nan/+-inf x zero
+divisor (->numpy passthrough) x negative base with integer AND fractional exponent (->signed real / nan) x
+negative divisors (sign follows divisor) x 2-D x integer dtype (->defer) x scalar operand (->defer).
+conformance_float_power_remainder 21/21 + conformance_remainder 48/48 + conformance_arithmetic 1/1 +
+conformance_arithmetic_ops 11/11 GREEN (shared __call__ change verified broadly). Build clean. Real wins. KEEP.
+REUSABLE: ufunc-object ops (m.add("op", PyUFunc{kind})) win by a default-surface-gated fast path INSIDE
+PyUFunc::__call__ — the per-op pyfunction is dead for them. AGENT_NAME=BlackThrush.

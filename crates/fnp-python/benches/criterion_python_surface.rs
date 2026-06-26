@@ -3878,8 +3878,12 @@ bnz = np.where(b == 0.0, 1.0, b)\n";
         let a = ns.get_item("a").expect("a");
         let b = ns.get_item("b").expect("b");
         let bnz = ns.get_item("bnz").expect("bnz");
-        let _ = &bnz;
-        for (op, x, y) in [("float_power", &a, &b), ("nextafter", &a, &b)] {
+        for (op, x, y) in [
+            ("float_power", &a, &b),
+            ("nextafter", &a, &b),
+            ("remainder", &a, &bnz),
+            ("power", &a, &b),
+        ] {
             let fnp_fn = module.getattr(op).expect("fnp op");
             let numpy_fn = numpy.getattr(op).expect("numpy op");
             group.bench_function(format!("fnp_{op}_f64_8m"), |bch| {
