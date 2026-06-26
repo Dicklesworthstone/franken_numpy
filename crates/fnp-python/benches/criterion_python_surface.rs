@@ -3676,8 +3676,48 @@ bins = np.linspace(-4.0, 4.0, 50)\n";
     group.finish();
 }
 
+fn bench_searchsorted_boundary(c: &mut Criterion) {
+    // np.searchsorted(1M sorted haystack, 4M queries) — serial per-query binary search vs parallel.
+    let mut group = c.benchmark_group("python_searchsorted_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = np.sort(rng.standard_normal(1_000_000))\n\
+v = rng.standard_normal(4_000_000)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("searchsorted setup");
+        let a = ns.get_item("a").expect("a");
+        let v = ns.get_item("v").expect("v");
+        let fnp_ss = module.getattr("searchsorted").expect("fnp searchsorted");
+        let numpy_ss = numpy.getattr("searchsorted").expect("numpy searchsorted");
+        group.bench_function("fnp_searchsorted_f64_4m", |b| {
+            b.iter(|| black_box(fnp_ss.call1((&a, &v)).expect("fnp searchsorted")));
+        });
+        group.bench_function("numpy_searchsorted_f64_4m", |b| {
+            b.iter(|| black_box(numpy_ss.call1((&a, &v)).expect("numpy searchsorted")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_searchsorted_boundary,
     bench_digitize_boundary,
     bench_tile_boundary,
     bench_kron_boundary,

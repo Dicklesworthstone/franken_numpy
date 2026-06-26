@@ -21744,13 +21744,16 @@ fn scalar_search_index<T: pyo3::buffer::Element + Copy + PartialOrd>(
 // f64 variant with numpy's NaN-aware ordering: NaN sorts after every real value, so a
 // NaN key inserts at the end and a NaN probe compares greater than any real key.
 // `lt(a, b) = a < b || (b.is_nan() && !a.is_nan())`; using is_nan keeps it clippy-clean.
-fn scalar_search_index_f64(s: &[pyo3::buffer::ReadOnlyCell<f64>], key: f64, right: bool) -> usize {
+// Raw-slice core of the NaN-correct f64 searchsorted binary search (numpy sorts NaN
+// last). Operates on a plain &[f64] so it is callable from rayon worker threads.
+#[inline]
+fn search_index_f64_raw(s: &[f64], key: f64, right: bool) -> usize {
     let mut left = 0usize;
     let mut len = s.len();
     while len > 0 {
         let half = len / 2;
         let mid = left + half;
-        let probe = s[mid].get();
+        let probe = s[mid];
         let cond = if right {
             !(key < probe || (probe.is_nan() && !key.is_nan()))
         } else {
@@ -21764,6 +21767,12 @@ fn scalar_search_index_f64(s: &[pyo3::buffer::ReadOnlyCell<f64>], key: f64, righ
         }
     }
     left
+}
+
+fn scalar_search_index_f64(s: &[pyo3::buffer::ReadOnlyCell<f64>], key: f64, right: bool) -> usize {
+    // SAFETY: ReadOnlyCell<f64> is repr(transparent) over f64; read-only under the GIL.
+    let raw: &[f64] = unsafe { std::slice::from_raw_parts(s.as_ptr().cast::<f64>(), s.len()) };
+    search_index_f64_raw(raw, key, right)
 }
 
 // Zero-copy np.searchsorted for a SCALAR query `v` over a 1-D numeric haystack `a`,
@@ -21884,8 +21893,33 @@ fn try_zerocopy_f64_searchsorted(
         let Some(output) = o_buf.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (o, vc) in output.iter().zip(v_s.iter()) {
-            o.set(scalar_search_index_f64(a_s, vc.get(), right) as i64);
+        // numpy.searchsorted is single-threaded; each query's binary search over the shared
+        // read-only haystack is independent and latency-bound, so a parallel map aggregates
+        // memory-level parallelism + ALU across cores and wins. Same search => bit-identical.
+        const SEARCHSORTED_PARALLEL_MIN: usize = 1 << 21;
+        if m >= SEARCHSORTED_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<f64>/Cell<i64> are repr(transparent) over f64/i64; the
+            // haystack/queries are read-only under the GIL and `flat` is a fresh numpy.empty
+            // we own (no alias). Raw &[f64] is Sync so the search runs on worker threads.
+            let a_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<f64>(), a_s.len()) };
+            let v_raw: &[f64] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<f64>(), m) };
+            let out_data: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            let chunk = m.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(v_raw.par_chunks(chunk))
+                .for_each(|(o, vq)| {
+                    for (slot, &key) in o.iter_mut().zip(vq.iter()) {
+                        *slot = search_index_f64_raw(a_raw, key, right) as i64;
+                    }
+                });
+        } else {
+            for (o, vc) in output.iter().zip(v_s.iter()) {
+                o.set(scalar_search_index_f64(a_s, vc.get(), right) as i64);
+            }
         }
     }
     let shape: Vec<usize> = v.getattr("shape")?.extract()?;
@@ -21899,7 +21933,7 @@ fn try_zerocopy_f64_searchsorted(
 // so it is effectively branchless). side="left" counts elements < key (first
 // index >= key); side="right" counts elements <= key (first index > key). Integer
 // ordering is total, so this is bit-exact with numpy. Output is intp of v.shape.
-fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd>(
+fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd + Send + Sync>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     a: &Bound<'py, PyAny>,
@@ -21923,15 +21957,18 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd>(
         let Some(output) = o_buf.as_mut_slice(py) else {
             return Ok(None);
         };
-        let n = a_s.len();
-        for (o, vc) in output.iter().zip(v_s.iter()) {
-            let key = vc.get();
+        // Integer ordering is total (no NaN), so one query = a lower/upper-bound search over
+        // the shared read-only haystack. numpy.searchsorted is single-threaded; the per-query
+        // searches are independent and latency-bound, so parallelize over chunks of v.
+        // Same search => bit-identical regardless of chunking. Gate large query counts only.
+        #[inline]
+        fn search_index<U: Copy + PartialOrd>(a: &[U], key: U, right: bool) -> i64 {
             let mut left = 0usize;
-            let mut len = n;
+            let mut len = a.len();
             while len > 0 {
                 let half = len / 2;
                 let mid = left + half;
-                let probe = a_s[mid].get();
+                let probe = a[mid];
                 let cond = if right { probe <= key } else { probe < key };
                 if cond {
                     left = mid + 1;
@@ -21940,7 +21977,33 @@ fn searchsorted_typed<'py, T: pyo3::buffer::Element + Copy + PartialOrd>(
                     len = half;
                 }
             }
-            o.set(left as i64);
+            left as i64
+        }
+        // SAFETY: ReadOnlyCell<T> is repr(transparent) over T; read-only under the GIL. Raw
+        // &[T] is Sync so the search runs on worker threads.
+        let a_raw: &[T] =
+            unsafe { std::slice::from_raw_parts(a_s.as_ptr().cast::<T>(), a_s.len()) };
+        const SEARCHSORTED_PARALLEL_MIN: usize = 1 << 21;
+        if m >= SEARCHSORTED_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: Cell<i64> is repr(transparent) over i64; `flat` is a fresh numpy.empty
+            // we own (no alias). v queries are read-only under the GIL.
+            let v_raw: &[T] = unsafe { std::slice::from_raw_parts(v_s.as_ptr().cast::<T>(), m) };
+            let out_data: &mut [i64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut i64, m) };
+            let chunk = m.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(v_raw.par_chunks(chunk))
+                .for_each(|(o, vq)| {
+                    for (slot, &key) in o.iter_mut().zip(vq.iter()) {
+                        *slot = search_index(a_raw, key, right);
+                    }
+                });
+        } else {
+            for (o, vc) in output.iter().zip(v_s.iter()) {
+                o.set(search_index(a_raw, vc.get(), right));
+            }
         }
     }
     let shape: Vec<usize> = v.getattr("shape")?.extract()?;
