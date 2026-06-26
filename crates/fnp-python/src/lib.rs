@@ -10659,7 +10659,7 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
 // IndexError. T is the uintN bit-mover chosen by itemsize, so one core covers
 // int/uint/float/bool verbatim.
 #[allow(clippy::too_many_arguments)]
-fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy>(
+fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     arr_u: &Bound<'py, PyAny>,
@@ -10705,7 +10705,39 @@ fn take_axis_typed<'py, T: pyo3::buffer::Element + Copy>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        if inner == 1 {
+        // numpy.take(axis) is single-threaded; every output element is an independent gather
+        // (indices already validated above), so parallelize over the flat output range. For
+        // flat position f: outer o = f/(count*inner), selected index j = (f%blk)/inner, inner
+        // offset inr = f%inner -> arr[o*la*inner + resolved[j]*inner + inr]. Unified over both
+        // the inner==1 (scalar) and inner>1 (block) cases. Same gather => bit-identical.
+        const TAKE_AXIS_PARALLEL_MIN: usize = 1 << 21;
+        if total_out >= TAKE_AXIS_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            // SAFETY: ReadOnlyCell<T>/Cell<T> are repr(transparent) over T; arr is read-only
+            // under the GIL and `flat` is a fresh numpy.empty we own (no alias). resolved is a
+            // pre-validated Vec<usize> (Sync). Raw &[T] is Sync for the worker threads.
+            let arr_raw: &[T] =
+                unsafe { std::slice::from_raw_parts(arr_s.as_ptr().cast::<T>(), arr_s.len()) };
+            let out_data: &mut [T] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, total_out) };
+            let resolved_ref: &[usize] = &resolved;
+            let blk = count * inner;
+            let chunk = total_out.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .enumerate()
+                .for_each(|(ci, o_chunk)| {
+                    let base = ci * chunk;
+                    for (jj, slot) in o_chunk.iter_mut().enumerate() {
+                        let f = base + jj;
+                        let o = f / blk;
+                        let rem = f % blk;
+                        let j = rem / inner;
+                        let inr = rem % inner;
+                        *slot = arr_raw[o * la * inner + resolved_ref[j] * inner + inr];
+                    }
+                });
+        } else if inner == 1 {
             // Scalar gather (axis is the last axis): out[o*count + j] = arr[o*la + k_j].
             // Specialized so the destination side iterates without per-element slice
             // bounds checks; only the gather read indexes randomly.

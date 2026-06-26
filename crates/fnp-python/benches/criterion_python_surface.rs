@@ -3794,8 +3794,50 @@ idx = rng.integers(0, 4096, (4096, 2048)).astype(np.int64)\n";
     group.finish();
 }
 
+fn bench_take_axis_boundary(c: &mut Criterion) {
+    // np.take(4096x4096 f64, 2048 idx, axis=1) — serial per-axis gather vs parallel raw-slice.
+    let mut group = c.benchmark_group("python_take_axis_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.standard_normal((4096, 4096))\n\
+idx = rng.integers(0, 4096, 2048).astype(np.int64)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("take_axis setup");
+        let a = ns.get_item("a").expect("a");
+        let idx = ns.get_item("idx").expect("idx");
+        let fnp_take = module.getattr("take").expect("fnp take");
+        let numpy_take = numpy.getattr("take").expect("numpy take");
+        let kwargs = PyDict::new(py);
+        kwargs.set_item("axis", 1_i64).expect("axis");
+        group.bench_function("fnp_take_axis1_f64_8m", |b| {
+            b.iter(|| black_box(fnp_take.call((&a, &idx), Some(&kwargs)).expect("fnp take axis")));
+        });
+        group.bench_function("numpy_take_axis1_f64_8m", |b| {
+            b.iter(|| black_box(numpy_take.call((&a, &idx), Some(&kwargs)).expect("numpy take axis")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_take_axis_boundary,
     bench_take_along_axis_boundary,
     bench_take_boundary,
     bench_searchsorted_boundary,

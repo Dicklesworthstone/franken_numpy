@@ -8941,3 +8941,24 @@ sizes below/at/above the 1<<21 total-output gate x 3-D middle axis x negative-in
 both sides. conformance_take_put 20/20 GREEN (incl 5 take_along_axis cases). Build clean. Real win (9.0x >>
 false-loss noise floor). Landed via isolated worktree off origin/main (peer holds uncommitted shared-lib rustfmt).
 KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize np.take(axis) per-axis gather (5.1x over numpy) (2026-06-25) — 64th win
+Completes the gather family (take 62nd, take_along_axis 63rd): take_axis_typed (np.take with an explicit axis)
+resolved indices once then ran a serial per-axis gather — at parity with single-threaded numpy.take(axis).
+Indices are pre-validated (resolved Vec<usize>), so the gather has no bounds checks; every output element is
+independent. Parallelize over the FLAT output (unified for inner==1 scalar gather AND inner>1 block gather):
+for flat position f, outer o = f/(count*inner), selected index j = (f%blk)/inner, inner offset inr = f%inner ->
+arr[o*la*inner + resolved[j]*inner + inr]. Cast arr/out to raw &[T]/&mut[T] (ReadOnlyCell NOT Sync), share the
+pre-validated resolved slice (Sync), par_chunks_mut().enumerate(). Same gather => BIT-IDENTICAL; no atomic
+needed (indices already validated). Gate total_out>=1<<21; below-gate serial unchanged. Generic over T -> all
+gated dtypes free.
+PERF (criterion, remote rch worker hz2 = truth; python_take_axis_boundary, 4096x4096 f64 source, 2048 int64
+indices, axis=1 -> 8.4M output gather):
+  take(axis=1) f64: fnp 14.959ms vs NumPy 76.631ms = 0.195x (5.1x faster)
+  (local serial vs parallel isolation, same build: axis=1 59ms->13.5ms = 4.4x, axis=0 inner>1 37ms->10.4ms =
+   3.6x, 3-D axis=1 inner=128 79ms->22ms = 3.6x — proving the win is parallelism; numpy take(axis) single-threaded)
+CORRECTNESS: probe 24/0 across f64/i64/f32/i16/u8/complex128/bool x axis=1 (inner=1) and axis=0 (inner>1) x
+3-D middle axis (inner=128) x below-gate (serial) x negative-index wraparound x OOB->IndexError both sides.
+conformance_take_put 20/20 GREEN. Build clean. Real win (5.1x >> false-loss noise floor). NOTE: np.choose
+already WINS 2.7-3.7x serial (numpy.choose is slow python-level) — NOT a gap, left as-is. Landed via isolated
+worktree off origin/main. KEEP. AGENT_NAME=BlackThrush.
