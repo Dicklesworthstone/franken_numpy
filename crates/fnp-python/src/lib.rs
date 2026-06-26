@@ -18813,12 +18813,17 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
         return fallback();
     }
 
-    // Native 2-D dense matrix_power runs fnp-linalg matmul_accumulate + an extract/build
-    // round-trip, which LOSES to numpy's BLAS at EVERY 2-D size (BlackThrush 2026-06-22,
-    // median-of-3: n=3 1.22x, 64 1.57x, 128 6.67x, 256 3.14x — native never wins). Delegate
-    // real 2-D square inputs to numpy (mirrors the det/inv/solve stale-cliff delegation,
-    // [[stale-cliff-gates-after-numpy-upgrade]]); batched (>=3-D) already delegates below
-    // (1.06x par). numpy.linalg.matrix_power is the exact reference, so parity is exact.
+    // Native 2-D dense matrix_power runs fnp-linalg matmul_accumulate (the parallel packed
+    // GEMM) via repeated squaring. The 2026-06-22 measurement that delegated ALL 2-D sizes to
+    // numpy ("native never wins, n=3..256 1.2-6.7x") was taken on a host with FAST multi-threaded
+    // OpenBLAS — the same local-fast-BLAS trap that made 2-D np.matmul look like a loss. On the
+    // rch worker / deployment host numpy's BLAS is SLOW (~11 GFLOPS) while the native packed GEMM
+    // runs ~5x faster (verified for matmul/dot: BlackThrush 2026-06-26, [[worker-slow-blas...]]).
+    // So route 2-D square f64 in the native-GEMM win window (dim in [MIN, PY_NATIVE_GEMM_MAX_DIM])
+    // to the native repeated-squaring path below; delegate only OUTSIDE that window (tiny matrices
+    // where extract/build dominates, or larger dims left to numpy). numpy.linalg.matrix_power is
+    // the exact reference, so parity is allclose. Batched (>=3-D) still delegates below.
+    const NATIVE_MATPOW_MIN_DIM: usize = 256;
     if power >= 2
         && is_exact_numpy_ndarray(py, a.bind(py))?
         && let Ok(shape) = a
@@ -18827,6 +18832,7 @@ fn matrix_power(py: Python<'_>, a: Py<PyAny>, n: Py<PyAny>) -> PyResult<Py<PyAny
             .and_then(|s| s.extract::<Vec<usize>>())
         && shape.len() == 2
         && shape[0] == shape[1]
+        && !(shape[0] >= NATIVE_MATPOW_MIN_DIM && shape[0] <= PY_NATIVE_GEMM_MAX_DIM)
     {
         return fallback();
     }

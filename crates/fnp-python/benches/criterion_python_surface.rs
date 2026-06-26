@@ -4110,6 +4110,22 @@ bb = rng.standard_normal((64, 256, 256))\n";
         group.bench_function("numpy_matmul_bcast_2dA_3dB_64x256x256", |bch| {
             bch.iter(|| black_box(np_m.call1((&aw, &bb)).expect("numpy call")));
         });
+        // matrix_power: 2-D square repeated-squaring through the native packed GEMM vs numpy.
+        let fnp_mp = module.getattr("matrix_power").expect("fnp matrix_power");
+        let np_mp = numpy
+            .getattr("linalg")
+            .expect("linalg")
+            .getattr("matrix_power")
+            .expect("np matrix_power");
+        for (sz, p) in [("512", 8_i64), ("1024", 6_i64)] {
+            let a = ns.get_item(format!("a{sz}")).expect("a");
+            group.bench_function(format!("fnp_matrix_power_{sz}x{sz}_p{p}"), |bch| {
+                bch.iter(|| black_box(fnp_mp.call1((&a, p)).expect("fnp call")));
+            });
+            group.bench_function(format!("numpy_matrix_power_{sz}x{sz}_p{p}"), |bch| {
+                bch.iter(|| black_box(np_mp.call1((&a, p)).expect("numpy call")));
+            });
+        }
     });
 
     group.finish();

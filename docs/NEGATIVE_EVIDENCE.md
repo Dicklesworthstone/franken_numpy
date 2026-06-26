@@ -9359,3 +9359,28 @@ CORRECTNESS: probe 18/0 (allclose) — both broadcast directions (3-D/4-D A @ 2-
 rectangular m!=k!=n; equal-batch regression; DEFER paths (general broadcast, non-finite, Fortran, int, tiny,
 1-D-vector both sides, 2-D@2-D). conformance_matmul 11/11(+1 ign) + conformance_dot 11/11(+1 ign) +
 conformance_dot_products 15/15 GREEN. Build clean. Real win. KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: native 2-D matrix_power in the GEMM win-window (9-10x) — undoes a local-BLAS-artifact delegation (2026-06-26) — 89th win
+np.linalg.matrix_power(M,n) is binary-exponentiation matmuls. A 2026-06-22 commit DELEGATED ALL real 2-D square
+matrix_power to numpy with the note "native LOSES at EVERY 2-D size (n=3 1.22x, 64 1.57x, 128 6.67x, 256 3.14x —
+native never wins)" citing the det/inv/solve stale-cliff. **That measurement was the LOCAL-FAST-OpenBLAS trap** —
+the exact one caught this session for 2-D np.matmul (which the local sweep flagged as a 2-6x LOSS but the worker
+proved a 5x WIN). The native repeated-squaring runs through fnp's parallel packed GEMM (matmul_accumulate, ~50-150
+GFLOPS); numpy's matrix_power runs through the worker's SLOW reference BLAS (~11 GFLOPS). FIX: narrow the delegation
+gate — for power>=2, 2-D square f64 with dim in [256, PY_NATIVE_GEMM_MAX_DIM=1024] (the native-GEMM win window) fall
+through to the EXISTING native array.matrix_power path; delegate only OUTSIDE that window (tiny dims where extract/
+build dominates, larger dims left to numpy). One-line condition change + a const; no new kernel. Batched (>=3-D)
+still delegates.
+PERF (criterion, remote rch worker hz2 = truth; python_matmul_boundary, 6s measurement, tight CIs):
+  matrix_power 512x512^8:   fnp  7.350ms vs NumPy  67.446ms = 0.109x (9.18x faster)
+  matrix_power 1024x1024^6: fnp 54.675ms vs NumPy 562.126ms = 0.097x (10.28x faster)
+CORRECTNESS: probe 36/0 (allclose) — native-window dims 256/300/512/777/1024 x powers 2/3/5/8/13; boundary p=0/p=1;
+DEFER paths (negative power, outside-window tiny 16/64/128 + large 1280/1500, batched 3-D, int, non-finite).
+conformance_linalg_advanced matrix_power_positive/negative/zero/one_is_original/non_square_raises all PASS (5/5);
+the 1 unrelated FAILURE in that suite is solve_triangular_complex = PRE-EXISTING worker-infra (scipy not installed:
+"ModuleNotFoundError: No module named 'scipy'"), my diff touches ONLY matrix_power. numpy.linalg.matrix_power is the
+exact reference so parity is allclose. Build clean. Real win. KEEP. AGENT_NAME=BlackThrush.
+LESSON (3rd confirmation this session): ANY delegation justified by a LOCAL "native loses to BLAS" measurement is
+SUSPECT — the local box has fast OpenBLAS, the worker/deployment has slow reference BLAS. matmul, batched-matmul, and
+now matrix_power all FLIP from local-loss to worker-win. Audit other BLAS-delegations (multi_dot, tensordot edge
+sizes, the 2-D matmul MAX_DIM=1024 cap) the same way: re-measure on the worker before trusting a local-loss verdict.
