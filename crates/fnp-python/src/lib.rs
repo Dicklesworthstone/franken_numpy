@@ -10501,15 +10501,56 @@ fn try_zerocopy_f64_take(
         // output buffer is simply dropped (take has no side effects) and numpy
         // reproduces the exact IndexError. take never reorders within a lane, so
         // gathering verbatim is bit-identical.
-        for (slot, idx_cell) in output.iter().zip(idx_in.iter()) {
-            let mut idx = idx_cell.get();
-            if idx < 0 {
-                idx += n;
-            }
-            if idx < 0 || idx >= n {
+        // numpy.take is single-threaded; the per-index gather is independent and the
+        // random reads from a large source are memory-latency-bound, so a parallel map
+        // aggregates memory-level parallelism across cores. Same gather => bit-identical.
+        // An out-of-range index sets a shared flag; we bail AFTER the pass (the partial
+        // output is dropped, take has no side effects) so numpy raises the exact IndexError.
+        const TAKE_PARALLEL_MIN: usize = 1 << 21;
+        if count >= TAKE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            // SAFETY: ReadOnlyCell<f64>/<i64> and Cell<f64> are repr(transparent) over their
+            // value; source+indices are read-only under the GIL and `flat` is a fresh
+            // numpy.empty we own (no alias). Raw slices are Sync for the worker threads.
+            let a_raw: &[f64] =
+                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<f64>(), a_in.len()) };
+            let idx_raw: &[i64] =
+                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), count) };
+            let out_data: &mut [f64] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut f64, count) };
+            let ok = AtomicBool::new(true);
+            let chunk = count.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(idx_raw.par_chunks(chunk))
+                .for_each(|(o, idxs)| {
+                    for (slot, &idx0) in o.iter_mut().zip(idxs.iter()) {
+                        let mut idx = idx0;
+                        if idx < 0 {
+                            idx += n;
+                        }
+                        if idx < 0 || idx >= n {
+                            ok.store(false, Ordering::Relaxed);
+                        } else {
+                            *slot = a_raw[idx as usize];
+                        }
+                    }
+                });
+            if !ok.load(Ordering::Relaxed) {
                 return Ok(None);
             }
-            slot.set(a_in[idx as usize].get());
+        } else {
+            for (slot, idx_cell) in output.iter().zip(idx_in.iter()) {
+                let mut idx = idx_cell.get();
+                if idx < 0 {
+                    idx += n;
+                }
+                if idx < 0 || idx >= n {
+                    return Ok(None);
+                }
+                slot.set(a_in[idx as usize].get());
+            }
         }
     }
     let output_shape = PyTuple::new(py, out_shape.iter().copied())?;
@@ -10527,7 +10568,7 @@ fn try_zerocopy_f64_take(
 // wraparound idx += n; out-of-range -> None so numpy reproduces the IndexError),
 // and gathers verbatim into a fresh `dtype_name` buffer. Returns the flat output
 // plus the indices' shape.
-fn take_typed<'py, T: pyo3::buffer::Element + Copy>(
+fn take_typed<'py, T: pyo3::buffer::Element + Copy + Send + Sync>(
     py: Python<'py>,
     numpy: &Bound<'py, PyModule>,
     src: &Bound<'py, PyAny>,
@@ -10554,15 +10595,55 @@ fn take_typed<'py, T: pyo3::buffer::Element + Copy>(
         let Some(output) = out_buffer.as_mut_slice(py) else {
             return Ok(None);
         };
-        for (slot, idx_cell) in output.iter().zip(idx_in.iter()) {
-            let mut idx = idx_cell.get();
-            if idx < 0 {
-                idx += n;
-            }
-            if idx < 0 || idx >= n {
+        // numpy.take is single-threaded; the per-index gather is independent and the random
+        // reads are memory-latency-bound, so parallelize over chunks (aggregate MLP across
+        // cores). Same gather => bit-identical. OOB sets a shared flag -> bail AFTER the pass
+        // (partial output dropped; take has no side effects) so numpy raises the IndexError.
+        const TAKE_PARALLEL_MIN: usize = 1 << 21;
+        if count >= TAKE_PARALLEL_MIN && rayon::current_num_threads() >= 2 {
+            use rayon::prelude::*;
+            use std::sync::atomic::{AtomicBool, Ordering};
+            // SAFETY: ReadOnlyCell<T>/<i64> and Cell<T> are repr(transparent) over their value;
+            // source+indices are read-only under the GIL and `flat` is a fresh numpy.empty we
+            // own (no alias). Raw slices are Sync for the worker threads.
+            let a_raw: &[T] =
+                unsafe { std::slice::from_raw_parts(a_in.as_ptr().cast::<T>(), a_in.len()) };
+            let idx_raw: &[i64] =
+                unsafe { std::slice::from_raw_parts(idx_in.as_ptr().cast::<i64>(), count) };
+            let out_data: &mut [T] =
+                unsafe { std::slice::from_raw_parts_mut(output.as_ptr() as *mut T, count) };
+            let ok = AtomicBool::new(true);
+            let chunk = count.div_ceil(rayon::current_num_threads());
+            out_data
+                .par_chunks_mut(chunk)
+                .zip(idx_raw.par_chunks(chunk))
+                .for_each(|(o, idxs)| {
+                    for (slot, &idx0) in o.iter_mut().zip(idxs.iter()) {
+                        let mut idx = idx0;
+                        if idx < 0 {
+                            idx += n;
+                        }
+                        if idx < 0 || idx >= n {
+                            ok.store(false, Ordering::Relaxed);
+                        } else {
+                            *slot = a_raw[idx as usize];
+                        }
+                    }
+                });
+            if !ok.load(Ordering::Relaxed) {
                 return Ok(None);
             }
-            slot.set(a_in[idx as usize].get());
+        } else {
+            for (slot, idx_cell) in output.iter().zip(idx_in.iter()) {
+                let mut idx = idx_cell.get();
+                if idx < 0 {
+                    idx += n;
+                }
+                if idx < 0 || idx >= n {
+                    return Ok(None);
+                }
+                slot.set(a_in[idx as usize].get());
+            }
         }
     }
     Ok(Some((flat, out_shape)))

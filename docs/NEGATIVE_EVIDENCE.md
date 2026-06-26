@@ -8873,3 +8873,24 @@ PRE-EXISTING list-input + invalid-side error-WORDING mismatch in an unrelated fa
 search-loop change) + conformance_searching GREEN. Build clean. Real win (42x >> false-loss noise floor).
 Landed via an isolated worktree off origin/main to avoid a concurrent peer's uncommitted rustfmt of the shared
 lib.rs (committing only the 6 searchsorted hunks + the bench). KEEP. AGENT_NAME=BlackThrush.
+
+## BlackThrush WIN: parallelize np.take flat gather (5.2x over numpy) (2026-06-25) — 62nd win
+Same parallelize-serial-loop lever as digitize/searchsorted (60th/61st), applied to a GATHER: fnp's native
+take (try_zerocopy_f64_take + the generic take_typed bit-mover) ran a serial validate-and-gather loop
+(out[i] = a[idx[i]] with negative-wraparound + OOB->bail) — at parity with single-threaded numpy.take. Each
+index is independent; the random reads from a large source are memory-latency-bound, so a single thread can't
+saturate the worker's memory bandwidth (limited outstanding misses). Parallelizing over index chunks aggregates
+memory-level parallelism across cores and wins. Cast source/indices/out to raw &[T]/&[i64]/&mut[T] (ReadOnlyCell
+NOT Sync), par_chunks; an OOB index sets a shared AtomicBool -> bail AFTER the pass (partial output dropped,
+take has no side effects) so numpy reproduces the exact IndexError. Same gather => BIT-IDENTICAL. Gate index-
+count count>=1<<21; below-gate serial unchanged. Covers f64 + all dtypes (take_typed generic, +Send+Sync).
+PERF (criterion, remote rch worker hz2 = truth; python_take_boundary, 8M random int64 indices into a 16M f64
+source = 128MB DRAM-resident gather):
+  take f64: fnp 22.501ms vs NumPy 116.81ms = 0.193x (5.2x faster)
+  (local serial vs parallel isolation, same build: src=16M 124ms->27ms = 4.6x, src=1M 16ms->1.95ms = 8x,
+   src=256 49ms->15ms = 3.2x — proving the win is parallelism not box noise; numpy take single-threaded)
+CORRECTNESS: probe 16/0 (f64: sizes below/at/above the 1<<21 gate, negative-index wraparound, OOB->IndexError
+both sides, 2-D index shape, all-negative) + 10/0 dtype probe (int64/32/16/8, uint8/32/64, float32, complex128,
+bool via take_typed). conformance_take_put 20/20 GREEN. Build clean. Real win (5.2x >> false-loss noise floor).
+Landed via isolated worktree off origin/main (concurrent peer holds uncommitted rustfmt of the shared lib.rs).
+KEEP. AGENT_NAME=BlackThrush.

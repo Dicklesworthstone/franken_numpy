@@ -3715,8 +3715,48 @@ v = rng.standard_normal(4_000_000)\n";
     group.finish();
 }
 
+fn bench_take_boundary(c: &mut Criterion) {
+    // np.take(16M f64 source, 8M random indices) — serial gather vs parallel raw-slice gather.
+    let mut group = c.benchmark_group("python_take_boundary");
+    group.sample_size(10);
+    group.measurement_time(Duration::from_secs(4));
+    group.warm_up_time(Duration::from_secs(2));
+
+    Python::initialize();
+    Python::attach(|py| {
+        ensure_numpy_available(py).expect("numpy available");
+        let module = PyModule::new(py, "fnp_python_bench").expect("bench module");
+        fnp_python(&module).expect("initialize fnp_python bench module");
+        let numpy = py.import("numpy").expect("numpy oracle");
+        let setup = "import numpy as np\n\
+rng = np.random.default_rng(0)\n\
+a = rng.standard_normal(16_000_000)\n\
+idx = rng.integers(0, 16_000_000, 8_000_000).astype(np.int64)\n";
+        let ns = PyDict::new(py);
+        py.run(
+            std::ffi::CString::new(setup).unwrap().as_c_str(),
+            Some(&ns),
+            Some(&ns),
+        )
+        .expect("take setup");
+        let a = ns.get_item("a").expect("a");
+        let idx = ns.get_item("idx").expect("idx");
+        let fnp_take = module.getattr("take").expect("fnp take");
+        let numpy_take = numpy.getattr("take").expect("numpy take");
+        group.bench_function("fnp_take_f64_8m", |b| {
+            b.iter(|| black_box(fnp_take.call1((&a, &idx)).expect("fnp take")));
+        });
+        group.bench_function("numpy_take_f64_8m", |b| {
+            b.iter(|| black_box(numpy_take.call1((&a, &idx)).expect("numpy take")));
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
+    bench_take_boundary,
     bench_searchsorted_boundary,
     bench_digitize_boundary,
     bench_tile_boundary,
